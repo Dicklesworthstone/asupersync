@@ -9,6 +9,7 @@
         "trace_id": "trace-atp-clean-001",
         "workload_id": "workload-clean-bulk",
         "sample_count": 16,
+        "consumer_status": "pass",
         "samples": [
           { "metric": "atp.autotune.rtt_micros", "value": 80000 },
           { "metric": "atp.autotune.loss_permille", "value": 0 },
@@ -42,6 +43,13 @@
         "fail_closed": false,
         "confidence": "conservative",
         "caveats": ["growth_requires_application_hysteresis"],
+        "stale_sources": [],
+        "proof_pointer": {
+          "receipt_schema_version": "atp-autotune-decision-receipt-v1",
+          "trace_id": "trace-atp-clean-001",
+          "workload_id": "workload-clean-bulk",
+          "sample_count": 16
+        },
         "bottlenecks": [],
         "current_settings": {
           "in_flight_bytes": 8388608,
@@ -71,6 +79,7 @@
         "trace_id": "trace-atp-loss-001",
         "workload_id": "workload-lossy-high-roi",
         "sample_count": 16,
+        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.loss_permille", "value": 26 },
           { "metric": "atp.autotune.repair_roi_permille", "value": 900 },
@@ -99,7 +108,14 @@
         "reason_code": "hold_or_backoff_on_pressure",
         "fail_closed": true,
         "confidence": "fail_closed",
-        "caveats": ["NetworkLoss"],
+        "caveats": ["network_loss"],
+        "stale_sources": [],
+        "proof_pointer": {
+          "receipt_schema_version": "atp-autotune-decision-receipt-v1",
+          "trace_id": "trace-atp-loss-001",
+          "workload_id": "workload-lossy-high-roi",
+          "sample_count": 16
+        },
         "bottlenecks": [
           { "kind": "NetworkLoss", "metric": "atp.autotune.loss_permille", "observed": 26, "threshold": 25 }
         ],
@@ -131,6 +147,7 @@
         "trace_id": "trace-atp-pto-001",
         "workload_id": "workload-high-pto",
         "sample_count": 16,
+        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.loss_permille", "value": 0 },
           { "metric": "atp.autotune.pto_micros", "value": 250001 }
@@ -155,7 +172,14 @@
         "reason_code": "hold_or_backoff_on_pressure",
         "fail_closed": true,
         "confidence": "fail_closed",
-        "caveats": ["NetworkLatency"],
+        "caveats": ["network_latency"],
+        "stale_sources": [],
+        "proof_pointer": {
+          "receipt_schema_version": "atp-autotune-decision-receipt-v1",
+          "trace_id": "trace-atp-pto-001",
+          "workload_id": "workload-high-pto",
+          "sample_count": 16
+        },
         "bottlenecks": [
           { "kind": "NetworkLatency", "metric": "atp.autotune.pto_micros", "observed": 250001, "threshold": 250000 }
         ],
@@ -187,6 +211,7 @@
         "trace_id": "trace-atp-disk-001",
         "workload_id": "workload-disk-lag",
         "sample_count": 16,
+        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.disk_read_lag_micros", "value": 100001 },
           { "metric": "atp.autotune.disk_write_lag_micros", "value": 100001 }
@@ -211,7 +236,14 @@
         "reason_code": "hold_or_backoff_on_pressure",
         "fail_closed": true,
         "confidence": "fail_closed",
-        "caveats": ["DiskReadLag", "DiskWriteLag"],
+        "caveats": ["disk_read_lag", "disk_write_lag"],
+        "stale_sources": [],
+        "proof_pointer": {
+          "receipt_schema_version": "atp-autotune-decision-receipt-v1",
+          "trace_id": "trace-atp-disk-001",
+          "workload_id": "workload-disk-lag",
+          "sample_count": 16
+        },
         "bottlenecks": [
           { "kind": "DiskReadLag", "metric": "atp.autotune.disk_read_lag_micros", "observed": 100001, "threshold": 100000 },
           { "kind": "DiskWriteLag", "metric": "atp.autotune.disk_write_lag_micros", "observed": 100001, "threshold": 100000 }
@@ -244,6 +276,7 @@
         "trace_id": "trace-atp-cpu-001",
         "workload_id": "workload-coding-backlog",
         "sample_count": 16,
+        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.encode_backlog_symbols", "value": 4097 },
           { "metric": "atp.autotune.decode_backlog_symbols", "value": 4097 }
@@ -268,7 +301,14 @@
         "reason_code": "hold_or_backoff_on_pressure",
         "fail_closed": true,
         "confidence": "fail_closed",
-        "caveats": ["EncodeBacklog", "DecodeBacklog"],
+        "caveats": ["encode_backlog", "decode_backlog"],
+        "stale_sources": [],
+        "proof_pointer": {
+          "receipt_schema_version": "atp-autotune-decision-receipt-v1",
+          "trace_id": "trace-atp-cpu-001",
+          "workload_id": "workload-coding-backlog",
+          "sample_count": 16
+        },
         "bottlenecks": [
           { "kind": "EncodeBacklog", "metric": "atp.autotune.encode_backlog_symbols", "observed": 4097, "threshold": 4096 },
           { "kind": "DecodeBacklog", "metric": "atp.autotune.decode_backlog_symbols", "observed": 4097, "threshold": 4096 }
@@ -301,6 +341,7 @@
         "trace_id": "trace-atp-relay-001",
         "workload_id": "workload-relay-cost",
         "sample_count": 16,
+        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.relay_cost_micros_per_mib", "value": 500001 }
         ]
@@ -323,7 +364,14 @@
         "reason_code": "hold_or_backoff_on_pressure",
         "fail_closed": true,
         "confidence": "fail_closed",
-        "caveats": ["RelayCost"],
+        "caveats": ["relay_cost"],
+        "stale_sources": [],
+        "proof_pointer": {
+          "receipt_schema_version": "atp-autotune-decision-receipt-v1",
+          "trace_id": "trace-atp-relay-001",
+          "workload_id": "workload-relay-cost",
+          "sample_count": 16
+        },
         "bottlenecks": [
           { "kind": "RelayCost", "metric": "atp.autotune.relay_cost_micros_per_mib", "observed": 500001, "threshold": 500000 }
         ],
@@ -355,6 +403,7 @@
         "trace_id": "trace-atp-migration-001",
         "workload_id": "workload-path-migration",
         "sample_count": 16,
+        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.migration_events", "value": 1 }
         ]
@@ -377,7 +426,14 @@
         "reason_code": "hold_or_backoff_on_pressure",
         "fail_closed": true,
         "confidence": "fail_closed",
-        "caveats": ["MigrationInstability"],
+        "caveats": ["migration_instability"],
+        "stale_sources": [],
+        "proof_pointer": {
+          "receipt_schema_version": "atp-autotune-decision-receipt-v1",
+          "trace_id": "trace-atp-migration-001",
+          "workload_id": "workload-path-migration",
+          "sample_count": 16
+        },
         "bottlenecks": [
           { "kind": "MigrationInstability", "metric": "atp.autotune.migration_events", "observed": 1, "threshold": 0 }
         ],
@@ -409,6 +465,7 @@
         "trace_id": "trace-atp-duplicate-001",
         "workload_id": "workload-duplicate-loss",
         "sample_count": 16,
+        "consumer_status": "pass",
         "samples": [
           { "metric": "atp.autotune.loss_permille", "value": 40 },
           { "metric": "atp.autotune.loss_permille", "value": 0 },
@@ -436,6 +493,13 @@
         "fail_closed": false,
         "confidence": "conservative",
         "caveats": ["growth_requires_application_hysteresis"],
+        "stale_sources": [],
+        "proof_pointer": {
+          "receipt_schema_version": "atp-autotune-decision-receipt-v1",
+          "trace_id": "trace-atp-duplicate-001",
+          "workload_id": "workload-duplicate-loss",
+          "sample_count": 16
+        },
         "bottlenecks": [],
         "current_settings": {
           "in_flight_bytes": 8388608,
@@ -478,12 +542,20 @@
         "trace_id": "trace-atp-zero-001",
         "workload_id": "workload-zero-samples",
         "sample_count": 0,
+        "consumer_status": "blocked",
         "samples": [],
         "outcome": "HoldNoWin",
         "reason_code": "hold_or_backoff_on_pressure",
         "fail_closed": true,
-        "confidence": "fail_closed",
-        "caveats": ["InsufficientTelemetry"],
+        "confidence": "insufficient_evidence",
+        "caveats": ["insufficient_evidence"],
+        "stale_sources": [],
+        "proof_pointer": {
+          "receipt_schema_version": "atp-autotune-decision-receipt-v1",
+          "trace_id": "trace-atp-zero-001",
+          "workload_id": "workload-zero-samples",
+          "sample_count": 0
+        },
         "bottlenecks": [
           { "kind": "InsufficientTelemetry", "metric": null, "observed": 0, "threshold": 8 }
         ],
@@ -515,6 +587,7 @@
         "trace_id": "",
         "workload_id": "workload-stale-trace",
         "sample_count": 16,
+        "consumer_status": "malformed",
         "samples": [
           { "metric": "atp.autotune.loss_permille", "value": 26 }
         ]
@@ -536,8 +609,15 @@
         "outcome": "MalformedTelemetry",
         "reason_code": "hold_or_backoff_on_pressure",
         "fail_closed": true,
-        "confidence": "fail_closed",
-        "caveats": ["ContradictoryTelemetry", "NetworkLoss"],
+        "confidence": "rejected",
+        "caveats": ["malformed_evidence"],
+        "stale_sources": [],
+        "proof_pointer": {
+          "receipt_schema_version": "atp-autotune-decision-receipt-v1",
+          "trace_id": "",
+          "workload_id": "workload-stale-trace",
+          "sample_count": 16
+        },
         "bottlenecks": [
           { "kind": "ContradictoryTelemetry", "metric": null, "observed": 0, "threshold": 1 },
           { "kind": "NetworkLoss", "metric": "atp.autotune.loss_permille", "observed": 26, "threshold": 25 }

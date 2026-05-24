@@ -14,6 +14,7 @@
 //! - [`reactor`]: I/O reactor abstraction
 //! - [`io_driver`]: Reactor driver that dispatches readiness to wakers
 //! - [`region_heap`]: Region-owned heap allocator with quiescent reclamation
+//! - [`cache`]: Content-addressed artifact cache and zero-copy handoff policy
 //!
 //! # Runtime Builder
 //!
@@ -120,6 +121,7 @@
 
 pub mod blocking_pool;
 pub mod builder;
+pub mod cache;
 pub mod config;
 pub mod deadline_monitor;
 #[cfg(test)]
@@ -180,6 +182,14 @@ pub use builder::{
     BrowserSharedWorkerCoordinatorSupportDiagnostics, BrowserSharedWorkerCoordinatorSupportReason,
     BrowserWorkerFallbackTarget, DeadlineMonitoringBuilder, JoinHandle, Runtime, RuntimeBuilder,
     RuntimeHandle,
+};
+pub use cache::{
+    ArtifactAbortReceipt, ArtifactCache, ArtifactCacheConfig, ArtifactCacheDecision,
+    ArtifactCacheEntrySnapshot, ArtifactCacheError, ArtifactGetReceipt, ArtifactHandoff,
+    ArtifactId, ArtifactMemoryPressureSnapshot, ArtifactOwner, ArtifactPutRequest,
+    ArtifactPutReservation, ArtifactRedactionClass, ArtifactRedactionMetadata,
+    ArtifactReplayReference, ArtifactRetentionPolicy, CacheEvictionReason, CacheEvictionRecord,
+    NumaArtifactHint,
 };
 pub use config::{BlockingPoolConfig, RuntimeConfig, TraceStorageBudget, TraceStorageProfile};
 pub use deadline_monitor::{

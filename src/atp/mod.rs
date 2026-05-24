@@ -41,8 +41,9 @@ pub use autotune::{
     AtpAutotuneApplicationState, AtpAutotuneDecision, AtpAutotuneDecisionOutcome,
     AtpAutotuneDecisionReceipt, AtpAutotuneKnob, AtpAutotuneKnobChange, AtpAutotuneKnobDirection,
     AtpAutotuneLimits, AtpAutotuneMetric, AtpAutotuneMetricSample, AtpAutotunePolicy,
-    AtpAutotuneSettings, AtpAutotuneTelemetry, AtpAutotuneTelemetryError,
-    AtpAutotuneTelemetryReport, AtpBottleneckKind, AtpBottleneckSignal,
+    AtpAutotuneReceiptConfidence, AtpAutotuneReceiptProofPointer, AtpAutotuneReceiptStatus,
+    AtpAutotuneReceiptValidationError, AtpAutotuneSettings, AtpAutotuneTelemetry,
+    AtpAutotuneTelemetryError, AtpAutotuneTelemetryReport, AtpBottleneckKind, AtpBottleneckSignal,
     AtpTransferPressureSnapshot,
 };
 pub use diagnostics::{

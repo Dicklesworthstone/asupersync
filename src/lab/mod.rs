@@ -61,6 +61,7 @@ pub mod injection;
 pub mod instrumented_future;
 pub mod meta;
 pub mod network;
+pub mod numa;
 pub mod opportunity;
 pub mod oracle;
 pub mod replay;
@@ -134,6 +135,10 @@ pub use meta::{
 pub use network::{
     Fault as NetworkFault, JitterModel, LatencyModel, NetworkConditions, NetworkConfig,
     NetworkMetrics, NetworkTraceEvent, NetworkTraceKind, Packet, SimulatedNetwork,
+};
+pub use numa::{
+    NumaCachePressureInput, NumaCachePressureProjection, NumaPressureClass,
+    project_numa_cache_pressure,
 };
 pub use oracle::{
     ActorLeakOracle, ActorLeakViolation, BayesFactor, DetectionModel, DeterminismOracle,

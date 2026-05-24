@@ -327,9 +327,9 @@ pub mod real_channel_broadcast_obligation_saga_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_channel_mpsc_sync_semaphore_backpressure_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_mpsc_net_tcp_backpressure_flow_control_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_channel_mpsc_sync_semaphore_backpressure_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_oneshot_cx_scope_cancellation_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
@@ -521,6 +521,8 @@ pub mod real_signal_graceful_shutdown_supervision_tree_e2e_tests;
 pub mod real_sqlite_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_supervision_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_sync_semaphore_obligation_ledger_commit_abort_backpressure_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_tcp_unix_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]

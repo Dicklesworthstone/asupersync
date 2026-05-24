@@ -7,21 +7,21 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod real_lab_scenario_runner_explorer_e2e {
+    use crate::cx::{Cx, scope};
     use crate::lab::{
         config::LabConfig,
         explorer::{DporExplorer, ExplorerConfig},
-        runtime::{LabRuntime, LabRunReport},
-        scenario::{Scenario, FaultEvent, FaultAction, LabSettings, SCENARIO_SCHEMA_VERSION},
-        scenario_runner::{ScenarioRunner, ScenarioRunResult, ScenarioRunnerError},
+        runtime::{LabRunReport, LabRuntime},
+        scenario::{FaultAction, FaultEvent, LabSettings, SCENARIO_SCHEMA_VERSION, Scenario},
+        scenario_runner::{ScenarioRunResult, ScenarioRunner, ScenarioRunnerError},
     };
-    use crate::trace::replay::ReplayTrace;
     use crate::time::{Duration, Time};
+    use crate::trace::replay::ReplayTrace;
     use crate::types::Budget;
-    use crate::cx::{Cx, scope};
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap, HashSet};
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     /// Statistics collected during deterministic replay verification
     #[derive(Debug, Clone, Default)]
@@ -76,7 +76,8 @@ mod real_lab_scenario_runner_explorer_e2e {
                     // Check if all certificates in this equivalence class are identical
                     let reference_cert = runs[0].certificate_hash;
                     let all_identical = runs.iter().all(|r| r.certificate_hash == reference_cert);
-                    self.certificate_consistency.insert(fingerprint, all_identical);
+                    self.certificate_consistency
+                        .insert(fingerprint, all_identical);
 
                     if all_identical {
                         self.identical_certificates += runs.len();
@@ -167,7 +168,8 @@ mod real_lab_scenario_runner_explorer_e2e {
             let mut scenario = Scenario {
                 schema_version: SCENARIO_SCHEMA_VERSION,
                 id: "e2e-test-deterministic-replay".to_string(),
-                description: "Integration test scenario for deterministic replay verification".to_string(),
+                description: "Integration test scenario for deterministic replay verification"
+                    .to_string(),
                 ..Default::default()
             };
 
@@ -201,9 +203,13 @@ mod real_lab_scenario_runner_explorer_e2e {
         }
 
         /// Run scenario across multiple seeds using both scenario_runner and explorer
-        async fn run_deterministic_replay_verification(&mut self) -> Result<ReplayVerificationStats, Box<dyn std::error::Error>> {
-            println!("Starting deterministic replay verification with {} runs from seed {}",
-                     self.max_runs, self.base_seed);
+        async fn run_deterministic_replay_verification(
+            &mut self,
+        ) -> Result<ReplayVerificationStats, Box<dyn std::error::Error>> {
+            println!(
+                "Starting deterministic replay verification with {} runs from seed {}",
+                self.max_runs, self.base_seed
+            );
 
             // Configure explorer for parameter sweeps
             let explorer_config = ExplorerConfig::new(self.base_seed, self.max_runs)
@@ -227,17 +233,23 @@ mod real_lab_scenario_runner_explorer_e2e {
                     Ok(scenario_result) => {
                         let test_result = TestRunResult::new(seed, scenario_result);
 
-                        println!("Seed {} -> fingerprint: {}, certificate: {}, steps: {}, passed: {}",
-                                seed,
-                                test_result.trace_fingerprint,
-                                test_result.certificate_hash,
-                                test_result.steps_executed,
-                                test_result.passed);
+                        println!(
+                            "Seed {} -> fingerprint: {}, certificate: {}, steps: {}, passed: {}",
+                            seed,
+                            test_result.trace_fingerprint,
+                            test_result.certificate_hash,
+                            test_result.steps_executed,
+                            test_result.passed
+                        );
 
                         // Update verification stats
                         {
                             let mut stats = self.verification_stats.lock().unwrap();
-                            stats.add_run(seed, test_result.trace_fingerprint, test_result.certificate_hash);
+                            stats.add_run(
+                                seed,
+                                test_result.trace_fingerprint,
+                                test_result.certificate_hash,
+                            );
                         }
 
                         collected_results.push(test_result);
@@ -275,7 +287,9 @@ mod real_lab_scenario_runner_explorer_e2e {
 
             for (fingerprint, is_consistent) in &stats.certificate_consistency {
                 if !is_consistent {
-                    let seeds_in_class = stats.equivalence_classes.get(fingerprint)
+                    let seeds_in_class = stats
+                        .equivalence_classes
+                        .get(fingerprint)
                         .map(|seeds| format!("{:?}", seeds))
                         .unwrap_or_else(|| "unknown".to_string());
 
@@ -297,7 +311,9 @@ mod real_lab_scenario_runner_explorer_e2e {
 
     #[tokio::test]
     async fn test_scenario_runner_explorer_deterministic_replay_integration() {
-        println!("=== Starting scenario_runner ↔ explorer deterministic replay integration test ===");
+        println!(
+            "=== Starting scenario_runner ↔ explorer deterministic replay integration test ==="
+        );
 
         // Test parameters
         let base_seed = 1000;
@@ -306,24 +322,49 @@ mod real_lab_scenario_runner_explorer_e2e {
         let mut harness = ScenarioExplorerTestHarness::new(base_seed, max_runs);
 
         // Run the deterministic replay verification
-        let stats = harness.run_deterministic_replay_verification().await
+        let stats = harness
+            .run_deterministic_replay_verification()
+            .await
             .expect("Deterministic replay verification should succeed");
 
-        println!("Final verification stats: {}", serde_json::to_string_pretty(&stats.to_json()).unwrap());
+        println!(
+            "Final verification stats: {}",
+            serde_json::to_string_pretty(&stats.to_json()).unwrap()
+        );
 
         // Verify that certificate consistency is maintained
-        harness.verify_certificate_consistency()
+        harness
+            .verify_certificate_consistency()
             .expect("Certificate consistency should be maintained across equivalent traces");
 
         // Assertions about the integration behavior
-        assert!(stats.total_runs > 0, "Should have executed at least one scenario run");
-        assert_eq!(stats.total_runs, max_runs, "Should have executed exactly {} runs", max_runs);
-        assert!(stats.unique_seeds > 0, "Should have tested multiple unique seeds");
-        assert!(stats.identical_certificates > 0, "Should have found identical certificates");
-        assert_eq!(stats.replay_divergences, 0, "Should not have any replay divergences in deterministic execution");
+        assert!(
+            stats.total_runs > 0,
+            "Should have executed at least one scenario run"
+        );
+        assert_eq!(
+            stats.total_runs, max_runs,
+            "Should have executed exactly {} runs",
+            max_runs
+        );
+        assert!(
+            stats.unique_seeds > 0,
+            "Should have tested multiple unique seeds"
+        );
+        assert!(
+            stats.identical_certificates > 0,
+            "Should have found identical certificates"
+        );
+        assert_eq!(
+            stats.replay_divergences, 0,
+            "Should not have any replay divergences in deterministic execution"
+        );
 
         // Verify explorer-style parameter sweep behavior
-        assert!(stats.equivalence_classes.len() >= 1, "Should have discovered at least one equivalence class");
+        assert!(
+            stats.equivalence_classes.len() >= 1,
+            "Should have discovered at least one equivalence class"
+        );
 
         // All scenarios should pass in this deterministic test
         let results = harness.results.lock().unwrap();
@@ -331,9 +372,18 @@ mod real_lab_scenario_runner_explorer_e2e {
         assert_eq!(passed_count, max_runs, "All scenario runs should pass");
 
         println!("✓ Deterministic replay integration test passed");
-        println!("  - Executed {} scenario runs across {} seeds", stats.total_runs, stats.unique_seeds);
-        println!("  - Found {} equivalence classes with consistent certificates", stats.equivalence_classes.len());
-        println!("  - All {} replay validations were successful", stats.successful_replays);
+        println!(
+            "  - Executed {} scenario runs across {} seeds",
+            stats.total_runs, stats.unique_seeds
+        );
+        println!(
+            "  - Found {} equivalence classes with consistent certificates",
+            stats.equivalence_classes.len()
+        );
+        println!(
+            "  - All {} replay validations were successful",
+            stats.successful_replays
+        );
     }
 
     #[tokio::test]
@@ -348,22 +398,36 @@ mod real_lab_scenario_runner_explorer_e2e {
 
         let mut harness = ScenarioExplorerTestHarness::new(base_seed, max_runs);
 
-        let stats = harness.run_deterministic_replay_verification().await
+        let stats = harness
+            .run_deterministic_replay_verification()
+            .await
             .expect("Replay verification should complete");
 
-        println!("Divergence detection test stats: {}", serde_json::to_string_pretty(&stats.to_json()).unwrap());
+        println!(
+            "Divergence detection test stats: {}",
+            serde_json::to_string_pretty(&stats.to_json()).unwrap()
+        );
 
         // Since our scenario is deterministic, we shouldn't see divergences
         // But we verify the detection mechanism is in place
-        assert_eq!(stats.replay_divergences, 0, "Deterministic scenario should not produce divergences");
+        assert_eq!(
+            stats.replay_divergences, 0,
+            "Deterministic scenario should not produce divergences"
+        );
 
         // Verify that the consistency checking logic is working
         for (_, is_consistent) in &stats.certificate_consistency {
-            assert!(*is_consistent, "All equivalence classes should have consistent certificates");
+            assert!(
+                *is_consistent,
+                "All equivalence classes should have consistent certificates"
+            );
         }
 
         println!("✓ Replay divergence detection test passed");
-        println!("  - Verified consistency checking for {} equivalence classes", stats.certificate_consistency.len());
+        println!(
+            "  - Verified consistency checking for {} equivalence classes",
+            stats.certificate_consistency.len()
+        );
     }
 
     #[tokio::test]
@@ -378,24 +442,46 @@ mod real_lab_scenario_runner_explorer_e2e {
 
         let mut harness = ScenarioExplorerTestHarness::new(base_seed, max_runs);
 
-        let stats = harness.run_deterministic_replay_verification().await
+        let stats = harness
+            .run_deterministic_replay_verification()
+            .await
             .expect("Parameter sweep should complete successfully");
 
-        println!("Parameter sweep stats: {}", serde_json::to_string_pretty(&stats.to_json()).unwrap());
+        println!(
+            "Parameter sweep stats: {}",
+            serde_json::to_string_pretty(&stats.to_json()).unwrap()
+        );
 
         // Verify explorer-style behavior
-        assert_eq!(stats.total_runs, max_runs, "Should execute all planned runs");
-        assert_eq!(stats.unique_seeds, max_runs, "Should test all unique seeds in the range");
+        assert_eq!(
+            stats.total_runs, max_runs,
+            "Should execute all planned runs"
+        );
+        assert_eq!(
+            stats.unique_seeds, max_runs,
+            "Should test all unique seeds in the range"
+        );
 
         // Check that we're actually exploring different execution paths
-        assert!(stats.equivalence_classes.len() >= 1, "Should discover at least one equivalence class");
+        assert!(
+            stats.equivalence_classes.len() >= 1,
+            "Should discover at least one equivalence class"
+        );
 
         // In a more complex scenario, we might expect multiple equivalence classes
         // For this simple test, we verify the mechanism is working
-        let total_seeds_in_classes: usize = stats.equivalence_classes.values().map(|v| v.len()).sum();
-        assert_eq!(total_seeds_in_classes, max_runs, "All seeds should be classified");
+        let total_seeds_in_classes: usize =
+            stats.equivalence_classes.values().map(|v| v.len()).sum();
+        assert_eq!(
+            total_seeds_in_classes, max_runs,
+            "All seeds should be classified"
+        );
 
         println!("✓ Explorer parameter sweep test passed");
-        println!("  - Swept {} parameters across {} equivalence classes", stats.unique_seeds, stats.equivalence_classes.len());
+        println!(
+            "  - Swept {} parameters across {} equivalence classes",
+            stats.unique_seeds,
+            stats.equivalence_classes.len()
+        );
     }
 }

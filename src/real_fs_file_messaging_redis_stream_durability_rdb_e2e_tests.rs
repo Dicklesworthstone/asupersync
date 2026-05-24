@@ -7,18 +7,18 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod real_fs_file_messaging_redis_e2e {
-    use crate::fs::{File, OpenOptions, write, read, remove_file, metadata};
-    use crate::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt, SeekFrom};
-    use crate::messaging::redis::{RedisClient, RedisError, RespValue};
     use crate::cx::{Cx, scope};
+    use crate::fs::{File, OpenOptions, metadata, read, remove_file, write};
+    use crate::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
+    use crate::messaging::redis::{RedisClient, RedisError, RespValue};
     use crate::runtime::RuntimeBuilder;
     use crate::time::{Duration, Instant, sleep, timeout};
     use serde_json::json;
-    use std::collections::{HashMap, BTreeMap};
+    use std::collections::{BTreeMap, HashMap};
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
-    use tempfile::{TempDir, NamedTempFile};
+    use tempfile::{NamedTempFile, TempDir};
 
     /// Statistics collected during Redis stream durability testing
     #[derive(Debug, Clone, Default)]
@@ -109,7 +109,10 @@ mod real_fs_file_messaging_redis_e2e {
         async fn setup_redis_client(&mut self, cx: &Cx) -> Result<(), Box<dyn std::error::Error>> {
             // In a real test environment, this would connect to a test Redis instance
             // For this e2e test, we simulate Redis operations with file-based storage
-            println!("Setting up Redis client with data directory: {:?}", self.redis_data_dir);
+            println!(
+                "Setting up Redis client with data directory: {:?}",
+                self.redis_data_dir
+            );
 
             // For testing purposes, we'll simulate Redis operations
             // In a real scenario, this would be:
@@ -120,10 +123,19 @@ mod real_fs_file_messaging_redis_e2e {
         }
 
         /// Add entries to Redis stream with file-backed persistence
-        async fn add_stream_entries(&mut self, cx: &Cx, stream: &str, entries: Vec<TestStreamEntry>) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        async fn add_stream_entries(
+            &mut self,
+            cx: &Cx,
+            stream: &str,
+            entries: Vec<TestStreamEntry>,
+        ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
             let mut entry_ids = Vec::new();
 
-            println!("Adding {} entries to Redis stream: {}", entries.len(), stream);
+            println!(
+                "Adding {} entries to Redis stream: {}",
+                entries.len(),
+                stream
+            );
 
             for (i, entry) in entries.iter().enumerate() {
                 // Simulate XADD command with file persistence
@@ -146,12 +158,19 @@ mod real_fs_file_messaging_redis_e2e {
         }
 
         /// Simulate Redis XADD command with file persistence
-        async fn simulate_xadd(&mut self, cx: &Cx, stream: &str, entry: &TestStreamEntry) -> Result<String, Box<dyn std::error::Error>> {
+        async fn simulate_xadd(
+            &mut self,
+            cx: &Cx,
+            stream: &str,
+            entry: &TestStreamEntry,
+        ) -> Result<String, Box<dyn std::error::Error>> {
             // Generate a Redis-style entry ID
             let entry_id = format!("{}-{}", chrono::Utc::now().timestamp_millis(), 0);
 
             // Write entry to file-backed storage
-            let stream_file_path = self.redis_data_dir.join(format!("{}.stream", stream.replace(":", "_")));
+            let stream_file_path = self
+                .redis_data_dir
+                .join(format!("{}.stream", stream.replace(":", "_")));
 
             // Serialize entry to JSON and append to stream file
             let entry_data = json!({
@@ -167,7 +186,8 @@ mod real_fs_file_messaging_redis_e2e {
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(&stream_file_path).await?;
+                .open(&stream_file_path)
+                .await?;
 
             file.write_all(entry_line.as_bytes()).await?;
             file.sync_data().await?; // Force sync
@@ -184,7 +204,10 @@ mod real_fs_file_messaging_redis_e2e {
         }
 
         /// Force Redis checkpoint (simulate RDB save)
-        async fn force_redis_checkpoint(&mut self, cx: &Cx) -> Result<(), Box<dyn std::error::Error>> {
+        async fn force_redis_checkpoint(
+            &mut self,
+            cx: &Cx,
+        ) -> Result<(), Box<dyn std::error::Error>> {
             println!("Forcing Redis checkpoint (RDB save)");
 
             // Simulate BGSAVE command by creating RDB checkpoint file
@@ -231,7 +254,9 @@ mod real_fs_file_messaging_redis_e2e {
 
             // Add stream data from files
             for stream_name in &self.test_streams {
-                let stream_file_path = self.redis_data_dir.join(format!("{}.stream", stream_name.replace(":", "_")));
+                let stream_file_path = self
+                    .redis_data_dir
+                    .join(format!("{}.stream", stream_name.replace(":", "_")));
 
                 if stream_file_path.exists() {
                     let stream_data = read(&stream_file_path).await.unwrap_or_default();
@@ -250,7 +275,10 @@ mod real_fs_file_messaging_redis_e2e {
         }
 
         /// Verify RDB file integrity
-        async fn verify_rdb_integrity(&self, rdb_path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+        async fn verify_rdb_integrity(
+            &self,
+            rdb_path: &Path,
+        ) -> Result<bool, Box<dyn std::error::Error>> {
             println!("Verifying RDB file integrity: {:?}", rdb_path);
 
             let rdb_data = read(rdb_path).await?;
@@ -275,7 +303,11 @@ mod real_fs_file_messaging_redis_e2e {
             ]);
 
             if expected_checksum != actual_checksum {
-                return Err(format!("RDB checksum mismatch: expected {}, got {}", expected_checksum, actual_checksum).into());
+                return Err(format!(
+                    "RDB checksum mismatch: expected {}, got {}",
+                    expected_checksum, actual_checksum
+                )
+                .into());
             }
 
             println!("RDB file integrity verified successfully");
@@ -283,7 +315,10 @@ mod real_fs_file_messaging_redis_e2e {
         }
 
         /// Simulate disk sync failure
-        async fn simulate_disk_sync_failure(&mut self, cx: &Cx) -> Result<(), Box<dyn std::error::Error>> {
+        async fn simulate_disk_sync_failure(
+            &mut self,
+            cx: &Cx,
+        ) -> Result<(), Box<dyn std::error::Error>> {
             println!("Simulating disk sync failure");
 
             // Create a corrupted RDB file to simulate failure
@@ -303,7 +338,10 @@ mod real_fs_file_messaging_redis_e2e {
         }
 
         /// Recover from disk sync failure
-        async fn recover_from_failure(&mut self, cx: &Cx) -> Result<bool, Box<dyn std::error::Error>> {
+        async fn recover_from_failure(
+            &mut self,
+            cx: &Cx,
+        ) -> Result<bool, Box<dyn std::error::Error>> {
             println!("Attempting recovery from disk sync failure");
 
             let rdb_path = self.redis_data_dir.join("dump.rdb");
@@ -325,7 +363,9 @@ mod real_fs_file_messaging_redis_e2e {
             // Check if stream files are intact
             let mut recovered_entries = 0;
             for stream_name in &self.test_streams.clone() {
-                let stream_file_path = self.redis_data_dir.join(format!("{}.stream", stream_name.replace(":", "_")));
+                let stream_file_path = self
+                    .redis_data_dir
+                    .join(format!("{}.stream", stream_name.replace(":", "_")));
 
                 if stream_file_path.exists() {
                     let stream_data = read(&stream_file_path).await?;
@@ -354,10 +394,21 @@ mod real_fs_file_messaging_redis_e2e {
         }
 
         /// Read Redis stream entries
-        async fn read_stream_entries(&mut self, cx: &Cx, stream: &str, start_id: &str, count: usize) -> Result<Vec<TestStreamEntry>, Box<dyn std::error::Error>> {
-            println!("Reading {} entries from stream {} starting from {}", count, stream, start_id);
+        async fn read_stream_entries(
+            &mut self,
+            cx: &Cx,
+            stream: &str,
+            start_id: &str,
+            count: usize,
+        ) -> Result<Vec<TestStreamEntry>, Box<dyn std::error::Error>> {
+            println!(
+                "Reading {} entries from stream {} starting from {}",
+                count, stream, start_id
+            );
 
-            let stream_file_path = self.redis_data_dir.join(format!("{}.stream", stream.replace(":", "_")));
+            let stream_file_path = self
+                .redis_data_dir
+                .join(format!("{}.stream", stream.replace(":", "_")));
 
             if !stream_file_path.exists() {
                 return Ok(Vec::new());
@@ -414,85 +465,159 @@ mod real_fs_file_messaging_redis_e2e {
         println!("=== Starting fs/file ↔ Redis stream durability integration test ===");
 
         scope(|cx| async move {
-            let mut harness = FsRedisIntegrationTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness =
+                FsRedisIntegrationTestHarness::new().expect("Failed to create test harness");
 
             // Set up Redis client
-            harness.setup_redis_client(&cx).await
+            harness
+                .setup_redis_client(&cx)
+                .await
                 .expect("Failed to setup Redis client");
 
             // Create test stream entries
             let test_entries = vec![
-                TestStreamEntry::new("test:stream:orders", [
-                    ("order_id".to_string(), "12345".to_string()),
-                    ("customer".to_string(), "alice".to_string()),
-                    ("amount".to_string(), "99.99".to_string()),
-                ].into_iter().collect()),
-                TestStreamEntry::new("test:stream:orders", [
-                    ("order_id".to_string(), "12346".to_string()),
-                    ("customer".to_string(), "bob".to_string()),
-                    ("amount".to_string(), "149.99".to_string()),
-                ].into_iter().collect()),
-                TestStreamEntry::new("test:stream:events", [
-                    ("event_type".to_string(), "user_login".to_string()),
-                    ("user_id".to_string(), "alice".to_string()),
-                    ("timestamp".to_string(), "2024-05-24T21:30:00Z".to_string()),
-                ].into_iter().collect()),
+                TestStreamEntry::new(
+                    "test:stream:orders",
+                    [
+                        ("order_id".to_string(), "12345".to_string()),
+                        ("customer".to_string(), "alice".to_string()),
+                        ("amount".to_string(), "99.99".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                TestStreamEntry::new(
+                    "test:stream:orders",
+                    [
+                        ("order_id".to_string(), "12346".to_string()),
+                        ("customer".to_string(), "bob".to_string()),
+                        ("amount".to_string(), "149.99".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                TestStreamEntry::new(
+                    "test:stream:events",
+                    [
+                        ("event_type".to_string(), "user_login".to_string()),
+                        ("user_id".to_string(), "alice".to_string()),
+                        ("timestamp".to_string(), "2024-05-24T21:30:00Z".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
             ];
 
             // Add entries to Redis streams
-            let _entry_ids = harness.add_stream_entries(&cx, "test:stream:orders", test_entries.clone()).await
+            let _entry_ids = harness
+                .add_stream_entries(&cx, "test:stream:orders", test_entries.clone())
+                .await
                 .expect("Failed to add stream entries");
 
             println!("Added {} test entries to Redis streams", test_entries.len());
 
             // Force a checkpoint to ensure data is persisted
-            harness.force_redis_checkpoint(&cx).await
+            harness
+                .force_redis_checkpoint(&cx)
+                .await
                 .expect("Failed to force Redis checkpoint");
 
             // Verify we can read the entries back
-            let read_entries = harness.read_stream_entries(&cx, "test:stream:orders", "0-0", 10).await
+            let read_entries = harness
+                .read_stream_entries(&cx, "test:stream:orders", "0-0", 10)
+                .await
                 .expect("Failed to read stream entries");
 
-            assert!(!read_entries.is_empty(), "Should be able to read back stream entries");
+            assert!(
+                !read_entries.is_empty(),
+                "Should be able to read back stream entries"
+            );
             println!("Successfully read back {} entries", read_entries.len());
 
             // Simulate disk sync failure
-            harness.simulate_disk_sync_failure(&cx).await
+            harness
+                .simulate_disk_sync_failure(&cx)
+                .await
                 .expect("Failed to simulate disk sync failure");
 
             // Attempt recovery from failure
-            let recovery_successful = harness.recover_from_failure(&cx).await
+            let recovery_successful = harness
+                .recover_from_failure(&cx)
+                .await
                 .expect("Recovery attempt failed");
 
-            assert!(recovery_successful, "Should be able to recover from disk sync failure");
+            assert!(
+                recovery_successful,
+                "Should be able to recover from disk sync failure"
+            );
             println!("Recovery successful!");
 
             // Verify data integrity after recovery
-            let recovered_entries = harness.read_stream_entries(&cx, "test:stream:orders", "0-0", 10).await
+            let recovered_entries = harness
+                .read_stream_entries(&cx, "test:stream:orders", "0-0", 10)
+                .await
                 .expect("Failed to read entries after recovery");
 
-            assert!(!recovered_entries.is_empty(), "Should have recovered entries");
-            println!("Verified {} entries after recovery", recovered_entries.len());
+            assert!(
+                !recovered_entries.is_empty(),
+                "Should have recovered entries"
+            );
+            println!(
+                "Verified {} entries after recovery",
+                recovered_entries.len()
+            );
 
             // Verify RDB integrity
             let stats = harness.get_stats();
-            println!("Test statistics: {}", serde_json::to_string_pretty(&stats.to_json()).unwrap());
+            println!(
+                "Test statistics: {}",
+                serde_json::to_string_pretty(&stats.to_json()).unwrap()
+            );
 
-            assert!(stats.stream_entries_added > 0, "Should have added stream entries");
-            assert!(stats.successful_checkpoints > 0, "Should have successful checkpoints");
-            assert!(stats.disk_sync_failures > 0, "Should have simulated disk sync failures");
-            assert!(stats.successful_recoveries > 0, "Should have successful recoveries");
-            assert!(stats.rdb_integrity_checks > 0, "Should have performed RDB integrity checks");
+            assert!(
+                stats.stream_entries_added > 0,
+                "Should have added stream entries"
+            );
+            assert!(
+                stats.successful_checkpoints > 0,
+                "Should have successful checkpoints"
+            );
+            assert!(
+                stats.disk_sync_failures > 0,
+                "Should have simulated disk sync failures"
+            );
+            assert!(
+                stats.successful_recoveries > 0,
+                "Should have successful recoveries"
+            );
+            assert!(
+                stats.rdb_integrity_checks > 0,
+                "Should have performed RDB integrity checks"
+            );
 
             println!("✓ fs/file ↔ Redis stream durability integration test passed");
-            println!("  - Added {} stream entries across {} streams", stats.stream_entries_added, harness.test_streams.len());
-            println!("  - Performed {} successful checkpoints", stats.successful_checkpoints);
-            println!("  - Recovered from {} disk sync failures", stats.disk_sync_failures);
-            println!("  - Verified RDB integrity {} times", stats.rdb_integrity_checks);
+            println!(
+                "  - Added {} stream entries across {} streams",
+                stats.stream_entries_added,
+                harness.test_streams.len()
+            );
+            println!(
+                "  - Performed {} successful checkpoints",
+                stats.successful_checkpoints
+            );
+            println!(
+                "  - Recovered from {} disk sync failures",
+                stats.disk_sync_failures
+            );
+            println!(
+                "  - Verified RDB integrity {} times",
+                stats.rdb_integrity_checks
+            );
 
             Ok::<(), Box<dyn std::error::Error>>(())
-        }).await.expect("Test scope failed");
+        })
+        .await
+        .expect("Test scope failed");
     }
 
     #[tokio::test]
@@ -500,34 +625,47 @@ mod real_fs_file_messaging_redis_e2e {
         println!("=== Testing Redis RDB checkpoint integrity verification ===");
 
         scope(|cx| async move {
-            let mut harness = FsRedisIntegrationTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness =
+                FsRedisIntegrationTestHarness::new().expect("Failed to create test harness");
 
             // Setup and add test data
-            harness.setup_redis_client(&cx).await
+            harness
+                .setup_redis_client(&cx)
+                .await
                 .expect("Failed to setup Redis client");
 
             // Add a larger dataset to stress test checkpoint integrity
             let mut large_dataset = Vec::new();
             for i in 0..50 {
-                large_dataset.push(TestStreamEntry::new("test:stream:metrics", [
-                    ("metric_id".to_string(), format!("metric_{}", i)),
-                    ("value".to_string(), format!("{}", i * 100)),
-                    ("timestamp".to_string(), chrono::Utc::now().to_rfc3339()),
-                ].into_iter().collect()));
+                large_dataset.push(TestStreamEntry::new(
+                    "test:stream:metrics",
+                    [
+                        ("metric_id".to_string(), format!("metric_{}", i)),
+                        ("value".to_string(), format!("{}", i * 100)),
+                        ("timestamp".to_string(), chrono::Utc::now().to_rfc3339()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ));
             }
 
-            let _entry_ids = harness.add_stream_entries(&cx, "test:stream:metrics", large_dataset).await
+            let _entry_ids = harness
+                .add_stream_entries(&cx, "test:stream:metrics", large_dataset)
+                .await
                 .expect("Failed to add large dataset");
 
             // Force checkpoint
-            harness.force_redis_checkpoint(&cx).await
+            harness
+                .force_redis_checkpoint(&cx)
+                .await
                 .expect("Failed to create checkpoint");
 
             // Verify RDB integrity multiple times
             let rdb_path = harness.redis_data_dir.join("dump.rdb");
             for i in 0..5 {
-                let integrity_check = harness.verify_rdb_integrity(&rdb_path).await
+                let integrity_check = harness
+                    .verify_rdb_integrity(&rdb_path)
+                    .await
                     .expect("RDB integrity check failed");
 
                 assert!(integrity_check, "RDB integrity check {} should pass", i + 1);
@@ -535,14 +673,25 @@ mod real_fs_file_messaging_redis_e2e {
             }
 
             let stats = harness.get_stats();
-            assert!(stats.rdb_integrity_checks >= 5, "Should have performed multiple integrity checks");
+            assert!(
+                stats.rdb_integrity_checks >= 5,
+                "Should have performed multiple integrity checks"
+            );
 
             println!("✓ Redis RDB checkpoint integrity verification test passed");
-            println!("  - Created checkpoint with {} entries", stats.stream_entries_added);
-            println!("  - Performed {} integrity verifications", stats.rdb_integrity_checks);
+            println!(
+                "  - Created checkpoint with {} entries",
+                stats.stream_entries_added
+            );
+            println!(
+                "  - Performed {} integrity verifications",
+                stats.rdb_integrity_checks
+            );
 
             Ok::<(), Box<dyn std::error::Error>>(())
-        }).await.expect("Test scope failed");
+        })
+        .await
+        .expect("Test scope failed");
     }
 
     #[tokio::test]
@@ -550,28 +699,42 @@ mod real_fs_file_messaging_redis_e2e {
         println!("=== Testing Redis stream recovery after data corruption ===");
 
         scope(|cx| async move {
-            let mut harness = FsRedisIntegrationTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness =
+                FsRedisIntegrationTestHarness::new().expect("Failed to create test harness");
 
-            harness.setup_redis_client(&cx).await
+            harness
+                .setup_redis_client(&cx)
+                .await
                 .expect("Failed to setup Redis client");
 
             // Create test data across multiple streams
             for (stream_idx, stream_name) in harness.test_streams.clone().iter().enumerate() {
                 let mut stream_entries = Vec::new();
                 for i in 0..10 {
-                    stream_entries.push(TestStreamEntry::new(stream_name, [
-                        ("data".to_string(), format!("stream_{}_entry_{}", stream_idx, i)),
-                        ("sequence".to_string(), i.to_string()),
-                    ].into_iter().collect()));
+                    stream_entries.push(TestStreamEntry::new(
+                        stream_name,
+                        [
+                            (
+                                "data".to_string(),
+                                format!("stream_{}_entry_{}", stream_idx, i),
+                            ),
+                            ("sequence".to_string(), i.to_string()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ));
                 }
 
-                harness.add_stream_entries(&cx, stream_name, stream_entries).await
+                harness
+                    .add_stream_entries(&cx, stream_name, stream_entries)
+                    .await
                     .expect("Failed to add stream entries");
             }
 
             // Create initial checkpoint
-            harness.force_redis_checkpoint(&cx).await
+            harness
+                .force_redis_checkpoint(&cx)
+                .await
                 .expect("Failed to create initial checkpoint");
 
             // Simulate multiple failure scenarios
@@ -579,35 +742,66 @@ mod real_fs_file_messaging_redis_e2e {
                 println!("Failure simulation round {}", failure_round + 1);
 
                 // Simulate failure
-                harness.simulate_disk_sync_failure(&cx).await
+                harness
+                    .simulate_disk_sync_failure(&cx)
+                    .await
                     .expect("Failed to simulate disk sync failure");
 
                 // Attempt recovery
-                let recovery_result = harness.recover_from_failure(&cx).await
+                let recovery_result = harness
+                    .recover_from_failure(&cx)
+                    .await
                     .expect("Recovery attempt failed");
 
-                assert!(recovery_result, "Recovery should succeed in round {}", failure_round + 1);
+                assert!(
+                    recovery_result,
+                    "Recovery should succeed in round {}",
+                    failure_round + 1
+                );
 
                 // Verify data is still accessible
                 for stream_name in &harness.test_streams.clone() {
-                    let entries = harness.read_stream_entries(&cx, stream_name, "0-0", 20).await
+                    let entries = harness
+                        .read_stream_entries(&cx, stream_name, "0-0", 20)
+                        .await
                         .expect("Failed to read entries after recovery");
 
-                    assert!(!entries.is_empty(), "Stream {} should have recoverable entries", stream_name);
+                    assert!(
+                        !entries.is_empty(),
+                        "Stream {} should have recoverable entries",
+                        stream_name
+                    );
                 }
             }
 
             let stats = harness.get_stats();
-            println!("Recovery test statistics: {}", serde_json::to_string_pretty(&stats.to_json()).unwrap());
+            println!(
+                "Recovery test statistics: {}",
+                serde_json::to_string_pretty(&stats.to_json()).unwrap()
+            );
 
-            assert_eq!(stats.disk_sync_failures, 3, "Should have simulated 3 disk sync failures");
-            assert_eq!(stats.successful_recoveries, 3, "Should have 3 successful recoveries");
+            assert_eq!(
+                stats.disk_sync_failures, 3,
+                "Should have simulated 3 disk sync failures"
+            );
+            assert_eq!(
+                stats.successful_recoveries, 3,
+                "Should have 3 successful recoveries"
+            );
 
             println!("✓ Redis stream recovery after corruption test passed");
-            println!("  - Survived {} corruption scenarios", stats.disk_sync_failures);
-            println!("  - Achieved {} successful recoveries", stats.successful_recoveries);
+            println!(
+                "  - Survived {} corruption scenarios",
+                stats.disk_sync_failures
+            );
+            println!(
+                "  - Achieved {} successful recoveries",
+                stats.successful_recoveries
+            );
 
             Ok::<(), Box<dyn std::error::Error>>(())
-        }).await.expect("Test scope failed");
+        })
+        .await
+        .expect("Test scope failed");
     }
 }

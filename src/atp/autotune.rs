@@ -753,6 +753,29 @@ pub enum AtpBottleneckKind {
     MigrationInstability,
 }
 
+impl AtpBottleneckKind {
+    /// Return the stable bottleneck name used in receipts and status output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InsufficientTelemetry => "insufficient_telemetry",
+            Self::ContradictoryTelemetry => "contradictory_telemetry",
+            Self::NetworkLoss => "network_loss",
+            Self::NetworkLatency => "network_latency",
+            Self::CongestionWindow => "congestion_window",
+            Self::SendBufferPressure => "send_buffer_pressure",
+            Self::ReceiveBufferPressure => "receive_buffer_pressure",
+            Self::DiskReadLag => "disk_read_lag",
+            Self::DiskWriteLag => "disk_write_lag",
+            Self::EncodeBacklog => "encode_backlog",
+            Self::DecodeBacklog => "decode_backlog",
+            Self::RepairLowRoi => "repair_low_roi",
+            Self::RelayCost => "relay_cost",
+            Self::MigrationInstability => "migration_instability",
+        }
+    }
+}
+
 /// One human-readable bottleneck signal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtpBottleneckSignal {
@@ -809,6 +832,69 @@ pub enum AtpAutotuneDecisionOutcome {
     HoldNoWin,
     /// Missing or malformed identity evidence made the telemetry unsafe to apply.
     MalformedTelemetry,
+}
+
+/// Consumer-facing ATP autotune receipt status.
+///
+/// This is intentionally coarser than the internal policy outcome so status,
+/// preflight, and proof consumers do not each re-classify raw metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtpAutotuneReceiptStatus {
+    /// Inputs were accepted and the selected settings are safe to report as passing.
+    Pass,
+    /// Pressure was accepted but the policy intentionally degraded throughput or repair knobs.
+    Degraded,
+    /// No bounded improvement was available, so the explicit no-win path was selected.
+    NoWin,
+    /// Work was not admitted because required evidence is incomplete.
+    Blocked,
+    /// The receipt or its telemetry evidence is malformed.
+    Malformed,
+    /// The receipt does not match current transfer-owned state.
+    StaleEvidence,
+}
+
+impl AtpAutotuneReceiptStatus {
+    /// Return the stable status string used in JSON and human output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Degraded => "degraded",
+            Self::NoWin => "no_win",
+            Self::Blocked => "blocked",
+            Self::Malformed => "malformed",
+            Self::StaleEvidence => "stale_evidence",
+        }
+    }
+}
+
+/// Confidence class for an explainable ATP autotune receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtpAutotuneReceiptConfidence {
+    /// Healthy evidence allowed conservative policy progress.
+    Conservative,
+    /// Evidence was accepted, but pressure forced fail-closed behavior.
+    FailClosed,
+    /// Evidence was incomplete, so the decision is blocked.
+    InsufficientEvidence,
+    /// Evidence was rejected as malformed or stale.
+    Rejected,
+}
+
+impl AtpAutotuneReceiptConfidence {
+    /// Return the stable confidence string used in JSON and human output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Conservative => "conservative",
+            Self::FailClosed => "fail_closed",
+            Self::InsufficientEvidence => "insufficient_evidence",
+            Self::Rejected => "rejected",
+        }
+    }
 }
 
 /// Transfer knob described by an autotune decision receipt.
@@ -880,6 +966,71 @@ impl AtpAutotuneKnobChange {
     }
 }
 
+/// Replay/proof pointer embedded in an autotune receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAutotuneReceiptProofPointer {
+    /// Receipt schema version that owns this proof pointer.
+    pub receipt_schema_version: String,
+    /// Stable trace id for joining status, preflight, and proof artifacts.
+    pub trace_id: String,
+    /// Stable workload or transfer id.
+    pub workload_id: String,
+    /// Samples represented by this receipt.
+    pub sample_count: u32,
+}
+
+impl AtpAutotuneReceiptProofPointer {
+    fn from_receipt_fields(trace_id: &str, workload_id: &str, sample_count: u32) -> Self {
+        Self {
+            receipt_schema_version: String::from(ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION),
+            trace_id: trace_id.to_string(),
+            workload_id: workload_id.to_string(),
+            sample_count,
+        }
+    }
+}
+
+/// Error returned when a receipt cannot be consumed by status/preflight/proof code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtpAutotuneReceiptValidationError {
+    /// Receipt schema is unsupported.
+    UnsupportedSchemaVersion {
+        /// Expected schema version.
+        expected: String,
+        /// Actual schema version.
+        actual: String,
+    },
+    /// Trace id is missing or blank.
+    MissingTraceId,
+    /// Workload id is missing or blank.
+    MissingWorkloadId,
+    /// Embedded proof pointer does not match the receipt identity.
+    ProofPointerMismatch {
+        /// Mismatched field name.
+        field: String,
+    },
+}
+
+impl fmt::Display for AtpAutotuneReceiptValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedSchemaVersion { expected, actual } => {
+                write!(
+                    f,
+                    "unsupported ATP autotune receipt schema {actual}, expected {expected}"
+                )
+            }
+            Self::MissingTraceId => write!(f, "ATP autotune receipt trace_id is missing"),
+            Self::MissingWorkloadId => write!(f, "ATP autotune receipt workload_id is missing"),
+            Self::ProofPointerMismatch { field } => {
+                write!(f, "ATP autotune receipt proof pointer mismatches {field}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AtpAutotuneReceiptValidationError {}
+
 /// Deterministic, replay-friendly receipt for one ATP autotune decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtpAutotuneDecisionReceipt {
@@ -897,6 +1048,18 @@ pub struct AtpAutotuneDecisionReceipt {
     pub decision: AtpAutotuneDecision,
     /// High-level outcome class.
     pub outcome: AtpAutotuneDecisionOutcome,
+    /// Consumer-facing status for status, preflight, and proof code.
+    pub consumer_status: AtpAutotuneReceiptStatus,
+    /// Confidence/certainty class for this decision.
+    pub confidence: AtpAutotuneReceiptConfidence,
+    /// Stable caveats explaining why this status was selected.
+    pub caveats: Vec<String>,
+    /// Metric sources omitted from this decision window.
+    pub omitted_sources: Vec<AtpAutotuneMetric>,
+    /// Evidence sources rejected as stale while building this decision receipt.
+    pub stale_sources: Vec<String>,
+    /// Stable replay/proof pointer for downstream artifact joins.
+    pub proof_pointer: AtpAutotuneReceiptProofPointer,
     /// Stable per-knob changes in a fixed order.
     pub changes: Vec<AtpAutotuneKnobChange>,
 }
@@ -911,6 +1074,15 @@ impl AtpAutotuneDecisionReceipt {
     ) -> Self {
         let changes = knob_changes(current_settings, decision.settings);
         let outcome = classify_decision_outcome(&decision, &changes);
+        let consumer_status = classify_receipt_status(&decision, outcome);
+        let confidence = receipt_confidence(&decision, consumer_status);
+        let caveats = receipt_caveats(&decision, consumer_status);
+        let omitted_sources = omitted_metric_sources(telemetry);
+        let proof_pointer = AtpAutotuneReceiptProofPointer::from_receipt_fields(
+            &telemetry.trace_id,
+            &telemetry.workload_id,
+            telemetry.sample_count,
+        );
         Self {
             schema_version: String::from(ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION),
             trace_id: telemetry.trace_id.clone(),
@@ -919,8 +1091,127 @@ impl AtpAutotuneDecisionReceipt {
             current_settings,
             decision,
             outcome,
+            consumer_status,
+            confidence,
+            caveats,
+            omitted_sources,
+            stale_sources: Vec::new(),
+            proof_pointer,
             changes,
         }
+    }
+
+    /// Validate this receipt before a downstream consumer trusts it.
+    pub fn validate_for_consumers(&self) -> Result<(), AtpAutotuneReceiptValidationError> {
+        if self.schema_version != ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION {
+            return Err(
+                AtpAutotuneReceiptValidationError::UnsupportedSchemaVersion {
+                    expected: String::from(ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION),
+                    actual: self.schema_version.clone(),
+                },
+            );
+        }
+        if self.trace_id.trim().is_empty() {
+            return Err(AtpAutotuneReceiptValidationError::MissingTraceId);
+        }
+        if self.workload_id.trim().is_empty() {
+            return Err(AtpAutotuneReceiptValidationError::MissingWorkloadId);
+        }
+        if self.proof_pointer.receipt_schema_version != ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION
+        {
+            return Err(AtpAutotuneReceiptValidationError::ProofPointerMismatch {
+                field: String::from("receipt_schema_version"),
+            });
+        }
+        if self.proof_pointer.trace_id != self.trace_id {
+            return Err(AtpAutotuneReceiptValidationError::ProofPointerMismatch {
+                field: String::from("trace_id"),
+            });
+        }
+        if self.proof_pointer.workload_id != self.workload_id {
+            return Err(AtpAutotuneReceiptValidationError::ProofPointerMismatch {
+                field: String::from("workload_id"),
+            });
+        }
+        if self.proof_pointer.sample_count != self.sample_count {
+            return Err(AtpAutotuneReceiptValidationError::ProofPointerMismatch {
+                field: String::from("sample_count"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Return knobs that changed, in stable receipt order.
+    #[must_use]
+    pub fn selected_knobs(&self) -> Vec<AtpAutotuneKnob> {
+        self.changes
+            .iter()
+            .filter(|change| change.direction != AtpAutotuneKnobDirection::Hold)
+            .map(|change| change.knob)
+            .collect()
+    }
+
+    /// Render a terse, stable human receipt for CLI/status output.
+    #[must_use]
+    pub fn render_human_summary(&self, explain: bool) -> String {
+        self.human_summary_lines(explain).join("\n")
+    }
+
+    /// Build stable human receipt lines for callers that add their own heading.
+    #[must_use]
+    pub fn human_summary_lines(&self, explain: bool) -> Vec<String> {
+        let mut lines = vec![
+            format!("Trace ID: {}", self.trace_id),
+            format!("Workload ID: {}", self.workload_id),
+            format!("Samples: {}", self.sample_count),
+            format!("Status: {}", self.consumer_status.as_str()),
+            format!("Outcome: {:?}", self.outcome),
+            format!("Reason: {}", self.decision.reason_code),
+            format!("Confidence: {}", self.confidence.as_str()),
+            format!("Fail closed: {}", self.decision.fail_closed),
+            format!(
+                "Next settings: in_flight_bytes={}, stream_count={}, chunk_size_bytes={}, repair_symbols_per_second={}",
+                self.decision.settings.in_flight_bytes,
+                self.decision.settings.stream_count,
+                self.decision.settings.chunk_size_bytes,
+                self.decision.settings.repair_symbols_per_second
+            ),
+            format!("Bottlenecks: {}", self.decision.bottlenecks.len()),
+        ];
+
+        if !self.caveats.is_empty() {
+            lines.push(format!("Caveats: {}", self.caveats.join(",")));
+        }
+        if !self.stale_sources.is_empty() {
+            lines.push(format!("Stale sources: {}", self.stale_sources.join(",")));
+        }
+
+        if explain {
+            for change in &self.changes {
+                if change.direction != AtpAutotuneKnobDirection::Hold {
+                    lines.push(format!(
+                        "- knob {}: {:?} {} -> {} (delta={})",
+                        change.knob.as_str(),
+                        change.direction,
+                        change.previous,
+                        change.next,
+                        change.delta
+                    ));
+                }
+            }
+            for signal in &self.decision.bottlenecks {
+                let metric = signal.metric.map_or("none", AtpAutotuneMetric::as_str);
+                lines.push(format!(
+                    "- {}: metric={}, observed={}, threshold={}",
+                    signal.kind.as_str(),
+                    metric,
+                    signal.observed,
+                    signal.threshold
+                ));
+            }
+        }
+
+        lines
     }
 }
 
@@ -968,6 +1259,8 @@ pub struct AtpAutotuneApplicationReceipt {
     pub applied: bool,
     /// Stable outcome for logs, status, and proof artifacts.
     pub outcome: AtpAutotuneApplicationOutcome,
+    /// Consumer-facing status after application/hysteresis checks.
+    pub consumer_status: AtpAutotuneReceiptStatus,
     /// Consecutive clean-growth windows observed after this application step.
     pub consecutive_growth_windows: u8,
     /// Number of clean-growth windows required before applying growth.
@@ -988,6 +1281,7 @@ impl AtpAutotuneApplicationReceipt {
         growth_confirmations_required: u8,
         decision_receipt: AtpAutotuneDecisionReceipt,
     ) -> Self {
+        let consumer_status = application_consumer_status(outcome);
         let reason_code = match outcome {
             AtpAutotuneApplicationOutcome::AppliedPressureBackoff => "applied_pressure_backoff",
             AtpAutotuneApplicationOutcome::AppliedConfirmedGrowth => "applied_confirmed_growth",
@@ -1010,6 +1304,7 @@ impl AtpAutotuneApplicationReceipt {
             applied_settings,
             applied,
             outcome,
+            consumer_status,
             consecutive_growth_windows,
             growth_confirmations_required,
             reason_code: String::from(reason_code),
@@ -1085,13 +1380,24 @@ impl AtpAutotuneApplicationState {
         let previous = self.limits.clamp(self.settings);
         self.settings = previous;
 
-        if receipt.schema_version != ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION {
+        if let Err(validation) = receipt.validate_for_consumers() {
+            let candidate = self.limits.clamp(receipt.decision.settings);
             self.consecutive_growth_windows = 0;
+            let outcome = match validation {
+                AtpAutotuneReceiptValidationError::UnsupportedSchemaVersion { .. } => {
+                    AtpAutotuneApplicationOutcome::RejectedSchemaVersion
+                }
+                AtpAutotuneReceiptValidationError::MissingTraceId
+                | AtpAutotuneReceiptValidationError::MissingWorkloadId
+                | AtpAutotuneReceiptValidationError::ProofPointerMismatch { .. } => {
+                    AtpAutotuneApplicationOutcome::RejectedMalformedTelemetry
+                }
+            };
             return AtpAutotuneApplicationReceipt::from_parts(
                 previous,
+                candidate,
                 previous,
-                previous,
-                AtpAutotuneApplicationOutcome::RejectedSchemaVersion,
+                outcome,
                 self.consecutive_growth_windows,
                 self.growth_confirmations_required,
                 receipt,
@@ -1575,6 +1881,119 @@ fn classify_decision_outcome(
     AtpAutotuneDecisionOutcome::HoldNoWin
 }
 
+fn classify_receipt_status(
+    decision: &AtpAutotuneDecision,
+    outcome: AtpAutotuneDecisionOutcome,
+) -> AtpAutotuneReceiptStatus {
+    if decision
+        .bottlenecks
+        .iter()
+        .any(|signal| signal.kind == AtpBottleneckKind::ContradictoryTelemetry)
+    {
+        return AtpAutotuneReceiptStatus::Malformed;
+    }
+    if decision
+        .bottlenecks
+        .iter()
+        .any(|signal| signal.kind == AtpBottleneckKind::InsufficientTelemetry)
+    {
+        return AtpAutotuneReceiptStatus::Blocked;
+    }
+
+    match outcome {
+        AtpAutotuneDecisionOutcome::ConservativeGrowth => AtpAutotuneReceiptStatus::Pass,
+        AtpAutotuneDecisionOutcome::PressureBackoff => AtpAutotuneReceiptStatus::Degraded,
+        AtpAutotuneDecisionOutcome::HoldNoWin => AtpAutotuneReceiptStatus::NoWin,
+        AtpAutotuneDecisionOutcome::MalformedTelemetry => AtpAutotuneReceiptStatus::Malformed,
+    }
+}
+
+fn receipt_confidence(
+    decision: &AtpAutotuneDecision,
+    status: AtpAutotuneReceiptStatus,
+) -> AtpAutotuneReceiptConfidence {
+    match status {
+        AtpAutotuneReceiptStatus::Pass => AtpAutotuneReceiptConfidence::Conservative,
+        AtpAutotuneReceiptStatus::NoWin if !decision.fail_closed => {
+            AtpAutotuneReceiptConfidence::Conservative
+        }
+        AtpAutotuneReceiptStatus::Degraded | AtpAutotuneReceiptStatus::NoWin => {
+            AtpAutotuneReceiptConfidence::FailClosed
+        }
+        AtpAutotuneReceiptStatus::Blocked => AtpAutotuneReceiptConfidence::InsufficientEvidence,
+        AtpAutotuneReceiptStatus::Malformed | AtpAutotuneReceiptStatus::StaleEvidence => {
+            AtpAutotuneReceiptConfidence::Rejected
+        }
+    }
+}
+
+fn receipt_caveats(
+    decision: &AtpAutotuneDecision,
+    status: AtpAutotuneReceiptStatus,
+) -> Vec<String> {
+    match status {
+        AtpAutotuneReceiptStatus::Pass => {
+            vec![String::from("growth_requires_application_hysteresis")]
+        }
+        AtpAutotuneReceiptStatus::NoWin => vec![String::from("bounded_no_win")],
+        AtpAutotuneReceiptStatus::Blocked => vec![String::from("insufficient_evidence")],
+        AtpAutotuneReceiptStatus::Malformed => vec![String::from("malformed_evidence")],
+        AtpAutotuneReceiptStatus::StaleEvidence => vec![String::from("stale_evidence")],
+        AtpAutotuneReceiptStatus::Degraded => decision
+            .bottlenecks
+            .iter()
+            .map(|signal| signal.kind.as_str().to_string())
+            .collect(),
+    }
+}
+
+fn omitted_metric_sources(telemetry: &AtpAutotuneTelemetry) -> Vec<AtpAutotuneMetric> {
+    ATP_AUTOTUNE_METRIC_NAMES
+        .iter()
+        .copied()
+        .filter(|metric| !telemetry_has_metric(telemetry, *metric))
+        .collect()
+}
+
+fn telemetry_has_metric(telemetry: &AtpAutotuneTelemetry, metric: AtpAutotuneMetric) -> bool {
+    match metric {
+        AtpAutotuneMetric::RttMicros => telemetry.rtt_micros.is_some(),
+        AtpAutotuneMetric::LossPermille => telemetry.loss_permille.is_some(),
+        AtpAutotuneMetric::PtoMicros => telemetry.pto_micros.is_some(),
+        AtpAutotuneMetric::CongestionWindowBytes => telemetry.congestion_window_bytes.is_some(),
+        AtpAutotuneMetric::InFlightBytes => telemetry.in_flight_bytes.is_some(),
+        AtpAutotuneMetric::SendBufferQueuedBytes => telemetry.send_buffer_queued_bytes.is_some(),
+        AtpAutotuneMetric::ReceiveBufferQueuedBytes => {
+            telemetry.receive_buffer_queued_bytes.is_some()
+        }
+        AtpAutotuneMetric::DiskReadLagMicros => telemetry.disk_read_lag_micros.is_some(),
+        AtpAutotuneMetric::DiskWriteLagMicros => telemetry.disk_write_lag_micros.is_some(),
+        AtpAutotuneMetric::EncodeBacklogSymbols => telemetry.encode_backlog_symbols.is_some(),
+        AtpAutotuneMetric::DecodeBacklogSymbols => telemetry.decode_backlog_symbols.is_some(),
+        AtpAutotuneMetric::RepairRoiPermille => telemetry.repair_roi_permille.is_some(),
+        AtpAutotuneMetric::RelayCostMicrosPerMiB => telemetry.relay_cost_micros_per_mib.is_some(),
+        AtpAutotuneMetric::MigrationEvents => telemetry.migration_events.is_some(),
+    }
+}
+
+fn application_consumer_status(outcome: AtpAutotuneApplicationOutcome) -> AtpAutotuneReceiptStatus {
+    match outcome {
+        AtpAutotuneApplicationOutcome::AppliedPressureBackoff => AtpAutotuneReceiptStatus::Degraded,
+        AtpAutotuneApplicationOutcome::AppliedConfirmedGrowth => AtpAutotuneReceiptStatus::Pass,
+        AtpAutotuneApplicationOutcome::DeferredGrowthHysteresis => {
+            AtpAutotuneReceiptStatus::Blocked
+        }
+        AtpAutotuneApplicationOutcome::HeldNoWin => AtpAutotuneReceiptStatus::NoWin,
+        AtpAutotuneApplicationOutcome::RejectedMalformedTelemetry
+        | AtpAutotuneApplicationOutcome::RejectedSchemaVersion => {
+            AtpAutotuneReceiptStatus::Malformed
+        }
+        AtpAutotuneApplicationOutcome::RejectedStaleReceipt => {
+            AtpAutotuneReceiptStatus::StaleEvidence
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1995,6 +2414,30 @@ mod tests {
         assert_eq!(receipt.sample_count, 16);
         assert_eq!(receipt.current_settings, current);
         assert_eq!(receipt.outcome, AtpAutotuneDecisionOutcome::PressureBackoff);
+        assert_eq!(receipt.consumer_status, AtpAutotuneReceiptStatus::Degraded);
+        assert_eq!(receipt.confidence, AtpAutotuneReceiptConfidence::FailClosed);
+        assert_eq!(receipt.caveats, vec![String::from("network_loss")]);
+        assert!(receipt.stale_sources.is_empty());
+        assert_eq!(
+            receipt.proof_pointer,
+            AtpAutotuneReceiptProofPointer {
+                receipt_schema_version: String::from(ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION),
+                trace_id: String::from("trace-a"),
+                workload_id: String::from("workload-a"),
+                sample_count: 16,
+            }
+        );
+        assert!(receipt.validate_for_consumers().is_ok());
+        assert!(
+            receipt
+                .omitted_sources
+                .contains(&AtpAutotuneMetric::RttMicros)
+        );
+        assert!(
+            !receipt
+                .omitted_sources
+                .contains(&AtpAutotuneMetric::LossPermille)
+        );
         assert_eq!(receipt.changes.len(), 4);
         assert_eq!(receipt.changes[0].knob, AtpAutotuneKnob::InFlightBytes);
         assert_eq!(
@@ -2006,6 +2449,26 @@ mod tests {
             receipt.changes[3].direction,
             AtpAutotuneKnobDirection::Increase
         );
+        assert_eq!(
+            receipt.selected_knobs(),
+            vec![
+                AtpAutotuneKnob::InFlightBytes,
+                AtpAutotuneKnob::StreamCount,
+                AtpAutotuneKnob::RepairSymbolsPerSecond,
+            ]
+        );
+
+        let encoded = serde_json::to_string(&receipt).expect("receipt JSON");
+        assert!(encoded.contains(r#""consumer_status":"degraded""#));
+        assert!(encoded.contains(r#""confidence":"fail_closed""#));
+        let decoded: AtpAutotuneDecisionReceipt =
+            serde_json::from_str(&encoded).expect("roundtrip receipt JSON");
+        assert_eq!(decoded, receipt);
+
+        let human = receipt.render_human_summary(true);
+        assert!(human.contains("Status: degraded"));
+        assert!(human.contains("Confidence: fail_closed"));
+        assert!(human.contains("- network_loss: metric=atp.autotune.loss_permille"));
     }
 
     #[test]
@@ -2032,15 +2495,69 @@ mod tests {
             malformed.outcome,
             AtpAutotuneDecisionOutcome::MalformedTelemetry
         );
+        assert_eq!(
+            malformed.consumer_status,
+            AtpAutotuneReceiptStatus::Malformed
+        );
+        assert_eq!(
+            malformed.validate_for_consumers(),
+            Err(AtpAutotuneReceiptValidationError::MissingTraceId)
+        );
 
         let bounded =
             policy.decide_with_receipt(AtpAutotuneSettings::default(), &healthy_telemetry());
         assert_eq!(bounded.outcome, AtpAutotuneDecisionOutcome::HoldNoWin);
+        assert_eq!(bounded.consumer_status, AtpAutotuneReceiptStatus::NoWin);
+        assert_eq!(
+            bounded.confidence,
+            AtpAutotuneReceiptConfidence::Conservative
+        );
+        assert_eq!(bounded.caveats, vec![String::from("bounded_no_win")]);
         assert!(
             bounded
                 .changes
                 .iter()
                 .all(|change| change.direction == AtpAutotuneKnobDirection::Hold)
+        );
+    }
+
+    #[test]
+    fn decision_receipt_status_distinguishes_blocked_and_malformed_consumers() {
+        let policy = AtpAutotunePolicy::default();
+        let current = AtpAutotuneSettings::default();
+        let blocked = policy.decide_with_receipt(
+            current,
+            &AtpAutotuneTelemetry::new("trace-blocked", "workload-blocked").with_sample_count(2),
+        );
+
+        assert_eq!(blocked.outcome, AtpAutotuneDecisionOutcome::HoldNoWin);
+        assert_eq!(blocked.consumer_status, AtpAutotuneReceiptStatus::Blocked);
+        assert_eq!(
+            blocked.confidence,
+            AtpAutotuneReceiptConfidence::InsufficientEvidence
+        );
+        assert_eq!(blocked.caveats, vec![String::from("insufficient_evidence")]);
+        assert!(blocked.validate_for_consumers().is_ok());
+
+        let mut unsupported = blocked.clone();
+        unsupported.schema_version = String::from("atp-autotune-decision-receipt-v0");
+        assert_eq!(
+            unsupported.validate_for_consumers(),
+            Err(
+                AtpAutotuneReceiptValidationError::UnsupportedSchemaVersion {
+                    expected: String::from(ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION),
+                    actual: String::from("atp-autotune-decision-receipt-v0"),
+                },
+            )
+        );
+
+        let mut bad_pointer = blocked;
+        bad_pointer.proof_pointer.trace_id = String::from("other-trace");
+        assert_eq!(
+            bad_pointer.validate_for_consumers(),
+            Err(AtpAutotuneReceiptValidationError::ProofPointerMismatch {
+                field: String::from("trace_id"),
+            })
         );
     }
 
@@ -2055,6 +2572,7 @@ mod tests {
             first.outcome,
             AtpAutotuneApplicationOutcome::DeferredGrowthHysteresis
         );
+        assert_eq!(first.consumer_status, AtpAutotuneReceiptStatus::Blocked);
         assert!(!first.applied);
         assert_eq!(state.settings, initial);
         assert_eq!(state.consecutive_growth_windows, 1);
@@ -2064,6 +2582,7 @@ mod tests {
             second.outcome,
             AtpAutotuneApplicationOutcome::AppliedConfirmedGrowth
         );
+        assert_eq!(second.consumer_status, AtpAutotuneReceiptStatus::Pass);
         assert!(second.applied);
         assert!(state.settings.in_flight_bytes > initial.in_flight_bytes);
         assert_eq!(state.consecutive_growth_windows, 0);
@@ -2083,6 +2602,7 @@ mod tests {
             receipt.outcome,
             AtpAutotuneApplicationOutcome::AppliedPressureBackoff
         );
+        assert_eq!(receipt.consumer_status, AtpAutotuneReceiptStatus::Degraded);
         assert!(receipt.applied);
         assert!(state.settings.in_flight_bytes < initial.in_flight_bytes);
         assert!(state.settings.repair_symbols_per_second > initial.repair_symbols_per_second);
@@ -2132,6 +2652,10 @@ mod tests {
             applied.outcome,
             AtpAutotuneApplicationOutcome::RejectedStaleReceipt
         );
+        assert_eq!(
+            applied.consumer_status,
+            AtpAutotuneReceiptStatus::StaleEvidence
+        );
         assert!(!applied.applied);
         assert_eq!(state.settings, before);
         assert_eq!(state.consecutive_growth_windows, 0);
@@ -2153,6 +2677,7 @@ mod tests {
             applied.outcome,
             AtpAutotuneApplicationOutcome::RejectedMalformedTelemetry
         );
+        assert_eq!(applied.consumer_status, AtpAutotuneReceiptStatus::Malformed);
         assert!(!applied.applied);
         assert_eq!(state.settings, before);
         assert_eq!(state.consecutive_growth_windows, 0);

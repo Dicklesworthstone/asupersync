@@ -347,6 +347,266 @@ pub struct InboxOffer {
     pub offered_at_epoch_secs: u64,
 }
 
+/// Privacy class for an object stored by an offline ATP mailbox relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MailboxStorageClass {
+    /// Relay storage may see routing metadata but not object payload bytes.
+    EndToEndEncrypted,
+    /// Payload bytes are intentionally public under an explicit policy id.
+    ExplicitlyPublic,
+}
+
+impl MailboxStorageClass {
+    /// Stable lowercase storage-class name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EndToEndEncrypted => "end_to_end_encrypted",
+            Self::ExplicitlyPublic => "explicitly_public",
+        }
+    }
+}
+
+/// Privacy policy attached to an offline mailbox storage record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxPrivacyPolicy {
+    /// Whether the relay stores encrypted or explicitly public bytes.
+    pub storage_class: MailboxStorageClass,
+    /// True when stored bytes are encrypted before the relay accepts them.
+    pub encrypted_at_rest: bool,
+    /// Stable public-data policy id required for explicitly public storage.
+    pub public_policy_id: Option<String>,
+    /// Maximum visible source-peer characters in mailbox metadata diagnostics.
+    pub metadata_peer_visible_chars: usize,
+}
+
+impl MailboxPrivacyPolicy {
+    /// Build the default private mailbox policy.
+    #[must_use]
+    pub const fn encrypted() -> Self {
+        Self {
+            storage_class: MailboxStorageClass::EndToEndEncrypted,
+            encrypted_at_rest: true,
+            public_policy_id: None,
+            metadata_peer_visible_chars: 8,
+        }
+    }
+
+    /// Build an explicitly public mailbox policy.
+    #[must_use]
+    pub fn explicitly_public(policy_id: impl Into<String>) -> Self {
+        Self {
+            storage_class: MailboxStorageClass::ExplicitlyPublic,
+            encrypted_at_rest: false,
+            public_policy_id: Some(policy_id.into()),
+            metadata_peer_visible_chars: 8,
+        }
+    }
+
+    /// Validate the storage privacy invariant before accepting relay custody.
+    pub fn validate(&self) -> Result<(), MailboxSecurityError> {
+        match self.storage_class {
+            MailboxStorageClass::EndToEndEncrypted if self.encrypted_at_rest => Ok(()),
+            MailboxStorageClass::EndToEndEncrypted => Err(MailboxSecurityError::MissingEncryption),
+            MailboxStorageClass::ExplicitlyPublic
+                if self
+                    .public_policy_id
+                    .as_deref()
+                    .is_some_and(|policy_id| !policy_id.trim().is_empty()) =>
+            {
+                Ok(())
+            }
+            MailboxStorageClass::ExplicitlyPublic => Err(MailboxSecurityError::MissingPublicPolicy),
+        }
+    }
+
+    /// Redact peer metadata according to this policy.
+    #[must_use]
+    pub fn redact_peer(&self, peer: &str) -> String {
+        redact_token_to(peer, self.metadata_peer_visible_chars)
+    }
+}
+
+/// Tamper-evidence attached to one mailbox storage record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxTamperEvidence {
+    /// Manifest root expected by the receiver.
+    pub manifest_root: ObjectDigest,
+    /// Digest of encrypted relay bytes or explicitly public payload bytes.
+    pub stored_object_digest: ObjectDigest,
+    /// Manifest generation expected for this mailbox entry.
+    pub manifest_epoch: u64,
+    /// Monotonic mailbox sequence number for replay detection.
+    pub sequence: u64,
+    /// Expected stored byte count.
+    pub content_length: u64,
+    /// Entry expiry time in seconds since Unix epoch.
+    pub expires_at_epoch_secs: u64,
+    /// Optional previous record digest for append-only mailbox chains.
+    pub previous_record_digest: Option<ObjectDigest>,
+}
+
+impl MailboxTamperEvidence {
+    /// Validate retrieval evidence before a receiver trusts mailbox data.
+    pub fn validate_retrieval(
+        &self,
+        receipt: &MailboxRetrievalReceipt,
+        last_seen_sequence: Option<u64>,
+    ) -> Result<(), MailboxSecurityError> {
+        if receipt.retrieved_at_epoch_secs > self.expires_at_epoch_secs {
+            return Err(MailboxSecurityError::StaleEntry {
+                expired_at_epoch_secs: self.expires_at_epoch_secs,
+                observed_epoch_secs: receipt.retrieved_at_epoch_secs,
+            });
+        }
+        if last_seen_sequence.is_some_and(|last_seen| receipt.sequence <= last_seen) {
+            return Err(MailboxSecurityError::Replay {
+                last_seen_sequence,
+                observed_sequence: receipt.sequence,
+            });
+        }
+        if receipt.sequence != self.sequence {
+            return Err(MailboxSecurityError::SequenceMismatch {
+                expected: self.sequence,
+                observed: receipt.sequence,
+            });
+        }
+        if !object_digest_eq(&receipt.manifest_root, &self.manifest_root) {
+            return Err(MailboxSecurityError::DigestMismatch {
+                field: "manifest_root",
+            });
+        }
+        if !object_digest_eq(&receipt.stored_object_digest, &self.stored_object_digest) {
+            return Err(MailboxSecurityError::DigestMismatch {
+                field: "stored_object_digest",
+            });
+        }
+        if receipt.manifest_epoch != self.manifest_epoch {
+            return Err(MailboxSecurityError::ManifestEpochMismatch {
+                expected: self.manifest_epoch,
+                observed: receipt.manifest_epoch,
+            });
+        }
+        if receipt.bytes_returned != self.content_length {
+            return Err(MailboxSecurityError::Truncated {
+                expected_bytes: self.content_length,
+                observed_bytes: receipt.bytes_returned,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Retrieval receipt supplied by an offline mailbox receiver.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxRetrievalReceipt {
+    /// Manifest root observed by the receiver.
+    pub manifest_root: ObjectDigest,
+    /// Digest of bytes returned by the relay.
+    pub stored_object_digest: ObjectDigest,
+    /// Manifest generation observed by the receiver.
+    pub manifest_epoch: u64,
+    /// Mailbox sequence number observed by the receiver.
+    pub sequence: u64,
+    /// Bytes returned by the relay.
+    pub bytes_returned: u64,
+    /// Retrieval time in seconds since Unix epoch.
+    pub retrieved_at_epoch_secs: u64,
+}
+
+/// Offline mailbox security validation failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MailboxSecurityError {
+    /// Private mailbox storage was not encrypted before relay custody.
+    MissingEncryption,
+    /// Public mailbox storage lacked an explicit public-data policy id.
+    MissingPublicPolicy,
+    /// A digest-bearing field differed from the expected value.
+    DigestMismatch {
+        /// Field that failed the digest check.
+        field: &'static str,
+    },
+    /// The retrieved manifest generation differed from the expected generation.
+    ManifestEpochMismatch {
+        /// Expected manifest generation.
+        expected: u64,
+        /// Observed manifest generation.
+        observed: u64,
+    },
+    /// The retrieved mailbox sequence differed from the expected sequence.
+    SequenceMismatch {
+        /// Expected sequence.
+        expected: u64,
+        /// Observed sequence.
+        observed: u64,
+    },
+    /// Retrieval repeated or rewound a previously seen sequence number.
+    Replay {
+        /// Highest sequence observed before this retrieval.
+        last_seen_sequence: Option<u64>,
+        /// Sequence observed in this retrieval.
+        observed_sequence: u64,
+    },
+    /// Relay returned fewer or more bytes than the manifest committed.
+    Truncated {
+        /// Expected byte count.
+        expected_bytes: u64,
+        /// Observed byte count.
+        observed_bytes: u64,
+    },
+    /// Mailbox entry was retrieved after its expiry.
+    StaleEntry {
+        /// Entry expiry time.
+        expired_at_epoch_secs: u64,
+        /// Observed retrieval time.
+        observed_epoch_secs: u64,
+    },
+}
+
+impl fmt::Display for MailboxSecurityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingEncryption => f.write_str("private mailbox object is not encrypted"),
+            Self::MissingPublicPolicy => {
+                f.write_str("public mailbox object lacks an explicit policy id")
+            }
+            Self::DigestMismatch { field } => write!(f, "mailbox digest mismatch in {field}"),
+            Self::ManifestEpochMismatch { expected, observed } => write!(
+                f,
+                "mailbox manifest epoch mismatch: expected {expected}, observed {observed}"
+            ),
+            Self::SequenceMismatch { expected, observed } => write!(
+                f,
+                "mailbox sequence mismatch: expected {expected}, observed {observed}"
+            ),
+            Self::Replay {
+                last_seen_sequence,
+                observed_sequence,
+            } => write!(
+                f,
+                "mailbox replay detected: last seen {last_seen_sequence:?}, observed {observed_sequence}"
+            ),
+            Self::Truncated {
+                expected_bytes,
+                observed_bytes,
+            } => write!(
+                f,
+                "mailbox truncation detected: expected {expected_bytes} bytes, observed {observed_bytes}"
+            ),
+            Self::StaleEntry {
+                expired_at_epoch_secs,
+                observed_epoch_secs,
+            } => write!(
+                f,
+                "stale mailbox entry: expired at {expired_at_epoch_secs}, observed at {observed_epoch_secs}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MailboxSecurityError {}
+
 /// Inbox item stored by the daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxItem {
@@ -822,9 +1082,17 @@ fn count_state(counts: &BTreeMap<InboxState, usize>, state: InboxState) -> usize
     counts.get(&state).copied().unwrap_or(0)
 }
 
+fn object_digest_eq(left: &ObjectDigest, right: &ObjectDigest) -> bool {
+    subtle::ConstantTimeEq::ct_eq(left.as_bytes().as_ref(), right.as_bytes().as_ref()).into()
+}
+
 fn redact_token(token: &str) -> String {
-    let visible: String = token.chars().take(8).collect();
-    if token.chars().count() <= 8 {
+    redact_token_to(token, 8)
+}
+
+fn redact_token_to(token: &str, visible_chars: usize) -> String {
+    let visible: String = token.chars().take(visible_chars).collect();
+    if token.chars().count() <= visible_chars {
         visible
     } else {
         format!("{visible}...")
@@ -853,6 +1121,108 @@ mod tests {
             manifest_epoch: 3,
             offered_at_epoch_secs: 10,
         }
+    }
+
+    fn mailbox_evidence() -> MailboxTamperEvidence {
+        MailboxTamperEvidence {
+            manifest_root: digest(1),
+            stored_object_digest: digest(2),
+            manifest_epoch: 7,
+            sequence: 42,
+            content_length: 4096,
+            expires_at_epoch_secs: 100,
+            previous_record_digest: Some(digest(3)),
+        }
+    }
+
+    fn mailbox_receipt() -> MailboxRetrievalReceipt {
+        MailboxRetrievalReceipt {
+            manifest_root: digest(1),
+            stored_object_digest: digest(2),
+            manifest_epoch: 7,
+            sequence: 42,
+            bytes_returned: 4096,
+            retrieved_at_epoch_secs: 99,
+        }
+    }
+
+    #[test]
+    fn mailbox_privacy_policy_requires_encryption_or_public_policy() {
+        let encrypted = MailboxPrivacyPolicy::encrypted();
+        assert_eq!(
+            encrypted.storage_class,
+            MailboxStorageClass::EndToEndEncrypted
+        );
+        encrypted.validate().unwrap(); // ubs:ignore - test oracle
+
+        let mut broken_private = MailboxPrivacyPolicy::encrypted();
+        broken_private.encrypted_at_rest = false;
+        assert_eq!(
+            broken_private.validate().unwrap_err(), // ubs:ignore - test oracle
+            MailboxSecurityError::MissingEncryption
+        );
+
+        let public = MailboxPrivacyPolicy::explicitly_public("policy:public-fixture");
+        public.validate().unwrap(); // ubs:ignore - test oracle
+        assert_eq!(
+            MailboxPrivacyPolicy::explicitly_public("  ")
+                .validate()
+                .unwrap_err(), // ubs:ignore - test oracle
+            MailboxSecurityError::MissingPublicPolicy
+        );
+
+        let redacted = MailboxPrivacyPolicy {
+            metadata_peer_visible_chars: 4,
+            ..MailboxPrivacyPolicy::encrypted()
+        }
+        .redact_peer("peer-abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(redacted, "peer...");
+    }
+
+    #[test]
+    fn mailbox_tamper_evidence_rejects_bad_retrievals() {
+        let evidence = mailbox_evidence();
+        let receipt = mailbox_receipt();
+        evidence.validate_retrieval(&receipt, Some(41)).unwrap(); // ubs:ignore - test oracle
+
+        let mut tampered = mailbox_receipt();
+        tampered.stored_object_digest = digest(9);
+        assert_eq!(
+            evidence.validate_retrieval(&tampered, Some(41)),
+            Err(MailboxSecurityError::DigestMismatch {
+                field: "stored_object_digest"
+            })
+        );
+
+        let mut replayed = mailbox_receipt();
+        replayed.sequence = 41;
+        assert_eq!(
+            evidence.validate_retrieval(&replayed, Some(41)),
+            Err(MailboxSecurityError::Replay {
+                last_seen_sequence: Some(41),
+                observed_sequence: 41,
+            })
+        );
+
+        let mut truncated = mailbox_receipt();
+        truncated.bytes_returned = 1024;
+        assert_eq!(
+            evidence.validate_retrieval(&truncated, Some(41)),
+            Err(MailboxSecurityError::Truncated {
+                expected_bytes: 4096,
+                observed_bytes: 1024,
+            })
+        );
+
+        let mut stale = mailbox_receipt();
+        stale.retrieved_at_epoch_secs = 101;
+        assert_eq!(
+            evidence.validate_retrieval(&stale, Some(41)),
+            Err(MailboxSecurityError::StaleEntry {
+                expired_at_epoch_secs: 100,
+                observed_epoch_secs: 101,
+            })
+        );
     }
 
     #[test]

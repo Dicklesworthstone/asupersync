@@ -7,18 +7,21 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod real_channel_mpsc_net_tcp_e2e {
-    use crate::channel::mpsc::{self, Receiver, Sender, SendError, TryRecvError};
-    use crate::net::tcp::{TcpListener, TcpStream};
-    use crate::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+    use crate::channel::mpsc::{self, Receiver, SendError, Sender, TryRecvError};
     use crate::cx::{Cx, scope};
+    use crate::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
+    use crate::net::tcp::{TcpListener, TcpStream};
     use crate::runtime::{RuntimeBuilder, spawn};
-    use crate::time::{Duration, Instant, sleep, timeout};
     use crate::sync::{Mutex, Semaphore};
+    use crate::time::{Duration, Instant, sleep, timeout};
     use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::collections::{HashMap, VecDeque};
-    use std::net::{SocketAddr, IpAddr, Ipv4Addr};
-    use std::sync::{Arc, atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering}};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    };
 
     /// Statistics collected during MPSC-TCP backpressure testing
     #[derive(Debug, Clone, Default)]
@@ -122,7 +125,11 @@ mod real_channel_mpsc_net_tcp_e2e {
             }
         }
 
-        async fn simulate_partition(&self, cx: &Cx, duration: Duration) -> Result<(), Box<dyn std::error::Error>> {
+        async fn simulate_partition(
+            &self,
+            cx: &Cx,
+            duration: Duration,
+        ) -> Result<(), Box<dyn std::error::Error>> {
             println!("Simulating network partition for {:?}", duration);
 
             self.partitioned.store(true, Ordering::Release);
@@ -172,7 +179,11 @@ mod real_channel_mpsc_net_tcp_e2e {
     }
 
     impl MpscTcpBridge {
-        fn new(buffer_size: usize, tcp_port: u16, stats: Arc<Mutex<MpscTcpBackpressureStats>>) -> Self {
+        fn new(
+            buffer_size: usize,
+            tcp_port: u16,
+            stats: Arc<Mutex<MpscTcpBackpressureStats>>,
+        ) -> Self {
             let (sender, receiver) = mpsc::channel(buffer_size);
             let tcp_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), tcp_port);
             let partition_sim = Arc::new(NetworkPartitionSimulator::new(Arc::clone(&stats)));
@@ -189,7 +200,11 @@ mod real_channel_mpsc_net_tcp_e2e {
         }
 
         /// Send message through MPSC with backpressure handling
-        async fn send_message(&self, cx: &Cx, message: TestMessage) -> Result<(), SendError<TestMessage>> {
+        async fn send_message(
+            &self,
+            cx: &Cx,
+            message: TestMessage,
+        ) -> Result<(), SendError<TestMessage>> {
             // Check if we should simulate backpressure
             if self.flow_control_enabled.load(Ordering::Acquire) {
                 // Simulate TCP backpressure affecting MPSC send
@@ -208,12 +223,15 @@ mod real_channel_mpsc_net_tcp_e2e {
                     stats.messages_sent += 1;
                     Ok(())
                 }
-                Err(e) => Err(e)
+                Err(e) => Err(e),
             }
         }
 
         /// Receive message from MPSC
-        async fn receive_message(&self, cx: &Cx) -> Result<TestMessage, Box<dyn std::error::Error>> {
+        async fn receive_message(
+            &self,
+            cx: &Cx,
+        ) -> Result<TestMessage, Box<dyn std::error::Error>> {
             match timeout(Duration::from_secs(5), self.receiver.recv()).await {
                 Ok(Some(message)) => {
                     let mut stats = self.stats.lock().unwrap();
@@ -240,7 +258,9 @@ mod real_channel_mpsc_net_tcp_e2e {
                 let partition_sim = Arc::clone(&self.partition_sim);
 
                 spawn(async move {
-                    if let Err(e) = Self::handle_tcp_connection(stream, receiver, stats, partition_sim).await {
+                    if let Err(e) =
+                        Self::handle_tcp_connection(stream, receiver, stats, partition_sim).await
+                    {
                         println!("TCP connection error: {}", e);
                     }
                 });
@@ -291,7 +311,10 @@ mod real_channel_mpsc_net_tcp_e2e {
         }
 
         /// Connect as TCP client and receive messages
-        async fn tcp_client_receive(&self, cx: &Cx) -> Result<Vec<TestMessage>, Box<dyn std::error::Error>> {
+        async fn tcp_client_receive(
+            &self,
+            cx: &Cx,
+        ) -> Result<Vec<TestMessage>, Box<dyn std::error::Error>> {
             let mut received_messages = Vec::new();
 
             // Connect to TCP server
@@ -310,7 +333,12 @@ mod real_channel_mpsc_net_tcp_e2e {
             while start_time.elapsed() < read_duration {
                 buffer.clear();
 
-                match timeout(Duration::from_millis(100), buf_reader.read_line(&mut buffer)).await {
+                match timeout(
+                    Duration::from_millis(100),
+                    buf_reader.read_line(&mut buffer),
+                )
+                .await
+                {
                     Ok(Ok(0)) => break, // EOF
                     Ok(Ok(_)) => {
                         if let Ok(message) = serde_json::from_str::<TestMessage>(buffer.trim()) {
@@ -369,8 +397,15 @@ mod real_channel_mpsc_net_tcp_e2e {
         }
 
         /// Run backpressure propagation test
-        async fn run_backpressure_test(&mut self, cx: &Cx, message_count: usize) -> Result<(), Box<dyn std::error::Error>> {
-            println!("Running MPSC-TCP backpressure test with {} messages", message_count);
+        async fn run_backpressure_test(
+            &mut self,
+            cx: &Cx,
+            message_count: usize,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            println!(
+                "Running MPSC-TCP backpressure test with {} messages",
+                message_count
+            );
 
             // Start TCP server in background
             let bridge_clone = self.bridge.clone();
@@ -385,9 +420,7 @@ mod real_channel_mpsc_net_tcp_e2e {
 
             // Start TCP client to receive messages
             let bridge_client = self.bridge.clone();
-            let receive_task = spawn(async move {
-                bridge_client.tcp_client_receive(cx).await
-            });
+            let receive_task = spawn(async move { bridge_client.tcp_client_receive(cx).await });
 
             // Send messages through MPSC with varying priorities
             for i in 0..message_count {
@@ -398,11 +431,9 @@ mod real_channel_mpsc_net_tcp_e2e {
                     _ => MessagePriority::Critical,
                 };
 
-                let message = TestMessage::new(
-                    i as u64,
-                    "test_source",
-                    &format!("Message {} payload", i)
-                ).with_priority(priority);
+                let message =
+                    TestMessage::new(i as u64, "test_source", &format!("Message {} payload", i))
+                        .with_priority(priority);
 
                 self.bridge.send_message(cx, message).await?;
 
@@ -426,7 +457,10 @@ mod real_channel_mpsc_net_tcp_e2e {
         }
 
         /// Test network partition recovery
-        async fn test_partition_recovery(&mut self, cx: &Cx) -> Result<(), Box<dyn std::error::Error>> {
+        async fn test_partition_recovery(
+            &mut self,
+            cx: &Cx,
+        ) -> Result<(), Box<dyn std::error::Error>> {
             println!("Testing network partition recovery scenario");
 
             let partition_sim = self.bridge.partition_simulator();
@@ -437,7 +471,7 @@ mod real_channel_mpsc_net_tcp_e2e {
                 let message = TestMessage::new(
                     i as u64,
                     "partition_test",
-                    &format!("Partition test message {}", i)
+                    &format!("Partition test message {}", i),
                 );
 
                 // Trigger partition in middle of test
@@ -445,7 +479,10 @@ mod real_channel_mpsc_net_tcp_e2e {
                     spawn({
                         let partition_sim = Arc::clone(&partition_sim);
                         async move {
-                            if let Err(e) = partition_sim.simulate_partition(cx, Duration::from_millis(200)).await {
+                            if let Err(e) = partition_sim
+                                .simulate_partition(cx, Duration::from_millis(200))
+                                .await
+                            {
                                 println!("Partition simulation error: {}", e);
                             }
                         }
@@ -464,13 +501,19 @@ mod real_channel_mpsc_net_tcp_e2e {
         }
 
         /// Verify message ordering
-        fn verify_message_ordering(&self, messages: &[TestMessage]) -> Result<(), Box<dyn std::error::Error>> {
+        fn verify_message_ordering(
+            &self,
+            messages: &[TestMessage],
+        ) -> Result<(), Box<dyn std::error::Error>> {
             let mut ordering_violations = 0;
 
             for window in messages.windows(2) {
                 if window[0].sequence_id > window[1].sequence_id {
                     ordering_violations += 1;
-                    println!("Ordering violation: {} -> {}", window[0].sequence_id, window[1].sequence_id);
+                    println!(
+                        "Ordering violation: {} -> {}",
+                        window[0].sequence_id, window[1].sequence_id
+                    );
                 }
             }
 
@@ -481,7 +524,10 @@ mod real_channel_mpsc_net_tcp_e2e {
             }
 
             if ordering_violations > 0 {
-                println!("Warning: {} message ordering violations detected", ordering_violations);
+                println!(
+                    "Warning: {} message ordering violations detected",
+                    ordering_violations
+                );
             }
 
             Ok(())
@@ -503,23 +549,39 @@ mod real_channel_mpsc_net_tcp_e2e {
             let mut harness = MpscTcpIntegrationTestHarness::new(100, 9001);
 
             // Run basic backpressure test
-            harness.run_backpressure_test(&cx, 50).await
+            harness
+                .run_backpressure_test(&cx, 50)
+                .await
                 .expect("Backpressure test should succeed");
 
             let stats = harness.get_stats();
-            println!("Backpressure test stats: {}", serde_json::to_string_pretty(&stats.to_json()).unwrap());
+            println!(
+                "Backpressure test stats: {}",
+                serde_json::to_string_pretty(&stats.to_json()).unwrap()
+            );
 
             // Verify basic functionality
             assert!(stats.messages_sent > 0, "Should have sent messages");
-            assert!(stats.tcp_messages_transmitted > 0, "Should have transmitted TCP messages");
+            assert!(
+                stats.tcp_messages_transmitted > 0,
+                "Should have transmitted TCP messages"
+            );
 
             println!("✓ MPSC-TCP backpressure integration test passed");
             println!("  - Sent {} messages through MPSC", stats.messages_sent);
-            println!("  - Transmitted {} messages via TCP", stats.tcp_messages_transmitted);
-            println!("  - Detected {} backpressure events", stats.backpressure_events);
+            println!(
+                "  - Transmitted {} messages via TCP",
+                stats.tcp_messages_transmitted
+            );
+            println!(
+                "  - Detected {} backpressure events",
+                stats.backpressure_events
+            );
 
             Ok::<(), Box<dyn std::error::Error>>(())
-        }).await.expect("Test scope failed");
+        })
+        .await
+        .expect("Test scope failed");
     }
 
     #[tokio::test]
@@ -533,21 +595,34 @@ mod real_channel_mpsc_net_tcp_e2e {
             harness.bridge.set_flow_control(true);
 
             // Send many messages to trigger backpressure
-            harness.run_backpressure_test(&cx, 100).await
+            harness
+                .run_backpressure_test(&cx, 100)
+                .await
                 .expect("Flow control test should succeed");
 
             let stats = harness.get_stats();
-            println!("Flow control test stats: {}", serde_json::to_string_pretty(&stats.to_json()).unwrap());
+            println!(
+                "Flow control test stats: {}",
+                serde_json::to_string_pretty(&stats.to_json()).unwrap()
+            );
 
             // Should have some backpressure with small buffer and many messages
-            assert!(stats.mpsc_send_blocks >= 0, "Should have some send blocks with small buffer");
+            assert!(
+                stats.mpsc_send_blocks >= 0,
+                "Should have some send blocks with small buffer"
+            );
 
             println!("✓ TCP flow control propagation test passed");
             println!("  - MPSC send blocks: {}", stats.mpsc_send_blocks);
-            println!("  - TCP flow control stalls: {}", stats.tcp_flow_control_stalls);
+            println!(
+                "  - TCP flow control stalls: {}",
+                stats.tcp_flow_control_stalls
+            );
 
             Ok::<(), Box<dyn std::error::Error>>(())
-        }).await.expect("Test scope failed");
+        })
+        .await
+        .expect("Test scope failed");
     }
 
     #[tokio::test]
@@ -558,19 +633,36 @@ mod real_channel_mpsc_net_tcp_e2e {
             let mut harness = MpscTcpIntegrationTestHarness::new(50, 9003);
 
             // Test partition recovery
-            harness.test_partition_recovery(&cx).await
+            harness
+                .test_partition_recovery(&cx)
+                .await
                 .expect("Partition recovery test should succeed");
 
             let stats = harness.get_stats();
-            println!("Partition recovery stats: {}", serde_json::to_string_pretty(&stats.to_json()).unwrap());
+            println!(
+                "Partition recovery stats: {}",
+                serde_json::to_string_pretty(&stats.to_json()).unwrap()
+            );
 
             // Verify partition events occurred
-            assert!(stats.partition_events > 0, "Should have simulated partition events");
-            assert!(stats.partition_recoveries > 0, "Should have recovered from partitions");
-            assert_eq!(stats.partition_events, stats.partition_recoveries, "All partitions should recover");
+            assert!(
+                stats.partition_events > 0,
+                "Should have simulated partition events"
+            );
+            assert!(
+                stats.partition_recoveries > 0,
+                "Should have recovered from partitions"
+            );
+            assert_eq!(
+                stats.partition_events, stats.partition_recoveries,
+                "All partitions should recover"
+            );
 
             // Should have minimal ordering violations
-            assert!(stats.ordering_violations <= 2, "Should have minimal ordering violations during partition recovery");
+            assert!(
+                stats.ordering_violations <= 2,
+                "Should have minimal ordering violations during partition recovery"
+            );
 
             println!("✓ Network partition recovery test passed");
             println!("  - Partition events: {}", stats.partition_events);
@@ -578,6 +670,8 @@ mod real_channel_mpsc_net_tcp_e2e {
             println!("  - Ordering violations: {}", stats.ordering_violations);
 
             Ok::<(), Box<dyn std::error::Error>>(())
-        }).await.expect("Test scope failed");
+        })
+        .await
+        .expect("Test scope failed");
     }
 }

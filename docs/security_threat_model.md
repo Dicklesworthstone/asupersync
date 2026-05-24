@@ -1,7 +1,7 @@
 # Security Review and Threat Model
 
 Status: draft
-Last updated: 2026-02-28
+Last updated: 2026-05-24
 Owner: asupersync-umelq.14.2
 
 ## Scope
@@ -143,6 +143,44 @@ CI enforcement:
   `.github/security_release_policy.json.trace_telemetry_privacy`.
 - Security release gate (`scripts/check_security_release_gate.py`) and CI report artifacts
   provide audit evidence for incident review.
+
+## ATP Offline Mailbox Threat Addendum (`asupersync-h3ti40`)
+
+Offline ATP mailbox relays are untrusted store-and-forward infrastructure. The
+relay may enforce storage policy and prove custody, but it must not need access
+to private payload bytes. Receiver safety is based on policy metadata, stable
+digests, expiry, monotonic sequence evidence, and proof-bundle linkage.
+
+### Threat Assumptions
+
+- Relay operators can observe timing, object sizes, mailbox ids, source and
+  receiver routing metadata, quota pressure, and expiry timestamps.
+- Relay operators cannot be trusted to preserve payload confidentiality unless
+  bytes are encrypted before relay custody.
+- Authenticated peers can still attempt replay, quota exhaustion, storage spam,
+  stale retrieval, truncation, or equivocation across receivers.
+- Receivers may be offline long enough for entries to expire, so expiry and
+  non-delivery evidence must remain explicit instead of inferred from absence.
+
+### Required Controls
+
+| Risk | Required control | Code surface |
+| --- | --- | --- |
+| Private payload disclosure | Stored mailbox objects must be end-to-end encrypted before relay custody unless they carry an explicit public-data policy id. | `MailboxPrivacyPolicy::validate` |
+| Metadata leakage | Diagnostics redact peer/object identifiers and cap visible peer metadata by policy. | `MailboxPrivacyPolicy::redact_peer`, `InboxJsonRow` |
+| Quota exhaustion / spam | Mailbox entries are charged to the `Mailbox` quota bucket before acceptance and expire through mailbox retention policy. | `QuotaBucket::Mailbox`, `QuotaLedger`, `RetentionPolicy` |
+| Tampering / equivocation | Retrieval must match manifest root, stored-object digest, manifest epoch, and mailbox sequence evidence. | `MailboxTamperEvidence::validate_retrieval` |
+| Replay | Receivers reject sequence numbers at or below the last accepted mailbox sequence. | `MailboxTamperEvidence::validate_retrieval` |
+| Truncation | Receivers compare returned byte count with the committed mailbox content length. | `MailboxTamperEvidence::validate_retrieval` |
+| Stale entries | Receivers reject retrieval after the committed mailbox expiry. | `MailboxTamperEvidence::validate_retrieval` |
+
+### Residual Risk Register
+
+| Risk | Why Residual | Current Mitigation | Closure Trigger |
+| --- | --- | --- | --- |
+| Relay traffic analysis | Size/timing/routing metadata remains visible even with encrypted payloads | Metadata redaction and explicit relay-visibility documentation | Padding/batching policy with deterministic quota impact tests |
+| Non-delivery ambiguity | A receiver cannot distinguish deletion, expiry, and malicious withholding without relay evidence | Expiry is explicit and proof bundles can attach mailbox storage/retrieval evidence | Signed non-delivery receipts and independent relay quorum evidence |
+| Abuse across federated relays | A malicious sender can distribute spam across operators | Per-relay quota bucket and retention controls | Federated reputation/rate-limit protocol with replayable abuse evidence |
 
 ## Threats and Mitigations by Component
 

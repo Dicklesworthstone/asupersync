@@ -5,9 +5,8 @@
 mod autotune;
 
 use autotune::{
-    ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION, AtpAutotuneDecisionReceipt,
-    AtpAutotuneKnobDirection, AtpAutotunePolicy, AtpAutotuneSettings, AtpAutotuneTelemetryError,
-    AtpAutotuneTelemetryReport,
+    ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION, AtpAutotuneDecisionReceipt, AtpAutotunePolicy,
+    AtpAutotuneSettings, AtpAutotuneTelemetryError, AtpAutotuneTelemetryReport,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -161,33 +160,36 @@ fn decision_receipt_summary(
         })
         .collect();
     let selected_knobs: Vec<Value> = receipt
-        .changes
+        .selected_knobs()
         .iter()
-        .filter(|change| change.direction != AtpAutotuneKnobDirection::Hold)
-        .map(|change| json!(change.knob.as_str()))
+        .map(|knob| json!(knob.as_str()))
         .collect();
-    let caveats: Vec<Value> = if receipt.decision.bottlenecks.is_empty() {
-        vec![json!("growth_requires_application_hysteresis")]
-    } else {
-        receipt
-            .decision
-            .bottlenecks
-            .iter()
-            .map(|signal| json!(format!("{:?}", signal.kind)))
-            .collect()
-    };
+    let caveats: Vec<Value> = receipt.caveats.iter().map(|caveat| json!(caveat)).collect();
+    let stale_sources: Vec<Value> = receipt
+        .stale_sources
+        .iter()
+        .map(|source| json!(source))
+        .collect();
 
     json!({
         "schema_version": receipt.schema_version.as_str(),
         "trace_id": receipt.trace_id.as_str(),
         "workload_id": receipt.workload_id.as_str(),
         "sample_count": receipt.sample_count,
+        "consumer_status": receipt.consumer_status.as_str(),
         "samples": samples,
         "outcome": format!("{:?}", receipt.outcome),
         "reason_code": receipt.decision.reason_code.as_str(),
         "fail_closed": receipt.decision.fail_closed,
-        "confidence": if receipt.decision.fail_closed { "fail_closed" } else { "conservative" },
+        "confidence": receipt.confidence.as_str(),
         "caveats": caveats,
+        "stale_sources": stale_sources,
+        "proof_pointer": {
+            "receipt_schema_version": receipt.proof_pointer.receipt_schema_version.as_str(),
+            "trace_id": receipt.proof_pointer.trace_id.as_str(),
+            "workload_id": receipt.proof_pointer.workload_id.as_str(),
+            "sample_count": receipt.proof_pointer.sample_count,
+        },
         "bottlenecks": bottlenecks,
         "current_settings": settings_summary(receipt.current_settings),
         "candidate_settings": settings_summary(receipt.decision.settings),

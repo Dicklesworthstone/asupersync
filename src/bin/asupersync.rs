@@ -22,9 +22,8 @@ use asupersync::atp::sdk::StreamEarlyUsabilityReport;
 use asupersync::atp::stream_object::ByteRange;
 use asupersync::atp::sync::DirectoryEarlyUsabilityReport;
 use asupersync::atp::{
-    ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision, AtpAutotuneDecisionReceipt,
-    AtpAutotuneKnobDirection, AtpAutotunePolicy, AtpAutotuneSettings, AtpAutotuneTelemetry,
-    AtpAutotuneTelemetryReport,
+    ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision, AtpAutotuneDecisionReceipt, AtpAutotunePolicy,
+    AtpAutotuneSettings, AtpAutotuneTelemetry, AtpAutotuneTelemetryReport,
 };
 use asupersync::cli::doctor::{
     AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
@@ -1727,45 +1726,8 @@ impl Outputtable for AtpStatusOutput {
         let mut lines = vec![
             "ATP Status".to_string(),
             format!("Telemetry: {}", self.telemetry_path),
-            format!("Trace ID: {}", self.trace_id),
-            format!("Workload ID: {}", self.workload_id),
-            format!("Samples: {}", self.sample_count),
-            format!("Outcome: {:?}", self.receipt.outcome),
-            format!("Reason: {}", self.decision.reason_code),
-            format!("Fail closed: {}", self.decision.fail_closed),
-            format!(
-                "Next settings: in_flight_bytes={}, stream_count={}, chunk_size_bytes={}, repair_symbols_per_second={}",
-                self.decision.settings.in_flight_bytes,
-                self.decision.settings.stream_count,
-                self.decision.settings.chunk_size_bytes,
-                self.decision.settings.repair_symbols_per_second
-            ),
-            format!("Bottlenecks: {}", self.decision.bottlenecks.len()),
         ];
-
-        if self.explain {
-            for change in &self.receipt.changes {
-                if change.direction != AtpAutotuneKnobDirection::Hold {
-                    lines.push(format!(
-                        "- knob {}: {:?} {} -> {} (delta={})",
-                        change.knob.as_str(),
-                        change.direction,
-                        change.previous,
-                        change.next,
-                        change.delta
-                    ));
-                }
-            }
-            for signal in &self.decision.bottlenecks {
-                let metric = signal
-                    .metric
-                    .map_or("none", asupersync::atp::AtpAutotuneMetric::as_str);
-                lines.push(format!(
-                    "- {:?}: metric={}, observed={}, threshold={}",
-                    signal.kind, metric, signal.observed, signal.threshold
-                ));
-            }
-        }
+        lines.extend(self.receipt.human_summary_lines(self.explain));
 
         lines.join("\n")
     }
@@ -9139,12 +9101,14 @@ mod tests {
         assert!(rendered.contains("Trace ID: trace-status"));
         assert!(rendered.contains("Workload ID: workload-status"));
         assert!(rendered.contains("Reason: hold_or_backoff_on_pressure"));
+        assert!(rendered.contains("Status: degraded"));
         assert!(rendered.contains("Outcome: PressureBackoff"));
+        assert!(rendered.contains("Confidence: fail_closed"));
         assert!(rendered.contains("Fail closed: true"));
         assert!(rendered.contains("- knob in_flight_bytes: Decrease"));
         assert!(rendered.contains("- knob repair_symbols_per_second: Increase"));
-        assert!(rendered.contains("NetworkLoss"));
-        assert!(rendered.contains("SendBufferPressure"));
+        assert!(rendered.contains("network_loss"));
+        assert!(rendered.contains("send_buffer_pressure"));
         assert!(rendered.contains("atp.autotune.loss_permille"));
         assert!(rendered.contains("Next settings:"));
         Ok(())
@@ -9182,8 +9146,9 @@ mod tests {
         assert!(rendered.contains("Trace ID: trace-samples"));
         assert!(rendered.contains("Workload ID: workload-samples"));
         assert!(rendered.contains("Samples: 16"));
-        assert!(rendered.contains("NetworkLoss"));
-        assert!(rendered.contains("SendBufferPressure"));
+        assert!(rendered.contains("Status: degraded"));
+        assert!(rendered.contains("network_loss"));
+        assert!(rendered.contains("send_buffer_pressure"));
         assert!(rendered.contains("atp.autotune.send_buffer_queued_bytes"));
         Ok(())
     }

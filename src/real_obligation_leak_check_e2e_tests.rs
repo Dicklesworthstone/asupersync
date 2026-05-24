@@ -1062,7 +1062,12 @@ mod real_obligation_leak_check_e2e {
     }
 }
 
+use crate::atp::logging::{
+    ATP_LOG_EVENT_SCHEMA_VERSION, AtpEvent, AtpLogger, AtpSubsystem, EventContext,
+};
+use crate::lab::chaos::{ChaosConfig, ChaosStats};
 use crate::obligation::ledger::ObligationLedger;
+use crate::observability::LogLevel;
 use crate::record::{ObligationAbortReason, ObligationKind, SourceLocation};
 use crate::runtime::RuntimeBuilder;
 use crate::types::{ObligationId, RegionId, TaskId, Time};
@@ -1076,6 +1081,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 struct ObligationCleanupHarness {
     ledger: Arc<Mutex<ObligationLedger>>,
+    atp_logger: AtpLogger,
     start_time: Instant,
     logical_time_ns: AtomicU64,
     log_entries: Mutex<Vec<Value>>,
@@ -1089,6 +1095,13 @@ struct ObligationOperation {
     created: bool,
     completed: bool,
     success: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CleanupChaosFault {
+    cancel_requested: bool,
+    delay: Option<Duration>,
+    budget_exhausted: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1106,6 +1119,7 @@ impl ObligationCleanupHarness {
     fn new() -> Self {
         Self {
             ledger: Arc::new(Mutex::new(ObligationLedger::new())),
+            atp_logger: AtpLogger::new(),
             start_time: Instant::now(),
             logical_time_ns: AtomicU64::new(1),
             log_entries: Mutex::new(Vec::new()),
@@ -1133,6 +1147,46 @@ impl ObligationCleanupHarness {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(entry);
+    }
+
+    fn atp_event_context(&self) -> EventContext {
+        EventContext {
+            session_id: "asupersync-9u057b.5".to_string(),
+            transfer_id: Some("obligation-cleanup-chaos".to_string()),
+            connection_id: None,
+            peer_id: None,
+            test_case_id: Some("asupersync-9u057b.5".to_string()),
+            trace_id: "trace-obligation-cleanup-chaos".to_string(),
+            span_id: "root".to_string(),
+        }
+    }
+
+    fn log_atp_event(&self, event_type: &str, data: Value) {
+        let event = AtpEvent {
+            schema_version: ATP_LOG_EVENT_SCHEMA_VERSION.to_string(),
+            timestamp: crate::atp::logging::current_timestamp(),
+            level: LogLevel::Info,
+            subsystem: AtpSubsystem::E2eTest,
+            event_type: event_type.to_string(),
+            data,
+            context: self.atp_event_context(),
+            redacted_fields: Vec::new(),
+        };
+        let rendered = self
+            .atp_logger
+            .render_event(&event)
+            .expect("ATP obligation cleanup E2E event should satisfy the logging contract");
+        let rendered_event: Value =
+            serde_json::from_str(&rendered).expect("rendered ATP log event should be JSON");
+
+        self.log(
+            "atp_structured_log",
+            json!({
+                "schema_version": ATP_LOG_EVENT_SCHEMA_VERSION,
+                "event_type": event_type,
+                "rendered_event": rendered_event
+            }),
+        );
     }
 
     fn record_operation(&self, operation: ObligationOperation) {
@@ -1323,6 +1377,14 @@ impl ObligationCleanupHarness {
                 "summary_path": artifact_dir.join("summary.json").display().to_string()
             }),
         );
+        self.log_atp_event(
+            "artifact_written",
+            json!({
+                "test_id": test_id,
+                "events_path": artifact_dir.join("events.ndjson").display().to_string(),
+                "summary_path": artifact_dir.join("summary.json").display().to_string(),
+            }),
+        );
 
         let log_entries = self
             .log_entries
@@ -1353,6 +1415,39 @@ impl ObligationCleanupHarness {
     }
 }
 
+fn cleanup_chaos_config(seed: u64) -> ChaosConfig {
+    ChaosConfig::new(seed)
+        .with_cancel_probability(1.0)
+        .with_delay_probability(1.0)
+        .with_delay_range(Duration::from_millis(1)..Duration::from_millis(3))
+        .with_budget_exhaust_probability(0.25)
+}
+
+fn build_cleanup_chaos_faults(
+    config: &ChaosConfig,
+    pending_count: usize,
+) -> (Vec<CleanupChaosFault>, ChaosStats) {
+    let mut rng = config.rng();
+    let mut stats = ChaosStats::new();
+    let mut faults = Vec::with_capacity(pending_count);
+
+    for _ in 0..pending_count {
+        let cancel_requested = rng.should_inject_cancel(config);
+        let delay = rng
+            .should_inject_delay(config)
+            .then(|| rng.next_delay(config));
+        let budget_exhausted = rng.should_inject_budget_exhaust(config);
+        stats.record_pre_poll_outcomes(cancel_requested, delay, budget_exhausted);
+        faults.push(CleanupChaosFault {
+            cancel_requested,
+            delay,
+            budget_exhausted,
+        });
+    }
+
+    (faults, stats)
+}
+
 /// Runs the focused no-mock client-disconnect obligation cleanup E2E scenario.
 ///
 /// The harness uses the real `ObligationLedger` and a real Asupersync runtime
@@ -1363,13 +1458,39 @@ pub fn run_client_disconnect_forced_cancel_cleanup_e2e() {
     let harness = Arc::new(ObligationCleanupHarness::new());
     let pending_count = 16;
     let cleanup_budget = Duration::from_millis(250);
+    let chaos_seed = 0x9005_7B50_u64;
+    let chaos_config = cleanup_chaos_config(chaos_seed);
+    let chaos_summary = chaos_config.summary();
+    let (cleanup_faults, chaos_stats) = build_cleanup_chaos_faults(&chaos_config, pending_count);
 
     harness.log(
         "test_start",
         json!({
             "test": "client_disconnect_forced_cancel_cleanup",
             "pending_count": pending_count,
-            "cleanup_budget_ms": cleanup_budget.as_millis()
+            "cleanup_budget_ms": cleanup_budget.as_millis(),
+            "chaos_seed": chaos_seed,
+            "chaos_summary": chaos_summary
+        }),
+    );
+    harness.log_atp_event(
+        "test_started",
+        json!({
+            "scenario": "client_disconnect_during_reserved_send",
+            "pending_count": pending_count,
+            "chaos_summary": chaos_summary,
+            "cleanup_budget_ms": cleanup_budget.as_millis(),
+        }),
+    );
+    harness.log_atp_event(
+        "seed_selected",
+        json!({
+            "seed": chaos_seed,
+            "scenario": "client_disconnect_during_reserved_send",
+            "chaos_decision_points": chaos_stats.decision_points,
+            "chaos_cancellations": chaos_stats.cancellations,
+            "chaos_delays": chaos_stats.delays,
+            "chaos_budget_exhaustions": chaos_stats.budget_exhaustions,
         }),
     );
 
@@ -1417,7 +1538,13 @@ pub fn run_client_disconnect_forced_cancel_cleanup_e2e() {
             "scenario": "client_disconnect_during_reserved_send",
             "pending_before": before_cancel.pending_obligations,
             "leaked_before": before_cancel.leaked_obligations,
-            "cleanup_budget_ms": cleanup_budget.as_millis()
+            "cleanup_budget_ms": cleanup_budget.as_millis(),
+            "chaos_seed": chaos_seed,
+            "chaos_summary": chaos_summary,
+            "chaos_decision_points": chaos_stats.decision_points,
+            "chaos_cancellations": chaos_stats.cancellations,
+            "chaos_delays": chaos_stats.delays,
+            "chaos_budget_exhaustions": chaos_stats.budget_exhaustions
         }),
     );
 
@@ -1437,8 +1564,29 @@ pub fn run_client_disconnect_forced_cancel_cleanup_e2e() {
         let cleanup_harness = Arc::clone(&harness);
         let tasks_started = Arc::clone(&cleanup_tasks_started);
         let tasks_completed = Arc::clone(&cleanup_tasks_completed);
+        let fault = cleanup_faults[index];
         let handle = runtime_handle.spawn(async move {
             tasks_started.fetch_add(1, Ordering::AcqRel);
+            if let Some(delay) = fault.delay {
+                std::thread::sleep(delay);
+            }
+            if fault.budget_exhausted {
+                std::thread::yield_now();
+            }
+            cleanup_harness.log(
+                "chaos_fault_injected",
+                json!({
+                    "stage": "forced_cancel_cleanup_task",
+                    "task_index": index,
+                    "cancel_requested": fault.cancel_requested,
+                    "delay_ms": fault.delay.map_or(0, |delay| delay.as_millis()),
+                    "budget_exhausted": fault.budget_exhausted
+                }),
+            );
+            assert!(
+                fault.cancel_requested,
+                "forced-cancel chaos plan must request cancellation for every pending obligation"
+            );
             cleanup_harness
                 .abort_reserved_send(obligation_id, "client_disconnect_forced_cancel")
                 .expect("forced cancellation should abort every pending obligation");
@@ -1484,10 +1632,24 @@ pub fn run_client_disconnect_forced_cancel_cleanup_e2e() {
             "cleanup_runtime_quiescent": cleanup_runtime_is_quiescent,
             "region_close_implies_quiescence": cleanup_region_is_closed && cleanup_runtime_is_quiescent,
             "cleanup_elapsed_ms": cleanup_elapsed.as_millis(),
-            "cleanup_budget_ms": cleanup_budget.as_millis()
+            "cleanup_budget_ms": cleanup_budget.as_millis(),
+            "chaos_seed": chaos_seed,
+            "chaos_decision_points": chaos_stats.decision_points,
+            "chaos_cancellations": chaos_stats.cancellations,
+            "chaos_delays": chaos_stats.delays,
+            "chaos_budget_exhaustions": chaos_stats.budget_exhaustions,
+            "chaos_total_delay_ms": chaos_stats.total_delay.as_millis()
         }),
     );
 
+    assert_eq!(
+        chaos_stats.decision_points as usize, pending_count,
+        "chaos plan should include one cleanup fault decision per pending obligation"
+    );
+    assert_eq!(
+        chaos_stats.cancellations as usize, pending_count,
+        "forced-cancel chaos plan should inject cancellation at every cleanup decision"
+    );
     assert!(
         cleanup_elapsed <= cleanup_budget,
         "forced cancellation cleanup exceeded budget: {:?} > {:?}",
@@ -1529,6 +1691,17 @@ pub fn run_client_disconnect_forced_cancel_cleanup_e2e() {
         "forced cancellation leak validation failed: {:?}",
         validation_result
     );
+    harness.log_atp_event(
+        "oracle_checked",
+        json!({
+            "oracle": "obligation_cleanup_no_leak",
+            "zero_pending": after_cancel.pending_obligations == 0,
+            "zero_leaks": after_cancel.leaked_obligations == 0,
+            "ledger_consistent": after_cancel.ledger_consistent,
+            "region_close_implies_quiescence": cleanup_region_is_closed && cleanup_runtime_is_quiescent,
+            "chaos_cancellations": chaos_stats.cancellations,
+        }),
+    );
 
     harness.log(
         "test_result",
@@ -1539,7 +1712,22 @@ pub fn run_client_disconnect_forced_cancel_cleanup_e2e() {
             "zero_leaks": after_cancel.leaked_obligations == 0,
             "no_task_leaks": cleanup_task_complete_count == pending_count,
             "region_close_implies_quiescence": cleanup_region_is_closed && cleanup_runtime_is_quiescent,
-            "cleanup_within_budget": cleanup_elapsed <= cleanup_budget
+            "cleanup_within_budget": cleanup_elapsed <= cleanup_budget,
+            "chaos_seed": chaos_seed,
+            "chaos_decision_points": chaos_stats.decision_points,
+            "chaos_cancellations": chaos_stats.cancellations,
+            "chaos_delays": chaos_stats.delays,
+            "chaos_budget_exhaustions": chaos_stats.budget_exhaustions
+        }),
+    );
+    harness.log_atp_event(
+        "test_completed",
+        json!({
+            "passed": true,
+            "scenario": "client_disconnect_during_reserved_send",
+            "cleanup_elapsed_ms": cleanup_elapsed.as_millis(),
+            "cleanup_budget_ms": cleanup_budget.as_millis(),
+            "chaos_seed": chaos_seed,
         }),
     );
 
@@ -1558,7 +1746,15 @@ pub fn run_client_disconnect_forced_cancel_cleanup_e2e() {
                 "cleanup_region_closed": cleanup_region_is_closed,
                 "cleanup_runtime_quiescent": cleanup_runtime_is_quiescent,
                 "cleanup_elapsed_ms": cleanup_elapsed.as_millis(),
-                "cleanup_budget_ms": cleanup_budget.as_millis()
+                "cleanup_budget_ms": cleanup_budget.as_millis(),
+                "atp_log_schema_version": ATP_LOG_EVENT_SCHEMA_VERSION,
+                "chaos_seed": chaos_seed,
+                "chaos_summary": chaos_summary,
+                "chaos_decision_points": chaos_stats.decision_points,
+                "chaos_cancellations": chaos_stats.cancellations,
+                "chaos_delays": chaos_stats.delays,
+                "chaos_budget_exhaustions": chaos_stats.budget_exhaustions,
+                "chaos_total_delay_ms": chaos_stats.total_delay.as_millis()
             }),
         )
         .expect("artifact bundle should be written when artifact env is set");

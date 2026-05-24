@@ -128,6 +128,22 @@ check_pattern "Task leak detected" "task leak detected"
 check_pattern 'Leak detected: [1-9][0-9]* obligations leaked|obligation leak detected|"zero_leaks":[[:space:]]*false|"leaked_after":[[:space:]]*[1-9]' "obligation leak"
 
 if [ "$TEST_RESULT" -eq 0 ]; then
+    require_pattern() {
+        local pattern="$1"
+        local label="$2"
+        if ! grep -Eq "$pattern" "$LOG_FILE" 2>/dev/null; then
+            echo "  ERROR: missing ${label}"
+            echo "missing ${label}: ${pattern}" > "${ARTIFACT_DIR}/${label// /_}.txt"
+            ((PATTERN_FAILURES++)) || true
+        fi
+    }
+
+    require_pattern '"schema_version":"asupersync\.atp\.log\.event\.v1"' "ATP structured log schema"
+    require_pattern '"event_type":"seed_selected"' "ATP seed-selected event"
+    require_pattern '"event_type":"oracle_checked"' "ATP oracle-checked event"
+    require_pattern '"event_type":"test_completed"' "ATP test-completed event"
+    require_pattern '"chaos_cancellations"[[:space:]]*:[[:space:]]*16' "forced-cancel chaos decisions"
+
     if [ ! -s "${TEST_ARTIFACT_SCENARIO_DIR}/events.ndjson" ] || [ ! -s "${TEST_ARTIFACT_SCENARIO_DIR}/summary.json" ]; then
         echo "  ERROR: test artifact materialization failed"
         ((PATTERN_FAILURES++)) || true
