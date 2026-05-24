@@ -1,0 +1,7 @@
+   Compiling asupersync v0.3.2 (/data/projects/asupersync)
+src/messaging_primitives_conformance_tests.rs:1613:10: error[E0425]: cannot find value `entry` in this scope
+src/cx_obligation_trace_metamorphic_tests.rs:40:28: error[E0603]: module `leak_check` is private
+src/messaging_primitives_conformance_tests.rs:1616:15: error[E0425]: cannot find value `entry` in this scope
+src/atp/journal/chunk_bitmap.rs:1027:50: error[E0277]: `chunk_bitmap::ChunkBitmap` doesn't implement `std::fmt::Debug`
+warning: `asupersync` (lib test) generated 223 warnings
+error: could not compile `asupersync` (lib test) due to 4 previous errors; 223 warnings emitted
