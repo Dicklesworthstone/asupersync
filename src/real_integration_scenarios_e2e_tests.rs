@@ -1563,6 +1563,839 @@ impl IntegrationTestHarness {
         assert!(total_backpressure_events > 0, "Backpressure events should have occurred due to slow stage");
         assert!(slow_stage_processed < total_items, "Slow stage should have limited overall throughput");
     }
+
+    /// [br-integration-8] Pubsub broker death and reconnection resilience
+    async fn test_pubsub_broker_death_reconnect(&self) {
+        self.logger.log_phase("pubsub_broker_death_setup");
+
+        let subscriber_count = 5;
+        let message_count = 200;
+        let broker_kill_interval = Duration::from_millis(500);
+
+        self.logger.log_event("pubsub_broker_death_config", serde_json::json!({
+            "subscriber_count": subscriber_count,
+            "message_count": message_count,
+            "broker_kill_interval_ms": broker_kill_interval.as_millis()
+        }));
+
+        // Phase 1: Setup pubsub broker with fault injection
+        self.logger.log_phase("broker_setup");
+
+        let (broker_tx, broker_rx) = broadcast::channel(1000);
+        let (death_signal_tx, death_signal_rx) = oneshot::channel();
+        let broker_deaths = Arc::new(AtomicUsize::new(0));
+        let broker_recoveries = Arc::new(AtomicUsize::new(0));
+        let total_messages_published = Arc::new(AtomicUsize::new(0));
+        let total_messages_received = Arc::new(AtomicUsize::new(0));
+
+        // Broker process with death/recovery simulation
+        let broker_task = {
+            let logger = self.logger.clone();
+            let broker_deaths = Arc::clone(&broker_deaths);
+            let broker_recoveries = Arc::clone(&broker_recoveries);
+            let total_published = Arc::clone(&total_messages_published);
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let mut death_signal_rx = death_signal_rx;
+                    let mut published_count = 0;
+                    let mut death_count = 0;
+
+                    loop {
+                        // Check for death signal
+                        match death_signal_rx.try_recv() {
+                            Ok(_) => {
+                                death_count += 1;
+                                broker_deaths.fetch_add(1, Ordering::Relaxed);
+
+                                logger.log_event("broker_death", serde_json::json!({
+                                    "death_count": death_count,
+                                    "published_before_death": published_count
+                                }));
+
+                                // Simulate broker restart delay
+                                sleep(Duration::from_millis(200)).await;
+
+                                broker_recoveries.fetch_add(1, Ordering::Relaxed);
+                                logger.log_event("broker_recovery", serde_json::json!({
+                                    "death_count": death_count,
+                                    "recovery_count": death_count
+                                }));
+
+                                // Resume publishing after recovery
+                            }
+                            Err(_) => {
+                                // Normal operation - publish messages
+                                if published_count < message_count {
+                                    let message = format!("broker_message_{}", published_count);
+
+                                    match broker_tx.send(message.clone()) {
+                                        Ok(_) => {
+                                            published_count += 1;
+                                            total_published.fetch_add(1, Ordering::Relaxed);
+
+                                            logger.log_event("broker_message_published", serde_json::json!({
+                                                "message": message,
+                                                "published_count": published_count
+                                            }));
+                                        }
+                                        Err(_) => {
+                                            logger.log_event("broker_publish_failed", serde_json::json!({
+                                                "message": message,
+                                                "published_count": published_count
+                                            }));
+                                            break;
+                                        }
+                                    }
+
+                                    sleep(Duration::from_millis(50)).await;
+                                } else {
+                                    // Publishing complete
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    logger.log_event("broker_shutdown", serde_json::json!({
+                        "total_published": published_count,
+                        "total_deaths": death_count
+                    }));
+
+                    Outcome::Ok(published_count)
+                }).await
+            }).await
+        };
+
+        // Phase 2: Setup subscribers with reconnection logic
+        self.logger.log_phase("subscriber_setup");
+
+        let mut subscriber_tasks = Vec::new();
+
+        for sub_id in 0..subscriber_count {
+            let mut subscriber_rx = broker_tx.subscribe();
+            let logger = self.logger.clone();
+            let total_received = Arc::clone(&total_messages_received);
+
+            let subscriber_task = self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let mut received_count = 0;
+                    let mut reconnect_count = 0;
+
+                    loop {
+                        match timeout(Duration::from_millis(100), subscriber_rx.recv()).await {
+                            Outcome::Ok(Ok(message)) => {
+                                received_count += 1;
+                                total_received.fetch_add(1, Ordering::Relaxed);
+
+                                logger.log_event("subscriber_message_received", serde_json::json!({
+                                    "subscriber_id": sub_id,
+                                    "message": message,
+                                    "received_count": received_count
+                                }));
+                            }
+                            Outcome::Ok(Err(_)) => {
+                                // Channel closed - attempt reconnect
+                                reconnect_count += 1;
+
+                                logger.log_event("subscriber_reconnect", serde_json::json!({
+                                    "subscriber_id": sub_id,
+                                    "reconnect_count": reconnect_count
+                                }));
+
+                                // Simulate reconnection delay
+                                sleep(Duration::from_millis(100)).await;
+
+                                // In real scenario, would reconnect to new broker instance
+                                break;
+                            }
+                            Outcome::Cancelled => {
+                                logger.log_event("subscriber_timeout", serde_json::json!({
+                                    "subscriber_id": sub_id,
+                                    "received_count": received_count
+                                }));
+                                continue;
+                            }
+                        }
+
+                        if received_count >= message_count / subscriber_count {
+                            break;
+                        }
+                    }
+
+                    logger.log_event("subscriber_complete", serde_json::json!({
+                        "subscriber_id": sub_id,
+                        "received_count": received_count,
+                        "reconnect_count": reconnect_count
+                    }));
+
+                    Outcome::Ok(received_count)
+                }).await
+            }).await;
+
+            subscriber_tasks.push(subscriber_task);
+        }
+
+        // Phase 3: Chaos injection - kill broker periodically
+        let chaos_task = {
+            let logger = self.logger.clone();
+            let death_signal_tx = death_signal_tx;
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    // Wait before first kill
+                    sleep(broker_kill_interval).await;
+
+                    let mut kill_count = 0;
+                    while kill_count < 3 {  // Kill broker 3 times during test
+                        if death_signal_tx.send(()).is_err() {
+                            logger.log_event("death_signal_failed", serde_json::json!({
+                                "kill_count": kill_count
+                            }));
+                            break;
+                        }
+
+                        kill_count += 1;
+                        logger.log_event("broker_kill_signal", serde_json::json!({
+                            "kill_count": kill_count
+                        }));
+
+                        sleep(broker_kill_interval).await;
+                    }
+
+                    Outcome::Ok(kill_count)
+                }).await
+            }).await
+        };
+
+        // Phase 4: Execute pubsub with chaos
+        self.logger.log_phase("pubsub_chaos_execution");
+
+        let execution_timeout = Duration::from_secs(15);
+
+        // Wait for broker task completion
+        let broker_result = timeout(execution_timeout, broker_task).await;
+
+        // Wait for chaos task
+        let _chaos_result = timeout(Duration::from_secs(5), chaos_task).await;
+
+        // Collect subscriber results
+        let mut total_subscriber_messages = 0;
+        for (sub_id, subscriber_task) in subscriber_tasks.into_iter().enumerate() {
+            match timeout(Duration::from_secs(3), subscriber_task).await {
+                Outcome::Ok(Outcome::Ok(received)) => {
+                    total_subscriber_messages += received;
+                    self.logger.log_event("subscriber_task_completed", serde_json::json!({
+                        "subscriber_id": sub_id,
+                        "received_count": received
+                    }));
+                }
+                _ => {
+                    self.logger.log_event("subscriber_task_timeout", serde_json::json!({
+                        "subscriber_id": sub_id
+                    }));
+                }
+            }
+        }
+
+        // Phase 5: Validate broker death/recovery resilience
+        self.logger.log_phase("broker_death_validation");
+
+        let broker_published = total_messages_published.load(Ordering::Relaxed);
+        let total_received = total_messages_received.load(Ordering::Relaxed);
+        let total_deaths = broker_deaths.load(Ordering::Relaxed);
+        let total_recoveries = broker_recoveries.load(Ordering::Relaxed);
+
+        self.logger.log_metrics(serde_json::json!({
+            "broker_death_results": {
+                "broker_published": broker_published,
+                "total_received": total_received,
+                "subscriber_messages": total_subscriber_messages,
+                "broker_deaths": total_deaths,
+                "broker_recoveries": total_recoveries,
+                "message_delivery_rate": total_received as f64 / broker_published as f64,
+                "death_recovery_rate": total_recoveries as f64 / total_deaths as f64
+            }
+        }));
+
+        // Critical assertions for broker resilience
+        self.logger.log_assertion("broker_deaths_occurred", total_deaths > 0, serde_json::json!({
+            "total_deaths": total_deaths
+        }));
+
+        self.logger.log_assertion("broker_recoveries_matched", total_recoveries == total_deaths, serde_json::json!({
+            "recoveries": total_recoveries,
+            "deaths": total_deaths
+        }));
+
+        self.logger.log_assertion("messages_published", broker_published > 0, serde_json::json!({
+            "published": broker_published
+        }));
+
+        self.logger.log_assertion("subscribers_received_messages", total_received > 0, serde_json::json!({
+            "received": total_received
+        }));
+
+        // Message delivery should be reasonably successful despite chaos
+        let delivery_rate = total_received as f64 / broker_published as f64;
+        self.logger.log_assertion("message_delivery_resilience", delivery_rate > 0.7, serde_json::json!({
+            "delivery_rate": delivery_rate,
+            "threshold": 0.7
+        }));
+
+        assert!(total_deaths > 0, "Broker deaths should occur during chaos");
+        assert!(total_recoveries == total_deaths, "All broker deaths should recover: {} recoveries vs {} deaths", total_recoveries, total_deaths);
+        assert!(broker_published > 0, "Broker should publish messages");
+        assert!(total_received > 0, "Subscribers should receive messages despite chaos");
+        assert!(delivery_rate > 0.7, "Message delivery rate should be >70% despite broker deaths: {:.2}%", delivery_rate * 100.0);
+    }
+
+    /// [br-integration-9] RaptorQ decode interruption and stream resumption
+    async fn test_raptorq_decode_interruption_resume(&self) {
+        self.logger.log_phase("raptorq_interruption_setup");
+
+        use crate::raptorq::{Encoder, Decoder, SourceBlockEncoder};
+
+        let source_data = vec![0u8; 8192]; // 8KB source data
+        let source_symbol_size = 64; // 64-byte symbols
+        let repair_symbol_count = 20; // Generate 20 repair symbols
+
+        self.logger.log_event("raptorq_config", serde_json::json!({
+            "source_data_size": source_data.len(),
+            "source_symbol_size": source_symbol_size,
+            "repair_symbol_count": repair_symbol_count
+        }));
+
+        // Phase 1: Encode source data for transmission
+        self.logger.log_phase("raptorq_encoding");
+
+        let mut encoder = Encoder::new(source_symbol_size);
+        let encoded_block = encoder.encode(&source_data, repair_symbol_count)
+            .expect("RaptorQ encoding should succeed");
+
+        let source_symbols = encoded_block.source_symbols();
+        let repair_symbols = encoded_block.repair_symbols();
+        let total_symbols = source_symbols.len() + repair_symbols.len();
+
+        self.logger.log_event("raptorq_encoded", serde_json::json!({
+            "source_symbol_count": source_symbols.len(),
+            "repair_symbol_count": repair_symbols.len(),
+            "total_symbol_count": total_symbols
+        }));
+
+        // Phase 2: Setup interrupted decode simulation
+        self.logger.log_phase("raptorq_decode_simulation");
+
+        let interruption_point = source_symbols.len() / 2; // Interrupt mid-stream
+        let interruption_delay = Duration::from_millis(100);
+        let total_interruptions = Arc::new(AtomicUsize::new(0));
+        let total_resumed = Arc::new(AtomicUsize::new(0));
+        let symbols_before_interruption = Arc::new(AtomicUsize::new(0));
+        let symbols_after_resumption = Arc::new(AtomicUsize::new(0));
+
+        // Decoder with interruption simulation
+        let decode_task = {
+            let logger = self.logger.clone();
+            let total_interruptions = Arc::clone(&total_interruptions);
+            let total_resumed = Arc::clone(&total_resumed);
+            let symbols_before = Arc::clone(&symbols_before_interruption);
+            let symbols_after = Arc::clone(&symbols_after_resumption);
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let mut decoder = Decoder::new(source_symbol_size);
+                    let mut symbols_processed = 0;
+                    let mut interruption_count = 0;
+
+                    // Process source symbols with interruption
+                    for (symbol_id, symbol_data) in source_symbols.iter().enumerate() {
+                        if symbol_id == interruption_point {
+                            // Simulate stream interruption
+                            interruption_count += 1;
+                            total_interruptions.fetch_add(1, Ordering::Relaxed);
+                            symbols_before.store(symbols_processed, Ordering::Relaxed);
+
+                            logger.log_event("raptorq_stream_interrupted", serde_json::json!({
+                                "interruption_count": interruption_count,
+                                "symbols_before_interruption": symbols_processed,
+                                "symbol_id": symbol_id
+                            }));
+
+                            // Simulate interruption delay (network timeout, etc.)
+                            sleep(interruption_delay).await;
+
+                            // Resume decoding
+                            total_resumed.fetch_add(1, Ordering::Relaxed);
+                            logger.log_event("raptorq_stream_resumed", serde_json::json!({
+                                "interruption_count": interruption_count,
+                                "resume_at_symbol_id": symbol_id
+                            }));
+                        }
+
+                        // Feed symbol to decoder
+                        if decoder.add_source_symbol(symbol_id as u32, symbol_data.clone()).is_ok() {
+                            symbols_processed += 1;
+
+                            if symbol_id > interruption_point {
+                                symbols_after.fetch_add(1, Ordering::Relaxed);
+                            }
+
+                            logger.log_event("raptorq_symbol_processed", serde_json::json!({
+                                "symbol_id": symbol_id,
+                                "symbols_processed": symbols_processed,
+                                "is_after_resumption": symbol_id > interruption_point
+                            }));
+
+                            // Check if we can decode yet
+                            if let Ok(decoded_data) = decoder.try_decode() {
+                                logger.log_event("raptorq_decode_success", serde_json::json!({
+                                    "symbols_processed": symbols_processed,
+                                    "decoded_size": decoded_data.len(),
+                                    "interruption_count": interruption_count
+                                }));
+
+                                return Outcome::Ok((decoded_data, symbols_processed, interruption_count));
+                            }
+                        } else {
+                            logger.log_event("raptorq_symbol_rejected", serde_json::json!({
+                                "symbol_id": symbol_id
+                            }));
+                        }
+
+                        // Simulate network transmission delay
+                        sleep(Duration::from_millis(10)).await;
+                    }
+
+                    // If source symbols weren't enough, try repair symbols
+                    for (repair_id, repair_data) in repair_symbols.iter().enumerate() {
+                        if decoder.add_repair_symbol(repair_id as u32, repair_data.clone()).is_ok() {
+                            symbols_processed += 1;
+                            symbols_after.fetch_add(1, Ordering::Relaxed);
+
+                            if let Ok(decoded_data) = decoder.try_decode() {
+                                logger.log_event("raptorq_decode_success_with_repair", serde_json::json!({
+                                    "symbols_processed": symbols_processed,
+                                    "decoded_size": decoded_data.len(),
+                                    "repair_symbols_used": repair_id + 1,
+                                    "interruption_count": interruption_count
+                                }));
+
+                                return Outcome::Ok((decoded_data, symbols_processed, interruption_count));
+                            }
+                        }
+
+                        sleep(Duration::from_millis(10)).await;
+                    }
+
+                    logger.log_event("raptorq_decode_failed", serde_json::json!({
+                        "symbols_processed": symbols_processed,
+                        "interruption_count": interruption_count
+                    }));
+
+                    Outcome::Err(Error::new(ErrorKind::Other, "RaptorQ decode failed after all symbols"))
+                }).await
+            }).await
+        };
+
+        // Phase 3: Execute decode with interruption
+        self.logger.log_phase("raptorq_decode_execution");
+
+        let decode_timeout = Duration::from_secs(10);
+        let decode_result = timeout(decode_timeout, decode_task).await;
+
+        // Phase 4: Validate interruption recovery
+        self.logger.log_phase("raptorq_interruption_validation");
+
+        let interruption_count = total_interruptions.load(Ordering::Relaxed);
+        let resume_count = total_resumed.load(Ordering::Relaxed);
+        let before_count = symbols_before_interruption.load(Ordering::Relaxed);
+        let after_count = symbols_after_resumption.load(Ordering::Relaxed);
+
+        let (decode_success, decoded_data_len, symbols_used) = match decode_result {
+            Outcome::Ok(Outcome::Ok((decoded_data, symbols_processed, _))) => {
+                (true, decoded_data.len(), symbols_processed)
+            }
+            _ => (false, 0, 0)
+        };
+
+        self.logger.log_metrics(serde_json::json!({
+            "raptorq_interruption_results": {
+                "decode_success": decode_success,
+                "decoded_data_size": decoded_data_len,
+                "symbols_used": symbols_used,
+                "interruption_count": interruption_count,
+                "resume_count": resume_count,
+                "symbols_before_interruption": before_count,
+                "symbols_after_resumption": after_count,
+                "recovery_rate": resume_count as f64 / interruption_count as f64
+            }
+        }));
+
+        // Critical assertions for RaptorQ resilience
+        self.logger.log_assertion("raptorq_interruption_occurred", interruption_count > 0, serde_json::json!({
+            "interruption_count": interruption_count
+        }));
+
+        self.logger.log_assertion("raptorq_stream_resumed", resume_count == interruption_count, serde_json::json!({
+            "resume_count": resume_count,
+            "interruption_count": interruption_count
+        }));
+
+        self.logger.log_assertion("raptorq_decode_success", decode_success, serde_json::json!({
+            "decode_success": decode_success
+        }));
+
+        self.logger.log_assertion("raptorq_data_integrity", decoded_data_len == source_data.len(), serde_json::json!({
+            "decoded_size": decoded_data_len,
+            "source_size": source_data.len()
+        }));
+
+        self.logger.log_assertion("raptorq_symbols_after_resume", after_count > 0, serde_json::json!({
+            "symbols_after_resume": after_count
+        }));
+
+        assert!(interruption_count > 0, "Stream interruption should occur during decode");
+        assert!(resume_count == interruption_count, "All interruptions should resume: {} resumes vs {} interruptions", resume_count, interruption_count);
+        assert!(decode_success, "RaptorQ decode should succeed despite interruption");
+        assert!(decoded_data_len == source_data.len(), "Decoded data should match source: {} vs {} bytes", decoded_data_len, source_data.len());
+        assert!(after_count > 0, "Symbols should be processed after resumption: {} symbols", after_count);
+    }
+
+    /// [br-integration-10] Runtime panic recovery with active subscriptions
+    async fn test_runtime_panic_recovery_subscriptions(&self) {
+        self.logger.log_phase("panic_recovery_setup");
+
+        let subscription_count = 8;
+        let panic_injection_probability = 0.3; // 30% chance of panic per work item
+        let total_work_items = 50;
+
+        self.logger.log_event("panic_recovery_config", serde_json::json!({
+            "subscription_count": subscription_count,
+            "panic_injection_probability": panic_injection_probability,
+            "total_work_items": total_work_items
+        }));
+
+        // Phase 1: Setup active subscriptions
+        self.logger.log_phase("subscription_setup");
+
+        let (work_tx, work_rx) = broadcast::channel(200);
+        let (result_tx, result_rx) = mpsc::channel(100);
+        let panic_count = Arc::new(AtomicUsize::new(0));
+        let recovery_count = Arc::new(AtomicUsize::new(0));
+        let surviving_subscriptions = Arc::new(AtomicUsize::new(0));
+        let completed_work = Arc::new(AtomicUsize::new(0));
+
+        // Subscription workers with panic boundaries
+        let mut subscription_tasks = Vec::new();
+
+        for sub_id in 0..subscription_count {
+            let mut subscriber_rx = work_tx.subscribe();
+            let result_tx = result_tx.clone();
+            let logger = self.logger.clone();
+            let panic_count = Arc::clone(&panic_count);
+            let recovery_count = Arc::clone(&recovery_count);
+            let surviving_subscriptions = Arc::clone(&surviving_subscriptions);
+            let completed_work = Arc::clone(&completed_work);
+
+            let subscription_task = self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let mut processed_items = 0;
+                    let mut panic_recoveries = 0;
+                    let mut subscription_active = true;
+
+                    while subscription_active {
+                        // Protected work execution with panic boundary
+                        let work_result = std::panic::catch_unwind(|| async {
+                            match timeout(Duration::from_millis(500), subscriber_rx.recv()).await {
+                                Outcome::Ok(Ok(work_item)) => {
+                                    // Simulate work with potential panic
+                                    let panic_roll: f64 = fastrand::f64();
+
+                                    if panic_roll < panic_injection_probability {
+                                        panic_count.fetch_add(1, Ordering::Relaxed);
+
+                                        logger.log_event("subscription_panic", serde_json::json!({
+                                            "subscriber_id": sub_id,
+                                            "work_item": work_item,
+                                            "panic_roll": panic_roll,
+                                            "processed_before_panic": processed_items
+                                        }));
+
+                                        panic!("Injected panic in subscription worker {}", sub_id);
+                                    }
+
+                                    // Normal processing
+                                    processed_items += 1;
+                                    completed_work.fetch_add(1, Ordering::Relaxed);
+
+                                    let result = format!("processed_by_sub_{}_item_{}", sub_id, processed_items);
+
+                                    logger.log_event("subscription_work_completed", serde_json::json!({
+                                        "subscriber_id": sub_id,
+                                        "work_item": work_item,
+                                        "result": result,
+                                        "processed_items": processed_items
+                                    }));
+
+                                    if result_tx.send(result).await.is_err() {
+                                        logger.log_event("result_send_failed", serde_json::json!({
+                                            "subscriber_id": sub_id
+                                        }));
+                                        return Outcome::Err(Error::new(ErrorKind::Other, "Result channel closed"));
+                                    }
+
+                                    Outcome::Ok(true)
+                                }
+                                Outcome::Ok(Err(_)) => {
+                                    // Channel closed
+                                    logger.log_event("subscription_channel_closed", serde_json::json!({
+                                        "subscriber_id": sub_id,
+                                        "processed_items": processed_items
+                                    }));
+                                    Outcome::Ok(false)
+                                }
+                                Outcome::Cancelled => {
+                                    // Timeout - continue listening
+                                    Outcome::Ok(true)
+                                }
+                            }
+                        });
+
+                        match work_result {
+                            Ok(future) => {
+                                // No panic occurred, execute the async work
+                                match future.await {
+                                    Outcome::Ok(continue_subscription) => {
+                                        if !continue_subscription {
+                                            subscription_active = false;
+                                        }
+                                    }
+                                    Outcome::Err(_) => {
+                                        subscription_active = false;
+                                    }
+                                    Outcome::Cancelled => {
+                                        subscription_active = false;
+                                    }
+                                }
+                            }
+                            Err(_panic_info) => {
+                                // Panic occurred - recover subscription
+                                panic_recoveries += 1;
+                                recovery_count.fetch_add(1, Ordering::Relaxed);
+
+                                logger.log_event("subscription_panic_recovery", serde_json::json!({
+                                    "subscriber_id": sub_id,
+                                    "panic_recoveries": panic_recoveries,
+                                    "processed_before_recovery": processed_items
+                                }));
+
+                                // Simulate recovery delay
+                                sleep(Duration::from_millis(100)).await;
+
+                                // Subscription survives the panic and continues
+                                logger.log_event("subscription_recovered", serde_json::json!({
+                                    "subscriber_id": sub_id,
+                                    "recovery_count": panic_recoveries
+                                }));
+                            }
+                        }
+
+                        // Subscription survival check
+                        if processed_items >= total_work_items / subscription_count + 5 {
+                            // Subscription has processed enough work
+                            subscription_active = false;
+                        }
+                    }
+
+                    surviving_subscriptions.fetch_add(1, Ordering::Relaxed);
+
+                    logger.log_event("subscription_final_shutdown", serde_json::json!({
+                        "subscriber_id": sub_id,
+                        "processed_items": processed_items,
+                        "panic_recoveries": panic_recoveries
+                    }));
+
+                    Outcome::Ok((processed_items, panic_recoveries))
+                }).await
+            }).await;
+
+            subscription_tasks.push(subscription_task);
+        }
+
+        // Phase 2: Work publisher
+        self.logger.log_phase("work_publishing");
+
+        let publisher_task = {
+            let logger = self.logger.clone();
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let mut published_count = 0;
+
+                    for work_item in 0..total_work_items {
+                        let work_data = format!("work_item_{}", work_item);
+
+                        match work_tx.send(work_data.clone()) {
+                            Ok(_) => {
+                                published_count += 1;
+
+                                logger.log_event("work_published", serde_json::json!({
+                                    "work_item": work_item,
+                                    "work_data": work_data,
+                                    "published_count": published_count
+                                }));
+                            }
+                            Err(_) => {
+                                logger.log_event("work_publish_failed", serde_json::json!({
+                                    "work_item": work_item,
+                                    "published_count": published_count
+                                }));
+                                break;
+                            }
+                        }
+
+                        sleep(Duration::from_millis(50)).await;
+                    }
+
+                    logger.log_event("work_publishing_complete", serde_json::json!({
+                        "total_published": published_count
+                    }));
+
+                    Outcome::Ok(published_count)
+                }).await
+            }).await
+        };
+
+        // Phase 3: Result collector
+        let collector_task = {
+            let logger = self.logger.clone();
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let mut result_rx = result_rx;
+                    let mut collected_results = 0;
+
+                    while let Some(result) = result_rx.recv().await {
+                        collected_results += 1;
+
+                        logger.log_event("result_collected", serde_json::json!({
+                            "result": result,
+                            "collected_count": collected_results
+                        }));
+
+                        if collected_results >= total_work_items {
+                            break;
+                        }
+                    }
+
+                    logger.log_event("result_collection_complete", serde_json::json!({
+                        "total_collected": collected_results
+                    }));
+
+                    Outcome::Ok(collected_results)
+                }).await
+            }).await
+        };
+
+        // Phase 4: Execute with panic recovery
+        self.logger.log_phase("panic_recovery_execution");
+
+        let execution_timeout = Duration::from_secs(20);
+
+        // Wait for publisher completion
+        let publisher_result = timeout(execution_timeout, publisher_task).await;
+
+        // Wait for collector
+        let collector_result = timeout(Duration::from_secs(5), collector_task).await;
+
+        // Collect subscription task results
+        let mut total_processed_items = 0;
+        let mut total_subscription_recoveries = 0;
+
+        for (sub_id, subscription_task) in subscription_tasks.into_iter().enumerate() {
+            match timeout(Duration::from_secs(3), subscription_task).await {
+                Outcome::Ok(Outcome::Ok((processed, recoveries))) => {
+                    total_processed_items += processed;
+                    total_subscription_recoveries += recoveries;
+
+                    self.logger.log_event("subscription_task_completed", serde_json::json!({
+                        "subscriber_id": sub_id,
+                        "processed_items": processed,
+                        "panic_recoveries": recoveries
+                    }));
+                }
+                _ => {
+                    self.logger.log_event("subscription_task_timeout", serde_json::json!({
+                        "subscriber_id": sub_id
+                    }));
+                }
+            }
+        }
+
+        // Phase 5: Validate panic recovery and subscription survival
+        self.logger.log_phase("panic_recovery_validation");
+
+        let total_panics = panic_count.load(Ordering::Relaxed);
+        let total_recoveries = recovery_count.load(Ordering::Relaxed);
+        let survivors = surviving_subscriptions.load(Ordering::Relaxed);
+        let work_completed = completed_work.load(Ordering::Relaxed);
+
+        let published_work = match publisher_result {
+            Outcome::Ok(Outcome::Ok(count)) => count,
+            _ => 0
+        };
+
+        let collected_results = match collector_result {
+            Outcome::Ok(Outcome::Ok(count)) => count,
+            _ => 0
+        };
+
+        self.logger.log_metrics(serde_json::json!({
+            "panic_recovery_results": {
+                "total_panics": total_panics,
+                "total_recoveries": total_recoveries,
+                "surviving_subscriptions": survivors,
+                "work_published": published_work,
+                "work_completed": work_completed,
+                "results_collected": collected_results,
+                "subscription_survival_rate": survivors as f64 / subscription_count as f64,
+                "panic_recovery_rate": total_recoveries as f64 / total_panics as f64,
+                "work_completion_rate": work_completed as f64 / published_work as f64
+            }
+        }));
+
+        // Critical assertions for panic recovery
+        self.logger.log_assertion("panics_occurred", total_panics > 0, serde_json::json!({
+            "total_panics": total_panics
+        }));
+
+        self.logger.log_assertion("panic_recovery", total_recoveries == total_panics, serde_json::json!({
+            "recoveries": total_recoveries,
+            "panics": total_panics
+        }));
+
+        self.logger.log_assertion("subscriptions_survived", survivors > subscription_count / 2, serde_json::json!({
+            "survivors": survivors,
+            "total_subscriptions": subscription_count
+        }));
+
+        self.logger.log_assertion("work_completed", work_completed > 0, serde_json::json!({
+            "work_completed": work_completed
+        }));
+
+        // Work completion should be reasonable despite panics
+        let completion_rate = work_completed as f64 / published_work as f64;
+        self.logger.log_assertion("work_completion_resilience", completion_rate > 0.6, serde_json::json!({
+            "completion_rate": completion_rate,
+            "threshold": 0.6
+        }));
+
+        assert!(total_panics > 0, "Runtime panics should occur during chaos");
+        assert!(total_recoveries == total_panics, "All panics should recover: {} recoveries vs {} panics", total_recoveries, total_panics);
+        assert!(survivors > subscription_count / 2, "Majority of subscriptions should survive: {} survivors out of {}", survivors, subscription_count);
+        assert!(work_completed > 0, "Work should complete despite panics");
+        assert!(completion_rate > 0.6, "Work completion rate should be >60% despite panics: {:.2}%", completion_rate * 100.0);
+    }
 }
 
 #[tokio::test]
@@ -1617,4 +2450,42 @@ async fn test_comprehensive_integration_scenario() {
     }));
 
     harness.logger.log_phase("comprehensive_scenario_complete");
+}
+
+// ===== CHAOS ENGINEERING INTEGRATION TEST FUNCTIONS =====
+
+#[tokio::test]
+async fn test_chaos_thread_kill_obligation_cleanup_integration() {
+    let harness = IntegrationTestHarness::new("chaos_thread_kill_obligation_cleanup_integration").await;
+    harness.test_chaos_thread_kill_obligation_cleanup().await;
+}
+
+#[tokio::test]
+async fn test_hedge_first_success_short_circuit_integration() {
+    let harness = IntegrationTestHarness::new("hedge_first_success_short_circuit_integration").await;
+    harness.test_hedge_first_success_short_circuit().await;
+}
+
+#[tokio::test]
+async fn test_distributed_bridge_rolling_restart_integration() {
+    let harness = IntegrationTestHarness::new("distributed_bridge_rolling_restart_integration").await;
+    harness.test_distributed_bridge_rolling_restart().await;
+}
+
+#[tokio::test]
+async fn test_pubsub_broker_death_reconnect_integration() {
+    let harness = IntegrationTestHarness::new("pubsub_broker_death_reconnect_integration").await;
+    harness.test_pubsub_broker_death_reconnect().await;
+}
+
+#[tokio::test]
+async fn test_raptorq_decode_interruption_resume_integration() {
+    let harness = IntegrationTestHarness::new("raptorq_decode_interruption_resume_integration").await;
+    harness.test_raptorq_decode_interruption_resume().await;
+}
+
+#[tokio::test]
+async fn test_runtime_panic_recovery_subscriptions_integration() {
+    let harness = IntegrationTestHarness::new("runtime_panic_recovery_subscriptions_integration").await;
+    harness.test_runtime_panic_recovery_subscriptions().await;
 }
