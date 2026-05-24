@@ -349,6 +349,8 @@ pub mod real_cx_registry_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cx_registry_trace_distributed_commit_permit_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_database_mysql_transport_aggregator_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_database_postgres_tls_connector_renegotiation_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_database_sqlite_obligation_saga_integration_e2e_tests;
