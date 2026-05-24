@@ -2,7 +2,7 @@
   "contract_version": "no-tokio-feature-boundary-contract-v1",
   "bead_id": "asupersync-rcktok",
   "signoff_date": "2026-05-04",
-  "description": "Checked no-Tokio boundary for default, metrics, and fuzz feature graphs.",
+  "description": "Checked no-Tokio boundary for default, metrics, fuzz, workspace, and full feature/dev dependency graphs.",
   "source_of_truth": {
     "cargo_manifest": "Cargo.toml",
     "readme_section": "README.md#what-asupersync-doesnt-do",
@@ -46,6 +46,39 @@
       "rationale": "The fuzz feature enables OTLP protobuf wire helpers through opentelemetry-proto gen-tonic-messages. This is not part of the default or metrics production graph."
     }
   ],
+  "scoped_audit_profiles": [
+    {
+      "profile": "workspace-normal-audit",
+      "feature_args": "--workspace",
+      "status": "tokio_carrying_scoped_audit",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_no_tokio_feature_boundary_workspace cargo tree -e normal --workspace -i tokio",
+      "expected_path_fragments": [
+        "asupersync-tokio-compat",
+        "asupersync-conformance",
+        "tokio"
+      ],
+      "rationale": "The workspace normal graph intentionally includes satellite and conformance crates. It audits documented carve-outs and must not be cited as the default or metrics production-consumer proof."
+    },
+    {
+      "profile": "full-feature-dev-audit",
+      "feature_args": "--workspace --invert tokio",
+      "status": "tokio_carrying_scoped_audit",
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_no_tokio_feature_boundary_full_graph cargo tree -e features --workspace --invert tokio",
+      "expected_path_fragments": [
+        "opentelemetry_sdk",
+        "tokio-stream",
+        "tokio-util",
+        "sqlx",
+        "asupersync-tokio-compat",
+        "asupersync-conformance",
+        "opentelemetry-proto",
+        "tonic",
+        "tonic-prost",
+        "tokio"
+      ],
+      "rationale": "The full feature/dev graph is an audit surface for dev-dependencies, reference implementations, fuzz helpers, and satellite crates. Unexpected tokio paths here must be classified before anyone weakens the default or metrics production guarantees."
+    }
+  ],
   "cargo_feature_contract": {
     "metrics_must_include": [
       "dep:opentelemetry",
@@ -69,11 +102,13 @@
     "readme_must_state": [
       "The optional `metrics` feature also has no normal-edge dependency on tokio",
       "The `fuzz` feature is intentionally outside this guarantee",
+      "full-graph cargo-tree output is likewise an audit surface",
       "artifacts/no_tokio_feature_boundary_contract_v1.json"
     ],
     "agents_must_state": [
       "The optional `metrics` feature also has no normal-edge dependency on tokio",
-      "The `fuzz` feature deliberately enables `opentelemetry-proto`"
+      "The `fuzz` feature deliberately enables `opentelemetry-proto`",
+      "full graph including dev-deps"
     ],
     "forbidden_stale_claims": [
       "metrics feature pulls tokio",

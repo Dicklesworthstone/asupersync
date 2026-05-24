@@ -267,6 +267,9 @@ fn manifest_records_required_lanes_and_doc_sources() {
     for required in [
         "default-production-tokio-tree",
         "metrics-production-tokio-tree",
+        "fuzz-tokio-quarantine-tree",
+        "workspace-normal-tokio-audit",
+        "full-feature-tokio-audit",
         "native-feature-smoke",
         "fuzz-manifest-smoke",
         "lib-tests",

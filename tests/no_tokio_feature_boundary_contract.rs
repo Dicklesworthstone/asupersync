@@ -265,6 +265,90 @@ fn boundary_contract_records_default_metrics_and_fuzz_proofs() {
 }
 
 #[test]
+fn scoped_audit_profiles_do_not_weaken_production_guarantees() {
+    let contract = contract();
+    let audits = contract
+        .get("scoped_audit_profiles")
+        .and_then(JsonValue::as_array)
+        .expect("scoped_audit_profiles array");
+    let profiles: BTreeSet<_> = audits
+        .iter()
+        .map(|item| json_string_field(item, "profile"))
+        .collect();
+    assert!(profiles.contains("workspace-normal-audit"));
+    assert!(profiles.contains("full-feature-dev-audit"));
+
+    for audit in audits {
+        let profile = json_string_field(audit, "profile");
+        let command = json_string_field(audit, "proof_command");
+        assert_target_dir_rch_cargo_command("scoped audit proof_command", command);
+        let args = cargo_args_from_rch_command(command);
+        assert_eq!(
+            args.first().copied(),
+            Some("tree"),
+            "{profile}: scoped audit proof_command must invoke cargo tree"
+        );
+        assert_eq!(
+            audit.get("status").and_then(JsonValue::as_str),
+            Some("tokio_carrying_scoped_audit")
+        );
+        assert!(
+            command.contains("--workspace"),
+            "{profile}: scoped audit command must be workspace-scoped"
+        );
+        let fragments = json_string_set(audit, "expected_path_fragments");
+        assert!(
+            fragments.contains("tokio"),
+            "{profile}: scoped audit must classify tokio-carrying output"
+        );
+        let rationale = json_string_field(audit, "rationale").to_ascii_lowercase();
+        assert!(
+            rationale.contains("not") && rationale.contains("production"),
+            "{profile}: rationale must state this is not production proof"
+        );
+    }
+
+    let full = audits
+        .iter()
+        .find(|item| item["profile"].as_str() == Some("full-feature-dev-audit"))
+        .expect("full-feature-dev-audit profile");
+    let full_command = json_string_field(full, "proof_command");
+    assert!(
+        full_command.contains("-e features")
+            && full_command.contains("--workspace")
+            && full_command.contains("--invert tokio"),
+        "full graph audit command must match the AGENTS full-graph interpretation: {full_command}"
+    );
+    let full_fragments = json_string_set(full, "expected_path_fragments");
+    for required in [
+        "opentelemetry_sdk",
+        "tokio-stream",
+        "tokio-util",
+        "sqlx",
+        "asupersync-tokio-compat",
+        "asupersync-conformance",
+        "tokio",
+    ] {
+        assert!(
+            full_fragments.contains(required),
+            "full-feature-dev-audit missing {required}"
+        );
+    }
+
+    for guarantee in contract
+        .get("production_guarantees")
+        .and_then(JsonValue::as_array)
+        .expect("production_guarantees array")
+    {
+        let command = json_string_field(guarantee, "proof_command");
+        assert!(
+            !command.contains("--workspace"),
+            "production guarantees must stay package-scoped, not workspace audits: {command}"
+        );
+    }
+}
+
+#[test]
 fn production_cargo_tree_commands_fail_if_tokio_enters_default_or_metrics_graphs() {
     let contract = contract();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
@@ -339,6 +423,7 @@ fn docs_describe_metrics_as_clean_and_fuzz_as_quarantined() {
     for required in [
         "The optional `metrics` feature also has no normal-edge dependency on tokio",
         "The `fuzz` feature is intentionally outside this guarantee",
+        "full-graph cargo-tree output is likewise an audit surface",
         "artifacts/no_tokio_feature_boundary_contract_v1.json",
     ] {
         assert!(
@@ -349,6 +434,7 @@ fn docs_describe_metrics_as_clean_and_fuzz_as_quarantined() {
     for required in [
         "The optional `metrics` feature also has no normal-edge dependency on tokio",
         "The `fuzz` feature deliberately enables `opentelemetry-proto`",
+        "full graph including dev-deps",
     ] {
         assert!(
             agents.contains(required),

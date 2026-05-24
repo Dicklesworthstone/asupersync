@@ -22,7 +22,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tempfile::NamedTempFile;
 
 // Structured JSON-line logging for CI debugging
 struct TestLogger {
@@ -91,6 +90,16 @@ struct MockAsyncIo<T> {
 impl<T> MockAsyncIo<T> {
     fn new(inner: T) -> Self {
         Self { inner }
+    }
+
+    async fn read_buf(&mut self, buf: &mut BytesMut) -> io::Result<usize>
+    where
+        Self: AsyncRead + Unpin,
+    {
+        let mut read = Vec::new();
+        let bytes_read = self.read_to_end(&mut read).await?;
+        buf.extend_from_slice(&read);
+        Ok(bytes_read)
     }
 }
 

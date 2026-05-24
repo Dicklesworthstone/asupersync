@@ -23,6 +23,7 @@
     "atp-native-self-contained",
     "fuzz-tokio-quarantine",
     "workspace-tokio-audit",
+    "full-graph-tokio-audit",
     "feature-gated-native-surfaces",
     "fuzz-manifest-smoke",
     "lib-test-frontier",
@@ -129,6 +130,31 @@
         "new workspace member enables tokio without documentation"
       ],
       "escalation_notes": "Compare output against AGENTS documented carve-outs before filing a regression."
+    },
+    {
+      "lane_id": "full-feature-tokio-audit",
+      "kind": "dependency_graph",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_full_tokio_tree cargo tree -e features --workspace --invert tokio",
+      "package": "workspace",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "full-graph-tokio-audit"
+      ],
+      "covers": "Full workspace feature/dev graph audit names expected scoped tokio edges in dev/test/reference, fuzz-helper, and satellite surfaces.",
+      "explicit_not_covered": "Not a default or metrics production proof; expected tokio edges are allowed only when documented as scoped non-production carve-outs.",
+      "expected_signal": "tokio paths are explained as scoped dev/test/fuzz/satellite audit edges",
+      "source_paths": [
+        "AGENTS.md",
+        "README.md",
+        "Cargo.toml",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs"
+      ],
+      "common_unrelated_blockers": [
+        "new dev-dependency enables tokio without documentation",
+        "new optional feature unifies into a production graph accidentally"
+      ],
+      "escalation_notes": "Classify every tokio path before citing this lane; any default or metrics overlap remains a production blocker."
     },
     {
       "lane_id": "native-feature-smoke",
@@ -424,6 +450,13 @@
       "description": "Workspace normal graph tokio edges are audited as scoped carve-outs rather than production regressions.",
       "lane_ids": [
         "workspace-normal-tokio-audit"
+      ]
+    },
+    {
+      "guarantee_id": "full-graph-tokio-audit",
+      "description": "Full workspace feature/dev graph tokio edges are audited as scoped non-production carve-outs rather than production regressions.",
+      "lane_ids": [
+        "full-feature-tokio-audit"
       ]
     },
     {

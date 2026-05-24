@@ -30,6 +30,7 @@
     "atp-native-self-contained",
     "fuzz-tokio-quarantine",
     "workspace-tokio-audit",
+    "full-graph-tokio-audit",
     "feature-gated-native-surfaces",
     "fuzz-manifest-smoke",
     "lib-test-frontier",
@@ -110,6 +111,24 @@
         "AGENTS.md",
         "README.md",
         "Cargo.toml"
+      ]
+    },
+    {
+      "lane_id": "full-feature-tokio-audit",
+      "kind": "dependency_graph",
+      "package": "workspace",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_full_tokio_tree cargo tree -e features --workspace --invert tokio",
+      "guarantee_ids": [
+        "full-graph-tokio-audit"
+      ],
+      "feature_flags": [],
+      "expected_signal": "tokio paths are explained as scoped dev/test/fuzz/satellite audit edges",
+      "source_paths": [
+        "AGENTS.md",
+        "README.md",
+        "Cargo.toml",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs"
       ]
     },
     {
@@ -323,6 +342,12 @@
       "guarantee_id": "workspace-tokio-audit",
       "lane_ids": [
         "workspace-normal-tokio-audit"
+      ]
+    },
+    {
+      "guarantee_id": "full-graph-tokio-audit",
+      "lane_ids": [
+        "full-feature-tokio-audit"
       ]
     },
     {

@@ -1331,8 +1331,8 @@ mod property_tests {
             if let Some(ref last) = last_assignments {
                 prop_assert_eq!(assignments.len(), last.len());
                 for (current, prev) in assignments.iter().zip(last.iter()) {
-                    prop_assert_eq!(current.consumer_id, prev.consumer_id);
-                    prop_assert_eq!(current.partitions, prev.partitions);
+                    prop_assert_eq!(&current.consumer_id, &prev.consumer_id);
+                    prop_assert_eq!(&current.partitions, &prev.partitions);
                 }
             }
 
@@ -1532,7 +1532,7 @@ fn run_messaging_conformance_suite() {
         print!("  {} ({}): ", case.id, case.description);
 
         let result = test_fn();
-        match result {
+        match &result {
             TestResult::Pass => {
                 println!("✓ PASS");
                 passed += 1;

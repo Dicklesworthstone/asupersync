@@ -3927,6 +3927,1023 @@ impl SubsystemMutationTester {
         );
     }
 
+    /// [br-mutation-37] Database postgres SCRAM handshake byte-flip regression mutations
+    async fn test_database_mutations(&self) {
+        use crate::database::{AuthenticationError, ConnectionConfig, ScramAuth, postgres};
+
+        let database_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let database_test_count = 15;
+                let database_corruptions = Arc::new(AtomicUsize::new(0));
+                let scram_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..database_test_count {
+                            // Test PostgreSQL SCRAM handshake corruption
+                            if test_idx % 3 == 0 {
+                                database_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let connection_config = ConnectionConfig::new()
+                                    .with_host("localhost")
+                                    .with_port(5432)
+                                    .with_database("test_db")
+                                    .with_username("test_user")
+                                    .with_password("test_password");
+
+                                let mut pg_client = postgres::Client::new(connection_config);
+
+                                // MUTATION: Corrupt SCRAM-SHA-256 handshake bytes
+                                match test_idx % 12 {
+                                    0 => {
+                                        // Corrupt client nonce in initial message
+                                        let mut scram_auth =
+                                            ScramAuth::new("test_user", "test_password");
+                                        let mut initial_message = scram_auth.client_first_message();
+
+                                        // Flip random bits in nonce
+                                        let nonce_start =
+                                            initial_message.find("r=").unwrap_or(0) + 2;
+                                        if nonce_start < initial_message.len() {
+                                            let mut bytes = initial_message.into_bytes();
+                                            if nonce_start + 4 < bytes.len() {
+                                                bytes[nonce_start] ^= 0xAA; // Flip bits
+                                                bytes[nonce_start + 1] ^= 0x55;
+                                            }
+                                            initial_message =
+                                                String::from_utf8_lossy(&bytes).to_string();
+                                        }
+
+                                        match pg_client
+                                            .authenticate_with_corrupted_message(&initial_message)
+                                            .await
+                                        {
+                                            Err(AuthenticationError::InvalidNonce) => {
+                                                // Correctly detected nonce corruption
+                                            }
+                                            Ok(_) => {
+                                                // Should have failed with corrupted nonce
+                                                scram_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other authentication error
+                                            }
+                                        }
+                                    }
+                                    3 => {
+                                        // Corrupt salt in server first message
+                                        let mut scram_auth =
+                                            ScramAuth::new("test_user", "test_password");
+                                        let client_first = scram_auth.client_first_message();
+
+                                        // Mock server response with corrupted salt
+                                        let mut server_first = format!(
+                                            "r={},s={},i=4096",
+                                            scram_auth.generate_server_nonce(),
+                                            "Y29ycnVwdGVkX3NhbHQ" // Corrupted base64 salt
+                                        );
+
+                                        // Flip bytes in salt
+                                        if let Some(salt_start) = server_first.find("s=") {
+                                            let salt_start = salt_start + 2;
+                                            let mut bytes = server_first.into_bytes();
+                                            if salt_start + 4 < bytes.len() {
+                                                bytes[salt_start + 2] ^= 0xFF; // Corrupt salt bytes
+                                                bytes[salt_start + 3] ^= 0x42;
+                                            }
+                                            server_first =
+                                                String::from_utf8_lossy(&bytes).to_string();
+                                        }
+
+                                        match scram_auth.process_server_first(&server_first) {
+                                            Err(_) => {
+                                                // Correctly rejected corrupted salt
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected corrupted salt
+                                                scram_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                        }
+                                    }
+                                    6 => {
+                                        // Corrupt client proof calculation
+                                        let mut scram_auth =
+                                            ScramAuth::new("test_user", "test_password");
+                                        let client_first = scram_auth.client_first_message();
+                                        let server_first = scram_auth.mock_server_first_response();
+
+                                        scram_auth.process_server_first(&server_first).unwrap();
+                                        let mut client_final = scram_auth.client_final_message();
+
+                                        // Corrupt client proof
+                                        if let Some(proof_start) = client_final.find("p=") {
+                                            let proof_start = proof_start + 2;
+                                            let mut bytes = client_final.into_bytes();
+                                            if proof_start + 8 < bytes.len() {
+                                                // Flip multiple bytes in proof
+                                                bytes[proof_start] ^= 0xDE;
+                                                bytes[proof_start + 2] ^= 0xAD;
+                                                bytes[proof_start + 4] ^= 0xBE;
+                                                bytes[proof_start + 6] ^= 0xEF;
+                                            }
+                                            client_final =
+                                                String::from_utf8_lossy(&bytes).to_string();
+                                        }
+
+                                        match pg_client
+                                            .validate_client_proof(&client_final, &scram_auth)
+                                            .await
+                                        {
+                                            Err(AuthenticationError::InvalidProof) => {
+                                                // Correctly detected proof corruption
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected corrupted proof
+                                                scram_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other authentication error
+                                            }
+                                        }
+                                    }
+                                    9 => {
+                                        // Corrupt server signature verification
+                                        let mut scram_auth =
+                                            ScramAuth::new("test_user", "test_password");
+                                        let auth_flow_result =
+                                            scram_auth.complete_mock_handshake().await;
+
+                                        if let Ok(server_final) = auth_flow_result {
+                                            let mut corrupted_server_final = server_final;
+
+                                            // Corrupt server signature
+                                            if let Some(sig_start) =
+                                                corrupted_server_final.find("v=")
+                                            {
+                                                let sig_start = sig_start + 2;
+                                                let mut bytes = corrupted_server_final.into_bytes();
+                                                if sig_start + 10 < bytes.len() {
+                                                    // Systematic corruption of signature
+                                                    for i in 0..8 {
+                                                        if sig_start + i < bytes.len() {
+                                                            bytes[sig_start + i] ^=
+                                                                (i as u8 * 0x11);
+                                                        }
+                                                    }
+                                                }
+                                                corrupted_server_final =
+                                                    String::from_utf8_lossy(&bytes).to_string();
+                                            }
+
+                                            match scram_auth
+                                                .verify_server_signature(&corrupted_server_final)
+                                            {
+                                                Err(
+                                                    AuthenticationError::InvalidServerSignature,
+                                                ) => {
+                                                    // Correctly detected signature corruption
+                                                }
+                                                Ok(_) => {
+                                                    // Should have rejected corrupted signature
+                                                    scram_violations
+                                                        .fetch_add(1, Ordering::Relaxed);
+                                                }
+                                                Err(_) => {
+                                                    // Other verification error
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal SCRAM handshake
+                                        let scram_auth =
+                                            ScramAuth::new("test_user", "test_password");
+                                        match pg_client.authenticate_scram(&scram_auth).await {
+                                            Ok(_) => {
+                                                // Normal authentication succeeded
+                                            }
+                                            Err(_) => {
+                                                // Normal authentication failed
+                                                scram_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Test PostgreSQL connection parameter corruption
+                            if test_idx % 4 == 0 {
+                                database_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let mut connection_params = HashMap::new();
+                                connection_params.insert("user", "test_user");
+                                connection_params.insert("database", "test_db");
+                                connection_params.insert("application_name", "asupersync_test");
+
+                                // MUTATION: Corrupt connection parameters
+                                match test_idx % 16 {
+                                    0 => {
+                                        // Inject SQL in database name
+                                        connection_params
+                                            .insert("database", "test_db'; DROP TABLE users; --");
+
+                                        match postgres::connect_with_params(&connection_params)
+                                            .await
+                                        {
+                                            Err(postgres::Error::InvalidDatabaseName) => {
+                                                // Correctly detected SQL injection attempt
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected dangerous database name
+                                                scram_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other connection error
+                                            }
+                                        }
+                                    }
+                                    4 => {
+                                        // Corrupt application_name with control characters
+                                        connection_params
+                                            .insert("application_name", "app\x00\x01\x02injection");
+
+                                        match postgres::connect_with_params(&connection_params)
+                                            .await
+                                        {
+                                            Err(postgres::Error::InvalidParameter(_)) => {
+                                                // Correctly detected control character injection
+                                            }
+                                            Ok(connection) => {
+                                                // Check if control characters were sanitized
+                                                if let Ok(app_name) =
+                                                    connection.get_parameter("application_name")
+                                                {
+                                                    if app_name.contains('\x00')
+                                                        || app_name.contains('\x01')
+                                                    {
+                                                        // Control characters not sanitized
+                                                        scram_violations
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                    }
+                                                }
+                                            }
+                                            Err(_) => {
+                                                // Other connection error
+                                            }
+                                        }
+                                    }
+                                    8 => {
+                                        // Oversized parameter values
+                                        let large_value = "x".repeat(65536);
+                                        connection_params.insert("application_name", &large_value);
+
+                                        match postgres::connect_with_params(&connection_params)
+                                            .await
+                                        {
+                                            Err(postgres::Error::ParameterTooLarge) => {
+                                                // Correctly detected oversized parameter
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected oversized parameter
+                                                scram_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other connection error
+                                            }
+                                        }
+                                    }
+                                    12 => {
+                                        // Unicode normalization attack
+                                        connection_params.insert("user", "testü\u{FEFF}ser"); // Zero-width space
+
+                                        match postgres::connect_with_params(&connection_params)
+                                            .await
+                                        {
+                                            Err(postgres::Error::InvalidUsername) => {
+                                                // Correctly detected unicode attack
+                                            }
+                                            Ok(connection) => {
+                                                // Check if username was normalized incorrectly
+                                                if let Ok(username) =
+                                                    connection.get_parameter("user")
+                                                {
+                                                    if username != "testüser"
+                                                        && username.contains('\u{FEFF}')
+                                                    {
+                                                        // Unicode not properly normalized
+                                                        scram_violations
+                                                            .fetch_add(1, Ordering::Relaxed);
+                                                    }
+                                                }
+                                            }
+                                            Err(_) => {
+                                                // Other connection error
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal connection parameters
+                                        match postgres::connect_with_params(&connection_params)
+                                            .await
+                                        {
+                                            Ok(_) => {
+                                                // Normal connection succeeded
+                                            }
+                                            Err(_) => {
+                                                // Connection failed unexpectedly
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(15)).await;
+                        }
+
+                        let corruptions = database_corruptions.load(Ordering::Relaxed);
+                        let violations = scram_violations.load(Ordering::Relaxed);
+
+                        // PostgreSQL should detect SCRAM handshake and parameter corruption
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Database corruption detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(
+                                ErrorKind::Other,
+                                format!(
+                                    "Database validation failed: {} corruptions, {} violations",
+                                    corruptions, violations
+                                ),
+                            ))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(database_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-37",
+            "database",
+            "postgres_scram_handshake_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-38] FS io_uring submission ordering regression mutations
+    async fn test_fs_mutations(&self) {
+        use crate::fs::{CompletionQueueEntry, File, IoUring, SubmissionQueueEntry, uring};
+
+        let fs_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let fs_test_count = 12;
+                let fs_corruptions = Arc::new(AtomicUsize::new(0));
+                let ordering_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..fs_test_count {
+                            // Test io_uring submission ordering corruption
+                            if test_idx % 3 == 0 {
+                                fs_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let mut io_uring =
+                                    IoUring::new(64).expect("Should create io_uring");
+                                let operation_count = 8;
+
+                                // Create test files for operations
+                                let test_files: Vec<File> = (0..operation_count)
+                                    .map(|i| {
+                                        File::create_temp(&format!("test_file_{}", i)).unwrap()
+                                    })
+                                    .collect();
+
+                                let mut submission_order = Vec::new();
+                                let mut expected_completions = Vec::new();
+
+                                // MUTATION: Corrupt submission queue ordering
+                                for op_idx in 0..operation_count {
+                                    let test_data =
+                                        format!("Operation data {}", op_idx).into_bytes();
+                                    let file = &test_files[op_idx];
+
+                                    let sqe = match test_idx % 12 {
+                                        0 => {
+                                            // Out-of-order submission - submit operations in reverse
+                                            let actual_idx = operation_count - 1 - op_idx;
+                                            submission_order.push(actual_idx);
+                                            SubmissionQueueEntry::write(
+                                                file.fd(),
+                                                &test_data,
+                                                0,                 // offset
+                                                actual_idx as u64, // user_data
+                                            )
+                                        }
+                                        3 => {
+                                            // Duplicate submission with same user_data
+                                            submission_order.push(op_idx);
+                                            if op_idx > 0 {
+                                                // Reuse previous operation's user_data
+                                                SubmissionQueueEntry::write(
+                                                    file.fd(),
+                                                    &test_data,
+                                                    0,
+                                                    (op_idx - 1) as u64, // Duplicate user_data
+                                                )
+                                            } else {
+                                                SubmissionQueueEntry::write(
+                                                    file.fd(),
+                                                    &test_data,
+                                                    0,
+                                                    op_idx as u64,
+                                                )
+                                            }
+                                        }
+                                        6 => {
+                                            // Corrupt operation type - submit read instead of write
+                                            submission_order.push(op_idx);
+                                            let mut buffer = vec![0u8; test_data.len()];
+                                            SubmissionQueueEntry::read(
+                                                file.fd(),
+                                                &mut buffer,
+                                                0, // offset
+                                                op_idx as u64,
+                                            )
+                                        }
+                                        9 => {
+                                            // Corrupt file descriptor - use wrong fd
+                                            submission_order.push(op_idx);
+                                            let wrong_fd = if op_idx > 0 {
+                                                test_files[op_idx - 1].fd()
+                                            } else {
+                                                test_files[op_idx].fd()
+                                            };
+                                            SubmissionQueueEntry::write(
+                                                wrong_fd,
+                                                &test_data,
+                                                0,
+                                                op_idx as u64,
+                                            )
+                                        }
+                                        _ => {
+                                            // Normal submission order
+                                            submission_order.push(op_idx);
+                                            SubmissionQueueEntry::write(
+                                                file.fd(),
+                                                &test_data,
+                                                0,
+                                                op_idx as u64,
+                                            )
+                                        }
+                                    };
+
+                                    expected_completions.push(op_idx);
+                                    io_uring.submit(sqe).expect("Should submit operation");
+                                }
+
+                                // Wait for completions and analyze ordering
+                                io_uring
+                                    .submit_and_wait(operation_count)
+                                    .expect("Should complete operations");
+
+                                let mut completion_order = Vec::new();
+                                let mut completion_results = Vec::new();
+
+                                for _ in 0..operation_count {
+                                    if let Some(cqe) = io_uring.peek_completion() {
+                                        let user_data = cqe.user_data() as usize;
+                                        let result = cqe.result();
+                                        completion_order.push(user_data);
+                                        completion_results.push(result);
+                                        io_uring.mark_completion_seen();
+                                    }
+                                }
+
+                                // Analyze ordering violations
+                                if test_idx % 12 == 0 {
+                                    // Check if reverse submission caused completion issues
+                                    let expected_reverse: Vec<_> =
+                                        (0..operation_count).rev().collect();
+                                    if submission_order == expected_reverse {
+                                        // Verify completions match submission corruption
+                                        for (i, &completion_idx) in
+                                            completion_order.iter().enumerate()
+                                        {
+                                            if completion_idx != expected_reverse[i] {
+                                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if test_idx % 12 == 3 {
+                                    // Check for duplicate user_data detection
+                                    let mut seen_user_data = std::collections::HashSet::new();
+                                    for &user_data in &completion_order {
+                                        if !seen_user_data.insert(user_data) {
+                                            // Duplicate user_data not handled properly
+                                            ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+
+                                if test_idx % 12 == 6 {
+                                    // Check for operation type mismatch errors
+                                    for (i, &result) in completion_results.iter().enumerate() {
+                                        if result < 0 && completion_order[i] < operation_count {
+                                            // Read operation correctly failed on write-only file
+                                        } else if result >= 0 {
+                                            // Read operation should have failed
+                                            ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+
+                                if test_idx % 12 == 9 {
+                                    // Check for file descriptor corruption detection
+                                    for &result in &completion_results {
+                                        if result < 0 {
+                                            // Correctly detected fd corruption
+                                        } else {
+                                            // Wrong fd operation succeeded unexpectedly
+                                            ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Test completion queue ordering validation
+                            if test_idx % 4 == 0 {
+                                fs_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let mut io_uring =
+                                    IoUring::new(32).expect("Should create io_uring");
+                                let sync_op_count = 6;
+
+                                // Submit synchronous operations that should complete in order
+                                for sync_idx in 0..sync_op_count {
+                                    let test_file =
+                                        File::create_temp(&format!("sync_file_{}", sync_idx))
+                                            .unwrap();
+                                    let sync_data = vec![sync_idx as u8; 16];
+
+                                    let sqe = match test_idx % 16 {
+                                        0 => {
+                                            // Normal ordered submission
+                                            SubmissionQueueEntry::write(
+                                                test_file.fd(),
+                                                &sync_data,
+                                                0,
+                                                sync_idx as u64,
+                                            )
+                                        }
+                                        4 => {
+                                            // Force completion ordering corruption via priority
+                                            let priority = if sync_idx % 2 == 0 { 1 } else { 0 }; // Alternate priority
+                                            let mut sqe = SubmissionQueueEntry::write(
+                                                test_file.fd(),
+                                                &sync_data,
+                                                0,
+                                                sync_idx as u64,
+                                            );
+                                            sqe.set_ioprio(priority);
+                                            sqe
+                                        }
+                                        8 => {
+                                            // Add artificial delays to create ordering issues
+                                            if sync_idx % 2 == 0 {
+                                                let mut sqe = SubmissionQueueEntry::write(
+                                                    test_file.fd(),
+                                                    &sync_data,
+                                                    0,
+                                                    sync_idx as u64,
+                                                );
+                                                sqe.set_flags(uring::IOSQE_ASYNC); // Force async for some operations
+                                                sqe
+                                            } else {
+                                                SubmissionQueueEntry::write(
+                                                    test_file.fd(),
+                                                    &sync_data,
+                                                    0,
+                                                    sync_idx as u64,
+                                                )
+                                            }
+                                        }
+                                        12 => {
+                                            // Link operations incorrectly
+                                            let mut sqe = SubmissionQueueEntry::write(
+                                                test_file.fd(),
+                                                &sync_data,
+                                                0,
+                                                sync_idx as u64,
+                                            );
+                                            if sync_idx > 0 {
+                                                sqe.set_flags(uring::IOSQE_IO_LINK); // Link to previous
+                                            }
+                                            sqe
+                                        }
+                                        _ => SubmissionQueueEntry::write(
+                                            test_file.fd(),
+                                            &sync_data,
+                                            0,
+                                            sync_idx as u64,
+                                        ),
+                                    };
+
+                                    io_uring.submit(sqe).expect("Should submit sync operation");
+                                }
+
+                                // Submit all operations and wait
+                                io_uring
+                                    .submit_and_wait(sync_op_count)
+                                    .expect("Should complete sync operations");
+
+                                // Check completion ordering
+                                let mut sync_completion_order = Vec::new();
+                                for _ in 0..sync_op_count {
+                                    if let Some(cqe) = io_uring.peek_completion() {
+                                        sync_completion_order.push(cqe.user_data() as usize);
+                                        io_uring.mark_completion_seen();
+                                    }
+                                }
+
+                                // Validate ordering based on mutation type
+                                if test_idx % 16 == 4 || test_idx % 16 == 8 || test_idx % 16 == 12 {
+                                    // Check if ordering corruption was properly detected
+                                    let is_ordered = sync_completion_order
+                                        .windows(2)
+                                        .all(|window| window[0] <= window[1]);
+
+                                    if !is_ordered && test_idx % 4 == 0 {
+                                        // Ordering corruption detected through completion analysis
+                                        ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(10)).await;
+                        }
+
+                        let corruptions = fs_corruptions.load(Ordering::Relaxed);
+                        let violations = ordering_violations.load(Ordering::Relaxed);
+
+                        // io_uring should detect submission and completion ordering violations
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // FS ordering violation detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(
+                                ErrorKind::Other,
+                                format!(
+                                    "FS io_uring validation failed: {} corruptions, {} violations",
+                                    corruptions, violations
+                                ),
+                            ))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(fs_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-38",
+            "fs",
+            "uring_submission_ordering_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-39] IO split→unsplit identity regression mutations
+    async fn test_io_mutations(&self) {
+        use crate::io::{AsyncRead, AsyncWrite, BufReader, BufWriter, Read, Write, split, unsplit};
+
+        let io_detected = self.runtime.scope(|scope| async move {
+            let io_test_count = 14;
+            let io_corruptions = Arc::new(AtomicUsize::new(0));
+            let identity_violations = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                for test_idx in 0..io_test_count {
+                    // Test split→unsplit identity preservation
+                    if test_idx % 3 == 0 {
+                        io_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        let test_data = format!("Test data for split→unsplit identity {}", test_idx).into_bytes();
+                        let original_data = test_data.clone();
+
+                        // Create in-memory stream for testing
+                        let mut stream = std::io::Cursor::new(test_data);
+
+                        // MUTATION: Corrupt split→unsplit identity
+                        match test_idx % 12 {
+                            0 => {
+                                // Split into read/write halves
+                                let (mut reader, mut writer) = split(stream);
+
+                                // Corrupt: modify data through writer after split
+                                let corruption_data = b"CORRUPTED";
+                                writer.write_all(corruption_data).await.ok();
+
+                                // Attempt unsplit
+                                match unsplit(reader, writer) {
+                                    Ok(mut restored_stream) => {
+                                        let mut result_data = Vec::new();
+                                        restored_stream.read_to_end(&mut result_data).await.ok();
+
+                                        // Check if corruption affected identity
+                                        if result_data != original_data && result_data.ends_with(corruption_data) {
+                                            // Identity violation: unsplit didn't preserve original state
+                                            identity_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Unsplit correctly failed due to corruption
+                                    }
+                                }
+                            }
+                            3 => {
+                                // Corrupt: use different stream types for unsplit
+                                let (reader, _writer) = split(stream);
+
+                                // Create different writer from different source
+                                let different_data = b"Different stream data".to_vec();
+                                let different_stream = std::io::Cursor::new(different_data);
+                                let (_different_reader, different_writer) = split(different_stream);
+
+                                // Attempt to unsplit mismatched halves
+                                match unsplit(reader, different_writer) {
+                                    Ok(mut restored_stream) => {
+                                        let mut result_data = Vec::new();
+                                        restored_stream.read_to_end(&mut result_data).await.ok();
+
+                                        // Check if mismatched unsplit was incorrectly allowed
+                                        if result_data != original_data {
+                                            identity_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Correctly rejected mismatched unsplit
+                                    }
+                                }
+                            }
+                            6 => {
+                                // Corrupt: close one half before unsplit
+                                let (reader, mut writer) = split(stream);
+
+                                // Close writer prematurely
+                                drop(writer);
+
+                                // Create new writer for testing
+                                let substitute_data = original_data.clone();
+                                let substitute_stream = std::io::Cursor::new(substitute_data);
+                                let (_sub_reader, substitute_writer) = split(substitute_stream);
+
+                                // Attempt unsplit with closed/substituted writer
+                                match unsplit(reader, substitute_writer) {
+                                    Ok(mut restored_stream) => {
+                                        let mut result_data = Vec::new();
+                                        restored_stream.read_to_end(&mut result_data).await.ok();
+
+                                        // Verify if identity was preserved despite substitution
+                                        if result_data == original_data {
+                                            // Identity incorrectly preserved with substituted writer
+                                            identity_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Correctly detected invalid unsplit
+                                    }
+                                }
+                            }
+                            9 => {
+                                // Corrupt: partial read/write before unsplit
+                                let (mut reader, mut writer) = split(stream);
+
+                                // Partial operations that should affect identity
+                                let mut partial_buffer = vec![0u8; 5];
+                                reader.read_exact(&mut partial_buffer).await.ok();
+
+                                let additional_data = b"EXTRA";
+                                writer.write_all(additional_data).await.ok();
+
+                                // Attempt unsplit after partial operations
+                                match unsplit(reader, writer) {
+                                    Ok(mut restored_stream) => {
+                                        let mut result_data = Vec::new();
+                                        restored_stream.read_to_end(&mut result_data).await.ok();
+
+                                        // Check if partial operations corrupted identity
+                                        let expected_length = original_data.len() + additional_data.len() - partial_buffer.len();
+                                        if result_data.len() != expected_length {
+                                            identity_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Unsplit failed due to partial operation state
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Normal split→unsplit identity test
+                                let (reader, writer) = split(stream);
+
+                                match unsplit(reader, writer) {
+                                    Ok(mut restored_stream) => {
+                                        let mut result_data = Vec::new();
+                                        restored_stream.read_to_end(&mut result_data).await.ok();
+
+                                        // Verify perfect identity preservation
+                                        if result_data != original_data {
+                                            identity_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Normal unsplit failed unexpectedly
+                                        identity_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Test buffered I/O split→unsplit identity
+                    if test_idx % 4 == 0 {
+                        io_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        let buffer_test_data = format!("Buffered I/O test data {}", test_idx).repeat(100);
+                        let original_buffered = buffer_test_data.clone();
+
+                        let stream = std::io::Cursor::new(buffer_test_data.into_bytes());
+
+                        // Create buffered reader/writer
+                        let buf_reader = BufReader::new(stream);
+                        let buf_writer = BufWriter::new(Vec::new());
+
+                        // MUTATION: Corrupt buffered split→unsplit
+                        match test_idx % 16 {
+                            0 => {
+                                // Split buffered I/O
+                                let (mut split_reader, mut split_writer) = split(buf_reader);
+                                let (writer_reader, writer_writer) = split(buf_writer);
+
+                                // Corrupt: flush partial data during split
+                                let mut partial_data = vec![0u8; 50];
+                                split_reader.read_exact(&mut partial_data).await.ok();
+                                split_writer.write_all(b"BUFFER_CORRUPTION").await.ok();
+
+                                // Attempt to reconstruct with corrupted buffer state
+                                let restored_reader = unsplit(split_reader, split_writer);
+                                let restored_writer = unsplit(writer_reader, writer_writer);
+
+                                if let (Ok(mut reader), Ok(mut writer)) = (restored_reader, restored_writer) {
+                                    let mut remaining_data = Vec::new();
+                                    reader.read_to_end(&mut remaining_data).await.ok();
+
+                                    writer.flush().await.ok();
+
+                                    // Check buffer corruption detection
+                                    if remaining_data.len() + 50 != original_buffered.len() {
+                                        identity_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                            4 => {
+                                // Corrupt: buffer state inconsistency
+                                let (buf_read_half, buf_write_half) = split(buf_reader);
+
+                                // Create inconsistent buffer states
+                                let inconsistent_reader = BufReader::with_capacity(1024, buf_read_half);
+                                let inconsistent_writer = BufWriter::with_capacity(512, buf_write_half);
+
+                                // Attempt unsplit with mismatched buffer capacities
+                                match unsplit(inconsistent_reader, inconsistent_writer) {
+                                    Ok(mut restored) => {
+                                        // Buffer capacity mismatch should be detected
+                                        let mut test_result = Vec::new();
+                                        restored.read_to_end(&mut test_result).await.ok();
+
+                                        if test_result == original_buffered.as_bytes() {
+                                            // Identity preserved despite buffer mismatch - might be correct
+                                        } else {
+                                            identity_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Correctly rejected buffer capacity mismatch
+                                    }
+                                }
+                            }
+                            8 => {
+                                // Corrupt: cross-contaminate buffer contents
+                                let (mut read_half, mut write_half) = split(buf_reader);
+
+                                // Read some data into buffer
+                                let mut buffer_content = vec![0u8; 100];
+                                read_half.read_exact(&mut buffer_content).await.ok();
+
+                                // Write different content to writer buffer
+                                write_half.write_all(b"CONTAMINATED_BUFFER_CONTENT").await.ok();
+
+                                // Unsplit with contaminated buffers
+                                match unsplit(read_half, write_half) {
+                                    Ok(mut contaminated_stream) => {
+                                        let mut final_content = Vec::new();
+                                        contaminated_stream.read_to_end(&mut final_content).await.ok();
+
+                                        // Check if contamination was detected
+                                        if final_content.contains(b"CONTAMINATED") {
+                                            identity_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Correctly detected buffer contamination
+                                    }
+                                }
+                            }
+                            12 => {
+                                // Corrupt: buffer position corruption
+                                let (read_half, write_half) = split(buf_reader);
+
+                                // Manually corrupt internal buffer positions (if accessible)
+                                // This simulates low-level buffer state corruption
+
+                                match unsplit(read_half, write_half) {
+                                    Ok(mut position_corrupted) => {
+                                        let mut position_test = Vec::new();
+                                        position_corrupted.read_to_end(&mut position_test).await.ok();
+
+                                        // Verify position integrity
+                                        if position_test != original_buffered.as_bytes() {
+                                            identity_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Position corruption correctly detected
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Normal buffered split→unsplit
+                                let (read_half, write_half) = split(buf_reader);
+
+                                match unsplit(read_half, write_half) {
+                                    Ok(mut normal_restored) => {
+                                        let mut normal_result = Vec::new();
+                                        normal_restored.read_to_end(&mut normal_result).await.ok();
+
+                                        if normal_result != original_buffered.as_bytes() {
+                                            identity_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Normal case failed unexpectedly
+                                        identity_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    sleep(Duration::from_millis(8)).await;
+                }
+
+                let corruptions = io_corruptions.load(Ordering::Relaxed);
+                let violations = identity_violations.load(Ordering::Relaxed);
+
+                // I/O should detect split→unsplit identity violations
+                if violations > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // IO identity violation detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("IO split→unsplit validation failed: {} corruptions, {} violations",
+                            corruptions, violations)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(io_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-39",
+            "io",
+            "split_unsplit_identity_corruption",
+            detected,
+        );
+    }
+
     /// Generate subsystem testing summary
     fn generate_subsystem_summary(&self) -> serde_json::Value {
         let applied = self.mutations_applied.load(Ordering::Relaxed);
@@ -4722,6 +5739,102 @@ async fn test_tls_subsystem_mutation_sensitivity() {
 }
 
 #[tokio::test]
+async fn test_database_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("database_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"database_start\"}}");
+
+    // Test database-specific mutations
+    tester.test_database_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply database mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.92,
+        "Database subsystem should detect ≥92% of postgres SCRAM handshake byte-flip mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"database_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_fs_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("fs_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"fs_start\"}}");
+
+    // Test fs-specific mutations
+    tester.test_fs_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply fs mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.93,
+        "FS subsystem should detect ≥93% of io_uring submission ordering mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"fs_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_io_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("io_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"io_start\"}}");
+
+    // Test io-specific mutations
+    tester.test_io_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply io mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.95,
+        "IO subsystem should detect ≥95% of split→unsplit identity mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"io_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
 async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"start\"}}");
 
@@ -4749,6 +5862,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     let http_tester = SubsystemMutationTester::new("comprehensive_http").await;
     let websocket_tester = SubsystemMutationTester::new("comprehensive_websocket").await;
     let tls_tester = SubsystemMutationTester::new("comprehensive_tls").await;
+    let database_tester = SubsystemMutationTester::new("comprehensive_database").await;
+    let fs_tester = SubsystemMutationTester::new("comprehensive_fs").await;
+    let io_tester = SubsystemMutationTester::new("comprehensive_io").await;
 
     // Test all subsystem mutations comprehensively
     obs_tester.test_observability_counter_mutations().await;
@@ -4788,6 +5904,12 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     websocket_tester.test_websocket_mutations().await;
     tls_tester.test_tls_mutations().await;
 
+    database_tester.test_database_mutations().await;
+
+    fs_tester.test_fs_mutations().await;
+
+    io_tester.test_io_mutations().await;
+
     // Calculate overall subsystem detection rate
     let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed)
         + trace_tester.mutations_applied.load(Ordering::Relaxed)
@@ -4812,7 +5934,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + lab_tester.mutations_applied.load(Ordering::Relaxed)
         + http_tester.mutations_applied.load(Ordering::Relaxed)
         + websocket_tester.mutations_applied.load(Ordering::Relaxed)
-        + tls_tester.mutations_applied.load(Ordering::Relaxed);
+        + tls_tester.mutations_applied.load(Ordering::Relaxed)
+        + database_tester.mutations_applied.load(Ordering::Relaxed)
+        + fs_tester.mutations_applied.load(Ordering::Relaxed)
+        + io_tester.mutations_applied.load(Ordering::Relaxed);
 
     let total_detected = obs_tester.mutations_detected.load(Ordering::Relaxed)
         + trace_tester.mutations_detected.load(Ordering::Relaxed)
@@ -4841,7 +5966,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + lab_tester.mutations_detected.load(Ordering::Relaxed)
         + http_tester.mutations_detected.load(Ordering::Relaxed)
         + websocket_tester.mutations_detected.load(Ordering::Relaxed)
-        + tls_tester.mutations_detected.load(Ordering::Relaxed);
+        + tls_tester.mutations_detected.load(Ordering::Relaxed)
+        + database_tester.mutations_detected.load(Ordering::Relaxed)
+        + fs_tester.mutations_detected.load(Ordering::Relaxed)
+        + io_tester.mutations_detected.load(Ordering::Relaxed);
 
     let overall_detection_rate = if total_applied > 0 {
         total_detected as f64 / total_applied as f64

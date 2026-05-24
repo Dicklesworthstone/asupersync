@@ -13,17 +13,15 @@
 
 #![cfg(all(test, feature = "real-service-e2e"))]
 
-use crate::bytes::{Bytes, BytesMut};
-use crate::codec::{Decoder, Encoder, FramedRead, FramedWrite, LengthDelimitedCodec};
-use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, split};
+use crate::bytes::BytesMut;
+use crate::codec::{Encoder, FramedRead, FramedWrite, LengthDelimitedCodec};
+use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::stream::StreamExt;
 
 use std::io::{self, Cursor};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tempfile::NamedTempFile;
-use tokio::io::{AsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt, BufReader, BufWriter, duplex};
 
 // Structured JSON-line logging for CI debugging
 struct TestLogger {
@@ -169,7 +167,7 @@ impl CodecTestHarness {
     async fn test_length_delimited_roundtrip(&self) {
         self.logger.log_phase("length_delimited_setup");
 
-        let codec = LengthDelimitedCodec::new();
+        let mut codec = LengthDelimitedCodec::new();
 
         // Test with various message sizes
         let test_messages = vec![
@@ -194,7 +192,7 @@ impl CodecTestHarness {
         let mut encoded_buffer = BytesMut::new();
 
         for (i, message) in test_messages.iter().enumerate() {
-            let bytes_msg = Bytes::copy_from_slice(message);
+            let bytes_msg = BytesMut::from(message.as_slice());
             codec
                 .encode(bytes_msg, &mut encoded_buffer)
                 .expect("Encoding should succeed");
@@ -309,7 +307,7 @@ impl CodecTestHarness {
             let mut framed_write = FramedWrite::new(writer, LengthDelimitedCodec::new());
 
             for (i, frame) in frames.iter().enumerate() {
-                let bytes_frame = Bytes::copy_from_slice(frame);
+                let bytes_frame = BytesMut::from(frame.as_slice());
                 framed_write
                     .send(bytes_frame)
                     .expect("Frame send should succeed");
@@ -324,11 +322,13 @@ impl CodecTestHarness {
             }
 
             // Flush all data
-            framed_write
-                .poll_flush(&mut std::task::Context::from_waker(
-                    &std::task::Waker::noop(),
-                ))
-                .expect("Flush should succeed");
+            match framed_write.poll_flush(&mut std::task::Context::from_waker(
+                &std::task::Waker::noop(),
+            )) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(err)) => panic!("Flush should succeed: {err}"),
+                Poll::Pending => panic!("Flush should complete for in-memory writer"),
+            }
 
             write_buffer = framed_write.into_inner().inner;
         }
@@ -407,13 +407,11 @@ impl CodecTestHarness {
             ("default", LengthDelimitedCodec::new()),
             (
                 "big_endian",
-                LengthDelimitedCodec::builder().big_endian(true).new_codec(),
+                LengthDelimitedCodec::builder().big_endian().new_codec(),
             ),
             (
                 "little_endian",
-                LengthDelimitedCodec::builder()
-                    .big_endian(false)
-                    .new_codec(),
+                LengthDelimitedCodec::builder().little_endian().new_codec(),
             ),
             (
                 "max_frame_1kb",
@@ -439,70 +437,67 @@ impl CodecTestHarness {
 
         let test_message = b"test message for configuration validation".to_vec();
 
-        for (config_name, codec) in test_configs {
+        for (config_name, mut codec) in test_configs {
             self.logger.log_phase(&format!("config_{}", config_name));
 
             // Encode with this configuration
             let mut encoded = BytesMut::new();
-            let bytes_msg = Bytes::copy_from_slice(&test_message);
+            let bytes_msg = BytesMut::from(test_message.as_slice());
 
-            let encode_result = codec.encode(bytes_msg, &mut encoded);
+            match codec.encode(bytes_msg, &mut encoded) {
+                Ok(()) => {
+                    // Decode back
+                    let reader = MockAsyncIo::new(Cursor::new(encoded.to_vec()));
+                    let mut framed_read = FramedRead::new(reader, codec);
 
-            if encode_result.is_ok() {
-                // Decode back
-                let reader = MockAsyncIo::new(Cursor::new(encoded.to_vec()));
-                let mut framed_read = FramedRead::new(reader, codec);
+                    if let Some(result) = framed_read.next().await {
+                        match result {
+                            Ok(decoded) => {
+                                let matches = test_message == decoded[..];
 
-                if let Some(result) = framed_read.next().await {
-                    match result {
-                        Ok(decoded) => {
-                            let matches = test_message == decoded[..];
+                                self.logger.log_assertion(
+                                    "config_roundtrip",
+                                    matches,
+                                    serde_json::json!({
+                                        "config": config_name,
+                                        "original_size": test_message.len(),
+                                        "decoded_size": decoded.len(),
+                                        "encoded_size": encoded.len()
+                                    }),
+                                );
 
-                            self.logger.log_assertion(
-                                "config_roundtrip",
-                                matches,
-                                serde_json::json!({
-                                    "config": config_name,
-                                    "original_size": test_message.len(),
-                                    "decoded_size": decoded.len(),
-                                    "encoded_size": encoded.len()
-                                }),
-                            );
-
-                            assert_eq!(
-                                test_message,
-                                decoded[..],
-                                "Config {} should preserve message",
-                                config_name
-                            );
+                                assert_eq!(
+                                    test_message,
+                                    decoded[..],
+                                    "Config {} should preserve message",
+                                    config_name
+                                );
+                            }
+                            Err(e) => {
+                                self.logger.log_event(
+                                    "config_decode_error",
+                                    serde_json::json!({
+                                        "config": config_name,
+                                        "error": e.to_string()
+                                    }),
+                                );
+                                panic!("Decode failed for config {}: {}", config_name, e);
+                            }
                         }
-                        Err(e) => {
-                            self.logger.log_event(
-                                "config_decode_error",
-                                serde_json::json!({
-                                    "config": config_name,
-                                    "error": e.to_string()
-                                }),
-                            );
-                            panic!("Decode failed for config {}: {}", config_name, e);
-                        }
+                    } else {
+                        panic!("No frame decoded for config {}", config_name);
                     }
-                } else {
-                    panic!("No frame decoded for config {}", config_name);
                 }
-            } else {
-                self.logger.log_event(
-                    "config_encode_error",
-                    serde_json::json!({
-                        "config": config_name,
-                        "error": encode_result.unwrap_err().to_string()
-                    }),
-                );
-                panic!(
-                    "Encode failed for config {}: {:?}",
-                    config_name,
-                    encode_result.unwrap_err()
-                );
+                Err(err) => {
+                    self.logger.log_event(
+                        "config_encode_error",
+                        serde_json::json!({
+                            "config": config_name,
+                            "error": err.to_string()
+                        }),
+                    );
+                    panic!("Encode failed for config {}: {}", config_name, err);
+                }
             }
         }
     }
@@ -604,10 +599,10 @@ impl CodecTestHarness {
 
             // Encode all frames
             let mut encoded_buffer = BytesMut::new();
-            let codec = LengthDelimitedCodec::new();
+            let mut codec = LengthDelimitedCodec::new();
 
             for frame in &frames {
-                let bytes_frame = Bytes::copy_from_slice(frame);
+                let bytes_frame = BytesMut::from(frame.as_slice());
                 codec
                     .encode(bytes_frame, &mut encoded_buffer)
                     .expect("Frame encoding should succeed");
@@ -737,17 +732,19 @@ async fn test_codec_full_pipeline_e2e() {
         let mut framed_write = FramedWrite::new(writer, LengthDelimitedCodec::new());
 
         for message in &messages {
-            let bytes_msg = Bytes::copy_from_slice(message);
+            let bytes_msg = BytesMut::from(message.as_slice());
             framed_write
                 .send(bytes_msg)
                 .expect("Pipeline write should succeed");
         }
 
-        framed_write
-            .poll_flush(&mut std::task::Context::from_waker(
-                &std::task::Waker::noop(),
-            ))
-            .expect("Pipeline flush should succeed");
+        match framed_write.poll_flush(&mut std::task::Context::from_waker(
+            &std::task::Waker::noop(),
+        )) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(err)) => panic!("Pipeline flush should succeed: {err}"),
+            Poll::Pending => panic!("Pipeline flush should complete for in-memory writer"),
+        }
 
         pipeline_buffer = framed_write.into_inner().inner;
     }

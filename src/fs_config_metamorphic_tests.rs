@@ -261,21 +261,34 @@ mod fs_config_tests {
         }
 
         /// Apply configuration to environment variables.
+        ///
+        /// SAFETY: Edition 2024 marks `env::set_var` as unsafe because it is
+        /// racy with concurrent reads on other threads. These metamorphic
+        /// tests run sequentially under the standard test harness and do not
+        /// spawn threads that read the affected variables, so the race
+        /// preconditions cannot occur. Per-fn `allow(unsafe_code)` per
+        /// AGENTS.md (narrow unsafe surface).
+        #[allow(unsafe_code)]
         pub fn to_env(&self) {
-            env::set_var(ENV_WORKER_THREADS, self.worker_threads.to_string());
-            env::set_var(ENV_TASK_QUEUE_DEPTH, self.task_queue_depth.to_string());
-            env::set_var(ENV_THREAD_STACK_SIZE, self.thread_stack_size.to_string());
-            env::set_var(ENV_THREAD_NAME_PREFIX, &self.thread_name_prefix);
-            env::set_var(ENV_STEAL_BATCH_SIZE, self.steal_batch_size.to_string());
+            unsafe {
+                env::set_var(ENV_WORKER_THREADS, self.worker_threads.to_string());
+                env::set_var(ENV_TASK_QUEUE_DEPTH, self.task_queue_depth.to_string());
+                env::set_var(ENV_THREAD_STACK_SIZE, self.thread_stack_size.to_string());
+                env::set_var(ENV_THREAD_NAME_PREFIX, &self.thread_name_prefix);
+                env::set_var(ENV_STEAL_BATCH_SIZE, self.steal_batch_size.to_string());
+            }
         }
 
-        /// Clear environment variables.
+        /// Clear environment variables. Same safety reasoning as `to_env`.
+        #[allow(unsafe_code)]
         pub fn clear_env() {
-            env::remove_var(ENV_WORKER_THREADS);
-            env::remove_var(ENV_TASK_QUEUE_DEPTH);
-            env::remove_var(ENV_THREAD_STACK_SIZE);
-            env::remove_var(ENV_THREAD_NAME_PREFIX);
-            env::remove_var(ENV_STEAL_BATCH_SIZE);
+            unsafe {
+                env::remove_var(ENV_WORKER_THREADS);
+                env::remove_var(ENV_TASK_QUEUE_DEPTH);
+                env::remove_var(ENV_THREAD_STACK_SIZE);
+                env::remove_var(ENV_THREAD_NAME_PREFIX);
+                env::remove_var(ENV_STEAL_BATCH_SIZE);
+            }
         }
     }
 
@@ -436,7 +449,7 @@ mod fs_config_tests {
             (
                 1usize..=16,
                 256usize..=8192,
-                (1024 * 1024)..=(8 * 1024 * 1024),
+                (1024usize * 1024)..=(8 * 1024 * 1024),
                 "[a-z]+",
                 1usize..=128,
                 any::<bool>(),

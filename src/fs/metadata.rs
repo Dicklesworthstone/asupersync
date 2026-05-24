@@ -113,6 +113,17 @@ pub struct Permissions {
 }
 
 impl Permissions {
+    /// Construct a `Permissions` from raw Unix mode bits (e.g. `0o644`).
+    /// Mirrors `std::os::unix::fs::PermissionsExt::from_mode`. Unix-only.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn from_mode(mode: u32) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        Self {
+            inner: std::fs::Permissions::from_mode(mode),
+        }
+    }
+
     /// Returns true if this file is read-only.
     #[must_use]
     pub fn readonly(&self) -> bool {

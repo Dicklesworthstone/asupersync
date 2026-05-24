@@ -33,6 +33,7 @@
   ],
   "required_claim_categories": [
     "no-Tokio production graph",
+    "no-Tokio scoped audit graphs",
     "structured concurrency invariants",
     "cancellation/oracle suite",
     "scheduler fairness",
@@ -70,6 +71,38 @@
       ],
       "blocked_frontier": null,
       "notes": "Green here is a mapped proof lane, not a fresh execution result."
+    },
+    {
+      "claim_id": "no-tokio-scoped-audit-graphs",
+      "category": "no-Tokio scoped audit graphs",
+      "status": "yellow_scoped",
+      "doc_claim_markers": {
+        "README.md": [
+          "Workspace-wide, full-graph, and fuzz-enabled cargo-tree output",
+          "audit/quarantine surface"
+        ],
+        "AGENTS.md": [
+          "workspace audit, not a production-consumer proof",
+          "full graph including dev-deps"
+        ]
+      },
+      "manifest_guarantee_ids": [
+        "fuzz-tokio-quarantine",
+        "workspace-tokio-audit",
+        "full-graph-tokio-audit"
+      ],
+      "manifest_lane_ids": [
+        "fuzz-tokio-quarantine-tree",
+        "workspace-normal-tokio-audit",
+        "full-feature-tokio-audit"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_full_tokio_tree cargo tree -e features --workspace --invert tokio"
+      ],
+      "blocked_frontier": null,
+      "notes": "Yellow-scoped rows classify expected audit/quarantine Tokio paths; they must not be cited as broader production proof."
     },
     {
       "claim_id": "structured-concurrency-invariants",
