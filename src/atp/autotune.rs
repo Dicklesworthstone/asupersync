@@ -1278,6 +1278,17 @@ impl AtpAutotunePolicy {
             ));
         }
 
+        if let Some(pto) = telemetry.pto_micros
+            && pto > self.latency_hold_micros
+        {
+            bottlenecks.push(AtpBottleneckSignal::new(
+                AtpBottleneckKind::NetworkLatency,
+                Some(AtpAutotuneMetric::PtoMicros),
+                pto,
+                self.latency_hold_micros,
+            ));
+        }
+
         if let (Some(in_flight), Some(cwnd)) =
             (telemetry.in_flight_bytes, telemetry.congestion_window_bytes)
             && in_flight > cwnd

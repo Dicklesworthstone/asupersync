@@ -1,0 +1,585 @@
+{
+  "schema_version": "atp-autotune-noisy-pressure-replay-corpus-v1",
+  "update_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_p5 cargo test -p asupersync --test atp_autotune_replay_corpus -- --nocapture",
+  "fixtures": [
+    {
+      "kind": "decision",
+      "fixture_id": "clean_path_growth",
+      "report": {
+        "trace_id": "trace-atp-clean-001",
+        "workload_id": "workload-clean-bulk",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.rtt_micros", "value": 80000 },
+          { "metric": "atp.autotune.loss_permille", "value": 0 },
+          { "metric": "atp.autotune.pto_micros", "value": 120000 },
+          { "metric": "atp.autotune.congestion_window_bytes", "value": 16777216 },
+          { "metric": "atp.autotune.in_flight_bytes", "value": 4194304 },
+          { "metric": "atp.autotune.repair_roi_permille", "value": 900 }
+        ]
+      },
+      "current_settings": {
+        "in_flight_bytes": 8388608,
+        "stream_count": 4,
+        "chunk_size_bytes": 262144,
+        "repair_symbols_per_second": 256
+      },
+      "expected_receipt": {
+        "schema_version": "atp-autotune-decision-receipt-v1",
+        "trace_id": "trace-atp-clean-001",
+        "workload_id": "workload-clean-bulk",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.rtt_micros", "value": 80000 },
+          { "metric": "atp.autotune.loss_permille", "value": 0 },
+          { "metric": "atp.autotune.pto_micros", "value": 120000 },
+          { "metric": "atp.autotune.congestion_window_bytes", "value": 16777216 },
+          { "metric": "atp.autotune.in_flight_bytes", "value": 4194304 },
+          { "metric": "atp.autotune.repair_roi_permille", "value": 900 }
+        ],
+        "outcome": "ConservativeGrowth",
+        "reason_code": "conservative_growth",
+        "fail_closed": false,
+        "confidence": "conservative",
+        "caveats": ["growth_requires_application_hysteresis"],
+        "bottlenecks": [],
+        "current_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "candidate_settings": {
+          "in_flight_bytes": 9437184,
+          "stream_count": 5,
+          "chunk_size_bytes": 294912,
+          "repair_symbols_per_second": 256
+        },
+        "selected_knobs": ["in_flight_bytes", "stream_count", "chunk_size_bytes"],
+        "changes": [
+          { "knob": "in_flight_bytes", "previous": 8388608, "next": 9437184, "direction": "Increase", "delta": 1048576 },
+          { "knob": "stream_count", "previous": 4, "next": 5, "direction": "Increase", "delta": 1 },
+          { "knob": "chunk_size_bytes", "previous": 262144, "next": 294912, "direction": "Increase", "delta": 32768 },
+          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+        ]
+      }
+    },
+    {
+      "kind": "decision",
+      "fixture_id": "lossy_high_repair_roi",
+      "report": {
+        "trace_id": "trace-atp-loss-001",
+        "workload_id": "workload-lossy-high-roi",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.loss_permille", "value": 26 },
+          { "metric": "atp.autotune.repair_roi_permille", "value": 900 },
+          { "metric": "atp.autotune.congestion_window_bytes", "value": 16777216 },
+          { "metric": "atp.autotune.in_flight_bytes", "value": 4194304 }
+        ]
+      },
+      "current_settings": {
+        "in_flight_bytes": 8388608,
+        "stream_count": 4,
+        "chunk_size_bytes": 262144,
+        "repair_symbols_per_second": 256
+      },
+      "expected_receipt": {
+        "schema_version": "atp-autotune-decision-receipt-v1",
+        "trace_id": "trace-atp-loss-001",
+        "workload_id": "workload-lossy-high-roi",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.loss_permille", "value": 26 },
+          { "metric": "atp.autotune.repair_roi_permille", "value": 900 },
+          { "metric": "atp.autotune.congestion_window_bytes", "value": 16777216 },
+          { "metric": "atp.autotune.in_flight_bytes", "value": 4194304 }
+        ],
+        "outcome": "PressureBackoff",
+        "reason_code": "hold_or_backoff_on_pressure",
+        "fail_closed": true,
+        "confidence": "fail_closed",
+        "caveats": ["NetworkLoss"],
+        "bottlenecks": [
+          { "kind": "NetworkLoss", "metric": "atp.autotune.loss_permille", "observed": 26, "threshold": 25 }
+        ],
+        "current_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "candidate_settings": {
+          "in_flight_bytes": 6291456,
+          "stream_count": 3,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 320
+        },
+        "selected_knobs": ["in_flight_bytes", "stream_count", "repair_symbols_per_second"],
+        "changes": [
+          { "knob": "in_flight_bytes", "previous": 8388608, "next": 6291456, "direction": "Decrease", "delta": 2097152 },
+          { "knob": "stream_count", "previous": 4, "next": 3, "direction": "Decrease", "delta": 1 },
+          { "knob": "chunk_size_bytes", "previous": 262144, "next": 262144, "direction": "Hold", "delta": 0 },
+          { "knob": "repair_symbols_per_second", "previous": 256, "next": 320, "direction": "Increase", "delta": 64 }
+        ]
+      }
+    },
+    {
+      "kind": "decision",
+      "fixture_id": "high_pto_backoff",
+      "report": {
+        "trace_id": "trace-atp-pto-001",
+        "workload_id": "workload-high-pto",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.loss_permille", "value": 0 },
+          { "metric": "atp.autotune.pto_micros", "value": 250001 }
+        ]
+      },
+      "current_settings": {
+        "in_flight_bytes": 8388608,
+        "stream_count": 4,
+        "chunk_size_bytes": 262144,
+        "repair_symbols_per_second": 256
+      },
+      "expected_receipt": {
+        "schema_version": "atp-autotune-decision-receipt-v1",
+        "trace_id": "trace-atp-pto-001",
+        "workload_id": "workload-high-pto",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.loss_permille", "value": 0 },
+          { "metric": "atp.autotune.pto_micros", "value": 250001 }
+        ],
+        "outcome": "PressureBackoff",
+        "reason_code": "hold_or_backoff_on_pressure",
+        "fail_closed": true,
+        "confidence": "fail_closed",
+        "caveats": ["NetworkLatency"],
+        "bottlenecks": [
+          { "kind": "NetworkLatency", "metric": "atp.autotune.pto_micros", "observed": 250001, "threshold": 250000 }
+        ],
+        "current_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "candidate_settings": {
+          "in_flight_bytes": 6291456,
+          "stream_count": 3,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "selected_knobs": ["in_flight_bytes", "stream_count"],
+        "changes": [
+          { "knob": "in_flight_bytes", "previous": 8388608, "next": 6291456, "direction": "Decrease", "delta": 2097152 },
+          { "knob": "stream_count", "previous": 4, "next": 3, "direction": "Decrease", "delta": 1 },
+          { "knob": "chunk_size_bytes", "previous": 262144, "next": 262144, "direction": "Hold", "delta": 0 },
+          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+        ]
+      }
+    },
+    {
+      "kind": "decision",
+      "fixture_id": "disk_read_write_lag",
+      "report": {
+        "trace_id": "trace-atp-disk-001",
+        "workload_id": "workload-disk-lag",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.disk_read_lag_micros", "value": 100001 },
+          { "metric": "atp.autotune.disk_write_lag_micros", "value": 100001 }
+        ]
+      },
+      "current_settings": {
+        "in_flight_bytes": 8388608,
+        "stream_count": 4,
+        "chunk_size_bytes": 262144,
+        "repair_symbols_per_second": 256
+      },
+      "expected_receipt": {
+        "schema_version": "atp-autotune-decision-receipt-v1",
+        "trace_id": "trace-atp-disk-001",
+        "workload_id": "workload-disk-lag",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.disk_read_lag_micros", "value": 100001 },
+          { "metric": "atp.autotune.disk_write_lag_micros", "value": 100001 }
+        ],
+        "outcome": "PressureBackoff",
+        "reason_code": "hold_or_backoff_on_pressure",
+        "fail_closed": true,
+        "confidence": "fail_closed",
+        "caveats": ["DiskReadLag", "DiskWriteLag"],
+        "bottlenecks": [
+          { "kind": "DiskReadLag", "metric": "atp.autotune.disk_read_lag_micros", "observed": 100001, "threshold": 100000 },
+          { "kind": "DiskWriteLag", "metric": "atp.autotune.disk_write_lag_micros", "observed": 100001, "threshold": 100000 }
+        ],
+        "current_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "candidate_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 196608,
+          "repair_symbols_per_second": 256
+        },
+        "selected_knobs": ["chunk_size_bytes"],
+        "changes": [
+          { "knob": "in_flight_bytes", "previous": 8388608, "next": 8388608, "direction": "Hold", "delta": 0 },
+          { "knob": "stream_count", "previous": 4, "next": 4, "direction": "Hold", "delta": 0 },
+          { "knob": "chunk_size_bytes", "previous": 262144, "next": 196608, "direction": "Decrease", "delta": 65536 },
+          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+        ]
+      }
+    },
+    {
+      "kind": "decision",
+      "fixture_id": "encode_decode_backlog",
+      "report": {
+        "trace_id": "trace-atp-cpu-001",
+        "workload_id": "workload-coding-backlog",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.encode_backlog_symbols", "value": 4097 },
+          { "metric": "atp.autotune.decode_backlog_symbols", "value": 4097 }
+        ]
+      },
+      "current_settings": {
+        "in_flight_bytes": 8388608,
+        "stream_count": 4,
+        "chunk_size_bytes": 262144,
+        "repair_symbols_per_second": 256
+      },
+      "expected_receipt": {
+        "schema_version": "atp-autotune-decision-receipt-v1",
+        "trace_id": "trace-atp-cpu-001",
+        "workload_id": "workload-coding-backlog",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.encode_backlog_symbols", "value": 4097 },
+          { "metric": "atp.autotune.decode_backlog_symbols", "value": 4097 }
+        ],
+        "outcome": "PressureBackoff",
+        "reason_code": "hold_or_backoff_on_pressure",
+        "fail_closed": true,
+        "confidence": "fail_closed",
+        "caveats": ["EncodeBacklog", "DecodeBacklog"],
+        "bottlenecks": [
+          { "kind": "EncodeBacklog", "metric": "atp.autotune.encode_backlog_symbols", "observed": 4097, "threshold": 4096 },
+          { "kind": "DecodeBacklog", "metric": "atp.autotune.decode_backlog_symbols", "observed": 4097, "threshold": 4096 }
+        ],
+        "current_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "candidate_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 196608,
+          "repair_symbols_per_second": 256
+        },
+        "selected_knobs": ["chunk_size_bytes"],
+        "changes": [
+          { "knob": "in_flight_bytes", "previous": 8388608, "next": 8388608, "direction": "Hold", "delta": 0 },
+          { "knob": "stream_count", "previous": 4, "next": 4, "direction": "Hold", "delta": 0 },
+          { "knob": "chunk_size_bytes", "previous": 262144, "next": 196608, "direction": "Decrease", "delta": 65536 },
+          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+        ]
+      }
+    },
+    {
+      "kind": "decision",
+      "fixture_id": "relay_expensive_path",
+      "report": {
+        "trace_id": "trace-atp-relay-001",
+        "workload_id": "workload-relay-cost",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.relay_cost_micros_per_mib", "value": 500001 }
+        ]
+      },
+      "current_settings": {
+        "in_flight_bytes": 8388608,
+        "stream_count": 4,
+        "chunk_size_bytes": 262144,
+        "repair_symbols_per_second": 256
+      },
+      "expected_receipt": {
+        "schema_version": "atp-autotune-decision-receipt-v1",
+        "trace_id": "trace-atp-relay-001",
+        "workload_id": "workload-relay-cost",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.relay_cost_micros_per_mib", "value": 500001 }
+        ],
+        "outcome": "PressureBackoff",
+        "reason_code": "hold_or_backoff_on_pressure",
+        "fail_closed": true,
+        "confidence": "fail_closed",
+        "caveats": ["RelayCost"],
+        "bottlenecks": [
+          { "kind": "RelayCost", "metric": "atp.autotune.relay_cost_micros_per_mib", "observed": 500001, "threshold": 500000 }
+        ],
+        "current_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "candidate_settings": {
+          "in_flight_bytes": 6291456,
+          "stream_count": 3,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "selected_knobs": ["in_flight_bytes", "stream_count"],
+        "changes": [
+          { "knob": "in_flight_bytes", "previous": 8388608, "next": 6291456, "direction": "Decrease", "delta": 2097152 },
+          { "knob": "stream_count", "previous": 4, "next": 3, "direction": "Decrease", "delta": 1 },
+          { "knob": "chunk_size_bytes", "previous": 262144, "next": 262144, "direction": "Hold", "delta": 0 },
+          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+        ]
+      }
+    },
+    {
+      "kind": "decision",
+      "fixture_id": "migration_event_backoff",
+      "report": {
+        "trace_id": "trace-atp-migration-001",
+        "workload_id": "workload-path-migration",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.migration_events", "value": 1 }
+        ]
+      },
+      "current_settings": {
+        "in_flight_bytes": 8388608,
+        "stream_count": 4,
+        "chunk_size_bytes": 262144,
+        "repair_symbols_per_second": 256
+      },
+      "expected_receipt": {
+        "schema_version": "atp-autotune-decision-receipt-v1",
+        "trace_id": "trace-atp-migration-001",
+        "workload_id": "workload-path-migration",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.migration_events", "value": 1 }
+        ],
+        "outcome": "PressureBackoff",
+        "reason_code": "hold_or_backoff_on_pressure",
+        "fail_closed": true,
+        "confidence": "fail_closed",
+        "caveats": ["MigrationInstability"],
+        "bottlenecks": [
+          { "kind": "MigrationInstability", "metric": "atp.autotune.migration_events", "observed": 1, "threshold": 0 }
+        ],
+        "current_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "candidate_settings": {
+          "in_flight_bytes": 6291456,
+          "stream_count": 3,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "selected_knobs": ["in_flight_bytes", "stream_count"],
+        "changes": [
+          { "knob": "in_flight_bytes", "previous": 8388608, "next": 6291456, "direction": "Decrease", "delta": 2097152 },
+          { "knob": "stream_count", "previous": 4, "next": 3, "direction": "Decrease", "delta": 1 },
+          { "knob": "chunk_size_bytes", "previous": 262144, "next": 262144, "direction": "Hold", "delta": 0 },
+          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+        ]
+      }
+    },
+    {
+      "kind": "decision",
+      "fixture_id": "duplicate_metric_latest_wins",
+      "report": {
+        "trace_id": "trace-atp-duplicate-001",
+        "workload_id": "workload-duplicate-loss",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.loss_permille", "value": 40 },
+          { "metric": "atp.autotune.loss_permille", "value": 0 },
+          { "metric": "atp.autotune.rtt_micros", "value": 90000 }
+        ]
+      },
+      "current_settings": {
+        "in_flight_bytes": 8388608,
+        "stream_count": 4,
+        "chunk_size_bytes": 262144,
+        "repair_symbols_per_second": 256
+      },
+      "expected_receipt": {
+        "schema_version": "atp-autotune-decision-receipt-v1",
+        "trace_id": "trace-atp-duplicate-001",
+        "workload_id": "workload-duplicate-loss",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.loss_permille", "value": 40 },
+          { "metric": "atp.autotune.loss_permille", "value": 0 },
+          { "metric": "atp.autotune.rtt_micros", "value": 90000 }
+        ],
+        "outcome": "ConservativeGrowth",
+        "reason_code": "conservative_growth",
+        "fail_closed": false,
+        "confidence": "conservative",
+        "caveats": ["growth_requires_application_hysteresis"],
+        "bottlenecks": [],
+        "current_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "candidate_settings": {
+          "in_flight_bytes": 9437184,
+          "stream_count": 5,
+          "chunk_size_bytes": 294912,
+          "repair_symbols_per_second": 256
+        },
+        "selected_knobs": ["in_flight_bytes", "stream_count", "chunk_size_bytes"],
+        "changes": [
+          { "knob": "in_flight_bytes", "previous": 8388608, "next": 9437184, "direction": "Increase", "delta": 1048576 },
+          { "knob": "stream_count", "previous": 4, "next": 5, "direction": "Increase", "delta": 1 },
+          { "knob": "chunk_size_bytes", "previous": 262144, "next": 294912, "direction": "Increase", "delta": 32768 },
+          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+        ]
+      }
+    },
+    {
+      "kind": "decision",
+      "fixture_id": "zero_samples_hold",
+      "report": {
+        "trace_id": "trace-atp-zero-001",
+        "workload_id": "workload-zero-samples",
+        "sample_count": 0,
+        "samples": []
+      },
+      "current_settings": {
+        "in_flight_bytes": 8388608,
+        "stream_count": 4,
+        "chunk_size_bytes": 262144,
+        "repair_symbols_per_second": 256
+      },
+      "expected_receipt": {
+        "schema_version": "atp-autotune-decision-receipt-v1",
+        "trace_id": "trace-atp-zero-001",
+        "workload_id": "workload-zero-samples",
+        "sample_count": 0,
+        "samples": [],
+        "outcome": "HoldNoWin",
+        "reason_code": "hold_or_backoff_on_pressure",
+        "fail_closed": true,
+        "confidence": "fail_closed",
+        "caveats": ["InsufficientTelemetry"],
+        "bottlenecks": [
+          { "kind": "InsufficientTelemetry", "metric": null, "observed": 0, "threshold": 8 }
+        ],
+        "current_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "candidate_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "selected_knobs": [],
+        "changes": [
+          { "knob": "in_flight_bytes", "previous": 8388608, "next": 8388608, "direction": "Hold", "delta": 0 },
+          { "knob": "stream_count", "previous": 4, "next": 4, "direction": "Hold", "delta": 0 },
+          { "knob": "chunk_size_bytes", "previous": 262144, "next": 262144, "direction": "Hold", "delta": 0 },
+          { "knob": "repair_symbols_per_second", "previous": 256, "next": 256, "direction": "Hold", "delta": 0 }
+        ]
+      }
+    },
+    {
+      "kind": "decision",
+      "fixture_id": "blank_trace_id_malformed",
+      "report": {
+        "trace_id": "",
+        "workload_id": "workload-stale-trace",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.loss_permille", "value": 26 }
+        ]
+      },
+      "current_settings": {
+        "in_flight_bytes": 8388608,
+        "stream_count": 4,
+        "chunk_size_bytes": 262144,
+        "repair_symbols_per_second": 256
+      },
+      "expected_receipt": {
+        "schema_version": "atp-autotune-decision-receipt-v1",
+        "trace_id": "",
+        "workload_id": "workload-stale-trace",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.loss_permille", "value": 26 }
+        ],
+        "outcome": "MalformedTelemetry",
+        "reason_code": "hold_or_backoff_on_pressure",
+        "fail_closed": true,
+        "confidence": "fail_closed",
+        "caveats": ["ContradictoryTelemetry", "NetworkLoss"],
+        "bottlenecks": [
+          { "kind": "ContradictoryTelemetry", "metric": null, "observed": 0, "threshold": 1 },
+          { "kind": "NetworkLoss", "metric": "atp.autotune.loss_permille", "observed": 26, "threshold": 25 }
+        ],
+        "current_settings": {
+          "in_flight_bytes": 8388608,
+          "stream_count": 4,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 256
+        },
+        "candidate_settings": {
+          "in_flight_bytes": 6291456,
+          "stream_count": 3,
+          "chunk_size_bytes": 262144,
+          "repair_symbols_per_second": 320
+        },
+        "selected_knobs": ["in_flight_bytes", "stream_count", "repair_symbols_per_second"],
+        "changes": [
+          { "knob": "in_flight_bytes", "previous": 8388608, "next": 6291456, "direction": "Decrease", "delta": 2097152 },
+          { "knob": "stream_count", "previous": 4, "next": 3, "direction": "Decrease", "delta": 1 },
+          { "knob": "chunk_size_bytes", "previous": 262144, "next": 262144, "direction": "Hold", "delta": 0 },
+          { "knob": "repair_symbols_per_second", "previous": 256, "next": 320, "direction": "Increase", "delta": 64 }
+        ]
+      }
+    },
+    {
+      "kind": "aggregation_error",
+      "fixture_id": "out_of_range_loss_sample",
+      "report": {
+        "trace_id": "trace-atp-out-of-range-001",
+        "workload_id": "workload-out-of-range-loss",
+        "sample_count": 16,
+        "samples": [
+          { "metric": "atp.autotune.loss_permille", "value": 70000 }
+        ]
+      },
+      "expected_error": {
+        "error": "metric_value_out_of_range",
+        "metric": "atp.autotune.loss_permille",
+        "value": 70000,
+        "max": 65535
+      }
+    }
+  ]
+}
