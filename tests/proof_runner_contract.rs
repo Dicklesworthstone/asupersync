@@ -9,6 +9,7 @@ use std::process::{Command, Output};
 
 const SCRIPT_PATH: &str = "scripts/proof_runner.py";
 const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
+const STATUS_SNAPSHOT_PATH: &str = "artifacts/proof_status_snapshot_v1.json";
 const SCHEMA_PATH: &str = "artifacts/validation_frontier_ledger_schema_v1.json";
 const RCH_OUTCOME_CONTRACT_PATH: &str = "artifacts/proof_runner_rch_outcome_contract_v1.json";
 const FIXTURE_ROOT: &str = "tests/fixtures/proof_runner";
@@ -75,6 +76,29 @@ fn output_json(output: &Output) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout)
         .unwrap_or_else(|error| panic!("proof runner output not JSON: {error}\noutput: {stdout}"))
+}
+
+fn proof_status_dashboard_with_snapshot(snapshot: &Value, generated_at: &str) -> Value {
+    let fixture = write_json_fixture(snapshot);
+    let snapshot_path = fixture.path().to_str().expect("snapshot fixture path utf8");
+    proof_runner_json(&[
+        "--proof-status-dashboard",
+        "--proof-status-snapshot",
+        snapshot_path,
+        "--proof-console-generated-at",
+        generated_at,
+        "--output",
+        "json",
+    ])
+}
+
+fn dashboard_claim_row<'a>(dashboard: &'a Value, claim_id: &str) -> &'a Value {
+    dashboard["claim_status_rows"]
+        .as_array()
+        .expect("claim status rows")
+        .iter()
+        .find(|row| row["claim_id"].as_str() == Some(claim_id))
+        .unwrap_or_else(|| panic!("claim row {claim_id} should be present"))
 }
 
 fn release_pack_golden_projection(result: &Value) -> Value {
@@ -3091,6 +3115,190 @@ fn proof_console_human_output_is_stable_markdown_without_raw_coordination_data()
             "markdown must not expose raw coordination marker {forbidden}"
         );
     }
+}
+
+#[test]
+fn proof_runner_emits_manifest_backed_proof_status_dashboard() {
+    let args = &[
+        "--proof-status-dashboard",
+        "--proof-console-generated-at",
+        "2026-05-08T00:00:00Z",
+        "--output",
+        "json",
+    ];
+    let dashboard1 = proof_runner_json(args);
+    let dashboard2 = proof_runner_json(args);
+
+    assert_eq!(
+        dashboard1, dashboard2,
+        "proof status dashboard must be stable"
+    );
+    assert_eq!(
+        dashboard1["schema_version"].as_str(),
+        Some("proof-status-dashboard-v1")
+    );
+    assert_eq!(
+        dashboard1["source_report_schema_version"].as_str(),
+        Some("proof-console-report-v1")
+    );
+    assert_eq!(dashboard1["verdict"].as_str(), Some("pass"));
+    assert_eq!(
+        dashboard1["summary"]["unsupported_broad_claim_count"].as_u64(),
+        Some(0)
+    );
+    assert_eq!(
+        dashboard1["summary"]["stale_blocker_count"].as_u64(),
+        Some(0)
+    );
+
+    let no_tokio = dashboard_claim_row(&dashboard1, "no-tokio-production-graph");
+    assert_eq!(no_tokio["status"].as_str(), Some("green"));
+    assert_eq!(no_tokio["broad_claim"].as_bool(), Some(false));
+    assert!(
+        no_tokio["proof_commands"]
+            .as_array()
+            .expect("proof commands")
+            .iter()
+            .all(|command| command
+                .as_str()
+                .expect("proof command")
+                .starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- ")),
+        "dashboard must surface exact remote manifest proof commands"
+    );
+    assert!(
+        dashboard1["lane_status_rows"]
+            .as_array()
+            .expect("lane rows")
+            .iter()
+            .all(|row| row["command"]
+                .as_str()
+                .expect("lane command")
+                .starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- ")),
+        "dashboard lane rows must preserve fail-closed remote proof commands"
+    );
+}
+
+#[test]
+fn proof_status_dashboard_fails_closed_on_missing_manifest_lane() {
+    let mut snapshot = load_json(STATUS_SNAPSHOT_PATH);
+    let claims = snapshot["claim_categories"]
+        .as_array_mut()
+        .expect("claim categories");
+    let claim = claims.first_mut().expect("first claim");
+    let claim_id = claim["claim_id"].as_str().expect("claim id").to_string();
+    claim["manifest_lane_ids"] = json!(["missing-proof-lane"]);
+
+    let dashboard = proof_status_dashboard_with_snapshot(&snapshot, "2026-05-24T00:00:00Z");
+
+    assert_eq!(dashboard["verdict"].as_str(), Some("fail_closed"));
+    assert_eq!(
+        dashboard["summary"]["unsupported_broad_claim_count"].as_u64(),
+        Some(1)
+    );
+    assert!(
+        dashboard["failure_reasons"]
+            .as_array()
+            .expect("failure reasons")
+            .iter()
+            .any(
+                |reason| reason["reason_id"].as_str() == Some("unsupported-broad-claim")
+                    && reason["claim_id"].as_str() == Some(claim_id.as_str()),
+            ),
+        "missing manifest lane should be reported as an unsupported claim"
+    );
+
+    let row = dashboard_claim_row(&dashboard, &claim_id);
+    assert_eq!(row["broad_claim"].as_bool(), Some(true));
+    assert!(
+        row["operator_action"]
+            .as_str()
+            .expect("operator action")
+            .contains("proof_lane_manifest_v1.json"),
+        "operator action should point at the manifest/snapshot repair"
+    );
+}
+
+#[test]
+fn proof_status_dashboard_fails_closed_on_unsupported_guarantee() {
+    let mut snapshot = load_json(STATUS_SNAPSHOT_PATH);
+    let claims = snapshot["claim_categories"]
+        .as_array_mut()
+        .expect("claim categories");
+    let claim = claims.first_mut().expect("first claim");
+    let claim_id = claim["claim_id"].as_str().expect("claim id").to_string();
+    claim["manifest_guarantee_ids"] = json!(["unsupported-proof-guarantee"]);
+
+    let dashboard = proof_status_dashboard_with_snapshot(&snapshot, "2026-05-24T00:00:00Z");
+
+    assert_eq!(dashboard["verdict"].as_str(), Some("fail_closed"));
+    let row = dashboard_claim_row(&dashboard, &claim_id);
+    assert_eq!(row["broad_claim"].as_bool(), Some(true));
+    assert!(
+        row["failure_reason_ids"]
+            .as_array()
+            .expect("failure reason ids")
+            .iter()
+            .any(|reason| reason.as_str() == Some("unsupported-broad-claim")),
+        "unsupported guarantee must be tied to the claim row"
+    );
+}
+
+#[test]
+fn proof_status_dashboard_fails_closed_on_stale_blocker_row() {
+    let mut snapshot = load_json(STATUS_SNAPSHOT_PATH);
+    let claims = snapshot["claim_categories"]
+        .as_array_mut()
+        .expect("claim categories");
+    let claim = claims.first_mut().expect("first claim");
+    let claim_id = claim["claim_id"].as_str().expect("claim id").to_string();
+    let lane_id = claim["manifest_lane_ids"][0]
+        .as_str()
+        .expect("lane id")
+        .to_string();
+    let command = claim["proof_commands"][0]
+        .as_str()
+        .expect("proof command")
+        .to_string();
+    claim["status"] = json!("red_blocked_external");
+    claim["blocked_frontier"] = json!({
+        "generated_at": "2026-05-01T00:00:00Z",
+        "command": command,
+        "proof_lane_id": lane_id,
+        "first_failure": {
+            "file": "",
+            "line": 0,
+            "column": 0,
+            "code": "",
+            "message": "remote proof lane blocked before an exact source location was recorded"
+        }
+    });
+
+    let dashboard = proof_status_dashboard_with_snapshot(&snapshot, "2026-05-24T00:00:00Z");
+
+    assert_eq!(dashboard["verdict"].as_str(), Some("fail_closed"));
+    assert_eq!(
+        dashboard["summary"]["stale_blocker_count"].as_u64(),
+        Some(1)
+    );
+    assert!(
+        dashboard["failure_reasons"]
+            .as_array()
+            .expect("failure reasons")
+            .iter()
+            .any(|reason| reason["reason_id"].as_str() == Some("stale-blocker-row")),
+        "stale red rows should fail closed"
+    );
+
+    let row = dashboard_claim_row(&dashboard, &claim_id);
+    assert_eq!(row["blocker_status"].as_str(), Some("stale"));
+    assert_eq!(row["current_blocker"]["line"].as_u64(), Some(0));
+    assert!(
+        row["operator_action"]
+            .as_str()
+            .expect("operator action")
+            .contains("refresh blocked_frontier"),
+        "operator action should require a fresh exact blocker record"
+    );
 }
 
 #[test]

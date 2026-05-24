@@ -283,22 +283,24 @@ impl CoverageStats {
 /// Mock time provider for deterministic testing.
 #[derive(Debug, Clone)]
 pub struct MockTime {
-    current: Arc<std::sync::Mutex<crate::types::Time>>,
+    current: Arc<std::sync::Mutex<asupersync::types::Time>>,
 }
 
 impl MockTime {
     pub fn new() -> Self {
         Self {
-            current: Arc::new(std::sync::Mutex::new(crate::types::Time::from_nanos(0))),
+            current: Arc::new(std::sync::Mutex::new(asupersync::types::Time::from_nanos(
+                0,
+            ))),
         }
     }
 
     pub fn advance(&self, duration: Duration) {
         let mut current = self.current.lock().unwrap();
-        *current = current.add_duration(duration);
+        *current = *current + duration;
     }
 
-    pub fn now(&self) -> crate::types::Time {
+    pub fn now(&self) -> asupersync::types::Time {
         *self.current.lock().unwrap()
     }
 }
@@ -367,6 +369,29 @@ impl Default for RuntimeConformanceHarness {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Run every runtime-side conformance harness and return one aggregate result set.
+///
+/// `tests/conformance/mod.rs` consumes this function when it builds the overall
+/// conformance report. Keeping the aggregation here avoids duplicating the
+/// runtime/kernel/reactor/remote/scheduler grouping logic in the report layer.
+pub fn run_full_runtime_conformance_suite() -> Vec<ConformanceTestResult> {
+    let mut results = Vec::new();
+
+    let mut kernel_harness = super::kernel_conformance::KernelConformanceHarness::new();
+    results.extend(kernel_harness.run_full_suite());
+
+    let mut reactor_harness = super::reactor_conformance::ReactorConformanceHarness::new();
+    results.extend(reactor_harness.run_full_suite());
+
+    let mut remote_harness = super::remote_conformance::RemoteConformanceHarness::new();
+    results.extend(remote_harness.run_full_suite());
+
+    let mut scheduler_harness = super::scheduler_conformance::SchedulerConformanceHarness::new();
+    results.extend(scheduler_harness.run_full_suite());
+
+    results
 }
 
 #[cfg(test)]

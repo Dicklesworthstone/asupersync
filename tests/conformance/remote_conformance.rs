@@ -14,7 +14,7 @@
 use super::harness::{
     ConformanceTestResult, RequirementLevel, RuntimeConformanceHarness, TestCategory, TestVerdict,
 };
-use crate::remote::{
+use asupersync::remote::{
     ComputationName, NodeId, Phase0RemoteFailure, Phase0RetryPolicy, Phase0SimulationConfig,
     RemoteCap, RemoteInput, RemoteTaskId,
 };

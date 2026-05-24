@@ -31,6 +31,7 @@ FORBIDDEN_VALIDATION_COMMAND_POLICY = (
 )
 RCH_OUTCOME_SCHEMA_VERSION = "proof-runner-rch-outcome-v1"
 PROOF_CONSOLE_REPORT_SCHEMA_VERSION = "proof-console-report-v1"
+PROOF_STATUS_DASHBOARD_SCHEMA_VERSION = "proof-status-dashboard-v1"
 RELEASE_PROOF_PACK_SCHEMA_VERSION = "release-proof-pack-v1"
 DISK_PRESSURE_SCHEMA_VERSION = "proof-runner-disk-pressure-v1"
 DEFAULT_DISK_MIN_FREE_BYTES = 1_073_741_824
@@ -696,6 +697,14 @@ def file_hash(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def _int_or_zero(value: Any) -> int:
+    """Coerce external JSON number fields to int for fail-closed evidence checks."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def proof_console_markdown(report: Dict[str, Any]) -> str:
     """Render a deterministic Markdown operator proof-console report."""
     summary = report["summary"]
@@ -743,6 +752,55 @@ def proof_console_markdown(report: Dict[str, Any]) -> str:
     lines.extend(["", "## Failure Reasons", ""])
     if report["failure_reasons"]:
         for reason in report["failure_reasons"]:
+            lines.append(f"- `{reason['reason_id']}`: {reason['summary']}")
+    else:
+        lines.append("- none")
+
+    return "\n".join(lines) + "\n"
+
+
+def proof_status_dashboard_markdown(dashboard: Dict[str, Any]) -> str:
+    """Render a compact deterministic Markdown proof-status dashboard."""
+    summary = dashboard["summary"]
+    lines = [
+        "# Proof Status Dashboard",
+        "",
+        f"- Schema: `{dashboard['schema_version']}`",
+        f"- Generated at: `{dashboard['generated_at']}`",
+        f"- Verdict: `{dashboard['verdict']}`",
+        (
+            "- Summary: "
+            f"{summary['claim_count']} claims, "
+            f"{summary['lane_count']} lanes, "
+            f"{summary['green_claim_count']} green, "
+            f"{summary['yellow_claim_count']} yellow, "
+            f"{summary['red_claim_count']} red, "
+            f"{summary['not_run_lane_count']} not-run lanes"
+        ),
+        "",
+        "## Claim Status",
+        "",
+        "| Claim | Status | Blocker | Action |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in dashboard["claim_status_rows"]:
+        blocker = row["current_blocker"]
+        if blocker:
+            blocker_text = "{}:{}".format(blocker.get("file", ""), blocker.get("line", 0))
+        else:
+            blocker_text = "none"
+        lines.append(
+            "| `{}` | `{}` | `{}` | {} |".format(
+                row["claim_id"],
+                row["status"],
+                blocker_text,
+                row["operator_action"],
+            )
+        )
+
+    lines.extend(["", "## Failure Reasons", ""])
+    if dashboard["failure_reasons"]:
+        for reason in dashboard["failure_reasons"]:
             lines.append(f"- `{reason['reason_id']}`: {reason['summary']}")
     else:
         lines.append("- none")
@@ -2565,12 +2623,31 @@ class ProofRunner:
             blocker_origin=blocker_origin,
         )
 
-    def _repo_json(self, relative_path: str) -> Dict[str, Any]:
-        with (self.repo_root / relative_path).open(encoding="utf-8") as handle:
+    def _path_for_read(self, path: str) -> Path:
+        source = Path(path)
+        if source.is_absolute():
+            return source
+        return self.repo_root / source
+
+    def _display_path(self, path: str) -> str:
+        source = self._path_for_read(path)
+        try:
+            return source.relative_to(self.repo_root).as_posix()
+        except ValueError:
+            return source.as_posix()
+
+    def _json_file(self, path: str) -> Dict[str, Any]:
+        with self._path_for_read(path).open(encoding="utf-8") as handle:
             return json.load(handle)
 
+    def _file_hash(self, path: str) -> str:
+        return file_hash(self._path_for_read(path))
+
+    def _repo_json(self, relative_path: str) -> Dict[str, Any]:
+        return self._json_file(relative_path)
+
     def _repo_hash(self, relative_path: str) -> str:
-        return file_hash(self.repo_root / relative_path)
+        return self._file_hash(relative_path)
 
     def _repo_artifact_row(self, relative_path: str) -> Dict[str, Any]:
         path = self.repo_root / relative_path
@@ -2779,9 +2856,11 @@ class ProofRunner:
         self,
         generated_at: str = "",
         rch_outcome_paths: Optional[List[str]] = None,
+        proof_status_snapshot_path: str = PROOF_STATUS_SNAPSHOT_PATH,
     ) -> Dict[str, Any]:
         """Generate the deterministic operator proof-console report."""
-        snapshot = self._repo_json(PROOF_STATUS_SNAPSHOT_PATH)
+        snapshot = self._json_file(proof_status_snapshot_path)
+        snapshot_display_path = self._display_path(proof_status_snapshot_path)
         manifest = self.manifest.data
         rch_outcomes = self._load_rch_outcomes(rch_outcome_paths or [])
         lanes = sorted(manifest.get("lanes", []), key=lambda row: row.get("lane_id", ""))
@@ -2827,16 +2906,36 @@ class ProofRunner:
                 unsupported_broad_claim_count += 1
 
             blocked_frontier = claim.get("blocked_frontier")
+            current_blocker: Dict[str, Any] = {}
+            blocker_status = "not_applicable"
+            if claim.get("status") == "red_blocked_external":
+                blocker_status = "stale"
             if claim.get("status") == "red_blocked_external" and isinstance(
                 blocked_frontier, dict
             ):
                 first_failure = blocked_frontier.get("first_failure", {})
+                if not isinstance(first_failure, dict):
+                    first_failure = {}
+                current_blocker = {
+                    "file": str(first_failure.get("file", "")),
+                    "line": _int_or_zero(first_failure.get("line")),
+                    "column": _int_or_zero(first_failure.get("column")),
+                    "code": str(first_failure.get("code", "")),
+                    "message": str(first_failure.get("message", "")),
+                    "command": str(blocked_frontier.get("command", "")),
+                    "proof_lane_id": str(blocked_frontier.get("proof_lane_id", "")),
+                    "generated_at": str(blocked_frontier.get("generated_at", "")),
+                }
                 if (
-                    blocked_frontier.get("generated_at", "") < generated_at
-                    or not first_failure.get("file")
-                    or int(first_failure.get("line") or 0) == 0
+                    current_blocker["generated_at"] < generated_at
+                    or not current_blocker["file"]
+                    or current_blocker["line"] == 0
                 ):
                     stale_blocker_count += 1
+                else:
+                    blocker_status = "fresh"
+            elif claim.get("status") == "red_blocked_external":
+                stale_blocker_count += 1
 
             claim_rows.append(
                 {
@@ -2851,6 +2950,8 @@ class ProofRunner:
                         if isinstance(command, str)
                     ],
                     "blocked_frontier": blocked_frontier,
+                    "current_blocker": current_blocker,
+                    "blocker_status": blocker_status,
                     "doc_claim_markers": claim.get("doc_claim_markers", {}),
                     "broad_claim": broad_claim,
                 }
@@ -2942,9 +3043,7 @@ class ProofRunner:
                 "artifacts/proof_lane_manifest_v1.json": self._repo_hash(
                     "artifacts/proof_lane_manifest_v1.json"
                 ),
-                "artifacts/proof_status_snapshot_v1.json": self._repo_hash(
-                    PROOF_STATUS_SNAPSHOT_PATH
-                ),
+                snapshot_display_path: self._file_hash(proof_status_snapshot_path),
                 "artifacts/validation_frontier_ledger_schema_v1.json": self._repo_hash(
                     VALIDATION_FRONTIER_LEDGER_PATH
                 ),
@@ -2964,6 +3063,107 @@ class ProofRunner:
             "rch_outcomes": rch_outcomes,
             "failure_reasons": failure_reasons,
             "verdict": "fail_closed" if failure_reasons else "pass",
+        }
+
+    def proof_status_dashboard(
+        self,
+        generated_at: str = "",
+        rch_outcome_paths: Optional[List[str]] = None,
+        proof_status_snapshot_path: str = PROOF_STATUS_SNAPSHOT_PATH,
+    ) -> Dict[str, Any]:
+        """Generate the concise manifest-backed proof-claim status dashboard."""
+        report = self.proof_console_report(
+            generated_at=generated_at,
+            rch_outcome_paths=rch_outcome_paths,
+            proof_status_snapshot_path=proof_status_snapshot_path,
+        )
+        failure_ids_by_claim: Dict[str, List[str]] = {}
+        for reason in report["failure_reasons"]:
+            claim_id = str(reason.get("claim_id", ""))
+            if claim_id:
+                failure_ids_by_claim.setdefault(claim_id, []).append(
+                    str(reason.get("reason_id", ""))
+                )
+
+        claim_status_rows = []
+        for row in report["claim_rows"]:
+            claim_id = str(row["claim_id"])
+            status = str(row["status"])
+            failure_reason_ids = failure_ids_by_claim.get(claim_id, [])
+            if row["broad_claim"]:
+                operator_action = (
+                    "repair proof_status_snapshot_v1.json or proof_lane_manifest_v1.json "
+                    "before citing this claim"
+                )
+            elif status == "red_blocked_external" and row["blocker_status"] != "fresh":
+                operator_action = (
+                    "rerun or classify the exact rch lane and refresh blocked_frontier "
+                    "with file and line evidence"
+                )
+            elif status == "red_blocked_external":
+                operator_action = "cite only the recorded first blocker until the lane is fixed"
+            elif status == "green":
+                operator_action = "run the exact manifest lane before citing fresh proof"
+            elif status.startswith("yellow_"):
+                operator_action = "cite only the scoped frontier guarantee named by the manifest"
+            else:
+                operator_action = "classify this claim status before citing it"
+
+            claim_status_rows.append(
+                {
+                    "claim_id": claim_id,
+                    "category": row["category"],
+                    "status": status,
+                    "manifest_lane_ids": row["manifest_lane_ids"],
+                    "manifest_guarantee_ids": row["manifest_guarantee_ids"],
+                    "proof_commands": row["proof_commands"],
+                    "current_blocker": row["current_blocker"],
+                    "blocker_status": row["blocker_status"],
+                    "broad_claim": row["broad_claim"],
+                    "failure_reason_ids": failure_reason_ids,
+                    "operator_action": operator_action,
+                }
+            )
+
+        lane_status_rows = [
+            {
+                "lane_id": row["lane_id"],
+                "kind": row["kind"],
+                "status": row["status"],
+                "command": row["command"],
+                "guarantee_ids": row["guarantee_ids"],
+                "expected_signal": row["expected_signal"],
+                "explicit_not_covered": row["explicit_not_covered"],
+            }
+            for row in report["lane_rows"]
+        ]
+
+        summary = dict(report["summary"])
+        summary.update(
+            {
+                "blocked_claim_count": summary["red_claim_count"],
+                "not_run_lane_count": sum(
+                    1 for row in lane_status_rows if row["status"] == "not_run"
+                ),
+                "fail_closed_reason_count": len(report["failure_reasons"]),
+            }
+        )
+
+        return {
+            "schema_version": PROOF_STATUS_DASHBOARD_SCHEMA_VERSION,
+            "generated_at": report["generated_at"],
+            "generator": {
+                "name": "scripts/proof_runner.py",
+                "mode": "proof-status-dashboard",
+            },
+            "source_report_schema_version": report["schema_version"],
+            "source_artifact_hashes": report["source_artifact_hashes"],
+            "summary": summary,
+            "claim_status_rows": claim_status_rows,
+            "lane_status_rows": lane_status_rows,
+            "rch_outcomes": report["rch_outcomes"],
+            "failure_reasons": report["failure_reasons"],
+            "verdict": report["verdict"],
         }
 
     def release_proof_pack(
@@ -3916,6 +4116,16 @@ def main():
         help="Emit the deterministic operator proof-console report"
     )
     parser.add_argument(
+        "--proof-status-dashboard",
+        action="store_true",
+        help="Emit the concise manifest-backed proof-claim status dashboard"
+    )
+    parser.add_argument(
+        "--proof-status-snapshot",
+        default=PROOF_STATUS_SNAPSHOT_PATH,
+        help="Proof status snapshot JSON used by proof-console and dashboard modes"
+    )
+    parser.add_argument(
         "--proof-console-generated-at",
         default="",
         help="Override generated_at for deterministic proof-console fixtures"
@@ -4147,11 +4357,24 @@ def main():
             result = runner.proof_console_report(
                 generated_at=args.proof_console_generated_at,
                 rch_outcome_paths=args.proof_console_rch_outcome,
+                proof_status_snapshot_path=args.proof_status_snapshot,
             )
             if args.output == "json":
                 print(json.dumps(result, indent=2))
             else:
                 print(proof_console_markdown(result), end="")
+            return 0
+
+        if args.proof_status_dashboard:
+            result = runner.proof_status_dashboard(
+                generated_at=args.proof_console_generated_at,
+                rch_outcome_paths=args.proof_console_rch_outcome,
+                proof_status_snapshot_path=args.proof_status_snapshot,
+            )
+            if args.output == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                print(proof_status_dashboard_markdown(result), end="")
             return 0
 
         if args.release_proof_pack:

@@ -13,11 +13,11 @@
 use super::harness::{
     ConformanceTestResult, RequirementLevel, RuntimeConformanceHarness, TestCategory, TestVerdict,
 };
-use crate::runtime::kernel::{
+use asupersync::runtime::kernel::{
     CONTROLLER_SNAPSHOT_LEDGER_SCHEMA_VERSION, RuntimeKernelSnapshot, SNAPSHOT_VERSION, SnapshotId,
     SnapshotVersion,
 };
-use crate::types::Time;
+use asupersync::types::Time;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -397,6 +397,21 @@ and its verifier, `tests/proof_status_snapshot_contract.rs`. Do not add a proof
 claim here unless the lane exists in the manifest or the status snapshot names
 the exact blocked frontier row.
 
+Generate the manifest-backed status dashboard before changing proof claims:
+
+```bash
+python3 scripts/proof_runner.py --proof-status-dashboard --output json
+```
+
+For reviewable fixtures or contract tests, pass
+`--proof-status-snapshot <path>` and
+`--proof-console-generated-at <timestamp>`. The dashboard fails closed when a
+claim references a missing manifest lane, names an unsupported guarantee, or
+keeps a red blocker row without fresh file-and-line evidence. When it fails,
+update `artifacts/proof_lane_manifest_v1.json`,
+`artifacts/proof_status_snapshot_v1.json`, and the exact validation frontier
+record together instead of broadening the claim.
+
 Use these colors for operator and agent decisions:
 
 | State | Meaning | Allowed agent action |
