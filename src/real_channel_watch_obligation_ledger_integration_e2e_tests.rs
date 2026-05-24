@@ -18,11 +18,12 @@
 //! 4. **State Consistency**: Watch state and ledger remain synchronized
 
 use crate::{
+    Result,
     channel::watch::{self, Receiver, Sender},
     cx::Cx,
     obligation::{
-        ledger::{LedgerEntry, ObligationLedger},
         ObligationId,
+        ledger::{LedgerEntry, ObligationLedger},
     },
     record::{
         obligation::{ObligationRecord, ObligationState},
@@ -30,26 +31,18 @@ use crate::{
         task::TaskRecord,
     },
     runtime::{
-        region_heap::RegionHeap,
-        scheduler::three_lane::ThreeLaneScheduler,
-        sharded_state::ShardedState,
-        state::RuntimeState,
-        RuntimeBuilder,
+        RuntimeBuilder, region_heap::RegionHeap, scheduler::three_lane::ThreeLaneScheduler,
+        sharded_state::ShardedState, state::RuntimeState,
     },
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
     types::{
-        budget::Budget,
-        cancel::CancelToken,
-        outcome::Outcome,
-        region::RegionId,
-        task::TaskId,
+        budget::Budget, cancel::CancelToken, outcome::Outcome, region::RegionId, task::TaskId,
     },
     util::{rng::DetRng, time::TimeSource},
-    Result,
 };
 use parking_lot::RwLock;
 use std::{
@@ -236,10 +229,8 @@ impl WatchLedgerTestHarness {
 
                     // Perform borrow_and_update with ledger generation tracking
                     let result = receiver_clone.borrow_and_update(|current| {
-                        let new_payload = WatchPayload::new(
-                            seq as u64 + (writer_id as u64 * 1000),
-                            writer_id,
-                        );
+                        let new_payload =
+                            WatchPayload::new(seq as u64 + (writer_id as u64 * 1000), writer_id);
 
                         // Update ledger generation
                         let mut ledger_guard = ledger_clone.lock();
@@ -340,14 +331,15 @@ impl TestObligationLedger {
     }
 
     fn get_next_generation(&mut self) -> u64 {
-        let gen = self.next_generation;
+        let generation = self.next_generation;
         self.next_generation += 1;
-        gen
+        generation
     }
 
     fn record_entry(&mut self, entry: LedgerEntry) {
         self.entries.insert(entry.generation, entry);
-        self.writer_sequences.insert(entry.writer_id, entry.sequence);
+        self.writer_sequences
+            .insert(entry.writer_id, entry.sequence);
     }
 
     fn verify_consistency(&self) -> bool {
@@ -430,7 +422,9 @@ mod tests {
                     sequence: i,
                 };
 
-                harness.generation_tracker.record_generation(entry.generation);
+                harness
+                    .generation_tracker
+                    .record_generation(entry.generation);
                 ledger_guard.record_entry(entry);
                 drop(ledger_guard);
 
@@ -465,21 +459,26 @@ mod tests {
         let ledger = Arc::new(Mutex::new(TestObligationLedger::new()));
 
         // Run concurrent writers
-        harness.simulate_concurrent_writers(
-            &cx,
-            sender,
-            receiver,
-            ledger.clone(),
-            4, // 4 concurrent writers
-            10, // 10 operations each
-        ).await?;
+        harness
+            .simulate_concurrent_writers(
+                &cx,
+                sender,
+                receiver,
+                ledger.clone(),
+                4,  // 4 concurrent writers
+                10, // 10 operations each
+            )
+            .await?;
 
         // Verify integration properties
         harness.verify_integration_properties()?;
 
         // Verify ledger consistency
         let ledger_guard = ledger.lock();
-        assert!(ledger_guard.verify_consistency(), "Ledger should be consistent");
+        assert!(
+            ledger_guard.verify_consistency(),
+            "Ledger should be consistent"
+        );
 
         let (entries, max_gen, writers) = ledger_guard.get_stats();
         assert!(entries > 0, "Should have ledger entries");
@@ -505,26 +504,40 @@ mod tests {
 
         // Run high-contention scenario
         let conflict_detector_clone = conflict_detector.clone();
-        harness.simulate_concurrent_writers(
-            &cx,
-            sender,
-            receiver.clone(),
-            ledger.clone(),
-            8, // 8 concurrent writers (high contention)
-            15, // 15 operations each
-        ).await?;
+        harness
+            .simulate_concurrent_writers(
+                &cx,
+                sender,
+                receiver.clone(),
+                ledger.clone(),
+                8,  // 8 concurrent writers (high contention)
+                15, // 15 operations each
+            )
+            .await?;
 
         // Verify no updates were lost
         let (_, _, _, successes) = harness.coordinator.get_stats();
         let (generations_count, _, monotonic) = harness.generation_tracker.get_stats();
 
-        assert!(monotonic, "Generation updates must remain monotonic despite conflicts");
-        assert!(successes > 0, "Should have successful updates despite contention");
-        assert_eq!(generations_count, successes, "Every success should record a generation");
+        assert!(
+            monotonic,
+            "Generation updates must remain monotonic despite conflicts"
+        );
+        assert!(
+            successes > 0,
+            "Should have successful updates despite contention"
+        );
+        assert_eq!(
+            generations_count, successes,
+            "Every success should record a generation"
+        );
 
         // Verify final state consistency
         let ledger_guard = ledger.lock();
-        assert!(ledger_guard.verify_consistency(), "Final ledger state must be consistent");
+        assert!(
+            ledger_guard.verify_consistency(),
+            "Final ledger state must be consistent"
+        );
 
         Ok(())
     }
@@ -554,7 +567,9 @@ mod tests {
                     writer_id: 0,
                     sequence: i,
                 };
-                harness.generation_tracker.record_generation(entry.generation);
+                harness
+                    .generation_tracker
+                    .record_generation(entry.generation);
                 ledger_guard.record_entry(entry);
                 drop(ledger_guard);
 
@@ -566,14 +581,16 @@ mod tests {
         harness.coordinator.unregister_writer();
 
         // Phase 2: Concurrent burst
-        harness.simulate_concurrent_writers(
-            &cx,
-            sender.clone(),
-            receiver.clone(),
-            ledger.clone(),
-            6, // 6 writers
-            8, // 8 operations each
-        ).await?;
+        harness
+            .simulate_concurrent_writers(
+                &cx,
+                sender.clone(),
+                receiver.clone(),
+                ledger.clone(),
+                6, // 6 writers
+                8, // 8 operations each
+            )
+            .await?;
 
         // Phase 3: Final consistency check
         cx.sleep(Duration::from_millis(100)).await;
@@ -583,16 +600,29 @@ mod tests {
 
         let ledger_guard = ledger.lock();
         let (total_entries, final_generation, unique_writers) = ledger_guard.get_stats();
-        assert!(ledger_guard.verify_consistency(), "Final state must be consistent");
+        assert!(
+            ledger_guard.verify_consistency(),
+            "Final state must be consistent"
+        );
         drop(ledger_guard);
 
-        let (tracked_updates, max_tracked_gen, is_monotonic) = harness.generation_tracker.get_stats();
+        let (tracked_updates, max_tracked_gen, is_monotonic) =
+            harness.generation_tracker.get_stats();
 
         // Verify comprehensive properties
         assert!(is_monotonic, "All generation updates must be monotonic");
-        assert!(total_entries > 50, "Should have substantial number of entries");
-        assert_eq!(tracked_updates, total_entries, "Tracking should match ledger entries");
-        assert_eq!(max_tracked_gen, final_generation, "Max generations should match");
+        assert!(
+            total_entries > 50,
+            "Should have substantial number of entries"
+        );
+        assert_eq!(
+            tracked_updates, total_entries,
+            "Tracking should match ledger entries"
+        );
+        assert_eq!(
+            max_tracked_gen, final_generation,
+            "Max generations should match"
+        );
         assert!(unique_writers > 1, "Should have multiple unique writers");
 
         println!(

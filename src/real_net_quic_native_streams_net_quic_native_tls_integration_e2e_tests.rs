@@ -22,30 +22,28 @@ use crate::{
     cx::{Cx, Scope},
     error::Outcome,
     net::{
+        SocketAddr,
         quic_native::{
+            connection::{QuicConnection, QuicConnectionConfig},
+            endpoint::{EndpointConfig, QuicEndpoint},
+            frame::{FrameType, QuicFrame},
+            packet::{PacketType, QuicPacket},
             streams::{
-                QuicStream, QuicStreamId, QuicStreamType, StreamDirection,
-                StreamFrame, StreamState, StreamEvent, StreamController,
-                StreamFlowController, StreamManager, StreamConfig,
-                StreamMultiplexer, BidirectionalStream, UnidirectionalStream,
+                BidirectionalStream, QuicStream, QuicStreamId, QuicStreamType, StreamConfig,
+                StreamController, StreamDirection, StreamEvent, StreamFlowController, StreamFrame,
+                StreamManager, StreamMultiplexer, StreamState, UnidirectionalStream,
             },
             tls::{
-                QuicTls, QuicTlsConfig, QuicTlsKeyManager, TlsRekey,
-                KeyRotationEvent, KeyRotationState, TlsHandshakeState,
-                EncryptionLevel, CipherSuite, KeyUpdateTrigger,
-                TrafficSecrets, QuicTlsConnection, TlsKeySchedule,
+                CipherSuite, EncryptionLevel, KeyRotationEvent, KeyRotationState, KeyUpdateTrigger,
+                QuicTls, QuicTlsConfig, QuicTlsConnection, QuicTlsKeyManager, TlsHandshakeState,
+                TlsKeySchedule, TlsRekey, TrafficSecrets,
             },
-            connection::{QuicConnection, QuicConnectionConfig},
-            endpoint::{QuicEndpoint, EndpointConfig},
-            packet::{QuicPacket, PacketType},
-            frame::{QuicFrame, FrameType},
         },
-        SocketAddr,
     },
     runtime::RuntimeBuilder,
     sync::{Barrier, Mutex, RwLock, Semaphore},
-    time::{Duration, Sleep, Instant, Timeout},
-    types::{Budget, TaskId, Cancel},
+    time::{Duration, Instant, Sleep, Timeout},
+    types::{Budget, Cancel, TaskId},
     util::{
         det_rng::{DetRng, RngSeed},
         entropy::EntropySource,
@@ -53,20 +51,20 @@ use crate::{
 };
 
 use std::{
-    collections::{HashMap, BTreeMap, VecDeque},
-    sync::{
-        atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering},
-        Arc,
-    },
-    pin::Pin,
-    task::{Context, Poll},
+    collections::{BTreeMap, HashMap, VecDeque},
     future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    },
+    task::{Context, Poll},
 };
 
 use futures::{
-    stream::{Stream, StreamExt},
-    sink::{Sink, SinkExt},
     ready,
+    sink::{Sink, SinkExt},
+    stream::{Stream, StreamExt},
 };
 
 /// Configuration for QUIC TLS rekey integration tests
@@ -163,7 +161,10 @@ impl TlsRekeyFlowTracker {
 
     fn record_rekey_event(&self, event: KeyRotationEvent) {
         let timestamp = Instant::now();
-        self.rekey_events.lock().unwrap().push((timestamp, event.clone()));
+        self.rekey_events
+            .lock()
+            .unwrap()
+            .push((timestamp, event.clone()));
 
         match event {
             KeyRotationEvent::Started { .. } => {
@@ -181,20 +182,23 @@ impl TlsRekeyFlowTracker {
 
     fn record_stream_flow(&self, measurement: StreamFlowMeasurement) {
         let mut flows = self.stream_flows.lock().unwrap();
-        flows.entry(measurement.stream_id)
+        flows
+            .entry(measurement.stream_id)
             .or_insert_with(Vec::new)
             .push(measurement.clone());
 
         // Update flow continuity state
         let mut continuity = self.flow_continuity.lock().unwrap();
-        let state = continuity.entry(measurement.stream_id)
-            .or_insert_with(|| FlowContinuityState {
-                last_transmission: measurement.timestamp,
-                total_bytes: 0,
-                rekey_interruptions: 0,
-                max_interruption_duration: Duration::ZERO,
-                flow_resumed_after_rekey: false,
-            });
+        let state =
+            continuity
+                .entry(measurement.stream_id)
+                .or_insert_with(|| FlowContinuityState {
+                    last_transmission: measurement.timestamp,
+                    total_bytes: 0,
+                    rekey_interruptions: 0,
+                    max_interruption_duration: Duration::ZERO,
+                    flow_resumed_after_rekey: false,
+                });
 
         state.last_transmission = measurement.timestamp;
         state.total_bytes += measurement.bytes_transmitted;
@@ -213,14 +217,18 @@ impl TlsRekeyFlowTracker {
         let continuity = self.flow_continuity.lock().unwrap();
         for (stream_id, state) in continuity.iter() {
             if state.rekey_interruptions > 0 && !state.flow_resumed_after_rekey {
-                eprintln!("Warning: Stream {:?} did not resume flow after rekey", stream_id);
+                eprintln!(
+                    "Warning: Stream {:?} did not resume flow after rekey",
+                    stream_id
+                );
             }
         }
     }
 
     fn verify_no_hol_blocking(&self) -> bool {
         let events = self.hol_blocking_events.lock().unwrap();
-        let key_rotation_blocking = events.iter()
+        let key_rotation_blocking = events
+            .iter()
             .filter(|e| e.blocking_cause == BlockingCause::KeyRotation)
             .count();
 
@@ -232,7 +240,11 @@ impl TlsRekeyFlowTracker {
     }
 
     fn get_stream_flow_continuity(&self, stream_id: QuicStreamId) -> Option<FlowContinuityState> {
-        self.flow_continuity.lock().unwrap().get(&stream_id).cloned()
+        self.flow_continuity
+            .lock()
+            .unwrap()
+            .get(&stream_id)
+            .cloned()
     }
 }
 
@@ -283,18 +295,17 @@ impl LongLivedStreamSimulator {
         tracker: Arc<TlsRekeyFlowTracker>,
         stream_controller: Arc<dyn StreamController>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let state = self.streams.get(&stream_id)
-            .ok_or("Stream not found")?;
+        let state = self.streams.get(&stream_id).ok_or("Stream not found")?;
 
         let chunk_size = 1024;
-        let interval = Duration::from_millis(
-            (chunk_size * 1000) / self.transmission_rate
-        );
+        let interval = Duration::from_millis((chunk_size * 1000) / self.transmission_rate);
 
         while self.active.load(Ordering::Acquire) {
             let data = {
                 let mut rng = self.data_generator.lock().unwrap();
-                (0..chunk_size).map(|_| rng.gen::<u8>()).collect::<Vec<u8>>()
+                (0..chunk_size)
+                    .map(|_| (rng.next_u64() as u8))
+                    .collect::<Vec<u8>>()
             };
 
             // Check if flow control allows transmission
@@ -317,7 +328,9 @@ impl LongLivedStreamSimulator {
             let transmission_result = stream_controller.send_data(stream_id, data.clone()).await;
 
             if transmission_result.is_ok() {
-                state.bytes_transmitted.fetch_add(data.len() as u64, Ordering::Release);
+                state
+                    .bytes_transmitted
+                    .fetch_add(data.len() as u64, Ordering::Release);
                 *state.last_transmission.lock().unwrap() = Instant::now();
 
                 // Record stream flow measurement
@@ -345,7 +358,8 @@ impl LongLivedStreamSimulator {
     }
 
     fn get_total_bytes_transmitted(&self, stream_id: QuicStreamId) -> u64 {
-        self.streams.get(&stream_id)
+        self.streams
+            .get(&stream_id)
             .map(|state| state.bytes_transmitted.load(Ordering::Acquire))
             .unwrap_or(0)
     }
@@ -421,9 +435,10 @@ impl MockQuicTlsKeyManager {
         }
 
         // Record rekey completion
-        self.tracker.record_rekey_event(KeyRotationEvent::Completed {
-            key_phase: new_phase,
-        });
+        self.tracker
+            .record_rekey_event(KeyRotationEvent::Completed {
+                key_phase: new_phase,
+            });
     }
 
     fn generate_traffic_secrets(&self) -> TrafficSecrets {
@@ -468,19 +483,26 @@ impl MockStreamController {
 
     fn create_stream(&self, stream_id: QuicStreamId, flow_limit: u64) {
         let mut streams = self.streams.lock().unwrap();
-        streams.insert(stream_id, MockStreamState {
+        streams.insert(
             stream_id,
-            state: StreamState::Open,
-            send_buffer: VecDeque::new(),
-            flow_control_limit: flow_limit,
-            bytes_sent: 0,
-        });
+            MockStreamState {
+                stream_id,
+                state: StreamState::Open,
+                send_buffer: VecDeque::new(),
+                flow_control_limit: flow_limit,
+                bytes_sent: 0,
+            },
+        );
 
         let mut flow_control = self.flow_control.write().unwrap();
         flow_control.insert(stream_id, flow_limit);
     }
 
-    async fn send_data(&self, stream_id: QuicStreamId, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_data(
+        &self,
+        stream_id: QuicStreamId,
+        data: Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let rotation_state = {
             let state = self.key_manager.rotation_state.lock().unwrap();
             state.clone()
@@ -492,8 +514,7 @@ impl MockStreamController {
         }
 
         let mut streams = self.streams.lock().unwrap();
-        let stream = streams.get_mut(&stream_id)
-            .ok_or("Stream not found")?;
+        let stream = streams.get_mut(&stream_id).ok_or("Stream not found")?;
 
         // Check flow control
         let flow_available = {
@@ -534,20 +555,26 @@ impl MockStreamController {
 
     fn get_stream_bytes_sent(&self, stream_id: QuicStreamId) -> u64 {
         let streams = self.streams.lock().unwrap();
-        streams.get(&stream_id)
-            .map(|s| s.bytes_sent)
-            .unwrap_or(0)
+        streams.get(&stream_id).map(|s| s.bytes_sent).unwrap_or(0)
     }
 }
 
 #[async_trait::async_trait]
 trait StreamController: Send + Sync {
-    async fn send_data(&self, stream_id: QuicStreamId, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>>;
+    async fn send_data(
+        &self,
+        stream_id: QuicStreamId,
+        data: Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 #[async_trait::async_trait]
 impl StreamController for MockStreamController {
-    async fn send_data(&self, stream_id: QuicStreamId, data: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_data(
+        &self,
+        stream_id: QuicStreamId,
+        data: Vec<u8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         MockStreamController::send_data(self, stream_id, data).await
     }
 }
@@ -597,19 +624,20 @@ mod tests {
             simulator.add_stream(stream_id);
         }
 
-        let simulation_handles: Vec<_> = stream_ids.iter().map(|&stream_id| {
-            let simulator = &simulator;
-            let tracker = tracker.clone();
-            let stream_controller = stream_controller.clone();
+        let simulation_handles: Vec<_> = stream_ids
+            .iter()
+            .map(|&stream_id| {
+                let simulator = &simulator;
+                let tracker = tracker.clone();
+                let stream_controller = stream_controller.clone();
 
-            tokio::spawn(async move {
-                simulator.simulate_continuous_transmission(
-                    stream_id,
-                    tracker,
-                    stream_controller,
-                ).await
+                tokio::spawn(async move {
+                    simulator
+                        .simulate_continuous_transmission(stream_id, tracker, stream_controller)
+                        .await
+                })
             })
-        }).collect();
+            .collect();
 
         // Periodically update flow control windows to prevent starvation
         let flow_control_handle = {
@@ -640,8 +668,14 @@ mod tests {
         }
 
         // Verify results
-        assert!(tracker.get_rekey_count() >= 2, "Should have at least 2 rekey operations");
-        assert!(tracker.verify_no_hol_blocking(), "Should not have head-of-line blocking due to rekey");
+        assert!(
+            tracker.get_rekey_count() >= 2,
+            "Should have at least 2 rekey operations"
+        );
+        assert!(
+            tracker.verify_no_hol_blocking(),
+            "Should not have head-of-line blocking due to rekey"
+        );
 
         // Verify flow continuity for each stream
         for &stream_id in &stream_ids {
@@ -649,8 +683,14 @@ mod tests {
             assert!(continuity.is_some(), "Stream should have continuity data");
 
             let continuity = continuity.unwrap();
-            assert!(continuity.total_bytes > 0, "Stream should have transmitted data");
-            assert!(continuity.flow_resumed_after_rekey, "Stream should resume after rekey");
+            assert!(
+                continuity.total_bytes > 0,
+                "Stream should have transmitted data"
+            );
+            assert!(
+                continuity.flow_resumed_after_rekey,
+                "Stream should resume after rekey"
+            );
 
             let bytes_sent = simulator.get_total_bytes_transmitted(stream_id);
             assert!(bytes_sent > 0, "Stream should have transmitted bytes");
@@ -698,22 +738,24 @@ mod tests {
             simulator.add_stream(stream_id);
         }
 
-        let simulation_handles: Vec<_> = stream_ids.iter().enumerate().map(|(i, &stream_id)| {
-            let simulator = &simulator;
-            let tracker = tracker.clone();
-            let stream_controller = stream_controller.clone();
+        let simulation_handles: Vec<_> = stream_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &stream_id)| {
+                let simulator = &simulator;
+                let tracker = tracker.clone();
+                let stream_controller = stream_controller.clone();
 
-            tokio::spawn(async move {
-                // Stagger stream starts
-                Sleep::new(Instant::now() + Duration::from_millis(i as u64 * 50)).await;
+                tokio::spawn(async move {
+                    // Stagger stream starts
+                    Sleep::new(Instant::now() + Duration::from_millis(i as u64 * 50)).await;
 
-                simulator.simulate_continuous_transmission(
-                    stream_id,
-                    tracker,
-                    stream_controller,
-                ).await
+                    simulator
+                        .simulate_continuous_transmission(stream_id, tracker, stream_controller)
+                        .await
+                })
             })
-        }).collect();
+            .collect();
 
         // Maintain flow control
         let flow_control_handle = {
@@ -744,19 +786,29 @@ mod tests {
         }
 
         // Verify that all streams operated independently during rekey
-        assert!(tracker.verify_no_hol_blocking(), "No head-of-line blocking should occur");
+        assert!(
+            tracker.verify_no_hol_blocking(),
+            "No head-of-line blocking should occur"
+        );
 
         // Verify all streams transmitted data
         for &stream_id in &stream_ids {
             let bytes_sent = simulator.get_total_bytes_transmitted(stream_id);
-            assert!(bytes_sent > 0, "Stream {:?} should have transmitted data", stream_id);
+            assert!(
+                bytes_sent > 0,
+                "Stream {:?} should have transmitted data",
+                stream_id
+            );
 
             let controller_bytes = stream_controller.get_stream_bytes_sent(stream_id);
             assert_eq!(bytes_sent, controller_bytes, "Byte counts should match");
         }
 
         // Verify at least one rekey occurred
-        assert!(tracker.get_rekey_count() >= 1, "Should have at least one rekey operation");
+        assert!(
+            tracker.get_rekey_count() >= 1,
+            "Should have at least one rekey operation"
+        );
 
         // Check rekey did not cause flow interruption longer than expected
         for &stream_id in &stream_ids {
@@ -810,19 +862,20 @@ mod tests {
             simulator.add_stream(stream_id);
         }
 
-        let simulation_handles: Vec<_> = stream_ids.iter().map(|&stream_id| {
-            let simulator = &simulator;
-            let tracker = tracker.clone();
-            let stream_controller = stream_controller.clone();
+        let simulation_handles: Vec<_> = stream_ids
+            .iter()
+            .map(|&stream_id| {
+                let simulator = &simulator;
+                let tracker = tracker.clone();
+                let stream_controller = stream_controller.clone();
 
-            tokio::spawn(async move {
-                simulator.simulate_continuous_transmission(
-                    stream_id,
-                    tracker,
-                    stream_controller,
-                ).await
+                tokio::spawn(async move {
+                    simulator
+                        .simulate_continuous_transmission(stream_id, tracker, stream_controller)
+                        .await
+                })
             })
-        }).collect();
+            .collect();
 
         // Aggressive flow control updates
         let flow_control_handle = {
@@ -853,20 +906,33 @@ mod tests {
         }
 
         // Verify high throughput was maintained during rekey
-        assert!(tracker.get_rekey_count() >= 3, "Should have multiple rekey operations");
-        assert!(tracker.verify_no_hol_blocking(), "High throughput should not cause HOL blocking");
+        assert!(
+            tracker.get_rekey_count() >= 3,
+            "Should have multiple rekey operations"
+        );
+        assert!(
+            tracker.verify_no_hol_blocking(),
+            "High throughput should not cause HOL blocking"
+        );
 
         // Verify substantial data transmission occurred
-        let total_bytes: u64 = stream_ids.iter()
+        let total_bytes: u64 = stream_ids
+            .iter()
             .map(|&stream_id| simulator.get_total_bytes_transmitted(stream_id))
             .sum();
 
-        assert!(total_bytes > 500_000, "Should have transmitted substantial data during rekey");
+        assert!(
+            total_bytes > 500_000,
+            "Should have transmitted substantial data during rekey"
+        );
 
         // Verify flow continuity was maintained
         for &stream_id in &stream_ids {
             if let Some(continuity) = tracker.get_stream_flow_continuity(stream_id) {
-                assert!(continuity.flow_resumed_after_rekey, "Flow should resume after each rekey");
+                assert!(
+                    continuity.flow_resumed_after_rekey,
+                    "Flow should resume after each rekey"
+                );
                 assert!(
                     continuity.total_bytes > 100_000,
                     "Each stream should transmit significant data"
@@ -891,9 +957,7 @@ mod tests {
 
         assert!(tracker.active_rotation.load(Ordering::Acquire));
 
-        tracker.record_rekey_event(KeyRotationEvent::Completed {
-            key_phase: 1,
-        });
+        tracker.record_rekey_event(KeyRotationEvent::Completed { key_phase: 1 });
 
         assert!(!tracker.active_rotation.load(Ordering::Acquire));
         assert_eq!(tracker.get_rekey_count(), 2); // Start + Complete
@@ -1006,9 +1070,17 @@ enum StreamState {
 
 #[derive(Debug, Clone)]
 enum StreamEvent {
-    DataReceived { stream_id: QuicStreamId, data: Vec<u8> },
-    FlowControlUpdated { stream_id: QuicStreamId, window: u64 },
-    StreamClosed { stream_id: QuicStreamId },
+    DataReceived {
+        stream_id: QuicStreamId,
+        data: Vec<u8>,
+    },
+    FlowControlUpdated {
+        stream_id: QuicStreamId,
+        window: u64,
+    },
+    StreamClosed {
+        stream_id: QuicStreamId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1021,9 +1093,17 @@ enum EncryptionLevel {
 
 #[derive(Debug, Clone)]
 enum KeyRotationEvent {
-    Started { key_phase: u32, trigger: KeyUpdateTrigger },
-    Completed { key_phase: u32 },
-    Failed { key_phase: u32, reason: String },
+    Started {
+        key_phase: u32,
+        trigger: KeyUpdateTrigger,
+    },
+    Completed {
+        key_phase: u32,
+    },
+    Failed {
+        key_phase: u32,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

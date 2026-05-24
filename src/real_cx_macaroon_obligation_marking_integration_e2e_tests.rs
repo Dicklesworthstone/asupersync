@@ -23,24 +23,24 @@ use crate::{
     cx::{
         Cx, Scope,
         macaroon::{
-            Macaroon, MacaroonBuilder, MacaroonVerifier, Caveat, CaveatType,
-            AttenuationChain, CapabilityToken, MacaroonSecret, MacaroonId,
-            ThirdPartyCaveat, FirstPartyCaveat, DischargeToken,
+            AttenuationChain, CapabilityToken, Caveat, CaveatType, DischargeToken,
+            FirstPartyCaveat, Macaroon, MacaroonBuilder, MacaroonId, MacaroonSecret,
+            MacaroonVerifier, ThirdPartyCaveat,
         },
-    },
-    obligation::{
-        marking::{
-            ObligationMarker, MarkingOperation, MarkingState, MarkingEvent,
-            ObligationMark, MarkingCapability, MarkingRestriction,
-            MarkingPolicy, ObligationMarkingController, MarkingSecurityContext,
-        },
-        ObligationId, ObligationState, ObligationTracker,
     },
     error::Outcome,
+    obligation::{
+        ObligationId, ObligationState, ObligationTracker,
+        marking::{
+            MarkingCapability, MarkingEvent, MarkingOperation, MarkingPolicy, MarkingRestriction,
+            MarkingSecurityContext, MarkingState, ObligationMark, ObligationMarker,
+            ObligationMarkingController,
+        },
+    },
     runtime::RuntimeBuilder,
     sync::{Barrier, Mutex, RwLock},
-    time::{Duration, Sleep, Instant},
-    types::{Budget, TaskId, Cancel},
+    time::{Duration, Instant, Sleep},
+    types::{Budget, Cancel, TaskId},
     util::{
         det_rng::{DetRng, RngSeed},
         entropy::EntropySource,
@@ -48,19 +48,19 @@ use crate::{
 };
 
 use std::{
-    collections::{HashMap, BTreeMap, HashSet},
-    sync::{
-        atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering},
-        Arc,
-    },
-    pin::Pin,
-    task::{Context, Poll},
+    collections::{BTreeMap, HashMap, HashSet},
     future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    },
+    task::{Context, Poll},
 };
 
 use futures::{
-    stream::{Stream, StreamExt},
     ready,
+    stream::{Stream, StreamExt},
 };
 
 /// Configuration for macaroon-based obligation marking integration tests
@@ -271,7 +271,8 @@ impl MacaroonMarkingEnforcementTracker {
         let violations = self.security_violations.lock().unwrap();
 
         // Ensure no unauthorized operations succeeded
-        let unauthorized_successes = checks.iter()
+        let unauthorized_successes = checks
+            .iter()
             .filter(|c| matches!(c.check_result, CapabilityCheckResult::Denied { .. }))
             .count();
 
@@ -302,13 +303,13 @@ impl MacaroonMarkingEnforcementTracker {
         let evaluations = self.caveat_evaluations.lock().unwrap();
 
         // Ensure caveat evaluations are consistent
-        evaluations.iter().all(|eval| {
-            match &eval.evaluation_result {
+        evaluations
+            .iter()
+            .all(|eval| match &eval.evaluation_result {
                 CaveatEvaluationResult::Satisfied => true,
                 CaveatEvaluationResult::Violated { reason } => !reason.is_empty(),
                 CaveatEvaluationResult::Indeterminate => true,
-            }
-        })
+            })
     }
 
     fn get_security_violation_count(&self) -> usize {
@@ -317,7 +318,8 @@ impl MacaroonMarkingEnforcementTracker {
 
     fn get_successful_marking_count(&self) -> usize {
         let operations = self.marking_operations.lock().unwrap();
-        operations.iter()
+        operations
+            .iter()
             .filter(|op| matches!(op.operation_result, MarkingOperationResult::Success { .. }))
             .count()
     }
@@ -328,7 +330,8 @@ impl MacaroonMarkingEnforcementTracker {
             return 1.0;
         }
 
-        let successful = verifications.iter()
+        let successful = verifications
+            .iter()
             .filter(|v| matches!(v.verification_result, AttenuationVerificationResult::Valid))
             .count();
 
@@ -413,7 +416,9 @@ impl MacaroonCapabilitySimulator {
         parent_id: &MacaroonId,
         restrictions: Vec<MarkingRestriction>,
     ) -> Result<MacaroonId, Box<dyn std::error::Error>> {
-        let parent = self.issued_macaroons.get(parent_id)
+        let parent = self
+            .issued_macaroons
+            .get(parent_id)
             .ok_or("Parent macaroon not found")?;
 
         let mut rng = self.rng.lock().unwrap();
@@ -431,10 +436,14 @@ impl MacaroonCapabilitySimulator {
                     attenuated_capabilities.can_mark_failed = false;
                 }
                 MarkingRestriction::ScopeRestriction { scope } => {
-                    attenuated_capabilities.scope_restrictions.push(scope.clone());
+                    attenuated_capabilities
+                        .scope_restrictions
+                        .push(scope.clone());
                 }
                 MarkingRestriction::ObligationIdRestriction { obligation_id } => {
-                    attenuated_capabilities.obligation_id_restrictions.insert(*obligation_id);
+                    attenuated_capabilities
+                        .obligation_id_restrictions
+                        .insert(*obligation_id);
                 }
                 MarkingRestriction::ExpiryTime { expiry } => {
                     // Set expiry time restriction
@@ -445,7 +454,9 @@ impl MacaroonCapabilitySimulator {
         let mut combined_restrictions = parent.restrictions.clone();
         combined_restrictions.extend(restrictions);
 
-        let attenuated_macaroon = parent.macaroon.clone()
+        let attenuated_macaroon = parent
+            .macaroon
+            .clone()
             .add_first_party_caveat("capability=restricted")?
             .add_first_party_caveat(&format!("depth={}", parent.attenuation_depth + 1))?;
 
@@ -457,10 +468,13 @@ impl MacaroonCapabilitySimulator {
             attenuation_depth: parent.attenuation_depth + 1,
         };
 
-        self.issued_macaroons.insert(attenuated_id.clone(), attenuated);
+        self.issued_macaroons
+            .insert(attenuated_id.clone(), attenuated);
 
         // Record attenuation chain
-        let mut chain = self.attenuation_chains.get(parent_id)
+        let mut chain = self
+            .attenuation_chains
+            .get(parent_id)
             .cloned()
             .unwrap_or_default();
         chain.add_attenuation(parent_id.clone(), attenuated_id.clone());
@@ -478,9 +492,11 @@ impl MacaroonCapabilitySimulator {
     ) -> CapabilityCheckResult {
         let issued = match self.issued_macaroons.get(macaroon_id) {
             Some(m) => m,
-            None => return CapabilityCheckResult::Denied {
-                reason: DenialReason::InsufficientCapability,
-            },
+            None => {
+                return CapabilityCheckResult::Denied {
+                    reason: DenialReason::InsufficientCapability,
+                };
+            }
         };
 
         // Check expiry
@@ -493,7 +509,11 @@ impl MacaroonCapabilitySimulator {
         }
 
         // Check obligation ID restrictions
-        if issued.capabilities.obligation_id_restrictions.contains(&obligation_id) {
+        if issued
+            .capabilities
+            .obligation_id_restrictions
+            .contains(&obligation_id)
+        {
             return CapabilityCheckResult::AttenuationViolation {
                 violated_caveat: format!("obligation_id={:?}", obligation_id),
             };
@@ -518,7 +538,8 @@ impl MacaroonCapabilitySimulator {
     }
 
     fn get_macaroon_attenuation_depth(&self, macaroon_id: &MacaroonId) -> u32 {
-        self.issued_macaroons.get(macaroon_id)
+        self.issued_macaroons
+            .get(macaroon_id)
             .map(|m| m.attenuation_depth)
             .unwrap_or(0)
     }
@@ -560,7 +581,10 @@ impl MockObligationMarkingController {
             scope_context: scope,
         };
 
-        self.obligations.lock().unwrap().insert(obligation_id, state);
+        self.obligations
+            .lock()
+            .unwrap()
+            .insert(obligation_id, state);
     }
 
     fn authorize_macaroon_for_obligation(
@@ -641,15 +665,11 @@ impl MockObligationMarkingController {
             (CapabilityCheckResult::Granted, MarkingOperation::MarkPending) => {
                 MarkingState::Pending
             }
-            (CapabilityCheckResult::Granted, MarkingOperation::MarkActive) => {
-                MarkingState::Active
-            }
+            (CapabilityCheckResult::Granted, MarkingOperation::MarkActive) => MarkingState::Active,
             (CapabilityCheckResult::Granted, MarkingOperation::MarkCompleted) => {
                 MarkingState::Completed
             }
-            (CapabilityCheckResult::Granted, MarkingOperation::MarkFailed) => {
-                MarkingState::Failed
-            }
+            (CapabilityCheckResult::Granted, MarkingOperation::MarkFailed) => MarkingState::Failed,
             (CapabilityCheckResult::Granted, MarkingOperation::MarkCancelled) => {
                 MarkingState::Cancelled
             }
@@ -700,7 +720,9 @@ impl MockObligationMarkingController {
             }
         }
 
-        let result = MarkingOperationResult::Success { new_state: new_state.clone() };
+        let result = MarkingOperationResult::Success {
+            new_state: new_state.clone(),
+        };
 
         let operation_event = MarkingOperationEvent {
             timestamp,
@@ -730,13 +752,17 @@ impl MockObligationMarkingController {
     }
 
     fn get_obligation_state(&self, obligation_id: ObligationId) -> Option<MarkingState> {
-        self.obligations.lock().unwrap()
+        self.obligations
+            .lock()
+            .unwrap()
             .get(&obligation_id)
             .map(|s| s.current_marking.clone())
     }
 
     fn get_marking_history(&self, obligation_id: ObligationId) -> Vec<MarkingEvent> {
-        self.obligations.lock().unwrap()
+        self.obligations
+            .lock()
+            .unwrap()
             .get(&obligation_id)
             .map(|s| s.marking_history.clone())
             .unwrap_or_default()
@@ -757,9 +783,7 @@ mod tests {
         let controller = MockObligationMarkingController::new(capability_simulator.clone());
 
         // Create test obligations
-        let obligation_ids: Vec<ObligationId> = (0..8)
-            .map(|i| ObligationId::new(i))
-            .collect();
+        let obligation_ids: Vec<ObligationId> = (0..8).map(|i| ObligationId::new(i)).collect();
 
         for &obligation_id in &obligation_ids {
             controller.create_obligation(obligation_id, "test-scope".to_string());
@@ -787,41 +811,49 @@ mod tests {
                         obligation_id: obligation_ids[0],
                     },
                 ],
-            ).unwrap()
+            )
+            .unwrap()
         };
 
         // Authorize restricted macaroon for subset of obligations
         for &obligation_id in &obligation_ids[1..4] {
-            controller.authorize_macaroon_for_obligation(obligation_id, restricted_macaroon.clone());
+            controller
+                .authorize_macaroon_for_obligation(obligation_id, restricted_macaroon.clone());
         }
 
         // Test operations with root macaroon (should succeed)
         for &obligation_id in &obligation_ids[0..2] {
             // Mark as pending
-            let result = controller.attempt_marking_operation(
-                root_macaroon.clone(),
-                obligation_id,
-                MarkingOperation::MarkPending,
-                tracker.clone(),
-            ).await;
+            let result = controller
+                .attempt_marking_operation(
+                    root_macaroon.clone(),
+                    obligation_id,
+                    MarkingOperation::MarkPending,
+                    tracker.clone(),
+                )
+                .await;
             assert!(matches!(result, MarkingOperationResult::Success { .. }));
 
             // Mark as active
-            let result = controller.attempt_marking_operation(
-                root_macaroon.clone(),
-                obligation_id,
-                MarkingOperation::MarkActive,
-                tracker.clone(),
-            ).await;
+            let result = controller
+                .attempt_marking_operation(
+                    root_macaroon.clone(),
+                    obligation_id,
+                    MarkingOperation::MarkActive,
+                    tracker.clone(),
+                )
+                .await;
             assert!(matches!(result, MarkingOperationResult::Success { .. }));
 
             // Mark as completed (should succeed for root macaroon)
-            let result = controller.attempt_marking_operation(
-                root_macaroon.clone(),
-                obligation_id,
-                MarkingOperation::MarkCompleted,
-                tracker.clone(),
-            ).await;
+            let result = controller
+                .attempt_marking_operation(
+                    root_macaroon.clone(),
+                    obligation_id,
+                    MarkingOperation::MarkCompleted,
+                    tracker.clone(),
+                )
+                .await;
             assert!(matches!(result, MarkingOperationResult::Success { .. }));
         }
 
@@ -829,44 +861,59 @@ mod tests {
         for &obligation_id in &obligation_ids[1..3] {
             // Reset obligation state for testing
             controller.create_obligation(obligation_id, "test-scope".to_string());
-            controller.authorize_macaroon_for_obligation(obligation_id, restricted_macaroon.clone());
+            controller
+                .authorize_macaroon_for_obligation(obligation_id, restricted_macaroon.clone());
 
             // Mark as pending (should succeed)
-            let result = controller.attempt_marking_operation(
-                restricted_macaroon.clone(),
-                obligation_id,
-                MarkingOperation::MarkPending,
-                tracker.clone(),
-            ).await;
+            let result = controller
+                .attempt_marking_operation(
+                    restricted_macaroon.clone(),
+                    obligation_id,
+                    MarkingOperation::MarkPending,
+                    tracker.clone(),
+                )
+                .await;
             assert!(matches!(result, MarkingOperationResult::Success { .. }));
 
             // Mark as active (should succeed)
-            let result = controller.attempt_marking_operation(
-                restricted_macaroon.clone(),
-                obligation_id,
-                MarkingOperation::MarkActive,
-                tracker.clone(),
-            ).await;
+            let result = controller
+                .attempt_marking_operation(
+                    restricted_macaroon.clone(),
+                    obligation_id,
+                    MarkingOperation::MarkActive,
+                    tracker.clone(),
+                )
+                .await;
             assert!(matches!(result, MarkingOperationResult::Success { .. }));
 
             // Mark as completed (should fail due to restriction)
-            let result = controller.attempt_marking_operation(
-                restricted_macaroon.clone(),
-                obligation_id,
-                MarkingOperation::MarkCompleted,
-                tracker.clone(),
-            ).await;
-            assert!(matches!(result, MarkingOperationResult::CaveatViolation { .. }));
+            let result = controller
+                .attempt_marking_operation(
+                    restricted_macaroon.clone(),
+                    obligation_id,
+                    MarkingOperation::MarkCompleted,
+                    tracker.clone(),
+                )
+                .await;
+            assert!(matches!(
+                result,
+                MarkingOperationResult::CaveatViolation { .. }
+            ));
         }
 
         // Test unauthorized obligation access
-        let result = controller.attempt_marking_operation(
-            restricted_macaroon.clone(),
-            obligation_ids[0], // Restricted obligation
-            MarkingOperation::MarkPending,
-            tracker.clone(),
-        ).await;
-        assert!(matches!(result, MarkingOperationResult::CaveatViolation { .. }));
+        let result = controller
+            .attempt_marking_operation(
+                restricted_macaroon.clone(),
+                obligation_ids[0], // Restricted obligation
+                MarkingOperation::MarkPending,
+                tracker.clone(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            MarkingOperationResult::CaveatViolation { .. }
+        ));
 
         // Verify enforcement tracking
         assert!(tracker.verify_capability_enforcement());
@@ -909,7 +956,8 @@ mod tests {
 
             current_macaroon = {
                 let mut sim = capability_simulator.lock().unwrap();
-                sim.attenuate_macaroon(&current_macaroon, restrictions).unwrap()
+                sim.attenuate_macaroon(&current_macaroon, restrictions)
+                    .unwrap()
             };
 
             attenuation_chain.push(current_macaroon.clone());
@@ -923,56 +971,74 @@ mod tests {
             controller.authorize_macaroon_for_obligation(obligation_id, macaroon_id.clone());
 
             // Operations that should work at all depths
-            let result = controller.attempt_marking_operation(
-                macaroon_id.clone(),
-                obligation_id,
-                MarkingOperation::MarkPending,
-                tracker.clone(),
-            ).await;
-            assert!(matches!(result, MarkingOperationResult::Success { .. }));
-
-            let result = controller.attempt_marking_operation(
-                macaroon_id.clone(),
-                obligation_id,
-                MarkingOperation::MarkActive,
-                tracker.clone(),
-            ).await;
-            assert!(matches!(result, MarkingOperationResult::Success { .. }));
-
-            // Operations restricted at specific depths
-            if depth >= 0 { // Depth 1 restriction: NoMarkingFailed
-                let result = controller.attempt_marking_operation(
-                    macaroon_id.clone(),
-                    obligation_id,
-                    MarkingOperation::MarkFailed,
-                    tracker.clone(),
-                ).await;
-                if depth == 0 {
-                    // First attenuation restricts MarkFailed
-                    assert!(matches!(result, MarkingOperationResult::CaveatViolation { .. }));
-                }
-            }
-
-            if depth >= 1 { // Depth 2 restriction: NoMarkingCancelled
-                // Reset to active state for cancellation test
-                controller.create_obligation(obligation_id, "deep-chain-test".to_string());
-                controller.authorize_macaroon_for_obligation(obligation_id, macaroon_id.clone());
-                controller.attempt_marking_operation(
+            let result = controller
+                .attempt_marking_operation(
                     macaroon_id.clone(),
                     obligation_id,
                     MarkingOperation::MarkPending,
                     tracker.clone(),
-                ).await;
+                )
+                .await;
+            assert!(matches!(result, MarkingOperationResult::Success { .. }));
 
-                let result = controller.attempt_marking_operation(
+            let result = controller
+                .attempt_marking_operation(
                     macaroon_id.clone(),
                     obligation_id,
-                    MarkingOperation::MarkCancelled,
+                    MarkingOperation::MarkActive,
                     tracker.clone(),
-                ).await;
+                )
+                .await;
+            assert!(matches!(result, MarkingOperationResult::Success { .. }));
+
+            // Operations restricted at specific depths
+            if depth >= 0 {
+                // Depth 1 restriction: NoMarkingFailed
+                let result = controller
+                    .attempt_marking_operation(
+                        macaroon_id.clone(),
+                        obligation_id,
+                        MarkingOperation::MarkFailed,
+                        tracker.clone(),
+                    )
+                    .await;
+                if depth == 0 {
+                    // First attenuation restricts MarkFailed
+                    assert!(matches!(
+                        result,
+                        MarkingOperationResult::CaveatViolation { .. }
+                    ));
+                }
+            }
+
+            if depth >= 1 {
+                // Depth 2 restriction: NoMarkingCancelled
+                // Reset to active state for cancellation test
+                controller.create_obligation(obligation_id, "deep-chain-test".to_string());
+                controller.authorize_macaroon_for_obligation(obligation_id, macaroon_id.clone());
+                controller
+                    .attempt_marking_operation(
+                        macaroon_id.clone(),
+                        obligation_id,
+                        MarkingOperation::MarkPending,
+                        tracker.clone(),
+                    )
+                    .await;
+
+                let result = controller
+                    .attempt_marking_operation(
+                        macaroon_id.clone(),
+                        obligation_id,
+                        MarkingOperation::MarkCancelled,
+                        tracker.clone(),
+                    )
+                    .await;
                 if depth == 1 {
                     // Second attenuation restricts MarkCancelled
-                    assert!(matches!(result, MarkingOperationResult::CaveatViolation { .. }));
+                    assert!(matches!(
+                        result,
+                        MarkingOperationResult::CaveatViolation { .. }
+                    ));
                 }
             }
         }
@@ -991,7 +1057,9 @@ mod tests {
         };
         let tracker = Arc::new(MacaroonMarkingEnforcementTracker::new());
         let capability_simulator = Arc::new(Mutex::new(MacaroonCapabilitySimulator::new()));
-        let controller = Arc::new(MockObligationMarkingController::new(capability_simulator.clone()));
+        let controller = Arc::new(MockObligationMarkingController::new(
+            capability_simulator.clone(),
+        ));
 
         // Create multiple obligations
         let obligation_ids: Vec<ObligationId> = (0..config.max_obligations)
@@ -999,7 +1067,10 @@ mod tests {
             .collect();
 
         for &obligation_id in &obligation_ids {
-            controller.create_obligation(obligation_id, format!("concurrent-test-{}", obligation_id.0));
+            controller.create_obligation(
+                obligation_id,
+                format!("concurrent-test-{}", obligation_id.0),
+            );
         }
 
         // Create diverse macaroon set with different restrictions
@@ -1007,31 +1078,39 @@ mod tests {
             let mut sim = capability_simulator.lock().unwrap();
             let root = sim.issue_root_macaroon("concurrent-root");
 
-            let restricted_complete = sim.attenuate_macaroon(
-                &root,
-                vec![MarkingRestriction::NoMarkingCompleted],
-            ).unwrap();
+            let restricted_complete = sim
+                .attenuate_macaroon(&root, vec![MarkingRestriction::NoMarkingCompleted])
+                .unwrap();
 
-            let restricted_failed = sim.attenuate_macaroon(
-                &root,
-                vec![MarkingRestriction::NoMarkingFailed],
-            ).unwrap();
+            let restricted_failed = sim
+                .attenuate_macaroon(&root, vec![MarkingRestriction::NoMarkingFailed])
+                .unwrap();
 
-            let scope_restricted = sim.attenuate_macaroon(
-                &root,
-                vec![MarkingRestriction::ScopeRestriction {
-                    scope: "limited-scope".to_string(),
-                }],
-            ).unwrap();
+            let scope_restricted = sim
+                .attenuate_macaroon(
+                    &root,
+                    vec![MarkingRestriction::ScopeRestriction {
+                        scope: "limited-scope".to_string(),
+                    }],
+                )
+                .unwrap();
 
-            let obligation_restricted = sim.attenuate_macaroon(
-                &root,
-                vec![MarkingRestriction::ObligationIdRestriction {
-                    obligation_id: obligation_ids[0],
-                }],
-            ).unwrap();
+            let obligation_restricted = sim
+                .attenuate_macaroon(
+                    &root,
+                    vec![MarkingRestriction::ObligationIdRestriction {
+                        obligation_id: obligation_ids[0],
+                    }],
+                )
+                .unwrap();
 
-            vec![root, restricted_complete, restricted_failed, scope_restricted, obligation_restricted]
+            vec![
+                root,
+                restricted_complete,
+                restricted_failed,
+                scope_restricted,
+                obligation_restricted,
+            ]
         };
 
         // Authorize macaroons for different obligation subsets
@@ -1039,7 +1118,8 @@ mod tests {
             for (j, macaroon_id) in macaroons.iter().enumerate() {
                 // Selective authorization to create capability boundaries
                 if (i + j) % 3 == 0 {
-                    controller.authorize_macaroon_for_obligation(obligation_id, macaroon_id.clone());
+                    controller
+                        .authorize_macaroon_for_obligation(obligation_id, macaroon_id.clone());
                 }
             }
         }
@@ -1067,12 +1147,14 @@ mod tests {
                     ];
 
                     for operation in operations {
-                        let result = controller.attempt_marking_operation(
-                            macaroon_id.clone(),
-                            obligation_id,
-                            operation.clone(),
-                            tracker.clone(),
-                        ).await;
+                        let result = controller
+                            .attempt_marking_operation(
+                                macaroon_id.clone(),
+                                obligation_id,
+                                operation.clone(),
+                                tracker.clone(),
+                            )
+                            .await;
 
                         // Small delay to allow interleaving
                         Sleep::new(Instant::now() + Duration::from_millis(10)).await;
@@ -1099,10 +1181,12 @@ mod tests {
 
         // Check that various operation types were attempted
         let operations = tracker.marking_operations.lock().unwrap();
-        let operation_types: HashSet<_> = operations.iter()
-            .map(|op| op.operation.clone())
-            .collect();
-        assert!(operation_types.len() > 1, "Should have diverse operation types");
+        let operation_types: HashSet<_> =
+            operations.iter().map(|op| op.operation.clone()).collect();
+        assert!(
+            operation_types.len() > 1,
+            "Should have diverse operation types"
+        );
     }
 
     #[test]
@@ -1143,16 +1227,29 @@ mod tests {
 
         let results = vec![
             Granted,
-            Denied { reason: InsufficientCapability },
-            Denied { reason: ExpiredCaveat },
-            AttenuationViolation { violated_caveat: "test-caveat".to_string() },
+            Denied {
+                reason: InsufficientCapability,
+            },
+            Denied {
+                reason: ExpiredCaveat,
+            },
+            AttenuationViolation {
+                violated_caveat: "test-caveat".to_string(),
+            },
             ChainValidationFailure,
         ];
 
         for result in results {
             match result {
                 Granted => assert!(true),
-                Denied { reason } => assert!(matches!(reason, InsufficientCapability | ExpiredCaveat | ScopeMismatch | ObligationNotFound | MarkingRestriction)),
+                Denied { reason } => assert!(matches!(
+                    reason,
+                    InsufficientCapability
+                        | ExpiredCaveat
+                        | ScopeMismatch
+                        | ObligationNotFound
+                        | MarkingRestriction
+                )),
                 AttenuationViolation { violated_caveat } => assert!(!violated_caveat.is_empty()),
                 ChainValidationFailure => assert!(true),
             }
@@ -1176,7 +1273,7 @@ struct MacaroonId(String);
 
 impl MacaroonId {
     fn generate(rng: &mut DetRng) -> Self {
-        Self(format!("macaroon-{:016x}", rng.gen::<u64>()))
+        Self(format!("macaroon-{:016x}", rng.next_u64()))
     }
 }
 
@@ -1185,7 +1282,7 @@ struct MacaroonSecret(Vec<u8>);
 
 impl MacaroonSecret {
     fn generate(rng: &mut DetRng) -> Self {
-        Self((0..32).map(|_| rng.gen()).collect())
+        Self((0..32).map(|_| (rng.next_u64() as u8)).collect())
     }
 }
 
@@ -1198,7 +1295,10 @@ struct Macaroon {
 }
 
 impl Macaroon {
-    fn add_first_party_caveat(mut self, predicate: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    fn add_first_party_caveat(
+        mut self,
+        predicate: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         self.caveats.push(Caveat::FirstParty(FirstPartyCaveat {
             predicate: predicate.to_string(),
         }));

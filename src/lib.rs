@@ -367,6 +367,8 @@ pub mod real_e2e_hardening_consolidation;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_epoch_obligation_no_leak_proof_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_epoch_sharded_state_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_fs_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_fs_uring_e2e_tests;
@@ -393,11 +395,13 @@ pub mod real_http_h2_concurrent_load_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h2_hpack_connection_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_http_h2_server_grpc_protobuf_streaming_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h2_server_messaging_kafka_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_http_h3_server_websocket_upgrade_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h3_native_net_quic_native_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_http_h3_server_websocket_upgrade_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_pool_service_discover_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
@@ -423,13 +427,13 @@ pub mod real_net_dns_resolver_happy_eyeballs_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_quic_native_streams_net_quic_native_tls_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_net_websocket_frame_sync_notify_integration_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_net_websocket_http_h1_upgrade_integration_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_tls_connector_messaging_kafka_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_udp_net_quic_native_datagram_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_net_websocket_frame_sync_notify_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_net_websocket_http_h1_upgrade_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_e2e_tests;
 #[cfg(any(
@@ -464,6 +468,8 @@ pub mod real_raptorq_scheduler_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_systematic_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_runtime_blocking_pool_cancel_symbol_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_runtime_obligation_trace_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_runtime_region_table_runtime_obligation_table_integration_e2e_tests;
@@ -476,6 +482,8 @@ pub mod real_server_session_evidence_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_service_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_signal_graceful_server_shutdown_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_signal_graceful_shutdown_supervision_tree_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_sqlite_e2e_tests;
@@ -483,6 +491,10 @@ pub mod real_sqlite_e2e_tests;
 pub mod real_supervision_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_tcp_unix_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_time_intrusive_wheel_combinator_timeout_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_time_sleep_runtime_scheduler_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_timer_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
@@ -494,9 +506,9 @@ pub mod real_tls_acceptor_http_h1_server_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_tls_acceptor_http_h2_connection_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_types_budget_combinator_rate_limit_integration_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_transport_security_authenticated_routing_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_types_budget_combinator_rate_limit_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_web_multipart_codec_raptorq_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
@@ -505,16 +517,6 @@ pub mod real_web_sse_broadcast_fanout_e2e_tests;
 pub mod real_websocket_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_websocket_server_channel_broadcast_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_runtime_blocking_pool_cancel_symbol_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_http_h2_server_grpc_protobuf_streaming_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_signal_graceful_server_shutdown_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_time_intrusive_wheel_combinator_timeout_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_time_sleep_runtime_scheduler_integration_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
