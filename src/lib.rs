@@ -313,6 +313,10 @@ pub mod raptorq_deep_dive_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod real_service_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod real_http_grpc_e2e_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod real_websocket_e2e_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod raptorq_rfc6330_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
