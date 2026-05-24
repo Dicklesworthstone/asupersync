@@ -8,7 +8,8 @@
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod fs_config_tests {
     use crate::config::{
-        EncodingConfig, RaptorQConfig, ResourceConfig, TimeoutConfig, TransportConfig,
+        EncodingConfig, RaptorQConfig, ResourceConfig, SecurityConfig, TimeoutConfig,
+        TransportConfig,
     };
     use crate::fs::metadata::Permissions;
     use crate::fs::vfs::{Vfs, VfsFile};
@@ -18,7 +19,7 @@ mod fs_config_tests {
         ENV_STEAL_BATCH_SIZE, ENV_TASK_QUEUE_DEPTH, ENV_THREAD_NAME_PREFIX, ENV_THREAD_STACK_SIZE,
         ENV_WORKER_THREADS,
     };
-    use crate::security::{AuthMode, SecurityConfig};
+    use crate::security::AuthMode;
     use crate::test_utils::init_test_logging;
     use proptest::prelude::*;
     use proptest::{prop_oneof, strategy::BoxedStrategy, strategy::Just};
