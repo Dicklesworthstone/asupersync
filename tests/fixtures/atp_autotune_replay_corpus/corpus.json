@@ -9,7 +9,6 @@
         "trace_id": "trace-atp-clean-001",
         "workload_id": "workload-clean-bulk",
         "sample_count": 16,
-        "consumer_status": "pass",
         "samples": [
           { "metric": "atp.autotune.rtt_micros", "value": 80000 },
           { "metric": "atp.autotune.loss_permille", "value": 0 },
@@ -30,6 +29,7 @@
         "trace_id": "trace-atp-clean-001",
         "workload_id": "workload-clean-bulk",
         "sample_count": 16,
+        "consumer_status": "pass",
         "samples": [
           { "metric": "atp.autotune.rtt_micros", "value": 80000 },
           { "metric": "atp.autotune.loss_permille", "value": 0 },
@@ -79,7 +79,6 @@
         "trace_id": "trace-atp-loss-001",
         "workload_id": "workload-lossy-high-roi",
         "sample_count": 16,
-        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.loss_permille", "value": 26 },
           { "metric": "atp.autotune.repair_roi_permille", "value": 900 },
@@ -98,6 +97,7 @@
         "trace_id": "trace-atp-loss-001",
         "workload_id": "workload-lossy-high-roi",
         "sample_count": 16,
+        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.loss_permille", "value": 26 },
           { "metric": "atp.autotune.repair_roi_permille", "value": 900 },
@@ -147,7 +147,6 @@
         "trace_id": "trace-atp-pto-001",
         "workload_id": "workload-high-pto",
         "sample_count": 16,
-        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.loss_permille", "value": 0 },
           { "metric": "atp.autotune.pto_micros", "value": 250001 }
@@ -164,6 +163,7 @@
         "trace_id": "trace-atp-pto-001",
         "workload_id": "workload-high-pto",
         "sample_count": 16,
+        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.loss_permille", "value": 0 },
           { "metric": "atp.autotune.pto_micros", "value": 250001 }
@@ -211,7 +211,6 @@
         "trace_id": "trace-atp-disk-001",
         "workload_id": "workload-disk-lag",
         "sample_count": 16,
-        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.disk_read_lag_micros", "value": 100001 },
           { "metric": "atp.autotune.disk_write_lag_micros", "value": 100001 }
@@ -228,6 +227,7 @@
         "trace_id": "trace-atp-disk-001",
         "workload_id": "workload-disk-lag",
         "sample_count": 16,
+        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.disk_read_lag_micros", "value": 100001 },
           { "metric": "atp.autotune.disk_write_lag_micros", "value": 100001 }
@@ -276,7 +276,6 @@
         "trace_id": "trace-atp-cpu-001",
         "workload_id": "workload-coding-backlog",
         "sample_count": 16,
-        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.encode_backlog_symbols", "value": 4097 },
           { "metric": "atp.autotune.decode_backlog_symbols", "value": 4097 }
@@ -293,6 +292,7 @@
         "trace_id": "trace-atp-cpu-001",
         "workload_id": "workload-coding-backlog",
         "sample_count": 16,
+        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.encode_backlog_symbols", "value": 4097 },
           { "metric": "atp.autotune.decode_backlog_symbols", "value": 4097 }
@@ -341,7 +341,6 @@
         "trace_id": "trace-atp-relay-001",
         "workload_id": "workload-relay-cost",
         "sample_count": 16,
-        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.relay_cost_micros_per_mib", "value": 500001 }
         ]
@@ -357,6 +356,7 @@
         "trace_id": "trace-atp-relay-001",
         "workload_id": "workload-relay-cost",
         "sample_count": 16,
+        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.relay_cost_micros_per_mib", "value": 500001 }
         ],
@@ -403,7 +403,6 @@
         "trace_id": "trace-atp-migration-001",
         "workload_id": "workload-path-migration",
         "sample_count": 16,
-        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.migration_events", "value": 1 }
         ]
@@ -419,6 +418,7 @@
         "trace_id": "trace-atp-migration-001",
         "workload_id": "workload-path-migration",
         "sample_count": 16,
+        "consumer_status": "degraded",
         "samples": [
           { "metric": "atp.autotune.migration_events", "value": 1 }
         ],
@@ -465,7 +465,6 @@
         "trace_id": "trace-atp-duplicate-001",
         "workload_id": "workload-duplicate-loss",
         "sample_count": 16,
-        "consumer_status": "pass",
         "samples": [
           { "metric": "atp.autotune.loss_permille", "value": 40 },
           { "metric": "atp.autotune.loss_permille", "value": 0 },
@@ -483,6 +482,7 @@
         "trace_id": "trace-atp-duplicate-001",
         "workload_id": "workload-duplicate-loss",
         "sample_count": 16,
+        "consumer_status": "pass",
         "samples": [
           { "metric": "atp.autotune.loss_permille", "value": 40 },
           { "metric": "atp.autotune.loss_permille", "value": 0 },
@@ -587,7 +587,6 @@
         "trace_id": "",
         "workload_id": "workload-stale-trace",
         "sample_count": 16,
-        "consumer_status": "malformed",
         "samples": [
           { "metric": "atp.autotune.loss_permille", "value": 26 }
         ]
@@ -603,6 +602,7 @@
         "trace_id": "",
         "workload_id": "workload-stale-trace",
         "sample_count": 16,
+        "consumer_status": "malformed",
         "samples": [
           { "metric": "atp.autotune.loss_permille", "value": 26 }
         ],

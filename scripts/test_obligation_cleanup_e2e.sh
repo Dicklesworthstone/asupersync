@@ -99,8 +99,8 @@ materialize_test_artifacts_from_log() {
     mkdir -p "$TEST_ARTIFACT_SCENARIO_DIR"
 
     awk '
-        /^ASUPERSYNC_OBLIGATION_CLEANUP_EVENTS_BEGIN / { capture = 1; next }
-        /^ASUPERSYNC_OBLIGATION_CLEANUP_EVENTS_END / { capture = 0; next }
+        /ASUPERSYNC_OBLIGATION_CLEANUP_EVENTS_BEGIN / { capture = 1; next }
+        /ASUPERSYNC_OBLIGATION_CLEANUP_EVENTS_END / { capture = 0; next }
         capture { print }
     ' "$LOG_FILE" > "${TEST_ARTIFACT_SCENARIO_DIR}/events.ndjson"
 

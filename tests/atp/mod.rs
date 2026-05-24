@@ -9,9 +9,11 @@ pub mod e2e_proof_suite;
 pub mod forensics;
 pub mod obligation_tracking;
 pub mod quic;
+pub mod security;
 
 pub use crash_injection::*;
 pub use e2e_proof_suite::*;
 pub use forensics::*;
 pub use obligation_tracking::*;
 pub use quic::*;
+pub use security::*;

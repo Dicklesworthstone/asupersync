@@ -464,6 +464,8 @@ pub mod real_obligation_calm_obligation_eprocess_integration_e2e_tests;
 pub mod real_obligation_choreography_pipeline_obligation_session_types_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_obligation_graded_obligation_no_aliasing_proof_nested_capability_e2e_tests;
 #[cfg(any(
     all(test, feature = "real-service-e2e"),
     feature = "obligation-cleanup-e2e"
