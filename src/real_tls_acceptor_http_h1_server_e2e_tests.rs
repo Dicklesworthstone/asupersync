@@ -1231,7 +1231,9 @@ mod tests {
             tls_version: TlsVersion::Tls13,
         };
 
-        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config).await.unwrap();
+        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config)
+            .await
+            .expect("Failed to create TLS HTTP integration harness for basic handshake test");
 
         // Add normal clients that complete handshake before HTTP
         for _ in 0..3 {

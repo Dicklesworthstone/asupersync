@@ -925,8 +925,17 @@ mod tests {
                 CancelOperationType::LinearHierarchy
             );
             assert_eq!(operation.scope_tree_depth, 5);
-            assert!(operation.cancellation_success_rate >= 0.8);
-            assert!(operation.cancel_propagation_latency_ns < 100_000_000); // < 100ms
+            assert!(
+                operation.cancellation_success_rate >= 0.8,
+                "Cancellation success rate should be at least 80%, got: {:.2}%",
+                operation.cancellation_success_rate * 100.0
+            );
+            assert!(
+                operation.cancel_propagation_latency_ns < 100_000_000, // < 100ms
+                "Cancel propagation latency should be under 100ms, got: {} ns ({:.2} ms)",
+                operation.cancel_propagation_latency_ns,
+                operation.cancel_propagation_latency_ns as f64 / 1_000_000.0
+            );
 
             let stats = manager.get_stats_summary();
             assert!(stats.total_scopes_created >= 5);

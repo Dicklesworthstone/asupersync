@@ -563,12 +563,20 @@ mod tests {
             assert!(!encoded.source_symbols.is_empty(), "Should have source symbols");
             assert_eq!(encoded.repair_symbols.len(), 10, "Should have 10 repair symbols");
             assert_eq!(encoded.boundary_info.symbol_size, 1316);
-            assert!(encoded.boundary_info.original_file_size > 0);
+            assert!(
+                encoded.boundary_info.original_file_size > 0,
+                "Original file size should be greater than 0, got: {}",
+                encoded.boundary_info.original_file_size
+            );
 
             // Verify statistics
             let pipeline_stats = pipeline.get_stats();
             assert_eq!(pipeline_stats.files_processed, 1);
-            assert!(pipeline_stats.source_symbols_created > 0);
+            assert!(
+                pipeline_stats.source_symbols_created > 0,
+                "Pipeline should have created source symbols, got: {}",
+                pipeline_stats.source_symbols_created
+            );
 
             let reader_stats = pipeline.get_reader_stats();
             assert_eq!(reader_stats.files_read, 1);
