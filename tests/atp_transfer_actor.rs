@@ -1,5 +1,7 @@
 #[path = "../src/atp/actor/mod.rs"]
 mod actor;
+#[path = "../src/atp/autotune.rs"]
+mod autotune;
 #[path = "../src/atp/transfer/mod.rs"]
 mod transfer;
 
