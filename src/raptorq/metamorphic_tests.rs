@@ -1938,17 +1938,22 @@ fn mr_repair_symbol_minimality_property() {
 
         if symbols.len() >= k_actual + 2 && k_actual >= 10 {
             // Start with K-1 symbols (should fail)
-            let insufficient_symbols: Vec<_> = symbols.iter().take(k_actual - 1).collect();
-            let initial_decode = decode_payload(insufficient_symbols, k_actual, symbol_size, original_data.len());
+            let insufficient_symbols: Vec<_> =
+                symbols.iter().take(k_actual - 1).cloned().collect();
+            let initial_decode =
+                decode_payload(&insufficient_symbols, k_actual, symbol_size, original_data.len());
 
             if initial_decode.is_err() {
                 // Add one more symbol (should improve or stay same, never worse)
-                let sufficient_symbols: Vec<_> = symbols.iter().take(k_actual).collect();
-                let improved_decode = decode_payload(sufficient_symbols, k_actual, symbol_size, original_data.len());
+                let sufficient_symbols: Vec<_> = symbols.iter().take(k_actual).cloned().collect();
+                let improved_decode =
+                    decode_payload(&sufficient_symbols, k_actual, symbol_size, original_data.len());
 
                 // Add one more repair symbol beyond minimum
-                let extra_symbols: Vec<_> = symbols.iter().take(k_actual + 1).collect();
-                let extra_decode = decode_payload(extra_symbols, k_actual, symbol_size, original_data.len());
+                let extra_symbols: Vec<_> =
+                    symbols.iter().take(k_actual + 1).cloned().collect();
+                let extra_decode =
+                    decode_payload(&extra_symbols, k_actual, symbol_size, original_data.len());
 
                 // Monotonicity: more symbols should not make success rate worse
                 let sufficient_success = improved_decode.is_ok();
@@ -2400,6 +2405,7 @@ fn mr_gaussian_solve_determinism() {
     )| {
         if !matrix_data.is_empty() && !matrix_data[0].is_empty() &&
            matrix_data.len() == rhs_data.len() &&
+           matrix_data.iter().all(|row| row.len() == matrix_data[0].len()) &&
            rhs_data.iter().all(|row| row.len() == matrix_data[0].len()) {
 
             let rows = matrix_data.len();
@@ -2412,12 +2418,8 @@ fn mr_gaussian_solve_determinism() {
                 let mut solver2 = GaussianSolver::new(rows, cols);
 
                 for (i, (matrix_row, rhs_row)) in matrix_data.iter().zip(rhs_data.iter()).enumerate() {
-                    if solver1.add_row(i, matrix_row.clone(), DenseRow::new(rhs_row.clone())).is_err() {
-                        return Ok(());
-                    }
-                    if solver2.add_row(i, matrix_row.clone(), DenseRow::new(rhs_row.clone())).is_err() {
-                        return Ok(());
-                    }
+                    solver1.set_row(i, matrix_row, DenseRow::new(rhs_row.clone()));
+                    solver2.set_row(i, matrix_row, DenseRow::new(rhs_row.clone()));
                 }
 
                 let result1 = solver1.solve();
@@ -2604,20 +2606,18 @@ fn mr_dense_row_operation_consistency() {
 #[test]
 fn mr_codec_roundtrip_identity() {
     use crate::bytes::{Bytes, BytesMut};
-    use crate::codec::{BytesCodec, LengthDelimitedCodec, LinesCodec};
+    use crate::codec::{BytesCodec, LengthDelimitedCodec};
     use crate::codec::{Decoder, Encoder};
-    use std::io;
 
     proptest!(|(data: Vec<u8>)| {
         if !data.is_empty() {
             // Test BytesCodec round-trip
             {
-                let codec = BytesCodec::new();
+                let mut codec = BytesCodec::new();
                 let mut encode_buf = BytesMut::new();
 
                 if let Ok(()) = codec.encode(Bytes::from(data.clone()), &mut encode_buf) {
-                    let mut decode_result = encode_buf.freeze();
-                    match codec.decode(&mut decode_result) {
+                    match codec.decode(&mut encode_buf) {
                         Ok(Some(decoded)) => {
                             prop_assert_eq!(
                                 decoded.as_ref(), data.as_slice(),
@@ -2636,12 +2636,11 @@ fn mr_codec_roundtrip_identity() {
 
             // Test LengthDelimitedCodec round-trip
             {
-                let codec = LengthDelimitedCodec::new();
+                let mut codec = LengthDelimitedCodec::new();
                 let mut encode_buf = BytesMut::new();
 
-                if let Ok(()) = codec.encode(Bytes::from(data.clone()), &mut encode_buf) {
-                    let mut decode_input = encode_buf.freeze();
-                    match codec.decode(&mut decode_input) {
+                if let Ok(()) = codec.encode(BytesMut::from(data.as_slice()), &mut encode_buf) {
+                    match codec.decode(&mut encode_buf) {
                         Ok(Some(decoded)) => {
                             prop_assert_eq!(
                                 decoded.as_ref(), data.as_slice(),
@@ -2671,37 +2670,34 @@ fn mr_codec_roundtrip_identity() {
 ///   - Partial buffer handling errors
 #[test]
 fn mr_codec_streaming_consistency() {
-    use crate::bytes::{Bytes, BytesMut};
-    use crate::codec::{Decoder, LengthDelimitedCodec};
+    use crate::bytes::BytesMut;
+    use crate::codec::{Decoder, Encoder, LengthDelimitedCodec};
 
     proptest!(|(
         data: Vec<u8>,
         chunk_size in 1usize..=100usize,
     )| {
         if !data.is_empty() && chunk_size > 0 {
-            let codec = LengthDelimitedCodec::new();
+            let mut codec = LengthDelimitedCodec::new();
             let mut encode_buf = BytesMut::new();
 
             // First encode the data
-            if let Ok(()) = codec.encode(Bytes::from(data.clone()), &mut encode_buf) {
+            if let Ok(()) = codec.encode(BytesMut::from(data.as_slice()), &mut encode_buf) {
                 let encoded_data = encode_buf.freeze();
 
                 // Full decode
-                let full_codec = LengthDelimitedCodec::new();
-                let mut full_input = encoded_data.clone();
+                let mut full_codec = LengthDelimitedCodec::new();
+                let mut full_input = BytesMut::from(encoded_data.as_ref());
                 let full_result = full_codec.decode(&mut full_input);
 
                 // Chunked decode
-                let chunked_codec = LengthDelimitedCodec::new();
+                let mut chunked_codec = LengthDelimitedCodec::new();
                 let mut chunked_results = Vec::new();
-                let chunks: Vec<Bytes> = encoded_data
-                    .chunks(chunk_size)
-                    .map(|chunk| Bytes::copy_from_slice(chunk))
-                    .collect();
+                let mut chunked_input = BytesMut::new();
 
-                for chunk in chunks {
-                    let mut chunk_input = chunk;
-                    if let Ok(Some(decoded)) = chunked_codec.decode(&mut chunk_input) {
+                for chunk in encoded_data.chunks(chunk_size) {
+                    chunked_input.extend_from_slice(chunk);
+                    if let Ok(Some(decoded)) = chunked_codec.decode(&mut chunked_input) {
                         chunked_results.push(decoded);
                     }
                 }
@@ -2835,7 +2831,7 @@ fn mr_bytes_mut_freeze_invariance() {
 
     proptest!(|(data: Vec<u8>)| {
         if !data.is_empty() {
-            let mut bytes_mut = BytesMut::from(data.as_slice());
+            let bytes_mut = BytesMut::from(data.as_slice());
             let pre_freeze_data = bytes_mut.to_vec();
 
             // Freeze the mutable buffer

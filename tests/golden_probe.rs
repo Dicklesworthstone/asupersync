@@ -75,7 +75,7 @@ fn probe_tuple_golden() {
     ];
 
     for (j, w, p, x) in cases {
-        let p1 = next_prime_ge(p);
+        let p1 = next_prime_ge(p).expect("probe primes are well within usize range");
         let t = tuple(j, w, p, p1, x);
         let indices = tuple_indices(t, w, p, p1);
         eprintln!(

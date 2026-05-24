@@ -5221,7 +5221,8 @@ mod golden_vectors {
     #[test]
     fn golden_rfc6330_lt_tuples() {
         for v in TUPLE_VECTORS {
-            let p1 = next_prime_ge(v.p);
+            let p1 = next_prime_ge(v.p)
+                .expect("RFC 6330 golden vectors stay well within usize range");
             let actual_tuple = tuple(v.j, v.w, v.p, p1, v.x);
             let actual_indices = tuple_indices(actual_tuple, v.w, v.p, p1);
             let ctx = format!(
