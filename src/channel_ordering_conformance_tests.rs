@@ -25,8 +25,7 @@
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, HashMap, VecDeque};
-    use std::sync::Arc;
+    use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Channel ordering conformance test infrastructure
@@ -378,7 +377,9 @@ mod tests {
             capacities in prop::collection::vec(prop::option::of(5usize..50), 3..10),
         )| {
             // CHN-1.1: Messages received in same order as sent (FIFO guarantee)
-            for (seq_idx, (messages, capacity)) in message_sequences.iter().zip(capacities.iter()).enumerate() {
+            'message_sequence: for (seq_idx, (messages, capacity)) in
+                message_sequences.iter().zip(capacities.iter()).enumerate()
+            {
                 let mut channel = MockMpscChannel::new(*capacity);
 
                 // Send all messages
@@ -399,7 +400,7 @@ mod tests {
                                 "MPSC send should succeed until capacity limit",
                                 result
                             );
-                            return;
+                            continue 'message_sequence;
                         }
                     }
                 }
@@ -459,7 +460,9 @@ mod tests {
             message_counts in prop::collection::vec(5usize..50, 5..15),
         )| {
             // CHN-1.3: Bounded channel provides backpressure correctly
-            for (test_idx, (&capacity, &message_count)) in capacities.iter().zip(message_counts.iter()).enumerate() {
+            'backpressure_case: for (test_idx, (&capacity, &message_count)) in
+                capacities.iter().zip(message_counts.iter()).enumerate()
+            {
                 let mut channel = MockMpscChannel::new(Some(capacity));
 
                 let mut successful_sends = 0;
@@ -479,7 +482,7 @@ mod tests {
                                 "Send errors should only be backpressure",
                                 result
                             );
-                            return;
+                            continue 'backpressure_case;
                         }
                     }
                 }
@@ -538,7 +541,9 @@ mod tests {
             receiver_counts in prop::collection::vec(2usize..8, 3..8),
         )| {
             // CHN-2.1: All receivers get same message sequence
-            for (seq_idx, (messages, &receiver_count)) in message_sequences.iter().zip(receiver_counts.iter()).enumerate() {
+            'broadcast_sequence: for (seq_idx, (messages, &receiver_count)) in
+                message_sequences.iter().zip(receiver_counts.iter()).enumerate()
+            {
                 let mut channel = MockBroadcastChannel::new(100); // Large history
 
                 // Subscribe receivers
@@ -561,7 +566,7 @@ mod tests {
                                 "Broadcast should succeed",
                                 result
                             );
-                            return;
+                            continue 'broadcast_sequence;
                         }
                     }
                 }
@@ -714,7 +719,7 @@ mod tests {
             ),
         )| {
             // CHN-3.1: Latest value always available to new receivers
-            for (seq_idx, values) in value_sequences.iter().enumerate() {
+            'watch_sequence: for (seq_idx, values) in value_sequences.iter().enumerate() {
                 let mut channel = MockWatchChannel::new(0i32);
 
                 // Send sequence of values
@@ -731,7 +736,7 @@ mod tests {
                                 "Watch send should succeed",
                                 result
                             );
-                            return;
+                            continue 'watch_sequence;
                         }
                     }
 
@@ -814,7 +819,7 @@ mod tests {
             ),
         )| {
             // CHN-3.2: Notification semantics are consistent under concurrent updates
-            for (seq_idx, values) in update_sequences.iter().enumerate() {
+            'notification_sequence: for (seq_idx, values) in update_sequences.iter().enumerate() {
                 let mut channel = MockWatchChannel::new(0i32);
                 let subscriber_id = channel.subscribe();
 
@@ -836,7 +841,7 @@ mod tests {
                             "Watch send should succeed",
                             result
                         );
-                        return;
+                        continue 'notification_sequence;
                     }
 
                     // Check if changed after sending
