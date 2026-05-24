@@ -423,6 +423,8 @@ pub mod real_web_sse_broadcast_fanout_e2e_tests;
 pub mod real_fs_vfs_obligation_recovery_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h3_server_websocket_upgrade_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_kafka_consumer_group_rebalance_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
