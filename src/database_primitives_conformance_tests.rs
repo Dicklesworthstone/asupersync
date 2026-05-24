@@ -38,7 +38,7 @@
 #![allow(dead_code)]
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
@@ -1969,6 +1969,8 @@ fn test_database_integration_scenario() {
 /// Run all database primitives conformance tests.
 #[test]
 fn run_database_conformance_suite() {
+    use std::collections::BTreeMap;
+
     let mut results = Vec::new();
     let mut passed = 0;
     let mut failed = 0;
@@ -2010,7 +2012,7 @@ fn run_database_conformance_suite() {
         print!("  {} ({}): ", case.id, case.description);
 
         let result = test_fn();
-        match result {
+        match &result {
             TestResult::Pass => {
                 println!("✓ PASS");
                 passed += 1;
