@@ -25,7 +25,7 @@
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Obligation leak conformance test infrastructure
@@ -117,6 +117,16 @@ mod tests {
         IoOperation,
         Timer,
         Region,
+    }
+
+    fn obligation_kind_strategy() -> impl Strategy<Value = ObligationKind> {
+        prop::sample::select(vec![
+            ObligationKind::Task,
+            ObligationKind::Channel,
+            ObligationKind::IoOperation,
+            ObligationKind::Timer,
+            ObligationKind::Region,
+        ])
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -273,13 +283,13 @@ mod tests {
         let tester = ObligationConformanceTester::new("obligation_lifecycle");
 
         proptest!(|(
-            spawn_counts in prop::collection::vec(1u32..20, 5..25),
+            _spawn_counts in prop::collection::vec(1u32..20, 5..25),
             operation_sequences in prop::collection::vec(
                 prop::collection::vec(0u8..4, 10..50), 3..15
             ),
         )| {
             // OBL-1.1: Every spawned obligation must be either resolved or properly aborted
-            for (seq_idx, operations) in operation_sequences.iter().enumerate() {
+            'operation_sequence: for (seq_idx, operations) in operation_sequences.iter().enumerate() {
                 let mut tracker = ObligationTracker::new();
                 let mut spawned_obligations = Vec::new();
 
@@ -329,7 +339,7 @@ mod tests {
                                     "No obligation leaks after spawn/abort sequences",
                                     result
                                 );
-                                return;
+                                continue 'operation_sequence;
                             }
                         }
                         _ => unreachable!(),
@@ -372,65 +382,29 @@ mod tests {
                 Just(VarState::Empty),
                 Just(VarState::Resolved),
                 Just(VarState::MayHoldAmbiguous),
-                prop::sample::select([
-                    ObligationKind::Task,
-                    ObligationKind::Channel,
-                    ObligationKind::IoOperation,
-                    ObligationKind::Timer,
-                    ObligationKind::Region,
-                ]).prop_map(VarState::Held),
-                prop::sample::select([
-                    ObligationKind::Task,
-                    ObligationKind::Channel,
-                    ObligationKind::IoOperation,
-                    ObligationKind::Timer,
-                    ObligationKind::Region,
-                ]).prop_map(VarState::MayHold),
+                obligation_kind_strategy().prop_map(VarState::Held),
+                obligation_kind_strategy().prop_map(VarState::MayHold),
             ],
             state_b in prop_oneof![
                 Just(VarState::Empty),
                 Just(VarState::Resolved),
                 Just(VarState::MayHoldAmbiguous),
-                prop::sample::select([
-                    ObligationKind::Task,
-                    ObligationKind::Channel,
-                    ObligationKind::IoOperation,
-                    ObligationKind::Timer,
-                    ObligationKind::Region,
-                ]).prop_map(VarState::Held),
-                prop::sample::select([
-                    ObligationKind::Task,
-                    ObligationKind::Channel,
-                    ObligationKind::IoOperation,
-                    ObligationKind::Timer,
-                    ObligationKind::Region,
-                ]).prop_map(VarState::MayHold),
+                obligation_kind_strategy().prop_map(VarState::Held),
+                obligation_kind_strategy().prop_map(VarState::MayHold),
             ],
             state_c in prop_oneof![
                 Just(VarState::Empty),
                 Just(VarState::Resolved),
                 Just(VarState::MayHoldAmbiguous),
-                prop::sample::select([
-                    ObligationKind::Task,
-                    ObligationKind::Channel,
-                    ObligationKind::IoOperation,
-                    ObligationKind::Timer,
-                    ObligationKind::Region,
-                ]).prop_map(VarState::Held),
-                prop::sample::select([
-                    ObligationKind::Task,
-                    ObligationKind::Channel,
-                    ObligationKind::IoOperation,
-                    ObligationKind::Timer,
-                    ObligationKind::Region,
-                ]).prop_map(VarState::MayHold),
+                obligation_kind_strategy().prop_map(VarState::Held),
+                obligation_kind_strategy().prop_map(VarState::MayHold),
             ],
         )| {
             // OBL-1.2: VarState lattice operations must preserve monotonicity
 
             // Test commutativity: join(A,B) = join(B,A)
-            let join_ab = state_a.join(state_b.clone());
-            let join_ba = state_b.join(state_a.clone());
+            let join_ab = state_a.clone().join(state_b.clone());
+            let join_ba = state_b.clone().join(state_a.clone());
             let commutativity_result = if join_ab == join_ba {
                 Ok(())
             } else {
@@ -449,8 +423,8 @@ mod tests {
             );
 
             // Test associativity: join(join(A,B),C) = join(A,join(B,C))
-            let left_assoc = state_a.join(state_b.clone()).join(state_c.clone());
-            let right_assoc = state_a.join(state_b.join(state_c.clone()));
+            let left_assoc = state_a.clone().join(state_b.clone()).join(state_c.clone());
+            let right_assoc = state_a.clone().join(state_b.clone().join(state_c.clone()));
             let associativity_result = if left_assoc == right_assoc {
                 Ok(())
             } else {
@@ -469,7 +443,7 @@ mod tests {
             );
 
             // Test idempotence: join(A,A) = A
-            let join_aa = state_a.join(state_a.clone());
+            let join_aa = state_a.clone().join(state_a.clone());
             let idempotence_result = if join_aa == state_a {
                 Ok(())
             } else {
@@ -499,7 +473,7 @@ mod tests {
 
         proptest!(|(
             obligation_counts in prop::collection::vec(0u32..50, 5..15),
-            resolve_patterns in prop::collection::vec(
+            _resolve_patterns in prop::collection::vec(
                 prop::collection::vec(any::<bool>(), 10..50), 5..15
             ),
         )| {
