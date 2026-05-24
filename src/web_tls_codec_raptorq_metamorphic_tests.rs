@@ -857,20 +857,23 @@ mod tests {
                 parsed.fields.len(), original.fields.len()
             );
 
-            // Verify each field round-trips correctly
+            // Verify each field round-trips correctly. `prop_assert_eq!`
+            // takes its arguments by value, so we `.clone()` the borrowed
+            // field components rather than moving out of the shared refs
+            // returned by `iter().zip()`.
             for (orig_field, parsed_field) in original.fields.iter().zip(parsed.fields.iter()) {
                 prop_assert_eq!(
-                    parsed_field.name, orig_field.name,
+                    parsed_field.name.clone(), orig_field.name.clone(),
                     "Field name should round-trip: {} != {}", parsed_field.name, orig_field.name
                 );
 
                 prop_assert_eq!(
-                    parsed_field.value, orig_field.value,
+                    parsed_field.value.clone(), orig_field.value.clone(),
                     "Field value should round-trip for field '{}'", orig_field.name
                 );
 
                 prop_assert_eq!(
-                    parsed_field.content_type, orig_field.content_type,
+                    parsed_field.content_type.clone(), orig_field.content_type.clone(),
                     "Content type should round-trip for field '{}'", orig_field.name
                 );
             }
@@ -1030,9 +1033,8 @@ mod tests {
                 let decoded = decoded.unwrap();
 
                 prop_assert_eq!(
-                    decoded, *original_frame,
-                    "Frame {} should round-trip correctly: original={:?}, decoded={:?}",
-                    i, original_frame, decoded
+                    decoded, original_frame.clone(),
+                    "Frame {} should round-trip correctly: original={:?}", i, original_frame
                 );
             }
 
@@ -1057,7 +1059,7 @@ mod tests {
 
                 let decoded = decoded.unwrap();
                 prop_assert_eq!(
-                    decoded, *original_frame,
+                    decoded, original_frame.clone(),
                     "Concatenated frame {} should match original", i
                 );
 
@@ -1108,30 +1110,28 @@ mod tests {
                 decoded_events.len(), events.len()
             );
 
-            // Verify each event round-trips correctly
+            // Verify each event round-trips correctly. `.clone()` on each
+            // field because the loop binds borrowed references and
+            // `prop_assert_eq!` takes owned arguments.
             for (i, (original, decoded)) in events.iter().zip(decoded_events.iter()).enumerate() {
                 prop_assert_eq!(
-                    decoded.event_type, original.event_type,
-                    "Event {} type should round-trip: {:?} != {:?}",
-                    i, decoded.event_type, original.event_type
+                    decoded.event_type.clone(), original.event_type.clone(),
+                    "Event {} type should round-trip", i
                 );
 
                 prop_assert_eq!(
-                    decoded.data, original.data,
-                    "Event {} data should round-trip: '{}' != '{}'",
-                    i, decoded.data, original.data
+                    decoded.data.clone(), original.data.clone(),
+                    "Event {} data should round-trip", i
                 );
 
                 prop_assert_eq!(
-                    decoded.id, original.id,
-                    "Event {} ID should round-trip: {:?} != {:?}",
-                    i, decoded.id, original.id
+                    decoded.id.clone(), original.id.clone(),
+                    "Event {} ID should round-trip", i
                 );
 
                 prop_assert_eq!(
                     decoded.retry, original.retry,
-                    "Event {} retry should round-trip: {:?} != {:?}",
-                    i, decoded.retry, original.retry
+                    "Event {} retry should round-trip", i
                 );
             }
 
@@ -1152,7 +1152,7 @@ mod tests {
                     );
 
                     prop_assert_eq!(
-                        partial_decoded[i], events[i],
+                        partial_decoded[i].clone(), events[i].clone(),
                         "Partially decoded event {} should match original", i
                     );
                 }
