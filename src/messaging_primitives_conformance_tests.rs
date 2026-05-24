@@ -867,13 +867,13 @@ fn test_kafka_partition_ordering() -> TestResult {
     }
 
     for (i, (expected, actual)) in messages.iter().zip(stored_messages.iter()).enumerate() {
-        if actual.value != expected.as_bytes() {
+        if actual.value.as_slice() != expected.as_bytes() {
             return TestResult::Fail {
                 reason: format!(
                     "Message {} mismatch: expected {:?}, got {:?}",
                     i,
                     expected.as_bytes(),
-                    actual.value
+                    actual.value.as_slice()
                 ),
             };
         }
@@ -1285,7 +1285,7 @@ mod property_tests {
 
         for (i, (expected, actual)) in messages.iter().zip(stored.iter()).enumerate() {
             prop_assert_eq!(
-                actual.value,
+                actual.value.as_slice(),
                 expected.as_bytes(),
                 "Message {} order violation", i
             );
@@ -1313,7 +1313,7 @@ mod property_tests {
             partition: i as u32,
         }).collect();
 
-        let mut last_assignments = None;
+        let mut last_assignments: Option<Vec<PartitionAssignment>> = None;
 
         // Trigger multiple rebalances with same input
         for _ in 0..rebalance_iterations {
@@ -1608,18 +1608,18 @@ fn run_messaging_conformance_suite() {
     }
 
     // Count passing based on our test results
-    for (section, (must, should, tested, _)) in &mut sections {
+    for (section, (must, should, tested, passing_count)) in &mut sections {
         let passing = passed.min(*tested); // Simplified for this implementation
-        *entry.3 = passing;
-        let total_requirements = must + should;
+        *passing_count = passing;
+        let total_requirements = *must + *should;
         let score = if total_requirements > 0 {
-            (*entry.3 as f64 / total_requirements as f64) * 100.0
+            (*passing_count as f64 / total_requirements as f64) * 100.0
         } else {
             100.0
         };
         println!(
             "| {} | {} | {} | {} | {} | {:.1}% |",
-            section, must, should, tested, entry.3, score
+            section, must, should, tested, passing_count, score
         );
     }
 
