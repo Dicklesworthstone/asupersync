@@ -325,6 +325,8 @@ pub mod real_channel_broadcast_obligation_saga_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_channel_mpsc_sync_semaphore_backpressure_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_supervision_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_codec_e2e_tests;
