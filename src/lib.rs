@@ -391,6 +391,8 @@ pub mod real_web_multipart_codec_raptorq_e2e_tests;
 pub mod real_websocket_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_websocket_server_channel_broadcast_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_tls_acceptor_http_h1_server_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
