@@ -6,15 +6,18 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod real_obligation_leak_check_e2e {
-    use crate::obligation::{ObligationLedger, ObligationId, ObligationState, LeakCheckResult};
-    use crate::runtime::{Runtime, spawn};
     use crate::cx::{Cx, scope};
-    use crate::time::{sleep, Duration, Instant};
-    use crate::types::{Outcome, Budget};
-    use std::sync::{Arc, Mutex, atomic::{AtomicUsize, AtomicBool, Ordering}};
+    use crate::obligation::{LeakCheckResult, ObligationId, ObligationLedger, ObligationState};
+    use crate::runtime::{Runtime, spawn};
+    use crate::time::{Duration, Instant, sleep};
+    use crate::types::{Budget, Outcome};
+    use rand::{Rng, seq::SliceRandom, thread_rng};
+    use serde_json::{Value, json};
     use std::collections::{HashMap, HashSet};
-    use rand::{Rng, thread_rng, seq::SliceRandom};
-    use serde_json::{json, Value};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
 
     /// Obligation test harness with leak detection and random sequence generation
     struct ObligationLeakTestHarness {
@@ -91,11 +94,14 @@ mod real_obligation_leak_check_e2e {
                         ledger_size_after: size_after,
                     });
 
-                    self.log("obligation_created", json!({
-                        "context": context,
-                        "obligation_id": obligation_id.to_string(),
-                        "ledger_size": size_after
-                    }));
+                    self.log(
+                        "obligation_created",
+                        json!({
+                            "context": context,
+                            "obligation_id": obligation_id.to_string(),
+                            "ledger_size": size_after
+                        }),
+                    );
 
                     Ok(obligation_id)
                 }
@@ -115,7 +121,11 @@ mod real_obligation_leak_check_e2e {
             }
         }
 
-        async fn commit_obligation(&self, obligation_id: ObligationId, context: &str) -> Result<(), String> {
+        async fn commit_obligation(
+            &self,
+            obligation_id: ObligationId,
+            context: &str,
+        ) -> Result<(), String> {
             let size_before = self.ledger.size();
 
             match self.ledger.commit_obligation(obligation_id).await {
@@ -132,11 +142,14 @@ mod real_obligation_leak_check_e2e {
                         ledger_size_after: size_after,
                     });
 
-                    self.log("obligation_committed", json!({
-                        "context": context,
-                        "obligation_id": obligation_id.to_string(),
-                        "ledger_size": size_after
-                    }));
+                    self.log(
+                        "obligation_committed",
+                        json!({
+                            "context": context,
+                            "obligation_id": obligation_id.to_string(),
+                            "ledger_size": size_after
+                        }),
+                    );
 
                     Ok(())
                 }
@@ -156,7 +169,11 @@ mod real_obligation_leak_check_e2e {
             }
         }
 
-        async fn abort_obligation(&self, obligation_id: ObligationId, context: &str) -> Result<(), String> {
+        async fn abort_obligation(
+            &self,
+            obligation_id: ObligationId,
+            context: &str,
+        ) -> Result<(), String> {
             let size_before = self.ledger.size();
 
             match self.ledger.abort_obligation(obligation_id).await {
@@ -173,11 +190,14 @@ mod real_obligation_leak_check_e2e {
                         ledger_size_after: size_after,
                     });
 
-                    self.log("obligation_aborted", json!({
-                        "context": context,
-                        "obligation_id": obligation_id.to_string(),
-                        "ledger_size": size_after
-                    }));
+                    self.log(
+                        "obligation_aborted",
+                        json!({
+                            "context": context,
+                            "obligation_id": obligation_id.to_string(),
+                            "ledger_size": size_after
+                        }),
+                    );
 
                     Ok(())
                 }
@@ -213,26 +233,33 @@ mod real_obligation_leak_check_e2e {
 
             self.leak_checks.lock().unwrap().push(snapshot.clone());
 
-            self.log("leak_check", json!({
-                "check_type": check_type,
-                "total_obligations": check_result.total_obligations,
-                "pending": check_result.pending_obligations,
-                "committed": check_result.committed_obligations,
-                "aborted": check_result.aborted_obligations,
-                "leaked": check_result.leaked_obligations,
-                "consistent": check_result.ledger_consistent
-            }));
+            self.log(
+                "leak_check",
+                json!({
+                    "check_type": check_type,
+                    "total_obligations": check_result.total_obligations,
+                    "pending": check_result.pending_obligations,
+                    "committed": check_result.committed_obligations,
+                    "aborted": check_result.aborted_obligations,
+                    "leaked": check_result.leaked_obligations,
+                    "consistent": check_result.ledger_consistent
+                }),
+            );
 
             check_result
         }
 
-        async fn random_obligation_sequence(&self, sequence_length: usize, abort_probability: f64) -> Vec<ObligationId> {
+        async fn random_obligation_sequence(
+            &self,
+            sequence_length: usize,
+            abort_probability: f64,
+        ) -> Vec<ObligationId> {
             let mut rng = thread_rng();
             let mut active_obligations = Vec::new();
             let mut completed_obligations = HashSet::new();
 
             for i in 0..sequence_length {
-                let action = rng.gen::<f64>();
+                let action = rng.gen_range(0.0..1.0);
 
                 if action < 0.6 || active_obligations.is_empty() {
                     // Create new obligation (60% probability or if no active obligations)
@@ -250,7 +277,10 @@ mod real_obligation_leak_check_e2e {
                         let idx = rng.gen_range(0..active_obligations.len());
                         let obligation_id = active_obligations.remove(idx);
 
-                        if let Ok(_) = self.abort_obligation(obligation_id, &format!("random_abort_{}", i)).await {
+                        if let Ok(_) = self
+                            .abort_obligation(obligation_id, &format!("random_abort_{}", i))
+                            .await
+                        {
                             completed_obligations.insert(obligation_id);
                         }
                     }
@@ -260,7 +290,10 @@ mod real_obligation_leak_check_e2e {
                         let idx = rng.gen_range(0..active_obligations.len());
                         let obligation_id = active_obligations.remove(idx);
 
-                        if let Ok(_) = self.commit_obligation(obligation_id, &format!("random_commit_{}", i)).await {
+                        if let Ok(_) = self
+                            .commit_obligation(obligation_id, &format!("random_commit_{}", i))
+                            .await
+                        {
                             completed_obligations.insert(obligation_id);
                         }
                     }
@@ -268,7 +301,8 @@ mod real_obligation_leak_check_e2e {
 
                 // Occasionally perform intermediate leak checks
                 if i % 50 == 0 && i > 0 {
-                    self.perform_leak_check(&format!("intermediate_{}", i)).await;
+                    self.perform_leak_check(&format!("intermediate_{}", i))
+                        .await;
                 }
 
                 // Small delay to allow concurrent operations
@@ -280,7 +314,9 @@ mod real_obligation_leak_check_e2e {
             // Clean up remaining active obligations
             for obligation_id in &active_obligations {
                 if rng.gen_bool(0.5) {
-                    let _ = self.commit_obligation(*obligation_id, "cleanup_commit").await;
+                    let _ = self
+                        .commit_obligation(*obligation_id, "cleanup_commit")
+                        .await;
                 } else {
                     let _ = self.abort_obligation(*obligation_id, "cleanup_abort").await;
                 }
@@ -314,7 +350,9 @@ mod real_obligation_leak_check_e2e {
                 if op.success {
                     if op.operation.starts_with("create") {
                         create_count += 1;
-                    } else if op.operation.starts_with("commit") || op.operation.starts_with("abort") {
+                    } else if op.operation.starts_with("commit")
+                        || op.operation.starts_with("abort")
+                    {
                         complete_count += 1;
                     }
                 }
@@ -334,51 +372,75 @@ mod real_obligation_leak_check_e2e {
     #[tokio::test]
     async fn test_single_threaded_random_obligation_sequence() {
         let harness = Arc::new(ObligationLeakTestHarness::new());
-        harness.log("test_start", json!({"test": "single_threaded_random_sequence"}));
+        harness.log(
+            "test_start",
+            json!({"test": "single_threaded_random_sequence"}),
+        );
 
         // Perform initial leak check
         let initial_check = harness.perform_leak_check("initial").await;
-        assert_eq!(initial_check.leaked_obligations, 0, "Should start with zero leaks");
+        assert_eq!(
+            initial_check.leaked_obligations, 0,
+            "Should start with zero leaks"
+        );
 
         // Run random sequence with 200 operations
         let sequence_length = 200;
         let abort_probability = 0.3; // 30% of completions are aborts
 
-        let processed_obligations = harness.random_obligation_sequence(sequence_length, abort_probability).await;
+        let processed_obligations = harness
+            .random_obligation_sequence(sequence_length, abort_probability)
+            .await;
 
         // Perform final leak check
         let final_check = harness.perform_leak_check("final").await;
 
-        harness.log("sequence_complete", json!({
-            "sequence_length": sequence_length,
-            "processed_obligations": processed_obligations.len(),
-            "abort_probability": abort_probability,
-            "final_leaks": final_check.leaked_obligations,
-            "ledger_consistent": final_check.ledger_consistent
-        }));
+        harness.log(
+            "sequence_complete",
+            json!({
+                "sequence_length": sequence_length,
+                "processed_obligations": processed_obligations.len(),
+                "abort_probability": abort_probability,
+                "final_leaks": final_check.leaked_obligations,
+                "ledger_consistent": final_check.ledger_consistent
+            }),
+        );
 
         // Validate zero leaks
         let validation_result = harness.validate_zero_leaks();
-        assert!(validation_result.is_ok(), "Leak validation failed: {:?}", validation_result);
+        assert!(
+            validation_result.is_ok(),
+            "Leak validation failed: {:?}",
+            validation_result
+        );
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "zero_leaks": final_check.leaked_obligations == 0,
-            "consistent": final_check.ledger_consistent,
-            "message": "Single-threaded random obligation sequence validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "zero_leaks": final_check.leaked_obligations == 0,
+                "consistent": final_check.ledger_consistent,
+                "message": "Single-threaded random obligation sequence validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
     async fn test_concurrent_obligation_workers() {
         let harness = Arc::new(ObligationLeakTestHarness::new());
-        harness.log("test_start", json!({"test": "concurrent_obligation_workers"}));
+        harness.log(
+            "test_start",
+            json!({"test": "concurrent_obligation_workers"}),
+        );
 
         let num_workers = 5;
         let operations_per_worker = 100;
 
         let initial_check = harness.perform_leak_check("initial").await;
-        assert_eq!(initial_check.leaked_obligations, 0, "Should start with zero leaks");
+        assert_eq!(
+            initial_check.leaked_obligations, 0,
+            "Should start with zero leaks"
+        );
 
         let mut worker_handles = Vec::new();
 
@@ -392,7 +454,10 @@ mod real_obligation_leak_check_e2e {
 
                 // Each worker creates obligations, then commits/aborts them
                 for op_id in 0..operations_per_worker {
-                    match harness.create_obligation(&format!("worker_{}_op_{}", worker_id, op_id)).await {
+                    match harness
+                        .create_obligation(&format!("worker_{}_op_{}", worker_id, op_id))
+                        .await
+                    {
                         Ok(obligation_id) => {
                             worker_obligations.push(obligation_id);
                         }
@@ -407,9 +472,19 @@ mod real_obligation_leak_check_e2e {
                         let obligation_id = worker_obligations.remove(idx);
 
                         if rng.gen_bool(0.7) {
-                            let _ = harness.commit_obligation(obligation_id, &format!("worker_{}_commit", worker_id)).await;
+                            let _ = harness
+                                .commit_obligation(
+                                    obligation_id,
+                                    &format!("worker_{}_commit", worker_id),
+                                )
+                                .await;
                         } else {
-                            let _ = harness.abort_obligation(obligation_id, &format!("worker_{}_abort", worker_id)).await;
+                            let _ = harness
+                                .abort_obligation(
+                                    obligation_id,
+                                    &format!("worker_{}_abort", worker_id),
+                                )
+                                .await;
                         }
                     }
 
@@ -422,9 +497,19 @@ mod real_obligation_leak_check_e2e {
                 // Complete remaining obligations for this worker
                 for obligation_id in worker_obligations {
                     if rng.gen_bool(0.6) {
-                        let _ = harness.commit_obligation(obligation_id, &format!("worker_{}_final_commit", worker_id)).await;
+                        let _ = harness
+                            .commit_obligation(
+                                obligation_id,
+                                &format!("worker_{}_final_commit", worker_id),
+                            )
+                            .await;
                     } else {
-                        let _ = harness.abort_obligation(obligation_id, &format!("worker_{}_final_abort", worker_id)).await;
+                        let _ = harness
+                            .abort_obligation(
+                                obligation_id,
+                                &format!("worker_{}_final_abort", worker_id),
+                            )
+                            .await;
                     }
                 }
 
@@ -444,35 +529,51 @@ mod real_obligation_leak_check_e2e {
         sleep(Duration::from_millis(100)).await; // Allow final cleanup
         let final_check = harness.perform_leak_check("final_concurrent").await;
 
-        harness.log("concurrent_test_complete", json!({
-            "num_workers": num_workers,
-            "operations_per_worker": operations_per_worker,
-            "final_leaks": final_check.leaked_obligations,
-            "ledger_consistent": final_check.ledger_consistent
-        }));
+        harness.log(
+            "concurrent_test_complete",
+            json!({
+                "num_workers": num_workers,
+                "operations_per_worker": operations_per_worker,
+                "final_leaks": final_check.leaked_obligations,
+                "ledger_consistent": final_check.ledger_consistent
+            }),
+        );
 
         // Validate zero leaks
         let validation_result = harness.validate_zero_leaks();
-        assert!(validation_result.is_ok(), "Concurrent leak validation failed: {:?}", validation_result);
+        assert!(
+            validation_result.is_ok(),
+            "Concurrent leak validation failed: {:?}",
+            validation_result
+        );
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "zero_leaks": final_check.leaked_obligations == 0,
-            "consistent": final_check.ledger_consistent,
-            "message": "Concurrent obligation workers validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "zero_leaks": final_check.leaked_obligations == 0,
+                "consistent": final_check.ledger_consistent,
+                "message": "Concurrent obligation workers validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
     async fn test_obligation_stress_with_timeouts() {
         let harness = Arc::new(ObligationLeakTestHarness::new());
-        harness.log("test_start", json!({"test": "obligation_stress_with_timeouts"}));
+        harness.log(
+            "test_start",
+            json!({"test": "obligation_stress_with_timeouts"}),
+        );
 
         let stress_duration = Duration::from_secs(5);
         let timeout_probability = 0.2; // 20% of obligations timeout
 
         let initial_check = harness.perform_leak_check("initial").await;
-        assert_eq!(initial_check.leaked_obligations, 0, "Should start with zero leaks");
+        assert_eq!(
+            initial_check.leaked_obligations, 0,
+            "Should start with zero leaks"
+        );
 
         let stress_start = Instant::now();
         let mut operation_counter = Arc::new(AtomicUsize::new(0));
@@ -488,7 +589,10 @@ mod real_obligation_leak_check_e2e {
                 let op_count = stress_counter.fetch_add(1, Ordering::Relaxed);
 
                 // Create obligation
-                if let Ok(obligation_id) = stress_harness.create_obligation(&format!("stress_{}", op_count)).await {
+                if let Ok(obligation_id) = stress_harness
+                    .create_obligation(&format!("stress_{}", op_count))
+                    .await
+                {
                     let should_timeout = rng.gen_bool(timeout_probability);
 
                     if should_timeout {
@@ -496,7 +600,9 @@ mod real_obligation_leak_check_e2e {
                         let timeout_harness = Arc::clone(&stress_harness);
                         spawn(async move {
                             sleep(Duration::from_millis(rng.gen_range(50..200))).await;
-                            let _ = timeout_harness.abort_obligation(obligation_id, "timeout_abort").await;
+                            let _ = timeout_harness
+                                .abort_obligation(obligation_id, "timeout_abort")
+                                .await;
                         });
                     } else {
                         pending_obligations.push(obligation_id);
@@ -509,9 +615,13 @@ mod real_obligation_leak_check_e2e {
                     let obligation_id = pending_obligations.remove(idx);
 
                     if rng.gen_bool(0.8) {
-                        let _ = stress_harness.commit_obligation(obligation_id, "stress_commit").await;
+                        let _ = stress_harness
+                            .commit_obligation(obligation_id, "stress_commit")
+                            .await;
                     } else {
-                        let _ = stress_harness.abort_obligation(obligation_id, "stress_abort").await;
+                        let _ = stress_harness
+                            .abort_obligation(obligation_id, "stress_abort")
+                            .await;
                     }
                 }
 
@@ -523,7 +633,9 @@ mod real_obligation_leak_check_e2e {
 
             // Clean up remaining obligations
             for obligation_id in pending_obligations {
-                let _ = stress_harness.commit_obligation(obligation_id, "stress_cleanup").await;
+                let _ = stress_harness
+                    .commit_obligation(obligation_id, "stress_cleanup")
+                    .await;
             }
         });
 
@@ -536,25 +648,35 @@ mod real_obligation_leak_check_e2e {
         let final_check = harness.perform_leak_check("final_stress").await;
         let total_operations = operation_counter.load(Ordering::Relaxed);
 
-        harness.log("stress_test_complete", json!({
-            "stress_duration_ms": stress_duration.as_millis(),
-            "total_operations": total_operations,
-            "timeout_probability": timeout_probability,
-            "final_leaks": final_check.leaked_obligations,
-            "ledger_consistent": final_check.ledger_consistent
-        }));
+        harness.log(
+            "stress_test_complete",
+            json!({
+                "stress_duration_ms": stress_duration.as_millis(),
+                "total_operations": total_operations,
+                "timeout_probability": timeout_probability,
+                "final_leaks": final_check.leaked_obligations,
+                "ledger_consistent": final_check.ledger_consistent
+            }),
+        );
 
         // Validate zero leaks
         let validation_result = harness.validate_zero_leaks();
-        assert!(validation_result.is_ok(), "Stress test leak validation failed: {:?}", validation_result);
+        assert!(
+            validation_result.is_ok(),
+            "Stress test leak validation failed: {:?}",
+            validation_result
+        );
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "zero_leaks": final_check.leaked_obligations == 0,
-            "consistent": final_check.ledger_consistent,
-            "operations_completed": total_operations,
-            "message": "Obligation stress test with timeouts validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "zero_leaks": final_check.leaked_obligations == 0,
+                "consistent": final_check.ledger_consistent,
+                "operations_completed": total_operations,
+                "message": "Obligation stress test with timeouts validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
@@ -567,53 +689,84 @@ mod real_obligation_leak_check_e2e {
 
         // Create 10 obligations
         for i in 0..10 {
-            if let Ok(obligation_id) = harness.create_obligation(&format!("recovery_test_{}", i)).await {
+            if let Ok(obligation_id) = harness
+                .create_obligation(&format!("recovery_test_{}", i))
+                .await
+            {
                 test_obligations.push(obligation_id);
             }
         }
 
         // Commit some
         for obligation_id in &test_obligations[0..3] {
-            let _ = harness.commit_obligation(*obligation_id, "recovery_commit").await;
+            let _ = harness
+                .commit_obligation(*obligation_id, "recovery_commit")
+                .await;
         }
 
         // Abort some
         for obligation_id in &test_obligations[3..6] {
-            let _ = harness.abort_obligation(*obligation_id, "recovery_abort").await;
+            let _ = harness
+                .abort_obligation(*obligation_id, "recovery_abort")
+                .await;
         }
 
         // Leave some pending: test_obligations[6..10]
 
         let pre_recovery_check = harness.perform_leak_check("pre_recovery").await;
-        assert_eq!(pre_recovery_check.pending_obligations, 4, "Should have 4 pending obligations");
+        assert_eq!(
+            pre_recovery_check.pending_obligations, 4,
+            "Should have 4 pending obligations"
+        );
 
         // Simulate recovery scenario - force cleanup of pending obligations
         for obligation_id in &test_obligations[6..10] {
-            let _ = harness.abort_obligation(*obligation_id, "recovery_cleanup").await;
+            let _ = harness
+                .abort_obligation(*obligation_id, "recovery_cleanup")
+                .await;
         }
 
         let post_recovery_check = harness.perform_leak_check("post_recovery").await;
 
-        harness.log("recovery_test_complete", json!({
-            "pre_recovery_pending": pre_recovery_check.pending_obligations,
-            "post_recovery_pending": post_recovery_check.pending_obligations,
-            "post_recovery_leaks": post_recovery_check.leaked_obligations,
-            "ledger_consistent": post_recovery_check.ledger_consistent
-        }));
+        harness.log(
+            "recovery_test_complete",
+            json!({
+                "pre_recovery_pending": pre_recovery_check.pending_obligations,
+                "post_recovery_pending": post_recovery_check.pending_obligations,
+                "post_recovery_leaks": post_recovery_check.leaked_obligations,
+                "ledger_consistent": post_recovery_check.ledger_consistent
+            }),
+        );
 
         // Validate recovery success
-        assert_eq!(post_recovery_check.pending_obligations, 0, "All obligations should be resolved");
-        assert_eq!(post_recovery_check.leaked_obligations, 0, "No leaks should remain");
-        assert!(post_recovery_check.ledger_consistent, "Ledger should be consistent");
+        assert_eq!(
+            post_recovery_check.pending_obligations, 0,
+            "All obligations should be resolved"
+        );
+        assert_eq!(
+            post_recovery_check.leaked_obligations, 0,
+            "No leaks should remain"
+        );
+        assert!(
+            post_recovery_check.ledger_consistent,
+            "Ledger should be consistent"
+        );
 
         let validation_result = harness.validate_zero_leaks();
-        assert!(validation_result.is_ok(), "Recovery validation failed: {:?}", validation_result);
+        assert!(
+            validation_result.is_ok(),
+            "Recovery validation failed: {:?}",
+            validation_result
+        );
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "recovery_successful": post_recovery_check.pending_obligations == 0,
-            "zero_leaks": post_recovery_check.leaked_obligations == 0,
-            "message": "Obligation ledger recovery validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "recovery_successful": post_recovery_check.pending_obligations == 0,
+                "zero_leaks": post_recovery_check.leaked_obligations == 0,
+                "message": "Obligation ledger recovery validated successfully"
+            }),
+        );
     }
 }
