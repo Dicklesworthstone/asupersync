@@ -373,12 +373,25 @@ mod fs_e2e_tests {
                     .fetch_add(content.len() as u64, Ordering::Relaxed);
             }
 
-            // Enumerate directory entries
+            // Enumerate directory entries with bounds protection
+            const MAX_DIRECTORY_ENTRIES: usize = 10_000;
             let mut entries = read_dir(&dir_path).await?;
             let mut entry_names = Vec::new();
             let mut entry_count = 0;
 
             while let Some(entry) = entries.next_entry().await? {
+                // Enforce size limit to prevent memory exhaustion from large directories
+                if entry_count >= MAX_DIRECTORY_ENTRIES {
+                    logger.log_directory_operation(
+                        "enumerate_truncated",
+                        &dir_path,
+                        Some(entry_count),
+                        true,
+                        Some(&format!("Directory enumeration hit limit of {} entries", MAX_DIRECTORY_ENTRIES))
+                    );
+                    break;
+                }
+
                 if let Some(filename) = entry.file_name().to_str() {
                     entry_names.push(filename.to_string());
                     entry_count += 1;

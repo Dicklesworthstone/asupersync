@@ -218,10 +218,24 @@ impl CodecTestHarness {
         let reader = MockAsyncIo::new(Cursor::new(encoded_buffer.to_vec()));
         let mut framed_read = FramedRead::new(reader, LengthDelimitedCodec::new());
 
-        let mut decoded_messages = Vec::new();
+        // Bounded frame collection with size protection
+        const MAX_DECODED_FRAMES: usize = 1000;
+        let mut decoded_messages = Vec::with_capacity(test_messages.len().min(MAX_DECODED_FRAMES));
         let mut decode_index = 0;
 
         while let Some(result) = framed_read.next().await {
+            // Enforce frame count limit to prevent memory exhaustion
+            if decode_index >= MAX_DECODED_FRAMES {
+                self.logger.log_event(
+                    "frame_collection_truncated",
+                    serde_json::json!({
+                        "max_frames": MAX_DECODED_FRAMES,
+                        "truncated_at": decode_index
+                    }),
+                );
+                break;
+            }
+
             let decoded = result.expect("Decoding should succeed");
 
             self.logger.log_event(

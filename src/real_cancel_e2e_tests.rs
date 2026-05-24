@@ -146,7 +146,9 @@ impl RealCancelManager {
         let start_time = Instant::now();
 
         let cancel_token = CancelToken::new();
-        let (status_sender, mut status_receiver) = mpsc::unbounded();
+        // Use bounded channel to prevent memory exhaustion from status updates
+        const STATUS_CHANNEL_CAPACITY: usize = 1000;
+        let (status_sender, mut status_receiver) = mpsc::channel(STATUS_CHANNEL_CAPACITY);
         let mut hierarchy_nodes = HashMap::new();
 
         // Build linear hierarchy of nested scopes
