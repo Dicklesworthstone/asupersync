@@ -11,7 +11,7 @@ mod fs_config_tests {
         EncodingConfig, RaptorQConfig, ResourceConfig, SecurityConfig, TimeoutConfig,
         TransportConfig,
     };
-    use crate::fs::metadata::Permissions;
+    use crate::fs::Permissions;
     use crate::fs::vfs::{Vfs, VfsFile};
     use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
     use crate::observability::{LogLevel, ObservabilityConfig};
