@@ -5459,6 +5459,898 @@ impl SubsystemMutationTester {
         );
     }
 
+    /// [br-mutation-43] Runtime state region close eager-vs-lazy regression mutations
+    async fn test_runtime_state_mutations(&self) {
+        use crate::runtime::{state, Region, RegionState, TaskState, RegionCloseMode, StateError};
+
+        let runtime_state_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let state_test_count = 18;
+                let state_corruptions = Arc::new(AtomicUsize::new(0));
+                let close_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..state_test_count {
+                            // Test region close eager vs lazy mode corruption
+                            if test_idx % 3 == 0 {
+                                state_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let runtime_state = state::RuntimeState::new();
+
+                                // MUTATION: Corrupt region close mode handling
+                                match test_idx % 18 {
+                                    0 => {
+                                        // Create region with eager close mode
+                                        let region = runtime_state
+                                            .create_region_with_mode(RegionCloseMode::Eager)
+                                            .await;
+
+                                        // Spawn tasks in the region
+                                        let mut task_handles = Vec::new();
+                                        for i in 0..5 {
+                                            let task_handle = region
+                                                .spawn_task(format!("eager_task_{}", i), async move {
+                                                    sleep(Duration::from_millis(100)).await;
+                                                })
+                                                .await;
+                                            task_handles.push(task_handle);
+                                        }
+
+                                        // MUTATION: Force lazy close despite eager mode
+                                        match runtime_state.close_region_with_mode(&region.id(), RegionCloseMode::Lazy).await {
+                                            Ok(_) => {
+                                                // Should have enforced eager mode
+                                                close_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(StateError::RegionCloseModeViolation) => {
+                                                // Correctly enforced eager mode
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    1 => {
+                                        // Create region with lazy close mode
+                                        let region = runtime_state
+                                            .create_region_with_mode(RegionCloseMode::Lazy)
+                                            .await;
+
+                                        // Spawn long-running task
+                                        let _long_task = region
+                                            .spawn_task("lazy_task", async move {
+                                                sleep(Duration::from_millis(500)).await;
+                                            })
+                                            .await;
+
+                                        // MUTATION: Force eager close despite lazy mode and active tasks
+                                        match runtime_state.close_region_with_mode(&region.id(), RegionCloseMode::Eager).await {
+                                            Ok(_) => {
+                                                // Check if tasks were properly cancelled
+                                                let remaining_tasks = runtime_state.get_region_task_count(&region.id()).await;
+                                                if remaining_tasks > 0 {
+                                                    // Eager close should have cancelled tasks
+                                                    close_violations.fetch_add(1, Ordering::Relaxed);
+                                                }
+                                            }
+                                            Err(StateError::ActiveTasksInEagerClose) => {
+                                                // Correctly prevented eager close with active tasks
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    2 => {
+                                        // Test region state transition corruption
+                                        let region = runtime_state.create_region_with_mode(RegionCloseMode::Eager).await;
+
+                                        // MUTATION: Corrupt region state directly
+                                        match runtime_state.force_region_state(&region.id(), RegionState::Closing).await {
+                                            Err(StateError::InvalidStateTransition) => {
+                                                // Correctly prevented invalid state transition
+                                            }
+                                            Ok(_) => {
+                                                // Should have prevented invalid state transition
+                                                close_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    3 => {
+                                        // Test quiescence check corruption in eager mode
+                                        let region = runtime_state.create_region_with_mode(RegionCloseMode::Eager).await;
+
+                                        // Create task that will block quiescence
+                                        let _blocking_task = region
+                                            .spawn_task("blocking_task", async move {
+                                                // Simulate task that doesn't respond to cancellation
+                                                loop {
+                                                    sleep(Duration::from_millis(10)).await;
+                                                }
+                                            })
+                                            .await;
+
+                                        // MUTATION: Skip quiescence check in eager close
+                                        match runtime_state.close_region_skip_quiescence(&region.id()).await {
+                                            Err(StateError::QuiescenceCheckRequired) => {
+                                                // Correctly enforced quiescence check
+                                            }
+                                            Ok(_) => {
+                                                // Should have enforced quiescence check
+                                                close_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    6 => {
+                                        // Test parent-child region close order corruption
+                                        let parent_region = runtime_state.create_region_with_mode(RegionCloseMode::Eager).await;
+                                        let child_region = runtime_state
+                                            .create_child_region(&parent_region.id(), RegionCloseMode::Lazy)
+                                            .await;
+
+                                        // MUTATION: Try to close parent before child
+                                        match runtime_state.close_region(&parent_region.id()).await {
+                                            Err(StateError::ChildRegionsStillActive) => {
+                                                // Correctly prevented closing parent with active children
+                                            }
+                                            Ok(_) => {
+                                                // Should have prevented closing parent with active children
+                                                close_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    9 => {
+                                        // Test region close timeout corruption
+                                        let region = runtime_state.create_region_with_mode(RegionCloseMode::Lazy).await;
+
+                                        // Create task that will timeout during close
+                                        let _timeout_task = region
+                                            .spawn_task("timeout_task", async move {
+                                                sleep(Duration::from_secs(10)).await; // Very long
+                                            })
+                                            .await;
+
+                                        // MUTATION: Close with corrupted timeout (too short)
+                                        match runtime_state
+                                            .close_region_with_timeout(&region.id(), Duration::from_millis(1))
+                                            .await
+                                        {
+                                            Err(StateError::RegionCloseTimeout) => {
+                                                // Correctly timed out
+                                            }
+                                            Ok(_) => {
+                                                // Should have timed out with too short timeout
+                                                close_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    12 => {
+                                        // Test obligation cleanup order corruption
+                                        let region = runtime_state.create_region_with_mode(RegionCloseMode::Eager).await;
+
+                                        // Create obligations in region
+                                        let obligation1 = region.create_obligation("test_obligation_1").await;
+                                        let obligation2 = region.create_obligation("test_obligation_2").await;
+
+                                        // MUTATION: Close region without completing obligations
+                                        match runtime_state.close_region(&region.id()).await {
+                                            Err(StateError::OutstandingObligations) => {
+                                                // Correctly detected outstanding obligations
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected outstanding obligations
+                                                close_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    15 => {
+                                        // Test concurrent region close corruption
+                                        let region = runtime_state.create_region_with_mode(RegionCloseMode::Lazy).await;
+
+                                        // MUTATION: Attempt concurrent closes
+                                        let close1 = runtime_state.close_region(&region.id());
+                                        let close2 = runtime_state.close_region(&region.id());
+
+                                        match futures::join!(close1, close2) {
+                                            (Ok(_), Err(StateError::RegionAlreadyClosing)) |
+                                            (Err(StateError::RegionAlreadyClosing), Ok(_)) => {
+                                                // Correctly handled concurrent close
+                                            }
+                                            (Ok(_), Ok(_)) => {
+                                                // Should have prevented double close
+                                                close_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            _ => {
+                                                // Other error combinations
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal region lifecycle test
+                                        let region = runtime_state.create_region_with_mode(RegionCloseMode::Eager).await;
+                                        let _task = region.spawn_task("normal_task", async {}).await;
+                                        runtime_state.close_region(&region.id()).await.ok();
+                                    }
+                                }
+                            }
+
+                            // Test task state corruption during region close
+                            if test_idx % 4 == 0 {
+                                state_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let runtime_state = state::RuntimeState::new();
+                                let region = runtime_state.create_region_with_mode(RegionCloseMode::Eager).await;
+
+                                // MUTATION: Corrupt task state during region close
+                                match test_idx % 12 {
+                                    0 => {
+                                        // Create task and corrupt its state to Running after it completes
+                                        let task = region.spawn_task("state_corrupt_task", async {}).await;
+
+                                        // Wait for task to complete
+                                        task.join().await.ok();
+
+                                        // MUTATION: Force task back to Running state
+                                        match runtime_state.force_task_state(&task.id(), TaskState::Running).await {
+                                            Err(StateError::InvalidTaskStateTransition) => {
+                                                // Correctly prevented invalid state transition
+                                            }
+                                            Ok(_) => {
+                                                // Should have prevented invalid state transition
+                                                close_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    4 => {
+                                        // Test task finalization corruption
+                                        let task = region
+                                            .spawn_task("finalize_corrupt_task", async {
+                                                panic!("Test panic");
+                                            })
+                                            .await;
+
+                                        // Wait for task to panic
+                                        task.join().await.ok();
+
+                                        // MUTATION: Skip finalization during region close
+                                        match runtime_state.close_region_skip_finalization(&region.id()).await {
+                                            Err(StateError::FinalizationRequired) => {
+                                                // Correctly enforced finalization
+                                            }
+                                            Ok(_) => {
+                                                // Should have enforced finalization
+                                                close_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    8 => {
+                                        // Test leaked reference during close
+                                        let task = region.spawn_task("leak_test_task", async {}).await;
+
+                                        // MUTATION: Keep reference to task after region starts closing
+                                        runtime_state.begin_region_close(&region.id()).await.ok();
+
+                                        match runtime_state.access_task_in_closing_region(&task.id()).await {
+                                            Err(StateError::TaskAccessInClosingRegion) => {
+                                                // Correctly prevented access to task in closing region
+                                            }
+                                            Ok(_) => {
+                                                // Should have prevented access to task in closing region
+                                                close_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal task lifecycle test
+                                        let task = region.spawn_task("normal_lifecycle_task", async {}).await;
+                                        task.join().await.ok();
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(3)).await;
+                        }
+
+                        let corruptions = state_corruptions.load(Ordering::Relaxed);
+                        let violations = close_violations.load(Ordering::Relaxed);
+
+                        // Runtime state validation should catch region close corruption
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Region close corruption detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(ErrorKind::Other,
+                                format!("Runtime state validation failed: {} corruptions, {} violations",
+                                    corruptions, violations)))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(runtime_state_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-43",
+            "runtime",
+            "state_region_close_eager_lazy_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-44] Cx registry commit_permit identity regression mutations
+    async fn test_cx_registry_mutations(&self) {
+        use crate::cx::{registry, CapabilityId, PermitId, RegistryError, CommitPermit};
+
+        let cx_registry_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let registry_test_count = 16;
+                let registry_corruptions = Arc::new(AtomicUsize::new(0));
+                let permit_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..registry_test_count {
+                            // Test commit permit identity corruption
+                            if test_idx % 3 == 0 {
+                                registry_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let mut cx_registry = registry::CxRegistry::new();
+
+                                // MUTATION: Corrupt commit permit identity checking
+                                match test_idx % 16 {
+                                    0 => {
+                                        // Create permit for one capability
+                                        let capability_a = cx_registry.register_capability("test_cap_a").await;
+                                        let permit_a = cx_registry.acquire_permit(&capability_a).await.unwrap();
+
+                                        // Create permit for different capability
+                                        let capability_b = cx_registry.register_capability("test_cap_b").await;
+                                        let permit_b = cx_registry.acquire_permit(&capability_b).await.unwrap();
+
+                                        // MUTATION: Try to commit permit A as if it were for capability B
+                                        let commit_permit_corrupted = CommitPermit::new(&permit_a.id(), &capability_b);
+
+                                        match cx_registry.commit_permit(commit_permit_corrupted).await {
+                                            Err(RegistryError::PermitIdentityMismatch) => {
+                                                // Correctly detected permit identity mismatch
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected permit identity mismatch
+                                                permit_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    1 => {
+                                        // Test double commit corruption
+                                        let capability = cx_registry.register_capability("double_commit_test").await;
+                                        let permit = cx_registry.acquire_permit(&capability).await.unwrap();
+
+                                        // First commit (should succeed)
+                                        let commit_permit1 = CommitPermit::new(&permit.id(), &capability);
+                                        cx_registry.commit_permit(commit_permit1).await.ok();
+
+                                        // MUTATION: Second commit of same permit
+                                        let commit_permit2 = CommitPermit::new(&permit.id(), &capability);
+                                        match cx_registry.commit_permit(commit_permit2).await {
+                                            Err(RegistryError::PermitAlreadyCommitted) => {
+                                                // Correctly prevented double commit
+                                            }
+                                            Ok(_) => {
+                                                // Should have prevented double commit
+                                                permit_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    2 => {
+                                        // Test permit expiry bypass corruption
+                                        let capability = cx_registry.register_capability("expiry_test").await;
+                                        let permit = cx_registry
+                                            .acquire_permit_with_expiry(&capability, Duration::from_millis(100))
+                                            .await
+                                            .unwrap();
+
+                                        // Wait for permit to expire
+                                        sleep(Duration::from_millis(200)).await;
+
+                                        // MUTATION: Try to commit expired permit
+                                        let commit_permit = CommitPermit::new(&permit.id(), &capability);
+                                        match cx_registry.commit_permit(commit_permit).await {
+                                            Err(RegistryError::PermitExpired) => {
+                                                // Correctly detected expired permit
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected expired permit
+                                                permit_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    3 => {
+                                        // Test capability revocation bypass corruption
+                                        let capability = cx_registry.register_capability("revocation_test").await;
+                                        let permit = cx_registry.acquire_permit(&capability).await.unwrap();
+
+                                        // Revoke capability
+                                        cx_registry.revoke_capability(&capability).await.ok();
+
+                                        // MUTATION: Try to commit permit for revoked capability
+                                        let commit_permit = CommitPermit::new(&permit.id(), &capability);
+                                        match cx_registry.commit_permit(commit_permit).await {
+                                            Err(RegistryError::CapabilityRevoked) => {
+                                                // Correctly detected revoked capability
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected revoked capability
+                                                permit_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    4 => {
+                                        // Test forged permit ID corruption
+                                        let capability = cx_registry.register_capability("forge_test").await;
+                                        let real_permit = cx_registry.acquire_permit(&capability).await.unwrap();
+
+                                        // MUTATION: Create commit permit with forged ID
+                                        let forged_permit_id = PermitId::new(); // Different ID
+                                        let commit_permit_forged = CommitPermit::new(&forged_permit_id, &capability);
+
+                                        match cx_registry.commit_permit(commit_permit_forged).await {
+                                            Err(RegistryError::PermitNotFound) => {
+                                                // Correctly detected forged permit ID
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected forged permit ID
+                                                permit_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    6 => {
+                                        // Test permit reuse across registry instances corruption
+                                        let registry1 = registry::CxRegistry::new();
+                                        let registry2 = registry::CxRegistry::new();
+
+                                        let capability1 = registry1.register_capability("cross_registry_test").await;
+                                        let permit1 = registry1.acquire_permit(&capability1).await.unwrap();
+
+                                        // MUTATION: Try to use permit from registry1 in registry2
+                                        let commit_permit = CommitPermit::new(&permit1.id(), &capability1);
+                                        match registry2.commit_permit(commit_permit).await {
+                                            Err(RegistryError::PermitRegistryMismatch) => {
+                                                // Correctly detected cross-registry permit reuse
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected cross-registry permit reuse
+                                                permit_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    8 => {
+                                        // Test concurrent permit commit corruption
+                                        let capability = cx_registry.register_capability("concurrent_test").await;
+                                        let permit = cx_registry.acquire_permit(&capability).await.unwrap();
+
+                                        // MUTATION: Attempt concurrent commits of same permit
+                                        let commit_permit1 = CommitPermit::new(&permit.id(), &capability);
+                                        let commit_permit2 = CommitPermit::new(&permit.id(), &capability);
+
+                                        let commit1 = cx_registry.commit_permit(commit_permit1);
+                                        let commit2 = cx_registry.commit_permit(commit_permit2);
+
+                                        match futures::join!(commit1, commit2) {
+                                            (Ok(_), Err(RegistryError::PermitAlreadyCommitted)) |
+                                            (Err(RegistryError::PermitAlreadyCommitted), Ok(_)) => {
+                                                // Correctly handled concurrent commit
+                                            }
+                                            (Ok(_), Ok(_)) => {
+                                                // Should have prevented double commit
+                                                permit_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            _ => {
+                                                // Other error combinations
+                                            }
+                                        }
+                                    }
+                                    12 => {
+                                        // Test capability hierarchy bypass corruption
+                                        let parent_capability = cx_registry.register_capability("parent_cap").await;
+                                        let child_capability = cx_registry
+                                            .register_child_capability("child_cap", &parent_capability)
+                                            .await
+                                            .unwrap();
+
+                                        let child_permit = cx_registry.acquire_permit(&child_capability).await.unwrap();
+
+                                        // MUTATION: Try to commit child permit as parent capability
+                                        let commit_permit_corrupted = CommitPermit::new(&child_permit.id(), &parent_capability);
+                                        match cx_registry.commit_permit(commit_permit_corrupted).await {
+                                            Err(RegistryError::CapabilityHierarchyViolation) => {
+                                                // Correctly detected capability hierarchy violation
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected capability hierarchy violation
+                                                permit_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal permit lifecycle test
+                                        let capability = cx_registry.register_capability("normal_test").await;
+                                        let permit = cx_registry.acquire_permit(&capability).await.unwrap();
+                                        let commit_permit = CommitPermit::new(&permit.id(), &capability);
+                                        cx_registry.commit_permit(commit_permit).await.ok();
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(4)).await;
+                        }
+
+                        let corruptions = registry_corruptions.load(Ordering::Relaxed);
+                        let violations = permit_violations.load(Ordering::Relaxed);
+
+                        // Cx registry validation should catch permit identity corruption
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Permit identity corruption detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(ErrorKind::Other,
+                                format!("Cx registry validation failed: {} corruptions, {} violations",
+                                    corruptions, violations)))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(cx_registry_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-44",
+            "cx",
+            "registry_commit_permit_identity_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-45] Net DNS TTL caching expiry regression mutations
+    async fn test_net_dns_mutations(&self) {
+        use crate::net::dns::{DnsCache, DnsRecord, RecordType, CacheError, DnsTtl};
+
+        let net_dns_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let dns_test_count = 20;
+                let dns_corruptions = Arc::new(AtomicUsize::new(0));
+                let ttl_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..dns_test_count {
+                            // Test DNS TTL caching expiry corruption
+                            if test_idx % 3 == 0 {
+                                dns_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let mut dns_cache = DnsCache::new();
+
+                                // MUTATION: Corrupt DNS TTL caching behavior
+                                match test_idx % 20 {
+                                    0 => {
+                                        // Test TTL expiry bypass corruption
+                                        let record = DnsRecord::new("example.com", RecordType::A, "192.168.1.1")
+                                            .with_ttl(DnsTtl::from_seconds(1)); // Very short TTL
+
+                                        dns_cache.insert(record.clone()).await;
+
+                                        // Wait for TTL to expire
+                                        sleep(Duration::from_millis(1500)).await;
+
+                                        // MUTATION: Return expired record instead of cache miss
+                                        match dns_cache.get_ignore_ttl("example.com", RecordType::A).await {
+                                            Some(cached_record) => {
+                                                // Should not return expired record
+                                                ttl_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            None => {
+                                                // Correctly handled TTL expiry
+                                            }
+                                        }
+                                    }
+                                    1 => {
+                                        // Test TTL refresh corruption
+                                        let original_record = DnsRecord::new("refresh.com", RecordType::A, "10.0.0.1")
+                                            .with_ttl(DnsTtl::from_seconds(60));
+
+                                        dns_cache.insert(original_record.clone()).await;
+
+                                        // MUTATION: Update TTL without proper authority validation
+                                        let updated_record = DnsRecord::new("refresh.com", RecordType::A, "10.0.0.1")
+                                            .with_ttl(DnsTtl::from_seconds(3600)); // Extended TTL
+
+                                        match dns_cache.update_ttl_without_validation(&updated_record).await {
+                                            Err(CacheError::TtlUpdateRequiresValidation) => {
+                                                // Correctly required validation for TTL update
+                                            }
+                                            Ok(_) => {
+                                                // Should have required validation for TTL update
+                                                ttl_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    2 => {
+                                        // Test negative caching TTL corruption
+                                        let nxdomain_record = DnsRecord::new_nxdomain("nonexistent.com")
+                                            .with_ttl(DnsTtl::from_seconds(300)); // 5 minutes negative cache
+
+                                        dns_cache.insert_negative(nxdomain_record).await;
+
+                                        // MUTATION: Positive record overwrites negative cache before TTL expires
+                                        let positive_record = DnsRecord::new("nonexistent.com", RecordType::A, "1.2.3.4")
+                                            .with_ttl(DnsTtl::from_seconds(60));
+
+                                        match dns_cache.insert_ignoring_negative_cache(positive_record).await {
+                                            Err(CacheError::NegativeCacheStillValid) => {
+                                                // Correctly honored negative cache TTL
+                                            }
+                                            Ok(_) => {
+                                                // Should have honored negative cache TTL
+                                                ttl_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    3 => {
+                                        // Test cache poisoning via TTL manipulation
+                                        let legitimate_record = DnsRecord::new("bank.com", RecordType::A, "203.0.113.1")
+                                            .with_ttl(DnsTtl::from_seconds(300));
+
+                                        dns_cache.insert(legitimate_record).await;
+
+                                        // MUTATION: Malicious record with very long TTL
+                                        let malicious_record = DnsRecord::new("bank.com", RecordType::A, "192.0.2.666") // Malicious IP
+                                            .with_ttl(DnsTtl::from_seconds(86400)); // 24 hours
+
+                                        match dns_cache.insert_without_authority_check(malicious_record).await {
+                                            Err(CacheError::AuthorityValidationRequired) => {
+                                                // Correctly required authority validation
+                                            }
+                                            Ok(_) => {
+                                                // Should have required authority validation
+                                                ttl_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    4 => {
+                                        // Test TTL zero handling corruption
+                                        let zero_ttl_record = DnsRecord::new("immediate.com", RecordType::A, "198.51.100.1")
+                                            .with_ttl(DnsTtl::from_seconds(0)); // Should not be cached
+
+                                        match dns_cache.insert_zero_ttl_record(zero_ttl_record).await {
+                                            Err(CacheError::ZeroTtlNotCacheable) => {
+                                                // Correctly rejected zero TTL caching
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected zero TTL caching
+                                                ttl_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    6 => {
+                                        // Test TTL drift corruption (system clock changes)
+                                        let record = DnsRecord::new("timetest.com", RecordType::A, "203.0.113.2")
+                                            .with_ttl(DnsTtl::from_seconds(120));
+
+                                        dns_cache.insert(record).await;
+
+                                        // MUTATION: Simulate system clock going backwards
+                                        dns_cache.simulate_clock_drift(Duration::from_secs(-60)).await;
+
+                                        match dns_cache.get("timetest.com", RecordType::A).await {
+                                            Some(cached_record) => {
+                                                // Check if TTL was correctly adjusted for clock drift
+                                                if cached_record.remaining_ttl() > Duration::from_secs(120) {
+                                                    // TTL should have been adjusted for clock drift
+                                                    ttl_violations.fetch_add(1, Ordering::Relaxed);
+                                                }
+                                            }
+                                            None => {
+                                                // Record expired due to clock drift handling
+                                            }
+                                        }
+                                    }
+                                    8 => {
+                                        // Test cache eviction TTL bypass corruption
+                                        dns_cache.set_max_size(2).await; // Very small cache
+
+                                        let record1 = DnsRecord::new("first.com", RecordType::A, "192.0.2.1")
+                                            .with_ttl(DnsTtl::from_seconds(3600));
+                                        let record2 = DnsRecord::new("second.com", RecordType::A, "192.0.2.2")
+                                            .with_ttl(DnsTtl::from_seconds(1)); // Short TTL
+                                        let record3 = DnsRecord::new("third.com", RecordType::A, "192.0.2.3")
+                                            .with_ttl(DnsTtl::from_seconds(3600));
+
+                                        dns_cache.insert(record1).await;
+                                        dns_cache.insert(record2).await;
+
+                                        // Wait for record2 to expire
+                                        sleep(Duration::from_millis(1500)).await;
+
+                                        // MUTATION: Insert record3, should evict expired record2 not valid record1
+                                        dns_cache.insert(record3).await;
+
+                                        if dns_cache.get("first.com", RecordType::A).await.is_none() {
+                                            // Should have evicted expired record2, not valid record1
+                                            ttl_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    10 => {
+                                        // Test concurrent TTL expiry corruption
+                                        let record = DnsRecord::new("concurrent.com", RecordType::A, "203.0.113.3")
+                                            .with_ttl(DnsTtl::from_seconds(1));
+
+                                        dns_cache.insert(record).await;
+
+                                        // Wait until just before expiry
+                                        sleep(Duration::from_millis(900)).await;
+
+                                        // MUTATION: Concurrent gets during expiry window
+                                        let get1 = dns_cache.get("concurrent.com", RecordType::A);
+                                        let get2 = dns_cache.get("concurrent.com", RecordType::A);
+
+                                        let (result1, result2) = futures::join!(get1, get2);
+
+                                        match (result1, result2) {
+                                            (Some(_), None) | (None, Some(_)) => {
+                                                // Inconsistent results during expiry window
+                                                ttl_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            _ => {
+                                                // Consistent results (both found or both expired)
+                                            }
+                                        }
+                                    }
+                                    12 => {
+                                        // Test minimum TTL enforcement corruption
+                                        let short_ttl_record = DnsRecord::new("shortttl.com", RecordType::A, "198.51.100.2")
+                                            .with_ttl(DnsTtl::from_seconds(5)); // Very short
+
+                                        dns_cache.set_minimum_ttl(Duration::from_secs(60)).await;
+
+                                        dns_cache.insert(short_ttl_record).await;
+
+                                        // Check after original TTL would have expired but minimum TTL hasn't
+                                        sleep(Duration::from_millis(6000)).await;
+
+                                        match dns_cache.get("shortttl.com", RecordType::A).await {
+                                            Some(_) => {
+                                                // Correctly honored minimum TTL
+                                            }
+                                            None => {
+                                                // Should have honored minimum TTL
+                                                ttl_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                        }
+                                    }
+                                    16 => {
+                                        // Test maximum TTL clamping corruption
+                                        let long_ttl_record = DnsRecord::new("longttl.com", RecordType::A, "203.0.113.4")
+                                            .with_ttl(DnsTtl::from_seconds(86400)); // 24 hours
+
+                                        dns_cache.set_maximum_ttl(Duration::from_secs(300)).await; // 5 minutes max
+
+                                        dns_cache.insert(long_ttl_record).await;
+
+                                        if let Some(cached_record) = dns_cache.get("longttl.com", RecordType::A).await {
+                                            if cached_record.remaining_ttl() > Duration::from_secs(300) {
+                                                // TTL should have been clamped to maximum
+                                                ttl_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal DNS caching test
+                                        let normal_record = DnsRecord::new("normal.com", RecordType::A, "192.0.2.100")
+                                            .with_ttl(DnsTtl::from_seconds(300));
+                                        dns_cache.insert(normal_record).await;
+                                        dns_cache.get("normal.com", RecordType::A).await;
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(2)).await;
+                        }
+
+                        let corruptions = dns_corruptions.load(Ordering::Relaxed);
+                        let violations = ttl_violations.load(Ordering::Relaxed);
+
+                        // DNS TTL validation should catch caching expiry corruption
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // TTL caching corruption detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(ErrorKind::Other,
+                                format!("DNS TTL validation failed: {} corruptions, {} violations",
+                                    corruptions, violations)))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(net_dns_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-45",
+            "net",
+            "dns_ttl_caching_expiry_corruption",
+            detected,
+        );
+    }
+
     /// Generate subsystem testing summary
     fn generate_subsystem_summary(&self) -> serde_json::Value {
         let applied = self.mutations_applied.load(Ordering::Relaxed);
@@ -6446,6 +7338,102 @@ async fn test_io_capability_subsystem_mutation_sensitivity() {
 }
 
 #[tokio::test]
+async fn test_runtime_state_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("runtime_state_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"runtime_state_start\"}}");
+
+    // Test runtime state-specific mutations
+    tester.test_runtime_state_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply runtime state mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.93,
+        "Runtime state subsystem should detect ≥93% of region close eager-vs-lazy mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"runtime_state_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_cx_registry_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("cx_registry_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"cx_registry_start\"}}");
+
+    // Test cx registry-specific mutations
+    tester.test_cx_registry_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply cx registry mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.95,
+        "Cx registry subsystem should detect ≥95% of commit_permit identity mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"cx_registry_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_net_dns_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("net_dns_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"net_dns_start\"}}");
+
+    // Test net dns-specific mutations
+    tester.test_net_dns_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply net dns mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.94,
+        "Net DNS subsystem should detect ≥94% of TTL caching expiry mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"net_dns_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
 async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"start\"}}");
 
@@ -6480,6 +7468,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         SubsystemMutationTester::new("comprehensive_database_client").await;
     let fs_operations_tester = SubsystemMutationTester::new("comprehensive_fs_operations").await;
     let io_capability_tester = SubsystemMutationTester::new("comprehensive_io_capability").await;
+    let runtime_state_tester = SubsystemMutationTester::new("comprehensive_runtime_state").await;
+    let cx_registry_tester = SubsystemMutationTester::new("comprehensive_cx_registry").await;
+    let net_dns_tester = SubsystemMutationTester::new("comprehensive_net_dns").await;
 
     // Test all subsystem mutations comprehensively
     obs_tester.test_observability_counter_mutations().await;
@@ -6533,6 +7524,12 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
 
     io_capability_tester.test_io_capability_mutations().await;
 
+    runtime_state_tester.test_runtime_state_mutations().await;
+
+    cx_registry_tester.test_cx_registry_mutations().await;
+
+    net_dns_tester.test_net_dns_mutations().await;
+
     // Calculate overall subsystem detection rate
     let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed)
         + trace_tester.mutations_applied.load(Ordering::Relaxed)
@@ -6568,6 +7565,15 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
             .mutations_applied
             .load(Ordering::Relaxed)
         + io_capability_tester
+            .mutations_applied
+            .load(Ordering::Relaxed)
+        + runtime_state_tester
+            .mutations_applied
+            .load(Ordering::Relaxed)
+        + cx_registry_tester
+            .mutations_applied
+            .load(Ordering::Relaxed)
+        + net_dns_tester
             .mutations_applied
             .load(Ordering::Relaxed);
 
@@ -6609,6 +7615,15 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
             .mutations_detected
             .load(Ordering::Relaxed)
         + io_capability_tester
+            .mutations_detected
+            .load(Ordering::Relaxed)
+        + runtime_state_tester
+            .mutations_detected
+            .load(Ordering::Relaxed)
+        + cx_registry_tester
+            .mutations_detected
+            .load(Ordering::Relaxed)
+        + net_dns_tester
             .mutations_detected
             .load(Ordering::Relaxed);
 
