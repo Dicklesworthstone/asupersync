@@ -173,24 +173,34 @@ fn mr_plan_certificate_transitivity() {
         // Create simple plan DAGs for testing
         let mut plan_a = PlanDag::new();
         let leaf_a = plan_a.leaf("test_a");
+        let timeout_a = plan_a.timeout(leaf_a, Duration::from_secs_f64(duration1));
+        plan_a.set_root(timeout_a);
         let mut plan_b = PlanDag::new();
         let leaf_b = plan_b.leaf("test_b");
+        let timeout_b = plan_b.timeout(leaf_b, Duration::from_secs_f64(duration2));
+        plan_b.set_root(timeout_b);
         let mut plan_c = PlanDag::new();
         let leaf_c = plan_c.leaf("test_c");
+        let timeout_c = plan_c.timeout(leaf_c, Duration::from_secs_f64(duration3));
+        plan_c.set_root(timeout_c);
 
         // Test hash consistency for different plans
-        let hash_a = crate::plan::certificate::hash_plan(&plan_a);
-        let hash_b = crate::plan::certificate::hash_plan(&plan_b);
-        let hash_c = crate::plan::certificate::hash_plan(&plan_c);
+        let hash_a = PlanHash::of(&plan_a);
+        let hash_b = PlanHash::of(&plan_b);
+        let hash_c = PlanHash::of(&plan_c);
 
         // Different plans should have different hashes (high probability)
         prop_assert_ne!(
             hash_a, hash_b,
             "Certificate transitivity test: different plans should have different hashes"
         );
+        prop_assert_ne!(
+            hash_b, hash_c,
+            "Certificate transitivity test: chained plans should retain distinct hashes"
+        );
 
         // Same plan should have same hash when computed multiple times
-        let hash_a2 = crate::plan::certificate::hash_plan(&plan_a);
+        let hash_a2 = PlanHash::of(&plan_a);
         prop_assert_eq!(
             hash_a, hash_a2,
             "Certificate transitivity test: same plan should have consistent hash"
@@ -209,7 +219,7 @@ fn mr_plan_certificate_transitivity() {
 #[test]
 fn mr_plan_hash_consistency() {
     use crate::plan::PlanDag;
-    use crate::plan::certificate::{PlanHash, hash_plan};
+    use crate::plan::certificate::PlanHash;
 
     proptest!(|(
         label_suffix1 in 0u32..1000u32,
@@ -218,13 +228,15 @@ fn mr_plan_hash_consistency() {
         // Create identical plan DAGs
         let mut plan1 = PlanDag::new();
         let leaf1 = plan1.leaf(&format!("test_{}", label_suffix1));
+        plan1.set_root(leaf1);
 
         let mut plan2 = PlanDag::new();
         let leaf2 = plan2.leaf(&format!("test_{}", label_suffix1));
+        plan2.set_root(leaf2);
 
         // Identical plans should have identical hashes
-        let hash1 = hash_plan(&plan1);
-        let hash2 = hash_plan(&plan2);
+        let hash1 = PlanHash::of(&plan1);
+        let hash2 = PlanHash::of(&plan2);
 
         prop_assert_eq!(
             hash1, hash2,
@@ -235,7 +247,8 @@ fn mr_plan_hash_consistency() {
         if label_suffix1 != label_suffix2 {
             let mut plan3 = PlanDag::new();
             let leaf3 = plan3.leaf(&format!("test_{}", label_suffix2));
-            let hash3 = hash_plan(&plan3);
+            plan3.set_root(leaf3);
+            let hash3 = PlanHash::of(&plan3);
 
             prop_assert_ne!(
                 hash1, hash3,
@@ -418,7 +431,7 @@ fn mr_trace_replay_determinism() {
 #[test]
 fn mr_plan_fixture_round_trip() {
     use crate::plan::PlanDag;
-    use crate::plan::certificate::hash_plan;
+    use crate::plan::certificate::PlanHash;
     use std::time::Duration;
 
     proptest!(|(
@@ -444,7 +457,7 @@ fn mr_plan_fixture_round_trip() {
         }
 
         // Extract key properties
-        let original_hash = hash_plan(&original_plan);
+        let original_hash = PlanHash::of(&original_plan);
         let original_node_count = original_plan.node_count();
         let original_root = original_plan.root();
 
@@ -473,7 +486,7 @@ fn mr_plan_fixture_round_trip() {
         );
 
         // Hash should be identical for identical plans
-        let reconstructed_hash = hash_plan(&reconstructed_plan);
+        let reconstructed_hash = PlanHash::of(&reconstructed_plan);
         prop_assert_eq!(
             original_hash,
             reconstructed_hash,
