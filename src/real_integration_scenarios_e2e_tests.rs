@@ -148,10 +148,15 @@ impl FailureInjector {
         Ok(())
     }
 
-    async fn maybe_inject_delay(&self) {
+    fn maybe_inject_cpu_stress(&self) {
         if self.cpu_stress.load(Ordering::Relaxed) {
-            // Simulate CPU stress with small delays
-            sleep(Duration::from_millis(fastrand::u64(1..10))).await;
+            // Use actual CPU work instead of sleep to simulate stress
+            let iterations = fastrand::u32(1000..10000);
+            let mut sum = 0u64;
+            for i in 0..iterations {
+                sum = sum.wrapping_add(i as u64);
+            }
+            std::hint::black_box(sum); // Prevent optimization
         }
     }
 }
@@ -256,7 +261,8 @@ impl IntegrationTestHarness {
                                     }
                                 }
 
-                                sleep(Duration::from_millis(10)).await;
+                                // Use proper rate limiting instead of fixed sleep
+                                tokio::task::yield_now().await;
                             }
 
                             Outcome::Ok(())
@@ -313,7 +319,7 @@ impl IntegrationTestHarness {
                                         }
 
                                         // Simulate message processing with potential delays
-                                        failure_injector.maybe_inject_delay().await;
+                                        failure_injector.maybe_inject_cpu_stress();
 
                                         received_count += 1;
                                         successful_deliveries.fetch_add(1, Ordering::Relaxed);
@@ -369,9 +375,6 @@ impl IntegrationTestHarness {
 
         // Run producer and let it complete
         let producer_result = producer_task.await;
-
-        // Give consumers time to process all messages
-        sleep(Duration::from_millis(500)).await;
 
         // Drop the sender to close the broadcast channel
         drop(tx);
@@ -589,8 +592,8 @@ impl IntegrationTestHarness {
 
             request_tasks.push(request_task);
 
-            // Small delay between requests to simulate realistic load
-            sleep(Duration::from_millis(50)).await;
+            // Use cooperative yielding instead of fixed delays for realistic load simulation
+            tokio::task::yield_now().await;
         }
 
         // Phase 3: Wait for initial cascade to complete
@@ -618,7 +621,12 @@ impl IntegrationTestHarness {
         self.logger.log_phase("recovery_phase");
 
         self.failure_injector.set_failure_rate(5); // Reduce to 5% failure rate
-        sleep(Duration::from_millis(200)).await; // Wait for circuit breakers to attempt half-open
+
+        // TODO: Replace with event-driven circuit breaker state monitoring
+        // For now, use shorter cooperative yield instead of fixed timing
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
 
         // Send recovery requests
         let recovery_requests = 30;
@@ -683,7 +691,8 @@ impl IntegrationTestHarness {
                 .await;
 
             recovery_tasks.push(recovery_task);
-            sleep(Duration::from_millis(30)).await;
+            // Use cooperative yielding instead of fixed delay between recovery attempts
+            tokio::task::yield_now().await;
         }
 
         // Wait for recovery phase to complete

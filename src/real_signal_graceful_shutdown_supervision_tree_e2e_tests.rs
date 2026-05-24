@@ -497,7 +497,7 @@ mod tests {
             node.stats.shutdown_attempts.fetch_add(1, Ordering::Relaxed);
 
             // Simulate drain process based on node type
-            let drain_duration = self.simulate_node_drain(&node)?;
+            let drain_duration = self.simulate_node_drain(&node).await?;
 
             // Check if drain completed within timeout
             let timeout = Duration::from_millis(self.shutdown_config.drain_timeout_ms);
@@ -512,7 +512,7 @@ mod tests {
             Ok(())
         }
 
-        fn simulate_node_drain(&self, node: &SupervisionNode) -> Result<Duration, String> {
+        async fn simulate_node_drain(&self, node: &SupervisionNode) -> Result<Duration, String> {
             // Simulate different drain times based on node type
             let base_drain_ms = match &node.node_type {
                 NodeType::RootSupervisor => 100,       // Root supervisor drains quickly
@@ -539,8 +539,8 @@ mod tests {
             let variance = (node.node_id % 50) as u64; // 0-49ms variance based on node ID
             let total_drain_ms = base_drain_ms + variance;
 
-            // Simulate actual drain work
-            std::thread::sleep(Duration::from_millis(total_drain_ms));
+            // Simulate actual drain work with non-blocking sleep
+            tokio::time::sleep(Duration::from_millis(total_drain_ms)).await;
 
             Ok(Duration::from_millis(total_drain_ms))
         }
@@ -628,8 +628,8 @@ mod tests {
                     return Err(format!("Timeout waiting for node {} to drain", node_id));
                 }
 
-                // Short sleep to avoid busy waiting
-                std::thread::sleep(Duration::from_millis(10));
+                // Use async yield instead of blocking thread sleep
+                tokio::task::yield_now().await;
             }
         }
 
