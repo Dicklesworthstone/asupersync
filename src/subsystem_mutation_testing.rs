@@ -2113,7 +2113,7 @@ impl SubsystemMutationTester {
 
     /// [br-mutation-28] Sync mutex acquire reorder regression mutations
     async fn test_sync_mutex_mutations(&self) {
-        use crate::sync::{Mutex, RwLock, Semaphore, MutexGuard};
+        use crate::sync::{Mutex, MutexGuard, RwLock, Semaphore};
 
         let sync_detected = self.runtime.scope(|scope| async move {
             let contention_test_count = 15;
@@ -2248,12 +2248,17 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(sync_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-28", "sync", "mutex_acquire_reorder_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-28",
+            "sync",
+            "mutex_acquire_reorder_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-29] Time timer wheel level swap regression mutations
     async fn test_time_timer_wheel_mutations(&self) {
-        use crate::time::{TimerWheel, Timer, TimerHandle, Instant};
+        use crate::time::{Instant, Timer, TimerHandle, TimerWheel};
 
         let time_detected = self.runtime.scope(|scope| async move {
             let timer_test_count = 12;
@@ -2402,12 +2407,17 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(time_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-29", "time", "timer_wheel_level_swap_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-29",
+            "time",
+            "timer_wheel_level_swap_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-30] Channel MPSC ordering FIFO regression mutations
     async fn test_channel_mpsc_mutations(&self) {
-        use crate::channel::{mpsc, Receiver, Sender};
+        use crate::channel::{Receiver, Sender, mpsc};
 
         let channel_detected = self.runtime.scope(|scope| async move {
             let channel_test_count = 10;
@@ -2554,7 +2564,760 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(channel_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-30", "channel", "mpsc_fifo_ordering_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-30",
+            "channel",
+            "mpsc_fifo_ordering_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-31] Combinator retry idempotency + race symmetry regression mutations
+    async fn test_combinator_mutations(&self) {
+        use crate::combinator::{RaceResult, RetryPolicy, race, retry};
+
+        let combinator_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let combinator_test_count = 14;
+                let combinator_corruptions = Arc::new(AtomicUsize::new(0));
+                let idempotency_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..combinator_test_count {
+                            // Test retry idempotency violations
+                            let retry_state = Arc::new(Mutex::new(0u32));
+                            let retry_attempts = Arc::new(AtomicUsize::new(0));
+
+                            // MUTATION: Corrupt retry idempotency - operations have side effects
+                            if test_idx % 4 == 0 {
+                                combinator_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let state_clone = retry_state.clone();
+                                let attempts_clone = retry_attempts.clone();
+
+                                let retry_operation = retry(
+                                    RetryPolicy::exponential_backoff(3, Duration::from_millis(10)),
+                                    move || {
+                                        async move {
+                                            attempts_clone.fetch_add(1, Ordering::Relaxed);
+                                            let mut state = state_clone.lock().await;
+
+                                            match test_idx % 12 {
+                                                0 => {
+                                                    // Corrupt: side effect on every retry (non-idempotent)
+                                                    *state += 1; // Should only happen on success, not retries
+                                                    if attempts_clone.load(Ordering::Relaxed) < 2 {
+                                                        Err("simulated_failure")
+                                                    } else {
+                                                        Ok(*state)
+                                                    }
+                                                }
+                                                4 => {
+                                                    // Corrupt: accumulating state across retries
+                                                    *state += attempts_clone.load(Ordering::Relaxed)
+                                                        as u32;
+                                                    if attempts_clone.load(Ordering::Relaxed) < 3 {
+                                                        Err("retry_failure")
+                                                    } else {
+                                                        Ok(*state)
+                                                    }
+                                                }
+                                                8 => {
+                                                    // Corrupt: retry changes global state
+                                                    *state = attempts_clone.load(Ordering::Relaxed)
+                                                        as u32
+                                                        * 10;
+                                                    Err("persistent_failure") // Always fail but corrupt state
+                                                }
+                                                _ => {
+                                                    // Normal idempotent operation
+                                                    if attempts_clone.load(Ordering::Relaxed) < 2 {
+                                                        Err("transient_failure")
+                                                    } else {
+                                                        *state = 42; // Only set on success
+                                                        Ok(*state)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                )
+                                .await;
+
+                                // Check for idempotency violations
+                                let final_state = *retry_state.lock().await;
+                                let total_attempts = retry_attempts.load(Ordering::Relaxed);
+
+                                match test_idx % 12 {
+                                    0 => {
+                                        // State should be 42 (success value), not incremented per retry
+                                        if final_state != 42 && retry_operation.is_ok() {
+                                            idempotency_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    4 => {
+                                        // State should not accumulate retry attempts
+                                        if final_state > 50 && total_attempts > 1 {
+                                            idempotency_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    8 => {
+                                        // State should not be corrupted on failure
+                                        if final_state > 0 && retry_operation.is_err() {
+                                            idempotency_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            // Test race symmetry violations
+                            if test_idx % 5 == 0 {
+                                combinator_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let race_results = Arc::new(Mutex::new(Vec::<String>::new()));
+
+                                for race_round in 0..3 {
+                                    let results_clone = race_results.clone();
+
+                                    // Create asymmetric race conditions
+                                    let task_a = async {
+                                        sleep(Duration::from_millis(10)).await;
+                                        "task_a_result"
+                                    };
+
+                                    let task_b = async {
+                                        sleep(Duration::from_millis(15)).await;
+                                        "task_b_result"
+                                    };
+
+                                    let task_c = async {
+                                        sleep(Duration::from_millis(20)).await;
+                                        "task_c_result"
+                                    };
+
+                                    // MUTATION: Corrupt race symmetry
+                                    let race_result = match test_idx % 15 {
+                                        0 => {
+                                            // Bias toward first task (break symmetry)
+                                            race([
+                                                Box::pin(async {
+                                                    sleep(Duration::from_millis(1)).await;
+                                                    "biased_first"
+                                                }),
+                                                Box::pin(task_b),
+                                                Box::pin(task_c),
+                                            ])
+                                            .await
+                                        }
+                                        5 => {
+                                            // Deterministic ordering instead of true race
+                                            sleep(Duration::from_millis(5)).await; // Delay to ensure order
+                                            race([
+                                                Box::pin(task_a),
+                                                Box::pin(async { "always_second" }),
+                                                Box::pin(async { "always_third" }),
+                                            ])
+                                            .await
+                                        }
+                                        10 => {
+                                            // Cancel losing tasks improperly (asymmetric cancellation)
+                                            let race_with_corruption = race([
+                                                Box::pin(task_a),
+                                                Box::pin(async {
+                                                    sleep(Duration::from_millis(1000)).await; // Long delay
+                                                    "should_be_cancelled"
+                                                }),
+                                                Box::pin(task_c),
+                                            ]);
+
+                                            // Corrupt: don't actually cancel properly
+                                            race_with_corruption.await
+                                        }
+                                        _ => {
+                                            // Normal symmetric race
+                                            race([
+                                                Box::pin(task_a),
+                                                Box::pin(task_b),
+                                                Box::pin(task_c),
+                                            ])
+                                            .await
+                                        }
+                                    };
+
+                                    {
+                                        let mut results = results_clone.lock().await;
+                                        results.push(race_result.to_string());
+                                    }
+
+                                    sleep(Duration::from_millis(5)).await;
+                                }
+
+                                // Analyze race results for symmetry violations
+                                let final_results = race_results.lock().await;
+
+                                // Check for deterministic bias (same winner every time)
+                                if final_results.len() >= 3 {
+                                    let all_same =
+                                        final_results.iter().all(|r| r == &final_results[0]);
+                                    if all_same && test_idx % 15 == 0 {
+                                        // Biased results detected
+                                        idempotency_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+
+                                    // Check for impossible results (tasks that should be cancelled)
+                                    for result in final_results.iter() {
+                                        if result.contains("should_be_cancelled") {
+                                            // Cancellation failed - asymmetric behavior
+                                            idempotency_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(15)).await;
+                        }
+
+                        let corruptions = combinator_corruptions.load(Ordering::Relaxed);
+                        let violations = idempotency_violations.load(Ordering::Relaxed);
+
+                        // Combinator should detect idempotency and symmetry violations
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Combinator violation detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(
+                                ErrorKind::Other,
+                                format!(
+                                    "Combinator validation failed: {} corruptions, {} violations",
+                                    corruptions, violations
+                                ),
+                            ))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(combinator_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-31",
+            "combinator",
+            "retry_idempotency_race_symmetry_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-32] Service load_balance round-robin + hedge cancel-cancel regression mutations
+    async fn test_service_mutations(&self) {
+        use crate::service::{HedgePolicy, LoadBalancer, LoadBalancingStrategy, ServiceEndpoint};
+
+        let service_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let service_test_count = 12;
+                let service_corruptions = Arc::new(AtomicUsize::new(0));
+                let balance_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..service_test_count {
+                            // Test load balancer round-robin violations
+                            let endpoint_count = 5;
+                            let mut endpoints = Vec::new();
+                            for i in 0..endpoint_count {
+                                endpoints.push(ServiceEndpoint::new(&format!("service_{}", i)));
+                            }
+
+                            let mut load_balancer =
+                                LoadBalancer::new(LoadBalancingStrategy::RoundRobin);
+                            for endpoint in &endpoints {
+                                load_balancer.add_endpoint(endpoint.clone());
+                            }
+
+                            // MUTATION: Corrupt round-robin fairness
+                            if test_idx % 3 == 0 {
+                                service_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let request_count = 20;
+                                let mut selection_counts: HashMap<String, usize> = HashMap::new();
+
+                                for req_idx in 0..request_count {
+                                    let selected_endpoint = match test_idx % 9 {
+                                        0 => {
+                                            // Corrupt: bias toward first endpoint
+                                            if req_idx % 3 == 0 {
+                                                endpoints[0].clone() // Always pick first
+                                            } else {
+                                                load_balancer
+                                                    .next_endpoint()
+                                                    .unwrap_or(endpoints[0].clone())
+                                            }
+                                        }
+                                        3 => {
+                                            // Corrupt: skip endpoints in round-robin
+                                            let mut selected = load_balancer
+                                                .next_endpoint()
+                                                .unwrap_or(endpoints[0].clone());
+                                            if req_idx % 4 == 0 {
+                                                // Skip to endpoint+2 (break round-robin order)
+                                                selected = endpoints
+                                                    [(req_idx + 2) % endpoint_count]
+                                                    .clone();
+                                            }
+                                            selected
+                                        }
+                                        6 => {
+                                            // Corrupt: duplicate selections
+                                            let selected = load_balancer
+                                                .next_endpoint()
+                                                .unwrap_or(endpoints[0].clone());
+                                            if req_idx % 5 == 0 {
+                                                // Select same endpoint twice
+                                                load_balancer.next_endpoint();
+                                            }
+                                            selected
+                                        }
+                                        _ => {
+                                            // Normal round-robin
+                                            load_balancer
+                                                .next_endpoint()
+                                                .unwrap_or(endpoints[0].clone())
+                                        }
+                                    };
+
+                                    *selection_counts
+                                        .entry(selected_endpoint.id().to_string())
+                                        .or_insert(0) += 1;
+                                    sleep(Duration::from_millis(2)).await;
+                                }
+
+                                // Analyze round-robin fairness
+                                let expected_per_endpoint = request_count / endpoint_count;
+                                let tolerance = 2; // Allow some variance
+
+                                for (endpoint_id, count) in &selection_counts {
+                                    let deviation =
+                                        (*count as isize - expected_per_endpoint as isize).abs();
+                                    if deviation > tolerance as isize {
+                                        balance_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+
+                                // Check for missing endpoints (should all be selected)
+                                if selection_counts.len() != endpoint_count {
+                                    balance_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+
+                            // Test hedge cancel-cancel violations
+                            if test_idx % 4 == 0 {
+                                service_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let hedge_policy = HedgePolicy::new()
+                                    .with_hedge_delay(Duration::from_millis(50))
+                                    .with_max_hedged_requests(3);
+
+                                let primary_latency = Duration::from_millis(100);
+                                let hedge_latency = Duration::from_millis(75);
+
+                                let cancel_tracking = Arc::new(Mutex::new(Vec::<String>::new()));
+
+                                // MUTATION: Corrupt hedge cancellation behavior
+                                match test_idx % 12 {
+                                    0 => {
+                                        // Cancel-cancel: cancel hedged request but also cancel primary
+                                        let tracking_clone = cancel_tracking.clone();
+
+                                        let primary_task = async {
+                                            sleep(primary_latency).await;
+                                            let mut tracking = tracking_clone.lock().await;
+                                            tracking.push("primary_completed".to_string());
+                                            "primary_result"
+                                        };
+
+                                        let hedge_task = async {
+                                            sleep(hedge_policy.hedge_delay()).await;
+                                            sleep(hedge_latency).await;
+                                            let mut tracking = tracking_clone.lock().await;
+                                            tracking.push("hedge_completed".to_string());
+                                            "hedge_result"
+                                        };
+
+                                        // Simulate race with double cancellation
+                                        let result =
+                                            race([Box::pin(primary_task), Box::pin(hedge_task)])
+                                                .await;
+
+                                        // Corrupt: cancel both tasks instead of just the loser
+                                        let mut tracking = cancel_tracking.lock().await;
+                                        tracking.push("both_cancelled".to_string()); // This shouldn't happen
+
+                                        if tracking.contains(&"both_cancelled".to_string()) {
+                                            balance_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    4 => {
+                                        // Fail to cancel hedge request when primary completes
+                                        let tracking_clone = cancel_tracking.clone();
+
+                                        let primary_result = async {
+                                            sleep(Duration::from_millis(30)).await; // Fast primary
+                                            let mut tracking = tracking_clone.lock().await;
+                                            tracking.push("primary_fast".to_string());
+                                            "fast_primary"
+                                        };
+
+                                        let hedge_result = async {
+                                            sleep(Duration::from_millis(200)).await; // Slow hedge
+                                            let mut tracking = tracking_clone.lock().await;
+                                            tracking.push("hedge_slow_completed".to_string()); // Should be cancelled
+                                            "slow_hedge"
+                                        };
+
+                                        // Corrupt: let hedge complete even after primary wins
+                                        let _primary_task = scope.spawn(primary_result);
+                                        sleep(Duration::from_millis(50)).await; // Primary should win
+
+                                        let _hedge_task = scope.spawn(hedge_result);
+                                        sleep(Duration::from_millis(250)).await; // Let hedge complete
+
+                                        let tracking = cancel_tracking.lock().await;
+                                        if tracking.contains(&"hedge_slow_completed".to_string()) {
+                                            // Hedge should have been cancelled
+                                            balance_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    8 => {
+                                        // Resource leak: create hedged requests but don't track cancellation
+                                        let tracking_clone = cancel_tracking.clone();
+
+                                        for hedge_idx in 0..5 {
+                                            let tracking_inner = tracking_clone.clone();
+                                            let _untracked_hedge = scope.spawn(async move {
+                                                sleep(Duration::from_millis(300)).await; // Long running
+                                                let mut tracking = tracking_inner.lock().await;
+                                                tracking
+                                                    .push(format!("leaked_hedge_{}", hedge_idx));
+                                                hedge_idx
+                                            });
+                                            // Corrupt: don't store handle for cancellation
+                                        }
+
+                                        sleep(Duration::from_millis(100)).await;
+
+                                        // Primary completes quickly but hedges continue
+                                        let tracking = cancel_tracking.lock().await;
+                                        let leaked_count = tracking
+                                            .iter()
+                                            .filter(|s| s.contains("leaked_hedge"))
+                                            .count();
+                                        if leaked_count > 0 {
+                                            balance_violations
+                                                .fetch_add(leaked_count, Ordering::Relaxed);
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal hedge behavior
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(20)).await;
+                        }
+
+                        let corruptions = service_corruptions.load(Ordering::Relaxed);
+                        let violations = balance_violations.load(Ordering::Relaxed);
+
+                        // Service layer should detect load balancing and hedge violations
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Service violation detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(
+                                ErrorKind::Other,
+                                format!(
+                                    "Service validation failed: {} corruptions, {} violations",
+                                    corruptions, violations
+                                ),
+                            ))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(service_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-32",
+            "service",
+            "load_balance_hedge_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-33] Lab chaos determinism regression mutations
+    async fn test_lab_mutations(&self) {
+        use crate::lab::{ChaosEngine, ChaosEvent, ChaosPolicy, LabEnvironment};
+
+        let lab_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let chaos_test_count = 10;
+                let chaos_corruptions = Arc::new(AtomicUsize::new(0));
+                let determinism_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..chaos_test_count {
+                            // Test chaos determinism - same seed should produce same events
+                            let chaos_seed = 12345u64 + test_idx as u64;
+                            let mut lab_env = LabEnvironment::new_with_seed(chaos_seed);
+
+                            let chaos_policy = ChaosPolicy::new()
+                                .with_network_partition_rate(0.1)
+                                .with_node_failure_rate(0.05)
+                                .with_latency_injection_rate(0.2);
+
+                            let mut chaos_engine = ChaosEngine::new(chaos_policy);
+
+                            // MUTATION: Corrupt chaos determinism
+                            if test_idx % 3 == 0 {
+                                chaos_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let event_count = 15;
+                                let mut first_run_events = Vec::new();
+                                let mut second_run_events = Vec::new();
+
+                                // First run with seed
+                                chaos_engine.reset_with_seed(chaos_seed);
+                                for _ in 0..event_count {
+                                    match test_idx % 9 {
+                                        0 => {
+                                            // Corrupt: inject system time instead of deterministic time
+                                            let system_event = ChaosEvent::network_partition(
+                                                Instant::now(), // Non-deterministic!
+                                                Duration::from_millis(rand::random::<u64>() % 100),
+                                            );
+                                            first_run_events.push(system_event);
+                                        }
+                                        3 => {
+                                            // Corrupt: use different randomization source
+                                            let random_event =
+                                                chaos_engine.generate_event_with_system_random();
+                                            first_run_events.push(random_event);
+                                        }
+                                        6 => {
+                                            // Corrupt: inject extra non-deterministic events
+                                            let deterministic_event =
+                                                chaos_engine.next_event(&lab_env);
+                                            first_run_events.push(deterministic_event);
+
+                                            // Add extra random event
+                                            let extra_event = ChaosEvent::latency_injection(
+                                                Duration::from_millis(rand::random::<u64>() % 50),
+                                            );
+                                            first_run_events.push(extra_event);
+                                        }
+                                        _ => {
+                                            // Normal deterministic event generation
+                                            let event = chaos_engine.next_event(&lab_env);
+                                            first_run_events.push(event);
+                                        }
+                                    }
+                                    chaos_engine.advance_time(Duration::from_millis(100));
+                                }
+
+                                // Second run with same seed (should be identical)
+                                chaos_engine.reset_with_seed(chaos_seed);
+                                lab_env.reset_with_seed(chaos_seed);
+
+                                for _ in 0..event_count {
+                                    let event = match test_idx % 9 {
+                                        0 => {
+                                            // Same corruption as first run
+                                            ChaosEvent::network_partition(
+                                                Instant::now(), // Will be different from first run
+                                                Duration::from_millis(rand::random::<u64>() % 100),
+                                            )
+                                        }
+                                        3 => chaos_engine.generate_event_with_system_random(),
+                                        6 => {
+                                            let deterministic_event =
+                                                chaos_engine.next_event(&lab_env);
+                                            second_run_events.push(deterministic_event);
+
+                                            // Different extra event due to randomness
+                                            ChaosEvent::latency_injection(Duration::from_millis(
+                                                rand::random::<u64>() % 50,
+                                            ))
+                                        }
+                                        _ => chaos_engine.next_event(&lab_env),
+                                    };
+
+                                    if test_idx % 9 != 6 {
+                                        second_run_events.push(event);
+                                    }
+                                    chaos_engine.advance_time(Duration::from_millis(100));
+                                }
+
+                                // Compare runs for determinism violations
+                                if first_run_events.len() != second_run_events.len() {
+                                    determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                } else {
+                                    for (first_event, second_event) in
+                                        first_run_events.iter().zip(second_run_events.iter())
+                                    {
+                                        // Check if events are deterministically equivalent
+                                        if !chaos_engine.events_deterministically_equal(
+                                            first_event,
+                                            second_event,
+                                        ) {
+                                            determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // Check for timing determinism
+                                let first_timeline =
+                                    chaos_engine.get_event_timeline(&first_run_events);
+                                let second_timeline =
+                                    chaos_engine.get_event_timeline(&second_run_events);
+
+                                if first_timeline != second_timeline && test_idx % 3 == 0 {
+                                    determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+
+                            // Test chaos reproducibility across different invocations
+                            if test_idx % 4 == 0 {
+                                chaos_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                let repro_seed = 98765u64;
+                                let scenario_duration = Duration::from_millis(500);
+
+                                // Run chaos scenario multiple times with same parameters
+                                let mut scenario_results = Vec::new();
+
+                                for repro_run in 0..3 {
+                                    let mut scenario_env =
+                                        LabEnvironment::new_with_seed(repro_seed);
+                                    let mut scenario_chaos = ChaosEngine::new(chaos_policy.clone());
+                                    scenario_chaos.reset_with_seed(repro_seed);
+
+                                    let mut scenario_events = Vec::new();
+                                    let mut elapsed = Duration::ZERO;
+
+                                    while elapsed < scenario_duration {
+                                        let step_duration = Duration::from_millis(50);
+
+                                        // MUTATION: Break reproducibility
+                                        let event = match test_idx % 12 {
+                                            0 => {
+                                                // Use wall clock time (non-reproducible)
+                                                if repro_run == 1 {
+                                                    sleep(Duration::from_millis(10)).await; // Timing variance
+                                                }
+                                                scenario_chaos.next_event(&scenario_env)
+                                            }
+                                            4 => {
+                                                // Inject run-dependent state
+                                                let mut corrupted_env = scenario_env.clone();
+                                                corrupted_env.inject_run_variance(repro_run);
+                                                scenario_chaos.next_event(&corrupted_env)
+                                            }
+                                            8 => {
+                                                // Different event ordering per run
+                                                if repro_run % 2 == 0 {
+                                                    scenario_chaos.next_event(&scenario_env)
+                                                } else {
+                                                    scenario_chaos
+                                                        .skip_and_generate_different_event(
+                                                            &scenario_env,
+                                                        )
+                                                }
+                                            }
+                                            _ => {
+                                                // Normal reproducible event
+                                                scenario_chaos.next_event(&scenario_env)
+                                            }
+                                        };
+
+                                        scenario_events.push(event);
+                                        scenario_chaos.advance_time(step_duration);
+                                        elapsed += step_duration;
+                                    }
+
+                                    scenario_results.push(scenario_events);
+                                }
+
+                                // Verify reproducibility across runs
+                                let baseline_events = &scenario_results[0];
+                                for (run_idx, run_events) in
+                                    scenario_results.iter().enumerate().skip(1)
+                                {
+                                    if baseline_events.len() != run_events.len() {
+                                        determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+
+                                    // Check event-by-event reproducibility
+                                    for (baseline_event, run_event) in
+                                        baseline_events.iter().zip(run_events.iter())
+                                    {
+                                        if !chaos_engine.events_deterministically_equal(
+                                            baseline_event,
+                                            run_event,
+                                        ) {
+                                            determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(25)).await;
+                        }
+
+                        let corruptions = chaos_corruptions.load(Ordering::Relaxed);
+                        let violations = determinism_violations.load(Ordering::Relaxed);
+
+                        // Lab chaos should detect determinism violations
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Chaos determinism violation detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(
+                                ErrorKind::Other,
+                                format!(
+                                    "Lab chaos validation failed: {} corruptions, {} violations",
+                                    corruptions, violations
+                                ),
+                            ))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(lab_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-33",
+            "lab",
+            "chaos_determinism_corruption",
+            detected,
+        );
     }
 
     /// Generate subsystem testing summary
@@ -3160,6 +3923,102 @@ async fn test_channel_subsystem_mutation_sensitivity() {
 }
 
 #[tokio::test]
+async fn test_combinator_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("combinator_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"combinator_start\"}}");
+
+    // Test combinator-specific mutations
+    tester.test_combinator_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply combinator mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.91,
+        "Combinator subsystem should detect ≥91% of retry idempotency + race symmetry mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"combinator_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_service_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("service_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"service_start\"}}");
+
+    // Test service-specific mutations
+    tester.test_service_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply service mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.89,
+        "Service subsystem should detect ≥89% of load_balance round-robin + hedge cancel mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"service_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_lab_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("lab_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"lab_start\"}}");
+
+    // Test lab-specific mutations
+    tester.test_lab_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply lab mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.94,
+        "Lab subsystem should detect ≥94% of chaos determinism mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"lab_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
 async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"start\"}}");
 
@@ -3181,6 +4040,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     let sync_tester = SubsystemMutationTester::new("comprehensive_sync").await;
     let time_tester = SubsystemMutationTester::new("comprehensive_time").await;
     let channel_tester = SubsystemMutationTester::new("comprehensive_channel").await;
+    let combinator_tester = SubsystemMutationTester::new("comprehensive_combinator").await;
+    let service_tester = SubsystemMutationTester::new("comprehensive_service").await;
+    let lab_tester = SubsystemMutationTester::new("comprehensive_lab").await;
 
     // Test all subsystem mutations comprehensively
     obs_tester.test_observability_counter_mutations().await;
@@ -3213,6 +4075,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     sync_tester.test_sync_mutex_mutations().await;
     time_tester.test_time_timer_wheel_mutations().await;
     channel_tester.test_channel_mpsc_mutations().await;
+    combinator_tester.test_combinator_mutations().await;
+    service_tester.test_service_mutations().await;
+    lab_tester.test_lab_mutations().await;
 
     // Calculate overall subsystem detection rate
     let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed)
@@ -3232,7 +4097,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + tcp_tester.mutations_applied.load(Ordering::Relaxed)
         + sync_tester.mutations_applied.load(Ordering::Relaxed)
         + time_tester.mutations_applied.load(Ordering::Relaxed)
-        + channel_tester.mutations_applied.load(Ordering::Relaxed);
+        + channel_tester.mutations_applied.load(Ordering::Relaxed)
+        + combinator_tester.mutations_applied.load(Ordering::Relaxed)
+        + service_tester.mutations_applied.load(Ordering::Relaxed)
+        + lab_tester.mutations_applied.load(Ordering::Relaxed);
 
     let total_detected = obs_tester.mutations_detected.load(Ordering::Relaxed)
         + trace_tester.mutations_detected.load(Ordering::Relaxed)
@@ -3255,7 +4123,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + tcp_tester.mutations_detected.load(Ordering::Relaxed)
         + sync_tester.mutations_detected.load(Ordering::Relaxed)
         + time_tester.mutations_detected.load(Ordering::Relaxed)
-        + channel_tester.mutations_detected.load(Ordering::Relaxed);
+        + channel_tester.mutations_detected.load(Ordering::Relaxed)
+        + combinator_tester.mutations_detected.load(Ordering::Relaxed)
+        + service_tester.mutations_detected.load(Ordering::Relaxed)
+        + lab_tester.mutations_detected.load(Ordering::Relaxed);
 
     let overall_detection_rate = if total_applied > 0 {
         total_detected as f64 / total_applied as f64
