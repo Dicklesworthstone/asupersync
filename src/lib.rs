@@ -417,6 +417,8 @@ pub mod real_net_dns_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_dns_resolver_happy_eyeballs_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_net_quic_native_streams_net_quic_native_tls_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_websocket_http_h1_upgrade_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_tls_connector_messaging_kafka_integration_e2e_tests;
