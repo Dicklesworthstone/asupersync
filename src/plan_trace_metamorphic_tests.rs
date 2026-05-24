@@ -312,7 +312,7 @@ fn mr_trace_record_replay_round_trip() {
 
         // Test metadata preservation
         prop_assert_eq!(
-            trace.metadata().seed(),
+            trace.metadata.seed,
             seed,
             "Trace recording: metadata seed changed"
         );
@@ -361,7 +361,7 @@ fn mr_trace_event_ordering_preservation() {
         let trace = recorder.finish().expect("trace recorder should be enabled");
 
         prop_assert_eq!(
-            trace.metadata().seed(),
+            trace.metadata.seed,
             seed,
             "Trace metadata should be preserved"
         );
@@ -411,8 +411,8 @@ fn mr_trace_replay_determinism() {
         // All traces should have identical metadata
         for i in 1..recording_count {
             prop_assert_eq!(
-                traces[0].metadata().seed(),
-                traces[i].metadata().seed(),
+                traces[0].metadata.seed,
+                traces[i].metadata.seed,
                 "Recording determinism violation: metadata seed differs between runs"
             );
         }
@@ -421,8 +421,8 @@ fn mr_trace_replay_determinism() {
         for i in 1..recording_count {
             // Compare basic properties that should be consistent
             prop_assert_eq!(
-                traces[0].metadata().schema_version(),
-                traces[i].metadata().schema_version(),
+                traces[0].metadata.version,
+                traces[i].metadata.version,
                 "Recording determinism violation: schema version differs between runs"
             );
         }
