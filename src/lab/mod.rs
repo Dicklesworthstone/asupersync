@@ -49,6 +49,7 @@
 
 #[path = "../atp/lab/mod.rs"]
 pub mod atp_lab;
+pub mod atp_path;
 pub mod chaos;
 pub mod config;
 pub mod conformal;

@@ -164,6 +164,41 @@ impl NetworkConditions {
     }
 }
 
+impl NetworkConfig {
+    /// Configuration optimized for LAN+IPv6 path testing.
+    #[must_use]
+    pub fn lan_ipv6() -> Self {
+        Self {
+            seed: 0xA7F0_0001,
+            default_conditions: NetworkConditions::lan(),
+            capture_trace: true,
+            ..Self::default()
+        }
+    }
+
+    /// Configuration for NAT traversal stress testing.
+    #[must_use]
+    pub fn nat_stress() -> Self {
+        Self {
+            seed: 0xA7F0_0002,
+            default_conditions: NetworkConditions::lossy(),
+            capture_trace: true,
+            ..Self::default()
+        }
+    }
+
+    /// Configuration for relay-only scenarios.
+    #[must_use]
+    pub fn relay_only() -> Self {
+        Self {
+            seed: 0xA7F0_0003,
+            default_conditions: NetworkConditions::wan(),
+            capture_trace: true,
+            ..Self::default()
+        }
+    }
+}
+
 /// Model for latency distribution.
 #[derive(Clone, Debug)]
 pub enum LatencyModel {
