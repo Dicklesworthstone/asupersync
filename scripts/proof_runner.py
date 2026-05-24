@@ -75,6 +75,10 @@ ASUPERSYNC_BEAD_RE = re.compile(
     re.IGNORECASE,
 )
 CARGO_LOCATION_RE = re.compile(r"^\s*-->\s+([^:\s]+):(\d+):(\d+)")
+CARGO_SHORT_ERROR_RE = re.compile(
+    r"^(?P<file>[^:\s][^:\n]*):(?P<line>\d+):(?P<column>\d+):\s+"
+    r"error(?:\[(?P<code>[^\]]+)\])?:\s*(?P<message>.+)$"
+)
 RUST_ERROR_RE = re.compile(
     r"^\s*error(?:\[(?P<code>[^\]]+)\])?:\s*(?P<message>.+)"
 )
@@ -129,6 +133,7 @@ FALLBACK_CARGO_HEAVY_WARNING = (
     "local disk pressure detected; prefer disk-safe fallback work or an artifact-free proof receipt before Cargo-heavy validation"
 )
 AUTOPILOT_PLAN_SCHEMA_VERSION = "proof-runner-autopilot-plan-v1"
+COMPILE_FRONTIER_SHARDS_SCHEMA_VERSION = "proof-runner-compile-frontier-shards-v1"
 
 
 def _non_negative_int(value: Any) -> int:
@@ -562,6 +567,116 @@ def rank_fallback_beads_for_disk(
     return sorted(ranked, key=sort_key)
 
 
+def compile_frontier_file_groups(
+    blockers: List[Dict[str, Any]],
+    touched_files: List[str],
+    reservation_checker: Optional["AgentMailChecker"] = None,
+) -> List[Dict[str, Any]]:
+    """Group rustc blockers by file and annotate reservation/touched state."""
+    touched = {normalize_repo_path(path) for path in touched_files}
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for input_order, blocker in enumerate(blockers):
+        file_path = normalize_repo_path(str(blocker.get("file", "")))
+        if not file_path:
+            continue
+        if file_path not in grouped:
+            grouped[file_path] = {
+                "file": file_path,
+                "input_order": input_order,
+                "diagnostic_count": 0,
+                "first_blocker": {
+                    "file": file_path,
+                    "line": int(blocker.get("line") or 0),
+                    "column": int(blocker.get("column") or 0),
+                    "message": str(blocker.get("message") or ""),
+                    "code": str(blocker.get("code") or ""),
+                },
+                "error_codes": [],
+                "messages": [],
+                "touched_by_request": file_path in touched,
+                "reservation_overlaps": [],
+                "reservation_state": "unchecked",
+                "eligible_for_new_slice": True,
+            }
+        group = grouped[file_path]
+        group["diagnostic_count"] += 1
+        code = str(blocker.get("code") or "")
+        if code and code not in group["error_codes"]:
+            group["error_codes"].append(code)
+        message = str(blocker.get("message") or "")
+        if message and message not in group["messages"]:
+            group["messages"].append(message)
+
+    groups = sorted(grouped.values(), key=lambda row: row["input_order"])
+    for group in groups:
+        if reservation_checker is None:
+            group["reservation_state"] = "not_configured"
+            continue
+        reservation_checker.check_file_reservations([group["file"]])
+        overlaps = list(reservation_checker.last_check["classifications"])
+        group["reservation_overlaps"] = overlaps
+        active_conflicts = [
+            row for row in overlaps
+            if row["classification"] in {"peer-active", "tracker-only", "unknown-owner", "unavailable"}
+        ]
+        if active_conflicts:
+            group["eligible_for_new_slice"] = False
+            group["reservation_state"] = active_conflicts[0]["classification"]
+        elif any(row["classification"] == "owned-active" for row in overlaps):
+            group["reservation_state"] = "owned-active"
+        elif any(row["classification"] == "expired" for row in overlaps):
+            group["reservation_state"] = "expired"
+        else:
+            group["reservation_state"] = "free"
+    return groups
+
+
+def compile_frontier_shard_suggestions(
+    file_groups: List[Dict[str, Any]],
+    command: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split file groups into actionable and reservation-blocked shard rows."""
+    suggestions = []
+    blocked = []
+    eligible_groups = [
+        group for group in file_groups
+        if group["eligible_for_new_slice"]
+    ]
+    eligible_groups = sorted(
+        eligible_groups,
+        key=lambda group: (
+            0 if group["touched_by_request"] else 1,
+            group["input_order"],
+        ),
+    )
+    for rank, group in enumerate(eligible_groups, start=1):
+        suggestions.append({
+            "rank": rank,
+            "candidate_title": f"Fix compile frontier in {group['file']}",
+            "touched_files": [group["file"]],
+            "reservation_paths": [group["file"]],
+            "first_blocker": group["first_blocker"],
+            "diagnostic_count": group["diagnostic_count"],
+            "error_codes": group["error_codes"],
+            "reservation_state": group["reservation_state"],
+            "validation_hint": command,
+        })
+    for group in file_groups:
+        if not group["eligible_for_new_slice"]:
+            blocked.append({
+                "candidate_title": f"Fix compile frontier in {group['file']}",
+                "touched_files": [group["file"]],
+                "reservation_paths": [group["file"]],
+                "first_blocker": group["first_blocker"],
+                "diagnostic_count": group["diagnostic_count"],
+                "error_codes": group["error_codes"],
+                "reservation_state": group["reservation_state"],
+                "reservation_overlaps": group["reservation_overlaps"],
+                "validation_hint": command,
+            })
+    return suggestions, blocked
+
+
 def canonical_json_bytes(payload: Dict[str, Any]) -> bytes:
     """Serialize JSON in the byte-stable form used by generated proof packs."""
     return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -853,6 +968,17 @@ def first_cargo_blocker(log_text: str) -> Dict[str, Any]:
     pending_message = ""
     pending_code = ""
     for line in log_text.splitlines():
+        short_match = CARGO_SHORT_ERROR_RE.match(line.strip())
+        if short_match:
+            return {
+                "file": short_match.group("file"),
+                "line": int(short_match.group("line")),
+                "column": int(short_match.group("column")),
+                "message": short_match.group("message").strip(),
+                "code": short_match.group("code") or "",
+                "raw": line.strip(),
+            }
+
         error_match = RUST_ERROR_RE.match(line)
         if error_match:
             pending_message = error_match.group("message").strip()
@@ -871,6 +997,89 @@ def first_cargo_blocker(log_text: str) -> Dict[str, Any]:
             }
 
     return empty_blocker(pending_message, pending_code)
+
+
+def rustc_json_blockers(log_text: str) -> List[Dict[str, Any]]:
+    """Extract all rustc --message-format=json error diagnostics."""
+    blockers = []
+    for line in log_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if payload.get("reason") != "compiler-message":
+            continue
+        message = payload.get("message") or {}
+        if message.get("level") != "error":
+            continue
+        spans = [span for span in message.get("spans") or [] if isinstance(span, dict)]
+        primary = next((span for span in spans if span.get("is_primary")), None)
+        if primary is None and spans:
+            primary = spans[0]
+        if primary is None:
+            continue
+        code = message.get("code") or {}
+        blockers.append({
+            "file": str(primary.get("file_name", "")),
+            "line": int(primary.get("line_start") or 0),
+            "column": int(primary.get("column_start") or 0),
+            "message": str(message.get("message", "")),
+            "code": str(code.get("code") or ""),
+            "raw": stripped,
+        })
+    return blockers
+
+
+def rustc_text_blockers(log_text: str) -> List[Dict[str, Any]]:
+    """Extract all rustc text diagnostics that include a file location."""
+    blockers = []
+    pending_message = ""
+    pending_code = ""
+    for line in log_text.splitlines():
+        short_match = CARGO_SHORT_ERROR_RE.match(line.strip())
+        if short_match:
+            blockers.append({
+                "file": short_match.group("file"),
+                "line": int(short_match.group("line")),
+                "column": int(short_match.group("column")),
+                "message": short_match.group("message").strip(),
+                "code": short_match.group("code") or "",
+                "raw": line.strip(),
+            })
+            pending_message = ""
+            pending_code = ""
+            continue
+
+        error_match = RUST_ERROR_RE.match(line)
+        if error_match:
+            pending_message = error_match.group("message").strip()
+            pending_code = error_match.group("code") or ""
+            continue
+
+        location_match = CARGO_LOCATION_RE.match(line)
+        if location_match:
+            blockers.append({
+                "file": location_match.group(1),
+                "line": int(location_match.group(2)),
+                "column": int(location_match.group(3)),
+                "message": pending_message,
+                "code": pending_code,
+                "raw": line.strip(),
+            })
+            pending_message = ""
+            pending_code = ""
+    return blockers
+
+
+def all_rustc_blockers(log_text: str) -> List[Dict[str, Any]]:
+    """Return all rustc blockers from JSON or text logs, preserving first-seen order."""
+    json_blockers = rustc_json_blockers(log_text)
+    if json_blockers:
+        return json_blockers
+    return rustc_text_blockers(log_text)
 
 
 def first_output_blocker(log_text: str) -> Dict[str, Any]:
@@ -3532,6 +3741,63 @@ class ProofRunner:
             "closeout_summary": closeout_summary_from_frontier(outcome, frontier),
         }
 
+    def plan_compile_frontier_shards(
+        self,
+        command: str,
+        log_path: str,
+        touched_files: List[str],
+    ) -> Dict[str, Any]:
+        """Plan reservation-aware file shards from a cargo/rch compile transcript."""
+        source_log = Path(log_path)
+        log_text = source_log.read_text(encoding="utf-8")
+        blockers = all_rustc_blockers(log_text)
+        file_groups = compile_frontier_file_groups(
+            blockers,
+            touched_files,
+            self.agent_mail,
+        )
+        suggested, blocked = compile_frontier_shard_suggestions(file_groups, command)
+        first_touched = next(
+            (group["first_blocker"] for group in file_groups if group["touched_by_request"]),
+            None,
+        )
+        first_external = next(
+            (group["first_blocker"] for group in file_groups if not group["touched_by_request"]),
+            None,
+        )
+        return {
+            "schema_version": COMPILE_FRONTIER_SHARDS_SCHEMA_VERSION,
+            "command": command,
+            "command_scope": command_scope(command),
+            "source_log_path": str(source_log),
+            "source_log_sha256": file_hash(source_log),
+            "source_log_bytes": source_log.stat().st_size,
+            "touched_files": [normalize_repo_path(path) for path in touched_files],
+            "total_diagnostics": sum(group["diagnostic_count"] for group in file_groups),
+            "file_group_count": len(file_groups),
+            "first_blocker": file_groups[0]["first_blocker"] if file_groups else empty_blocker(),
+            "first_touched_blocker": first_touched or empty_blocker(),
+            "first_external_blocker": first_external or empty_blocker(),
+            "reservation_snapshot": self.agent_mail.snapshot_status(),
+            "file_groups": file_groups,
+            "suggested_shards": suggested,
+            "blocked_shards": blocked,
+            "summary": {
+                "suggested_count": len(suggested),
+                "blocked_count": len(blocked),
+                "touched_group_count": sum(
+                    1 for group in file_groups if group["touched_by_request"]
+                ),
+                "external_group_count": sum(
+                    1 for group in file_groups if not group["touched_by_request"]
+                ),
+                "green_proof_claimed": False,
+                "mutates_beads": False,
+                "mutates_agent_mail": False,
+                "deletes_files": False,
+            },
+        }
+
     def list_operator_recipes(self) -> Dict[str, Any]:
         """List deterministic shared-main operator recipes."""
         return {
@@ -3611,6 +3877,10 @@ def main():
     parser.add_argument(
         "--classify-rch-log",
         help="Classify a saved rch output transcript instead of running lane preflight"
+    )
+    parser.add_argument(
+        "--plan-compile-frontier-shards",
+        help="Plan reservation-aware file shards from a saved cargo/rch compile transcript"
     )
     parser.add_argument(
         "--bead-id",
@@ -3695,7 +3965,7 @@ def main():
     parser.add_argument(
         "--command",
         default="",
-        help="Original rch command for --classify-rch-log"
+        help="Original rch command for --classify-rch-log or --plan-compile-frontier-shards"
     )
     parser.add_argument(
         "--agent-name",
@@ -3801,6 +4071,36 @@ def main():
                 print(f"Suggested lanes for {args.touched_files}:")
                 for lane in suggestions:
                     print(f"  {lane}")
+            return 0
+
+        if args.plan_compile_frontier_shards:
+            if not args.command:
+                parser.error("--command is required with --plan-compile-frontier-shards")
+            result = runner.plan_compile_frontier_shards(
+                args.command,
+                args.plan_compile_frontier_shards,
+                args.touched_files,
+            )
+            if args.output == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                print(
+                    "diagnostics={} groups={} suggested={} blocked={}".format(
+                        result["total_diagnostics"],
+                        result["file_group_count"],
+                        result["summary"]["suggested_count"],
+                        result["summary"]["blocked_count"],
+                    )
+                )
+                for row in result["suggested_shards"]:
+                    print(
+                        "{}. {} errors={} reservation={}".format(
+                            row["rank"],
+                            row["reservation_paths"][0],
+                            row["diagnostic_count"],
+                            row["reservation_state"],
+                        )
+                    )
             return 0
 
         if args.classify_rch_log:

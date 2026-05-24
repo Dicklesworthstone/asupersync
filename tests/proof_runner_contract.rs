@@ -2471,6 +2471,109 @@ fn proof_runner_classifies_truncated_rustc_output_fixture() {
 }
 
 #[test]
+fn proof_runner_compile_frontier_plans_file_shards() {
+    let command = "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_lib cargo test --message-format=short -p asupersync --lib cancel_cx_runtime_channel_metamorphic_tests -- --nocapture";
+    let result = proof_runner_json(&[
+        "--plan-compile-frontier-shards",
+        "tests/fixtures/proof_runner/compile_frontier_multi.log",
+        "--command",
+        command,
+        "--touched-files",
+        "src/cx_obligation_trace_metamorphic_tests.rs",
+        "--output",
+        "json",
+    ]);
+
+    assert_eq!(
+        result["schema_version"].as_str(),
+        Some("proof-runner-compile-frontier-shards-v1")
+    );
+    assert_eq!(result["total_diagnostics"].as_i64(), Some(4));
+    assert_eq!(result["file_group_count"].as_i64(), Some(3));
+    assert_eq!(
+        result["first_blocker"]["file"].as_str(),
+        Some("src/messaging_primitives_conformance_tests.rs")
+    );
+    assert_eq!(
+        result["first_touched_blocker"]["file"].as_str(),
+        Some("src/cx_obligation_trace_metamorphic_tests.rs")
+    );
+    assert_eq!(
+        result["first_external_blocker"]["file"].as_str(),
+        Some("src/messaging_primitives_conformance_tests.rs")
+    );
+    assert_eq!(
+        result["file_groups"][0]["diagnostic_count"].as_i64(),
+        Some(2)
+    );
+    assert_eq!(
+        result["suggested_shards"][0]["reservation_paths"][0].as_str(),
+        Some("src/cx_obligation_trace_metamorphic_tests.rs")
+    );
+    assert_eq!(
+        result["suggested_shards"][0]["validation_hint"].as_str(),
+        Some(command)
+    );
+    assert_eq!(
+        result["summary"]["green_proof_claimed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(result["summary"]["mutates_beads"].as_bool(), Some(false));
+    assert_eq!(
+        result["summary"]["mutates_agent_mail"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn proof_runner_compile_frontier_planner_avoids_reserved_shards() {
+    let snapshot = write_reservation_snapshot(
+        r#"{"reservations":[
+{"path_pattern":"src/messaging_primitives_conformance_tests.rs","holder":"SilverPike","expires_ts":"2999-01-01T00:00:00Z"},
+{"path_pattern":"src/cx_obligation_trace_metamorphic_tests.rs","holder":"RainyFalcon","expires_ts":"2999-01-01T00:00:00Z"}
+]}"#,
+    );
+    let snapshot_path = snapshot.path().to_str().expect("snapshot path utf8");
+    let command = "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_lib cargo test --message-format=short -p asupersync --lib cancel_cx_runtime_channel_metamorphic_tests -- --nocapture";
+    let result = proof_runner_json(&[
+        "--plan-compile-frontier-shards",
+        "tests/fixtures/proof_runner/compile_frontier_multi.log",
+        "--command",
+        command,
+        "--touched-files",
+        "src/cx_obligation_trace_metamorphic_tests.rs",
+        "--reservation-snapshot",
+        snapshot_path,
+        "--agent-name",
+        "RainyFalcon",
+        "--output",
+        "json",
+    ]);
+
+    assert_eq!(
+        result["blocked_shards"][0]["reservation_paths"][0].as_str(),
+        Some("src/messaging_primitives_conformance_tests.rs")
+    );
+    assert_eq!(
+        result["blocked_shards"][0]["reservation_state"].as_str(),
+        Some("peer-active")
+    );
+    let suggested = result["suggested_shards"]
+        .as_array()
+        .expect("suggested shards");
+    assert!(
+        suggested
+            .iter()
+            .all(|row| row["reservation_paths"][0].as_str()
+                != Some("src/messaging_primitives_conformance_tests.rs"))
+    );
+    assert_eq!(
+        result["file_groups"][1]["reservation_state"].as_str(),
+        Some("owned-active")
+    );
+}
+
+#[test]
 fn proof_runner_classifies_remote_required_refusal_as_external_admission_blocker() {
     let command = "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_refusal cargo test -p asupersync --test proof_runner_contract -- --nocapture";
     let result = classify_fixture(
