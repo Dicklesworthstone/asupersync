@@ -137,6 +137,36 @@ Validation for the ledger contract is also `rch`-scoped:
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_ledger cargo test -p asupersync --test validation_frontier_ledger_contract -- --nocapture
 ```
 
+## Proof-Lane Status Dashboard
+
+The live proof dashboard is `artifacts/proof_status_snapshot_v1.json`, checked
+by `tests/proof_status_snapshot_contract.rs`. It is a derived status view over
+`artifacts/proof_lane_manifest_v1.json` plus the validation-frontier ledger; it
+must not invent proof commands or broaden a lane beyond the manifest's
+`covers` / `explicit_not_covered` text.
+
+Update the dashboard as one atomic proof-status change:
+
+1. Add or update the lane in `artifacts/proof_lane_manifest_v1.json` and keep
+   its guarantee mapping bidirectional.
+2. Add or update the claim row in `artifacts/proof_status_snapshot_v1.json`.
+   `proof_commands` must be copied from the referenced manifest lanes.
+3. Keep `green` for dependency/formal/artifact lanes that are not merely broad
+   compile/test/lint/doc frontiers. Use `yellow_frontier` for broad validation
+   frontiers, `yellow_scoped` for quarantined or intentionally scoped lanes, and
+   `red_blocked_external` only with an exact validation-frontier fixture.
+4. For a red row, preserve the fixture id, command, decision, error class,
+   first-failure file/line, summary, and supplemental proof command. Stale
+   blocker summaries are rejected by the contract test.
+5. Keep README and AGENTS claim markers present; marker drift is a dashboard
+   failure, not a reason to loosen the test.
+
+The focused proof for dashboard/manifest consistency is:
+
+```bash
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_status_snapshot cargo test -p asupersync --test proof_status_snapshot_contract -- --nocapture
+```
+
 ## Capability And Ambient-Effect Gate
 
 The no-ambient-authority lane is anchored in `src/audit/ambient.rs`. It scans production `src/` Rust files for direct wall-clock time, OS randomness, filesystem/network construction, runtime environment access, stdout/stderr macros, and thread-spawn patterns that bypass `Cx` or explicit capability providers.

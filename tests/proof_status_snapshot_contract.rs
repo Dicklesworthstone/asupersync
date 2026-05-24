@@ -107,6 +107,163 @@ fn proof_commands_for_lanes(
         .collect()
 }
 
+fn validate_claim_lane_mapping(
+    entry: &Value,
+    lanes: &BTreeMap<String, Value>,
+    guarantees: &BTreeMap<String, Value>,
+) -> Result<BTreeSet<String>, String> {
+    let claim_id = string(entry, "claim_id");
+    let lane_ids = string_set(entry, "manifest_lane_ids");
+    let guarantee_ids = string_set(entry, "manifest_guarantee_ids");
+    if lane_ids.is_empty() {
+        return Err(format!("{claim_id}: missing lane ids"));
+    }
+    if guarantee_ids.is_empty() {
+        return Err(format!("{claim_id}: missing guarantee ids"));
+    }
+
+    for guarantee_id in &guarantee_ids {
+        let guarantee = guarantees
+            .get(guarantee_id)
+            .ok_or_else(|| format!("{claim_id}: unknown guarantee {guarantee_id}"))?;
+        let mapped_lanes = string_set(guarantee, "lane_ids");
+        if mapped_lanes.is_disjoint(&lane_ids) {
+            return Err(format!(
+                "{claim_id}: guarantee {guarantee_id} must share at least one listed lane"
+            ));
+        }
+    }
+
+    for lane_id in &lane_ids {
+        let lane = lanes
+            .get(lane_id)
+            .ok_or_else(|| format!("{claim_id}: unknown lane {lane_id}"))?;
+        let lane_guarantees = string_set(lane, "guarantee_ids");
+        if lane_guarantees.is_disjoint(&guarantee_ids) {
+            return Err(format!(
+                "{claim_id}: lane {lane_id} must cover at least one listed guarantee"
+            ));
+        }
+    }
+
+    let expected_commands = proof_commands_for_lanes(&lane_ids, lanes);
+    let snapshot_commands = string_set(entry, "proof_commands");
+    if expected_commands != snapshot_commands {
+        return Err(format!(
+            "{claim_id}: proof commands must match the manifest lane commands"
+        ));
+    }
+
+    Ok(snapshot_commands)
+}
+
+fn validate_status_support(entry: &Value, lanes: &BTreeMap<String, Value>) -> Result<(), String> {
+    let claim_id = string(entry, "claim_id");
+    let status = string(entry, "status");
+    let lane_ids = string_set(entry, "manifest_lane_ids");
+    let lane_kinds = lane_ids
+        .iter()
+        .map(|lane_id| {
+            lanes
+                .get(lane_id)
+                .map(|lane| string(lane, "kind").to_string())
+                .ok_or_else(|| format!("{claim_id}: unknown lane {lane_id}"))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+
+    match status {
+        "green" => {
+            let frontier_only_kinds = [
+                "compile_frontier",
+                "test_frontier",
+                "lint_frontier",
+                "format_frontier",
+                "documentation_frontier",
+            ];
+            if lane_kinds
+                .iter()
+                .any(|kind| frontier_only_kinds.contains(&kind.as_str()))
+            {
+                return Err(format!(
+                    "{claim_id}: frontier lane kinds cannot be represented as green: {lane_kinds:?}"
+                ));
+            }
+        }
+        "yellow_frontier" => {
+            if !lane_kinds.iter().any(|kind| kind.ends_with("_frontier")) {
+                return Err(format!(
+                    "{claim_id}: yellow_frontier row must include at least one frontier lane"
+                ));
+            }
+        }
+        "yellow_scoped" => {
+            let notes = string(entry, "notes").to_ascii_lowercase();
+            if !(notes.contains("scoped") || notes.contains("quarantine")) {
+                return Err(format!(
+                    "{claim_id}: yellow_scoped row must explain its scope or quarantine"
+                ));
+            }
+        }
+        "red_blocked_external" => {}
+        other => return Err(format!("{claim_id}: unknown status {other}")),
+    }
+
+    Ok(())
+}
+
+fn validate_blocked_frontier_record(
+    blocked: &Value,
+    fixtures: &BTreeMap<String, Value>,
+) -> Result<(), String> {
+    let blocked = blocked
+        .as_object()
+        .ok_or_else(|| "red row must have a blocked_frontier object".to_string())?;
+    let fixture_id = blocked
+        .get("fixture_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "blocked fixture_id".to_string())?;
+    let fixture = fixtures
+        .get(fixture_id)
+        .ok_or_else(|| format!("missing frontier fixture {fixture_id}"))?;
+    let expected = fixture
+        .get("expected_record")
+        .ok_or_else(|| format!("{fixture_id}: missing expected_record"))?;
+    let first_failure = expected
+        .get("first_failure")
+        .ok_or_else(|| format!("{fixture_id}: missing expected first_failure"))?;
+    let blocked_failure = blocked
+        .get("first_failure")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{fixture_id}: blocked first_failure must be an object"))?;
+
+    for (blocked_key, expected_value) in [
+        ("command", fixture.get("command")),
+        ("decision", expected.get("decision")),
+        ("error_class", expected.get("error_class")),
+        ("summary", expected.get("summary")),
+        (
+            "supplemental_proof_command",
+            fixture.get("supplemental_proof_command"),
+        ),
+    ] {
+        if blocked.get(blocked_key) != expected_value {
+            return Err(format!(
+                "{fixture_id}: blocked_frontier.{blocked_key} no longer matches validation frontier fixture"
+            ));
+        }
+    }
+
+    for key in ["crate_or_surface", "target", "file", "line"] {
+        if blocked_failure.get(key) != first_failure.get(key) {
+            return Err(format!(
+                "{fixture_id}: first_failure.{key} must match validation frontier fixture"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 #[test]
 fn snapshot_declares_schema_sources_and_required_categories() {
     let snapshot = json(SNAPSHOT_PATH);
@@ -186,42 +343,8 @@ fn every_claim_maps_to_manifest_lanes_guarantees_and_commands() {
 
     for entry in array(&snapshot, "claim_categories") {
         let claim_id = string(entry, "claim_id");
-        let lane_ids = string_set(entry, "manifest_lane_ids");
-        let guarantee_ids = string_set(entry, "manifest_guarantee_ids");
-        assert!(!lane_ids.is_empty(), "{claim_id}: missing lane ids");
-        assert!(
-            !guarantee_ids.is_empty(),
-            "{claim_id}: missing guarantee ids"
-        );
-
-        for guarantee_id in &guarantee_ids {
-            let guarantee = guarantees
-                .get(guarantee_id)
-                .unwrap_or_else(|| panic!("{claim_id}: unknown guarantee {guarantee_id}"));
-            let mapped_lanes = string_set(guarantee, "lane_ids");
-            assert!(
-                !mapped_lanes.is_disjoint(&lane_ids),
-                "{claim_id}: guarantee {guarantee_id} must share at least one listed lane"
-            );
-        }
-
-        for lane_id in &lane_ids {
-            let lane = lanes
-                .get(lane_id)
-                .unwrap_or_else(|| panic!("{claim_id}: unknown lane {lane_id}"));
-            let lane_guarantees = string_set(lane, "guarantee_ids");
-            assert!(
-                !lane_guarantees.is_disjoint(&guarantee_ids),
-                "{claim_id}: lane {lane_id} must cover at least one listed guarantee"
-            );
-        }
-
-        let expected_commands = proof_commands_for_lanes(&lane_ids, &lanes);
-        let snapshot_commands = string_set(entry, "proof_commands");
-        assert_eq!(
-            expected_commands, snapshot_commands,
-            "{claim_id}: proof commands must match the manifest lane commands"
-        );
+        let snapshot_commands = validate_claim_lane_mapping(entry, &lanes, &guarantees)
+            .unwrap_or_else(|error| panic!("{error}"));
         for command in &snapshot_commands {
             assert!(
                 command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- "),
@@ -238,6 +361,17 @@ fn every_claim_maps_to_manifest_lanes_guarantees_and_commands() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn status_rows_do_not_overstate_frontier_or_scoped_claims() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+
+    for entry in array(&snapshot, "claim_categories") {
+        validate_status_support(entry, &lanes).unwrap_or_else(|error| panic!("{error}"));
     }
 }
 
@@ -295,58 +429,8 @@ fn red_rows_carry_exact_validation_frontier_records() {
         let status = string(entry, "status");
         let blocked = entry.get("blocked_frontier").expect("blocked_frontier");
         if status == "red_blocked_external" {
-            let blocked = blocked
-                .as_object()
-                .unwrap_or_else(|| panic!("red row must have a blocked_frontier object"));
-            let fixture_id = blocked
-                .get("fixture_id")
-                .and_then(Value::as_str)
-                .expect("blocked fixture_id");
-            let fixture = fixtures
-                .get(fixture_id)
-                .unwrap_or_else(|| panic!("missing frontier fixture {fixture_id}"));
-            let expected = fixture
-                .get("expected_record")
-                .expect("fixture expected_record");
-            let first_failure = expected
-                .get("first_failure")
-                .expect("fixture first_failure");
-            let blocked_failure = blocked
-                .get("first_failure")
-                .and_then(Value::as_object)
-                .expect("blocked first_failure");
-
-            assert_eq!(
-                blocked.get("command").and_then(Value::as_str),
-                fixture.get("command").and_then(Value::as_str)
-            );
-            assert_eq!(
-                blocked.get("decision").and_then(Value::as_str),
-                expected.get("decision").and_then(Value::as_str)
-            );
-            assert_eq!(
-                blocked.get("error_class").and_then(Value::as_str),
-                expected.get("error_class").and_then(Value::as_str)
-            );
-            assert_eq!(
-                blocked.get("summary").and_then(Value::as_str),
-                expected.get("summary").and_then(Value::as_str)
-            );
-            assert_eq!(
-                blocked
-                    .get("supplemental_proof_command")
-                    .and_then(Value::as_str),
-                fixture
-                    .get("supplemental_proof_command")
-                    .and_then(Value::as_str)
-            );
-            for key in ["crate_or_surface", "target", "file", "line"] {
-                assert_eq!(
-                    blocked_failure.get(key),
-                    first_failure.get(key),
-                    "{fixture_id}: first_failure.{key} must match validation frontier fixture"
-                );
-            }
+            validate_blocked_frontier_record(blocked, &fixtures)
+                .unwrap_or_else(|error| panic!("{error}"));
         } else {
             assert!(
                 blocked.is_null(),
@@ -354,6 +438,67 @@ fn red_rows_carry_exact_validation_frontier_records() {
             );
         }
     }
+}
+
+#[test]
+fn synthetic_missing_lane_and_unsupported_green_claims_are_rejected() {
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let guarantees = manifest_guarantees(&manifest);
+    let missing_lane = serde_json::json!({
+        "claim_id": "synthetic-missing-lane",
+        "status": "yellow_frontier",
+        "manifest_guarantee_ids": ["all-target-compile-frontier"],
+        "manifest_lane_ids": ["not-a-real-proof-lane"],
+        "proof_commands": [],
+        "blocked_frontier": null,
+        "notes": "frontier fixture"
+    });
+    let missing_lane_error =
+        validate_claim_lane_mapping(&missing_lane, &lanes, &guarantees).unwrap_err();
+    assert!(
+        missing_lane_error.contains("unknown lane not-a-real-proof-lane"),
+        "unexpected missing-lane error: {missing_lane_error}"
+    );
+
+    let unsupported_green = serde_json::json!({
+        "claim_id": "synthetic-frontier-green",
+        "status": "green",
+        "manifest_lane_ids": ["all-targets-check"],
+        "notes": "would overstate broad compile-frontier evidence"
+    });
+    let status_error = validate_status_support(&unsupported_green, &lanes).unwrap_err();
+    assert!(
+        status_error.contains("frontier lane kinds cannot be represented as green"),
+        "unexpected unsupported-green error: {status_error}"
+    );
+}
+
+#[test]
+fn synthetic_stale_blocker_rows_are_rejected() {
+    let frontier = json(FRONTIER_PATH);
+    let fixtures = frontier_fixture_map(&frontier);
+    let fixture = fixtures
+        .get("VF-RUSTC-COMPILE-STOP")
+        .expect("fixture exists");
+    let expected = fixture
+        .get("expected_record")
+        .expect("fixture expected_record");
+    let stale_blocker = serde_json::json!({
+        "fixture_id": "VF-RUSTC-COMPILE-STOP",
+        "command": fixture["command"].clone(),
+        "decision": expected["decision"].clone(),
+        "error_class": expected["error_class"].clone(),
+        "summary": "stale summary that no longer matches the validation frontier fixture",
+        "supplemental_proof_command": fixture["supplemental_proof_command"].clone(),
+        "first_failure": expected["first_failure"].clone()
+    });
+
+    let error = validate_blocked_frontier_record(&stale_blocker, &fixtures).unwrap_err();
+    assert!(
+        error.contains("blocked_frontier.summary no longer matches"),
+        "unexpected stale-blocker error: {error}"
+    );
 }
 
 #[test]
