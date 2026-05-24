@@ -396,6 +396,8 @@ pub mod real_tls_acceptor_http_h1_server_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_transport_security_authenticated_routing_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_scheduler_three_lane_obligation_leak_check_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_distributed_snapshot_raptorq_encoder_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_lab_chaos_runtime_state_e2e_tests;
