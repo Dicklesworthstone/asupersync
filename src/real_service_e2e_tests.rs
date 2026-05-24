@@ -160,6 +160,25 @@ mod tests {
         Ok(addr.port())
     }
 
+    /// Wait for server to be ready with proper readiness probe instead of fixed sleep
+    async fn wait_for_server_ready(addr: SocketAddr, timeout_ms: u64) -> io::Result<()> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "Server readiness timeout"));
+            }
+
+            match tokio::time::timeout(
+                Duration::from_millis(100),
+                TcpStream::connect(addr)
+            ).await {
+                Ok(Ok(_)) => return Ok(()),
+                _ => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // HTTP E2E Test Server
     // ---------------------------------------------------------------------------
@@ -202,8 +221,8 @@ mod tests {
                 }
             });
 
-            // Wait a bit for server to start
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Wait for server to be ready with proper probe
+            Self::wait_for_server_ready(addr, 5000).await?;
 
             Ok(Self {
                 addr,
@@ -300,8 +319,8 @@ mod tests {
                 }
             });
 
-            // Wait a bit for server to start
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Wait for server to be ready with proper probe
+            Self::wait_for_server_ready(addr, 5000).await?;
 
             Ok(Self {
                 addr,
@@ -603,8 +622,8 @@ mod tests {
             }
         });
 
-        // Wait for server to start
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Wait for messaging server to be ready
+        wait_for_server_ready(server_addr, 5000).await.expect("Messaging server failed to start");
 
         logger
             .log_phase(TestPhase::ClientConnect, Some(server_addr))

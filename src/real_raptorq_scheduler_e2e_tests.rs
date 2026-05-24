@@ -489,78 +489,10 @@ mod tests {
         async fn report_workload(&mut self, lane: SchedulerLaneType, count: usize) -> Result<(), Box<dyn std::error::Error>>;
     }
 
-    // Mock scheduler that follows three-lane priority with fairness
-    struct MockThreeLaneScheduler {
-        cancel_streak: usize,
-        timed_streak: usize,
-        cancel_limit: usize,
-        timed_limit: usize,
-        lane_workloads: HashMap<SchedulerLaneType, usize>,
-    }
+    // Real three-lane scheduler integration for E2E testing
+    type RealThreeLaneScheduler = ThreeLaneScheduler;
 
-    impl MockThreeLaneScheduler {
-        fn new() -> Self {
-            let mut lane_workloads = HashMap::new();
-            lane_workloads.insert(SchedulerLaneType::Cancel, 0);
-            lane_workloads.insert(SchedulerLaneType::Timed, 0);
-            lane_workloads.insert(SchedulerLaneType::Ready, 0);
-
-            Self {
-                cancel_streak: 0,
-                timed_streak: 0,
-                cancel_limit: 5,  // Allow up to 5 consecutive cancel dispatches
-                timed_limit: 3,   // Allow up to 3 consecutive timed dispatches
-                lane_workloads,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl SchedulerInterface for MockThreeLaneScheduler {
-        async fn next_priority_lane(&mut self) -> Result<SchedulerLaneType, Box<dyn std::error::Error>> {
-            // Implement three-lane priority with fairness bounds
-
-            // Check for work in each lane
-            let has_cancel_work = self.lane_workloads.get(&SchedulerLaneType::Cancel).unwrap_or(&0) > &0;
-            let has_timed_work = self.lane_workloads.get(&SchedulerLaneType::Timed).unwrap_or(&0) > &0;
-            let has_ready_work = self.lane_workloads.get(&SchedulerLaneType::Ready).unwrap_or(&0) > &0;
-
-            // Priority 1: Cancel lane (with fairness limit)
-            if has_cancel_work && self.cancel_streak < self.cancel_limit {
-                self.cancel_streak += 1;
-                self.timed_streak = 0;
-                return Ok(SchedulerLaneType::Cancel);
-            }
-
-            // Priority 2: Timed lane (with fairness limit)
-            if has_timed_work && self.timed_streak < self.timed_limit {
-                self.cancel_streak = 0;
-                self.timed_streak += 1;
-                return Ok(SchedulerLaneType::Timed);
-            }
-
-            // Priority 3: Ready lane
-            if has_ready_work {
-                self.cancel_streak = 0;
-                self.timed_streak = 0;
-                return Ok(SchedulerLaneType::Ready);
-            }
-
-            // Fallback: If no other work, allow more cancel work
-            if has_cancel_work {
-                self.cancel_streak += 1;
-                return Ok(SchedulerLaneType::Cancel);
-            }
-
-            // No work available
-            Err("No work available in any lane".into())
-        }
-
-        async fn report_workload(&mut self, lane: SchedulerLaneType, count: usize) -> Result<(), Box<dyn std::error::Error>> {
-            self.lane_workloads.insert(lane, count);
-            Ok(())
-        }
-    }
+    // Note: Using real ThreeLaneScheduler implementation - no mock interface needed
 
     // Structured test logger for RaptorQ scheduler integration
     #[derive(Debug, Clone)]
@@ -609,7 +541,7 @@ mod tests {
     // Integration test harness
     struct RaptorQSchedulerHarness {
         decoder: ScheduledRaptorQDecoder,
-        scheduler: MockThreeLaneScheduler,
+        scheduler: RealThreeLaneScheduler,
         factory: RaptorQDecodeFactory,
         logger: TestLogger,
         symbol_loss_scenario: SymbolLossBurst,
@@ -619,7 +551,12 @@ mod tests {
         async fn new(test_name: &str, k_symbols: usize) -> Result<Self, Box<dyn std::error::Error>> {
             let logger = TestLogger::new(test_name);
             let decoder = ScheduledRaptorQDecoder::new(1, k_symbols, logger.clone())?;
-            let scheduler = MockThreeLaneScheduler::new();
+            let scheduler_config = SchedulerConfig {
+                cancel_limit: 5,  // Allow up to 5 consecutive cancel dispatches
+                timed_limit: 3,   // Allow up to 3 consecutive timed dispatches
+                fairness_policy: FairnessPolicy::BoundedStreaks,
+            };
+            let scheduler = ThreeLaneScheduler::new(scheduler_config);
             let factory = RaptorQDecodeFactory::new();
             let symbol_loss_scenario = factory.create_symbol_loss_burst("sporadic");
 
