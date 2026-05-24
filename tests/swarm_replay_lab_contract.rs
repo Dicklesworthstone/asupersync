@@ -1,11 +1,12 @@
 //! Contract tests for deterministic swarm replay lab scenarios.
 
 use asupersync::lab::{
-    SWARM_PRESSURE_SCHEMA_VERSION, SWARM_REPLAY_SCHEMA_VERSION, SwarmDiskPressureLevel,
+    SWARM_AGENT_RUN_SCHEMA_VERSION, SWARM_PRESSURE_SCHEMA_VERSION, SWARM_REPLAY_SCHEMA_VERSION,
+    SwarmAgentRunEventKind, SwarmAgentRunScenario, SwarmDiskPressureLevel,
     SwarmDiskPressureTransition, SwarmPressureEventKind, SwarmPressureLane, SwarmPressureScenario,
     SwarmRchWorkerEvent, SwarmRchWorkerEventKind, SwarmReplayError, SwarmReplayEventKind,
-    SwarmReplayScenario, SwarmReplayTaskStatus, run_swarm_pressure_scenario,
-    run_swarm_replay_scenario,
+    SwarmReplayScenario, SwarmReplayTaskStatus, run_swarm_agent_run_scenario,
+    run_swarm_pressure_scenario, run_swarm_replay_scenario,
 };
 
 fn cancellation_scenario(seed: u64) -> SwarmReplayScenario {
@@ -121,6 +122,19 @@ fn agent_scale_pressure_scenario(seed: u64, agent_count: usize) -> SwarmPressure
         ],
         interactive_latency_bound_steps: 4,
         max_steps: 50_000,
+    }
+}
+
+fn agent_run_scenario(seed: u64) -> SwarmAgentRunScenario {
+    SwarmAgentRunScenario {
+        scenario_id: "asw-agent-run-claim-proof-blocker-crash".to_string(),
+        seed,
+        agent_count: 6,
+        rch_workers: 2,
+        rch_refusal_agent: Some(1),
+        validation_blocker_agent: Some(3),
+        crash_agent: Some(5),
+        max_steps: 20_000,
     }
 }
 
@@ -320,6 +334,113 @@ fn swarm_pressure_simulator_bounds_10_50_200_agent_workloads() {
             "{agent_count}-agent JSON summary must be byte stable"
         );
     }
+}
+
+#[test]
+fn deterministic_agent_run_lab_models_claim_reserve_proof_commit_blocker_and_recovery() {
+    let scenario = agent_run_scenario(0xA5A5_A5A5_2026);
+    let first = run_swarm_agent_run_scenario(&scenario).expect("first agent-run lab");
+    let second = run_swarm_agent_run_scenario(&scenario).expect("second agent-run lab");
+
+    assert_eq!(first, second, "same seed and knobs must replay identically");
+    assert_eq!(first.schema_version, SWARM_AGENT_RUN_SCHEMA_VERSION);
+    assert_eq!(first.agent_count, scenario.agent_count);
+    assert!(first.quiescent, "agent-run lab must drain to quiescence");
+    assert_eq!(first.scheduled_task_count, scenario.agent_count);
+    assert_eq!(first.terminal_task_count, scenario.agent_count);
+    assert_eq!(first.non_terminal_task_count, 0);
+    assert_eq!(first.task_leaks, 0);
+    assert_eq!(first.bead_claim_count, scenario.agent_count);
+    assert_eq!(first.file_reservations_acquired, scenario.agent_count);
+    assert_eq!(first.file_reservations_released, scenario.agent_count);
+    assert_eq!(first.mail_message_count, scenario.agent_count);
+    assert_eq!(first.rch_proof_attempt_count, scenario.agent_count - 1);
+    assert_eq!(first.rch_remote_refusal_count, 1);
+    assert_eq!(first.validation_blocker_count, 1);
+    assert_eq!(first.crashed_agent_count, 1);
+    assert_eq!(first.recovery_handoff_count, 3);
+    assert_eq!(first.proof_pass_count, 3);
+    assert_eq!(first.commit_count, first.proof_pass_count);
+    assert!(first.no_duplicate_ownership);
+    assert!(first.no_leaked_reservations);
+    assert!(first.no_false_green_proof);
+    assert!(first.non_mutating);
+    assert!(!first.forbidden_actions.runs_cargo);
+    assert!(!first.forbidden_actions.runs_git_mutation);
+    assert!(!first.forbidden_actions.runs_beads_mutation);
+    assert!(!first.forbidden_actions.runs_agent_mail_mutation);
+    assert!(!first.forbidden_actions.runs_destructive_command);
+    assert!(
+        first
+            .replay_command
+            .contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_p6"),
+        "replay command must preserve the pane-6 target dir"
+    );
+    assert!(
+        first.replay_command.contains(
+            "deterministic_agent_run_lab_models_claim_reserve_proof_commit_blocker_and_recovery"
+        ),
+        "replay command must point at this contract"
+    );
+    assert_eq!(
+        first.first_blocker.as_deref(),
+        Some("rch remote required refused local fallback: no admissible worker")
+    );
+
+    for kind in [
+        SwarmAgentRunEventKind::BeadClaimed,
+        SwarmAgentRunEventKind::FileReserved,
+        SwarmAgentRunEventKind::MailSent,
+        SwarmAgentRunEventKind::RchProofStarted,
+        SwarmAgentRunEventKind::RchProofRemoteRefused,
+        SwarmAgentRunEventKind::ValidationBlocked,
+        SwarmAgentRunEventKind::RchProofPassed,
+        SwarmAgentRunEventKind::CommitRecorded,
+        SwarmAgentRunEventKind::AgentCrashed,
+        SwarmAgentRunEventKind::RecoveryHandoffEmitted,
+        SwarmAgentRunEventKind::FileReservationReleased,
+    ] {
+        assert!(
+            first.event_log.iter().any(|event| event.kind == kind),
+            "agent-run log must include {kind:?}"
+        );
+    }
+    assert!(
+        first
+            .event_log
+            .iter()
+            .all(|event| !event.mutates_real_services),
+        "deterministic lab events must not mutate live services"
+    );
+    assert!(
+        first
+            .event_log
+            .iter()
+            .filter(|event| event.kind == SwarmAgentRunEventKind::CommitRecorded)
+            .all(|event| event
+                .commit_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("simulated-main-"))),
+        "commits must be simulated ids gated by green proof"
+    );
+    assert!(
+        first
+            .event_log
+            .iter()
+            .filter(|event| event.kind == SwarmAgentRunEventKind::RecoveryHandoffEmitted)
+            .all(|event| event
+                .artifact_refs
+                .iter()
+                .any(|artifact| artifact.ends_with("/handoff.json"))),
+        "failure handoffs must carry replay artifact refs"
+    );
+
+    let first_json = serde_json::to_vec(&first).expect("serialize first agent run");
+    let second_json = serde_json::to_vec(&second).expect("serialize second agent run");
+    assert_eq!(
+        first_json, second_json,
+        "agent-run JSON summary must be byte stable"
+    );
 }
 
 #[test]

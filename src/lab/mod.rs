@@ -183,12 +183,14 @@ pub use spork_harness::{
     SporkScenarioRunner, SporkScenarioSpec,
 };
 pub use swarm_replay::{
-    SWARM_PRESSURE_SCHEMA_VERSION, SWARM_REPLAY_SCHEMA_VERSION, SwarmDiskPressureLevel,
+    SWARM_AGENT_RUN_SCHEMA_VERSION, SWARM_PRESSURE_SCHEMA_VERSION, SWARM_REPLAY_SCHEMA_VERSION,
+    SwarmAgentRunEvent, SwarmAgentRunEventKind, SwarmAgentRunForbiddenActions,
+    SwarmAgentRunScenario, SwarmAgentRunSummary, SwarmDiskPressureLevel,
     SwarmDiskPressureTransition, SwarmPressureEvent, SwarmPressureEventKind, SwarmPressureLane,
     SwarmPressureScenario, SwarmPressureSummary, SwarmRchWorkerEvent, SwarmRchWorkerEventKind,
     SwarmReplayError, SwarmReplayEvent, SwarmReplayEventKind, SwarmReplayScenario,
     SwarmReplayShrinkHint, SwarmReplaySummary, SwarmReplayTaskOutcome, SwarmReplayTaskStatus,
-    run_swarm_pressure_scenario, run_swarm_replay_scenario,
+    run_swarm_agent_run_scenario, run_swarm_pressure_scenario, run_swarm_replay_scenario,
 };
 pub use util::{
     StackTraceConfig, capture_stack_trace, capture_stack_trace_default, capture_stack_trace_depth,

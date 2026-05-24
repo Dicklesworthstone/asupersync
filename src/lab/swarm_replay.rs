@@ -13,6 +13,7 @@ use crate::types::{Budget, CancelReason, RegionId, TaskId};
 use crate::util::DetRng;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -24,6 +25,9 @@ pub const SWARM_REPLAY_SCHEMA_VERSION: &str = "asupersync.swarm-replay-lab.v1";
 
 /// Stable schema version for swarm pressure summaries.
 pub const SWARM_PRESSURE_SCHEMA_VERSION: &str = "asupersync.swarm-pressure-lab.v1";
+
+/// Stable schema version for deterministic agent-run summaries.
+pub const SWARM_AGENT_RUN_SCHEMA_VERSION: &str = "asupersync.swarm-agent-run-lab.v1";
 
 const MAX_FIRST_SLICE_TASKS: usize = 10_000;
 
@@ -148,8 +152,19 @@ pub enum SwarmReplayError {
     ZeroWorkerCount,
     /// No interactive work was requested.
     ZeroInteractiveTasks,
+    /// No synthetic agents were requested.
+    ZeroAgentCount,
     /// The interactive latency bound was zero.
     ZeroInteractiveLatencyBound,
+    /// A configured synthetic agent index is outside the scenario.
+    AgentIndexOutOfRange {
+        /// Field that carried the out-of-range index.
+        field: &'static str,
+        /// Requested agent index.
+        agent_index: usize,
+        /// Number of agents configured for the scenario.
+        agent_count: usize,
+    },
     /// An RCH worker event used a zero delta.
     ZeroRchWorkerDelta {
         /// Step containing the invalid event.
@@ -203,9 +218,18 @@ impl fmt::Display for SwarmReplayError {
             Self::ZeroInteractiveTasks => {
                 f.write_str("interactive_tasks must be greater than zero")
             }
+            Self::ZeroAgentCount => f.write_str("agent_count must be greater than zero"),
             Self::ZeroInteractiveLatencyBound => {
                 f.write_str("interactive_latency_bound_steps must be greater than zero")
             }
+            Self::AgentIndexOutOfRange {
+                field,
+                agent_index,
+                agent_count,
+            } => write!(
+                f,
+                "{field} index {agent_index} must be less than agent_count {agent_count}"
+            ),
             Self::ZeroRchWorkerDelta { at_step } => write!(
                 f,
                 "rch worker event at step {at_step} used zero worker_delta"
@@ -559,6 +583,232 @@ pub struct SwarmPressureSummary {
     pub invariant_violations: Vec<String>,
     /// Deterministic event log for dashboard/future artifact consumers.
     pub event_log: Vec<SwarmPressureEvent>,
+}
+
+/// Deterministic knobs for the synthetic agent-run lab harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAgentRunScenario {
+    /// Stable scenario identifier used in JSON evidence.
+    pub scenario_id: String,
+    /// Lab runtime seed.
+    pub seed: u64,
+    /// Number of synthetic agents to schedule.
+    pub agent_count: usize,
+    /// Logical remote RCH workers available to the scenario.
+    pub rch_workers: usize,
+    /// Agent that should observe remote-required RCH refusal.
+    pub rch_refusal_agent: Option<usize>,
+    /// Agent that should hit an unrelated validation frontier blocker.
+    pub validation_blocker_agent: Option<usize>,
+    /// Agent that should crash before completing proof handoff.
+    pub crash_agent: Option<usize>,
+    /// Maximum lab steps before the runtime stops.
+    pub max_steps: u64,
+}
+
+impl Default for SwarmAgentRunScenario {
+    fn default() -> Self {
+        Self {
+            scenario_id: "swarm-agent-run-default".to_string(),
+            seed: 0xA6E1_7A5C,
+            agent_count: 6,
+            rch_workers: 2,
+            rch_refusal_agent: Some(1),
+            validation_blocker_agent: Some(3),
+            crash_agent: Some(5),
+            max_steps: 20_000,
+        }
+    }
+}
+
+impl SwarmAgentRunScenario {
+    /// Validate that the synthetic agent run is bounded and replayable.
+    pub fn validate(&self) -> Result<(), SwarmReplayError> {
+        if self.scenario_id.trim().is_empty() {
+            return Err(SwarmReplayError::EmptyScenarioId);
+        }
+        if self.agent_count == 0 {
+            return Err(SwarmReplayError::ZeroAgentCount);
+        }
+        if self.max_steps == 0 {
+            return Err(SwarmReplayError::ZeroMaxSteps);
+        }
+        if self.agent_count > MAX_FIRST_SLICE_TASKS {
+            return Err(SwarmReplayError::TooManyTasks {
+                task_count: self.agent_count,
+                max: MAX_FIRST_SLICE_TASKS,
+            });
+        }
+
+        for (field, maybe_index) in [
+            ("rch_refusal_agent", self.rch_refusal_agent),
+            ("validation_blocker_agent", self.validation_blocker_agent),
+            ("crash_agent", self.crash_agent),
+        ] {
+            if let Some(agent_index) = maybe_index {
+                if agent_index >= self.agent_count {
+                    return Err(SwarmReplayError::AgentIndexOutOfRange {
+                        field,
+                        agent_index,
+                        agent_count: self.agent_count,
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Stable event kind emitted by the synthetic agent-run lab harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmAgentRunEventKind {
+    /// The agent claimed a bead in the modeled tracker.
+    BeadClaimed,
+    /// The agent acquired modeled file reservations.
+    FileReserved,
+    /// The agent sent modeled coordination mail.
+    MailSent,
+    /// The agent started an RCH-backed proof lane.
+    RchProofStarted,
+    /// Remote-required RCH refused local fallback.
+    RchProofRemoteRefused,
+    /// The proof lane passed.
+    RchProofPassed,
+    /// An unrelated validation frontier blocked completion.
+    ValidationBlocked,
+    /// A main-branch commit was recorded after proof success.
+    CommitRecorded,
+    /// The agent crashed before the run completed.
+    AgentCrashed,
+    /// A replayable handoff was emitted for a failed or interrupted run.
+    RecoveryHandoffEmitted,
+    /// The agent released modeled file reservations.
+    FileReservationReleased,
+}
+
+/// One deterministic synthetic agent-run event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAgentRunEvent {
+    /// Stable sequence number used for byte-stable ordering.
+    pub stable_sequence: u64,
+    /// Synthetic agent ordinal.
+    pub agent_index: usize,
+    /// Pseudonymized synthetic agent name.
+    pub agent_name: String,
+    /// Synthetic bead claimed by the agent.
+    pub bead_id: String,
+    /// Stable event kind.
+    pub kind: SwarmAgentRunEventKind,
+    /// Modeled source frontier touched by this agent.
+    pub file_frontier: Vec<String>,
+    /// Modeled proof command, when the event belongs to a proof lane.
+    pub proof_command: Option<String>,
+    /// Modeled blocker or failure reason.
+    pub blocker: Option<String>,
+    /// Modeled proof, handoff, or trace artifact references.
+    pub artifact_refs: Vec<String>,
+    /// Simulated main-branch commit id after a green proof.
+    pub commit_id: Option<String>,
+    /// Stable replay pointer for this event.
+    pub replay_pointer: String,
+    /// Whether this event mutates real external services or the repo.
+    pub mutates_real_services: bool,
+}
+
+/// Forbidden real-world side effects for the synthetic lab harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAgentRunForbiddenActions {
+    /// Whether the harness runs real Cargo.
+    pub runs_cargo: bool,
+    /// Whether the harness mutates Git state.
+    pub runs_git_mutation: bool,
+    /// Whether the harness mutates Beads state.
+    pub runs_beads_mutation: bool,
+    /// Whether the harness mutates Agent Mail state.
+    pub runs_agent_mail_mutation: bool,
+    /// Whether the harness runs destructive cleanup.
+    pub runs_destructive_command: bool,
+}
+
+impl SwarmAgentRunForbiddenActions {
+    const fn none() -> Self {
+        Self {
+            runs_cargo: false,
+            runs_git_mutation: false,
+            runs_beads_mutation: false,
+            runs_agent_mail_mutation: false,
+            runs_destructive_command: false,
+        }
+    }
+}
+
+/// Byte-stable summary emitted by the synthetic agent-run lab harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAgentRunSummary {
+    /// Stable schema version.
+    pub schema_version: String,
+    /// Scenario id copied from input.
+    pub scenario_id: String,
+    /// Lab runtime seed.
+    pub seed: u64,
+    /// Number of synthetic agents submitted.
+    pub agent_count: usize,
+    /// Number of tasks scheduled into [`LabRuntime`].
+    pub scheduled_task_count: usize,
+    /// Number of tracked tasks that reached a terminal state.
+    pub terminal_task_count: usize,
+    /// Number of tracked tasks still non-terminal after the run.
+    pub non_terminal_task_count: usize,
+    /// Task leak count derived from non-terminal tracked tasks.
+    pub task_leaks: usize,
+    /// Number of modeled bead claims.
+    pub bead_claim_count: usize,
+    /// Number of modeled file reservations acquired.
+    pub file_reservations_acquired: usize,
+    /// Number of modeled file reservations released.
+    pub file_reservations_released: usize,
+    /// Number of modeled Agent Mail messages.
+    pub mail_message_count: usize,
+    /// Number of modeled RCH proof attempts.
+    pub rch_proof_attempt_count: usize,
+    /// Number of modeled remote-required RCH refusals.
+    pub rch_remote_refusal_count: usize,
+    /// Number of modeled unrelated validation blockers.
+    pub validation_blocker_count: usize,
+    /// Number of modeled proof passes.
+    pub proof_pass_count: usize,
+    /// Number of modeled commits after green proof.
+    pub commit_count: usize,
+    /// Number of modeled crashed agents.
+    pub crashed_agent_count: usize,
+    /// Number of replayable handoff records emitted.
+    pub recovery_handoff_count: usize,
+    /// Whether active bead ownership stayed unique.
+    pub no_duplicate_ownership: bool,
+    /// Whether every modeled file reservation was released.
+    pub no_leaked_reservations: bool,
+    /// Whether commits only appear after a green proof.
+    pub no_false_green_proof: bool,
+    /// Whether the harness is report-only and non-mutating.
+    pub non_mutating: bool,
+    /// Forbidden real-world side effects observed by the harness.
+    pub forbidden_actions: SwarmAgentRunForbiddenActions,
+    /// First blocker, if any, for operator handoff.
+    pub first_blocker: Option<String>,
+    /// Replay command for the deterministic lab scenario.
+    pub replay_command: String,
+    /// Whether the lab runtime reached quiescence.
+    pub quiescent: bool,
+    /// Canonical trace fingerprint from the lab run report.
+    pub trace_fingerprint: u64,
+    /// Trace event count from the lab run report.
+    pub trace_event_count: usize,
+    /// Runtime invariant violations from the lab run report.
+    pub invariant_violations: Vec<String>,
+    /// Deterministic event log for replay bundles and golden tests.
+    pub event_log: Vec<SwarmAgentRunEvent>,
 }
 
 /// Deterministic shrink hint for failing swarm replay scenarios.
@@ -1049,6 +1299,47 @@ pub fn run_swarm_pressure_scenario(
     })
 }
 
+/// Run a deterministic synthetic agent coordination scenario through [`LabRuntime`].
+pub fn run_swarm_agent_run_scenario(
+    scenario: &SwarmAgentRunScenario,
+) -> Result<SwarmAgentRunSummary, SwarmReplayError> {
+    scenario.validate()?;
+
+    let config = LabConfig::new(scenario.seed)
+        .worker_count(scenario.agent_count.min(scenario.rch_workers.max(1)))
+        .max_steps(scenario.max_steps)
+        .with_default_replay_recording();
+    let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut tracked_tasks = Vec::with_capacity(scenario.agent_count);
+
+    for agent_index in 0..scenario.agent_count {
+        let task_id = spawn_agent_run_task(&mut runtime, root, scenario, agent_index, &events)?;
+        runtime.scheduler.lock().schedule(task_id, 5);
+        tracked_tasks.push(task_id);
+    }
+
+    let report = runtime.run_until_quiescent_with_report();
+    let terminal_counts = terminal_counts(&runtime, &tracked_tasks);
+    let mut event_log = events.lock().clone();
+    event_log.sort_by_key(|event| {
+        (
+            event.stable_sequence,
+            event.agent_index,
+            event.kind,
+            event.bead_id.clone(),
+        )
+    });
+
+    Ok(build_agent_run_summary(
+        scenario,
+        report,
+        terminal_counts,
+        event_log,
+    ))
+}
+
 fn build_summary(
     scenario: &SwarmReplayScenario,
     report: LabRunReport,
@@ -1111,6 +1402,116 @@ fn build_summary(
     }
 }
 
+fn build_agent_run_summary(
+    scenario: &SwarmAgentRunScenario,
+    report: LabRunReport,
+    terminal_counts: (usize, usize),
+    event_log: Vec<SwarmAgentRunEvent>,
+) -> SwarmAgentRunSummary {
+    let bead_claim_count = count_agent_events(&event_log, SwarmAgentRunEventKind::BeadClaimed);
+    let file_reservations_acquired =
+        count_agent_events(&event_log, SwarmAgentRunEventKind::FileReserved);
+    let file_reservations_released =
+        count_agent_events(&event_log, SwarmAgentRunEventKind::FileReservationReleased);
+    let mail_message_count = count_agent_events(&event_log, SwarmAgentRunEventKind::MailSent);
+    let rch_proof_attempt_count =
+        count_agent_events(&event_log, SwarmAgentRunEventKind::RchProofStarted);
+    let rch_remote_refusal_count =
+        count_agent_events(&event_log, SwarmAgentRunEventKind::RchProofRemoteRefused);
+    let validation_blocker_count =
+        count_agent_events(&event_log, SwarmAgentRunEventKind::ValidationBlocked);
+    let proof_pass_count = count_agent_events(&event_log, SwarmAgentRunEventKind::RchProofPassed);
+    let commit_count = count_agent_events(&event_log, SwarmAgentRunEventKind::CommitRecorded);
+    let crashed_agent_count = count_agent_events(&event_log, SwarmAgentRunEventKind::AgentCrashed);
+    let recovery_handoff_count =
+        count_agent_events(&event_log, SwarmAgentRunEventKind::RecoveryHandoffEmitted);
+    let no_duplicate_ownership = no_duplicate_bead_claims(&event_log);
+    let no_false_green_proof = no_false_green_agent_commits(&event_log);
+    let first_blocker = event_log
+        .iter()
+        .find_map(|event| event.blocker.as_ref().map(ToString::to_string));
+
+    SwarmAgentRunSummary {
+        schema_version: SWARM_AGENT_RUN_SCHEMA_VERSION.to_string(),
+        scenario_id: scenario.scenario_id.clone(),
+        seed: scenario.seed,
+        agent_count: scenario.agent_count,
+        scheduled_task_count: scenario.agent_count,
+        terminal_task_count: terminal_counts.0,
+        non_terminal_task_count: terminal_counts.1,
+        task_leaks: terminal_counts.1,
+        bead_claim_count,
+        file_reservations_acquired,
+        file_reservations_released,
+        mail_message_count,
+        rch_proof_attempt_count,
+        rch_remote_refusal_count,
+        validation_blocker_count,
+        proof_pass_count,
+        commit_count,
+        crashed_agent_count,
+        recovery_handoff_count,
+        no_duplicate_ownership,
+        no_leaked_reservations: file_reservations_acquired == file_reservations_released,
+        no_false_green_proof,
+        non_mutating: event_log.iter().all(|event| !event.mutates_real_services),
+        forbidden_actions: SwarmAgentRunForbiddenActions::none(),
+        first_blocker,
+        replay_command: swarm_agent_replay_command(scenario),
+        quiescent: report.quiescent,
+        trace_fingerprint: report.trace_fingerprint,
+        trace_event_count: report.trace_len,
+        invariant_violations: report.invariant_violations,
+        event_log,
+    }
+}
+
+fn count_agent_events(events: &[SwarmAgentRunEvent], kind: SwarmAgentRunEventKind) -> usize {
+    events.iter().filter(|event| event.kind == kind).count()
+}
+
+fn no_duplicate_bead_claims(events: &[SwarmAgentRunEvent]) -> bool {
+    let mut active_claims = BTreeSet::new();
+    for event in events {
+        if event.kind == SwarmAgentRunEventKind::BeadClaimed
+            && !active_claims.insert(event.bead_id.as_str())
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn no_false_green_agent_commits(events: &[SwarmAgentRunEvent]) -> bool {
+    let mut proof_pass_agents = BTreeSet::new();
+    let mut blocked_agents = BTreeSet::new();
+    let mut commit_agents = BTreeSet::new();
+
+    for event in events {
+        match event.kind {
+            SwarmAgentRunEventKind::RchProofPassed => {
+                proof_pass_agents.insert(event.agent_index);
+            }
+            SwarmAgentRunEventKind::RchProofRemoteRefused
+            | SwarmAgentRunEventKind::ValidationBlocked
+            | SwarmAgentRunEventKind::AgentCrashed => {
+                blocked_agents.insert(event.agent_index);
+            }
+            SwarmAgentRunEventKind::CommitRecorded => {
+                commit_agents.insert(event.agent_index);
+            }
+            SwarmAgentRunEventKind::BeadClaimed
+            | SwarmAgentRunEventKind::FileReserved
+            | SwarmAgentRunEventKind::MailSent
+            | SwarmAgentRunEventKind::RchProofStarted
+            | SwarmAgentRunEventKind::RecoveryHandoffEmitted
+            | SwarmAgentRunEventKind::FileReservationReleased => {}
+        }
+    }
+
+    commit_agents.is_subset(&proof_pass_agents) && commit_agents.is_disjoint(&blocked_agents)
+}
+
 fn terminal_counts(runtime: &LabRuntime, tracked_tasks: &[TaskId]) -> (usize, usize) {
     let mut terminal = 0usize;
     let mut non_terminal = 0usize;
@@ -1157,11 +1558,320 @@ fn spawn_pressure_task(
     Ok(task_id)
 }
 
+fn spawn_agent_run_task(
+    runtime: &mut LabRuntime,
+    region: RegionId,
+    scenario: &SwarmAgentRunScenario,
+    agent_index: usize,
+    events: &Arc<Mutex<Vec<SwarmAgentRunEvent>>>,
+) -> Result<TaskId, SwarmReplayError> {
+    let scenario_id = scenario.scenario_id.clone();
+    let seed = scenario.seed;
+    let proof_command = swarm_agent_replay_command(scenario);
+    let remote_refusal = scenario.rch_refusal_agent == Some(agent_index);
+    let validation_blocker = scenario.validation_blocker_agent == Some(agent_index);
+    let crash = scenario.crash_agent == Some(agent_index);
+    let events_for_task = Arc::clone(events);
+
+    let (task_id, _handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async move {
+            push_agent_event(
+                &events_for_task,
+                &scenario_id,
+                seed,
+                agent_index,
+                0,
+                SwarmAgentRunEventKind::BeadClaimed,
+                None,
+                None,
+                None,
+            );
+            yield_once().await;
+            push_agent_event(
+                &events_for_task,
+                &scenario_id,
+                seed,
+                agent_index,
+                1,
+                SwarmAgentRunEventKind::FileReserved,
+                None,
+                None,
+                None,
+            );
+            yield_once().await;
+            push_agent_event(
+                &events_for_task,
+                &scenario_id,
+                seed,
+                agent_index,
+                2,
+                SwarmAgentRunEventKind::MailSent,
+                None,
+                None,
+                None,
+            );
+            yield_once().await;
+
+            if crash {
+                push_agent_event(
+                    &events_for_task,
+                    &scenario_id,
+                    seed,
+                    agent_index,
+                    3,
+                    SwarmAgentRunEventKind::AgentCrashed,
+                    None,
+                    Some("agent crashed before proof handoff"),
+                    None,
+                );
+                push_agent_event(
+                    &events_for_task,
+                    &scenario_id,
+                    seed,
+                    agent_index,
+                    4,
+                    SwarmAgentRunEventKind::RecoveryHandoffEmitted,
+                    None,
+                    Some("crash handoff emitted with replay seed and reserved files"),
+                    None,
+                );
+                push_agent_event(
+                    &events_for_task,
+                    &scenario_id,
+                    seed,
+                    agent_index,
+                    5,
+                    SwarmAgentRunEventKind::FileReservationReleased,
+                    None,
+                    None,
+                    None,
+                );
+                return;
+            }
+
+            push_agent_event(
+                &events_for_task,
+                &scenario_id,
+                seed,
+                agent_index,
+                3,
+                SwarmAgentRunEventKind::RchProofStarted,
+                Some(proof_command.clone()),
+                None,
+                None,
+            );
+            yield_once().await;
+
+            if remote_refusal {
+                push_agent_event(
+                    &events_for_task,
+                    &scenario_id,
+                    seed,
+                    agent_index,
+                    4,
+                    SwarmAgentRunEventKind::RchProofRemoteRefused,
+                    Some(proof_command.clone()),
+                    Some("rch remote required refused local fallback: no admissible worker"),
+                    None,
+                );
+                push_agent_event(
+                    &events_for_task,
+                    &scenario_id,
+                    seed,
+                    agent_index,
+                    5,
+                    SwarmAgentRunEventKind::RecoveryHandoffEmitted,
+                    None,
+                    Some("remote refusal handoff emitted with first blocker"),
+                    None,
+                );
+                push_agent_event(
+                    &events_for_task,
+                    &scenario_id,
+                    seed,
+                    agent_index,
+                    6,
+                    SwarmAgentRunEventKind::FileReservationReleased,
+                    None,
+                    None,
+                    None,
+                );
+                return;
+            }
+
+            if validation_blocker {
+                push_agent_event(
+                    &events_for_task,
+                    &scenario_id,
+                    seed,
+                    agent_index,
+                    4,
+                    SwarmAgentRunEventKind::ValidationBlocked,
+                    Some(proof_command.clone()),
+                    Some("unrelated validation frontier blocked proof before closeout"),
+                    None,
+                );
+                push_agent_event(
+                    &events_for_task,
+                    &scenario_id,
+                    seed,
+                    agent_index,
+                    5,
+                    SwarmAgentRunEventKind::RecoveryHandoffEmitted,
+                    None,
+                    Some("validation blocker handoff emitted with proof command"),
+                    None,
+                );
+                push_agent_event(
+                    &events_for_task,
+                    &scenario_id,
+                    seed,
+                    agent_index,
+                    6,
+                    SwarmAgentRunEventKind::FileReservationReleased,
+                    None,
+                    None,
+                    None,
+                );
+                return;
+            }
+
+            push_agent_event(
+                &events_for_task,
+                &scenario_id,
+                seed,
+                agent_index,
+                4,
+                SwarmAgentRunEventKind::RchProofPassed,
+                Some(proof_command),
+                None,
+                None,
+            );
+            push_agent_event(
+                &events_for_task,
+                &scenario_id,
+                seed,
+                agent_index,
+                5,
+                SwarmAgentRunEventKind::CommitRecorded,
+                None,
+                None,
+                Some(agent_commit_id(seed, agent_index)),
+            );
+            push_agent_event(
+                &events_for_task,
+                &scenario_id,
+                seed,
+                agent_index,
+                6,
+                SwarmAgentRunEventKind::FileReservationReleased,
+                None,
+                None,
+                None,
+            );
+        })
+        .map_err(|err| SwarmReplayError::TaskSpawnRejected {
+            region_index: 0,
+            task_index: agent_index,
+            reason: format!("{err:?}"),
+        })?;
+    Ok(task_id)
+}
+
+fn push_agent_event(
+    events: &Arc<Mutex<Vec<SwarmAgentRunEvent>>>,
+    scenario_id: &str,
+    seed: u64,
+    agent_index: usize,
+    event_ordinal: u64,
+    kind: SwarmAgentRunEventKind,
+    proof_command: Option<String>,
+    blocker: Option<&'static str>,
+    commit_id: Option<String>,
+) {
+    let stable_sequence = (agent_index as u64)
+        .saturating_mul(16)
+        .saturating_add(event_ordinal);
+    let artifact_refs = agent_event_artifacts(seed, agent_index, kind);
+    events.lock().push(SwarmAgentRunEvent {
+        stable_sequence,
+        agent_index,
+        agent_name: agent_label(agent_index),
+        bead_id: agent_bead_id(agent_index),
+        kind,
+        file_frontier: agent_file_frontier(agent_index),
+        proof_command,
+        blocker: blocker.map(ToString::to_string),
+        artifact_refs,
+        commit_id,
+        replay_pointer: format!(
+            "swarm-agent-run://{scenario_id}/agent/{agent_index:03}/event/{stable_sequence:04}"
+        ),
+        mutates_real_services: false,
+    });
+}
+
 const fn pressure_lane_digest(lane: SwarmPressureLane) -> u64 {
     match lane {
         SwarmPressureLane::Interactive => 0x1A7E_5A11,
         SwarmPressureLane::Proof => 0x9E57_000F,
         SwarmPressureLane::Cleanup => 0xC1EA_2026,
+    }
+}
+
+fn agent_label(agent_index: usize) -> String {
+    format!("agent-{agent_index:03}")
+}
+
+fn agent_bead_id(agent_index: usize) -> String {
+    format!("asw-lab-{agent_index:03}")
+}
+
+fn agent_file_frontier(agent_index: usize) -> Vec<String> {
+    vec![format!("src/lab/swarm_replay.rs#agent-{agent_index:03}")]
+}
+
+fn agent_commit_id(seed: u64, agent_index: usize) -> String {
+    format!("simulated-main-{seed:016x}-{agent_index:03}")
+}
+
+fn swarm_agent_replay_command(scenario: &SwarmAgentRunScenario) -> String {
+    format!(
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_p6 cargo test -p asupersync --test swarm_replay_lab_contract deterministic_agent_run_lab_models_claim_reserve_proof_commit_blocker_and_recovery -- --exact --nocapture # scenario={} seed={:016x}",
+        scenario.scenario_id, scenario.seed
+    )
+}
+
+fn agent_event_artifacts(
+    seed: u64,
+    agent_index: usize,
+    kind: SwarmAgentRunEventKind,
+) -> Vec<String> {
+    match kind {
+        SwarmAgentRunEventKind::RchProofStarted
+        | SwarmAgentRunEventKind::RchProofRemoteRefused
+        | SwarmAgentRunEventKind::RchProofPassed
+        | SwarmAgentRunEventKind::ValidationBlocked => {
+            vec![format!(
+                "target/lab-replay/swarm-agent-run/seed-{seed:016x}/agent-{agent_index:03}/proof.json"
+            )]
+        }
+        SwarmAgentRunEventKind::RecoveryHandoffEmitted => {
+            vec![format!(
+                "target/lab-replay/swarm-agent-run/seed-{seed:016x}/agent-{agent_index:03}/handoff.json"
+            )]
+        }
+        SwarmAgentRunEventKind::CommitRecorded => {
+            vec![format!(
+                "target/lab-replay/swarm-agent-run/seed-{seed:016x}/agent-{agent_index:03}/commit.json"
+            )]
+        }
+        SwarmAgentRunEventKind::BeadClaimed
+        | SwarmAgentRunEventKind::FileReserved
+        | SwarmAgentRunEventKind::MailSent
+        | SwarmAgentRunEventKind::AgentCrashed
+        | SwarmAgentRunEventKind::FileReservationReleased => Vec::new(),
     }
 }
 
