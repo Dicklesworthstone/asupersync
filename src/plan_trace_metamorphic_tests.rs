@@ -55,8 +55,8 @@ fn mr_latency_algebra_associativity() {
         let test_points = [0.0, 1.0, 5.0, 10.0, 50.0];
 
         for &t in &test_points {
-            let left_val = left_result.eval_at(t);
-            let right_val = right_result.eval_at(t);
+            let left_val = left_result.eval(t);
+            let right_val = right_result.eval(t);
 
             prop_assert!(
                 (left_val - right_val).abs() < 1e-6,
@@ -98,8 +98,8 @@ fn mr_latency_algebra_commutativity() {
         let test_points = [0.0, 0.5, 1.0, 2.0, 5.0, 10.0];
 
         for &t in &test_points {
-            let forward_val = forward.eval_at(t);
-            let backward_val = backward.eval_at(t);
+            let forward_val = forward.eval(t);
+            let backward_val = backward.eval(t);
 
             prop_assert!(
                 (forward_val - backward_val).abs() < 1e-6,
@@ -138,8 +138,8 @@ fn mr_latency_algebra_identity() {
         let test_points = [0.0, 0.1, 1.0, 5.0];
 
         for &t in &test_points {
-            let original_val = curve.eval_at(t);
-            let convolved_val = convolved.eval_at(t);
+            let original_val = curve.eval(t);
+            let convolved_val = convolved.eval(t);
 
             // Allow some tolerance due to approximation
             prop_assert!(
@@ -277,7 +277,7 @@ fn mr_plan_hash_consistency() {
 ///   - Basic state management bugs
 #[test]
 fn mr_trace_record_replay_round_trip() {
-    use crate::trace::recorder::{RecorderConfig, TraceRecorder};
+    use crate::trace::recorder::TraceRecorder;
     use crate::trace::replay::TraceMetadata;
     use crate::types::TaskId;
 
@@ -290,7 +290,10 @@ fn mr_trace_record_replay_round_trip() {
 
         // Record some basic events
         for i in 0..event_count {
-            let task_id = TaskId::for_test(i as u64);
+            let task_id = TaskId::new_for_test(
+                u32::try_from(i).expect("event count is bounded by the proptest range"),
+                0,
+            );
             recorder.record_task_scheduled(task_id, i as u64);
         }
 
@@ -298,7 +301,7 @@ fn mr_trace_record_replay_round_trip() {
         let count_before = recorder.event_count();
 
         // Finish recording
-        let trace = recorder.finish();
+        let trace = recorder.finish().expect("trace recorder should be enabled");
 
         // Basic consistency checks
         prop_assert_eq!(
@@ -339,7 +342,10 @@ fn mr_trace_event_ordering_preservation() {
 
         // Record events in strict order
         for i in 0..event_count {
-            let task_id = TaskId::for_test(i as u64);
+            let task_id = TaskId::new_for_test(
+                u32::try_from(i).expect("event count is bounded by the proptest range"),
+                0,
+            );
             recorder.record_task_scheduled(task_id, i as u64);
         }
 
@@ -352,7 +358,7 @@ fn mr_trace_event_ordering_preservation() {
         );
 
         // Finish and verify basic properties
-        let trace = recorder.finish();
+        let trace = recorder.finish().expect("trace recorder should be enabled");
 
         prop_assert_eq!(
             trace.metadata().seed(),
@@ -391,11 +397,14 @@ fn mr_trace_replay_determinism() {
 
             // Record identical events
             for i in 0..event_count {
-                let task_id = TaskId::for_test(i as u64);
+                let task_id = TaskId::new_for_test(
+                    u32::try_from(i).expect("event count is bounded by the proptest range"),
+                    0,
+                );
                 recorder.record_task_scheduled(task_id, i as u64);
             }
 
-            let trace = recorder.finish();
+            let trace = recorder.finish().expect("trace recorder should be enabled");
             traces.push(trace);
         }
 
@@ -432,8 +441,6 @@ fn mr_trace_replay_determinism() {
 fn mr_plan_fixture_round_trip() {
     use crate::plan::PlanDag;
     use crate::plan::certificate::PlanHash;
-    use std::time::Duration;
-
     proptest!(|(
         node_count in 1usize..=5usize,
         label_base in 0u32..100u32,
