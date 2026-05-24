@@ -37,8 +37,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use proptest::prelude::*;
@@ -668,7 +668,11 @@ impl MessagePermutationGenerator {
     }
 
     /// Test that all permutations round-trip correctly.
-    pub fn test_permutation_round_trip(&self, codec: &MockGrpcCodec, permutations: &[MockGrpcMessage]) -> Result<usize, String> {
+    pub fn test_permutation_round_trip(
+        &self,
+        codec: &MockGrpcCodec,
+        permutations: &[MockGrpcMessage],
+    ) -> Result<usize, String> {
         let mut successful = 0;
 
         for (i, message) in permutations.iter().enumerate() {
@@ -724,7 +728,6 @@ const GRPC_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::MessageCodec,
         description: "Codec handles malformed input gracefully",
     },
-
     // Status Code Mapping
     ConformanceCase {
         id: "GRPC-STATUS-001",
@@ -754,7 +757,6 @@ const GRPC_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::StatusCodeMapping,
         description: "Error metadata survives status conversion",
     },
-
     // Message Permutation Testing
     ConformanceCase {
         id: "GRPC-PERM-001",
@@ -805,12 +807,16 @@ fn test_grpc_message_framing_identity() -> TestResult {
     for (i, message) in test_messages.iter().enumerate() {
         match codec.round_trip(message) {
             Ok(true) => continue,
-            Ok(false) => return TestResult::Fail {
-                reason: format!("Message {} failed round-trip identity", i),
-            },
-            Err(e) => return TestResult::Fail {
-                reason: format!("Message {} round-trip error: {}", i, e),
-            },
+            Ok(false) => {
+                return TestResult::Fail {
+                    reason: format!("Message {} failed round-trip identity", i),
+                };
+            }
+            Err(e) => {
+                return TestResult::Fail {
+                    reason: format!("Message {} round-trip error: {}", i, e),
+                };
+            }
         }
     }
 
@@ -865,11 +871,11 @@ fn test_message_length_encoding() -> TestResult {
     let codec = MockGrpcCodec::new();
 
     let test_cases = vec![
-        (0, vec![0, 0, 0, 0]),      // Empty message
-        (255, vec![0, 0, 0, 255]),  // Single byte length
-        (256, vec![0, 0, 1, 0]),    // Multi-byte length
+        (0, vec![0, 0, 0, 0]),         // Empty message
+        (255, vec![0, 0, 0, 255]),     // Single byte length
+        (256, vec![0, 0, 1, 0]),       // Multi-byte length
         (65535, vec![0, 0, 255, 255]), // 16-bit max
-        (1048576, vec![0, 16, 0, 0]), // 1MB
+        (1048576, vec![0, 16, 0, 0]),  // 1MB
     ];
 
     for (length, expected_bytes) in test_cases {
@@ -895,7 +901,8 @@ fn test_message_length_encoding() -> TestResult {
             return TestResult::Fail {
                 reason: format!(
                     "Decoded message length mismatch: expected {}, got {}",
-                    length, decoded.data.len()
+                    length,
+                    decoded.data.len()
                 ),
             };
         }
@@ -929,7 +936,10 @@ fn test_grpc_status_code_bijection() -> TestResult {
         let mapped = MockGrpcCode::from_i32(unknown);
         if mapped != MockGrpcCode::Unknown {
             return TestResult::Fail {
-                reason: format!("Unknown code {} should map to Unknown, got {:?}", unknown, mapped),
+                reason: format!(
+                    "Unknown code {} should map to Unknown, got {:?}",
+                    unknown, mapped
+                ),
             };
         }
     }
@@ -937,7 +947,10 @@ fn test_grpc_status_code_bijection() -> TestResult {
     // Test Unknown maps to code 2
     if MockGrpcCode::Unknown.as_i32() != 2 {
         return TestResult::Fail {
-            reason: format!("Unknown should map to 2, got {}", MockGrpcCode::Unknown.as_i32()),
+            reason: format!(
+                "Unknown should map to 2, got {}",
+                MockGrpcCode::Unknown.as_i32()
+            ),
         };
     }
 
@@ -993,12 +1006,16 @@ fn test_arbitrary_message_round_trip() -> TestResult {
 
         match codec.round_trip(&message) {
             Ok(true) => continue,
-            Ok(false) => return TestResult::Fail {
-                reason: format!("Arbitrary message of size {} failed round-trip", size),
-            },
-            Err(e) => return TestResult::Fail {
-                reason: format!("Arbitrary message of size {} error: {}", size, e),
-            },
+            Ok(false) => {
+                return TestResult::Fail {
+                    reason: format!("Arbitrary message of size {} failed round-trip", size),
+                };
+            }
+            Err(e) => {
+                return TestResult::Fail {
+                    reason: format!("Arbitrary message of size {} error: {}", size, e),
+                };
+            }
         }
     }
 
@@ -1021,7 +1038,8 @@ fn test_message_permutation_round_trip() -> TestResult {
                 TestResult::Fail {
                     reason: format!(
                         "Only {}/{} permutations succeeded round-trip",
-                        successful, permutations.len()
+                        successful,
+                        permutations.len()
                     ),
                 }
             }
@@ -1037,19 +1055,21 @@ fn test_malformed_input_handling() -> TestResult {
     let codec = MockGrpcCodec::new();
 
     let malformed_inputs = vec![
-        vec![], // Empty buffer
-        vec![0], // Too short for header
-        vec![0, 0, 0, 0], // Missing compression flag byte
-        vec![2, 0, 0, 0, 5], // Invalid compression flag
-        vec![0, 0, 0, 0, 10], // Length > actual data
+        vec![],                      // Empty buffer
+        vec![0],                     // Too short for header
+        vec![0, 0, 0, 0],            // Missing compression flag byte
+        vec![2, 0, 0, 0, 5],         // Invalid compression flag
+        vec![0, 0, 0, 0, 10],        // Length > actual data
         vec![0, 255, 255, 255, 255], // Very large length
     ];
 
     for (i, input) in malformed_inputs.iter().enumerate() {
         match codec.decode(input) {
-            Ok(_) => return TestResult::Fail {
-                reason: format!("Malformed input {} should have failed", i),
-            },
+            Ok(_) => {
+                return TestResult::Fail {
+                    reason: format!("Malformed input {} should have failed", i),
+                };
+            }
             Err(_) => continue, // Expected failure
         }
     }
@@ -1241,8 +1261,7 @@ fn test_grpc_integration_scenario() {
 
     // Phase 8: Test error scenarios
     let error_status = MockGrpcStatus::new(MockGrpcCode::InvalidArgument, "Bad request");
-    let error_response = MockGrpcResponse::new(Vec::<u8>::new())
-        .with_status(error_status);
+    let error_response = MockGrpcResponse::new(Vec::<u8>::new()).with_status(error_status);
 
     assert_eq!(error_response.status.code, MockGrpcCode::InvalidArgument);
     assert_eq!(error_response.status.code.as_i32(), 3);
@@ -1251,7 +1270,9 @@ fn test_grpc_integration_scenario() {
     // Phase 9: Test message permutations
     let base_data = b"base message for permutation testing";
     let permutations = generator.generate_permutations(base_data, 10);
-    let successful = generator.test_permutation_round_trip(&codec, &permutations).unwrap();
+    let successful = generator
+        .test_permutation_round_trip(&codec, &permutations)
+        .unwrap();
     assert_eq!(successful, permutations.len());
 
     // Phase 10: Test large message handling
@@ -1274,13 +1295,25 @@ fn run_grpc_conformance_suite() {
 
     // Individual test cases
     let test_functions: Vec<(&ConformanceCase, fn() -> TestResult)> = vec![
-        (&GRPC_CONFORMANCE_CASES[0], test_grpc_message_framing_identity),
-        (&GRPC_CONFORMANCE_CASES[1], test_compression_flag_preservation),
+        (
+            &GRPC_CONFORMANCE_CASES[0],
+            test_grpc_message_framing_identity,
+        ),
+        (
+            &GRPC_CONFORMANCE_CASES[1],
+            test_compression_flag_preservation,
+        ),
         (&GRPC_CONFORMANCE_CASES[2], test_message_length_encoding),
         (&GRPC_CONFORMANCE_CASES[5], test_grpc_status_code_bijection),
         (&GRPC_CONFORMANCE_CASES[7], test_status_http_mapping),
-        (&GRPC_CONFORMANCE_CASES[9], test_arbitrary_message_round_trip),
-        (&GRPC_CONFORMANCE_CASES[11], test_message_permutation_round_trip),
+        (
+            &GRPC_CONFORMANCE_CASES[9],
+            test_arbitrary_message_round_trip,
+        ),
+        (
+            &GRPC_CONFORMANCE_CASES[11],
+            test_message_permutation_round_trip,
+        ),
         (&GRPC_CONFORMANCE_CASES[4], test_malformed_input_handling),
     ];
 
@@ -1312,8 +1345,14 @@ fn run_grpc_conformance_suite() {
     println!("\n🔧 Additional System Tests:");
     print!("  Metadata Round-Trip: ");
     match test_metadata_round_trip() {
-        TestResult::Pass => { println!("✓ PASS"); passed += 1; }
-        TestResult::Fail { reason } => { println!("✗ FAIL - {}", reason); failed += 1; }
+        TestResult::Pass => {
+            println!("✓ PASS");
+            passed += 1;
+        }
+        TestResult::Fail { reason } => {
+            println!("✗ FAIL - {}", reason);
+            failed += 1;
+        }
         TestResult::Skipped { reason } => println!("⊘ SKIP - {}", reason),
     }
 
@@ -1342,7 +1381,7 @@ fn run_grpc_conformance_suite() {
         match case.level {
             RequirementLevel::Must => entry.0 += 1,
             RequirementLevel::Should => entry.1 += 1,
-            RequirementLevel::May => {},
+            RequirementLevel::May => {}
         }
         entry.2 += 1; // tested
     }
@@ -1357,8 +1396,10 @@ fn run_grpc_conformance_suite() {
         } else {
             100.0
         };
-        println!("| {} | {} | {} | {} | {} | {:.1}% |",
-            section, entry.0, entry.1, entry.2, entry.3, score);
+        println!(
+            "| {} | {} | {} | {} | {} | {:.1}% |",
+            section, entry.0, entry.1, entry.2, entry.3, score
+        );
     }
 
     // Fail the test if any conformance tests failed
