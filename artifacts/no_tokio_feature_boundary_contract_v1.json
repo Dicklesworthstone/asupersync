@@ -76,7 +76,7 @@
         "tonic-prost",
         "tokio"
       ],
-      "rationale": "The full feature/dev graph is an audit surface for dev-dependencies, reference implementations, fuzz helpers, and satellite crates. Unexpected tokio paths here must be classified before anyone weakens the default or metrics production guarantees."
+      "rationale": "The full feature/dev graph is not production proof; it is an audit surface for dev-dependencies, reference implementations, fuzz helpers, and satellite crates. Unexpected tokio paths here must be classified before anyone weakens the default or metrics production guarantees."
     }
   ],
   "cargo_feature_contract": {
