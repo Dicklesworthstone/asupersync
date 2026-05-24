@@ -29,7 +29,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use asupersync::trace::compression::{Level, compress, validate_compressed};
+use asupersync::trace::compression::{CompressedTrace, Level, compress, validate_compressed};
 use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
 use asupersync::types::Time;
 
@@ -578,8 +578,7 @@ fn comprehensive_compression_performance_conformance() {
                 let mut compressed_idx = 0;
                 for (orig_idx, original_event) in trace.iter().enumerate() {
                     if compressed_idx < compressed.events.len()
-                        && compressed.events[compressed_idx].sequence_number()
-                            == original_event.sequence_number()
+                        && compressed.events[compressed_idx].seq == original_event.seq
                     {
                         assert_eq!(
                             compressed.events[compressed_idx], *original_event,
@@ -676,7 +675,7 @@ fn comprehensive_compression_performance_conformance() {
     }
 
     // Cross-level validation: stronger levels should never keep more events than weaker ones
-    for &(size_label, _) in &test_cases {
+    for &(_, size_label) in &test_cases {
         let lossless_stats = all_metrics.get(&(size_label, Level::Lossless));
         let structural_stats = all_metrics.get(&(size_label, Level::Structural));
         let skeleton_stats = all_metrics.get(&(size_label, Level::Skeleton));

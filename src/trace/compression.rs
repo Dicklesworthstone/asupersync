@@ -25,7 +25,7 @@ use crate::trace::certificate::TraceCertificate;
 use crate::trace::event::{TraceEvent, TraceEventKind};
 
 /// Compression level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Level {
     /// No event removal; delta encoding only.
     Lossless,
