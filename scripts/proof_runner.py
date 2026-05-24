@@ -32,11 +32,13 @@ FORBIDDEN_VALIDATION_COMMAND_POLICY = (
 RCH_OUTCOME_SCHEMA_VERSION = "proof-runner-rch-outcome-v1"
 PROOF_CONSOLE_REPORT_SCHEMA_VERSION = "proof-console-report-v1"
 PROOF_STATUS_DASHBOARD_SCHEMA_VERSION = "proof-status-dashboard-v1"
+FAILURE_CORPUS_REPLAY_SCHEMA_VERSION = "failure-corpus-replay-result-v1"
 RELEASE_PROOF_PACK_SCHEMA_VERSION = "release-proof-pack-v1"
 DISK_PRESSURE_SCHEMA_VERSION = "proof-runner-disk-pressure-v1"
 DEFAULT_DISK_MIN_FREE_BYTES = 1_073_741_824
 DEFAULT_DEV_SHM_MIN_FREE_BYTES = 268_435_456
 PROOF_STATUS_SNAPSHOT_PATH = "artifacts/proof_status_snapshot_v1.json"
+FAILURE_CORPUS_MANIFEST_PATH = "artifacts/failure_corpus_manifest_v1.json"
 VALIDATION_FRONTIER_LEDGER_PATH = "artifacts/validation_frontier_ledger_schema_v1.json"
 RELEASE_PROOF_PACK_SOURCE_ARTIFACTS = (
     "artifacts/proof_lane_manifest_v1.json",
@@ -88,6 +90,15 @@ TRUNCATED_OUTPUT_RE = re.compile(r"truncated (?:after|output)|output truncated",
 CLIPPY_LINT_RE = re.compile(
     r"(?:rust-clippy/[^\s#]+#|clippy::)(?P<lint>[A-Za-z0-9_-]+)"
 )
+ISO_TIMESTAMP_RE = re.compile(
+    r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b"
+)
+SHA256_VALUE_RE = re.compile(r"sha256:[0-9a-fA-F]{64}")
+RCH_COMMAND_FIELD_RE = re.compile(r"command=RCH_REQUIRE_REMOTE[^\n]*")
+WORKER_FIELD_RE = re.compile(r"\bworker=[A-Za-z0-9_.-]+")
+ACTIVE_PROJECT_EXCLUSION_RE = re.compile(r"active_project_exclusion=\d+")
+DURATION_VALUE_RE = re.compile(r"\b\d+(?:\.\d+)?(?:ms|us|ns|s)\b")
+TMP_PATH_RE = re.compile(r"/tmp/[A-Za-z0-9._/\-]+")
 WRAPPER_RETRIEVAL_HANG_HINTS = (
     "retrieval timed out",
     "retrieval stalled",
@@ -703,6 +714,37 @@ def _int_or_zero(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def scrub_failure_corpus_text(raw_text: str, repo_root: Path) -> str:
+    """Scrub nondeterministic proof-failure text for replayable corpus entries."""
+    scrubbed = raw_text.replace("\r\n", "\n").replace("\r", "\n")
+    repo = repo_root.as_posix().rstrip("/")
+    scrubbed = scrubbed.replace(repo, "[REPO]")
+    scrubbed = ISO_TIMESTAMP_RE.sub("[TIMESTAMP]", scrubbed)
+    scrubbed = SHA256_VALUE_RE.sub("sha256:[HASH]", scrubbed)
+    scrubbed = RCH_COMMAND_FIELD_RE.sub("command=[RCH_COMMAND]", scrubbed)
+    scrubbed = WORKER_FIELD_RE.sub("worker=[WORKER]", scrubbed)
+    scrubbed = ACTIVE_PROJECT_EXCLUSION_RE.sub(
+        "active_project_exclusion=[COUNT]",
+        scrubbed,
+    )
+    scrubbed = DURATION_VALUE_RE.sub("[DURATION]", scrubbed)
+    scrubbed = TMP_PATH_RE.sub("[TMP]", scrubbed)
+    return scrubbed
+
+
+def minimize_failure_corpus_lines(scrubbed_text: str, markers: List[str]) -> List[str]:
+    """Return the stable replay lines that prove the stored failure still matches."""
+    lines = [line for line in scrubbed_text.splitlines() if line.strip()]
+    matched = [
+        line
+        for line in lines
+        if any(marker and marker in line for marker in markers)
+    ]
+    if matched:
+        return matched
+    return lines[:1]
 
 
 def proof_console_markdown(report: Dict[str, Any]) -> str:
@@ -3166,6 +3208,112 @@ class ProofRunner:
             "verdict": report["verdict"],
         }
 
+    def failure_corpus_replay(
+        self,
+        case_id: str = "",
+        manifest_path: str = FAILURE_CORPUS_MANIFEST_PATH,
+    ) -> Dict[str, Any]:
+        """Replay one stored deterministic failure corpus entry without external services."""
+        manifest = self._json_file(manifest_path)
+        cases = [
+            case for case in manifest.get("cases", []) if isinstance(case, dict)
+        ]
+        if not cases:
+            raise ValueError("failure corpus manifest must contain at least one case")
+        selected = None
+        for case in cases:
+            if not case_id or case.get("case_id") == case_id:
+                selected = case
+                break
+        if selected is None:
+            raise ValueError(f"failure corpus case not found: {case_id}")
+
+        scrubbed_text = scrub_failure_corpus_text(
+            str(selected.get("raw_event_log", "")),
+            self.repo_root,
+        )
+        expected_scrubbed = str(selected.get("expected_scrubbed_log", ""))
+        expected_markers = [
+            marker
+            for marker in selected.get("expected_markers", [])
+            if isinstance(marker, str)
+        ]
+        minimized_lines = minimize_failure_corpus_lines(scrubbed_text, expected_markers)
+        missing_markers = [
+            marker for marker in expected_markers if marker not in scrubbed_text
+        ]
+        failure_reasons = []
+        if scrubbed_text != expected_scrubbed:
+            failure_reasons.append(
+                {
+                    "reason_id": "scrubbed-log-mismatch",
+                    "summary": "scrubbed failure log differs from the stored golden text",
+                }
+            )
+        if missing_markers:
+            failure_reasons.append(
+                {
+                    "reason_id": "missing-replay-marker",
+                    "summary": "stored failure log no longer contains required replay markers",
+                    "missing_markers": missing_markers,
+                }
+            )
+        if selected.get("external_services_required") is not False:
+            failure_reasons.append(
+                {
+                    "reason_id": "external-service-required",
+                    "summary": "failure corpus replay cases must be deterministic local fixtures",
+                }
+            )
+
+        return {
+            "schema_version": FAILURE_CORPUS_REPLAY_SCHEMA_VERSION,
+            "manifest_contract_version": manifest.get("contract_version", ""),
+            "case_id": selected.get("case_id", ""),
+            "title": selected.get("title", ""),
+            "failure_kind": selected.get("failure_kind", ""),
+            "external_services_required": selected.get(
+                "external_services_required",
+                None,
+            ),
+            "first_failure": selected.get("first_failure", {}),
+            "replay_command": selected.get("replay", {}).get("command", ""),
+            "scrubbed_log": scrubbed_text,
+            "scrubbed_log_sha256": payload_hash({"scrubbed_log": scrubbed_text}),
+            "minimized_replay_lines": minimized_lines,
+            "stage_log_count": len(
+                [
+                    stage
+                    for stage in selected.get("stage_logs", [])
+                    if isinstance(stage, dict)
+                ]
+            ),
+            "failure_reasons": failure_reasons,
+            "verdict": "fail_closed" if failure_reasons else "pass",
+        }
+
+    def failure_corpus_scrub_file(self, input_path: str) -> Dict[str, Any]:
+        """Scrub one raw failure transcript and return its minimized marker lines."""
+        raw_text = self._path_for_read(input_path).read_text(encoding="utf-8")
+        scrubbed_text = scrub_failure_corpus_text(raw_text, self.repo_root)
+        markers = [
+            "remote required",
+            "refusing local fallback",
+            "error:",
+            "failed-local",
+            "blocked-external",
+        ]
+        return {
+            "schema_version": "failure-corpus-scrub-result-v1",
+            "input_path": self._display_path(input_path),
+            "scrubbed_text": scrubbed_text,
+            "minimized_replay_lines": minimize_failure_corpus_lines(
+                scrubbed_text,
+                markers,
+            ),
+            "verdict": "pass",
+        }
+
     def release_proof_pack(
         self,
         generated_at: str = "",
@@ -4137,6 +4285,21 @@ def main():
         help="JSON rch outcome produced by --classify-rch-log to include in the proof console"
     )
     parser.add_argument(
+        "--failure-corpus-replay",
+        default="",
+        help="Replay one deterministic failure corpus case by id without external services"
+    )
+    parser.add_argument(
+        "--failure-corpus-manifest",
+        default=FAILURE_CORPUS_MANIFEST_PATH,
+        help="Failure corpus manifest JSON used by --failure-corpus-replay"
+    )
+    parser.add_argument(
+        "--failure-corpus-scrub-input",
+        default="",
+        help="Scrub one raw failure transcript and emit deterministic replay lines"
+    )
+    parser.add_argument(
         "--release-proof-pack",
         action="store_true",
         help="Emit a deterministic release proof-pack index"
@@ -4375,6 +4538,28 @@ def main():
                 print(json.dumps(result, indent=2))
             else:
                 print(proof_status_dashboard_markdown(result), end="")
+            return 0
+
+        if args.failure_corpus_replay:
+            result = runner.failure_corpus_replay(
+                case_id=args.failure_corpus_replay,
+                manifest_path=args.failure_corpus_manifest,
+            )
+            if args.output == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                print(f"Failure corpus case: {result['case_id']}")
+                print(f"Verdict: {result['verdict']}")
+                for line in result["minimized_replay_lines"]:
+                    print(f"  {line}")
+            return 0 if result["verdict"] == "pass" else 1
+
+        if args.failure_corpus_scrub_input:
+            result = runner.failure_corpus_scrub_file(args.failure_corpus_scrub_input)
+            if args.output == "json":
+                print(json.dumps(result, indent=2))
+            else:
+                print(result["scrubbed_text"], end="")
             return 0
 
         if args.release_proof_pack:

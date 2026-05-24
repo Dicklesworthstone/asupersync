@@ -364,6 +364,8 @@ pub mod real_integration_scenarios_e2e_tests;
 pub mod integration_mutation_testing;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod integration_scenario_mutations;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod subsystem_mutation_testing;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod raptorq_rfc6330_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
