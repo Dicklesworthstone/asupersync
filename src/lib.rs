@@ -465,6 +465,8 @@ pub mod real_http_h2_server_grpc_protobuf_streaming_e2e_tests;
 pub mod real_signal_graceful_server_shutdown_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_time_intrusive_wheel_combinator_timeout_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_time_sleep_runtime_scheduler_integration_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
