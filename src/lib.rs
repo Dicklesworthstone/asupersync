@@ -333,6 +333,8 @@ pub mod real_channel_mpsc_net_tcp_backpressure_flow_control_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_mpsc_sync_semaphore_backpressure_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_channel_oneshot_cancel_symbol_cancel_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_oneshot_cx_scope_cancellation_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_partition_distributed_distribution_integration_e2e_tests;
