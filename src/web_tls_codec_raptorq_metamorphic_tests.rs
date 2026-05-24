@@ -917,12 +917,12 @@ mod tests {
                 let deserialized = deserialized.unwrap();
 
                 prop_assert_eq!(
-                    deserialized.session_id, original_cookie.session_id,
+                    deserialized.session_id.clone(), original_cookie.session_id.clone(),
                     "Session ID should round-trip correctly"
                 );
 
                 prop_assert_eq!(
-                    deserialized.user_data, original_cookie.user_data,
+                    deserialized.user_data.clone(), original_cookie.user_data.clone(),
                     "User data should round-trip correctly"
                 );
 
@@ -1253,23 +1253,29 @@ mod tests {
 
             let decompressed = decompressed.unwrap();
 
+            // `.clone()` so the originals remain available for the
+            // post-assert length/.len() checks (prop_assert_eq! consumes
+            // its first two args by value on the failure path).
+            let orig_len = original_data.len();
+            let comp_len = compressed.len();
+            let decomp_len = decompressed.len();
             prop_assert_eq!(
-                decompressed, original_data,
+                decompressed.clone(), original_data.clone(),
                 "Round-trip should preserve data exactly. Original length: {}, compressed length: {}, decompressed length: {}",
-                original_data.len(), compressed.len(), decompressed.len()
+                orig_len, comp_len, decomp_len
             );
 
             // Test compression is deterministic
             let compressed2 = MockGzipCompressor::compress(&original_data);
             prop_assert_eq!(
-                compressed, compressed2,
+                compressed.clone(), compressed2,
                 "Compression should be deterministic for same input"
             );
 
             // Test that compressed data is different from original (unless very short)
             if original_data.len() > 20 {
                 prop_assert_ne!(
-                    compressed, original_data,
+                    compressed.clone(), original_data.clone(),
                     "Compressed data should be different from original for non-trivial inputs"
                 );
             }
@@ -1326,19 +1332,19 @@ mod tests {
                 // Check if both reached connected state
                 if client.is_connected() && server.is_connected() {
                     prop_assert_eq!(
-                        client.cipher_suite, server.cipher_suite,
+                        &client.cipher_suite, &server.cipher_suite,
                         "Connected client and server should have matching cipher suites: round={}",
                         round
                     );
 
                     prop_assert_eq!(
-                        client.session_id, server.session_id,
+                        client.session_id.clone(), server.session_id.clone(),
                         "Connected client and server should have matching session IDs: round={}",
                         round
                     );
 
                     prop_assert_eq!(
-                        client.certificates, server.certificates,
+                        client.certificates.clone(), server.certificates.clone(),
                         "Connected client and server should have consistent certificate chain: round={}",
                         round
                     );
@@ -1400,18 +1406,17 @@ mod tests {
                     );
 
                     prop_assert_eq!(
-                        client1.state, client2.state,
-                        "Client states should be identical at step {}: client1={:?}, client2={:?}",
-                        step, client1.state, client2.state
+                        client1.state.clone(), client2.state.clone(),
+                        "Client states should be identical at step {}", step
                     );
 
                     prop_assert_eq!(
-                        client1.cipher_suite, client2.cipher_suite,
+                        client1.cipher_suite.clone(), client2.cipher_suite.clone(),
                         "Client cipher suites should be identical at step {}", step
                     );
 
                     prop_assert_eq!(
-                        client1.session_id, client2.session_id,
+                        client1.session_id.clone(), client2.session_id.clone(),
                         "Client session IDs should be identical at step {}", step
                     );
 
@@ -1425,18 +1430,17 @@ mod tests {
                     );
 
                     prop_assert_eq!(
-                        server1.state, server2.state,
-                        "Server states should be identical at step {}: server1={:?}, server2={:?}",
-                        step, server1.state, server2.state
+                        server1.state.clone(), server2.state.clone(),
+                        "Server states should be identical at step {}", step
                     );
 
                     prop_assert_eq!(
-                        server1.cipher_suite, server2.cipher_suite,
+                        server1.cipher_suite.clone(), server2.cipher_suite.clone(),
                         "Server cipher suites should be identical at step {}", step
                     );
 
                     prop_assert_eq!(
-                        server1.certificates, server2.certificates,
+                        server1.certificates.clone(), server2.certificates.clone(),
                         "Server certificates should be identical at step {}", step
                     );
 
@@ -1563,11 +1567,11 @@ mod tests {
                 let encoded2 = encoder.encode_symbol(symbol_id);
 
                 prop_assert_eq!(
-                    encoded1, encoded2,
+                    &encoded1, &encoded2,
                     "Symbol encoding should be deterministic for symbol_id={}", symbol_id
                 );
 
-                if let Some(symbol) = encoded1 {
+                if let Some(ref symbol) = encoded1 {
                     prop_assert_eq!(
                         symbol.len(), symbol_size,
                         "Encoded symbol should have correct size: symbol_id={}, size={}, expected={}",
@@ -1587,12 +1591,18 @@ mod tests {
             frame_sizes in proptest::collection::vec(64usize..1024, 3..8)
         )| {
             // MR-CodecFramingPreservation: codec framing should preserve message boundaries
-            for (messages, &frame_size) in message_data.iter().zip(frame_sizes.iter()) {
+            for (message_bytes, &frame_size) in message_data.iter().zip(frame_sizes.iter()) {
+                let message_chunk_len = (message_bytes.len() / 3).max(1).min(frame_size);
+                let messages: Vec<Vec<u8>> = message_bytes
+                    .chunks(message_chunk_len)
+                    .map(|chunk| chunk.to_vec())
+                    .collect();
+
                 // Create framed messages - prepend length to each message
                 let mut framed_stream = Vec::new();
                 let mut expected_lengths = Vec::new();
 
-                for message in messages {
+                for message in &messages {
                     let len = message.len() as u32;
                     framed_stream.extend_from_slice(&len.to_be_bytes());
                     framed_stream.extend_from_slice(message);
