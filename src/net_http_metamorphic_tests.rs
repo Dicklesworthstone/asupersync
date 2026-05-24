@@ -840,15 +840,17 @@ fn test_mr_h2_hpack_encode_decode_round_trip() {
 
                 // Decode header
                 if let Some((decoded_name, decoded_value)) = hpack_context.decode_header(&encoded) {
-                    // MR: HPACK encode→decode should preserve header name and value
+                    // MR: HPACK encode→decode should preserve header name and value.
+                    // `.clone()` the borrowed name/value so the prop_assert_eq! macro
+                    // doesn't move out of the shared reference.
                     prop_assert_eq!(
-                        decoded_name, *name,
-                        "HPACK round-trip should preserve header name: {} != {}", decoded_name, name
+                        decoded_name.clone(), name.clone(),
+                        "HPACK round-trip should preserve header name"
                     );
 
                     prop_assert_eq!(
-                        decoded_value, *value,
-                        "HPACK round-trip should preserve header value: {} != {}", decoded_value, value
+                        decoded_value.clone(), value.clone(),
+                        "HPACK round-trip should preserve header value"
                     );
                 }
             }

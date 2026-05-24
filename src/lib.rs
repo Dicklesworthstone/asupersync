@@ -323,6 +323,8 @@ pub mod real_cancel_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_channel_supervision_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_codec_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cx_registry_e2e_tests;
