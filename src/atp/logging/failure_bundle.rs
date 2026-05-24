@@ -9,9 +9,14 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+/// Stable ATP failure-bundle schema.
+pub const ATP_FAILURE_BUNDLE_SCHEMA_VERSION: &str = "asupersync.atp.failure_bundle.v1";
+
 /// Complete failure bundle for ATP debugging
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailureBundle {
+    /// Stable schema version for machine validation.
+    pub schema_version: String,
     /// Bundle metadata
     pub metadata: BundleMetadata,
     /// Exact command that failed
@@ -330,13 +335,24 @@ pub fn create_bundle(
         &config.redaction_rules,
         "additional_data",
     );
+    let mut safe_error_context = serde_json::Value::String(error_context.to_string());
+    let _redacted_error_context = redaction::redact_json_value(
+        &mut safe_error_context,
+        &config.redaction_rules,
+        "error_context",
+    );
+    let safe_error_context = safe_error_context
+        .as_str()
+        .unwrap_or(error_context)
+        .to_string();
 
     FailureBundle {
+        schema_version: ATP_FAILURE_BUNDLE_SCHEMA_VERSION.to_string(),
         metadata: create_metadata(&bundle_id, &timestamp),
         command: capture_command_info(),
         environment: capture_environment_info(),
         seed: generate_deterministic_seed(),
-        trace_data: capture_trace_data(error_context),
+        trace_data: capture_trace_data(&safe_error_context),
         qlog_data: capture_qlog_data(),
         path_log: capture_path_log(),
         repair_log: capture_repair_log(),
@@ -616,6 +632,7 @@ mod tests {
         let config = AtpLoggerConfig::default();
         let bundle = create_bundle("Test error", json!({"test": true}), &config);
 
+        assert_eq!(bundle.schema_version, ATP_FAILURE_BUNDLE_SCHEMA_VERSION);
         assert!(!bundle.metadata.bundle_id.is_empty());
         assert_eq!(bundle.metadata.atp_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(bundle.additional_data["test"], true);
@@ -643,7 +660,7 @@ mod tests {
     fn test_bundle_redacts_sensitive_context() {
         let config = AtpLoggerConfig::default();
         let bundle = create_bundle(
-            "secret leaked",
+            "Bearer abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz leaked",
             json!({
                 "capability_secret": "cap://super-secret-capability",
                 "content_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -654,6 +671,7 @@ mod tests {
 
         let serialized = serde_json::to_string(&bundle).unwrap(); // ubs:ignore - test oracle
         assert!(!serialized.contains("super-secret"));
+        assert!(!serialized.contains("abcdefghijklmnopqrstuvwxyz"));
         assert!(!serialized.contains("/home/alice"));
         assert!(serialized.contains("[REDACTED_CAPABILITY]"));
         assert!(serialized.contains("[REDACTED_CONTENT_HASH]"));

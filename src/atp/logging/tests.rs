@@ -47,6 +47,7 @@ fn all_subsystems_and_test_lanes_have_schema_entries() {
 fn json_diagnostic_output_is_stable_and_redacted() {
     let logger = AtpLogger::new();
     let event = AtpEvent {
+        schema_version: ATP_LOG_EVENT_SCHEMA_VERSION.to_string(),
         timestamp: "2026-05-20T00:00:00Z".to_string(),
         level: Level::Info,
         subsystem: AtpSubsystem::Security,
@@ -64,7 +65,7 @@ fn json_diagnostic_output_is_stable_and_redacted() {
 
     assert_eq!(
         rendered,
-        "{\"timestamp\":\"2026-05-20T00:00:00Z\",\"level\":\"info\",\"subsystem\":\"Security\",\"event_type\":\"capability_issued\",\"data\":{\"capability_secret\":\"[REDACTED_CAPABILITY]\",\"content_hash\":\"[REDACTED_CONTENT_HASH]\",\"path\":\"[REDACTED_PATH]\"},\"context\":{\"session_id\":\"session-1\",\"transfer_id\":\"transfer-1\",\"connection_id\":\"conn-1\",\"peer_id\":\"[REDACTED_PEER_ID]\",\"test_case_id\":\"ATP-N6\",\"trace_id\":\"trace-1\",\"span_id\":\"span-1\"},\"redacted_fields\":[\"context.peer_id\",\"data.capability_secret\",\"data.content_hash\",\"data.path\"]}"
+        "{\"schema_version\":\"asupersync.atp.log.event.v1\",\"timestamp\":\"2026-05-20T00:00:00Z\",\"level\":\"info\",\"subsystem\":\"Security\",\"event_type\":\"capability_issued\",\"data\":{\"capability_secret\":\"[REDACTED_CAPABILITY]\",\"content_hash\":\"[REDACTED_CONTENT_HASH]\",\"path\":\"[REDACTED_PATH]\"},\"context\":{\"session_id\":\"session-1\",\"transfer_id\":\"transfer-1\",\"connection_id\":\"conn-1\",\"peer_id\":\"[REDACTED_PEER_ID]\",\"test_case_id\":\"ATP-N6\",\"trace_id\":\"trace-1\",\"span_id\":\"span-1\"},\"redacted_fields\":[\"context.peer_id\",\"data.capability_secret\",\"data.content_hash\",\"data.path\"]}"
     );
     assert!(!rendered.contains("very-secret"));
     assert!(!rendered.contains("/home/alice"));
@@ -77,6 +78,7 @@ fn human_diagnostic_output_is_stable() {
         ..AtpLoggerConfig::default()
     });
     let event = AtpEvent {
+        schema_version: ATP_LOG_EVENT_SCHEMA_VERSION.to_string(),
         timestamp: "2026-05-20T00:00:00Z".to_string(),
         level: Level::Warn,
         subsystem: AtpSubsystem::Path,
@@ -90,7 +92,7 @@ fn human_diagnostic_output_is_stable() {
 
     assert_eq!(
         rendered,
-        "2026-05-20T00:00:00Z [WARN] path.path_selected trace=trace-1 span=root data={\"path_id\":\"direct-1\"} redacted="
+        "2026-05-20T00:00:00Z [WARN] schema=asupersync.atp.log.event.v1 path.path_selected trace=trace-1 span=root data={\"path_id\":\"direct-1\"} redacted="
     );
 }
 
@@ -98,6 +100,7 @@ fn human_diagnostic_output_is_stable() {
 fn unknown_event_type_is_rejected() {
     let logger = AtpLogger::new();
     let event = AtpEvent {
+        schema_version: ATP_LOG_EVENT_SCHEMA_VERSION.to_string(),
         timestamp: "2026-05-20T00:00:00Z".to_string(),
         level: Level::Info,
         subsystem: AtpSubsystem::Transfer,

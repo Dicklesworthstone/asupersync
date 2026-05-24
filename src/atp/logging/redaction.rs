@@ -243,6 +243,15 @@ fn is_private_key_pattern(text: &str) -> bool {
 
 /// Detect auth token patterns
 fn is_auth_token_pattern(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("token=")
+        || lower.contains("password=")
+        || lower.contains("secret=")
+        || lower.contains("authorization: bearer ")
+    {
+        return true;
+    }
+
     // JWT pattern
     if text.matches('.').count() == 2 && text.len() > 100 {
         return true;
@@ -350,6 +359,7 @@ mod tests {
         };
 
         let mut event = AtpEvent {
+            schema_version: super::super::ATP_LOG_EVENT_SCHEMA_VERSION.to_string(),
             timestamp: "2026-05-20T12:00:00Z".to_string(),
             level: super::super::Level::Info,
             subsystem: super::super::AtpSubsystem::Security,
@@ -388,6 +398,7 @@ mod tests {
         };
 
         let mut event = AtpEvent {
+            schema_version: super::super::ATP_LOG_EVENT_SCHEMA_VERSION.to_string(),
             timestamp: "2026-05-20T12:00:00Z".to_string(),
             level: super::super::Level::Info,
             subsystem: super::super::AtpSubsystem::Disk,

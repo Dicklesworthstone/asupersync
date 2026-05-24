@@ -11,14 +11,22 @@ pub mod schema;
 #[cfg(test)]
 mod tests;
 
+pub use failure_bundle::ATP_FAILURE_BUNDLE_SCHEMA_VERSION;
+pub use replay_artifacts::ATP_REPLAY_ARTIFACT_SCHEMA_ID;
+
 use crate::observability::level::LogLevel as Level;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+/// Stable ATP structured-log event schema.
+pub const ATP_LOG_EVENT_SCHEMA_VERSION: &str = "asupersync.atp.log.event.v1";
+
 /// ATP event schema for consistent logging across all subsystems
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AtpEvent {
+    /// Stable schema version for machine validation.
+    pub schema_version: String,
     /// Event timestamp in RFC3339 format
     pub timestamp: String,
     /// Log level
@@ -270,6 +278,21 @@ fn default_redaction_rules() -> Vec<RedactionRule> {
             replacement: "[REDACTED_TOKEN]".to_string(),
         },
         RedactionRule {
+            field_pattern: "token".to_string(),
+            redaction_type: RedactionType::AuthToken,
+            replacement: "[REDACTED_TOKEN]".to_string(),
+        },
+        RedactionRule {
+            field_pattern: "authorization".to_string(),
+            redaction_type: RedactionType::AuthToken,
+            replacement: "[REDACTED_TOKEN]".to_string(),
+        },
+        RedactionRule {
+            field_pattern: "password".to_string(),
+            redaction_type: RedactionType::AuthToken,
+            replacement: "[REDACTED_TOKEN]".to_string(),
+        },
+        RedactionRule {
             field_pattern: "capability_secret".to_string(),
             redaction_type: RedactionType::CapabilitySecret,
             replacement: "[REDACTED_CAPABILITY]".to_string(),
@@ -281,6 +304,11 @@ fn default_redaction_rules() -> Vec<RedactionRule> {
         },
         RedactionRule {
             field_pattern: "context.peer_id".to_string(),
+            redaction_type: RedactionType::Custom("peer".to_string()),
+            replacement: "[REDACTED_PEER_ID]".to_string(),
+        },
+        RedactionRule {
+            field_pattern: "peer_id".to_string(),
             redaction_type: RedactionType::Custom("peer".to_string()),
             replacement: "[REDACTED_PEER_ID]".to_string(),
         },
@@ -448,9 +476,10 @@ impl AtpLogger {
 
 fn render_human_event(event: &AtpEvent) -> String {
     format!(
-        "{} [{}] {}.{} trace={} span={} data={} redacted={}",
+        "{} [{}] schema={} {}.{} trace={} span={} data={} redacted={}",
         event.timestamp,
         event.level,
+        event.schema_version,
         event.subsystem.as_str(),
         event.event_type,
         event.context.trace_id,
@@ -488,6 +517,7 @@ macro_rules! atp_log {
     ($subsystem:expr, $event_type:expr, $level:expr, $data:expr, $context:expr) => {
         if let Some(logger) = $crate::atp::logging::atp_logger() {
             let mut event = $crate::atp::logging::AtpEvent {
+                schema_version: $crate::atp::logging::ATP_LOG_EVENT_SCHEMA_VERSION.to_string(),
                 timestamp: $crate::atp::logging::current_timestamp(),
                 level: $level,
                 subsystem: $subsystem,

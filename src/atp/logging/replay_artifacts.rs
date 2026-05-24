@@ -8,9 +8,14 @@ use serde::{Deserialize, Serialize};
 
 use super::AtpLoggerConfig;
 
+/// Stable ATP replay-artifact schema id.
+pub const ATP_REPLAY_ARTIFACT_SCHEMA_ID: &str = "asupersync.atp.replay_artifacts.v1";
+
 /// Replay artifact bundle for deterministic ATP failure reproduction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayArtifacts {
+    /// Stable schema id for machine validation.
+    pub schema_id: String,
     /// Contract schema version.
     pub schema_version: u32,
     /// ATP session that produced the artifacts.
@@ -51,6 +56,7 @@ pub struct ReplayEnvironment {
 pub fn generate(session_id: &str, seed: u64, config: &AtpLoggerConfig) -> ReplayArtifacts {
     let safe_session = sanitize_identifier(session_id);
     ReplayArtifacts {
+        schema_id: ATP_REPLAY_ARTIFACT_SCHEMA_ID.to_string(),
         schema_version: 1,
         session_id: safe_session.clone(),
         seed,
@@ -90,6 +96,7 @@ mod tests {
     fn replay_artifacts_include_reproduction_context() {
         let artifacts = generate("session:ATP-N6", 42, &AtpLoggerConfig::default());
 
+        assert_eq!(artifacts.schema_id, ATP_REPLAY_ARTIFACT_SCHEMA_ID);
         assert_eq!(artifacts.schema_version, 1);
         assert_eq!(artifacts.session_id, "session_ATP-N6");
         assert_eq!(

@@ -754,6 +754,12 @@ fn empty_artifact_ref() -> &'static AtpFailureArtifact {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::atp::logging::{
+        ATP_FAILURE_BUNDLE_SCHEMA_VERSION, ATP_LOG_EVENT_SCHEMA_VERSION,
+        ATP_REPLAY_ARTIFACT_SCHEMA_ID,
+    };
+    use asupersync::atp::{AtpEvent, AtpLogger, AtpSubsystem, EventContext};
+    use asupersync::observability::LogLevel;
     use tempfile::TempDir;
 
     #[test]
@@ -1014,6 +1020,92 @@ mod tests {
             "reproduction steps should preserve journal evidence: {:?}",
             minimized.reproduction_steps
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_forensics_uses_logging_failure_bundle_replay_contract()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let logger = AtpLogger::new();
+        let event = AtpEvent {
+            schema_version: ATP_LOG_EVENT_SCHEMA_VERSION.to_string(),
+            timestamp: "2026-05-20T00:00:00Z".to_string(),
+            level: LogLevel::Info,
+            subsystem: AtpSubsystem::E2eTest,
+            event_type: "test_started".to_string(),
+            data: serde_json::json!({
+                "test_name": "test_atp_forensics_basic",
+                "auth_token": "Bearer abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+                "capability_secret": "cap://forensics-transfer-capability",
+                "fixture_path": "/home/alice/.ssh/id_ed25519",
+                "content_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }),
+            context: EventContext {
+                session_id: "atp-forensics-contract".to_string(),
+                transfer_id: Some("transfer-1".to_string()),
+                connection_id: Some("conn-1".to_string()),
+                peer_id: Some("peer-private-identity".to_string()),
+                test_case_id: Some("test_atp_forensics_basic".to_string()),
+                trace_id: "trace-forensics-contract".to_string(),
+                span_id: "root".to_string(),
+            },
+            redacted_fields: Vec::new(),
+        };
+
+        let rendered = logger.render_event(&event)?;
+        let rendered_json: serde_json::Value = serde_json::from_str(&rendered)?;
+        assert_eq!(
+            rendered_json["schema_version"],
+            ATP_LOG_EVENT_SCHEMA_VERSION
+        );
+        assert_eq!(rendered_json["subsystem"], "E2eTest");
+        assert_eq!(
+            rendered_json["context"]["test_case_id"],
+            "test_atp_forensics_basic"
+        );
+        assert!(!rendered.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(!rendered.contains("forensics-transfer-capability"));
+        assert!(!rendered.contains("/home/alice"));
+        assert!(!rendered.contains("peer-private-identity"));
+        assert!(rendered.contains("[REDACTED_TOKEN]"));
+        assert!(rendered.contains("[REDACTED_CAPABILITY]"));
+        assert!(rendered.contains("[REDACTED_PATH]"));
+        assert!(rendered.contains("[REDACTED_PEER_ID]"));
+
+        let bundle = logger.create_failure_bundle(
+            "authorization: bearer abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz",
+            serde_json::json!({
+                "test_case_id": "test_atp_forensics_basic",
+                "private_key": "-----BEGIN PRIVATE KEY-----\nMIIsecret",
+                "path": "/Users/alice/private/key.pem"
+            }),
+        );
+        let bundle_json = serde_json::to_string(&bundle)?;
+        assert_eq!(bundle.schema_version, ATP_FAILURE_BUNDLE_SCHEMA_VERSION);
+        assert!(bundle.qlog_data.is_some());
+        assert!(bundle.path_log.is_some());
+        assert!(bundle.repair_log.is_some());
+        assert!(bundle.journal_digest.is_some());
+        assert!(bundle.proof_bundle.is_some());
+        assert!(bundle.replay_command.contains(&bundle.metadata.bundle_id));
+        assert!(!bundle_json.contains("MIIsecret"));
+        assert!(!bundle_json.contains("/Users/alice"));
+        assert!(!bundle_json.contains("abcdefghijklmnopqrstuvwxyz"));
+
+        let replay = logger.generate_replay_artifacts("test_atp_forensics_basic", 1234);
+        assert_eq!(replay.schema_id, ATP_REPLAY_ARTIFACT_SCHEMA_ID);
+        assert_eq!(replay.schema_version, 1);
+        assert_eq!(replay.session_id, "test_atp_forensics_basic");
+        assert!(replay.replay_command.contains("--seed 1234"));
+        assert_eq!(
+            replay.trace_artifact,
+            "test_atp_forensics_basic/trace.jsonl"
+        );
+        assert_eq!(
+            replay.proof_bundle_artifact,
+            "test_atp_forensics_basic/proof.bundle.json"
+        );
+
         Ok(())
     }
 }
