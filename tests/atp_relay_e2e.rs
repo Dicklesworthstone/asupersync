@@ -1700,7 +1700,7 @@ fn relay_socket_turn_services_udp_and_tcp_with_detailed_logs() {
     let mut source_client =
         TcpStream::connect(source_listener.local_addr().expect("source listener addr"))
             .expect("source client connects");
-    let mut source_accept = socket_loop
+    let source_accept = socket_loop
         .accept_tcp_tls_stream_once(&source_listener, peer(1))
         .expect("accept source stream")
         .expect("source stream accepted");
@@ -1716,7 +1716,7 @@ fn relay_socket_turn_services_udp_and_tcp_with_detailed_logs() {
     destination_client
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("destination tcp read timeout");
-    let mut destination_accept = socket_loop
+    let destination_accept = socket_loop
         .accept_tcp_tls_stream_once(&destination_listener, peer(2))
         .expect("accept destination stream")
         .expect("destination stream accepted");
