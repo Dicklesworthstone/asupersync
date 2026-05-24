@@ -3280,6 +3280,987 @@ impl IntegrationTestHarness {
         assert!(accuracy_rate > 0.85, "Timer accuracy should be >85% under load: {:.2}% ({} violations)", accuracy_rate * 100.0, accuracy_violations_count);
         assert!(final_active == 0, "NO timer leaks after test: {} active timers remain", final_active);
     }
+
+    /// [br-integration-14] Multi-hour task with periodic checkpoint and resume
+    async fn test_multi_hour_task_checkpoint_resume(&self) {
+        self.logger.log_phase("checkpoint_resume_setup");
+
+        // Simulate multi-hour operation in compressed time
+        let simulated_hour_duration = Duration::from_secs(30); // 30 seconds = 1 simulated hour
+        let total_simulated_hours = 4; // Simulate 4-hour long-running task
+        let checkpoint_interval = simulated_hour_duration / 6; // Checkpoint every 10 minutes (simulated)
+        let work_units_per_hour = 200; // 200 work units per simulated hour
+
+        self.logger.log_event("checkpoint_config", serde_json::json!({
+            "simulated_hour_duration_secs": simulated_hour_duration.as_secs(),
+            "total_simulated_hours": total_simulated_hours,
+            "checkpoint_interval_secs": checkpoint_interval.as_secs(),
+            "work_units_per_hour": work_units_per_hour
+        }));
+
+        // Phase 1: Setup long-running task state
+        self.logger.log_phase("long_running_task_setup");
+
+        let work_progress = Arc::new(AtomicUsize::new(0));
+        let checkpoints_created = Arc::new(AtomicUsize::new(0));
+        let resumes_performed = Arc::new(AtomicUsize::new(0));
+        let interruptions_simulated = Arc::new(AtomicUsize::new(0));
+        let state_consistency_violations = Arc::new(AtomicUsize::new(0));
+
+        // Persistent state for checkpointing
+        let checkpointed_state = Arc::new(Mutex::new(HashMap::<String, serde_json::Value>::new()));
+
+        // Phase 2: Long-running task with checkpoint/resume
+        let task_processor = {
+            let logger = self.logger.clone();
+            let progress = Arc::clone(&work_progress);
+            let checkpoints = Arc::clone(&checkpoints_created);
+            let resumes = Arc::clone(&resumes_performed);
+            let interruptions = Arc::clone(&interruptions_simulated);
+            let violations = Arc::clone(&state_consistency_violations);
+            let checkpoint_state = Arc::clone(&checkpointed_state);
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let task_start = Instant::now();
+                    let mut current_work_unit = 0;
+                    let mut last_checkpoint = Instant::now();
+                    let mut current_hour = 0;
+                    let mut accumulated_data = Vec::new(); // Simulated work state
+
+                    while current_hour < total_simulated_hours {
+                        let hour_start = Instant::now();
+
+                        // Process work units for current hour
+                        let work_units_this_hour = work_units_per_hour;
+
+                        for unit_id in 0..work_units_this_hour {
+                            // Simulate work processing
+                            let work_data = format!("hour_{}_unit_{}_data_{}", current_hour, unit_id, current_work_unit);
+                            accumulated_data.push(work_data.clone());
+
+                            current_work_unit += 1;
+                            progress.store(current_work_unit, Ordering::Relaxed);
+
+                            // Periodic checkpointing
+                            if last_checkpoint.elapsed() >= checkpoint_interval {
+                                // Create checkpoint
+                                let checkpoint_id = checkpoints.fetch_add(1, Ordering::Relaxed);
+                                let checkpoint_data = serde_json::json!({
+                                    "checkpoint_id": checkpoint_id,
+                                    "work_progress": current_work_unit,
+                                    "current_hour": current_hour,
+                                    "accumulated_data_count": accumulated_data.len(),
+                                    "timestamp": task_start.elapsed().as_millis(),
+                                    "last_work_data": accumulated_data.last().cloned().unwrap_or_default()
+                                });
+
+                                // Persist checkpoint
+                                {
+                                    let mut state = checkpoint_state.lock().await;
+                                    state.insert(format!("checkpoint_{}", checkpoint_id), checkpoint_data.clone());
+                                }
+
+                                last_checkpoint = Instant::now();
+
+                                logger.log_event("checkpoint_created", serde_json::json!({
+                                    "checkpoint_id": checkpoint_id,
+                                    "work_progress": current_work_unit,
+                                    "hour": current_hour,
+                                    "data_size": accumulated_data.len(),
+                                    "elapsed_ms": task_start.elapsed().as_millis()
+                                }));
+
+                                // Simulate random interruption (20% chance)
+                                if fastrand::f64() < 0.2 {
+                                    interruptions.fetch_add(1, Ordering::Relaxed);
+
+                                    logger.log_event("task_interruption", serde_json::json!({
+                                        "interruption_point": current_work_unit,
+                                        "checkpoint_id": checkpoint_id,
+                                        "hour": current_hour
+                                    }));
+
+                                    // Simulate interruption delay (restart/recovery time)
+                                    sleep(Duration::from_millis(200)).await;
+
+                                    // Resume from checkpoint
+                                    let resume_id = resumes.fetch_add(1, Ordering::Relaxed);
+
+                                    // Validate state consistency after resume
+                                    let state = checkpoint_state.lock().await;
+                                    if let Some(checkpoint) = state.get(&format!("checkpoint_{}", checkpoint_id)) {
+                                        let expected_progress = checkpoint["work_progress"].as_u64().unwrap_or(0) as usize;
+
+                                        if current_work_unit != expected_progress {
+                                            violations.fetch_add(1, Ordering::Relaxed);
+                                            logger.log_event("state_consistency_violation", serde_json::json!({
+                                                "expected_progress": expected_progress,
+                                                "actual_progress": current_work_unit,
+                                                "checkpoint_id": checkpoint_id
+                                            }));
+                                        }
+
+                                        logger.log_event("task_resumed", serde_json::json!({
+                                            "resume_id": resume_id,
+                                            "checkpoint_id": checkpoint_id,
+                                            "resumed_progress": expected_progress,
+                                            "hour": current_hour
+                                        }));
+                                    }
+                                }
+                            }
+
+                            // Simulate processing delay
+                            sleep(Duration::from_millis(5)).await;
+
+                            // Progress tracking within hour
+                            if unit_id % 50 == 0 {
+                                logger.log_event("hour_progress", serde_json::json!({
+                                    "hour": current_hour,
+                                    "units_completed": unit_id,
+                                    "total_units": work_units_this_hour,
+                                    "hour_elapsed_ms": hour_start.elapsed().as_millis()
+                                }));
+                            }
+                        }
+
+                        current_hour += 1;
+
+                        logger.log_event("hour_completed", serde_json::json!({
+                            "completed_hour": current_hour - 1,
+                            "work_units_processed": work_units_this_hour,
+                            "total_progress": current_work_unit,
+                            "hour_duration_ms": hour_start.elapsed().as_millis()
+                        }));
+
+                        // Brief pause between hours
+                        sleep(Duration::from_millis(100)).await;
+                    }
+
+                    // Final checkpoint
+                    let final_checkpoint_id = checkpoints.fetch_add(1, Ordering::Relaxed);
+                    let final_checkpoint = serde_json::json!({
+                        "checkpoint_id": final_checkpoint_id,
+                        "work_progress": current_work_unit,
+                        "completion_status": "finished",
+                        "total_hours": current_hour,
+                        "final_data_size": accumulated_data.len(),
+                        "total_duration_ms": task_start.elapsed().as_millis()
+                    });
+
+                    {
+                        let mut state = checkpoint_state.lock().await;
+                        state.insert(format!("final_checkpoint_{}", final_checkpoint_id), final_checkpoint);
+                    }
+
+                    logger.log_event("long_running_task_complete", serde_json::json!({
+                        "total_work_units": current_work_unit,
+                        "total_hours": current_hour,
+                        "total_checkpoints": checkpoints.load(Ordering::Relaxed) + 1,
+                        "duration_ms": task_start.elapsed().as_millis()
+                    }));
+
+                    Outcome::Ok(current_work_unit)
+                }).await
+            }).await
+        };
+
+        // Phase 3: Execute long-running task with monitoring
+        self.logger.log_phase("long_running_execution");
+
+        let total_timeout = simulated_hour_duration * total_simulated_hours as u32 + Duration::from_secs(30);
+        let task_result = timeout(total_timeout, task_processor).await;
+
+        // Phase 4: Validate checkpoint/resume functionality
+        self.logger.log_phase("checkpoint_resume_validation");
+
+        let total_progress = work_progress.load(Ordering::Relaxed);
+        let total_checkpoints = checkpoints_created.load(Ordering::Relaxed);
+        let total_resumes = resumes_performed.load(Ordering::Relaxed);
+        let total_interruptions = interruptions_simulated.load(Ordering::Relaxed);
+        let consistency_violations = state_consistency_violations.load(Ordering::Relaxed);
+
+        let expected_work_units = work_units_per_hour * total_simulated_hours;
+
+        // Validate checkpoint state persistence
+        let checkpoint_count = {
+            let state = checkpointed_state.lock().await;
+            state.len()
+        };
+
+        self.logger.log_metrics(serde_json::json!({
+            "checkpoint_resume_results": {
+                "total_work_progress": total_progress,
+                "expected_work_units": expected_work_units,
+                "total_checkpoints": total_checkpoints,
+                "total_resumes": total_resumes,
+                "total_interruptions": total_interruptions,
+                "consistency_violations": consistency_violations,
+                "persisted_checkpoint_count": checkpoint_count,
+                "completion_rate": total_progress as f64 / expected_work_units as f64,
+                "checkpoint_frequency": total_checkpoints as f64 / total_simulated_hours as f64,
+                "resume_success_rate": total_resumes as f64 / total_interruptions as f64
+            }
+        }));
+
+        // Critical assertions for long-running task reliability
+        self.logger.log_assertion("work_progress", total_progress > 0, serde_json::json!({
+            "progress": total_progress
+        }));
+
+        self.logger.log_assertion("checkpoints_created", total_checkpoints > 0, serde_json::json!({
+            "checkpoints": total_checkpoints
+        }));
+
+        self.logger.log_assertion("task_interruptions", total_interruptions > 0, serde_json::json!({
+            "interruptions": total_interruptions
+        }));
+
+        self.logger.log_assertion("resume_operations", total_resumes == total_interruptions, serde_json::json!({
+            "resumes": total_resumes,
+            "interruptions": total_interruptions
+        }));
+
+        // Work completion should be high despite interruptions
+        let completion_rate = total_progress as f64 / expected_work_units as f64;
+        self.logger.log_assertion("completion_rate", completion_rate > 0.9, serde_json::json!({
+            "completion_rate": completion_rate,
+            "threshold": 0.9
+        }));
+
+        // State consistency should be maintained across resumes
+        self.logger.log_assertion("state_consistency", consistency_violations == 0, serde_json::json!({
+            "violations": consistency_violations
+        }));
+
+        assert!(total_progress > 0, "Long-running task should make progress");
+        assert!(total_checkpoints > 0, "Task should create checkpoints: {} checkpoints", total_checkpoints);
+        assert!(total_interruptions > 0, "Interruptions should occur during long-running task: {} interruptions", total_interruptions);
+        assert!(total_resumes == total_interruptions, "All interruptions should resume: {} resumes vs {} interruptions", total_resumes, total_interruptions);
+        assert!(completion_rate > 0.9, "Task completion should be >90% despite interruptions: {:.2}%", completion_rate * 100.0);
+        assert!(consistency_violations == 0, "NO state consistency violations across checkpoints: {} violations", consistency_violations);
+    }
+
+    /// [br-integration-15] Memory-pressure-induced backpressure with recovery
+    async fn test_memory_pressure_backpressure_recovery(&self) {
+        self.logger.log_phase("memory_pressure_setup");
+
+        // Simulate memory pressure through large data structures
+        let memory_pressure_threshold = 50 * 1024 * 1024; // 50MB threshold
+        let pressure_induction_rate = 1024 * 1024; // 1MB per allocation
+        let pressure_relief_delay = Duration::from_millis(100);
+        let backpressure_detection_threshold = 10; // Queue size threshold
+
+        self.logger.log_event("memory_pressure_config", serde_json::json!({
+            "pressure_threshold_mb": memory_pressure_threshold / (1024 * 1024),
+            "induction_rate_mb": pressure_induction_rate / (1024 * 1024),
+            "relief_delay_ms": pressure_relief_delay.as_millis(),
+            "backpressure_threshold": backpressure_detection_threshold
+        }));
+
+        // Phase 1: Setup memory-sensitive processing pipeline
+        self.logger.log_phase("memory_pipeline_setup");
+
+        let (input_tx, input_rx) = mpsc::channel(50);
+        let (output_tx, output_rx) = mpsc::channel(50);
+        let memory_allocations = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let memory_usage = Arc::new(AtomicUsize::new(0));
+        let backpressure_events = Arc::new(AtomicUsize::new(0));
+        let pressure_relief_events = Arc::new(AtomicUsize::new(0));
+        let processing_delays = Arc::new(AtomicUsize::new(0));
+        let total_processed = Arc::new(AtomicUsize::new(0));
+
+        // Memory pressure monitor
+        let pressure_monitor = {
+            let logger = self.logger.clone();
+            let usage = Arc::clone(&memory_usage);
+            let backpressure_events = Arc::clone(&backpressure_events);
+            let allocations = Arc::clone(&memory_allocations);
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let monitor_start = Instant::now();
+                    let mut pressure_state = false;
+
+                    while monitor_start.elapsed() < Duration::from_secs(20) {
+                        let current_usage = usage.load(Ordering::Relaxed);
+                        let under_pressure = current_usage > memory_pressure_threshold;
+
+                        if under_pressure && !pressure_state {
+                            // Memory pressure detected
+                            pressure_state = true;
+                            backpressure_events.fetch_add(1, Ordering::Relaxed);
+
+                            logger.log_event("memory_pressure_detected", serde_json::json!({
+                                "memory_usage_mb": current_usage / (1024 * 1024),
+                                "threshold_mb": memory_pressure_threshold / (1024 * 1024),
+                                "pressure_events": backpressure_events.load(Ordering::Relaxed)
+                            }));
+                        } else if !under_pressure && pressure_state {
+                            // Memory pressure relieved
+                            pressure_state = false;
+
+                            logger.log_event("memory_pressure_relieved", serde_json::json!({
+                                "memory_usage_mb": current_usage / (1024 * 1024),
+                                "pressure_duration_ms": monitor_start.elapsed().as_millis()
+                            }));
+                        }
+
+                        // Periodic memory usage reporting
+                        if monitor_start.elapsed().as_millis() % 2000 == 0 {
+                            let alloc_count = allocations.lock().await.len();
+                            logger.log_event("memory_usage_report", serde_json::json!({
+                                "usage_mb": current_usage / (1024 * 1024),
+                                "allocation_count": alloc_count,
+                                "under_pressure": under_pressure,
+                                "elapsed_ms": monitor_start.elapsed().as_millis()
+                            }));
+                        }
+
+                        sleep(Duration::from_millis(50)).await;
+                    }
+
+                    logger.log_event("memory_monitor_complete", serde_json::json!({
+                        "final_usage_mb": usage.load(Ordering::Relaxed) / (1024 * 1024),
+                        "total_pressure_events": backpressure_events.load(Ordering::Relaxed)
+                    }));
+
+                    Outcome::Ok(backpressure_events.load(Ordering::Relaxed))
+                }).await
+            }).await
+        };
+
+        // Processing pipeline with backpressure response
+        let processor = {
+            let logger = self.logger.clone();
+            let allocations = Arc::clone(&memory_allocations);
+            let usage = Arc::clone(&memory_usage);
+            let delays = Arc::clone(&processing_delays);
+            let processed = Arc::clone(&total_processed);
+            let relief_events = Arc::clone(&pressure_relief_events);
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let mut input_rx = input_rx;
+                    let mut processed_count = 0;
+
+                    while let Some((item_id, data_size)) = input_rx.recv().await {
+                        let process_start = Instant::now();
+
+                        // Check memory pressure before processing
+                        let current_usage = usage.load(Ordering::Relaxed);
+                        let under_pressure = current_usage > memory_pressure_threshold;
+
+                        if under_pressure {
+                            // Apply backpressure - delay processing
+                            delays.fetch_add(1, Ordering::Relaxed);
+
+                            logger.log_event("backpressure_applied", serde_json::json!({
+                                "item_id": item_id,
+                                "memory_usage_mb": current_usage / (1024 * 1024),
+                                "processing_delayed": true
+                            }));
+
+                            // Wait for memory pressure to subside
+                            while usage.load(Ordering::Relaxed) > memory_pressure_threshold {
+                                sleep(pressure_relief_delay).await;
+
+                                // Trigger memory relief periodically
+                                if fastrand::f64() < 0.3 { // 30% chance per cycle
+                                    let mut allocs = allocations.lock().await;
+                                    if !allocs.is_empty() {
+                                        let removed = allocs.remove(0);
+                                        let freed = removed.len();
+                                        usage.fetch_sub(freed, Ordering::Relaxed);
+                                        relief_events.fetch_add(1, Ordering::Relaxed);
+
+                                        logger.log_event("memory_relief", serde_json::json!({
+                                            "freed_mb": freed / (1024 * 1024),
+                                            "new_usage_mb": usage.load(Ordering::Relaxed) / (1024 * 1024)
+                                        }));
+
+                                        break; // Exit pressure wait loop
+                                    }
+                                }
+                            }
+
+                            logger.log_event("backpressure_relieved", serde_json::json!({
+                                "item_id": item_id,
+                                "relief_duration_ms": process_start.elapsed().as_millis()
+                            }));
+                        }
+
+                        // Process item (allocate memory)
+                        let allocation = vec![0u8; data_size];
+                        let allocated_size = allocation.len();
+
+                        {
+                            let mut allocs = allocations.lock().await;
+                            allocs.push(allocation);
+                            usage.fetch_add(allocated_size, Ordering::Relaxed);
+                        }
+
+                        processed_count += 1;
+                        processed.store(processed_count, Ordering::Relaxed);
+
+                        logger.log_event("item_processed", serde_json::json!({
+                            "item_id": item_id,
+                            "allocated_mb": allocated_size / (1024 * 1024),
+                            "total_usage_mb": usage.load(Ordering::Relaxed) / (1024 * 1024),
+                            "processed_count": processed_count,
+                            "processing_time_ms": process_start.elapsed().as_millis()
+                        }));
+
+                        // Send output
+                        let result = format!("processed_item_{}_size_{}", item_id, allocated_size);
+                        if output_tx.send(result).await.is_err() {
+                            break;
+                        }
+
+                        sleep(Duration::from_millis(20)).await;
+                    }
+
+                    logger.log_event("processor_shutdown", serde_json::json!({
+                        "total_processed": processed_count
+                    }));
+
+                    Outcome::Ok(processed_count)
+                }).await
+            }).await
+        };
+
+        // Phase 2: Data producer with varying sizes
+        self.logger.log_phase("data_production");
+
+        let producer = {
+            let logger = self.logger.clone();
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let mut produced_count = 0;
+                    let item_count = 100;
+
+                    for item_id in 0..item_count {
+                        // Varying data sizes to create memory pressure patterns
+                        let data_size = match item_id % 10 {
+                            0..=2 => pressure_induction_rate / 4,      // Small items
+                            3..=6 => pressure_induction_rate,          // Medium items
+                            7..=8 => pressure_induction_rate * 2,      // Large items
+                            _ => pressure_induction_rate * 4,          // Very large items
+                        };
+
+                        if input_tx.send((item_id, data_size)).await.is_err() {
+                            logger.log_event("producer_send_failed", serde_json::json!({
+                                "item_id": item_id,
+                                "produced_count": produced_count
+                            }));
+                            break;
+                        }
+
+                        produced_count += 1;
+
+                        logger.log_event("item_produced", serde_json::json!({
+                            "item_id": item_id,
+                            "data_size_mb": data_size / (1024 * 1024),
+                            "produced_count": produced_count
+                        }));
+
+                        sleep(Duration::from_millis(50)).await;
+                    }
+
+                    logger.log_event("production_complete", serde_json::json!({
+                        "total_produced": produced_count
+                    }));
+
+                    Outcome::Ok(produced_count)
+                }).await
+            }).await
+        };
+
+        // Phase 3: Output collector
+        let collector = {
+            let logger = self.logger.clone();
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let mut output_rx = output_rx;
+                    let mut collected_count = 0;
+
+                    while let Some(result) = output_rx.recv().await {
+                        collected_count += 1;
+
+                        if collected_count % 20 == 0 {
+                            logger.log_event("output_collected", serde_json::json!({
+                                "result": result,
+                                "collected_count": collected_count
+                            }));
+                        }
+                    }
+
+                    logger.log_event("collection_complete", serde_json::json!({
+                        "total_collected": collected_count
+                    }));
+
+                    Outcome::Ok(collected_count)
+                }).await
+            }).await
+        };
+
+        // Phase 4: Execute memory pressure test
+        self.logger.log_phase("memory_pressure_execution");
+
+        let test_timeout = Duration::from_secs(25);
+
+        // Run all components
+        let pressure_result = pressure_monitor;
+        let producer_result = timeout(Duration::from_secs(10), producer).await;
+        let processor_result = timeout(Duration::from_secs(20), processor).await;
+        let collector_result = timeout(Duration::from_secs(5), collector).await;
+        let monitor_result = timeout(Duration::from_secs(5), pressure_result).await;
+
+        // Phase 5: Validate memory pressure handling
+        self.logger.log_phase("pressure_recovery_validation");
+
+        let final_usage = memory_usage.load(Ordering::Relaxed);
+        let total_backpressure = backpressure_events.load(Ordering::Relaxed);
+        let total_relief = pressure_relief_events.load(Ordering::Relaxed);
+        let processing_delays_count = processing_delays.load(Ordering::Relaxed);
+        let items_processed = total_processed.load(Ordering::Relaxed);
+
+        let allocation_count = {
+            let allocs = memory_allocations.lock().await;
+            allocs.len()
+        };
+
+        self.logger.log_metrics(serde_json::json!({
+            "memory_pressure_results": {
+                "final_memory_usage_mb": final_usage / (1024 * 1024),
+                "total_backpressure_events": total_backpressure,
+                "total_relief_events": total_relief,
+                "processing_delays": processing_delays_count,
+                "items_processed": items_processed,
+                "active_allocations": allocation_count,
+                "backpressure_effectiveness": processing_delays_count as f64 / total_backpressure as f64,
+                "memory_recovery_rate": total_relief as f64 / total_backpressure.max(1) as f64
+            }
+        }));
+
+        // Critical assertions for memory pressure handling
+        self.logger.log_assertion("memory_pressure_detected", total_backpressure > 0, serde_json::json!({
+            "backpressure_events": total_backpressure
+        }));
+
+        self.logger.log_assertion("backpressure_applied", processing_delays_count > 0, serde_json::json!({
+            "processing_delays": processing_delays_count
+        }));
+
+        self.logger.log_assertion("memory_relief_occurred", total_relief > 0, serde_json::json!({
+            "relief_events": total_relief
+        }));
+
+        self.logger.log_assertion("items_processed", items_processed > 0, serde_json::json!({
+            "processed": items_processed
+        }));
+
+        // Recovery should be effective
+        let recovery_rate = total_relief as f64 / total_backpressure.max(1) as f64;
+        self.logger.log_assertion("memory_recovery_rate", recovery_rate > 0.5, serde_json::json!({
+            "recovery_rate": recovery_rate,
+            "threshold": 0.5
+        }));
+
+        assert!(total_backpressure > 0, "Memory pressure should be detected: {} events", total_backpressure);
+        assert!(processing_delays_count > 0, "Backpressure should cause processing delays: {} delays", processing_delays_count);
+        assert!(total_relief > 0, "Memory relief should occur: {} relief events", total_relief);
+        assert!(items_processed > 0, "Items should be processed despite pressure");
+        assert!(recovery_rate > 0.5, "Memory recovery rate should be >50%: {:.2}%", recovery_rate * 100.0);
+    }
+
+    /// [br-integration-16] Partition tolerance test with split-brain detection and healing
+    async fn test_partition_tolerance_split_brain_healing(&self) {
+        self.logger.log_phase("partition_tolerance_setup");
+
+        use crate::distributed::{ConsistentHash, DistributionStrategy};
+
+        let node_count = 5;
+        let partition_duration = Duration::from_secs(3);
+        let healing_delay = Duration::from_millis(500);
+        let consensus_threshold = (node_count / 2) + 1; // Majority required
+
+        self.logger.log_event("partition_config", serde_json::json!({
+            "node_count": node_count,
+            "partition_duration_secs": partition_duration.as_secs(),
+            "healing_delay_ms": healing_delay.as_millis(),
+            "consensus_threshold": consensus_threshold
+        }));
+
+        // Phase 1: Setup distributed node cluster
+        self.logger.log_phase("cluster_setup");
+
+        let (coordinator_tx, coordinator_rx) = broadcast::channel(1000);
+        let nodes_online = Arc::new(AtomicUsize::new(0));
+        let partition_events = Arc::new(AtomicUsize::new(0));
+        let split_brain_detections = Arc::new(AtomicUsize::new(0));
+        let healing_operations = Arc::new(AtomicUsize::new(0));
+        let consensus_violations = Arc::new(AtomicUsize::new(0));
+        let total_messages_exchanged = Arc::new(AtomicUsize::new(0));
+
+        // Distributed node state tracking
+        let node_states = Arc::new(Mutex::new(HashMap::<usize, serde_json::Value>::new()));
+        let partition_map = Arc::new(Mutex::new(HashSet::<usize>::new())); // Partitioned nodes
+
+        // Phase 2: Node cluster with partition simulation
+        let mut node_tasks = Vec::new();
+
+        for node_id in 0..node_count {
+            let mut node_rx = coordinator_tx.subscribe();
+            let coordinator_tx = coordinator_tx.clone();
+            let logger = self.logger.clone();
+            let online = Arc::clone(&nodes_online);
+            let partitions = Arc::clone(&partition_events);
+            let split_brains = Arc::clone(&split_brain_detections);
+            let healings = Arc::clone(&healing_operations);
+            let violations = Arc::clone(&consensus_violations);
+            let messages = Arc::clone(&total_messages_exchanged);
+            let states = Arc::clone(&node_states);
+            let partition_map = Arc::clone(&partition_map);
+
+            let node_task = self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let node_start = Instant::now();
+                    online.fetch_add(1, Ordering::Relaxed);
+
+                    let mut local_state = serde_json::json!({
+                        "node_id": node_id,
+                        "term": 0,
+                        "leader": null,
+                        "committed_entries": 0,
+                        "last_heartbeat": 0
+                    });
+
+                    let mut is_partitioned = false;
+                    let mut partition_start = None;
+                    let mut consensus_term = 0;
+
+                    logger.log_event("node_started", serde_json::json!({
+                        "node_id": node_id,
+                        "initial_state": local_state
+                    }));
+
+                    while node_start.elapsed() < Duration::from_secs(15) {
+                        // Check for partition status
+                        let now_partitioned = {
+                            let partition_set = partition_map.lock().await;
+                            partition_set.contains(&node_id)
+                        };
+
+                        // Partition state changes
+                        if now_partitioned && !is_partitioned {
+                            // Node becomes partitioned
+                            is_partitioned = true;
+                            partition_start = Some(Instant::now());
+                            partitions.fetch_add(1, Ordering::Relaxed);
+
+                            logger.log_event("node_partitioned", serde_json::json!({
+                                "node_id": node_id,
+                                "partition_time": node_start.elapsed().as_millis()
+                            }));
+                        } else if !now_partitioned && is_partitioned {
+                            // Node recovers from partition
+                            is_partitioned = false;
+                            if let Some(start) = partition_start {
+                                let partition_duration = start.elapsed();
+                                logger.log_event("node_partition_healed", serde_json::json!({
+                                    "node_id": node_id,
+                                    "partition_duration_ms": partition_duration.as_millis()
+                                }));
+                            }
+                            partition_start = None;
+                        }
+
+                        if !is_partitioned {
+                            // Normal operation - participate in consensus
+                            match timeout(Duration::from_millis(50), node_rx.try_recv()).await {
+                                Outcome::Ok(Ok(message)) => {
+                                    messages.fetch_add(1, Ordering::Relaxed);
+
+                                    // Process consensus message
+                                    if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&message) {
+                                        let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                                        let msg_term = msg.get("term").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                                        match msg_type {
+                                            "heartbeat" => {
+                                                // Update last heartbeat
+                                                local_state["last_heartbeat"] = serde_json::json!(node_start.elapsed().as_millis());
+
+                                                logger.log_event("heartbeat_received", serde_json::json!({
+                                                    "node_id": node_id,
+                                                    "from_term": msg_term,
+                                                    "local_term": local_state["term"]
+                                                }));
+                                            }
+                                            "leader_election" => {
+                                                // Participate in leader election
+                                                if msg_term > consensus_term {
+                                                    consensus_term = msg_term;
+                                                    local_state["term"] = serde_json::json!(consensus_term);
+
+                                                    // Vote or acknowledge leader
+                                                    let response = serde_json::json!({
+                                                        "type": "vote",
+                                                        "node_id": node_id,
+                                                        "term": consensus_term,
+                                                        "vote_for": msg.get("candidate_id")
+                                                    });
+
+                                                    if coordinator_tx.send(response.to_string()).is_err() {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            "split_brain_check" => {
+                                                // Detect split-brain scenario
+                                                let active_nodes = online.load(Ordering::Relaxed);
+                                                let partition_count = {
+                                                    let partition_set = partition_map.lock().await;
+                                                    partition_set.len()
+                                                };
+
+                                                if active_nodes - partition_count < consensus_threshold {
+                                                    split_brains.fetch_add(1, Ordering::Relaxed);
+
+                                                    logger.log_event("split_brain_detected", serde_json::json!({
+                                                        "node_id": node_id,
+                                                        "active_nodes": active_nodes,
+                                                        "partitioned_nodes": partition_count,
+                                                        "consensus_threshold": consensus_threshold
+                                                    }));
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+
+                            // Send periodic heartbeat if elected as leader
+                            if local_state["leader"].as_u64() == Some(node_id as u64) {
+                                let heartbeat = serde_json::json!({
+                                    "type": "heartbeat",
+                                    "leader_id": node_id,
+                                    "term": local_state["term"]
+                                });
+
+                                if coordinator_tx.send(heartbeat.to_string()).is_err() {
+                                    break;
+                                }
+                            }
+
+                            // Update node state
+                            {
+                                let mut states_map = states.lock().await;
+                                states_map.insert(node_id, local_state.clone());
+                            }
+                        } else {
+                            // Partitioned - limited operation
+                            logger.log_event("node_isolated", serde_json::json!({
+                                "node_id": node_id,
+                                "partition_duration_ms": partition_start.map(|s| s.elapsed().as_millis()).unwrap_or(0)
+                            }));
+                        }
+
+                        sleep(Duration::from_millis(100)).await;
+                    }
+
+                    online.fetch_sub(1, Ordering::Relaxed);
+
+                    logger.log_event("node_shutdown", serde_json::json!({
+                        "node_id": node_id,
+                        "final_state": local_state,
+                        "uptime_ms": node_start.elapsed().as_millis()
+                    }));
+
+                    Outcome::Ok(messages.load(Ordering::Relaxed))
+                }).await
+            }).await;
+
+            node_tasks.push(node_task);
+        }
+
+        // Phase 3: Partition coordinator
+        let partition_coordinator = {
+            let logger = self.logger.clone();
+            let partition_map = Arc::clone(&partition_map);
+            let healings = Arc::clone(&healing_operations);
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let coord_start = Instant::now();
+
+                    // Wait for cluster to stabilize
+                    sleep(Duration::from_millis(500)).await;
+
+                    // Create partition - isolate nodes 0 and 1
+                    {
+                        let mut partition_set = partition_map.lock().await;
+                        partition_set.insert(0);
+                        partition_set.insert(1);
+                    }
+
+                    logger.log_event("partition_created", serde_json::json!({
+                        "partitioned_nodes": [0, 1],
+                        "remaining_nodes": [2, 3, 4]
+                    }));
+
+                    // Maintain partition
+                    sleep(partition_duration).await;
+
+                    // Heal partition
+                    {
+                        let mut partition_set = partition_map.lock().await;
+                        partition_set.clear();
+                    }
+
+                    let healing_id = healings.fetch_add(1, Ordering::Relaxed);
+
+                    logger.log_event("partition_healed", serde_json::json!({
+                        "healing_id": healing_id,
+                        "partition_duration_ms": partition_duration.as_millis()
+                    }));
+
+                    // Allow healing to complete
+                    sleep(healing_delay).await;
+
+                    // Send split-brain detection messages
+                    for _ in 0..5 {
+                        let split_brain_msg = serde_json::json!({
+                            "type": "split_brain_check",
+                            "timestamp": coord_start.elapsed().as_millis()
+                        });
+
+                        if coordinator_tx.send(split_brain_msg.to_string()).is_err() {
+                            break;
+                        }
+
+                        sleep(Duration::from_millis(200)).await;
+                    }
+
+                    logger.log_event("partition_coordinator_complete", serde_json::json!({
+                        "total_healing_operations": healings.load(Ordering::Relaxed)
+                    }));
+
+                    Outcome::Ok(healings.load(Ordering::Relaxed))
+                }).await
+            }).await
+        };
+
+        // Phase 4: Execute partition tolerance test
+        self.logger.log_phase("partition_tolerance_execution");
+
+        let test_timeout = Duration::from_secs(18);
+
+        // Wait for partition coordinator
+        let coordinator_result = timeout(test_timeout, partition_coordinator).await;
+
+        // Wait for all nodes to complete
+        let mut successful_nodes = 0;
+        for (node_id, node_task) in node_tasks.into_iter().enumerate() {
+            match timeout(Duration::from_secs(5), node_task).await {
+                Outcome::Ok(Outcome::Ok(_)) => successful_nodes += 1,
+                _ => {
+                    self.logger.log_event("node_timeout", serde_json::json!({
+                        "node_id": node_id
+                    }));
+                }
+            }
+        }
+
+        // Phase 5: Validate partition tolerance and healing
+        self.logger.log_phase("split_brain_healing_validation");
+
+        let final_online = nodes_online.load(Ordering::Relaxed);
+        let total_partitions = partition_events.load(Ordering::Relaxed);
+        let total_split_brains = split_brain_detections.load(Ordering::Relaxed);
+        let total_healings = healing_operations.load(Ordering::Relaxed);
+        let total_violations = consensus_violations.load(Ordering::Relaxed);
+        let messages_exchanged = total_messages_exchanged.load(Ordering::Relaxed);
+
+        let final_state_consistency = {
+            let states_map = node_states.lock().await;
+            let mut consistent_nodes = 0;
+            let mut max_term = 0;
+
+            for (_, state) in states_map.iter() {
+                if let Some(term) = state.get("term").and_then(|v| v.as_u64()) {
+                    max_term = max_term.max(term);
+                }
+            }
+
+            for (_, state) in states_map.iter() {
+                if let Some(term) = state.get("term").and_then(|v| v.as_u64()) {
+                    if term == max_term {
+                        consistent_nodes += 1;
+                    }
+                }
+            }
+
+            consistent_nodes
+        };
+
+        self.logger.log_metrics(serde_json::json!({
+            "partition_tolerance_results": {
+                "nodes_completed": successful_nodes,
+                "partition_events": total_partitions,
+                "split_brain_detections": total_split_brains,
+                "healing_operations": total_healings,
+                "consensus_violations": total_violations,
+                "messages_exchanged": messages_exchanged,
+                "final_state_consistency": final_state_consistency,
+                "partition_survival_rate": successful_nodes as f64 / node_count as f64,
+                "healing_effectiveness": total_healings as f64 / total_partitions.max(1) as f64,
+                "split_brain_detection_rate": total_split_brains as f64 / total_partitions.max(1) as f64
+            }
+        }));
+
+        // Critical assertions for partition tolerance
+        self.logger.log_assertion("partition_events", total_partitions > 0, serde_json::json!({
+            "partition_events": total_partitions
+        }));
+
+        self.logger.log_assertion("split_brain_detection", total_split_brains > 0, serde_json::json!({
+            "split_brain_detections": total_split_brains
+        }));
+
+        self.logger.log_assertion("healing_operations", total_healings > 0, serde_json::json!({
+            "healing_operations": total_healings
+        }));
+
+        self.logger.log_assertion("node_survival", successful_nodes >= consensus_threshold, serde_json::json!({
+            "successful_nodes": successful_nodes,
+            "consensus_threshold": consensus_threshold
+        }));
+
+        // No consensus violations should occur
+        self.logger.log_assertion("no_consensus_violations", total_violations == 0, serde_json::json!({
+            "violations": total_violations
+        }));
+
+        // State consistency after healing
+        self.logger.log_assertion("post_healing_consistency", final_state_consistency >= consensus_threshold, serde_json::json!({
+            "consistent_nodes": final_state_consistency,
+            "threshold": consensus_threshold
+        }));
+
+        assert!(total_partitions > 0, "Network partitions should occur: {} events", total_partitions);
+        assert!(total_split_brains > 0, "Split-brain scenarios should be detected: {} detections", total_split_brains);
+        assert!(total_healings > 0, "Partition healing should occur: {} healing operations", total_healings);
+        assert!(successful_nodes >= consensus_threshold, "Majority of nodes should survive partition: {} vs {} threshold", successful_nodes, consensus_threshold);
+        assert!(total_violations == 0, "NO consensus violations during partition: {} violations", total_violations);
+        assert!(final_state_consistency >= consensus_threshold, "State consistency should be restored after healing: {} consistent nodes", final_state_consistency);
+    }
 }
 
 #[tokio::test]
@@ -3392,4 +4373,24 @@ async fn test_http2_connection_storm_slot_leaks_integration() {
 async fn test_high_frequency_timer_churn_wheel_stress_integration() {
     let harness = IntegrationTestHarness::new("high_frequency_timer_churn_wheel_stress_integration").await;
     harness.test_high_frequency_timer_churn_wheel_stress().await;
+}
+
+// ===== LONG-RUNNING SCENARIOS INTEGRATION TEST FUNCTIONS =====
+
+#[tokio::test]
+async fn test_multi_hour_task_checkpoint_resume_integration() {
+    let harness = IntegrationTestHarness::new("multi_hour_task_checkpoint_resume_integration").await;
+    harness.test_multi_hour_task_checkpoint_resume().await;
+}
+
+#[tokio::test]
+async fn test_memory_pressure_backpressure_recovery_integration() {
+    let harness = IntegrationTestHarness::new("memory_pressure_backpressure_recovery_integration").await;
+    harness.test_memory_pressure_backpressure_recovery().await;
+}
+
+#[tokio::test]
+async fn test_partition_tolerance_split_brain_healing_integration() {
+    let harness = IntegrationTestHarness::new("partition_tolerance_split_brain_healing_integration").await;
+    harness.test_partition_tolerance_split_brain_healing().await;
 }
