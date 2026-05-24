@@ -677,7 +677,7 @@ mod tests {
                         );
 
                         prop_assert_eq!(
-                            proof1.proof_path, proof2.proof_path,
+                            &proof1.proof_path, &proof2.proof_path,
                             "Proof paths should be deterministic"
                         );
 
@@ -840,7 +840,7 @@ mod tests {
                     let mut decoder = MockRaptorQDecoder::new(source_count, symbol_size);
 
                     // Add symbols incrementally and verify recovery state consistency
-                    let mut previous_recovery_states = Vec::new();
+                    let mut previous_recovery_states: Vec<HashMap<u32, PartialBlock>> = Vec::new();
 
                     for (symbol_id, symbol_data) in adjusted_symbol_data.iter().enumerate() {
                         decoder.add_encoding_symbol(symbol_id as u32, symbol_data.clone());
@@ -1008,13 +1008,13 @@ mod tests {
                 }
 
                 let symbol_size = 64;
-                let symbols: Vec<(u32, Vec<u8>)> = test_symbols.iter()
-                    .take(source_count as usize)
-                    .enumerate()
-                    .map(|(i, data)| {
-                        let mut symbol_data = data.clone();
-                        symbol_data.resize(symbol_size, 0);
-                        (i as u32, symbol_data)
+                let symbols: Vec<(u32, Vec<u8>)> = (0..source_count)
+                    .map(|symbol_id| {
+                        let start = symbol_id as usize;
+                        let symbol_data = (0..symbol_size)
+                            .map(|offset| test_symbols[(start + offset) % test_symbols.len()])
+                            .collect();
+                        (symbol_id, symbol_data)
                     })
                     .collect();
 
@@ -1105,7 +1105,7 @@ mod tests {
                     let expected_symbol = &encoder.source_symbols[esi as usize];
 
                     prop_assert_eq!(
-                        generated_symbol, *expected_symbol,
+                        &generated_symbol, expected_symbol,
                         "Systematic symbol {} should match source symbol exactly (RFC 6330)",
                         esi
                     );
@@ -1180,17 +1180,17 @@ mod tests {
 
                     // Verify that encoders are identical
                     prop_assert_eq!(
-                        encoder1.source_symbols, encoder2.source_symbols,
+                        &encoder1.source_symbols, &encoder2.source_symbols,
                         "Encoders should have identical source symbols for same data"
                     );
 
                     prop_assert_eq!(
-                        encoder1.systematic_indices, encoder2.systematic_indices,
+                        &encoder1.systematic_indices, &encoder2.systematic_indices,
                         "Encoders should have identical systematic indices"
                     );
 
                     prop_assert_eq!(
-                        encoder1.constraint_matrix, encoder2.constraint_matrix,
+                        &encoder1.constraint_matrix, &encoder2.constraint_matrix,
                         "Encoders should have identical constraint matrices"
                     );
 
@@ -1201,13 +1201,13 @@ mod tests {
                         let symbol3 = encoder3.generate_encoding_symbol(symbol_id);
 
                         prop_assert_eq!(
-                            symbol1, symbol2,
+                            &symbol1, &symbol2,
                             "Symbol {} should be identical across encoder instances",
                             symbol_id
                         );
 
                         prop_assert_eq!(
-                            symbol2, symbol3,
+                            &symbol2, &symbol3,
                             "Symbol {} should be deterministic across multiple generations",
                             symbol_id
                         );
@@ -1217,13 +1217,13 @@ mod tests {
                         let symbol1_repeat2 = encoder1.generate_encoding_symbol(symbol_id);
 
                         prop_assert_eq!(
-                            symbol1, symbol1_repeat,
+                            &symbol1, &symbol1_repeat,
                             "Same encoder should produce identical symbol {} on repeated calls",
                             symbol_id
                         );
 
                         prop_assert_eq!(
-                            symbol1_repeat, symbol1_repeat2,
+                            &symbol1_repeat, &symbol1_repeat2,
                             "Symbol {} generation should be idempotent within same encoder",
                             symbol_id
                         );
@@ -1241,7 +1241,7 @@ mod tests {
                             if symbol_id >= encoder1.source_symbols.len() as u32 {
                                 // For repair symbols, they should typically be different
                                 prop_assert_ne!(
-                                    symbol1, different_symbol,
+                                    &symbol1, &different_symbol,
                                     "Different repair symbols should be distinct: {} vs {}",
                                     symbol_id, symbol_id + 1
                                 );
@@ -1446,7 +1446,7 @@ mod tests {
 
                     // Verify generators are identical
                     prop_assert_eq!(
-                        generator1.systematic_mapping, generator2.systematic_mapping,
+                        &generator1.systematic_mapping, &generator2.systematic_mapping,
                         "Systematic mappings should be identical for same parameters"
                     );
 
@@ -1463,13 +1463,13 @@ mod tests {
                         let symbol2_attempt1 = generator2.generate_systematic_symbol(esi, source_data);
 
                         prop_assert_eq!(
-                            symbol1_attempt1, symbol1_attempt2,
+                            &symbol1_attempt1, &symbol1_attempt2,
                             "Same generator should produce identical symbol for ESI {} on repeated calls",
                             esi
                         );
 
                         prop_assert_eq!(
-                            symbol1_attempt1, symbol2_attempt1,
+                            &symbol1_attempt1, &symbol2_attempt1,
                             "Different generators should produce identical symbol for ESI {} with same data",
                             esi
                         );
@@ -1693,7 +1693,7 @@ mod tests {
                     );
 
                     // If solution exists, verify row operations preserve the augmented system
-                    if let Some(sol) = solution {
+                    if let Some(ref sol) = solution {
                         prop_assert_eq!(
                             sol.len(), matrix_size,
                             "Solution should have correct dimension"
@@ -1758,7 +1758,7 @@ mod tests {
 
                     if solution.is_some() && solution2.is_some() {
                         prop_assert_eq!(
-                            solution, solution2,
+                            &solution, &solution2,
                             "Solutions should be identical for same input"
                         );
                     }
@@ -1771,7 +1771,7 @@ mod tests {
     fn mr_matrix_inversion_consistency() {
         proptest!(|(
             matrix_sizes in proptest::collection::vec(2usize..6, 2..3),
-            identity_tests in proptest::collection::vec(true, 2..5)
+            identity_tests in proptest::collection::vec(Just(true), 2..5)
         )| {
             // MR-MatrixInversionConsistency: A * A^-1 = I for invertible matrices
             for &matrix_size in &matrix_sizes {

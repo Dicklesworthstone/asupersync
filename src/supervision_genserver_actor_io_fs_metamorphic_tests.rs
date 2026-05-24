@@ -391,14 +391,17 @@ mod tests {
             let decision2a = policy.evaluate_restart(failures2, attempt);
             let decision2b = policy.evaluate_restart(failures2, attempt);
 
+            // `.clone()` the four decisions so `decision1a` / `decision2a`
+            // survive the prop_assert_eq! moves below and remain available
+            // for the followup `remaining_attempts` comparison.
             prop_assert_eq!(
-                decision1a, decision1b,
+                decision1a.clone(), decision1b.clone(),
                 "Restart policy should be deterministic for same inputs: failures={}, attempt={}",
                 failures1, attempt
             );
 
             prop_assert_eq!(
-                decision2a, decision2b,
+                decision2a.clone(), decision2b.clone(),
                 "Restart policy should be deterministic for same inputs: failures={}, attempt={}",
                 failures2, attempt
             );
@@ -635,16 +638,14 @@ mod tests {
             }
 
             prop_assert_eq!(
-                state1.processed_casts, state2.processed_casts,
-                "Cast ordering should be preserved regardless of batch processing: {:?} vs {:?}",
-                state1.processed_casts, state2.processed_casts
+                state1.processed_casts.clone(), state2.processed_casts.clone(),
+                "Cast ordering should be preserved regardless of batch processing"
             );
 
             // Verify FIFO property: processed order matches submission order
             prop_assert_eq!(
-                state1.processed_casts, all_casts,
-                "Processed cast order should match submission order (FIFO): processed={:?}, submitted={:?}",
-                state1.processed_casts, all_casts
+                state1.processed_casts.clone(), all_casts.clone(),
+                "Processed cast order should match submission order (FIFO)"
             );
         });
     }
