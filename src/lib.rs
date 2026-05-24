@@ -325,6 +325,8 @@ pub mod real_channel_broadcast_obligation_marking_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_broadcast_obligation_saga_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_channel_crash_obligation_saga_rollback_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_mpsc_net_tcp_backpressure_flow_control_e2e_tests;
