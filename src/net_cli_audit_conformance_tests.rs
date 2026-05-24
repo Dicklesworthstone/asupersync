@@ -1544,7 +1544,7 @@ mod tests {
             .iter()
             .map(|run| &run.output_hash)
             .collect();
-        assert!(output_hashes.iter().all(|hash| *hash == &output_hashes[0]));
+        assert!(output_hashes.iter().all(|hash| *hash == output_hashes[0]));
     }
 
     #[test]

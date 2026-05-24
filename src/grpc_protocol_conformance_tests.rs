@@ -1324,7 +1324,10 @@ fn run_grpc_conformance_suite() {
         print!("  {} ({}): ", case.id, case.description);
 
         let result = test_fn();
-        match result {
+        // `result` is matched (which moves the Fail/Skipped payload) and then
+        // pushed into `results`, so match against a borrow and clone the
+        // owned String payloads when reporting.
+        match &result {
             TestResult::Pass => {
                 println!("✓ PASS");
                 passed += 1;

@@ -936,9 +936,11 @@ fn test_mr_grpc_status_code_mapping() {
             let status1 = MockGrpcStatus::from_error_condition(condition.clone(), &message1);
             let status2 = MockGrpcStatus::from_error_condition(condition.clone(), &message2);
 
-            // MR: Same error condition should produce same status code
+            // MR: Same error condition should produce same status code.
+            // `.clone()` the code fields so status1/status2 remain intact for
+            // the later is_retryable() borrow.
             prop_assert_eq!(
-                status1.code, status2.code,
+                status1.code.clone(), status2.code.clone(),
                 "Same error condition should map to same gRPC status code: {:?}", condition
             );
 

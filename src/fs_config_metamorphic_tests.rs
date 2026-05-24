@@ -825,7 +825,7 @@ mod fs_config_tests {
             path3.push("..");
 
             let canonical3 = mock_vfs.canonicalize(&path3).unwrap();
-            prop_assert_eq!(canonical1, canonical3,
+            prop_assert_eq!(canonical1.clone(), canonical3,
                 "Path with parent ref doesn't normalize correctly");
         });
 

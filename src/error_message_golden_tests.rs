@@ -368,7 +368,9 @@ mod tests {
             partition_events.push(format_region_close_cause_chain(&event));
         }
 
-        let combined = partition_events.join(b"\n===\n");
+        // `.as_slice()` coerces the byte literal `&[u8; 5]` to `&[u8]` so
+        // `Vec<Vec<u8>>::join` accepts it as a separator slice.
+        let combined = partition_events.join(b"\n===\n".as_slice());
         tester.assert_error_golden("distributed_partition", &combined);
     }
 }

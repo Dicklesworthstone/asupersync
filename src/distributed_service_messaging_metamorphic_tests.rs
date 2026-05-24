@@ -1012,9 +1012,12 @@ fn test_mr_bridge_sequence_monotonicity() {
                 "Bridge sequence monotonicity invariant should hold");
         }
 
-        // Apply messages and check ordering
-        for message in &bridge.message_log {
-            let applied = bridge.apply_message(message.clone());
+        // Apply messages and check ordering. Snapshot the message log up
+        // front (`.clone()`) so we don't hold an immutable borrow of `bridge`
+        // across the mutating `apply_message` calls.
+        let messages_to_apply: Vec<_> = bridge.message_log.clone();
+        for message in messages_to_apply {
+            let applied = bridge.apply_message(message);
             prop_assert!(applied, "Messages should apply in sequence order");
         }
     });

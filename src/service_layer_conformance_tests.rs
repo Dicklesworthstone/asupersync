@@ -905,8 +905,11 @@ mod conformance_tests {
                 backoff_multiplier: multiplier,
             };
 
-            // Create all-failure scenario to test backoff calculation
-            let responses: Vec<_> = (0..max_attempts)
+            // Create all-failure scenario to test backoff calculation.
+            // Pin the T parameter on MockResponse since the only payloads we
+            // construct are TransientError(String) and the followup .execute
+            // boundary doesn't constrain it.
+            let responses: Vec<MockResponse<()>> = (0..max_attempts)
                 .map(|i| MockResponse::TransientError(format!("fail{}", i)))
                 .collect();
 

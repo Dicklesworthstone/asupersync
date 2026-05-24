@@ -1594,8 +1594,10 @@ fn test_mr_security_tag_verification_consistency() {
         prop_assert!(gen_success1 && gen_success2,
             "Tag generation should succeed with valid inputs");
 
-        // Tags should be identical for same inputs
-        prop_assert_eq!(tag1.tag, tag2.tag,
+        // Tags should be identical for same inputs. `.clone()` the tag
+        // field so tag1/tag2 remain intact for the followup verify_tag
+        // borrows below.
+        prop_assert_eq!(tag1.tag.clone(), tag2.tag.clone(),
             "Same data and key should produce identical tags");
 
         // Verify tags

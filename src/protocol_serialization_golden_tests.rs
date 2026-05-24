@@ -523,8 +523,11 @@ mod tests {
     fn golden_websocket_frame_format() {
         let tester = ProtocolGoldenTester::new("websocket_frame_format");
 
-        // RFC 6455 Section 5.2 - Base Framing Protocol
-        let frame_examples = [
+        // RFC 6455 Section 5.2 - Base Framing Protocol.
+        // Annotate the slice element type as `&[u8]` so the byte literals'
+        // differing array sizes (&[u8; 5], &[u8; 4], &[u8; 2]) coerce
+        // uniformly into the slice type.
+        let frame_examples: [(bool, u8, bool, &[u8], [u8; 4]); 4] = [
             // Text frame, masked (client)
             (true, 0x1, true, b"Hello", [0x12, 0x34, 0x56, 0x78]),
             // Binary frame, unmasked (server)
