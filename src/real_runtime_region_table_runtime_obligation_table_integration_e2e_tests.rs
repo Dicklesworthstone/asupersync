@@ -20,25 +20,25 @@
 //! - Obligation migration during region hierarchy collapse
 
 use crate::{
-    runtime::{
-        region_table::{
-            RegionTable, RegionEntry, RegionId, RegionState, RegionHierarchy,
-            RegionCloseOperation, RegionCloseEvent, ParentRegion, ChildRegion,
-            RegionCloseReason, RegionLifecycle, RegionConsistencyCheck,
-        },
-        obligation_table::{
-            ObligationTable, ObligationEntry, ObligationId, ObligationState,
-            ObligationModification, ObligationEvent, ObligationOwnership,
-            ObligationMigration, ObligationLifecycle, ObligationConsistencyCheck,
-        },
-        sharded_state::{ShardedState, ShardGuard, LockOrder, LockOrderValidator},
-        RuntimeState, RuntimeConfig,
-    },
     cx::{Cx, Scope},
     error::Outcome,
-    sync::{Mutex, RwLock, ContendedMutex},
-    time::{Duration, Sleep, Instant, Timeout},
-    types::{Budget, TaskId, Cancel},
+    runtime::{
+        RuntimeConfig, RuntimeState,
+        obligation_table::{
+            ObligationConsistencyCheck, ObligationEntry, ObligationEvent, ObligationId,
+            ObligationLifecycle, ObligationMigration, ObligationModification, ObligationOwnership,
+            ObligationState, ObligationTable,
+        },
+        region_table::{
+            ChildRegion, ParentRegion, RegionCloseEvent, RegionCloseOperation, RegionCloseReason,
+            RegionConsistencyCheck, RegionEntry, RegionHierarchy, RegionId, RegionLifecycle,
+            RegionState, RegionTable,
+        },
+        sharded_state::{LockOrder, LockOrderValidator, ShardGuard, ShardedState},
+    },
+    sync::{ContendedMutex, Mutex, RwLock},
+    time::{Duration, Instant, Sleep, Timeout},
+    types::{Budget, Cancel, TaskId},
     util::{
         det_rng::{DetRng, RngSeed},
         entropy::EntropySource,
@@ -46,19 +46,19 @@ use crate::{
 };
 
 use std::{
-    collections::{HashMap, BTreeMap, VecDeque, BTreeSet},
-    sync::{
-        atomic::{AtomicU64, AtomicU32, AtomicBool, AtomicUsize, Ordering},
-        Arc,
-    },
-    pin::Pin,
-    task::{Context, Poll},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
 };
 
 use futures::{
-    stream::{Stream, StreamExt},
     ready,
+    stream::{Stream, StreamExt},
 };
 
 /// Configuration for region/obligation table integration tests
@@ -181,8 +181,8 @@ enum LockType {
     Config,          // E
     Instrumentation, // D
     Regions,         // B
-    Tasks,          // A
-    Obligations,    // C
+    Tasks,           // A
+    Obligations,     // C
 }
 
 impl LockType {
@@ -396,24 +396,25 @@ impl RegionObligationConsistencyTracker {
 
     fn verify_dual_table_consistency(&self) -> bool {
         let checks = self.consistency_checks.lock().unwrap();
-        checks.iter().all(|check| {
-            matches!(check.consistency_result, ConsistencyResult::Consistent)
-        })
+        checks
+            .iter()
+            .all(|check| matches!(check.consistency_result, ConsistencyResult::Consistent))
     }
 
     fn verify_region_close_coordination(&self) -> bool {
         let coordinations = self.close_coordination.lock().unwrap();
-        coordinations.iter().all(|coord| {
-            matches!(coord.coordination_result, CoordinationResult::Success)
-        })
+        coordinations
+            .iter()
+            .all(|coord| matches!(coord.coordination_result, CoordinationResult::Success))
     }
 
     fn verify_no_orphaned_obligations(&self) -> bool {
         let checks = self.consistency_checks.lock().unwrap();
         checks.iter().all(|check| {
-            !check.inconsistencies.iter().any(|inc| {
-                inc.inconsistency_type == InconsistencyType::OrphanedObligation
-            })
+            !check
+                .inconsistencies
+                .iter()
+                .any(|inc| inc.inconsistency_type == InconsistencyType::OrphanedObligation)
         })
     }
 
@@ -498,7 +499,9 @@ impl MockDualTableRuntime {
         self.start_operation_tracking(operation_id, "create_region".to_string(), thread_id);
 
         // Acquire locks in proper order: E→D→B→A→C
-        let lock_sequence = self.acquire_locks_for_region_create(operation_id, thread_id, tracker.clone()).await?;
+        let lock_sequence = self
+            .acquire_locks_for_region_create(operation_id, thread_id, tracker.clone())
+            .await?;
 
         // Perform region creation
         let region_id = {
@@ -567,19 +570,24 @@ impl MockDualTableRuntime {
         tracker.record_close_coordination(close_coord_event);
 
         // Acquire locks in proper order for close operation
-        let lock_sequence = self.acquire_locks_for_region_close(operation_id, thread_id, tracker.clone()).await?;
+        let lock_sequence = self
+            .acquire_locks_for_region_close(operation_id, thread_id, tracker.clone())
+            .await?;
 
         // Get affected obligations before close
         let affected_obligations = {
             let region_table = self.region_table.lock().await;
-            region_table.regions.get(&region_id)
+            region_table
+                .regions
+                .get(&region_id)
                 .map(|entry| entry.obligations.clone())
                 .unwrap_or_default()
         };
 
         // Migrate obligations to parent region or complete them
         for obligation_id in &affected_obligations {
-            self.migrate_obligation(*obligation_id, region_id, tracker.clone()).await?;
+            self.migrate_obligation(*obligation_id, region_id, tracker.clone())
+                .await?;
         }
 
         // Close the region
@@ -632,7 +640,9 @@ impl MockDualTableRuntime {
         self.start_operation_tracking(operation_id, "create_obligation".to_string(), thread_id);
 
         // Acquire locks in proper order
-        let lock_sequence = self.acquire_locks_for_obligation_create(operation_id, thread_id, tracker.clone()).await?;
+        let lock_sequence = self
+            .acquire_locks_for_obligation_create(operation_id, thread_id, tracker.clone())
+            .await?;
 
         // Create obligation
         let obligation_id = {
@@ -648,8 +658,12 @@ impl MockDualTableRuntime {
                 metadata: HashMap::new(),
             };
 
-            obligation_table.obligations.insert(obligation_id, obligation_entry);
-            obligation_table.region_bindings.insert(obligation_id, region_id);
+            obligation_table
+                .obligations
+                .insert(obligation_id, obligation_entry);
+            obligation_table
+                .region_bindings
+                .insert(obligation_id, region_id);
 
             obligation_id
         };
@@ -691,12 +705,16 @@ impl MockDualTableRuntime {
         self.start_operation_tracking(operation_id, "modify_obligation".to_string(), thread_id);
 
         // Acquire locks in proper order
-        let lock_sequence = self.acquire_locks_for_obligation_modify(operation_id, thread_id, tracker.clone()).await?;
+        let lock_sequence = self
+            .acquire_locks_for_obligation_modify(operation_id, thread_id, tracker.clone())
+            .await?;
 
         // Get current state
         let (current_state, region_id) = {
             let obligation_table = self.obligation_table.lock().await;
-            let entry = obligation_table.obligations.get(&obligation_id)
+            let entry = obligation_table
+                .obligations
+                .get(&obligation_id)
                 .ok_or("Obligation not found")?;
             (entry.state, entry.region_id)
         };
@@ -714,7 +732,9 @@ impl MockDualTableRuntime {
                         };
                     }
                     ObligationModificationType::MetadataUpdate => {
-                        obligation_entry.metadata.insert("modified".to_string(), "true".to_string());
+                        obligation_entry
+                            .metadata
+                            .insert("modified".to_string(), "true".to_string());
                     }
                     _ => {}
                 }
@@ -752,20 +772,27 @@ impl MockDualTableRuntime {
         // Find target region (parent or complete the obligation)
         let target_region = {
             let region_table = self.region_table.lock().await;
-            region_table.regions.get(&from_region)
+            region_table
+                .regions
+                .get(&from_region)
                 .and_then(|entry| entry.parent)
         };
 
-        let lock_sequence = self.acquire_locks_for_obligation_migrate(operation_id, thread_id, tracker.clone()).await?;
+        let lock_sequence = self
+            .acquire_locks_for_obligation_migrate(operation_id, thread_id, tracker.clone())
+            .await?;
 
         if let Some(target_region) = target_region {
             // Migrate to parent region
             {
                 let mut obligation_table = self.obligation_table.lock().await;
-                if let Some(obligation_entry) = obligation_table.obligations.get_mut(&obligation_id) {
+                if let Some(obligation_entry) = obligation_table.obligations.get_mut(&obligation_id)
+                {
                     obligation_entry.region_id = target_region;
                 }
-                obligation_table.region_bindings.insert(obligation_id, target_region);
+                obligation_table
+                    .region_bindings
+                    .insert(obligation_id, target_region);
             }
 
             // Update region tables
@@ -784,7 +811,8 @@ impl MockDualTableRuntime {
             // No parent region, complete the obligation
             {
                 let mut obligation_table = self.obligation_table.lock().await;
-                if let Some(obligation_entry) = obligation_table.obligations.get_mut(&obligation_id) {
+                if let Some(obligation_entry) = obligation_table.obligations.get_mut(&obligation_id)
+                {
                     obligation_entry.state = ObligationState::Completed;
                 }
             }
@@ -815,9 +843,30 @@ impl MockDualTableRuntime {
         let mut lock_sequence = Vec::new();
 
         // Lock order: E→D→B (Config→Instrumentation→Regions)
-        self.acquire_lock_with_tracking(LockType::Config, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Instrumentation, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Regions, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
+        self.acquire_lock_with_tracking(
+            LockType::Config,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Instrumentation,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Regions,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
 
         Ok(lock_sequence)
     }
@@ -831,11 +880,46 @@ impl MockDualTableRuntime {
         let mut lock_sequence = Vec::new();
 
         // Lock order: E→D→B→A→C (full sequence for region close)
-        self.acquire_lock_with_tracking(LockType::Config, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Instrumentation, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Regions, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Tasks, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Obligations, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
+        self.acquire_lock_with_tracking(
+            LockType::Config,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Instrumentation,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Regions,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Tasks,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Obligations,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
 
         Ok(lock_sequence)
     }
@@ -849,10 +933,38 @@ impl MockDualTableRuntime {
         let mut lock_sequence = Vec::new();
 
         // Lock order: E→D→B→C (Config→Instrumentation→Regions→Obligations)
-        self.acquire_lock_with_tracking(LockType::Config, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Instrumentation, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Regions, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Obligations, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
+        self.acquire_lock_with_tracking(
+            LockType::Config,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Instrumentation,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Regions,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Obligations,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
 
         Ok(lock_sequence)
     }
@@ -866,9 +978,30 @@ impl MockDualTableRuntime {
         let mut lock_sequence = Vec::new();
 
         // Lock order: E→D→C (Config→Instrumentation→Obligations)
-        self.acquire_lock_with_tracking(LockType::Config, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Instrumentation, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Obligations, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
+        self.acquire_lock_with_tracking(
+            LockType::Config,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Instrumentation,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Obligations,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
 
         Ok(lock_sequence)
     }
@@ -882,10 +1015,38 @@ impl MockDualTableRuntime {
         let mut lock_sequence = Vec::new();
 
         // Lock order: E→D→B→C (Config→Instrumentation→Regions→Obligations)
-        self.acquire_lock_with_tracking(LockType::Config, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Instrumentation, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Regions, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
-        self.acquire_lock_with_tracking(LockType::Obligations, operation_id, thread_id, &mut lock_sequence, tracker.clone()).await?;
+        self.acquire_lock_with_tracking(
+            LockType::Config,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Instrumentation,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Regions,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
+        self.acquire_lock_with_tracking(
+            LockType::Obligations,
+            operation_id,
+            thread_id,
+            &mut lock_sequence,
+            tracker.clone(),
+        )
+        .await?;
 
         Ok(lock_sequence)
     }
@@ -1006,8 +1167,12 @@ impl MockDualTableRuntime {
             let pending_modifications = obligation_table.pending_modifications.len() as u32;
 
             for obligation_entry in obligation_table.obligations.values() {
-                *obligation_count_by_state.entry(obligation_entry.state).or_insert(0) += 1;
-                *obligations_by_region.entry(obligation_entry.region_id).or_insert(0) += 1;
+                *obligation_count_by_state
+                    .entry(obligation_entry.state)
+                    .or_insert(0) += 1;
+                *obligations_by_region
+                    .entry(obligation_entry.region_id)
+                    .or_insert(0) += 1;
                 if obligation_entry.state == ObligationState::Active {
                     active_obligations += 1;
                 }
@@ -1022,16 +1187,21 @@ impl MockDualTableRuntime {
         };
 
         // Check for inconsistencies
-        let inconsistencies = self.detect_inconsistencies(&region_table_state, &obligation_table_state).await;
+        let inconsistencies = self
+            .detect_inconsistencies(&region_table_state, &obligation_table_state)
+            .await;
 
         let consistency_result = if inconsistencies.is_empty() {
             ConsistencyResult::Consistent
         } else {
-            let max_severity = inconsistencies.iter()
+            let max_severity = inconsistencies
+                .iter()
                 .map(|inc| self.get_severity(&inc.inconsistency_type))
                 .max()
                 .unwrap_or(InconsistencySeverity::Low);
-            ConsistencyResult::Inconsistent { severity: max_severity }
+            ConsistencyResult::Inconsistent {
+                severity: max_severity,
+            }
         };
 
         let consistency_event = ConsistencyCheckEvent {
@@ -1058,11 +1228,16 @@ impl MockDualTableRuntime {
         let obligation_table = self.obligation_table.lock().await;
 
         for (obligation_id, obligation_entry) in &obligation_table.obligations {
-            if !region_table.regions.contains_key(&obligation_entry.region_id) {
+            if !region_table
+                .regions
+                .contains_key(&obligation_entry.region_id)
+            {
                 inconsistencies.push(Inconsistency {
                     inconsistency_type: InconsistencyType::OrphanedObligation,
-                    description: format!("Obligation {:?} references non-existent region {:?}",
-                                       obligation_id, obligation_entry.region_id),
+                    description: format!(
+                        "Obligation {:?} references non-existent region {:?}",
+                        obligation_id, obligation_entry.region_id
+                    ),
                     affected_regions: vec![obligation_entry.region_id],
                     affected_obligations: vec![*obligation_id],
                 });
@@ -1104,13 +1279,19 @@ impl MockDualTableRuntime {
 
         HierarchyContext {
             parent_region: region_entry.and_then(|entry| entry.parent),
-            child_regions: region_entry.map(|entry| entry.children.clone()).unwrap_or_default(),
+            child_regions: region_entry
+                .map(|entry| entry.children.clone())
+                .unwrap_or_default(),
             hierarchy_depth: self.calculate_hierarchy_depth(region_id, &region_table.regions),
             root_region: self.find_root_region(region_id, &region_table.regions),
         }
     }
 
-    fn calculate_hierarchy_depth(&self, region_id: RegionId, regions: &HashMap<RegionId, RegionEntry>) -> u32 {
+    fn calculate_hierarchy_depth(
+        &self,
+        region_id: RegionId,
+        regions: &HashMap<RegionId, RegionEntry>,
+    ) -> u32 {
         let mut depth = 0;
         let mut current = region_id;
 
@@ -1126,7 +1307,11 @@ impl MockDualTableRuntime {
         depth
     }
 
-    fn find_root_region(&self, region_id: RegionId, regions: &HashMap<RegionId, RegionEntry>) -> RegionId {
+    fn find_root_region(
+        &self,
+        region_id: RegionId,
+        regions: &HashMap<RegionId, RegionEntry>,
+    ) -> RegionId {
         let mut current = region_id;
 
         while let Some(region_entry) = regions.get(&current) {
@@ -1140,7 +1325,12 @@ impl MockDualTableRuntime {
         current
     }
 
-    fn start_operation_tracking(&self, operation_id: OperationId, operation_type: String, thread_id: u64) {
+    fn start_operation_tracking(
+        &self,
+        operation_id: OperationId,
+        operation_type: String,
+        thread_id: u64,
+    ) {
         let operation_context = OperationContext {
             operation_id,
             operation_type,
@@ -1148,7 +1338,10 @@ impl MockDualTableRuntime {
             start_time: Instant::now(),
         };
 
-        self.active_operations.lock().unwrap().insert(operation_id, operation_context);
+        self.active_operations
+            .lock()
+            .unwrap()
+            .insert(operation_id, operation_context);
     }
 
     fn end_operation_tracking(&self, operation_id: OperationId) {
@@ -1196,8 +1389,15 @@ mod tests {
 
         let mut child_regions = Vec::new();
         for i in 0..config.concurrent_regions {
-            let parent = if i == 0 { Some(root_region) } else { child_regions.get(0).copied() };
-            let region = runtime.create_region(parent, tracker.clone()).await.unwrap();
+            let parent = if i == 0 {
+                Some(root_region)
+            } else {
+                child_regions.get(0).copied()
+            };
+            let region = runtime
+                .create_region(parent, tracker.clone())
+                .await
+                .unwrap();
             child_regions.push(region);
         }
 
@@ -1206,42 +1406,56 @@ mod tests {
         for i in 0..config.concurrent_obligations {
             let region_idx = i as usize % child_regions.len();
             let region = child_regions[region_idx];
-            let obligation = runtime.create_obligation(region, tracker.clone()).await.unwrap();
+            let obligation = runtime
+                .create_obligation(region, tracker.clone())
+                .await
+                .unwrap();
             obligations.push(obligation);
         }
 
         // Start concurrent obligation modifications
-        let modification_handles: Vec<_> = obligations.iter().take(4).enumerate().map(|(i, &obligation_id)| {
-            let runtime = runtime.clone();
-            let tracker = tracker.clone();
+        let modification_handles: Vec<_> = obligations
+            .iter()
+            .take(4)
+            .enumerate()
+            .map(|(i, &obligation_id)| {
+                let runtime = runtime.clone();
+                let tracker = tracker.clone();
 
-            tokio::spawn(async move {
-                let modification_types = [
-                    ObligationModificationType::StateChange,
-                    ObligationModificationType::MetadataUpdate,
-                ];
+                tokio::spawn(async move {
+                    let modification_types = [
+                        ObligationModificationType::StateChange,
+                        ObligationModificationType::MetadataUpdate,
+                    ];
 
-                for j in 0..3 {
-                    let mod_type = modification_types[j % modification_types.len()].clone();
-                    let _ = runtime.modify_obligation(obligation_id, mod_type, tracker.clone()).await;
+                    for j in 0..3 {
+                        let mod_type = modification_types[j % modification_types.len()].clone();
+                        let _ = runtime
+                            .modify_obligation(obligation_id, mod_type, tracker.clone())
+                            .await;
 
-                    Sleep::new(Instant::now() + Duration::from_millis(50)).await;
-                }
+                        Sleep::new(Instant::now() + Duration::from_millis(50)).await;
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for some modifications to start
         Sleep::new(Instant::now() + config.region_close_delay).await;
 
         // Start region close operations
-        let close_handles: Vec<_> = child_regions.iter().take(2).map(|&region_id| {
-            let runtime = runtime.clone();
-            let tracker = tracker.clone();
+        let close_handles: Vec<_> = child_regions
+            .iter()
+            .take(2)
+            .map(|&region_id| {
+                let runtime = runtime.clone();
+                let tracker = tracker.clone();
 
-            tokio::spawn(async move {
-                let _ = runtime.close_region(region_id, tracker).await;
+                tokio::spawn(async move {
+                    let _ = runtime.close_region(region_id, tracker).await;
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all operations to complete
         for handle in modification_handles {
@@ -1253,25 +1467,43 @@ mod tests {
         }
 
         // Verify lock order compliance
-        assert!(tracker.verify_lock_order_compliance(),
-                "Lock order E→D→B→A→C should be maintained");
+        assert!(
+            tracker.verify_lock_order_compliance(),
+            "Lock order E→D→B→A→C should be maintained"
+        );
 
         // Verify dual-table consistency
-        assert!(tracker.verify_dual_table_consistency(),
-                "Region and obligation tables should remain consistent");
+        assert!(
+            tracker.verify_dual_table_consistency(),
+            "Region and obligation tables should remain consistent"
+        );
 
         // Verify region close coordination
-        assert!(tracker.verify_region_close_coordination(),
-                "Region close operations should coordinate properly");
+        assert!(
+            tracker.verify_region_close_coordination(),
+            "Region close operations should coordinate properly"
+        );
 
         // Verify no orphaned obligations
-        assert!(tracker.verify_no_orphaned_obligations(),
-                "No obligations should be orphaned after region close");
+        assert!(
+            tracker.verify_no_orphaned_obligations(),
+            "No obligations should be orphaned after region close"
+        );
 
         // Verify operation counts
-        assert!(tracker.get_region_operation_count() > 0, "Should have region operations");
-        assert!(tracker.get_obligation_operation_count() > 0, "Should have obligation operations");
-        assert_eq!(tracker.get_lock_order_violation_count(), 0, "Should have no lock order violations");
+        assert!(
+            tracker.get_region_operation_count() > 0,
+            "Should have region operations"
+        );
+        assert!(
+            tracker.get_obligation_operation_count() > 0,
+            "Should have obligation operations"
+        );
+        assert_eq!(
+            tracker.get_lock_order_violation_count(),
+            0,
+            "Should have no lock order violations"
+        );
     }
 
     #[tokio::test]
@@ -1291,7 +1523,8 @@ mod tests {
         let root_region = runtime.create_region(None, tracker.clone()).await.unwrap();
 
         // Start high-frequency concurrent operations
-        let operation_handles: Vec<_> = (0..config.concurrent_regions + config.concurrent_obligations)
+        let operation_handles: Vec<_> = (0..config.concurrent_regions
+            + config.concurrent_obligations)
             .map(|i| {
                 let runtime = runtime.clone();
                 let tracker = tracker.clone();
@@ -1300,15 +1533,22 @@ mod tests {
                     for j in 0..5 {
                         if i % 2 == 0 {
                             // Create regions
-                            let _ = runtime.create_region(Some(root_region), tracker.clone()).await;
+                            let _ = runtime
+                                .create_region(Some(root_region), tracker.clone())
+                                .await;
                         } else {
                             // Create and modify obligations
-                            if let Ok(obligation_id) = runtime.create_obligation(root_region, tracker.clone()).await {
-                                let _ = runtime.modify_obligation(
-                                    obligation_id,
-                                    ObligationModificationType::StateChange,
-                                    tracker.clone()
-                                ).await;
+                            if let Ok(obligation_id) = runtime
+                                .create_obligation(root_region, tracker.clone())
+                                .await
+                            {
+                                let _ = runtime
+                                    .modify_obligation(
+                                        obligation_id,
+                                        ObligationModificationType::StateChange,
+                                        tracker.clone(),
+                                    )
+                                    .await;
                             }
                         }
 
@@ -1324,19 +1564,28 @@ mod tests {
         }
 
         // Verify strict lock order compliance
-        assert!(tracker.verify_lock_order_compliance(),
-                "All operations should maintain strict lock order E→D→B→A→C");
+        assert!(
+            tracker.verify_lock_order_compliance(),
+            "All operations should maintain strict lock order E→D→B→A→C"
+        );
 
         // Verify no deadlocks occurred
         let violations = tracker.lock_order_violations.lock().unwrap();
-        let deadlock_violations = violations.iter()
+        let deadlock_violations = violations
+            .iter()
             .filter(|v| v.violation_type == LockOrderViolationType::Deadlock)
             .count();
         assert_eq!(deadlock_violations, 0, "Should have no deadlock violations");
 
         // Verify consistent operation tracking
-        assert!(tracker.get_region_operation_count() > 0, "Should track region operations");
-        assert!(tracker.get_obligation_operation_count() > 0, "Should track obligation operations");
+        assert!(
+            tracker.get_region_operation_count() > 0,
+            "Should track region operations"
+        );
+        assert!(
+            tracker.get_obligation_operation_count() > 0,
+            "Should track obligation operations"
+        );
     }
 
     #[tokio::test]
@@ -1358,7 +1607,10 @@ mod tests {
 
         for depth in 1..=config.max_hierarchy_depth {
             let parent = hierarchy[(depth - 1) as usize];
-            let child = runtime.create_region(Some(parent), tracker.clone()).await.unwrap();
+            let child = runtime
+                .create_region(Some(parent), tracker.clone())
+                .await
+                .unwrap();
             hierarchy.push(child);
         }
 
@@ -1367,38 +1619,51 @@ mod tests {
         for i in 0..config.concurrent_obligations {
             let region_idx = (i as usize) % hierarchy.len();
             let region = hierarchy[region_idx];
-            let obligation = runtime.create_obligation(region, tracker.clone()).await.unwrap();
+            let obligation = runtime
+                .create_obligation(region, tracker.clone())
+                .await
+                .unwrap();
             obligations.push((obligation, region));
         }
 
         // Start obligation modifications
-        let modification_handles: Vec<_> = obligations.iter().map(|&(obligation_id, _)| {
-            let runtime = runtime.clone();
-            let tracker = tracker.clone();
+        let modification_handles: Vec<_> = obligations
+            .iter()
+            .map(|&(obligation_id, _)| {
+                let runtime = runtime.clone();
+                let tracker = tracker.clone();
 
-            tokio::spawn(async move {
-                for _ in 0..3 {
-                    let _ = runtime.modify_obligation(
-                        obligation_id,
-                        ObligationModificationType::MetadataUpdate,
-                        tracker.clone(),
-                    ).await;
+                tokio::spawn(async move {
+                    for _ in 0..3 {
+                        let _ = runtime
+                            .modify_obligation(
+                                obligation_id,
+                                ObligationModificationType::MetadataUpdate,
+                                tracker.clone(),
+                            )
+                            .await;
 
-                    Sleep::new(Instant::now() + Duration::from_millis(30)).await;
-                }
+                        Sleep::new(Instant::now() + Duration::from_millis(30)).await;
+                    }
+                })
             })
-        }).collect();
+            .collect();
 
         // Close regions from deepest to shallowest (cascading close)
-        let close_handles: Vec<_> = hierarchy.iter().rev().skip(1).map(|&region_id| {
-            let runtime = runtime.clone();
-            let tracker = tracker.clone();
+        let close_handles: Vec<_> = hierarchy
+            .iter()
+            .rev()
+            .skip(1)
+            .map(|&region_id| {
+                let runtime = runtime.clone();
+                let tracker = tracker.clone();
 
-            tokio::spawn(async move {
-                Sleep::new(Instant::now() + Duration::from_millis(100)).await;
-                let _ = runtime.close_region(region_id, tracker).await;
+                tokio::spawn(async move {
+                    Sleep::new(Instant::now() + Duration::from_millis(100)).await;
+                    let _ = runtime.close_region(region_id, tracker).await;
+                })
             })
-        }).collect();
+            .collect();
 
         // Wait for all operations
         for handle in modification_handles {
@@ -1410,20 +1675,28 @@ mod tests {
         }
 
         // Verify hierarchy consistency
-        assert!(tracker.verify_dual_table_consistency(),
-                "Hierarchy should remain consistent during cascading close");
+        assert!(
+            tracker.verify_dual_table_consistency(),
+            "Hierarchy should remain consistent during cascading close"
+        );
 
         // Verify obligation migration occurred correctly
-        assert!(tracker.verify_no_orphaned_obligations(),
-                "All obligations should be properly migrated or completed");
+        assert!(
+            tracker.verify_no_orphaned_obligations(),
+            "All obligations should be properly migrated or completed"
+        );
 
         // Verify coordination was successful
-        assert!(tracker.verify_region_close_coordination(),
-                "All close operations should coordinate successfully");
+        assert!(
+            tracker.verify_region_close_coordination(),
+            "All close operations should coordinate successfully"
+        );
 
         // Check consistency check results
-        assert!(tracker.get_consistency_check_count() > 0,
-                "Should have performed consistency checks");
+        assert!(
+            tracker.get_consistency_check_count() > 0,
+            "Should have performed consistency checks"
+        );
     }
 
     #[test]
@@ -1431,7 +1704,11 @@ mod tests {
         let runtime = MockDualTableRuntime::new();
 
         // Test valid lock order
-        let valid_sequence = vec![LockType::Config, LockType::Instrumentation, LockType::Regions];
+        let valid_sequence = vec![
+            LockType::Config,
+            LockType::Instrumentation,
+            LockType::Regions,
+        ];
         assert!(runtime.validate_lock_order(&valid_sequence, &LockType::Tasks));
 
         // Test invalid lock order (skipping)
@@ -1453,11 +1730,11 @@ mod tests {
         assert!(LockType::Tasks.order_index() < LockType::Obligations.order_index());
 
         // Test the complete E→D→B→A→C ordering
-        assert_eq!(LockType::Config.order_index(), 0);          // E
+        assert_eq!(LockType::Config.order_index(), 0); // E
         assert_eq!(LockType::Instrumentation.order_index(), 1); // D
-        assert_eq!(LockType::Regions.order_index(), 2);         // B
-        assert_eq!(LockType::Tasks.order_index(), 3);           // A
-        assert_eq!(LockType::Obligations.order_index(), 4);     // C
+        assert_eq!(LockType::Regions.order_index(), 2); // B
+        assert_eq!(LockType::Tasks.order_index(), 3); // A
+        assert_eq!(LockType::Obligations.order_index(), 4); // C
     }
 }
 

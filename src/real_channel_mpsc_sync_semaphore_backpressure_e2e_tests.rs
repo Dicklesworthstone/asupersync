@@ -41,12 +41,12 @@ mod tests {
         dead_code
     )]
 
-    use crate::channel::mpsc::{self, SendError, SendPermit, Sender, Receiver};
+    use crate::channel::mpsc::{self, Receiver, SendError, SendPermit, Sender};
     use crate::cx::{Cx, Registry};
     use crate::runtime::{Runtime, spawn};
     use crate::sync::semaphore::{AcquireError, Semaphore, SemaphorePermit};
     use crate::time::{Duration, Instant, sleep, timeout};
-    use crate::types::{CancelReason, Outcome, RegionId, TaskId, Budget};
+    use crate::types::{Budget, CancelReason, Outcome, RegionId, TaskId};
     use std::collections::{HashMap, VecDeque};
     use std::future::Future;
     use std::net::{Ipv4Addr, SocketAddr};
@@ -177,10 +177,7 @@ mod tests {
     }
 
     impl MpscSemaphoreBackpressureTestHarness {
-        pub async fn new(
-            semaphore_permits: usize,
-            mpsc_capacity: usize,
-        ) -> Self {
+        pub async fn new(semaphore_permits: usize, mpsc_capacity: usize) -> Self {
             let runtime = Runtime::new().expect("Failed to create runtime");
 
             // Create semaphore with specified permit count
@@ -213,7 +210,10 @@ mod tests {
                 last_operation_time: Instant::now(),
             };
 
-            self.producer_trackers.lock().unwrap().insert(producer_id, tracker);
+            self.producer_trackers
+                .lock()
+                .unwrap()
+                .insert(producer_id, tracker);
         }
 
         pub fn record_backpressure_event(&self, event: BackpressureEvent) {
@@ -265,7 +265,10 @@ mod tests {
             }
 
             // Phase 1: Acquire semaphore permit (backpressure control)
-            let permit = self.semaphore.acquire(cx, 1).await
+            let permit = self
+                .semaphore
+                .acquire(cx, 1)
+                .await
                 .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
 
             // Record permit acquisition
@@ -274,7 +277,7 @@ mod tests {
                 event_type: BackpressureEventType::PermitAcquired,
                 producer_id,
                 permit_count: 1,
-                mpsc_buffer_usage: 0, // We don't have easy access to this
+                mpsc_buffer_usage: 0,   // We don't have easy access to this
                 mpsc_reserved_count: 0, // Would need channel introspection
             };
             self.record_backpressure_event(permit_event);
@@ -287,14 +290,26 @@ mod tests {
             }
 
             // Phase 2: Reserve MPSC channel slot
-            let mpsc_permit = self.mpsc_sender.reserve(cx).await
-                .map_err(|e| -> Box<dyn std::error::Error> {
-                    match e {
-                        SendError::Disconnected(_) => Box::new(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "MPSC disconnected")),
-                        SendError::Cancelled(_) => Box::new(std::io::Error::new(std::io::ErrorKind::Interrupted, "MPSC cancelled")),
-                        SendError::Full(_) => Box::new(std::io::Error::new(std::io::ErrorKind::WouldBlock, "MPSC full")),
-                    }
-                })?;
+            let mpsc_permit =
+                self.mpsc_sender
+                    .reserve(cx)
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error> {
+                        match e {
+                            SendError::Disconnected(_) => Box::new(std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                "MPSC disconnected",
+                            )),
+                            SendError::Cancelled(_) => Box::new(std::io::Error::new(
+                                std::io::ErrorKind::Interrupted,
+                                "MPSC cancelled",
+                            )),
+                            SendError::Full(_) => Box::new(std::io::Error::new(
+                                std::io::ErrorKind::WouldBlock,
+                                "MPSC full",
+                            )),
+                        }
+                    })?;
 
             // Record MPSC reservation
             let mpsc_reserve_event = BackpressureEvent {
@@ -325,7 +340,9 @@ mod tests {
                     self.record_backpressure_event(send_event);
 
                     // Update tracker
-                    if let Some(tracker) = self.producer_trackers.lock().unwrap().get_mut(&producer_id) {
+                    if let Some(tracker) =
+                        self.producer_trackers.lock().unwrap().get_mut(&producer_id)
+                    {
                         tracker.messages_sent += 1;
                         tracker.blocked_on_mpsc_capacity = false;
                     }
@@ -342,7 +359,10 @@ mod tests {
                     };
                     self.record_backpressure_event(abort_event);
 
-                    return Err(Box::new(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "MPSC send failed")));
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "MPSC send failed",
+                    )));
                 }
             }
 
@@ -367,7 +387,10 @@ mod tests {
             self.semaphore.close();
 
             // Record permit revocations for waiting producers
-            let waiting_count = self.producer_trackers.lock().unwrap()
+            let waiting_count = self
+                .producer_trackers
+                .lock()
+                .unwrap()
                 .values()
                 .filter(|t| t.blocked_on_permits)
                 .count() as u32;
@@ -395,7 +418,7 @@ mod tests {
                         consumed.push(message);
                     }
                     Ok(Err(_)) => break, // Channel closed or error
-                    Err(_) => break, // Timeout
+                    Err(_) => break,     // Timeout
                 }
             }
 
@@ -411,7 +434,12 @@ mod tests {
         }
 
         pub fn get_backpressure_events(&self) -> Vec<BackpressureEvent> {
-            self.backpressure_events.lock().unwrap().iter().cloned().collect()
+            self.backpressure_events
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect()
         }
 
         pub fn verify_no_buffer_leaks(&self) -> bool {
@@ -429,7 +457,8 @@ mod tests {
 
             // All acquired permits should be released or revoked
             let permits_acquired = stats.semaphore_permits_acquired;
-            let permits_accounted = stats.semaphore_permits_released + stats.permit_revocations_propagated;
+            let permits_accounted =
+                stats.semaphore_permits_released + stats.permit_revocations_propagated;
 
             permits_acquired <= permits_accounted
         }
@@ -491,8 +520,14 @@ mod tests {
 
         // Acquire permits to exhaust the semaphore
         let cx1 = create_test_cx(1);
-        let permit1 = harness.semaphore.try_acquire(1).expect("Should acquire first permit");
-        let permit2 = harness.semaphore.try_acquire(1).expect("Should acquire second permit");
+        let permit1 = harness
+            .semaphore
+            .try_acquire(1)
+            .expect("Should acquire first permit");
+        let permit2 = harness
+            .semaphore
+            .try_acquire(1)
+            .expect("Should acquire second permit");
 
         // Third acquire should fail immediately
         assert!(harness.semaphore.try_acquire(1).is_err());
@@ -502,19 +537,29 @@ mod tests {
         let message3 = TestMessage::new(2003, 3, "blocked message".to_string(), 0);
 
         // Start the send operation in background (it will block)
-        let send_result = timeout(Duration::from_millis(100),
-            harness.permit_gated_send(&cx3, message3)
-        ).await;
+        let send_result = timeout(
+            Duration::from_millis(100),
+            harness.permit_gated_send(&cx3, message3),
+        )
+        .await;
 
         // Should timeout because permit is not available
-        assert!(send_result.is_err(), "Send should timeout waiting for permit");
+        assert!(
+            send_result.is_err(),
+            "Send should timeout waiting for permit"
+        );
 
         // Release one permit
         drop(permit1);
 
         // Now the send should succeed
         let message3_retry = TestMessage::new(2004, 3, "unblocked message".to_string(), 1);
-        assert!(harness.permit_gated_send(&cx3, message3_retry).await.is_ok());
+        assert!(
+            harness
+                .permit_gated_send(&cx3, message3_retry)
+                .await
+                .is_ok()
+        );
 
         // Clean up
         drop(permit2);
@@ -538,7 +583,10 @@ mod tests {
         harness.register_producer(2);
 
         // Exhaust the single permit
-        let permit = harness.semaphore.try_acquire(1).expect("Should acquire permit");
+        let permit = harness
+            .semaphore
+            .try_acquire(1)
+            .expect("Should acquire permit");
 
         // Start a producer that will block waiting for permit
         let cx2 = create_test_cx(2);
@@ -556,16 +604,25 @@ mod tests {
 
         // The send task should complete with an error
         let send_result = timeout(Duration::from_millis(200), send_task).await;
-        assert!(send_result.is_ok(), "Send task should complete after semaphore closure");
+        assert!(
+            send_result.is_ok(),
+            "Send task should complete after semaphore closure"
+        );
 
         let task_result = send_result.unwrap().unwrap();
-        assert!(task_result.is_err(), "Send should fail after permit revocation");
+        assert!(
+            task_result.is_err(),
+            "Send should fail after permit revocation"
+        );
 
         // Clean up
         drop(permit);
 
         let stats = harness.get_stats_snapshot();
-        assert!(stats.permit_revocations_propagated > 0, "Should have recorded permit revocations");
+        assert!(
+            stats.permit_revocations_propagated > 0,
+            "Should have recorded permit revocations"
+        );
         assert!(harness.verify_no_buffer_leaks());
     }
 
@@ -591,9 +648,8 @@ mod tests {
             let message = TestMessage::new(4000 + u64::from(i), i, format!("message-{}", i), i);
 
             let harness_ref = &harness;
-            let task = tokio::spawn(async move {
-                harness_ref.permit_gated_send(&cx, message).await
-            });
+            let task =
+                tokio::spawn(async move { harness_ref.permit_gated_send(&cx, message).await });
             send_tasks.push(task);
         }
 
@@ -610,7 +666,10 @@ mod tests {
 
         // Should have some successful sends (limited by permits)
         assert!(successful_sends > 0, "Should have successful sends");
-        println!("✅ Concurrent: {} successful, {} failed sends", successful_sends, failed_sends);
+        println!(
+            "✅ Concurrent: {} successful, {} failed sends",
+            successful_sends, failed_sends
+        );
 
         let stats = harness.get_stats_snapshot();
         assert!(stats.semaphore_permits_acquired > 0);
@@ -655,17 +714,26 @@ mod tests {
             let message = TestMessage::new(5000 + u64::from(i), i, format!("fail-{}", i), 0);
 
             let result = harness.permit_gated_send(&cx, message).await;
-            assert!(result.is_err(), "Operations should fail after semaphore closure");
+            assert!(
+                result.is_err(),
+                "Operations should fail after semaphore closure"
+            );
         }
 
         // Verify no buffer leaks
-        assert!(harness.verify_no_buffer_leaks(), "Should have no buffer leaks");
+        assert!(
+            harness.verify_no_buffer_leaks(),
+            "Should have no buffer leaks"
+        );
 
         let stats = harness.get_stats_snapshot();
         let events = harness.get_backpressure_events();
 
         // Verify proper cleanup
-        assert!(stats.mpsc_reservations_made > 0, "Should have made reservations");
+        assert!(
+            stats.mpsc_reservations_made > 0,
+            "Should have made reservations"
+        );
         assert_eq!(
             stats.mpsc_reservations_made,
             stats.mpsc_messages_sent + stats.mpsc_reservations_aborted,
@@ -673,8 +741,11 @@ mod tests {
         );
 
         let successful_ops = operations.iter().filter(|&&success| success).count();
-        println!("✅ Buffer Leak Prevention: {} successful ops, {} total events, no leaks",
-                successful_ops, events.len());
+        println!(
+            "✅ Buffer Leak Prevention: {} successful ops, {} total events, no leaks",
+            successful_ops,
+            events.len()
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -701,9 +772,8 @@ mod tests {
             let message = TestMessage::new(6000 + u64::from(i), i, format!("phase1-{}", i), 0);
 
             let harness_ref = &harness;
-            let task = tokio::spawn(async move {
-                harness_ref.permit_gated_send(&cx, message).await
-            });
+            let task =
+                tokio::spawn(async move { harness_ref.permit_gated_send(&cx, message).await });
             phase1_tasks.push(task);
         }
 
@@ -716,9 +786,8 @@ mod tests {
             let message = TestMessage::new(6000 + u64::from(i), i, format!("phase2-{}", i), 0);
 
             let harness_ref = &harness;
-            let task = tokio::spawn(async move {
-                harness_ref.permit_gated_send(&cx, message).await
-            });
+            let task =
+                tokio::spawn(async move { harness_ref.permit_gated_send(&cx, message).await });
             phase2_tasks.push(task);
         }
 
@@ -745,32 +814,54 @@ mod tests {
         let events = harness.get_backpressure_events();
 
         // Comprehensive verification
-        assert!(harness.verify_no_buffer_leaks(), "No MPSC buffer leaks allowed");
-        assert!(harness.verify_permit_balance(), "Semaphore permits must be balanced");
+        assert!(
+            harness.verify_no_buffer_leaks(),
+            "No MPSC buffer leaks allowed"
+        );
+        assert!(
+            harness.verify_permit_balance(),
+            "Semaphore permits must be balanced"
+        );
 
         let successful_phase1 = phase1_results.iter().filter(|r| r.is_ok()).count();
         let successful_phase2 = phase2_results.iter().filter(|r| r.is_ok()).count();
         let total_successful = successful_phase1 + successful_phase2;
 
         // Should have permit acquisition and release events
-        assert!(final_stats.semaphore_permits_acquired > 0, "Should acquire permits");
-        assert!(final_stats.mpsc_reservations_made > 0, "Should make MPSC reservations");
+        assert!(
+            final_stats.semaphore_permits_acquired > 0,
+            "Should acquire permits"
+        );
+        assert!(
+            final_stats.mpsc_reservations_made > 0,
+            "Should make MPSC reservations"
+        );
 
         // Verify permit revocations were recorded
-        assert!(final_stats.permit_revocations_propagated > 0, "Should record permit revocations");
+        assert!(
+            final_stats.permit_revocations_propagated > 0,
+            "Should record permit revocations"
+        );
 
         // Consume any successfully sent messages
         let consumed_messages = harness.consume_messages(total_successful as u32).await;
 
         println!("✅ MPSC ↔ Semaphore Backpressure Integration Test Complete");
         println!("📊 Final Stats: {:?}", final_stats);
-        println!("🎯 Results: Phase1={}/{} Phase2={}/{} Total={} Messages={}",
-                successful_phase1, phase1_results.len(),
-                successful_phase2, phase2_results.len(),
-                total_successful, consumed_messages.len());
-        println!("🔄 Backpressure Events: {}, No Buffer Leaks: {}, Permit Balance: {}",
-                events.len(),
-                harness.verify_no_buffer_leaks(),
-                harness.verify_permit_balance());
+        println!(
+            "🎯 Results: Phase1={}/{} Phase2={}/{} Total={} Messages={}",
+            successful_phase1,
+            phase1_results.len(),
+            successful_phase2,
+            phase2_results.len(),
+            total_successful,
+            consumed_messages.len()
+        );
+        println!(
+            "🔄 Backpressure Events: {}, No Buffer Leaks: {}, Permit Balance: {}",
+            events.len(),
+            harness.verify_no_buffer_leaks(),
+            harness.verify_permit_balance()
+        );
     }
 }

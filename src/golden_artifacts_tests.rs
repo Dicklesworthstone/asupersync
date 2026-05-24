@@ -773,7 +773,10 @@ mod tests {
             let symbol_id = i;
             let symbol_data = format!("SYM_{:02X}", i * 17); // Deterministic data
             let symbol_bytes = symbol_data.as_bytes().len();
-            output.push_str(&format!("Symbol {}: {} ({} bytes)\n", symbol_id, symbol_data, symbol_bytes));
+            output.push_str(&format!(
+                "Symbol {}: {} ({} bytes)\n",
+                symbol_id, symbol_data, symbol_bytes
+            ));
         }
         output.push_str("\n");
 
@@ -783,7 +786,10 @@ mod tests {
             let symbol_id = i;
             let repair_data = format!("REP_{:02X}", (i - k) * 23); // Deterministic repair data
             let repair_bytes = repair_data.as_bytes().len();
-            output.push_str(&format!("Symbol {}: {} ({} bytes)\n", symbol_id, repair_data, repair_bytes));
+            output.push_str(&format!(
+                "Symbol {}: {} ({} bytes)\n",
+                symbol_id, repair_data, repair_bytes
+            ));
         }
         output.push_str("\n");
 
@@ -791,12 +797,20 @@ mod tests {
         output.push_str("Decode Process:\n");
         output.push_str("Phase 1: Gaussian Elimination\n");
         for step in 0..k {
-            output.push_str(&format!("  Step {}: Pivot on symbol {} -> rank {}\n", step, step, step + 1));
+            output.push_str(&format!(
+                "  Step {}: Pivot on symbol {} -> rank {}\n",
+                step,
+                step,
+                step + 1
+            ));
         }
         output.push_str("Phase 2: Back Substitution\n");
         for step in 0..k {
             let recovered_symbol = k - 1 - step;
-            output.push_str(&format!("  Step {}: Recovered symbol {} -> systematic position\n", step, recovered_symbol));
+            output.push_str(&format!(
+                "  Step {}: Recovered symbol {} -> systematic position\n",
+                step, recovered_symbol
+            ));
         }
         output.push_str("\n");
 
@@ -805,7 +819,10 @@ mod tests {
         output.push_str(&format!("Total operations: {}\n", k * (k + 1) / 2));
         output.push_str(&format!("Symbols processed: {}\n", n));
         output.push_str(&format!("Decode success: true\n"));
-        output.push_str(&format!("Recovery efficiency: {:.2}%\n", (k as f64 / n as f64) * 100.0));
+        output.push_str(&format!(
+            "Recovery efficiency: {:.2}%\n",
+            (k as f64 / n as f64) * 100.0
+        ));
 
         tester.assert_golden(&tester.canonicalize(&output));
     }
@@ -821,23 +838,65 @@ mod tests {
 
         // Supervisor hierarchy restart events
         let restart_events = vec![
-            ("supervisor_root", "normal_shutdown", 0, "System maintenance restart"),
-            ("supervisor_db_pool", "dependency_failure", 1, "Database connection lost"),
-            ("worker_db_conn_001", "timeout", 2, "Query timeout exceeded 30s"),
-            ("worker_db_conn_002", "timeout", 2, "Query timeout exceeded 30s"),
-            ("supervisor_http", "child_failure", 1, "HTTP worker supervisor restart"),
-            ("worker_http_handler_001", "panic", 3, "Request handler panicked"),
+            (
+                "supervisor_root",
+                "normal_shutdown",
+                0,
+                "System maintenance restart",
+            ),
+            (
+                "supervisor_db_pool",
+                "dependency_failure",
+                1,
+                "Database connection lost",
+            ),
+            (
+                "worker_db_conn_001",
+                "timeout",
+                2,
+                "Query timeout exceeded 30s",
+            ),
+            (
+                "worker_db_conn_002",
+                "timeout",
+                2,
+                "Query timeout exceeded 30s",
+            ),
+            (
+                "supervisor_http",
+                "child_failure",
+                1,
+                "HTTP worker supervisor restart",
+            ),
+            (
+                "worker_http_handler_001",
+                "panic",
+                3,
+                "Request handler panicked",
+            ),
             ("worker_http_handler_002", "normal", 3, "Graceful restart"),
-            ("supervisor_messaging", "rate_limit", 1, "Message queue backpressure"),
-            ("worker_msg_consumer_001", "overflow", 4, "Consumer queue overflow"),
+            (
+                "supervisor_messaging",
+                "rate_limit",
+                1,
+                "Message queue backpressure",
+            ),
+            (
+                "worker_msg_consumer_001",
+                "overflow",
+                4,
+                "Consumer queue overflow",
+            ),
         ];
 
         output.push_str("Restart Events (Chronological):\n");
         for (i, (component, reason, depth, description)) in restart_events.iter().enumerate() {
             let timestamp = format!("2026-05-24T10:{:02}:{:02}Z", 30 + i, (i * 7) % 60);
             let indent = "  ".repeat(*depth);
-            output.push_str(&format!("{}{} [{}] {} - {} ({})\n",
-                indent, timestamp, reason, component, description, depth));
+            output.push_str(&format!(
+                "{}{} [{}] {} - {} ({})\n",
+                indent, timestamp, reason, component, description, depth
+            ));
         }
         output.push_str("\n");
 
@@ -924,7 +983,12 @@ mod tests {
             ("IO Driver", "HEALTHY", "epoll", "1247 fds"),
             ("Timer Wheel", "HEALTHY", "intrusive", "89 timers"),
             ("Network Stack", "HEALTHY", "tcp+quic", "45 connections"),
-            ("Channel System", "HEALTHY", "mpsc+broadcast", "156 channels"),
+            (
+                "Channel System",
+                "HEALTHY",
+                "mpsc+broadcast",
+                "156 channels",
+            ),
             ("Sync Primitives", "HEALTHY", "mutex+rwlock", "23 locks"),
             ("Trace System", "HEALTHY", "json+binary", "2.1 MB traces"),
         ];
@@ -976,27 +1040,34 @@ mod tests {
         // Kafka frame serialization
         output.push_str("## Kafka Frame Serialization\n");
         let kafka_frames = vec![
-            ("produce_request", vec![
-                0x00, 0x00, 0x00, 0x2C, // Request Size: 44 bytes
-                0x00, 0x00, // API Key: Produce (0)
-                0x00, 0x09, // API Version: 9
-                0x12, 0x34, 0x56, 0x78, // Correlation ID
-                0x00, 0x0C, // Client ID Length: 12
-                0x61, 0x73, 0x75, 0x70, 0x65, 0x72, 0x73, 0x79, 0x6E, 0x63, 0x2D, 0x31, // "asupersync-1"
-                0x00, 0x05, // Topic Name Length: 5
-                0x65, 0x76, 0x65, 0x6E, 0x74, // "event"
-                0x00, 0x00, 0x00, 0x01, // Partition: 1
-            ]),
-            ("fetch_response", vec![
-                0x00, 0x00, 0x00, 0x20, // Response Size: 32 bytes
-                0x12, 0x34, 0x56, 0x78, // Correlation ID
-                0x00, 0x00, // Error Code: None
-                0x00, 0x00, 0x00, 0x01, // Session ID
-                0x00, 0x00, 0x00, 0x05, // Topic Array Length: 5
-                0x65, 0x76, 0x65, 0x6E, 0x74, // "event"
-                0x00, 0x00, 0x00, 0x00, // Partition: 0
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, // High Water Mark: 255
-            ]),
+            (
+                "produce_request",
+                vec![
+                    0x00, 0x00, 0x00, 0x2C, // Request Size: 44 bytes
+                    0x00, 0x00, // API Key: Produce (0)
+                    0x00, 0x09, // API Version: 9
+                    0x12, 0x34, 0x56, 0x78, // Correlation ID
+                    0x00, 0x0C, // Client ID Length: 12
+                    0x61, 0x73, 0x75, 0x70, 0x65, 0x72, 0x73, 0x79, 0x6E, 0x63, 0x2D,
+                    0x31, // "asupersync-1"
+                    0x00, 0x05, // Topic Name Length: 5
+                    0x65, 0x76, 0x65, 0x6E, 0x74, // "event"
+                    0x00, 0x00, 0x00, 0x01, // Partition: 1
+                ],
+            ),
+            (
+                "fetch_response",
+                vec![
+                    0x00, 0x00, 0x00, 0x20, // Response Size: 32 bytes
+                    0x12, 0x34, 0x56, 0x78, // Correlation ID
+                    0x00, 0x00, // Error Code: None
+                    0x00, 0x00, 0x00, 0x01, // Session ID
+                    0x00, 0x00, 0x00, 0x05, // Topic Array Length: 5
+                    0x65, 0x76, 0x65, 0x6E, 0x74, // "event"
+                    0x00, 0x00, 0x00, 0x00, // Partition: 0
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, // High Water Mark: 255
+                ],
+            ),
         ];
 
         for (frame_type, frame_bytes) in kafka_frames {
@@ -1094,23 +1165,37 @@ mod tests {
 
         output.push_str("Virtual Nodes (Sorted by Hash):\n");
         for (i, (hash, node, vnode_id)) in virtual_nodes.iter().take(10).enumerate() {
-            output.push_str(&format!("{:02}: hash={:016x} -> {}:{}\n", i, hash, node, vnode_id));
+            output.push_str(&format!(
+                "{:02}: hash={:016x} -> {}:{}\n",
+                i, hash, node, vnode_id
+            ));
         }
-        output.push_str(&format!("... ({} more virtual nodes)\n", virtual_nodes.len() - 10));
+        output.push_str(&format!(
+            "... ({} more virtual nodes)\n",
+            virtual_nodes.len() - 10
+        ));
         output.push_str("\n");
 
         // Key distribution simulation
         output.push_str("## Key Distribution Simulation\n");
         let test_keys = vec![
-            "user:12345", "session:abcdef", "cache:widget_list",
-            "metric:cpu_usage", "event:login_attempt", "config:feature_flags",
-            "task:background_job", "lock:payment_processing"
+            "user:12345",
+            "session:abcdef",
+            "cache:widget_list",
+            "metric:cpu_usage",
+            "event:login_attempt",
+            "config:feature_flags",
+            "task:background_job",
+            "lock:payment_processing",
         ];
 
         for key in &test_keys {
             let key_hash = simple_hash(key);
             let assigned_node = find_node(&virtual_nodes, key_hash);
-            output.push_str(&format!("{} -> hash={:016x} -> {}\n", key, key_hash, assigned_node));
+            output.push_str(&format!(
+                "{} -> hash={:016x} -> {}\n",
+                key, key_hash, assigned_node
+            ));
         }
         output.push_str("\n");
 
@@ -1122,8 +1207,14 @@ mod tests {
 
         output.push_str(&format!("Total Physical Nodes: {}\n", node_count));
         output.push_str(&format!("Total Virtual Nodes: {}\n", total_vnodes));
-        output.push_str(&format!("Average Virtual Nodes per Physical Node: {:.1}\n", avg_vnodes));
-        output.push_str(&format!("Hash Space Utilization: {:.2}%\n", (total_vnodes as f64 / 65536.0) * 100.0));
+        output.push_str(&format!(
+            "Average Virtual Nodes per Physical Node: {:.1}\n",
+            avg_vnodes
+        ));
+        output.push_str(&format!(
+            "Hash Space Utilization: {:.2}%\n",
+            (total_vnodes as f64 / 65536.0) * 100.0
+        ));
         output.push_str("Load Balance Quality: GOOD\n");
         output.push_str("Replication Strategy: 3-replica\n");
 
@@ -1273,81 +1364,83 @@ debug_mode = false
 
         // TLS handshake message simulation
         let handshake_messages = vec![
-            ("client_hello", vec![
-                // Record Header: Content Type (22), Version (TLS 1.2), Length
-                0x16, 0x03, 0x03, 0x00, 0x2A,
-                // Handshake Header: Type (1=ClientHello), Length
-                0x01, 0x00, 0x00, 0x26,
-                // Version TLS 1.2
-                0x03, 0x03,
-                // Random (32 bytes, deterministic for testing)
-                0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
-                0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
-                0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-                0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
-                // Session ID Length: 0
-                0x00,
-                // Cipher Suites Length: 4
-                0x00, 0x04,
-                // Cipher Suites: TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256
-                0x13, 0x02, 0x13, 0x03,
-                // Compression Methods Length: 1, No Compression
-                0x01, 0x00,
-            ]),
-            ("server_hello", vec![
-                // Record Header: Content Type (22), Version (TLS 1.2), Length
-                0x16, 0x03, 0x03, 0x00, 0x2A,
-                // Handshake Header: Type (2=ServerHello), Length
-                0x02, 0x00, 0x00, 0x26,
-                // Version TLS 1.2
-                0x03, 0x03,
-                // Random (32 bytes, deterministic for testing)
-                0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA, 0x99, 0x88,
-                0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x00,
-                0x0F, 0x1E, 0x2D, 0x3C, 0x4B, 0x5A, 0x69, 0x78,
-                0x87, 0x96, 0xA5, 0xB4, 0xC3, 0xD2, 0xE1, 0xF0,
-                // Session ID Length: 0
-                0x00,
-                // Selected Cipher Suite: TLS_AES_256_GCM_SHA384
-                0x13, 0x02,
-                // Selected Compression Method: No Compression
-                0x00,
-            ]),
-            ("certificate", vec![
-                // Record Header: Content Type (22), Version (TLS 1.2), Length
-                0x16, 0x03, 0x03, 0x00, 0x0F,
-                // Handshake Header: Type (11=Certificate), Length
-                0x0B, 0x00, 0x00, 0x0B,
-                // Certificate List Length
-                0x00, 0x00, 0x08,
-                // First Certificate Length
-                0x00, 0x00, 0x05,
-                // Certificate Data (truncated for testing)
-                0x30, 0x82, 0x01, 0x2A, 0x30,
-            ]),
-            ("server_hello_done", vec![
-                // Record Header: Content Type (22), Version (TLS 1.2), Length
-                0x16, 0x03, 0x03, 0x00, 0x04,
-                // Handshake Header: Type (14=ServerHelloDone), Length
-                0x0E, 0x00, 0x00, 0x00,
-            ]),
-            ("client_key_exchange", vec![
-                // Record Header: Content Type (22), Version (TLS 1.2), Length
-                0x16, 0x03, 0x03, 0x00, 0x08,
-                // Handshake Header: Type (16=ClientKeyExchange), Length
-                0x10, 0x00, 0x00, 0x04,
-                // Key Exchange Data (simplified for testing)
-                0x00, 0x02, 0x01, 0x00,
-            ]),
-            ("finished", vec![
-                // Record Header: Content Type (22), Version (TLS 1.2), Length
-                0x16, 0x03, 0x03, 0x00, 0x10,
-                // Handshake Header: Type (20=Finished), Length
-                0x14, 0x00, 0x00, 0x0C,
-                // Verify Data (12 bytes, deterministic for testing)
-                0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89,
-                0xFE, 0xDC, 0xBA, 0x98,
-            ]),
+            (
+                "client_hello",
+                vec![
+                    // Record Header: Content Type (22), Version (TLS 1.2), Length
+                    0x16, 0x03, 0x03, 0x00, 0x2A,
+                    // Handshake Header: Type (1=ClientHello), Length
+                    0x01, 0x00, 0x00, 0x26, // Version TLS 1.2
+                    0x03, 0x03, // Random (32 bytes, deterministic for testing)
+                    0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76,
+                    0x54, 0x32, 0x10, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA,
+                    0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, // Session ID Length: 0
+                    0x00, // Cipher Suites Length: 4
+                    0x00, 0x04,
+                    // Cipher Suites: TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256
+                    0x13, 0x02, 0x13, 0x03,
+                    // Compression Methods Length: 1, No Compression
+                    0x01, 0x00,
+                ],
+            ),
+            (
+                "server_hello",
+                vec![
+                    // Record Header: Content Type (22), Version (TLS 1.2), Length
+                    0x16, 0x03, 0x03, 0x00, 0x2A,
+                    // Handshake Header: Type (2=ServerHello), Length
+                    0x02, 0x00, 0x00, 0x26, // Version TLS 1.2
+                    0x03, 0x03, // Random (32 bytes, deterministic for testing)
+                    0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA, 0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33,
+                    0x22, 0x11, 0x00, 0x0F, 0x1E, 0x2D, 0x3C, 0x4B, 0x5A, 0x69, 0x78, 0x87, 0x96,
+                    0xA5, 0xB4, 0xC3, 0xD2, 0xE1, 0xF0, // Session ID Length: 0
+                    0x00, // Selected Cipher Suite: TLS_AES_256_GCM_SHA384
+                    0x13, 0x02, // Selected Compression Method: No Compression
+                    0x00,
+                ],
+            ),
+            (
+                "certificate",
+                vec![
+                    // Record Header: Content Type (22), Version (TLS 1.2), Length
+                    0x16, 0x03, 0x03, 0x00, 0x0F,
+                    // Handshake Header: Type (11=Certificate), Length
+                    0x0B, 0x00, 0x00, 0x0B, // Certificate List Length
+                    0x00, 0x00, 0x08, // First Certificate Length
+                    0x00, 0x00, 0x05, // Certificate Data (truncated for testing)
+                    0x30, 0x82, 0x01, 0x2A, 0x30,
+                ],
+            ),
+            (
+                "server_hello_done",
+                vec![
+                    // Record Header: Content Type (22), Version (TLS 1.2), Length
+                    0x16, 0x03, 0x03, 0x00, 0x04,
+                    // Handshake Header: Type (14=ServerHelloDone), Length
+                    0x0E, 0x00, 0x00, 0x00,
+                ],
+            ),
+            (
+                "client_key_exchange",
+                vec![
+                    // Record Header: Content Type (22), Version (TLS 1.2), Length
+                    0x16, 0x03, 0x03, 0x00, 0x08,
+                    // Handshake Header: Type (16=ClientKeyExchange), Length
+                    0x10, 0x00, 0x00, 0x04, // Key Exchange Data (simplified for testing)
+                    0x00, 0x02, 0x01, 0x00,
+                ],
+            ),
+            (
+                "finished",
+                vec![
+                    // Record Header: Content Type (22), Version (TLS 1.2), Length
+                    0x16, 0x03, 0x03, 0x00, 0x10,
+                    // Handshake Header: Type (20=Finished), Length
+                    0x14, 0x00, 0x00, 0x0C,
+                    // Verify Data (12 bytes, deterministic for testing)
+                    0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xFE, 0xDC, 0xBA, 0x98,
+                ],
+            ),
         ];
 
         output.push_str("## TLS Handshake Messages\n");
@@ -1360,7 +1453,10 @@ debug_mode = false
 
         // Handshake transcript analysis
         output.push_str("## Handshake Transcript Analysis\n");
-        let total_bytes: usize = handshake_messages.iter().map(|(_, bytes)| bytes.len()).sum();
+        let total_bytes: usize = handshake_messages
+            .iter()
+            .map(|(_, bytes)| bytes.len())
+            .sum();
         output.push_str(&format!("Total Messages: {}\n", handshake_messages.len()));
         output.push_str(&format!("Total Bytes: {}\n", total_bytes));
         output.push_str("Protocol Version: TLS 1.2 (0x0303)\n");
@@ -1466,24 +1562,47 @@ debug_mode = false
         // HPACK encoding examples
         output.push_str("## HPACK Encoding Examples\n");
         let encoding_examples = vec![
-            ("literal_with_incremental_indexing", "custom-key", "custom-value", vec![
-                0x40, // Literal Header Field with Incremental Indexing (pattern: 01)
-                0x0A, // Header name length: 10
-                0x63, 0x75, 0x73, 0x74, 0x6F, 0x6D, 0x2D, 0x6B, 0x65, 0x79, // "custom-key"
-                0x0C, // Header value length: 12
-                0x63, 0x75, 0x73, 0x74, 0x6F, 0x6D, 0x2D, 0x76, 0x61, 0x6C, 0x75, 0x65, // "custom-value"
-            ]),
-            ("indexed_header_field", ":method", "GET", vec![
-                0x82, // Indexed Header Field (index 2 = ":method: GET")
-            ]),
-            ("literal_without_indexing", "cache-control", "no-cache", vec![
-                0x0F, 0x09, // Literal Header Field without Indexing (index 15 = "cache-control")
-                0x08, // Header value length: 8
-                0x6E, 0x6F, 0x2D, 0x63, 0x61, 0x63, 0x68, 0x65, // "no-cache"
-            ]),
-            ("dynamic_table_size_update", "", "", vec![
-                0x20, 0x20, // Dynamic Table Size Update: set to 4096 (0x1000)
-            ]),
+            (
+                "literal_with_incremental_indexing",
+                "custom-key",
+                "custom-value",
+                vec![
+                    0x40, // Literal Header Field with Incremental Indexing (pattern: 01)
+                    0x0A, // Header name length: 10
+                    0x63, 0x75, 0x73, 0x74, 0x6F, 0x6D, 0x2D, 0x6B, 0x65,
+                    0x79, // "custom-key"
+                    0x0C, // Header value length: 12
+                    0x63, 0x75, 0x73, 0x74, 0x6F, 0x6D, 0x2D, 0x76, 0x61, 0x6C, 0x75,
+                    0x65, // "custom-value"
+                ],
+            ),
+            (
+                "indexed_header_field",
+                ":method",
+                "GET",
+                vec![
+                    0x82, // Indexed Header Field (index 2 = ":method: GET")
+                ],
+            ),
+            (
+                "literal_without_indexing",
+                "cache-control",
+                "no-cache",
+                vec![
+                    0x0F,
+                    0x09, // Literal Header Field without Indexing (index 15 = "cache-control")
+                    0x08, // Header value length: 8
+                    0x6E, 0x6F, 0x2D, 0x63, 0x61, 0x63, 0x68, 0x65, // "no-cache"
+                ],
+            ),
+            (
+                "dynamic_table_size_update",
+                "",
+                "",
+                vec![
+                    0x20, 0x20, // Dynamic Table Size Update: set to 4096 (0x1000)
+                ],
+            ),
         ];
 
         for (encoding_type, name, value, bytes) in &encoding_examples {
@@ -1548,15 +1667,33 @@ debug_mode = false
             (8, 0.123456, "Update", "Eighth obligation batch processed"),
             (9, 0.087654, "Update", "Ninth obligation batch processed"),
             (10, 0.065432, "Update", "Tenth obligation batch processed"),
-            (11, 0.054321, "Update", "Eleventh obligation batch processed"),
-            (12, 0.043210, "Boundary", "E-value crossed boundary threshold"),
-            (13, 0.032109, "Reject", "Null hypothesis rejected - leak detected"),
+            (
+                11,
+                0.054321,
+                "Update",
+                "Eleventh obligation batch processed",
+            ),
+            (
+                12,
+                0.043210,
+                "Boundary",
+                "E-value crossed boundary threshold",
+            ),
+            (
+                13,
+                0.032109,
+                "Reject",
+                "Null hypothesis rejected - leak detected",
+            ),
         ];
 
         output.push_str("Step | E-Value  | Type     | Description\n");
         output.push_str("-----|----------|----------|---------------------------\n");
         for (step, e_value, event_type, description) in &trajectory_points {
-            output.push_str(&format!("{:4} | {:.6} | {:8} | {}\n", step, e_value, event_type, description));
+            output.push_str(&format!(
+                "{:4} | {:.6} | {:8} | {}\n",
+                step, e_value, event_type, description
+            ));
         }
         output.push_str("\n");
 
@@ -1680,7 +1817,10 @@ debug_mode = false
         let session_hash_hex = format!("{:016x}", session_hash);
 
         output.push_str(&format!("Session Hash Input: {}\n", session_hash_input));
-        output.push_str(&format!("Session Hash (SHA256-like): {}\n", session_hash_hex));
+        output.push_str(&format!(
+            "Session Hash (SHA256-like): {}\n",
+            session_hash_hex
+        ));
         output.push_str(&format!("Hash Algorithm: deterministic_hash_v1\n"));
         output.push_str("\n");
 
@@ -1725,39 +1865,53 @@ debug_mode = false
         // SQE (Submission Queue Entry) sequence
         output.push_str("## SQE (Submission Queue Entry) Sequence\n");
         let sqe_operations = vec![
-            ("read_file", vec![
-                // io_uring SQE structure (simplified for testing)
-                0x16, 0x00, 0x00, 0x00, // opcode: IORING_OP_READV (22), flags, ioprio, fd
-                0x05, 0x00, 0x00, 0x00, // fd: 5
-                0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // offset: 4096
-                0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // addr: buffer address (simulated)
-                0x00, 0x10, 0x00, 0x00, // len: 4096 bytes
-                0x00, 0x00, 0x00, 0x00, // rw_flags
-                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 1
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // personality, splice_fd_in, __pad2
-            ]),
-            ("write_file", vec![
-                // io_uring SQE structure for write
-                0x17, 0x00, 0x00, 0x00, // opcode: IORING_OP_WRITEV (23), flags, ioprio, fd
-                0x06, 0x00, 0x00, 0x00, // fd: 6
-                0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // offset: 8192
-                0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // addr: buffer address (simulated)
-                0x00, 0x08, 0x00, 0x00, // len: 2048 bytes
-                0x00, 0x00, 0x00, 0x00, // rw_flags
-                0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 2
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // personality, splice_fd_in, __pad2
-            ]),
-            ("fsync", vec![
-                // io_uring SQE structure for fsync
-                0x1C, 0x00, 0x00, 0x00, // opcode: IORING_OP_FSYNC (28), flags, ioprio, fd
-                0x06, 0x00, 0x00, 0x00, // fd: 6
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // offset: unused
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // addr: unused
-                0x00, 0x00, 0x00, 0x00, // len: unused
-                0x01, 0x00, 0x00, 0x00, // fsync_flags: IORING_FSYNC_DATASYNC
-                0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 3
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // personality, splice_fd_in, __pad2
-            ]),
+            (
+                "read_file",
+                vec![
+                    // io_uring SQE structure (simplified for testing)
+                    0x16, 0x00, 0x00, 0x00, // opcode: IORING_OP_READV (22), flags, ioprio, fd
+                    0x05, 0x00, 0x00, 0x00, // fd: 5
+                    0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // offset: 4096
+                    0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, // addr: buffer address (simulated)
+                    0x00, 0x10, 0x00, 0x00, // len: 4096 bytes
+                    0x00, 0x00, 0x00, 0x00, // rw_flags
+                    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 1
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, // personality, splice_fd_in, __pad2
+                ],
+            ),
+            (
+                "write_file",
+                vec![
+                    // io_uring SQE structure for write
+                    0x17, 0x00, 0x00, 0x00, // opcode: IORING_OP_WRITEV (23), flags, ioprio, fd
+                    0x06, 0x00, 0x00, 0x00, // fd: 6
+                    0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // offset: 8192
+                    0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, // addr: buffer address (simulated)
+                    0x00, 0x08, 0x00, 0x00, // len: 2048 bytes
+                    0x00, 0x00, 0x00, 0x00, // rw_flags
+                    0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 2
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, // personality, splice_fd_in, __pad2
+                ],
+            ),
+            (
+                "fsync",
+                vec![
+                    // io_uring SQE structure for fsync
+                    0x1C, 0x00, 0x00, 0x00, // opcode: IORING_OP_FSYNC (28), flags, ioprio, fd
+                    0x06, 0x00, 0x00, 0x00, // fd: 6
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // offset: unused
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // addr: unused
+                    0x00, 0x00, 0x00, 0x00, // len: unused
+                    0x01, 0x00, 0x00, 0x00, // fsync_flags: IORING_FSYNC_DATASYNC
+                    0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 3
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, // personality, splice_fd_in, __pad2
+                ],
+            ),
         ];
 
         for (op_name, sqe_bytes) in &sqe_operations {
@@ -1770,21 +1924,30 @@ debug_mode = false
         // CQE (Completion Queue Entry) sequence
         output.push_str("## CQE (Completion Queue Entry) Sequence\n");
         let cqe_completions = vec![
-            ("read_completion", vec![
-                0x00, 0x10, 0x00, 0x00, // res: 4096 (bytes read)
-                0x00, 0x00, 0x00, 0x00, // flags: 0
-                0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 1
-            ]),
-            ("write_completion", vec![
-                0x00, 0x08, 0x00, 0x00, // res: 2048 (bytes written)
-                0x00, 0x00, 0x00, 0x00, // flags: 0
-                0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 2
-            ]),
-            ("fsync_completion", vec![
-                0x00, 0x00, 0x00, 0x00, // res: 0 (success)
-                0x00, 0x00, 0x00, 0x00, // flags: 0
-                0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 3
-            ]),
+            (
+                "read_completion",
+                vec![
+                    0x00, 0x10, 0x00, 0x00, // res: 4096 (bytes read)
+                    0x00, 0x00, 0x00, 0x00, // flags: 0
+                    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 1
+                ],
+            ),
+            (
+                "write_completion",
+                vec![
+                    0x00, 0x08, 0x00, 0x00, // res: 2048 (bytes written)
+                    0x00, 0x00, 0x00, 0x00, // flags: 0
+                    0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 2
+                ],
+            ),
+            (
+                "fsync_completion",
+                vec![
+                    0x00, 0x00, 0x00, 0x00, // res: 0 (success)
+                    0x00, 0x00, 0x00, 0x00, // flags: 0
+                    0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // user_data: 3
+                ],
+            ),
         ];
 
         for (completion_name, cqe_bytes) in &cqe_completions {
@@ -1837,32 +2000,57 @@ debug_mode = false
         // Frame sequence examples
         output.push_str("## Frame Sequence Examples\n");
         let frame_examples = vec![
-            ("hello_message", b"Hello, World!", vec![
-                0x00, 0x00, 0x00, 0x0D, // Length: 13 bytes
-                0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x2C, 0x20, 0x57, 0x6F, 0x72, 0x6C, 0x64, 0x21, // "Hello, World!"
-            ]),
-            ("json_payload", b"{\"user\":\"alice\",\"action\":\"login\"}", vec![
-                0x00, 0x00, 0x00, 0x21, // Length: 33 bytes
-                0x7B, 0x22, 0x75, 0x73, 0x65, 0x72, 0x22, 0x3A, 0x22, 0x61, 0x6C, 0x69, 0x63, 0x65, 0x22, 0x2C,
-                0x22, 0x61, 0x63, 0x74, 0x69, 0x6F, 0x6E, 0x22, 0x3A, 0x22, 0x6C, 0x6F, 0x67, 0x69, 0x6E, 0x22, 0x7D,
-            ]),
-            ("binary_data", &[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE], vec![
-                0x00, 0x00, 0x00, 0x08, // Length: 8 bytes
-                0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, // Binary payload
-            ]),
-            ("empty_frame", b"", vec![
-                0x00, 0x00, 0x00, 0x00, // Length: 0 bytes (empty frame)
-            ]),
-            ("large_frame_header", b"", vec![
-                0x00, 0x10, 0x00, 0x00, // Length: 1048576 bytes (1MB frame header only)
-            ]),
+            (
+                "hello_message",
+                b"Hello, World!",
+                vec![
+                    0x00, 0x00, 0x00, 0x0D, // Length: 13 bytes
+                    0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x2C, 0x20, 0x57, 0x6F, 0x72, 0x6C, 0x64,
+                    0x21, // "Hello, World!"
+                ],
+            ),
+            (
+                "json_payload",
+                b"{\"user\":\"alice\",\"action\":\"login\"}",
+                vec![
+                    0x00, 0x00, 0x00, 0x21, // Length: 33 bytes
+                    0x7B, 0x22, 0x75, 0x73, 0x65, 0x72, 0x22, 0x3A, 0x22, 0x61, 0x6C, 0x69, 0x63,
+                    0x65, 0x22, 0x2C, 0x22, 0x61, 0x63, 0x74, 0x69, 0x6F, 0x6E, 0x22, 0x3A, 0x22,
+                    0x6C, 0x6F, 0x67, 0x69, 0x6E, 0x22, 0x7D,
+                ],
+            ),
+            (
+                "binary_data",
+                &[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE],
+                vec![
+                    0x00, 0x00, 0x00, 0x08, // Length: 8 bytes
+                    0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, // Binary payload
+                ],
+            ),
+            (
+                "empty_frame",
+                b"",
+                vec![
+                    0x00, 0x00, 0x00, 0x00, // Length: 0 bytes (empty frame)
+                ],
+            ),
+            (
+                "large_frame_header",
+                b"",
+                vec![
+                    0x00, 0x10, 0x00, 0x00, // Length: 1048576 bytes (1MB frame header only)
+                ],
+            ),
         ];
 
         for (frame_name, payload, frame_bytes) in &frame_examples {
             let frame_hex = hex::encode(frame_bytes);
             output.push_str(&format!("{}: {}\n", frame_name, frame_hex));
-            output.push_str(&format!("Length: {} bytes (header: 4, payload: {})\n",
-                frame_bytes.len(), payload.len()));
+            output.push_str(&format!(
+                "Length: {} bytes (header: 4, payload: {})\n",
+                frame_bytes.len(),
+                payload.len()
+            ));
         }
         output.push_str("\n");
 
@@ -1873,11 +2061,18 @@ debug_mode = false
 
         for (frame_name, payload, frame_bytes) in &frame_examples {
             let length_field = u32::from_be_bytes([
-                frame_bytes[0], frame_bytes[1], frame_bytes[2], frame_bytes[3]
+                frame_bytes[0],
+                frame_bytes[1],
+                frame_bytes[2],
+                frame_bytes[3],
             ]);
 
-            output.push_str(&format!("Parsing {}: length_field={}, actual_payload={}\n",
-                frame_name, length_field, payload.len()));
+            output.push_str(&format!(
+                "Parsing {}: length_field={}, actual_payload={}\n",
+                frame_name,
+                length_field,
+                payload.len()
+            ));
 
             total_bytes += frame_bytes.len();
             frame_count += 1;
@@ -1888,8 +2083,11 @@ debug_mode = false
         output.push_str("## Codec Statistics\n");
         output.push_str(&format!("Total Frames: {}\n", frame_count));
         output.push_str(&format!("Total Bytes: {}\n", total_bytes));
-        output.push_str(&format!("Header Overhead: {} bytes ({}%)\n",
-            frame_count * 4, (frame_count * 4 * 100) / total_bytes));
+        output.push_str(&format!(
+            "Header Overhead: {} bytes ({}%)\n",
+            frame_count * 4,
+            (frame_count * 4 * 100) / total_bytes
+        ));
         output.push_str("Framing Protocol: length-delimited\n");
         output.push_str("Byte Order: Big-endian\n");
         output.push_str("Frame Integrity: VALID\n");
@@ -1916,4 +2114,3 @@ debug_mode = false
 // Helpers moved inside `mod tests` (see top of file) so the test code can
 // actually see them; the prior file-level position left them out of scope
 // of the cfg(test) module and the test callers failed with E0425.
-

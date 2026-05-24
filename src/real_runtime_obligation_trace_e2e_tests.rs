@@ -12,20 +12,19 @@
 #[cfg(test)]
 mod tests {
     use crate::cx::Cx;
-    use crate::obligation::ledger::{ObligationLedger, LedgerError};
-    use crate::runtime::state::RuntimeState;
-    use crate::trace::recorder::{TraceRecorder, TraceLimits};
-    use crate::trace::replay::{ReplayEvent, TraceMetadata};
+    use crate::obligation::ledger::{LedgerError, ObligationLedger};
     use crate::record::{
-        ObligationKind, ObligationRecord, ObligationState, ObligationResolution,
-        ObligationAbortReason, SourceLocation, RegionRecord, TaskRecord
+        ObligationAbortReason, ObligationKind, ObligationRecord, ObligationResolution,
+        ObligationState, RegionRecord, SourceLocation, TaskRecord,
     };
     use crate::runtime::region;
+    use crate::runtime::state::RuntimeState;
+    use crate::trace::recorder::{TraceLimits, TraceRecorder};
+    use crate::trace::replay::{ReplayEvent, TraceMetadata};
     use crate::types::{
-        Budget, Time, TaskId, RegionId, ObligationId, Outcome, CancelReason,
-        Policy, PolicyAction
+        Budget, CancelReason, ObligationId, Outcome, Policy, PolicyAction, RegionId, TaskId, Time,
     };
-    use std::collections::{HashMap, BTreeMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
@@ -41,12 +40,27 @@ mod tests {
 
     #[derive(Debug, Clone)]
     enum StepType {
-        CreateRegion { name: String },
-        SpawnTask { region_id: RegionId, task_name: String },
-        AcquireObligation { task_id: TaskId, kind: ObligationKind },
-        CommitObligation { obligation_id: ObligationId },
-        AbortObligation { obligation_id: ObligationId, reason: ObligationAbortReason },
-        CloseRegion { region_id: RegionId },
+        CreateRegion {
+            name: String,
+        },
+        SpawnTask {
+            region_id: RegionId,
+            task_name: String,
+        },
+        AcquireObligation {
+            task_id: TaskId,
+            kind: ObligationKind,
+        },
+        CommitObligation {
+            obligation_id: ObligationId,
+        },
+        AbortObligation {
+            obligation_id: ObligationId,
+            reason: ObligationAbortReason,
+        },
+        CloseRegion {
+            region_id: RegionId,
+        },
     }
 
     #[derive(Debug)]
@@ -90,79 +104,87 @@ mod tests {
 
             // Step 1: Create root region
             steps.push(self.create_step(
-                StepType::CreateRegion { name: "root_region".to_string() },
-                vec![]
+                StepType::CreateRegion {
+                    name: "root_region".to_string(),
+                },
+                vec![],
             ));
 
             // Step 2: Create child region (depends on root)
             steps.push(self.create_step(
-                StepType::CreateRegion { name: "child_region".to_string() },
-                vec![1] // depends on step 1
+                StepType::CreateRegion {
+                    name: "child_region".to_string(),
+                },
+                vec![1], // depends on step 1
             ));
 
             // Step 3: Spawn task in root region
             steps.push(self.create_step(
                 StepType::SpawnTask {
                     region_id: self.next_region_id(),
-                    task_name: "coordinator_task".to_string()
+                    task_name: "coordinator_task".to_string(),
                 },
-                vec![1] // depends on root region
+                vec![1], // depends on root region
             ));
 
             // Step 4: Spawn task in child region
             steps.push(self.create_step(
                 StepType::SpawnTask {
                     region_id: self.next_region_id(),
-                    task_name: "worker_task".to_string()
+                    task_name: "worker_task".to_string(),
                 },
-                vec![2] // depends on child region
+                vec![2], // depends on child region
             ));
 
             // Step 5: Acquire obligation from coordinator
             steps.push(self.create_step(
                 StepType::AcquireObligation {
                     task_id: self.next_task_id(),
-                    kind: ObligationKind::Permit
+                    kind: ObligationKind::Permit,
                 },
-                vec![3] // depends on coordinator task
+                vec![3], // depends on coordinator task
             ));
 
             // Step 6: Acquire obligation from worker
             steps.push(self.create_step(
                 StepType::AcquireObligation {
                     task_id: self.next_task_id(),
-                    kind: ObligationKind::Ack
+                    kind: ObligationKind::Ack,
                 },
-                vec![4] // depends on worker task
+                vec![4], // depends on worker task
             ));
 
             // Step 7: Commit coordinator obligation
             steps.push(self.create_step(
                 StepType::CommitObligation {
-                    obligation_id: ObligationId::from_raw(1)
+                    obligation_id: ObligationId::from_raw(1),
                 },
-                vec![5] // depends on coordinator obligation
+                vec![5], // depends on coordinator obligation
             ));
 
             // Step 8: Abort worker obligation due to cancellation
             steps.push(self.create_step(
                 StepType::AbortObligation {
                     obligation_id: ObligationId::from_raw(2),
-                    reason: ObligationAbortReason::CancelledByParent
+                    reason: ObligationAbortReason::CancelledByParent,
                 },
-                vec![6] // depends on worker obligation
+                vec![6], // depends on worker obligation
             ));
 
             // Step 9: Close child region
             steps.push(self.create_step(
-                StepType::CloseRegion { region_id: self.next_region_id() },
-                vec![8] // depends on worker obligation abort
+                StepType::CloseRegion {
+                    region_id: self.next_region_id(),
+                },
+                vec![8], // depends on worker obligation abort
             ));
 
             // Step 10: Close root region
             steps.push(self.create_step(
-                StepType::CloseRegion { region_id: self.next_region_id() },
-                vec![7, 9] // depends on coordinator commit and child close
+                StepType::CloseRegion {
+                    region_id: self.next_region_id(),
+                },
+                vec![7, 9], // depends on coordinator commit and child close
             ));
 
             steps
@@ -240,7 +262,7 @@ mod tests {
             &self,
             event_id: u64,
             visited: &mut HashSet<u64>,
-            recursion_stack: &mut HashSet<u64>
+            recursion_stack: &mut HashSet<u64>,
         ) -> Result<bool, String> {
             visited.insert(event_id);
             recursion_stack.insert(event_id);
@@ -336,13 +358,19 @@ mod tests {
         }
 
         fn set_context(&mut self, key: &str, value: &str) {
-            self.execution_context.insert(key.to_string(), value.to_string());
+            self.execution_context
+                .insert(key.to_string(), value.to_string());
         }
 
         fn log_event(&self, event: &str) {
             let timestamp = crate::time::wall_now();
-            let entry = format!("{{\"test\":\"{}\",\"phase\":\"{}\",\"event\":\"{}\",\"ts\":{}}}",
-                self.test_name, self.phase, event, timestamp.as_nanos());
+            let entry = format!(
+                "{{\"test\":\"{}\",\"phase\":\"{}\",\"event\":\"{}\",\"ts\":{}}}",
+                self.test_name,
+                self.phase,
+                event,
+                timestamp.as_nanos()
+            );
             self.events.lock().push(entry);
             eprintln!("{}", entry);
         }
@@ -399,7 +427,7 @@ mod tests {
 
             // Create trace recorder with reasonable limits
             let trace_limits = TraceLimits {
-                max_memory: 10 * 1024 * 1024, // 10MB
+                max_memory: 10 * 1024 * 1024,     // 10MB
                 max_file_size: 100 * 1024 * 1024, // 100MB
             };
             let metadata = TraceMetadata::new(42);
@@ -420,15 +448,19 @@ mod tests {
         async fn execute_workflow_step(
             &mut self,
             cx: &Cx,
-            step: &WorkflowStep
+            step: &WorkflowStep,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            self.logger.workflow_step(step.step_id, &format!("{:?}", step.step_type));
+            self.logger
+                .workflow_step(step.step_id, &format!("{:?}", step.step_type));
 
             match &step.step_type {
                 StepType::CreateRegion { name } => {
                     self.create_region(cx, name).await?;
                 }
-                StepType::SpawnTask { region_id, task_name } => {
+                StepType::SpawnTask {
+                    region_id,
+                    task_name,
+                } => {
                     self.spawn_task(cx, *region_id, task_name).await?;
                 }
                 StepType::AcquireObligation { task_id, kind } => {
@@ -437,8 +469,12 @@ mod tests {
                 StepType::CommitObligation { obligation_id } => {
                     self.commit_obligation(cx, *obligation_id).await?;
                 }
-                StepType::AbortObligation { obligation_id, reason } => {
-                    self.abort_obligation(cx, *obligation_id, reason.clone()).await?;
+                StepType::AbortObligation {
+                    obligation_id,
+                    reason,
+                } => {
+                    self.abort_obligation(cx, *obligation_id, reason.clone())
+                        .await?;
                 }
                 StepType::CloseRegion { region_id } => {
                     self.close_region(cx, *region_id).await?;
@@ -451,7 +487,7 @@ mod tests {
         async fn create_region(
             &mut self,
             cx: &Cx,
-            name: &str
+            name: &str,
         ) -> Result<RegionId, Box<dyn std::error::Error>> {
             self.logger.runtime_event("create_region_start", name);
 
@@ -471,8 +507,12 @@ mod tests {
             // Store in runtime state (simplified - real implementation would use RegionTable)
             self.active_regions.insert(name.to_string(), region_id);
 
-            self.logger.runtime_event("create_region_complete", &format!("{}:{}", name, region_id.raw()));
-            self.trace_recorder.record_event_with_context("region_created", &format!("name={}", name));
+            self.logger.runtime_event(
+                "create_region_complete",
+                &format!("{}:{}", name, region_id.raw()),
+            );
+            self.trace_recorder
+                .record_event_with_context("region_created", &format!("name={}", name));
 
             Ok(region_id)
         }
@@ -481,27 +521,31 @@ mod tests {
             &mut self,
             cx: &Cx,
             region_id: RegionId,
-            task_name: &str
+            task_name: &str,
         ) -> Result<TaskId, Box<dyn std::error::Error>> {
-            self.logger.runtime_event("spawn_task_start", &format!("{}:region_{}", task_name, region_id.raw()));
+            self.logger.runtime_event(
+                "spawn_task_start",
+                &format!("{}:region_{}", task_name, region_id.raw()),
+            );
 
             // Record trace event for task spawn
             let task_id = TaskId::from_raw(self.active_tasks.len() as u64 + 1);
             self.trace_recorder.record_task_spawned(task_id, region_id);
 
             // Create task record
-            let task_record = TaskRecord::new(
-                task_id,
-                region_id,
-                SourceLocation::caller(),
-            );
+            let task_record = TaskRecord::new(task_id, region_id, SourceLocation::caller());
 
             // Store task
             self.active_tasks.insert(task_name.to_string(), task_id);
 
-            self.logger.runtime_event("spawn_task_complete", &format!("{}:{}", task_name, task_id.raw()));
-            self.trace_recorder.record_event_with_context("task_spawned",
-                &format!("name={},region={}", task_name, region_id.raw()));
+            self.logger.runtime_event(
+                "spawn_task_complete",
+                &format!("{}:{}", task_name, task_id.raw()),
+            );
+            self.trace_recorder.record_event_with_context(
+                "task_spawned",
+                &format!("name={},region={}", task_name, region_id.raw()),
+            );
 
             Ok(task_id)
         }
@@ -510,13 +554,15 @@ mod tests {
             &mut self,
             cx: &Cx,
             task_id: TaskId,
-            kind: ObligationKind
+            kind: ObligationKind,
         ) -> Result<ObligationId, Box<dyn std::error::Error>> {
-            self.logger.obligation_event(ObligationId::from_raw(0), "acquire_start");
+            self.logger
+                .obligation_event(ObligationId::from_raw(0), "acquire_start");
 
             // Record trace event for obligation acquisition
             let obligation_id = ObligationId::from_raw(self.active_obligations.len() as u64 + 1);
-            self.trace_recorder.record_obligation_acquired(obligation_id, task_id);
+            self.trace_recorder
+                .record_obligation_acquired(obligation_id, task_id);
 
             // Create obligation record
             let obligation_record = ObligationRecord::new(
@@ -531,11 +577,20 @@ mod tests {
 
             // Store reference
             let obligation_key = format!("{}_{}", task_id.raw(), obligation_id.raw());
-            self.active_obligations.insert(obligation_key, obligation_id);
+            self.active_obligations
+                .insert(obligation_key, obligation_id);
 
-            self.logger.obligation_event(obligation_id, "acquire_complete");
-            self.trace_recorder.record_event_with_context("obligation_acquired",
-                &format!("id={},task={},kind={:?}", obligation_id.raw(), task_id.raw(), kind));
+            self.logger
+                .obligation_event(obligation_id, "acquire_complete");
+            self.trace_recorder.record_event_with_context(
+                "obligation_acquired",
+                &format!(
+                    "id={},task={},kind={:?}",
+                    obligation_id.raw(),
+                    task_id.raw(),
+                    kind
+                ),
+            );
 
             Ok(obligation_id)
         }
@@ -543,12 +598,13 @@ mod tests {
         async fn commit_obligation(
             &mut self,
             cx: &Cx,
-            obligation_id: ObligationId
+            obligation_id: ObligationId,
         ) -> Result<(), Box<dyn std::error::Error>> {
             self.logger.obligation_event(obligation_id, "commit_start");
 
             // Record trace event for obligation commit
-            self.trace_recorder.record_obligation_resolved(obligation_id, true);
+            self.trace_recorder
+                .record_obligation_resolved(obligation_id, true);
 
             // Commit in ledger
             let resolution = ObligationResolution::Committed {
@@ -556,9 +612,12 @@ mod tests {
             };
             self.obligation_ledger.commit(obligation_id, resolution);
 
-            self.logger.obligation_event(obligation_id, "commit_complete");
-            self.trace_recorder.record_event_with_context("obligation_committed",
-                &format!("id={}", obligation_id.raw()));
+            self.logger
+                .obligation_event(obligation_id, "commit_complete");
+            self.trace_recorder.record_event_with_context(
+                "obligation_committed",
+                &format!("id={}", obligation_id.raw()),
+            );
 
             Ok(())
         }
@@ -567,12 +626,13 @@ mod tests {
             &mut self,
             cx: &Cx,
             obligation_id: ObligationId,
-            reason: ObligationAbortReason
+            reason: ObligationAbortReason,
         ) -> Result<(), Box<dyn std::error::Error>> {
             self.logger.obligation_event(obligation_id, "abort_start");
 
             // Record trace event for obligation abort
-            self.trace_recorder.record_obligation_resolved(obligation_id, false);
+            self.trace_recorder
+                .record_obligation_resolved(obligation_id, false);
 
             // Abort in ledger
             let resolution = ObligationResolution::Aborted {
@@ -581,9 +641,12 @@ mod tests {
             };
             self.obligation_ledger.abort(obligation_id, resolution);
 
-            self.logger.obligation_event(obligation_id, "abort_complete");
-            self.trace_recorder.record_event_with_context("obligation_aborted",
-                &format!("id={},reason={:?}", obligation_id.raw(), reason));
+            self.logger
+                .obligation_event(obligation_id, "abort_complete");
+            self.trace_recorder.record_event_with_context(
+                "obligation_aborted",
+                &format!("id={},reason={:?}", obligation_id.raw(), reason),
+            );
 
             Ok(())
         }
@@ -591,9 +654,10 @@ mod tests {
         async fn close_region(
             &mut self,
             cx: &Cx,
-            region_id: RegionId
+            region_id: RegionId,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            self.logger.runtime_event("close_region_start", &region_id.raw().to_string());
+            self.logger
+                .runtime_event("close_region_start", &region_id.raw().to_string());
 
             // Record trace event for region close
             self.trace_recorder.record_region_closed(region_id);
@@ -604,15 +668,17 @@ mod tests {
             // 3. Run finalizers
             // 4. Mark region as closed in runtime state
 
-            self.logger.runtime_event("close_region_complete", &region_id.raw().to_string());
-            self.trace_recorder.record_event_with_context("region_closed",
-                &format!("id={}", region_id.raw()));
+            self.logger
+                .runtime_event("close_region_complete", &region_id.raw().to_string());
+            self.trace_recorder
+                .record_event_with_context("region_closed", &format!("id={}", region_id.raw()));
 
             Ok(())
         }
 
         fn build_causality_dag(&mut self) -> Result<CausalityAnalyzer, String> {
-            self.logger.trace_event(self.trace_recorder.event_count(), "build_dag_start");
+            self.logger
+                .trace_event(self.trace_recorder.event_count(), "build_dag_start");
 
             let mut analyzer = CausalityAnalyzer::new();
 
@@ -641,10 +707,19 @@ mod tests {
 
         fn get_runtime_metrics(&self) -> HashMap<String, u64> {
             let mut metrics = HashMap::new();
-            metrics.insert("active_regions".to_string(), self.active_regions.len() as u64);
+            metrics.insert(
+                "active_regions".to_string(),
+                self.active_regions.len() as u64,
+            );
             metrics.insert("active_tasks".to_string(), self.active_tasks.len() as u64);
-            metrics.insert("active_obligations".to_string(), self.active_obligations.len() as u64);
-            metrics.insert("trace_events".to_string(), self.trace_recorder.event_count() as u64);
+            metrics.insert(
+                "active_obligations".to_string(),
+                self.active_obligations.len() as u64,
+            );
+            metrics.insert(
+                "trace_events".to_string(),
+                self.trace_recorder.event_count() as u64,
+            );
             metrics
         }
     }
@@ -652,9 +727,10 @@ mod tests {
     #[test]
     fn test_runtime_obligation_trace_integration() {
         crate::lab::runtime::test_with_lab(|cx| async move {
-            let mut harness = RuntimeObligationTraceHarness::new("runtime_obligation_trace_integration")
-                .await
-                .expect("Harness creation should succeed");
+            let mut harness =
+                RuntimeObligationTraceHarness::new("runtime_obligation_trace_integration")
+                    .await
+                    .expect("Harness creation should succeed");
 
             harness.logger.phase("workflow_execution");
 
@@ -662,66 +738,94 @@ mod tests {
             let factory = WorkflowFactory::new();
 
             // Step 1: Create root region
-            let root_region_id = harness.create_region(&cx, "root").await
+            let root_region_id = harness
+                .create_region(&cx, "root")
+                .await
                 .expect("Root region creation should succeed");
 
             // Step 2: Spawn coordinator task
-            let coordinator_id = harness.spawn_task(&cx, root_region_id, "coordinator").await
+            let coordinator_id = harness
+                .spawn_task(&cx, root_region_id, "coordinator")
+                .await
                 .expect("Coordinator task spawn should succeed");
 
             // Step 3: Acquire permit obligation
-            let permit_id = harness.acquire_obligation(&cx, coordinator_id, ObligationKind::Permit).await
+            let permit_id = harness
+                .acquire_obligation(&cx, coordinator_id, ObligationKind::Permit)
+                .await
                 .expect("Permit acquisition should succeed");
 
             // Step 4: Create child region
-            let child_region_id = harness.create_region(&cx, "child").await
+            let child_region_id = harness
+                .create_region(&cx, "child")
+                .await
                 .expect("Child region creation should succeed");
 
             // Step 5: Spawn worker task
-            let worker_id = harness.spawn_task(&cx, child_region_id, "worker").await
+            let worker_id = harness
+                .spawn_task(&cx, child_region_id, "worker")
+                .await
                 .expect("Worker task spawn should succeed");
 
             // Step 6: Acquire ack obligation
-            let ack_id = harness.acquire_obligation(&cx, worker_id, ObligationKind::Ack).await
+            let ack_id = harness
+                .acquire_obligation(&cx, worker_id, ObligationKind::Ack)
+                .await
                 .expect("Ack acquisition should succeed");
 
             harness.logger.phase("obligation_resolution");
 
             // Step 7: Commit permit obligation
-            harness.commit_obligation(&cx, permit_id).await
+            harness
+                .commit_obligation(&cx, permit_id)
+                .await
                 .expect("Permit commit should succeed");
 
             // Step 8: Abort ack obligation due to cancellation
-            harness.abort_obligation(&cx, ack_id, ObligationAbortReason::CancelledByParent).await
+            harness
+                .abort_obligation(&cx, ack_id, ObligationAbortReason::CancelledByParent)
+                .await
                 .expect("Ack abort should succeed");
 
             harness.logger.phase("region_cleanup");
 
             // Step 9: Close child region
-            harness.close_region(&cx, child_region_id).await
+            harness
+                .close_region(&cx, child_region_id)
+                .await
                 .expect("Child region close should succeed");
 
             // Step 10: Close root region
-            harness.close_region(&cx, root_region_id).await
+            harness
+                .close_region(&cx, root_region_id)
+                .await
                 .expect("Root region close should succeed");
 
             harness.logger.phase("verification");
 
             // Build causality DAG from trace
-            let analyzer = harness.build_causality_dag()
+            let analyzer = harness
+                .build_causality_dag()
                 .expect("DAG construction should succeed");
 
             // Verify causality invariants
-            analyzer.verify_causality_invariants()
+            analyzer
+                .verify_causality_invariants()
                 .expect("Causality invariants should hold");
 
             // Verify dependency graph structure
             let dependency_graph = analyzer.build_dependency_graph();
-            assert!(!dependency_graph.is_empty(), "Should have recorded dependencies");
+            assert!(
+                !dependency_graph.is_empty(),
+                "Should have recorded dependencies"
+            );
 
             // Verify critical path
             let critical_path = analyzer.get_critical_path();
-            assert!(critical_path.len() > 5, "Critical path should span multiple operations");
+            assert!(
+                critical_path.len() > 5,
+                "Critical path should span multiple operations"
+            );
 
             harness.logger.causality_event("verification_passed");
 
@@ -729,13 +833,22 @@ mod tests {
             let metrics = harness.get_runtime_metrics();
             assert_eq!(metrics["active_regions"], 2, "Should track both regions");
             assert_eq!(metrics["active_tasks"], 2, "Should track both tasks");
-            assert_eq!(metrics["active_obligations"], 2, "Should track both obligations");
-            assert!(metrics["trace_events"] > 10, "Should have recorded multiple trace events");
+            assert_eq!(
+                metrics["active_obligations"], 2,
+                "Should track both obligations"
+            );
+            assert!(
+                metrics["trace_events"] > 10,
+                "Should have recorded multiple trace events"
+            );
 
-            harness.logger.log_event("integration_test_completed_successfully");
+            harness
+                .logger
+                .log_event("integration_test_completed_successfully");
 
             Ok(())
-        }).expect("Integration test should complete successfully");
+        })
+        .expect("Integration test should complete successfully");
     }
 
     #[test]
@@ -754,32 +867,45 @@ mod tests {
             harness.logger.phase("obligation_transitions");
 
             // Test multiple obligation lifecycle paths
-            let permit_id = harness.acquire_obligation(&cx, task_id, ObligationKind::Permit).await?;
-            let ack_id = harness.acquire_obligation(&cx, task_id, ObligationKind::Ack).await?;
-            let lease_id = harness.acquire_obligation(&cx, task_id, ObligationKind::Lease).await?;
+            let permit_id = harness
+                .acquire_obligation(&cx, task_id, ObligationKind::Permit)
+                .await?;
+            let ack_id = harness
+                .acquire_obligation(&cx, task_id, ObligationKind::Ack)
+                .await?;
+            let lease_id = harness
+                .acquire_obligation(&cx, task_id, ObligationKind::Lease)
+                .await?;
 
             // Different resolution paths
             harness.commit_obligation(&cx, permit_id).await?;
-            harness.abort_obligation(&cx, ack_id, ObligationAbortReason::ResourceExhausted).await?;
+            harness
+                .abort_obligation(&cx, ack_id, ObligationAbortReason::ResourceExhausted)
+                .await?;
             harness.commit_obligation(&cx, lease_id).await?;
 
             harness.logger.phase("trace_analysis");
 
             // Analyze trace for obligation lifecycle patterns
             let analyzer = harness.build_causality_dag()?;
-            analyzer.verify_causality_invariants()
+            analyzer
+                .verify_causality_invariants()
                 .expect("Lifecycle should maintain causality invariants");
 
             // Verify that acquisition events precede resolution events in DAG
             let dependency_graph = analyzer.build_dependency_graph();
 
             // Check that we have proper event ordering
-            assert!(dependency_graph.len() >= 6, "Should have events for acquisition and resolution");
+            assert!(
+                dependency_graph.len() >= 6,
+                "Should have events for acquisition and resolution"
+            );
 
             harness.logger.causality_event("lifecycle_verified");
 
             Ok(())
-        }).expect("Lifecycle test should complete successfully");
+        })
+        .expect("Lifecycle test should complete successfully");
     }
 
     #[test]
@@ -801,16 +927,26 @@ mod tests {
 
                 // Each workflow gets its own region and tasks
                 let region_id = harness.create_region(&cx, &format!("region_{}", i)).await?;
-                let task_id = harness.spawn_task(&cx, region_id, &format!("task_{}", i)).await?;
+                let task_id = harness
+                    .spawn_task(&cx, region_id, &format!("task_{}", i))
+                    .await?;
 
                 // Create obligation in each workflow
-                let obligation_id = harness.acquire_obligation(&cx, task_id, ObligationKind::Permit).await?;
+                let obligation_id = harness
+                    .acquire_obligation(&cx, task_id, ObligationKind::Permit)
+                    .await?;
 
                 // Resolve obligations with different patterns
                 if i % 2 == 0 {
                     harness.commit_obligation(&cx, obligation_id).await?;
                 } else {
-                    harness.abort_obligation(&cx, obligation_id, ObligationAbortReason::CancelledByParent).await?;
+                    harness
+                        .abort_obligation(
+                            &cx,
+                            obligation_id,
+                            ObligationAbortReason::CancelledByParent,
+                        )
+                        .await?;
                 }
 
                 harness.close_region(&cx, region_id).await?;
@@ -820,17 +956,23 @@ mod tests {
 
             // Verify trace captured all concurrent activity correctly
             let analyzer = harness.build_causality_dag()?;
-            analyzer.verify_causality_invariants()
+            analyzer
+                .verify_causality_invariants()
                 .expect("Concurrent workflows should maintain causality");
 
             let metrics = harness.get_runtime_metrics();
-            assert!(metrics["trace_events"] >= num_workflows as u64 * 4,
-                "Should have events for each workflow step");
+            assert!(
+                metrics["trace_events"] >= num_workflows as u64 * 4,
+                "Should have events for each workflow step"
+            );
 
-            harness.logger.causality_event("concurrent_verification_passed");
+            harness
+                .logger
+                .causality_event("concurrent_verification_passed");
 
             Ok(())
-        }).expect("Concurrent workflows test should complete successfully");
+        })
+        .expect("Concurrent workflows test should complete successfully");
     }
 
     #[test]
@@ -845,7 +987,9 @@ mod tests {
             // Create scenario with intentional failures
             let region_id = harness.create_region(&cx, "error_region").await?;
             let task_id = harness.spawn_task(&cx, region_id, "error_task").await?;
-            let obligation_id = harness.acquire_obligation(&cx, task_id, ObligationKind::Permit).await?;
+            let obligation_id = harness
+                .acquire_obligation(&cx, task_id, ObligationKind::Permit)
+                .await?;
 
             // Simulate error by attempting to commit a non-existent obligation
             let fake_obligation_id = ObligationId::from_raw(99999);
@@ -865,12 +1009,14 @@ mod tests {
             let analyzer = harness.build_causality_dag()?;
 
             // Causality should still be valid even with failed operations
-            analyzer.verify_causality_invariants()
+            analyzer
+                .verify_causality_invariants()
                 .expect("Trace integrity should be maintained during errors");
 
             harness.logger.causality_event("error_handling_verified");
 
             Ok(())
-        }).expect("Error propagation test should complete successfully");
+        })
+        .expect("Error propagation test should complete successfully");
     }
 }

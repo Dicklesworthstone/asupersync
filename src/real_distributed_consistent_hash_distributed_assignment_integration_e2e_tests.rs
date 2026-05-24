@@ -21,21 +21,21 @@
 
 use crate::{
     cx::{Cx, Scope},
-    error::Outcome,
     distributed::{
-        consistent_hash::{
-            ConsistentHashRing, HashRingConfig, HashRingStats, NodeId, VirtualNode,
-            RingPosition, RebalanceEvent, KeyMovement,
-        },
-        assignment::{
-            AssignmentTable, AssignmentConfig, AssignmentEntry, AssignmentUpdate,
-            ConsistencyLevel, EventualConsistency, AssignmentStats,
-        },
         DistributedKey, DistributedValue, NodeWeight, TopologyChange,
+        assignment::{
+            AssignmentConfig, AssignmentEntry, AssignmentStats, AssignmentTable, AssignmentUpdate,
+            ConsistencyLevel, EventualConsistency,
+        },
+        consistent_hash::{
+            ConsistentHashRing, HashRingConfig, HashRingStats, KeyMovement, NodeId, RebalanceEvent,
+            RingPosition, VirtualNode,
+        },
     },
+    error::Outcome,
     runtime::RuntimeBuilder,
     sync::{Barrier, Mutex},
-    time::{Duration, Sleep, Instant},
+    time::{Duration, Instant, Sleep},
     types::{Budget, TaskId},
     util::{
         det_rng::{DetRng, RngSeed},
@@ -43,10 +43,10 @@ use crate::{
     },
 };
 use std::{
-    collections::{HashMap, HashSet, BTreeMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -106,7 +106,8 @@ impl ConsistencyEfficiencyTracker {
     }
 
     fn record_consistency_convergence(&self) -> u64 {
-        self.consistency_convergences.fetch_add(1, Ordering::Relaxed)
+        self.consistency_convergences
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     fn record_load_imbalance(&self) -> u64 {
@@ -263,7 +264,11 @@ impl MockDistributedNode {
         assigned_keys.clone()
     }
 
-    async fn synchronize_assignment_table(&self, cx: &Cx, other_table: &AssignmentTable) -> Outcome<()> {
+    async fn synchronize_assignment_table(
+        &self,
+        cx: &Cx,
+        other_table: &AssignmentTable,
+    ) -> Outcome<()> {
         let updates = other_table.get_all_assignments(cx).await?;
 
         for assignment in updates {
@@ -626,7 +631,8 @@ async fn test_assignment_consistency_concurrent_ring_changes() -> Outcome<()> {
                             weight,
                             assignment_config.clone(),
                             efficiency_tracker.clone(),
-                        ).await?;
+                        )
+                        .await?;
 
                         nodes.push(node);
                     }
@@ -646,7 +652,9 @@ async fn test_assignment_consistency_concurrent_ring_changes() -> Outcome<()> {
                     // Initial key distribution
                     for key in &keys {
                         let assigned_node_id = hash_ring.get_node(key)?;
-                        if let Some(node) = nodes.iter().find(|n| n.get_node_id() == assigned_node_id) {
+                        if let Some(node) =
+                            nodes.iter().find(|n| n.get_node_id() == assigned_node_id)
+                        {
                             node.assign_key(cx, key.clone()).await?;
                         }
                     }
@@ -664,7 +672,8 @@ async fn test_assignment_consistency_concurrent_ring_changes() -> Outcome<()> {
                                 Sleep::new(Duration::from_millis(20 + (i * 10))).await;
 
                                 // Add a temporary node
-                                let temp_node_id = NodeId::from_string(format!("temp_node_{}_{}", i, j));
+                                let temp_node_id =
+                                    NodeId::from_string(format!("temp_node_{}_{}", i, j));
                                 let weight = NodeWeight::from_value(100);
 
                                 match local_hash_ring.add_node(temp_node_id.clone(), weight) {
@@ -694,28 +703,29 @@ async fn test_assignment_consistency_concurrent_ring_changes() -> Outcome<()> {
                         let keys_ref = &keys;
                         let tracker = efficiency_tracker.clone();
 
-                        let handle = cx.spawn(&format!("assignment_update_{}", i), async move |cx| {
-                            for j in 0..5 {
-                                Sleep::new(Duration::from_millis(15 + (j * 5))).await;
+                        let handle =
+                            cx.spawn(&format!("assignment_update_{}", i), async move |cx| {
+                                for j in 0..5 {
+                                    Sleep::new(Duration::from_millis(15 + (j * 5))).await;
 
-                                // Update some random assignments
-                                let start_idx = (j * 50) % keys_ref.len();
-                                let end_idx = std::cmp::min(start_idx + 20, keys_ref.len());
+                                    // Update some random assignments
+                                    let start_idx = (j * 50) % keys_ref.len();
+                                    let end_idx = std::cmp::min(start_idx + 20, keys_ref.len());
 
-                                for k in start_idx..end_idx {
-                                    let key = &keys_ref[k];
-                                    let target_node = &nodes_ref[k % nodes_ref.len()];
+                                    for k in start_idx..end_idx {
+                                        let key = &keys_ref[k];
+                                        let target_node = &nodes_ref[k % nodes_ref.len()];
 
-                                    match target_node.assign_key(cx, key.clone()).await {
-                                        Ok(()) => tracker.record_assignment_update(),
-                                        Err(_) => {
-                                            // Concurrent update conflict - continue
+                                        match target_node.assign_key(cx, key.clone()).await {
+                                            Ok(()) => tracker.record_assignment_update(),
+                                            Err(_) => {
+                                                // Concurrent update conflict - continue
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            Ok(())
-                        })?;
+                                Ok(())
+                            })?;
 
                         operation_handles.push(handle);
                     }
@@ -729,7 +739,12 @@ async fn test_assignment_consistency_concurrent_ring_changes() -> Outcome<()> {
                             for i in 0..nodes.len() {
                                 for j in 0..nodes.len() {
                                     if i != j {
-                                        let _ = nodes[i].synchronize_assignment_table(cx, &nodes[j].assignment_table).await;
+                                        let _ = nodes[i]
+                                            .synchronize_assignment_table(
+                                                cx,
+                                                &nodes[j].assignment_table,
+                                            )
+                                            .await;
                                     }
                                 }
                             }
@@ -750,7 +765,9 @@ async fn test_assignment_consistency_concurrent_ring_changes() -> Outcome<()> {
                     for i in 0..nodes.len() {
                         for j in 0..nodes.len() {
                             if i != j {
-                                nodes[i].synchronize_assignment_table(cx, &nodes[j].assignment_table).await?;
+                                nodes[i]
+                                    .synchronize_assignment_table(cx, &nodes[j].assignment_table)
+                                    .await?;
                             }
                         }
                     }
@@ -761,9 +778,15 @@ async fn test_assignment_consistency_concurrent_ring_changes() -> Outcome<()> {
                         "Should achieve eventual consistency despite concurrent modifications"
                     );
 
-                    let rebalance_operations = efficiency_tracker.rebalance_operations.load(Ordering::Relaxed);
-                    let assignment_updates = efficiency_tracker.assignment_updates.load(Ordering::Relaxed);
-                    let consistency_convergences = efficiency_tracker.consistency_convergences.load(Ordering::Relaxed);
+                    let rebalance_operations = efficiency_tracker
+                        .rebalance_operations
+                        .load(Ordering::Relaxed);
+                    let assignment_updates = efficiency_tracker
+                        .assignment_updates
+                        .load(Ordering::Relaxed);
+                    let consistency_convergences = efficiency_tracker
+                        .consistency_convergences
+                        .load(Ordering::Relaxed);
 
                     assert!(
                         rebalance_operations > 0,
@@ -1054,10 +1077,8 @@ mod tests {
 
     #[test]
     fn test_distributed_key_generator_creation() {
-        let generator = DistributedKeyGenerator::new(
-            "test_prefix".to_string(),
-            RngSeed::new(12345),
-        );
+        let generator =
+            DistributedKeyGenerator::new("test_prefix".to_string(), RngSeed::new(12345));
 
         assert_eq!(generator.prefix, "test_prefix");
         assert_eq!(generator.get_generated_count(), 0);

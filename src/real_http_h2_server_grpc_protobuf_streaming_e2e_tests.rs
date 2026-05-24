@@ -210,7 +210,10 @@ mod tests {
                 flow_control_events: Arc::new(Mutex::new(VecDeque::new())),
             };
 
-            self.window_monitors.lock().unwrap().insert(stream_id, monitor.clone());
+            self.window_monitors
+                .lock()
+                .unwrap()
+                .insert(stream_id, monitor.clone());
             monitor
         }
 
@@ -237,7 +240,9 @@ mod tests {
                 let window_after = window_before.saturating_add(increment);
 
                 if stream_id == 0 {
-                    monitor.connection_window.store(window_after, Ordering::Relaxed);
+                    monitor
+                        .connection_window
+                        .store(window_after, Ordering::Relaxed);
                 } else {
                     monitor.stream_window.store(window_after, Ordering::Relaxed);
                 }
@@ -291,7 +296,11 @@ mod tests {
                         bytes_transferred: 0,
                     };
 
-                    monitor.flow_control_events.lock().unwrap().push_back(exhaustion_event);
+                    monitor
+                        .flow_control_events
+                        .lock()
+                        .unwrap()
+                        .push_back(exhaustion_event);
                 }
             }
         }
@@ -318,11 +327,24 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get(&stream_id)
-                .map(|monitor| monitor.flow_control_events.lock().unwrap().iter().cloned().collect())
+                .map(|monitor| {
+                    monitor
+                        .flow_control_events
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .cloned()
+                        .collect()
+                })
                 .unwrap_or_default()
         }
 
-        pub async fn simulate_chunked_encoding_pressure(&self, stream_id: u32, chunk_count: u32, chunk_size: u32) -> Result<(), H2Error> {
+        pub async fn simulate_chunked_encoding_pressure(
+            &self,
+            stream_id: u32,
+            chunk_count: u32,
+            chunk_size: u32,
+        ) -> Result<(), H2Error> {
             let monitor = self.create_window_monitor(stream_id);
 
             for i in 0..chunk_count {
@@ -359,7 +381,10 @@ mod tests {
             Self { stats }
         }
 
-        async fn handle_stream_test(&self, request: Request<StreamTestRequest>) -> Result<Response<ResponseStream<StreamTestMessage>>, Status> {
+        async fn handle_stream_test(
+            &self,
+            request: Request<StreamTestRequest>,
+        ) -> Result<Response<ResponseStream<StreamTestMessage>>, Status> {
             let req = request.into_inner();
 
             let mut stats = self.stats.lock().unwrap();
@@ -369,10 +394,13 @@ mod tests {
             Ok(Response::new(stream))
         }
 
-        async fn create_test_stream(&self, request: StreamTestRequest) -> ResponseStream<StreamTestMessage> {
-            use std::task::{Context, Poll};
-            use std::pin::Pin;
+        async fn create_test_stream(
+            &self,
+            request: StreamTestRequest,
+        ) -> ResponseStream<StreamTestMessage> {
             use futures_core::Stream;
+            use std::pin::Pin;
+            use std::task::{Context, Poll};
 
             let stats = Arc::clone(&self.stats);
 
@@ -386,7 +414,10 @@ mod tests {
             impl Stream for TestMessageStream {
                 type Item = Result<StreamTestMessage, Status>;
 
-                fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+                fn poll_next(
+                    mut self: Pin<&mut Self>,
+                    _cx: &mut Context<'_>,
+                ) -> Poll<Option<Self::Item>> {
                     if self.current_index >= self.request.message_count {
                         return Poll::Ready(None);
                     }
@@ -398,7 +429,10 @@ mod tests {
                     };
 
                     let payload_data = vec![0u8; payload_size as usize];
-                    let data_string = format!("Stream message {} for test {}", self.current_index, self.request.test_id);
+                    let data_string = format!(
+                        "Stream message {} for test {}",
+                        self.current_index, self.request.test_id
+                    );
 
                     let message = StreamTestMessage {
                         sequence: u64::from(self.current_index),
@@ -436,7 +470,11 @@ mod tests {
     }
 
     impl ServiceHandler for TestStreamingService {
-        fn call(&mut self, method: &str, request_bytes: Bytes) -> Pin<Box<dyn Future<Output = Result<Bytes, Status>> + Send + '_>> {
+        fn call(
+            &mut self,
+            method: &str,
+            request_bytes: Bytes,
+        ) -> Pin<Box<dyn Future<Output = Result<Bytes, Status>> + Send + '_>> {
             match method {
                 "/test.StreamingService/StreamTest" => {
                     // Decode request
@@ -458,11 +496,9 @@ mod tests {
                         Ok(Bytes::from(buf))
                     })
                 }
-                _ => {
-                    Box::pin(async move {
-                        Err(Status::new(StatusCode::Unimplemented, "Method not found"))
-                    })
-                }
+                _ => Box::pin(async move {
+                    Err(Status::new(StatusCode::Unimplemented, "Method not found"))
+                }),
             }
         }
     }
@@ -509,11 +545,20 @@ mod tests {
         assert_eq!(stats.bytes_streamed, 10240); // 10 * 1024
 
         let events = harness.get_window_events(stream_id);
-        assert!(!events.is_empty(), "Should have recorded flow control events");
+        assert!(
+            !events.is_empty(),
+            "Should have recorded flow control events"
+        );
 
         // Verify we have both data sends and window updates
-        let data_events = events.iter().filter(|e| e.event_type == FlowControlEventType::DataSent).count();
-        let window_events = events.iter().filter(|e| e.event_type == FlowControlEventType::WindowUpdate).count();
+        let data_events = events
+            .iter()
+            .filter(|e| e.event_type == FlowControlEventType::DataSent)
+            .count();
+        let window_events = events
+            .iter()
+            .filter(|e| e.event_type == FlowControlEventType::WindowUpdate)
+            .count();
 
         assert_eq!(data_events, 10);
         assert!(window_events > 0);
@@ -537,7 +582,12 @@ mod tests {
         let chunk_size = 16384; // 16KB chunks
         let chunk_count = 8;
 
-        assert!(harness.simulate_chunked_encoding_pressure(stream_id, chunk_count, chunk_size).await.is_ok());
+        assert!(
+            harness
+                .simulate_chunked_encoding_pressure(stream_id, chunk_count, chunk_size)
+                .await
+                .is_ok()
+        );
 
         let stats = harness.get_stats_snapshot();
         assert!(stats.window_update_frames_sent > 0);
@@ -547,12 +597,16 @@ mod tests {
         assert!(stats.stream_window_updates > 0);
 
         let events = harness.get_window_events(stream_id);
-        let window_exhaustions = events.iter()
+        let window_exhaustions = events
+            .iter()
             .filter(|e| e.event_type == FlowControlEventType::WindowExhausted)
             .count();
 
         // Large messages should trigger window exhaustion
-        assert!(window_exhaustions > 0, "Large messages should exhaust flow control windows");
+        assert!(
+            window_exhaustions > 0,
+            "Large messages should exhaust flow control windows"
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -596,8 +650,10 @@ mod tests {
         let events = harness.get_window_events(stream_id);
         assert!(events.len() >= iterations as usize); // At least one event per iteration
 
-        println!("✅ Sustained Load: {} bytes streamed, {} window updates",
-                stats.bytes_streamed, stats.window_update_frames_sent);
+        println!(
+            "✅ Sustained Load: {} bytes streamed, {} window updates",
+            stats.bytes_streamed, stats.window_update_frames_sent
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -616,7 +672,9 @@ mod tests {
 
         // Set initial window size low to force exhaustion
         let initial_window = 8192u32;
-        monitor.stream_window.store(initial_window, Ordering::Relaxed);
+        monitor
+            .stream_window
+            .store(initial_window, Ordering::Relaxed);
 
         // Send data to exhaust window
         let large_chunk = initial_window + 1000; // Exceed window
@@ -637,18 +695,22 @@ mod tests {
         assert!(stats.window_update_frames_sent >= 1);
 
         let events = harness.get_window_events(stream_id);
-        let exhaustion_events = events.iter()
+        let exhaustion_events = events
+            .iter()
             .filter(|e| e.event_type == FlowControlEventType::WindowExhausted)
             .count();
-        let recovery_events = events.iter()
+        let recovery_events = events
+            .iter()
             .filter(|e| e.event_type == FlowControlEventType::WindowUpdate)
             .count();
 
         assert!(exhaustion_events >= 1, "Should record window exhaustion");
         assert!(recovery_events >= 1, "Should record window recovery");
 
-        println!("✅ Window Exhaustion Recovery: {} exhaustions, {} recoveries",
-                exhaustion_events, recovery_events);
+        println!(
+            "✅ Window Exhaustion Recovery: {} exhaustions, {} recoveries",
+            exhaustion_events, recovery_events
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -697,19 +759,36 @@ mod tests {
         assert_eq!(stats.streams_created, 0); // We simulated manually
         assert!(stats.connection_window_updates >= 5);
         assert!(stats.stream_window_updates > 0);
-        assert!(stats.bytes_streamed >= u64::from(chunk_size * iterations * stream_ids.len() as u32));
+        assert!(
+            stats.bytes_streamed >= u64::from(chunk_size * iterations * stream_ids.len() as u32)
+        );
 
         // Verify independent flow control per stream
         for &stream_id in &stream_ids {
             let events = harness.get_window_events(stream_id);
-            assert!(!events.is_empty(), "Stream {} should have flow control events", stream_id);
+            assert!(
+                !events.is_empty(),
+                "Stream {} should have flow control events",
+                stream_id
+            );
 
-            let data_events = events.iter().filter(|e| e.event_type == FlowControlEventType::DataSent).count();
-            assert_eq!(data_events, iterations as usize, "Stream {} should have {} data events", stream_id, iterations);
+            let data_events = events
+                .iter()
+                .filter(|e| e.event_type == FlowControlEventType::DataSent)
+                .count();
+            assert_eq!(
+                data_events, iterations as usize,
+                "Stream {} should have {} data events",
+                stream_id, iterations
+            );
         }
 
-        println!("✅ Multi-Stream Flow Control: {} streams, {} total bytes, {} window updates",
-                stream_ids.len(), stats.bytes_streamed, stats.window_update_frames_sent);
+        println!(
+            "✅ Multi-Stream Flow Control: {} streams, {} total bytes, {} window updates",
+            stream_ids.len(),
+            stats.bytes_streamed,
+            stats.window_update_frames_sent
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -725,9 +804,9 @@ mod tests {
 
         // Complex integration scenario: multiple streams with mixed load patterns
         let scenarios = vec![
-            (21, 1024, 10),   // Small messages
-            (23, 16384, 5),   // Large messages
-            (25, 8192, 15),   // Medium messages, high count
+            (21, 1024, 10), // Small messages
+            (23, 16384, 5), // Large messages
+            (25, 8192, 15), // Medium messages, high count
         ];
 
         for (stream_id, chunk_size, iterations) in scenarios {
@@ -750,26 +829,46 @@ mod tests {
         // Final verification
         let final_stats = harness.get_stats_snapshot();
 
-        assert!(final_stats.window_update_frames_sent > 0, "Should send WINDOW_UPDATE frames");
-        assert!(final_stats.stream_window_updates > 0, "Should update stream windows");
+        assert!(
+            final_stats.window_update_frames_sent > 0,
+            "Should send WINDOW_UPDATE frames"
+        );
+        assert!(
+            final_stats.stream_window_updates > 0,
+            "Should update stream windows"
+        );
         assert!(final_stats.bytes_streamed > 0, "Should stream data");
 
         // Verify comprehensive flow control behavior
         for (stream_id, _, _) in scenarios {
             let events = harness.get_window_events(stream_id);
-            assert!(!events.is_empty(), "Stream {} should have events", stream_id);
+            assert!(
+                !events.is_empty(),
+                "Stream {} should have events",
+                stream_id
+            );
 
             // Should have both data and window update events
-            let has_data = events.iter().any(|e| e.event_type == FlowControlEventType::DataSent);
-            let has_window_update = events.iter().any(|e| e.event_type == FlowControlEventType::WindowUpdate);
+            let has_data = events
+                .iter()
+                .any(|e| e.event_type == FlowControlEventType::DataSent);
+            let has_window_update = events
+                .iter()
+                .any(|e| e.event_type == FlowControlEventType::WindowUpdate);
 
             assert!(has_data, "Stream {} should have data events", stream_id);
-            assert!(has_window_update, "Stream {} should have window update events", stream_id);
+            assert!(
+                has_window_update,
+                "Stream {} should have window update events",
+                stream_id
+            );
         }
 
         println!("✅ HTTP/2 ↔ gRPC Flow Control Integration Test Complete");
         println!("📊 Final Stats: {:?}", final_stats);
-        println!("🎯 Window Updates: {}, Bytes Streamed: {}",
-                final_stats.window_update_frames_sent, final_stats.bytes_streamed);
+        println!(
+            "🎯 Window Updates: {}, Bytes Streamed: {}",
+            final_stats.window_update_frames_sent, final_stats.bytes_streamed
+        );
     }
 }

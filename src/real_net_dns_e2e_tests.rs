@@ -316,120 +316,121 @@ mod real_net_dns_e2e {
     #[test]
     fn test_dns_lookup_cache_ttl_cycle() {
         crate::lab::runtime::block_on(async {
-        let harness = Arc::new(DnsTestHarness::new().await);
-        harness.log("test_start", json!({"test": "dns_lookup_cache_ttl_cycle"}));
+            let harness = Arc::new(DnsTestHarness::new().await);
+            harness.log("test_start", json!({"test": "dns_lookup_cache_ttl_cycle"}));
 
-        // Test domains with different characteristics
-        let test_domains = vec![
-            ("google.com", RecordType::A),
-            ("cloudflare.com", RecordType::A),
-            ("github.com", RecordType::AAAA),
-        ];
+            // Test domains with different characteristics
+            let test_domains = vec![
+                ("google.com", RecordType::A),
+                ("cloudflare.com", RecordType::A),
+                ("github.com", RecordType::AAAA),
+            ];
 
-        harness.snapshot_cache_stats();
+            harness.snapshot_cache_stats();
 
-        // Phase 1: Initial lookups (cache misses)
-        for (domain, record_type) in &test_domains {
-            match harness.resolve_with_cache(domain, *record_type).await {
-                Ok(records) => {
+            // Phase 1: Initial lookups (cache misses)
+            for (domain, record_type) in &test_domains {
+                match harness.resolve_with_cache(domain, *record_type).await {
+                    Ok(records) => {
+                        harness.log(
+                            "initial_lookup",
+                            json!({
+                                "domain": domain,
+                                "record_type": format!("{:?}", record_type),
+                                "record_count": records.len()
+                            }),
+                        );
+                        assert!(!records.is_empty(), "Should get DNS records for {}", domain);
+                    }
+                    Err(e) => {
+                        harness.log(
+                            "initial_lookup_failed",
+                            json!({
+                                "domain": domain,
+                                "error": e
+                            }),
+                        );
+                        // Continue with other domains
+                    }
+                }
+            }
+
+            harness.snapshot_cache_stats();
+
+            // Phase 2: Immediate re-lookups (cache hits)
+            for (domain, record_type) in &test_domains {
+                let hit_start = Instant::now();
+                if let Ok(_) = harness.resolve_with_cache(domain, *record_type).await {
+                    let hit_time = hit_start.elapsed();
+
                     harness.log(
-                        "initial_lookup",
+                        "cache_hit_lookup",
                         json!({
                             "domain": domain,
                             "record_type": format!("{:?}", record_type),
-                            "record_count": records.len()
+                            "hit_time_ms": hit_time.as_millis()
                         }),
                     );
-                    assert!(!records.is_empty(), "Should get DNS records for {}", domain);
+
+                    // Cache hits should be very fast
+                    assert!(
+                        hit_time < Duration::from_millis(10),
+                        "Cache hit for {} should be under 10ms, got {}ms",
+                        domain,
+                        hit_time.as_millis()
+                    );
                 }
-                Err(e) => {
+            }
+
+            harness.snapshot_cache_stats();
+
+            // Phase 3: Wait for TTL expiration (simulate short TTL)
+            harness.log("waiting_for_ttl_expiration", json!({"wait_time_ms": 500}));
+            sleep(Duration::from_millis(500)).await;
+
+            // Force cache cleanup
+            harness.cache.cleanup_expired().await;
+            harness.snapshot_cache_stats();
+
+            // Phase 4: Post-TTL lookups (should be cache misses again)
+            for (domain, record_type) in &test_domains {
+                let post_ttl_start = Instant::now();
+                if let Ok(_) = harness.resolve_with_cache(domain, *record_type).await {
+                    let post_ttl_time = post_ttl_start.elapsed();
+
                     harness.log(
-                        "initial_lookup_failed",
+                        "post_ttl_lookup",
                         json!({
                             "domain": domain,
-                            "error": e
+                            "record_type": format!("{:?}", record_type),
+                            "response_time_ms": post_ttl_time.as_millis()
                         }),
                     );
-                    // Continue with other domains
                 }
             }
-        }
 
-        harness.snapshot_cache_stats();
+            harness.snapshot_cache_stats();
 
-        // Phase 2: Immediate re-lookups (cache hits)
-        for (domain, record_type) in &test_domains {
-            let hit_start = Instant::now();
-            if let Ok(_) = harness.resolve_with_cache(domain, *record_type).await {
-                let hit_time = hit_start.elapsed();
+            // Validate cache behavior
+            let validation_result = harness.validate_cache_behavior();
+            assert!(
+                validation_result.is_ok(),
+                "Cache behavior validation failed: {:?}",
+                validation_result
+            );
 
-                harness.log(
-                    "cache_hit_lookup",
-                    json!({
-                        "domain": domain,
-                        "record_type": format!("{:?}", record_type),
-                        "hit_time_ms": hit_time.as_millis()
-                    }),
-                );
+            harness.log(
+                "test_result",
+                json!({
+                    "passed": true,
+                    "cache_cycles_validated": true,
+                    "message": "DNS lookup → cache → TTL invalidation cycle validated successfully"
+                }),
+            );
 
-                // Cache hits should be very fast
-                assert!(
-                    hit_time < Duration::from_millis(10),
-                    "Cache hit for {} should be under 10ms, got {}ms",
-                    domain,
-                    hit_time.as_millis()
-                );
-            }
-        }
-
-        harness.snapshot_cache_stats();
-
-        // Phase 3: Wait for TTL expiration (simulate short TTL)
-        harness.log("waiting_for_ttl_expiration", json!({"wait_time_ms": 500}));
-        sleep(Duration::from_millis(500)).await;
-
-        // Force cache cleanup
-        harness.cache.cleanup_expired().await;
-        harness.snapshot_cache_stats();
-
-        // Phase 4: Post-TTL lookups (should be cache misses again)
-        for (domain, record_type) in &test_domains {
-            let post_ttl_start = Instant::now();
-            if let Ok(_) = harness.resolve_with_cache(domain, *record_type).await {
-                let post_ttl_time = post_ttl_start.elapsed();
-
-                harness.log(
-                    "post_ttl_lookup",
-                    json!({
-                        "domain": domain,
-                        "record_type": format!("{:?}", record_type),
-                        "response_time_ms": post_ttl_time.as_millis()
-                    }),
-                );
-            }
-        }
-
-        harness.snapshot_cache_stats();
-
-        // Validate cache behavior
-        let validation_result = harness.validate_cache_behavior();
-        assert!(
-            validation_result.is_ok(),
-            "Cache behavior validation failed: {:?}",
-            validation_result
-        );
-
-        harness.log(
-            "test_result",
-            json!({
-                "passed": true,
-                "cache_cycles_validated": true,
-                "message": "DNS lookup → cache → TTL invalidation cycle validated successfully"
-            }),
-        );
-
-        Ok::<(), Box<dyn std::error::Error>>(())
-        }).unwrap();
+            Ok::<(), Box<dyn std::error::Error>>(())
+        })
+        .unwrap();
     }
 
     #[tokio::test]

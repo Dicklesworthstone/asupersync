@@ -40,21 +40,21 @@ mod tests {
         dead_code
     )]
 
+    use crate::bytes::Bytes;
+    use crate::cx::Cx;
+    use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use crate::lab::network::{
         config::{NetworkConditions, NetworkConfig},
         harness::{FaultScript, NetworkHarness, SimNode},
         network::{HostId, SimulatedNetwork},
     };
     use crate::net::tcp::{TcpListener, TcpStream, TcpStreamBuilder};
-    use crate::bytes::Bytes;
-    use crate::cx::Cx;
-    use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-    use crate::types::Time;
     use crate::runtime::region::Region;
+    use crate::types::Time;
     use std::collections::HashMap;
     use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::time::Duration;
 
     /// Test phases for lab network-TCP integration testing
@@ -172,7 +172,11 @@ mod tests {
         }
 
         /// Create lab network with configurable fault injection
-        fn create_fault_injection_network(&self, loss_rate: f64, reorder_rate: f64) -> SimulatedNetwork {
+        fn create_fault_injection_network(
+            &self,
+            loss_rate: f64,
+            reorder_rate: f64,
+        ) -> SimulatedNetwork {
             let config = NetworkConfig {
                 default_conditions: NetworkConditions {
                     packet_loss: loss_rate,
@@ -218,7 +222,8 @@ mod tests {
             // Simulate connection establishment
             let _client_stream = match TcpStreamBuilder::new(server_addr)
                 .connect_timeout(Duration::from_secs(5))
-                .connect().await
+                .connect()
+                .await
             {
                 Ok(stream) => {
                     self.increment_tcp_stat("connection_established", 1);
@@ -264,16 +269,23 @@ mod tests {
             // Simulate server and client addresses
             let server_port = self.get_next_port();
             let client_port = self.get_next_port();
-            let server_addr: SocketAddr = format!("127.0.0.1:{}", server_port).parse()
+            let server_addr: SocketAddr = format!("127.0.0.1:{}", server_port)
+                .parse()
                 .map_err(|e| format!("Invalid server address: {:?}", e))?;
-            let client_addr: SocketAddr = format!("127.0.0.1:{}", client_port).parse()
+            let client_addr: SocketAddr = format!("127.0.0.1:{}", client_port)
+                .parse()
                 .map_err(|e| format!("Invalid client address: {:?}", e))?;
 
             // Perform data transfer simulation
-            match self.simulate_tcp_transfer_with_faults(cx, client_addr, server_addr, test_data.clone()).await {
+            match self
+                .simulate_tcp_transfer_with_faults(cx, client_addr, server_addr, test_data.clone())
+                .await
+            {
                 Ok(received_data) => {
                     // Verify data integrity despite network faults
-                    let integrity_ok = self.integrity_tracker.verify_data_integrity(&test_data, &received_data);
+                    let integrity_ok = self
+                        .integrity_tracker
+                        .verify_data_integrity(&test_data, &received_data);
 
                     if integrity_ok {
                         self.increment_tcp_stat("integrity_verified", 1);
@@ -283,7 +295,7 @@ mod tests {
 
                     Ok(integrity_ok)
                 }
-                Err(e) => Err(format!("Transfer simulation failed: {}", e))
+                Err(e) => Err(format!("Transfer simulation failed: {}", e)),
             }
         }
 
@@ -311,7 +323,15 @@ mod tests {
             result.phase = LabNetworkTcpTestPhase::DataTransmission;
 
             // Test data transfer with packet loss
-            match self.execute_data_transfer_with_integrity_check(cx, 1024, packet_loss_rate, reorder_rate).await {
+            match self
+                .execute_data_transfer_with_integrity_check(
+                    cx,
+                    1024,
+                    packet_loss_rate,
+                    reorder_rate,
+                )
+                .await
+            {
                 Ok(integrity_preserved) => {
                     result.data_integrity_preserved = integrity_preserved;
                     result.tcp_stats.data_bytes_sent = 1024;
@@ -365,7 +385,15 @@ mod tests {
             result.phase = LabNetworkTcpTestPhase::DataTransmission;
 
             // Test data transfer with packet reordering
-            match self.execute_data_transfer_with_integrity_check(cx, 2048, packet_loss_rate, reorder_rate).await {
+            match self
+                .execute_data_transfer_with_integrity_check(
+                    cx,
+                    2048,
+                    packet_loss_rate,
+                    reorder_rate,
+                )
+                .await
+            {
                 Ok(integrity_preserved) => {
                     result.data_integrity_preserved = integrity_preserved;
                     result.tcp_stats.data_bytes_sent = 2048;
@@ -416,7 +444,15 @@ mod tests {
             result.phase = LabNetworkTcpTestPhase::DataTransmission;
 
             // Test larger data transfer under high loss
-            match self.execute_data_transfer_with_integrity_check(cx, 8192, packet_loss_rate, reorder_rate).await {
+            match self
+                .execute_data_transfer_with_integrity_check(
+                    cx,
+                    8192,
+                    packet_loss_rate,
+                    reorder_rate,
+                )
+                .await
+            {
                 Ok(integrity_preserved) => {
                     result.data_integrity_preserved = integrity_preserved;
                     result.tcp_stats.data_bytes_sent = 8192;
@@ -442,7 +478,10 @@ mod tests {
         }
 
         /// Test comprehensive lab network-TCP integration
-        async fn test_comprehensive_lab_network_tcp_integration(&mut self, cx: &Cx) -> LabNetworkTcpTestResult {
+        async fn test_comprehensive_lab_network_tcp_integration(
+            &mut self,
+            cx: &Cx,
+        ) -> LabNetworkTcpTestResult {
             let mut result = LabNetworkTcpTestResult {
                 success: false,
                 phase: LabNetworkTcpTestPhase::Initial,
@@ -459,42 +498,47 @@ mod tests {
             let resilience_result = self.test_high_loss_rate_resilience(cx).await;
 
             // Aggregate statistics
-            result.network_stats.packets_dropped = loss_result.network_stats.packets_dropped +
-                reorder_result.network_stats.packets_dropped +
-                resilience_result.network_stats.packets_dropped;
+            result.network_stats.packets_dropped = loss_result.network_stats.packets_dropped
+                + reorder_result.network_stats.packets_dropped
+                + resilience_result.network_stats.packets_dropped;
 
-            result.network_stats.packets_reordered = loss_result.network_stats.packets_reordered +
-                reorder_result.network_stats.packets_reordered +
-                resilience_result.network_stats.packets_reordered;
+            result.network_stats.packets_reordered = loss_result.network_stats.packets_reordered
+                + reorder_result.network_stats.packets_reordered
+                + resilience_result.network_stats.packets_reordered;
 
-            result.tcp_stats.data_bytes_sent = loss_result.tcp_stats.data_bytes_sent +
-                reorder_result.tcp_stats.data_bytes_sent +
-                resilience_result.tcp_stats.data_bytes_sent;
+            result.tcp_stats.data_bytes_sent = loss_result.tcp_stats.data_bytes_sent
+                + reorder_result.tcp_stats.data_bytes_sent
+                + resilience_result.tcp_stats.data_bytes_sent;
 
-            result.tcp_stats.transfer_integrity_verified = loss_result.tcp_stats.transfer_integrity_verified +
-                reorder_result.tcp_stats.transfer_integrity_verified +
-                resilience_result.tcp_stats.transfer_integrity_verified;
+            result.tcp_stats.transfer_integrity_verified =
+                loss_result.tcp_stats.transfer_integrity_verified
+                    + reorder_result.tcp_stats.transfer_integrity_verified
+                    + resilience_result.tcp_stats.transfer_integrity_verified;
 
             // Check overall success
-            result.success = loss_result.success && reorder_result.success && resilience_result.success;
-            result.data_integrity_preserved = loss_result.data_integrity_preserved &&
-                reorder_result.data_integrity_preserved &&
-                resilience_result.data_integrity_preserved;
-            result.retransmission_functional = loss_result.retransmission_functional &&
-                reorder_result.retransmission_functional &&
-                resilience_result.retransmission_functional;
+            result.success =
+                loss_result.success && reorder_result.success && resilience_result.success;
+            result.data_integrity_preserved = loss_result.data_integrity_preserved
+                && reorder_result.data_integrity_preserved
+                && resilience_result.data_integrity_preserved;
+            result.retransmission_functional = loss_result.retransmission_functional
+                && reorder_result.retransmission_functional
+                && resilience_result.retransmission_functional;
 
             // Verify no integrity violations across all tests
             if !self.integrity_tracker.has_integrity_violations() {
-                result.network_stats.data_integrity_checks = self.integrity_tracker.get_verification_count() as u32;
+                result.network_stats.data_integrity_checks =
+                    self.integrity_tracker.get_verification_count() as u32;
             } else {
-                result.error = Some("Data integrity violations detected across test runs".to_string());
+                result.error =
+                    Some("Data integrity violations detected across test runs".to_string());
             }
 
             if result.success {
                 result.phase = LabNetworkTcpTestPhase::Complete;
             } else {
-                result.error = Some("One or more lab network-TCP integration tests failed".to_string());
+                result.error =
+                    Some("One or more lab network-TCP integration tests failed".to_string());
             }
 
             result
@@ -507,14 +551,19 @@ mod tests {
             let mut harness = LabNetworkTcpTestHarness::new("packet_loss_recovery");
             let result = harness.test_basic_packet_loss_recovery(&cx).await;
 
-            assert!(result.success, "Basic packet loss recovery failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Basic packet loss recovery failed: {:?}",
+                result.error
+            );
             assert!(result.data_integrity_preserved);
             assert!(result.retransmission_functional);
             assert_eq!(result.phase, LabNetworkTcpTestPhase::Complete);
             assert!(result.network_stats.packets_dropped > 0);
             assert!(result.tcp_stats.transfer_integrity_verified > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -523,13 +572,18 @@ mod tests {
             let mut harness = LabNetworkTcpTestHarness::new("packet_reordering");
             let result = harness.test_packet_reordering_tolerance(&cx).await;
 
-            assert!(result.success, "Packet reordering tolerance failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Packet reordering tolerance failed: {:?}",
+                result.error
+            );
             assert!(result.data_integrity_preserved);
             assert!(result.retransmission_functional);
             assert!(result.network_stats.packets_reordered > 0);
             assert!(result.tcp_stats.data_bytes_sent > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -538,23 +592,34 @@ mod tests {
             let mut harness = LabNetworkTcpTestHarness::new("high_loss_resilience");
             let result = harness.test_high_loss_rate_resilience(&cx).await;
 
-            assert!(result.success, "High loss rate resilience failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "High loss rate resilience failed: {:?}",
+                result.error
+            );
             assert!(result.data_integrity_preserved);
             assert!(result.retransmission_functional);
             assert!(result.network_stats.packets_dropped > 0);
             assert!(result.tcp_stats.large_transfers_completed > 0);
             assert!(result.network_stats.retransmissions_triggered > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn test_lab_network_comprehensive_tcp_integration() {
         crate::lab::runtime::test_with_lab(|cx| async move {
             let mut harness = LabNetworkTcpTestHarness::new("comprehensive_lab_network_tcp");
-            let result = harness.test_comprehensive_lab_network_tcp_integration(&cx).await;
+            let result = harness
+                .test_comprehensive_lab_network_tcp_integration(&cx)
+                .await;
 
-            assert!(result.success, "Comprehensive lab network-TCP integration failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Comprehensive lab network-TCP integration failed: {:?}",
+                result.error
+            );
             assert!(result.data_integrity_preserved);
             assert!(result.retransmission_functional);
             let network_stats = result.network_stats;
@@ -566,6 +631,7 @@ mod tests {
             assert!(tcp_stats.data_bytes_sent > 0);
             assert!(tcp_stats.transfer_integrity_verified > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

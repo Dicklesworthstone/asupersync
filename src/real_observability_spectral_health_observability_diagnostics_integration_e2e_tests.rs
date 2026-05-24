@@ -18,39 +18,33 @@
 //! 4. **Continuity Guarantee**: No metric loss during snapshot operations
 
 use crate::{
+    Result,
     cx::Cx,
     observability::{
         diagnostics::{
-            DiagnosticCapture, DiagnosticSnapshot, DiagnosticSnapshotConfig,
-            DiagnosticTrigger, SnapshotMetrics, SnapshotScope,
+            DiagnosticCapture, DiagnosticSnapshot, DiagnosticSnapshotConfig, DiagnosticTrigger,
+            SnapshotMetrics, SnapshotScope,
         },
         metrics::{
-            Counter, Gauge, Histogram, MetricRegistry, MetricValue,
-            TimeSeriesData, MetricCollector,
-        },
-        spectral_health::{
-            AnomalyDetector, HealthAnalyzer, HealthMetric, HealthScore,
-            HealthThreshold, SpectralAnalysis, SpectralHealthConfig,
-            HealthAnomalyEvent, AnomalyType,
+            Counter, Gauge, Histogram, MetricCollector, MetricRegistry, MetricValue, TimeSeriesData,
         },
         resource_accounting::{ResourceTracker, ResourceUsage},
+        spectral_health::{
+            AnomalyDetector, AnomalyType, HealthAnalyzer, HealthAnomalyEvent, HealthMetric,
+            HealthScore, HealthThreshold, SpectralAnalysis, SpectralHealthConfig,
+        },
         task_inspector::{TaskMetrics, TaskObservability},
     },
-    runtime::{RuntimeBuilder, LabRuntime, LabRuntimeBuilder},
+    runtime::{LabRuntime, LabRuntimeBuilder, RuntimeBuilder},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
     types::{
-        budget::Budget,
-        cancel::CancelToken,
-        outcome::Outcome,
-        region::RegionId,
-        task::TaskId,
+        budget::Budget, cancel::CancelToken, outcome::Outcome, region::RegionId, task::TaskId,
     },
     util::{rng::DetRng, time::TimeSource},
-    Result,
 };
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -111,33 +105,46 @@ impl InFlightMetricsTracker {
     fn update_counter(&self, name: String, value: u64) {
         {
             let mut counters = self.active_counters.write();
-            counters.entry(name.clone()).or_insert_with(|| AtomicU64::new(0))
+            counters
+                .entry(name.clone())
+                .or_insert_with(|| AtomicU64::new(0))
                 .fetch_add(value, Ordering::Release);
         }
 
         {
             let mut times = self.metric_capture_times.write();
-            times.entry(name).or_insert_with(Vec::new).push(Instant::now());
+            times
+                .entry(name)
+                .or_insert_with(Vec::new)
+                .push(Instant::now());
         }
     }
 
     fn update_gauge(&self, name: String, value: u64) {
         {
             let mut gauges = self.active_gauges.write();
-            gauges.entry(name.clone()).or_insert_with(|| AtomicU64::new(0))
+            gauges
+                .entry(name.clone())
+                .or_insert_with(|| AtomicU64::new(0))
                 .store(value, Ordering::Release);
         }
 
         {
             let mut times = self.metric_capture_times.write();
-            times.entry(name).or_insert_with(Vec::new).push(Instant::now());
+            times
+                .entry(name)
+                .or_insert_with(Vec::new)
+                .push(Instant::now());
         }
     }
 
     fn record_histogram_sample(&self, name: String, value: u64) {
         {
             let mut histograms = self.active_histograms.write();
-            histograms.entry(name.clone()).or_insert_with(VecDeque::new).push_back(value);
+            histograms
+                .entry(name.clone())
+                .or_insert_with(VecDeque::new)
+                .push_back(value);
 
             // Keep histogram bounded
             if let Some(hist) = histograms.get_mut(&name) {
@@ -149,7 +156,10 @@ impl InFlightMetricsTracker {
 
         {
             let mut times = self.metric_capture_times.write();
-            times.entry(name).or_insert_with(Vec::new).push(Instant::now());
+            times
+                .entry(name)
+                .or_insert_with(Vec::new)
+                .push(Instant::now());
         }
     }
 
@@ -161,7 +171,9 @@ impl InFlightMetricsTracker {
         // Verify all active metrics are preserved in snapshot
         for (name, counter) in counters.iter() {
             let current_value = counter.load(Ordering::Acquire);
-            if !snapshot.contains_metric(name) || snapshot.get_counter_value(name) != Some(current_value) {
+            if !snapshot.contains_metric(name)
+                || snapshot.get_counter_value(name) != Some(current_value)
+            {
                 self.preservation_violations.fetch_add(1, Ordering::Release);
                 return false;
             }
@@ -169,7 +181,9 @@ impl InFlightMetricsTracker {
 
         for (name, gauge) in gauges.iter() {
             let current_value = gauge.load(Ordering::Acquire);
-            if !snapshot.contains_metric(name) || snapshot.get_gauge_value(name) != Some(current_value) {
+            if !snapshot.contains_metric(name)
+                || snapshot.get_gauge_value(name) != Some(current_value)
+            {
                 self.preservation_violations.fetch_add(1, Ordering::Release);
                 return false;
             }
@@ -232,10 +246,9 @@ impl DiagnosticSnapshotCoordinator {
         };
 
         // Capture snapshot while preserving in-flight metrics
-        let snapshot = self.capture_snapshot_with_preservation(
-            &diagnostic_trigger,
-            metrics_tracker,
-        ).await?;
+        let snapshot = self
+            .capture_snapshot_with_preservation(&diagnostic_trigger, metrics_tracker)
+            .await?;
 
         let capture_time = capture_start.elapsed();
         {
@@ -361,9 +374,7 @@ struct SnapshotIntegrityResult {
 
 impl SnapshotIntegrityResult {
     fn is_successful(&self) -> bool {
-        self.total_snapshots > 0
-            && self.invalid_snapshots == 0
-            && self.preservation_failures == 0
+        self.total_snapshots > 0 && self.invalid_snapshots == 0 && self.preservation_failures == 0
     }
 }
 
@@ -455,17 +466,14 @@ impl SpectralHealthDiagnosticsTestHarness {
             );
 
             // Trigger diagnostic snapshot capture
-            let captured_snapshot = self.snapshot_coordinator.trigger_snapshot_capture(
-                &anomaly_event,
-                &self.metrics_tracker,
-            ).await?;
+            let captured_snapshot = self
+                .snapshot_coordinator
+                .trigger_snapshot_capture(&anomaly_event, &self.metrics_tracker)
+                .await?;
 
             // Verify snapshot integrity immediately
             if !captured_snapshot.metrics_preserved {
-                return Err(format!(
-                    "Metric preservation failed for anomaly trigger {}",
-                    i
-                ).into());
+                return Err(format!("Metric preservation failed for anomaly trigger {}", i).into());
             }
 
             // Continue metric generation during snapshot
@@ -480,13 +488,19 @@ impl SpectralHealthDiagnosticsTestHarness {
 
     async fn start_continuous_metric_generation(&self, cx: &Cx) -> Result<()> {
         // Generate baseline metrics
-        self.metrics_tracker.update_counter("requests_total".to_string(), 1);
-        self.metrics_tracker.update_gauge("active_connections".to_string(), 42);
-        self.metrics_tracker.record_histogram_sample("response_time_ms".to_string(), 125);
+        self.metrics_tracker
+            .update_counter("requests_total".to_string(), 1);
+        self.metrics_tracker
+            .update_gauge("active_connections".to_string(), 42);
+        self.metrics_tracker
+            .record_histogram_sample("response_time_ms".to_string(), 125);
 
-        self.metrics_tracker.update_counter("errors_total".to_string(), 1);
-        self.metrics_tracker.update_gauge("memory_usage_bytes".to_string(), 1024 * 1024);
-        self.metrics_tracker.record_histogram_sample("cpu_usage_percent".to_string(), 25);
+        self.metrics_tracker
+            .update_counter("errors_total".to_string(), 1);
+        self.metrics_tracker
+            .update_gauge("memory_usage_bytes".to_string(), 1024 * 1024);
+        self.metrics_tracker
+            .record_histogram_sample("cpu_usage_percent".to_string(), 25);
 
         Ok(())
     }
@@ -494,9 +508,12 @@ impl SpectralHealthDiagnosticsTestHarness {
     async fn continue_metric_generation_during_snapshot(&self, cx: &Cx) -> Result<()> {
         // Continue generating metrics while snapshot is being captured
         for i in 0..5 {
-            self.metrics_tracker.update_counter("requests_total".to_string(), 1);
-            self.metrics_tracker.update_gauge("active_connections".to_string(), 42 + i);
-            self.metrics_tracker.record_histogram_sample("response_time_ms".to_string(), 125 + (i * 10));
+            self.metrics_tracker
+                .update_counter("requests_total".to_string(), 1);
+            self.metrics_tracker
+                .update_gauge("active_connections".to_string(), 42 + i);
+            self.metrics_tracker
+                .record_histogram_sample("response_time_ms".to_string(), 125 + (i * 10));
 
             cx.sleep(Duration::from_millis(10)).await;
         }
@@ -513,7 +530,8 @@ impl SpectralHealthDiagnosticsTestHarness {
                 integrity_result.valid_snapshots,
                 integrity_result.total_snapshots,
                 integrity_result.preservation_failures
-            ).into());
+            )
+            .into());
         }
 
         // Verify metric preservation
@@ -522,7 +540,8 @@ impl SpectralHealthDiagnosticsTestHarness {
             return Err(format!(
                 "Metric preservation violations detected: {}",
                 preservation_violations
-            ).into());
+            )
+            .into());
         }
 
         // Verify capture performance
@@ -534,20 +553,16 @@ impl SpectralHealthDiagnosticsTestHarness {
         if avg_capture_time > self.integration_timeout {
             return Err(format!(
                 "Average capture time {:?} exceeded timeout {:?}",
-                avg_capture_time,
-                self.integration_timeout
-            ).into());
+                avg_capture_time, self.integration_timeout
+            )
+            .into());
         }
 
         let (counters, gauges, histograms) = self.metrics_tracker.get_active_metrics_count();
 
         println!(
             "Spectral health/diagnostics integration verified: {} snapshots, {:?} avg capture time, {}/{}/{} metrics",
-            snapshot_count,
-            avg_capture_time,
-            counters,
-            gauges,
-            histograms
+            snapshot_count, avg_capture_time, counters, gauges, histograms
         );
 
         Ok(())
@@ -755,18 +770,27 @@ mod tests {
         );
 
         // Run anomaly detection simulation
-        harness.simulate_spectral_health_anomaly_detection(
-            &cx,
-            vec![scenario],
-        ).await?;
+        harness
+            .simulate_spectral_health_anomaly_detection(&cx, vec![scenario])
+            .await?;
 
         // Verify snapshot was captured
         let snapshots = harness.snapshot_coordinator.get_captured_snapshots();
-        assert_eq!(snapshots.len(), 1, "Should capture exactly one diagnostic snapshot");
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "Should capture exactly one diagnostic snapshot"
+        );
 
         let snapshot = &snapshots[0];
-        assert!(snapshot.metrics_preserved, "Metrics should be preserved during capture");
-        assert!(snapshot.snapshot.is_valid(), "Captured snapshot should be valid");
+        assert!(
+            snapshot.metrics_preserved,
+            "Metrics should be preserved during capture"
+        );
+        assert!(
+            snapshot.snapshot.is_valid(),
+            "Captured snapshot should be valid"
+        );
 
         Ok(())
     }
@@ -791,20 +815,39 @@ mod tests {
         );
 
         // Trigger snapshot capture
-        let captured_snapshot = harness.snapshot_coordinator.trigger_snapshot_capture(
-            &anomaly_event,
-            &harness.metrics_tracker,
-        ).await?;
+        let captured_snapshot = harness
+            .snapshot_coordinator
+            .trigger_snapshot_capture(&anomaly_event, &harness.metrics_tracker)
+            .await?;
 
         // Verify metric preservation
-        assert!(captured_snapshot.metrics_preserved, "Metrics should be preserved during snapshot");
-        assert!(captured_snapshot.snapshot.contains_metric("requests_total"), "Counter metrics should be captured");
-        assert!(captured_snapshot.snapshot.contains_metric("active_connections"), "Gauge metrics should be captured");
-        assert!(captured_snapshot.snapshot.contains_metric("response_time_ms"), "Histogram metrics should be captured");
+        assert!(
+            captured_snapshot.metrics_preserved,
+            "Metrics should be preserved during snapshot"
+        );
+        assert!(
+            captured_snapshot.snapshot.contains_metric("requests_total"),
+            "Counter metrics should be captured"
+        );
+        assert!(
+            captured_snapshot
+                .snapshot
+                .contains_metric("active_connections"),
+            "Gauge metrics should be captured"
+        );
+        assert!(
+            captured_snapshot
+                .snapshot
+                .contains_metric("response_time_ms"),
+            "Histogram metrics should be captured"
+        );
 
         // Verify no preservation violations
         let violations = harness.metrics_tracker.get_preservation_violations();
-        assert_eq!(violations, 0, "No metric preservation violations should occur");
+        assert_eq!(
+            violations, 0,
+            "No metric preservation violations should occur"
+        );
 
         Ok(())
     }
@@ -842,21 +885,38 @@ mod tests {
         ];
 
         // Run multiple anomaly detection
-        harness.simulate_spectral_health_anomaly_detection(&cx, scenarios).await?;
+        harness
+            .simulate_spectral_health_anomaly_detection(&cx, scenarios)
+            .await?;
 
         // Verify all snapshots were captured
         let snapshots = harness.snapshot_coordinator.get_captured_snapshots();
-        assert_eq!(snapshots.len(), 3, "Should capture snapshot for each anomaly");
+        assert_eq!(
+            snapshots.len(),
+            3,
+            "Should capture snapshot for each anomaly"
+        );
 
         // Verify each snapshot integrity
         for (i, snapshot) in snapshots.iter().enumerate() {
-            assert!(snapshot.metrics_preserved, "Snapshot {} should preserve metrics", i);
-            assert!(snapshot.snapshot.is_valid(), "Snapshot {} should be valid", i);
+            assert!(
+                snapshot.metrics_preserved,
+                "Snapshot {} should preserve metrics",
+                i
+            );
+            assert!(
+                snapshot.snapshot.is_valid(),
+                "Snapshot {} should be valid",
+                i
+            );
         }
 
         // Verify no preservation violations across all snapshots
         let violations = harness.metrics_tracker.get_preservation_violations();
-        assert_eq!(violations, 0, "No preservation violations across multiple snapshots");
+        assert_eq!(
+            violations, 0,
+            "No preservation violations across multiple snapshots"
+        );
 
         Ok(())
     }
@@ -881,19 +941,24 @@ mod tests {
         let capture_start = Instant::now();
 
         // Run capture with timing
-        harness.simulate_spectral_health_anomaly_detection(
-            &cx,
-            vec![scenario],
-        ).await?;
+        harness
+            .simulate_spectral_health_anomaly_detection(&cx, vec![scenario])
+            .await?;
 
         let total_time = capture_start.elapsed();
 
         // Verify capture performance
-        assert!(total_time < Duration::from_millis(200), "Total capture should be fast");
+        assert!(
+            total_time < Duration::from_millis(200),
+            "Total capture should be fast"
+        );
 
         let (snapshot_count, avg_capture_time) = harness.snapshot_coordinator.get_capture_stats();
         assert_eq!(snapshot_count, 1, "Should have captured one snapshot");
-        assert!(avg_capture_time < tight_timeout, "Average capture time should meet timeout");
+        assert!(
+            avg_capture_time < tight_timeout,
+            "Average capture time should meet timeout"
+        );
 
         Ok(())
     }
@@ -925,7 +990,10 @@ mod tests {
                 AnomalyType::TaskQueueBacklog,
                 HealthScore::new(0.3),
                 HealthThreshold::new("task_queue_depth", 100.0),
-                vec!["task_queue_depth".to_string(), "active_connections".to_string()],
+                vec![
+                    "task_queue_depth".to_string(),
+                    "active_connections".to_string(),
+                ],
                 Duration::from_millis(45),
             ),
             HealthAnomalyScenario::new(
@@ -938,7 +1006,9 @@ mod tests {
         ];
 
         // Run comprehensive integration test
-        harness.simulate_spectral_health_anomaly_detection(&cx, scenarios).await?;
+        harness
+            .simulate_spectral_health_anomaly_detection(&cx, scenarios)
+            .await?;
 
         // Verify comprehensive integration properties
         harness.verify_integration_properties()?;
@@ -948,13 +1018,22 @@ mod tests {
         assert_eq!(snapshots.len(), 4, "Should capture all anomaly snapshots");
 
         let integrity_result = harness.snapshot_coordinator.verify_snapshot_integrity()?;
-        assert!(integrity_result.is_successful(), "All snapshots should maintain integrity");
+        assert!(
+            integrity_result.is_successful(),
+            "All snapshots should maintain integrity"
+        );
 
         let violations = harness.metrics_tracker.get_preservation_violations();
-        assert_eq!(violations, 0, "No metric preservation violations should occur");
+        assert_eq!(
+            violations, 0,
+            "No metric preservation violations should occur"
+        );
 
         let (counters, gauges, histograms) = harness.metrics_tracker.get_active_metrics_count();
-        assert!(counters > 0 && gauges > 0 && histograms > 0, "Should track multiple metric types");
+        assert!(
+            counters > 0 && gauges > 0 && histograms > 0,
+            "Should track multiple metric types"
+        );
 
         println!(
             "Comprehensive spectral health/diagnostics integration completed: {} snapshots, {}/{}/{} metrics tracked",

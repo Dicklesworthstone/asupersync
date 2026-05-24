@@ -18,50 +18,42 @@
 //! 4. **False Positive Prevention**: No spurious leak reports for valid obligations
 
 use crate::{
+    Result,
     cx::Cx,
     lab::{
         oracle::{
-            obligation_leak::{
-                LeakDetectionOracle, LeakEvent, LeakPath, ObligationLeakConfig, SyntheticLeakInjector,
-            },
             Oracle, OracleConfig, OracleResult,
+            obligation_leak::{
+                LeakDetectionOracle, LeakEvent, LeakPath, ObligationLeakConfig,
+                SyntheticLeakInjector,
+            },
         },
         runtime::{LabRuntime, LabRuntimeBuilder},
         time::{VirtualTime, VirtualTimeSource},
     },
     obligation::{
-        leak_check::{
-            LeakCheckConfig, LeakChecker, LeakReport, ObligationTracker,
-        },
-        ledger::{LedgerEntry, ObligationLedger},
         Obligation, ObligationId, ObligationState,
+        leak_check::{LeakCheckConfig, LeakChecker, LeakReport, ObligationTracker},
+        ledger::{LedgerEntry, ObligationLedger},
     },
     record::{
-        obligation::{ObligationRecord, ObligationKind},
+        obligation::{ObligationKind, ObligationRecord},
         region::RegionRecord,
         task::TaskRecord,
     },
     runtime::{
-        region_heap::RegionHeap,
-        scheduler::three_lane::ThreeLaneScheduler,
-        sharded_state::ShardedState,
-        state::RuntimeState,
-        RuntimeBuilder,
+        RuntimeBuilder, region_heap::RegionHeap, scheduler::three_lane::ThreeLaneScheduler,
+        sharded_state::ShardedState, state::RuntimeState,
     },
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
     types::{
-        budget::Budget,
-        cancel::CancelToken,
-        outcome::Outcome,
-        region::RegionId,
-        task::TaskId,
+        budget::Budget, cancel::CancelToken, outcome::Outcome, region::RegionId, task::TaskId,
     },
     util::{rng::DetRng, time::TimeSource},
-    Result,
 };
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -291,38 +283,50 @@ impl OracleLeakDetectionCoordinator {
                 ObligationKind::Permit,
                 LeakType::Abandoned,
                 Duration::from_secs(2),
-                vec!["test".to_string(), "permit".to_string(), "abandoned".to_string()],
+                vec![
+                    "test".to_string(),
+                    "permit".to_string(),
+                    "abandoned".to_string(),
+                ],
             ),
             (
                 ObligationKind::Lease,
                 LeakType::CommitStalled,
                 Duration::from_secs(3),
-                vec!["test".to_string(), "lease".to_string(), "stalled".to_string()],
+                vec![
+                    "test".to_string(),
+                    "lease".to_string(),
+                    "stalled".to_string(),
+                ],
             ),
             (
                 ObligationKind::Ack,
                 LeakType::AbortStalled,
                 Duration::from_secs(1),
-                vec!["test".to_string(), "ack".to_string(), "abort_stalled".to_string()],
+                vec![
+                    "test".to_string(),
+                    "ack".to_string(),
+                    "abort_stalled".to_string(),
+                ],
             ),
             (
                 ObligationKind::Permit,
                 LeakType::DoubleCommit,
                 Duration::from_secs(4),
-                vec!["test".to_string(), "permit".to_string(), "double_commit".to_string()],
+                vec![
+                    "test".to_string(),
+                    "permit".to_string(),
+                    "double_commit".to_string(),
+                ],
             ),
         ];
 
         let mut injected_obligations = Vec::new();
 
         for (kind, leak_type, lifetime, source_path) in leak_scenarios {
-            let obligation = self.injector.inject_leak(
-                kind,
-                leak_type,
-                scenario_start,
-                lifetime,
-                source_path,
-            );
+            let obligation =
+                self.injector
+                    .inject_leak(kind, leak_type, scenario_start, lifetime, source_path);
             injected_obligations.push(obligation);
         }
 
@@ -338,18 +342,16 @@ impl OracleLeakDetectionCoordinator {
                 let detection_time = cx.now().duration_since(detection_start);
 
                 // Verify leak is one we injected
-                let is_correct = self.injector
+                let is_correct = self
+                    .injector
                     .get_leak_type(&leak_event.obligation_id)
                     .is_some();
 
                 // Verify leak path accuracy
                 let path_correct = self.verify_leak_path(&leak_event);
 
-                self.detection_metrics.record_detection(
-                    detection_time,
-                    is_correct,
-                    path_correct,
-                );
+                self.detection_metrics
+                    .record_detection(detection_time, is_correct, path_correct);
 
                 detected_leaks.push(leak_event);
             }
@@ -373,7 +375,10 @@ impl OracleLeakDetectionCoordinator {
         // Check if the leak path matches expected source path for this obligation
         if let Some(leak_type) = self.injector.get_leak_type(&leak_event.obligation_id) {
             // For synthetic leaks, path should contain test markers
-            leak_event.leak_path.path_elements.contains(&"test".to_string())
+            leak_event
+                .leak_path
+                .path_elements
+                .contains(&"test".to_string())
         } else {
             false
         }
@@ -384,41 +389,35 @@ impl OracleLeakDetectionCoordinator {
             self.detection_metrics.get_stats();
 
         // Verify bounded detection time
-        if !self.detection_metrics.verify_bounded_detection(self.detection_timeout) {
+        if !self
+            .detection_metrics
+            .verify_bounded_detection(self.detection_timeout)
+        {
             return Err(format!(
                 "Detection times exceeded bounds: max allowed={:?}",
                 self.detection_timeout
-            ).into());
+            )
+            .into());
         }
 
         // Verify no false positives
         if false_positives > 0 {
-            return Err(format!(
-                "False positives detected: {}",
-                false_positives
-            ).into());
+            return Err(format!("False positives detected: {}", false_positives).into());
         }
 
         // Verify no missed leaks
         if missed_leaks > 0 {
-            return Err(format!(
-                "Missed leak detections: {}",
-                missed_leaks
-            ).into());
+            return Err(format!("Missed leak detections: {}", missed_leaks).into());
         }
 
         // Verify correct detections
         if correct_detections == 0 {
-            return Err(format!(
-                "No correct leak detections recorded"
-            ).into());
+            return Err(format!("No correct leak detections recorded").into());
         }
 
         // Verify path accuracy
         if path_accuracy == 0 {
-            return Err(format!(
-                "No accurate leak path identifications"
-            ).into());
+            return Err(format!("No accurate leak path identifications").into());
         }
 
         println!(
@@ -464,12 +463,9 @@ impl LeakCheckOracleTestHarness {
         let leak_checker = LeakChecker::new(self.leak_checker_config.clone())?;
 
         // Run leak detection scenario
-        self.coordinator.run_leak_detection_scenario(
-            cx,
-            &oracle,
-            &leak_checker,
-            Duration::from_secs(15),
-        ).await?;
+        self.coordinator
+            .run_leak_detection_scenario(cx, &oracle, &leak_checker, Duration::from_secs(15))
+            .await?;
 
         // Verify detection properties
         self.coordinator.verify_detection_properties()?;
@@ -494,15 +490,13 @@ impl LeakDetectionOracle {
     async fn check_obligation_leaks(&self) -> Result<OracleLeakResult> {
         // Simulate leak detection with synthetic results
         Ok(OracleLeakResult {
-            detected_leaks: vec![
-                LeakEvent {
-                    obligation_id: ObligationId::new(),
-                    leak_path: LeakPath {
-                        path_elements: vec!["test".to_string(), "synthetic".to_string()],
-                    },
-                    leak_type_description: "synthetic test leak".to_string(),
+            detected_leaks: vec![LeakEvent {
+                obligation_id: ObligationId::new(),
+                leak_path: LeakPath {
+                    path_elements: vec!["test".to_string(), "synthetic".to_string()],
                 },
-            ],
+                leak_type_description: "synthetic test leak".to_string(),
+            }],
         })
     }
 }
@@ -563,16 +557,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_oracle_leak_detection() -> Result<()> {
-        let lab_runtime = LabRuntimeBuilder::new()
-            .with_virtual_time()
-            .build()?;
+        let lab_runtime = LabRuntimeBuilder::new().with_virtual_time().build()?;
         let cx = lab_runtime.cx();
 
         let start_time = lab_runtime.virtual_time().now();
-        let harness = LeakCheckOracleTestHarness::new(
-            Duration::from_secs(5),
-            start_time,
-        );
+        let harness = LeakCheckOracleTestHarness::new(Duration::from_secs(5), start_time);
 
         // Create basic oracle and leak checker
         let oracle = LeakDetectionOracle::new(harness.coordinator.oracle_config.clone())?;
@@ -589,7 +578,10 @@ mod tests {
 
         // Run detection
         let result = oracle.check_obligation_leaks().await?;
-        assert!(!result.detected_leaks.is_empty(), "Should detect synthetic leak");
+        assert!(
+            !result.detected_leaks.is_empty(),
+            "Should detect synthetic leak"
+        );
 
         // Verify basic properties
         let (injection_count, _) = harness.coordinator.injector.get_injection_stats();
@@ -600,9 +592,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bounded_time_leak_detection() -> Result<()> {
-        let lab_runtime = LabRuntimeBuilder::new()
-            .with_virtual_time()
-            .build()?;
+        let lab_runtime = LabRuntimeBuilder::new().with_virtual_time().build()?;
         let cx = lab_runtime.cx();
 
         let start_time = lab_runtime.virtual_time().now();
@@ -634,23 +624,21 @@ mod tests {
             detection_timeout
         );
 
-        assert!(!result.detected_leaks.is_empty(), "Should detect leak within time bound");
+        assert!(
+            !result.detected_leaks.is_empty(),
+            "Should detect leak within time bound"
+        );
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_exact_leak_path_identification() -> Result<()> {
-        let lab_runtime = LabRuntimeBuilder::new()
-            .with_virtual_time()
-            .build()?;
+        let lab_runtime = LabRuntimeBuilder::new().with_virtual_time().build()?;
         let cx = lab_runtime.cx();
 
         let start_time = lab_runtime.virtual_time().now();
-        let harness = LeakCheckOracleTestHarness::new(
-            Duration::from_secs(5),
-            start_time,
-        );
+        let harness = LeakCheckOracleTestHarness::new(Duration::from_secs(5), start_time);
 
         // Create oracle with path tracking enabled
         let oracle = LeakDetectionOracle::new(harness.coordinator.oracle_config.clone())?;
@@ -679,7 +667,10 @@ mod tests {
 
         // Verify path contains expected elements
         assert!(
-            detected_leak.leak_path.path_elements.contains(&"test".to_string()),
+            detected_leak
+                .leak_path
+                .path_elements
+                .contains(&"test".to_string()),
             "Leak path should contain test marker: {:?}",
             detected_leak.leak_path.path_elements
         );
@@ -689,16 +680,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_leak_types_detection() -> Result<()> {
-        let lab_runtime = LabRuntimeBuilder::new()
-            .with_virtual_time()
-            .build()?;
+        let lab_runtime = LabRuntimeBuilder::new().with_virtual_time().build()?;
         let cx = lab_runtime.cx();
 
         let start_time = lab_runtime.virtual_time().now();
-        let harness = LeakCheckOracleTestHarness::new(
-            Duration::from_secs(10),
-            start_time,
-        );
+        let harness = LeakCheckOracleTestHarness::new(Duration::from_secs(10), start_time);
 
         let oracle = LeakDetectionOracle::new(harness.coordinator.oracle_config.clone())?;
 
@@ -731,7 +717,10 @@ mod tests {
         );
 
         let (injection_count, registry_size) = harness.coordinator.injector.get_injection_stats();
-        assert_eq!(injection_count, 5, "Should have injected 5 different leak types");
+        assert_eq!(
+            injection_count, 5,
+            "Should have injected 5 different leak types"
+        );
         assert_eq!(registry_size, 5, "Registry should track all injected leaks");
 
         Ok(())
@@ -752,12 +741,17 @@ mod tests {
         );
 
         // Run comprehensive test scenario
-        harness.run_comprehensive_leak_detection_test(&cx, &lab_runtime).await?;
+        harness
+            .run_comprehensive_leak_detection_test(&cx, &lab_runtime)
+            .await?;
 
         // Verify final state
         let (injection_count, registry_size) = harness.coordinator.injector.get_injection_stats();
         assert!(injection_count > 0, "Should have injected synthetic leaks");
-        assert_eq!(injection_count, registry_size, "Registry should match injections");
+        assert_eq!(
+            injection_count, registry_size,
+            "Registry should match injections"
+        );
 
         println!(
             "Comprehensive integration test completed: {} leaks injected and tracked",

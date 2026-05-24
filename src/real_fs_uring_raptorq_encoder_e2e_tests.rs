@@ -34,10 +34,10 @@ use crate::fs::File;
 use crate::io::{AsyncRead, AsyncSeek, SeekFrom};
 use crate::raptorq::systematic::{SystematicEncoder, SystematicParams};
 use std::collections::HashMap;
+use std::io;
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::io;
 
 // ────────────────────────────────────────────────────────────────────────────────
 // Resource Management — File Drop Bombs
@@ -61,7 +61,10 @@ impl FileGuard {
 
 impl Drop for FileGuard {
     fn drop(&mut self) {
-        eprintln!("FileGuard: Ensuring file '{}' is properly closed", self.path);
+        eprintln!(
+            "FileGuard: Ensuring file '{}' is properly closed",
+            self.path
+        );
         // File::drop() will be called automatically
     }
 }
@@ -303,7 +306,10 @@ impl FileToRaptorQPipeline {
         let encoding_start = Instant::now();
 
         // Step 1: Read file with deterministic chunking
-        let chunks = self.reader.read_file_chunked(cx).await
+        let chunks = self
+            .reader
+            .read_file_chunked(cx)
+            .await
             .map_err(PipelineError::IoError)?;
 
         if chunks.is_empty() {
@@ -311,16 +317,17 @@ impl FileToRaptorQPipeline {
         }
 
         // Step 2: Convert chunks to RaptorQ source symbols
-        let source_symbols: Vec<Vec<u8>> = chunks.iter()
-            .map(|chunk| chunk.data.to_vec())
-            .collect();
+        let source_symbols: Vec<Vec<u8>> = chunks.iter().map(|chunk| chunk.data.to_vec()).collect();
 
         // Step 3: Create RaptorQ encoder
         let encoder = SystematicEncoder::new(
             &source_symbols,
             self.encoding_params.symbol_size,
-            self.encoding_params.seed
-        ).ok_or(PipelineError::EncodingFailed("Failed to create encoder".to_string()))?;
+            self.encoding_params.seed,
+        )
+        .ok_or(PipelineError::EncodingFailed(
+            "Failed to create encoder".to_string(),
+        ))?;
 
         // Step 4: Generate repair symbols
         let k = source_symbols.len() as u32;
@@ -362,16 +369,23 @@ impl FileToRaptorQPipeline {
 
         // Compare source symbols
         let source_symbols_match = result1.source_symbols.len() == result2.source_symbols.len()
-            && result1.source_symbols.iter().zip(result2.source_symbols.iter())
+            && result1
+                .source_symbols
+                .iter()
+                .zip(result2.source_symbols.iter())
                 .all(|(s1, s2)| s1 == s2);
 
         // Compare repair symbols
         let repair_symbols_match = result1.repair_symbols.len() == result2.repair_symbols.len()
-            && result1.repair_symbols.iter().zip(result2.repair_symbols.iter())
+            && result1
+                .repair_symbols
+                .iter()
+                .zip(result2.repair_symbols.iter())
                 .all(|(r1, r2)| r1 == r2);
 
         // Compare boundary information
-        let boundaries_match = result1.boundary_info.boundary_checksum == result2.boundary_info.boundary_checksum;
+        let boundaries_match =
+            result1.boundary_info.boundary_checksum == result2.boundary_info.boundary_checksum;
 
         let is_deterministic = source_symbols_match && repair_symbols_match && boundaries_match;
 
@@ -386,14 +400,17 @@ impl FileToRaptorQPipeline {
         let chunk_boundaries: Vec<u64> = chunks.iter().map(|c| c.file_offset).collect();
 
         // Calculate deterministic checksum for boundary verification
-        let boundary_checksum = chunk_boundaries.iter()
+        let boundary_checksum = chunk_boundaries
+            .iter()
             .enumerate()
             .fold(0u64, |acc, (i, &offset)| {
                 acc.wrapping_add(offset).wrapping_mul(i as u64 + 1)
             });
 
         BlockBoundaryInfo {
-            original_file_size: chunks.last().map_or(0, |c| c.file_offset + c.data.len() as u64),
+            original_file_size: chunks
+                .last()
+                .map_or(0, |c| c.file_offset + c.data.len() as u64),
             chunk_count: chunks.len(),
             chunk_boundaries,
             symbol_size: self.encoding_params.symbol_size,
@@ -406,8 +423,10 @@ impl FileToRaptorQPipeline {
             stats.files_processed += 1;
             stats.source_symbols_created += encoded_file.source_symbols.len();
             stats.repair_symbols_generated += encoded_file.repair_symbols.len();
-            stats.total_encoding_time_ms += encoded_file.encoding_stats.encoding_duration.as_secs_f64() * 1000.0;
-            stats.avg_symbols_per_file = stats.source_symbols_created as f64 / stats.files_processed as f64;
+            stats.total_encoding_time_ms +=
+                encoded_file.encoding_stats.encoding_duration.as_secs_f64() * 1000.0;
+            stats.avg_symbols_per_file =
+                stats.source_symbols_created as f64 / stats.files_processed as f64;
         }
     }
 
@@ -445,7 +464,13 @@ impl TestFileGenerator {
     }
 
     /// Create a test file with deterministic content
-    async fn create_test_file(&self, cx: &Cx, name: &str, size: usize, pattern: u8) -> Result<String, io::Error> {
+    async fn create_test_file(
+        &self,
+        cx: &Cx,
+        name: &str,
+        size: usize,
+        pattern: u8,
+    ) -> Result<String, io::Error> {
         let file_path = format!("{}/{}", self.base_dir, name);
 
         // Generate deterministic content
@@ -461,7 +486,12 @@ impl TestFileGenerator {
     }
 
     /// Create a large test file for streaming tests
-    async fn create_large_test_file(&self, cx: &Cx, name: &str, size: usize) -> Result<String, io::Error> {
+    async fn create_large_test_file(
+        &self,
+        cx: &Cx,
+        name: &str,
+        size: usize,
+    ) -> Result<String, io::Error> {
         let file_path = format!("{}/{}", self.base_dir, name);
         let mut file = File::create(cx, &file_path).await?;
 
@@ -544,24 +574,35 @@ mod tests {
 
             // Create test file
             let generator = TestFileGenerator::new(base_path);
-            let file_path = generator.create_test_file(&cx, "basic_test.bin", 4096, 0xAA).await
+            let file_path = generator
+                .create_test_file(&cx, "basic_test.bin", 4096, 0xAA)
+                .await
                 .expect("Failed to create test file");
 
             // Create pipeline
             let encoding_config = EncodingConfig {
-                symbol_size: 1316,  // Standard RaptorQ symbol size
+                symbol_size: 1316, // Standard RaptorQ symbol size
                 seed: 12345,
                 repair_symbols: 10,
             };
             let pipeline = FileToRaptorQPipeline::new(file_path, 1316, encoding_config);
 
             // Process file
-            let encoded = pipeline.process_file(&cx).await
+            let encoded = pipeline
+                .process_file(&cx)
+                .await
                 .expect("File processing should succeed");
 
             // Verify results
-            assert!(!encoded.source_symbols.is_empty(), "Should have source symbols");
-            assert_eq!(encoded.repair_symbols.len(), 10, "Should have 10 repair symbols");
+            assert!(
+                !encoded.source_symbols.is_empty(),
+                "Should have source symbols"
+            );
+            assert_eq!(
+                encoded.repair_symbols.len(),
+                10,
+                "Should have 10 repair symbols"
+            );
             assert_eq!(encoded.boundary_info.symbol_size, 1316);
             assert!(
                 encoded.boundary_info.original_file_size > 0,
@@ -592,7 +633,9 @@ mod tests {
 
             // Create test file
             let generator = TestFileGenerator::new(base_path);
-            let file_path = generator.create_test_file(&cx, "deterministic_test.bin", 8192, 0xBB).await
+            let file_path = generator
+                .create_test_file(&cx, "deterministic_test.bin", 8192, 0xBB)
+                .await
                 .expect("Failed to create test file");
 
             // Create pipeline with specific chunk size
@@ -604,22 +647,33 @@ mod tests {
             let pipeline = FileToRaptorQPipeline::new(file_path, 1000, encoding_config);
 
             // Verify deterministic encoding
-            let is_deterministic = pipeline.verify_deterministic_encoding(&cx).await
+            let is_deterministic = pipeline
+                .verify_deterministic_encoding(&cx)
+                .await
                 .expect("Deterministic verification should succeed");
 
             assert!(is_deterministic, "Encoding should be deterministic");
 
             // Check boundary consistency
-            let encoded = pipeline.process_file(&cx).await
+            let encoded = pipeline
+                .process_file(&cx)
+                .await
                 .expect("File processing should succeed");
 
-            assert!(encoded.boundary_info.chunk_count > 1, "Should have multiple chunks");
-            assert_eq!(encoded.boundary_info.chunk_boundaries.len(), encoded.boundary_info.chunk_count);
+            assert!(
+                encoded.boundary_info.chunk_count > 1,
+                "Should have multiple chunks"
+            );
+            assert_eq!(
+                encoded.boundary_info.chunk_boundaries.len(),
+                encoded.boundary_info.chunk_count
+            );
 
             // Verify chunk boundaries are sequential
             for i in 1..encoded.boundary_info.chunk_boundaries.len() {
                 assert!(
-                    encoded.boundary_info.chunk_boundaries[i] > encoded.boundary_info.chunk_boundaries[i-1],
+                    encoded.boundary_info.chunk_boundaries[i]
+                        > encoded.boundary_info.chunk_boundaries[i - 1],
                     "Chunk boundaries should be sequential"
                 );
             }
@@ -634,7 +688,9 @@ mod tests {
 
             // Create large test file (64KB)
             let generator = TestFileGenerator::new(base_path);
-            let file_path = generator.create_large_test_file(&cx, "large_test.bin", 65536).await
+            let file_path = generator
+                .create_large_test_file(&cx, "large_test.bin", 65536)
+                .await
                 .expect("Failed to create large test file");
 
             // Create pipeline with smaller chunk size for streaming
@@ -646,11 +702,16 @@ mod tests {
             let pipeline = FileToRaptorQPipeline::new(file_path, 1024, encoding_config);
 
             // Process large file
-            let encoded = pipeline.process_file(&cx).await
+            let encoded = pipeline
+                .process_file(&cx)
+                .await
                 .expect("Large file processing should succeed");
 
             // Verify streaming worked correctly
-            assert!(encoded.source_symbols.len() > 60, "Should have many symbols for large file");
+            assert!(
+                encoded.source_symbols.len() > 60,
+                "Should have many symbols for large file"
+            );
             assert_eq!(encoded.repair_symbols.len(), 20);
             assert_eq!(encoded.boundary_info.original_file_size, 65536);
 
@@ -674,12 +735,15 @@ mod tests {
             let mut file_paths = Vec::new();
 
             for i in 0..5 {
-                let file_path = generator.create_test_file(
-                    &cx,
-                    &format!("concurrent_{}.bin", i),
-                    2048 + i * 512, // Different sizes
-                    (0x50 + i) as u8 // Different patterns
-                ).await.expect("Failed to create test file");
+                let file_path = generator
+                    .create_test_file(
+                        &cx,
+                        &format!("concurrent_{}.bin", i),
+                        2048 + i * 512,   // Different sizes
+                        (0x50 + i) as u8, // Different patterns
+                    )
+                    .await
+                    .expect("Failed to create test file");
                 file_paths.push(file_path);
             }
 
@@ -690,7 +754,8 @@ mod tests {
                 repair_symbols: 8,
             };
 
-            let futures: Vec<_> = file_paths.into_iter()
+            let futures: Vec<_> = file_paths
+                .into_iter()
                 .map(|path| {
                     let config = encoding_config.clone();
                     async move {
@@ -715,7 +780,7 @@ mod tests {
             for i in 1..results.len() {
                 assert_ne!(
                     results[i].boundary_info.boundary_checksum,
-                    results[i-1].boundary_info.boundary_checksum,
+                    results[i - 1].boundary_info.boundary_checksum,
                     "Different files should have different boundary checksums"
                 );
             }
@@ -730,7 +795,9 @@ mod tests {
 
             // Create test file that doesn't align perfectly with chunk size
             let generator = TestFileGenerator::new(base_path);
-            let file_path = generator.create_test_file(&cx, "alignment_test.bin", 3333, 0xCC).await
+            let file_path = generator
+                .create_test_file(&cx, "alignment_test.bin", 3333, 0xCC)
+                .await
                 .expect("Failed to create test file");
 
             // Use chunk size that doesn't divide evenly
@@ -741,7 +808,9 @@ mod tests {
             };
             let pipeline = FileToRaptorQPipeline::new(file_path, 1000, encoding_config);
 
-            let encoded = pipeline.process_file(&cx).await
+            let encoded = pipeline
+                .process_file(&cx)
+                .await
                 .expect("Processing should handle misaligned chunks");
 
             // Should have 4 chunks: 1000, 1000, 1000, 333 (padded to 1000)
@@ -749,7 +818,11 @@ mod tests {
 
             // All source symbols should be same size due to padding
             for symbol in &encoded.source_symbols {
-                assert_eq!(symbol.len(), 1000, "All symbols should be padded to symbol_size");
+                assert_eq!(
+                    symbol.len(),
+                    1000,
+                    "All symbols should be padded to symbol_size"
+                );
             }
 
             // Verify boundary information
@@ -766,7 +839,9 @@ mod tests {
             let generator = TestFileGenerator::new(base_path);
 
             // Test empty file
-            let empty_path = generator.create_test_file(&cx, "empty.bin", 0, 0x00).await
+            let empty_path = generator
+                .create_test_file(&cx, "empty.bin", 0, 0x00)
+                .await
                 .expect("Failed to create empty file");
 
             let encoding_config = EncodingConfig {
@@ -777,14 +852,21 @@ mod tests {
 
             let pipeline = FileToRaptorQPipeline::new(empty_path, 500, encoding_config.clone());
             let empty_result = pipeline.process_file(&cx).await;
-            assert!(empty_result.is_err(), "Empty file should be handled gracefully");
+            assert!(
+                empty_result.is_err(),
+                "Empty file should be handled gracefully"
+            );
 
             // Test minimal file (1 byte)
-            let minimal_path = generator.create_test_file(&cx, "minimal.bin", 1, 0xFF).await
+            let minimal_path = generator
+                .create_test_file(&cx, "minimal.bin", 1, 0xFF)
+                .await
                 .expect("Failed to create minimal file");
 
             let minimal_pipeline = FileToRaptorQPipeline::new(minimal_path, 500, encoding_config);
-            let minimal_result = minimal_pipeline.process_file(&cx).await
+            let minimal_result = minimal_pipeline
+                .process_file(&cx)
+                .await
                 .expect("Minimal file should be processed");
 
             assert_eq!(minimal_result.source_symbols.len(), 1);
@@ -801,7 +883,9 @@ mod tests {
 
             // Create test file
             let generator = TestFileGenerator::new(base_path);
-            let file_path = generator.create_test_file(&cx, "consistency_test.bin", 5000, 0xDD).await
+            let file_path = generator
+                .create_test_file(&cx, "consistency_test.bin", 5000, 0xDD)
+                .await
                 .expect("Failed to create test file");
 
             // Test different symbol sizes
@@ -814,8 +898,11 @@ mod tests {
                     repair_symbols: 5,
                 };
 
-                let pipeline = FileToRaptorQPipeline::new(file_path.clone(), symbol_size, encoding_config);
-                let encoded = pipeline.process_file(&cx).await
+                let pipeline =
+                    FileToRaptorQPipeline::new(file_path.clone(), symbol_size, encoding_config);
+                let encoded = pipeline
+                    .process_file(&cx)
+                    .await
                     .expect("Processing should succeed for all symbol sizes");
 
                 // Verify all symbols have correct size
@@ -840,7 +927,9 @@ mod tests {
 
             // Create test file
             let generator = TestFileGenerator::new(base_path);
-            let file_path = generator.create_test_file(&cx, "param_test.bin", 4096, 0xEE).await
+            let file_path = generator
+                .create_test_file(&cx, "param_test.bin", 4096, 0xEE)
+                .await
                 .expect("Failed to create test file");
 
             // Test different seeds produce different repair symbols
@@ -850,8 +939,11 @@ mod tests {
                 repair_symbols: 8,
             };
 
-            let pipeline1 = FileToRaptorQPipeline::new(file_path.clone(), 1024, base_config.clone());
-            let encoded1 = pipeline1.process_file(&cx).await
+            let pipeline1 =
+                FileToRaptorQPipeline::new(file_path.clone(), 1024, base_config.clone());
+            let encoded1 = pipeline1
+                .process_file(&cx)
+                .await
                 .expect("First encoding should succeed");
 
             let config2 = EncodingConfig {
@@ -859,23 +951,34 @@ mod tests {
                 ..base_config
             };
             let pipeline2 = FileToRaptorQPipeline::new(file_path, 1024, config2);
-            let encoded2 = pipeline2.process_file(&cx).await
+            let encoded2 = pipeline2
+                .process_file(&cx)
+                .await
                 .expect("Second encoding should succeed");
 
             // Source symbols should be identical (same file, same chunking)
             assert_eq!(encoded1.source_symbols.len(), encoded2.source_symbols.len());
-            for (s1, s2) in encoded1.source_symbols.iter().zip(encoded2.source_symbols.iter()) {
+            for (s1, s2) in encoded1
+                .source_symbols
+                .iter()
+                .zip(encoded2.source_symbols.iter())
+            {
                 assert_eq!(s1, s2, "Source symbols should be identical");
             }
 
             // Repair symbols should be different (different seed)
             assert_eq!(encoded1.repair_symbols.len(), encoded2.repair_symbols.len());
-            let repair_differences = encoded1.repair_symbols.iter()
+            let repair_differences = encoded1
+                .repair_symbols
+                .iter()
                 .zip(encoded2.repair_symbols.iter())
                 .filter(|(r1, r2)| r1 != r2)
                 .count();
 
-            assert!(repair_differences > 0, "Repair symbols should differ with different seeds");
+            assert!(
+                repair_differences > 0,
+                "Repair symbols should differ with different seeds"
+            );
         });
     }
 
@@ -887,7 +990,9 @@ mod tests {
 
             // Create test file
             let generator = TestFileGenerator::new(base_path);
-            let file_path = generator.create_test_file(&cx, "stats_test.bin", 3072, 0x77).await
+            let file_path = generator
+                .create_test_file(&cx, "stats_test.bin", 3072, 0x77)
+                .await
                 .expect("Failed to create test file");
 
             let encoding_config = EncodingConfig {
@@ -900,7 +1005,9 @@ mod tests {
 
             // Process file multiple times
             for _ in 0..3 {
-                let _result = pipeline.process_file(&cx).await
+                let _result = pipeline
+                    .process_file(&cx)
+                    .await
                     .expect("Processing should succeed");
             }
 

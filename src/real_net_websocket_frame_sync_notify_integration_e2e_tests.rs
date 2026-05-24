@@ -20,31 +20,30 @@
 //! - Notification ordering and delivery guarantees
 
 use crate::{
-    net::{
-        websocket::{
-            frame::{
-                WebSocketFrame, FrameType, CloseFrame, CloseCode, FrameHeader,
-                FrameParser, FrameReader, FrameWriter, FrameOpcode,
-                MaskingKey, PayloadLength, FrameBuffer, ParseResult,
-                FrameProcessingState, ReaderState, FrameNotificationEvent,
-            },
-            WebSocketError, WebSocketConfig,
-        },
-        TcpStream,
-    },
-    sync::{
-        notify::{
-            Notify, NotifyHandle, WakeEvent, WakeReason, NotificationTracker,
-            WakeupVerification, SpuriousWakeDetector, MissedWakeDetector,
-            NotifyConfig, NotifyMultiplexer, WaitGroup,
-        },
-        Mutex, RwLock,
-    },
     cx::{Cx, Scope},
     error::Outcome,
+    net::{
+        TcpStream,
+        websocket::{
+            WebSocketConfig, WebSocketError,
+            frame::{
+                CloseCode, CloseFrame, FrameBuffer, FrameHeader, FrameNotificationEvent,
+                FrameOpcode, FrameParser, FrameProcessingState, FrameReader, FrameType,
+                FrameWriter, MaskingKey, ParseResult, PayloadLength, ReaderState, WebSocketFrame,
+            },
+        },
+    },
     runtime::RuntimeBuilder,
-    time::{Duration, Sleep, Instant, Timeout},
-    types::{Budget, TaskId, Cancel},
+    sync::{
+        Mutex, RwLock,
+        notify::{
+            MissedWakeDetector, NotificationTracker, Notify, NotifyConfig, NotifyHandle,
+            NotifyMultiplexer, SpuriousWakeDetector, WaitGroup, WakeEvent, WakeReason,
+            WakeupVerification,
+        },
+    },
+    time::{Duration, Instant, Sleep, Timeout},
+    types::{Budget, Cancel, TaskId},
     util::{
         det_rng::{DetRng, RngSeed},
         entropy::EntropySource,
@@ -52,20 +51,20 @@ use crate::{
 };
 
 use std::{
-    collections::{HashMap, BTreeMap, VecDeque, BTreeSet},
-    sync::{
-        atomic::{AtomicU64, AtomicU32, AtomicBool, AtomicUsize, Ordering},
-        Arc,
-    },
-    pin::Pin,
-    task::{Context, Poll, Waker},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll, Waker},
 };
 
 use futures::{
-    stream::{Stream, StreamExt},
-    sink::{Sink, SinkExt},
     ready,
+    sink::{Sink, SinkExt},
+    stream::{Stream, StreamExt},
 };
 
 /// Configuration for WebSocket frame notification integration tests
@@ -218,9 +217,16 @@ enum CoordinationType {
 
 #[derive(Debug, Clone, PartialEq)]
 enum CoordinationResult {
-    Success { completion_time: Duration },
-    PartialSuccess { completed_readers: u32, failed_readers: u32 },
-    Failed { reason: String },
+    Success {
+        completion_time: Duration,
+    },
+    PartialSuccess {
+        completed_readers: u32,
+        failed_readers: u32,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -254,7 +260,10 @@ impl WebSocketFrameNotificationTracker {
     }
 
     fn record_wake_verification(&self, event: WakeVerificationEvent) {
-        if matches!(event.verification_result, WakeVerificationResult::SpuriousWake { .. }) {
+        if matches!(
+            event.verification_result,
+            WakeVerificationResult::SpuriousWake { .. }
+        ) {
             self.spurious_wake_count.fetch_add(1, Ordering::Release);
         }
         self.total_wakes.fetch_add(1, Ordering::Release);
@@ -275,14 +284,17 @@ impl WebSocketFrameNotificationTracker {
 
     fn verify_close_frame_notification_completeness(&self) -> bool {
         let coordinations = self.reader_coordination.lock().unwrap();
-        let close_frame_broadcasts = coordinations.iter()
+        let close_frame_broadcasts = coordinations
+            .iter()
             .filter(|c| c.coordination_type == CoordinationType::CloseFrameBroadcast)
             .count();
 
         // Should have at least one successful close frame broadcast
-        close_frame_broadcasts > 0 && coordinations.iter()
-            .filter(|c| c.coordination_type == CoordinationType::CloseFrameBroadcast)
-            .any(|c| matches!(c.coordination_result, CoordinationResult::Success { .. }))
+        close_frame_broadcasts > 0
+            && coordinations
+                .iter()
+                .filter(|c| c.coordination_type == CoordinationType::CloseFrameBroadcast)
+                .any(|c| matches!(c.coordination_result, CoordinationResult::Success { .. }))
     }
 
     fn verify_no_spurious_wakes(&self, max_allowed: u32) -> bool {
@@ -299,16 +311,17 @@ impl WebSocketFrameNotificationTracker {
         let notifications = self.notification_events.lock().unwrap();
 
         // Verify that close-frame notifications are properly ordered
-        let mut close_notifications: Vec<_> = notifications.iter()
+        let mut close_notifications: Vec<_> = notifications
+            .iter()
             .filter(|n| n.delivery_method == NotificationDeliveryMethod::Broadcast)
             .collect();
 
         close_notifications.sort_by_key(|n| n.timestamp);
 
         // All close-frame notifications should be delivered in order
-        close_notifications.windows(2).all(|pair| {
-            pair[0].timestamp <= pair[1].timestamp
-        })
+        close_notifications
+            .windows(2)
+            .all(|pair| pair[0].timestamp <= pair[1].timestamp)
     }
 
     fn get_total_wake_count(&self) -> u64 {
@@ -320,7 +333,10 @@ impl WebSocketFrameNotificationTracker {
     }
 
     fn get_close_frame_processing_count(&self) -> usize {
-        self.frame_events.lock().unwrap().iter()
+        self.frame_events
+            .lock()
+            .unwrap()
+            .iter()
             .filter(|e| e.frame_type == FrameType::Close)
             .count()
     }
@@ -331,11 +347,13 @@ impl WebSocketFrameNotificationTracker {
             return 1.0;
         }
 
-        let successful = notifications.iter()
+        let successful = notifications
+            .iter()
             .map(|n| n.successful_deliveries)
             .sum::<u32>();
 
-        let total = notifications.iter()
+        let total = notifications
+            .iter()
             .map(|n| n.target_readers.len() as u32)
             .sum::<u32>();
 
@@ -398,11 +416,7 @@ impl MockWebSocketFrameProcessor {
         }
     }
 
-    fn register_reader(
-        &self,
-        reader_id: ReaderId,
-        frame_filter: FrameFilter,
-    ) -> NotifyHandle {
+    fn register_reader(&self, reader_id: ReaderId, frame_filter: FrameFilter) -> NotifyHandle {
         let notify_handle = self.notification_multiplexer.create_handle();
 
         let registration = ReaderRegistration {
@@ -414,7 +428,10 @@ impl MockWebSocketFrameProcessor {
             last_frame_received: None,
         };
 
-        self.reader_registry.lock().unwrap().insert(reader_id, registration);
+        self.reader_registry
+            .lock()
+            .unwrap()
+            .insert(reader_id, registration);
         notify_handle
     }
 
@@ -452,13 +469,16 @@ impl MockWebSocketFrameProcessor {
         // Determine notification strategy based on frame type
         match frame.frame_type() {
             FrameType::Close => {
-                self.handle_close_frame(frame, frame_id, tracker.clone()).await?;
+                self.handle_close_frame(frame, frame_id, tracker.clone())
+                    .await?;
             }
             FrameType::Text | FrameType::Binary => {
-                self.handle_data_frame(frame, frame_id, tracker.clone()).await?;
+                self.handle_data_frame(frame, frame_id, tracker.clone())
+                    .await?;
             }
             FrameType::Ping | FrameType::Pong => {
-                self.handle_control_frame(frame, frame_id, tracker.clone()).await?;
+                self.handle_control_frame(frame, frame_id, tracker.clone())
+                    .await?;
             }
         }
 
@@ -476,9 +496,11 @@ impl MockWebSocketFrameProcessor {
         // Get all registered readers
         let target_readers: Vec<ReaderId> = {
             let registry = self.reader_registry.lock().unwrap();
-            registry.keys()
+            registry
+                .keys()
                 .filter(|&reader_id| {
-                    registry.get(reader_id)
+                    registry
+                        .get(reader_id)
                         .map(|reg| reg.frame_filter.accept_close_frames)
                         .unwrap_or(false)
                 })
@@ -501,7 +523,9 @@ impl MockWebSocketFrameProcessor {
                 let wake_verification = WakeVerificationEvent {
                     timestamp,
                     reader_id: *reader_id,
-                    wake_reason: WakeReason::FrameAvailable { frame_type: FrameType::Close },
+                    wake_reason: WakeReason::FrameAvailable {
+                        frame_type: FrameType::Close,
+                    },
                     expected_wake: true,
                     verification_result: WakeVerificationResult::ValidWake,
                     frame_context: Some(frame_id),
@@ -547,9 +571,11 @@ impl MockWebSocketFrameProcessor {
         // For data frames, notify one reader at a time to avoid spurious wakes
         let target_reader = {
             let registry = self.reader_registry.lock().unwrap();
-            registry.keys()
+            registry
+                .keys()
                 .find(|&reader_id| {
-                    registry.get(reader_id)
+                    registry
+                        .get(reader_id)
                         .map(|reg| reg.frame_filter.accept_data_frames)
                         .unwrap_or(false)
                 })
@@ -585,9 +611,11 @@ impl MockWebSocketFrameProcessor {
         // Control frames notify all interested readers
         let target_readers: Vec<ReaderId> = {
             let registry = self.reader_registry.lock().unwrap();
-            registry.keys()
+            registry
+                .keys()
                 .filter(|&reader_id| {
-                    registry.get(reader_id)
+                    registry
+                        .get(reader_id)
                         .map(|reg| reg.frame_filter.accept_control_frames)
                         .unwrap_or(false)
                 })
@@ -649,8 +677,7 @@ impl MockWebSocketFrameReader {
         processor: Arc<MockWebSocketFrameProcessor>,
         tracker: Arc<WebSocketFrameNotificationTracker>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let notify_handle = self.notify_handle.as_ref()
-            .ok_or("No notify handle set")?;
+        let notify_handle = self.notify_handle.as_ref().ok_or("No notify handle set")?;
 
         while self.active.load(Ordering::Acquire) {
             // Wait for notification
@@ -661,15 +688,14 @@ impl MockWebSocketFrameReader {
             *self.last_wake_time.lock().unwrap() = Some(wake_time);
 
             // Check if this is a spurious wake
-            let is_spurious = self.check_for_spurious_wake(
-                &processor,
-                wake_time,
-                tracker.clone(),
-            ).await;
+            let is_spurious = self
+                .check_for_spurious_wake(&processor, wake_time, tracker.clone())
+                .await;
 
             if !is_spurious {
                 // Process available frames
-                self.process_available_frames(&processor, tracker.clone()).await?;
+                self.process_available_frames(&processor, tracker.clone())
+                    .await?;
             }
         }
 
@@ -752,7 +778,8 @@ impl MockWebSocketFrameReader {
             let mut frames = Vec::new();
             while let Some(frame) = buffer.pop_front() {
                 frames.push(frame);
-                if frames.len() >= 4 { // Process in small batches
+                if frames.len() >= 4 {
+                    // Process in small batches
                     break;
                 }
             }
@@ -820,20 +847,24 @@ mod tests {
         }
 
         // Start frame reading tasks
-        let reader_handles: Vec<_> = readers.iter().map(|reader| {
-            let reader = reader.clone();
-            let processor = processor.clone();
-            let tracker = tracker.clone();
+        let reader_handles: Vec<_> = readers
+            .iter()
+            .map(|reader| {
+                let reader = reader.clone();
+                let processor = processor.clone();
+                let tracker = tracker.clone();
 
-            tokio::spawn(async move {
-                reader.wait_for_frames(processor, tracker).await
+                tokio::spawn(async move { reader.wait_for_frames(processor, tracker).await })
             })
-        }).collect();
+            .collect();
 
         // Send some data frames first
         for i in 0..5 {
             let data_frame = WebSocketFrame::new_text(format!("test message {}", i));
-            processor.process_frame(data_frame, tracker.clone()).await.unwrap();
+            processor
+                .process_frame(data_frame, tracker.clone())
+                .await
+                .unwrap();
 
             Sleep::new(Instant::now() + Duration::from_millis(50)).await;
         }
@@ -843,7 +874,10 @@ mod tests {
 
         // Send close frame - this should notify ALL readers
         let close_frame = WebSocketFrame::new_close(CloseCode::Normal, "Test close");
-        processor.process_frame(close_frame, tracker.clone()).await.unwrap();
+        processor
+            .process_frame(close_frame, tracker.clone())
+            .await
+            .unwrap();
 
         // Wait for close frame processing
         Sleep::new(Instant::now() + Duration::from_millis(200)).await;
@@ -859,28 +893,38 @@ mod tests {
         }
 
         // Verify results
-        assert!(tracker.verify_close_frame_notification_completeness(),
-                "Close frame should notify all readers");
-        assert!(tracker.verify_no_spurious_wakes(config.max_spurious_wakes),
-                "Should have minimal spurious wakes");
-        assert!(tracker.verify_no_missed_wakes(),
-                "Should have no missed wakeups");
-        assert!(tracker.verify_notification_ordering(),
-                "Notifications should be properly ordered");
+        assert!(
+            tracker.verify_close_frame_notification_completeness(),
+            "Close frame should notify all readers"
+        );
+        assert!(
+            tracker.verify_no_spurious_wakes(config.max_spurious_wakes),
+            "Should have minimal spurious wakes"
+        );
+        assert!(
+            tracker.verify_no_missed_wakes(),
+            "Should have no missed wakeups"
+        );
+        assert!(
+            tracker.verify_notification_ordering(),
+            "Notifications should be properly ordered"
+        );
 
         // Verify all readers received the close frame
-        let total_frames_received: u32 = readers.iter()
-            .map(|r| r.get_frames_received())
-            .sum();
+        let total_frames_received: u32 = readers.iter().map(|r| r.get_frames_received()).sum();
         assert!(total_frames_received > 0, "Readers should receive frames");
 
         // Verify close frame processing occurred
-        assert!(tracker.get_close_frame_processing_count() >= 1,
-                "Should have processed close frame");
+        assert!(
+            tracker.get_close_frame_processing_count() >= 1,
+            "Should have processed close frame"
+        );
 
         // Verify notification delivery success rate
-        assert!(tracker.get_successful_notification_rate() > 0.8,
-                "Should have high notification success rate");
+        assert!(
+            tracker.get_successful_notification_rate() > 0.8,
+            "Should have high notification success rate"
+        );
     }
 
     #[tokio::test]
@@ -925,15 +969,16 @@ mod tests {
         }
 
         // Start reading tasks
-        let reader_handles: Vec<_> = readers.iter().map(|reader| {
-            let reader = reader.clone();
-            let processor = processor.clone();
-            let tracker = tracker.clone();
+        let reader_handles: Vec<_> = readers
+            .iter()
+            .map(|reader| {
+                let reader = reader.clone();
+                let processor = processor.clone();
+                let tracker = tracker.clone();
 
-            tokio::spawn(async move {
-                reader.wait_for_frames(processor, tracker).await
+                tokio::spawn(async move { reader.wait_for_frames(processor, tracker).await })
             })
-        }).collect();
+            .collect();
 
         // Send frames that should NOT wake certain readers
         for i in 0..10 {
@@ -943,13 +988,19 @@ mod tests {
                 WebSocketFrame::new_text(format!("data-{}", i))
             };
 
-            processor.process_frame(frame, tracker.clone()).await.unwrap();
+            processor
+                .process_frame(frame, tracker.clone())
+                .await
+                .unwrap();
             Sleep::new(Instant::now() + Duration::from_millis(100)).await;
         }
 
         // Send close frame
         let close_frame = WebSocketFrame::new_close(CloseCode::Normal, "Spurious wake test");
-        processor.process_frame(close_frame, tracker.clone()).await.unwrap();
+        processor
+            .process_frame(close_frame, tracker.clone())
+            .await
+            .unwrap();
 
         // Wait for processing completion
         Sleep::new(Instant::now() + Duration::from_millis(300)).await;
@@ -964,16 +1015,23 @@ mod tests {
         }
 
         // Verify spurious wake prevention
-        assert!(tracker.verify_no_spurious_wakes(config.max_spurious_wakes),
-                "Should prevent spurious wakes with strict filtering");
-        assert!(tracker.verify_notification_ordering(),
-                "Should maintain notification order");
+        assert!(
+            tracker.verify_no_spurious_wakes(config.max_spurious_wakes),
+            "Should prevent spurious wakes with strict filtering"
+        );
+        assert!(
+            tracker.verify_notification_ordering(),
+            "Should maintain notification order"
+        );
 
         // Verify that only appropriate readers were woken
         let spurious_wake_count = tracker.get_spurious_wake_count();
-        assert!(spurious_wake_count <= config.max_spurious_wakes,
-                "Spurious wake count {} should be <= {}",
-                spurious_wake_count, config.max_spurious_wakes);
+        assert!(
+            spurious_wake_count <= config.max_spurious_wakes,
+            "Spurious wake count {} should be <= {}",
+            spurious_wake_count,
+            config.max_spurious_wakes
+        );
     }
 
     #[tokio::test]
@@ -1000,15 +1058,16 @@ mod tests {
         }
 
         // Start reader tasks
-        let reader_handles: Vec<_> = readers.iter().map(|reader| {
-            let reader = reader.clone();
-            let processor = processor.clone();
-            let tracker = tracker.clone();
+        let reader_handles: Vec<_> = readers
+            .iter()
+            .map(|reader| {
+                let reader = reader.clone();
+                let processor = processor.clone();
+                let tracker = tracker.clone();
 
-            tokio::spawn(async move {
-                reader.wait_for_frames(processor, tracker).await
+                tokio::spawn(async move { reader.wait_for_frames(processor, tracker).await })
             })
-        }).collect();
+            .collect();
 
         // Send rapid sequence of frames to test notification handling
         for i in 0..15 {
@@ -1019,7 +1078,10 @@ mod tests {
                 _ => WebSocketFrame::new_pong(format!("pong-{}", i)),
             };
 
-            processor.process_frame(frame, tracker.clone()).await.unwrap();
+            processor
+                .process_frame(frame, tracker.clone())
+                .await
+                .unwrap();
 
             // Minimal delay to create potential race conditions
             Sleep::new(Instant::now() + Duration::from_millis(20)).await;
@@ -1027,7 +1089,10 @@ mod tests {
 
         // Send close frame
         let close_frame = WebSocketFrame::new_close(CloseCode::Normal, "Missed wakeup test");
-        processor.process_frame(close_frame, tracker.clone()).await.unwrap();
+        processor
+            .process_frame(close_frame, tracker.clone())
+            .await
+            .unwrap();
 
         // Wait for all processing to complete
         Sleep::new(Instant::now() + Duration::from_millis(400)).await;
@@ -1042,20 +1107,28 @@ mod tests {
         }
 
         // Verify no missed wakeups
-        assert!(tracker.verify_no_missed_wakes(),
-                "Should detect and handle any missed wakeups");
-        assert!(tracker.verify_close_frame_notification_completeness(),
-                "Close frame should reach all readers despite rapid frames");
+        assert!(
+            tracker.verify_no_missed_wakes(),
+            "Should detect and handle any missed wakeups"
+        );
+        assert!(
+            tracker.verify_close_frame_notification_completeness(),
+            "Close frame should reach all readers despite rapid frames"
+        );
 
         // Verify reasonable wake patterns
         let total_wakes = tracker.get_total_wake_count();
         assert!(total_wakes > 0, "Should have wakeup activity");
 
         // Verify all readers received frames
-        let active_readers = readers.iter()
+        let active_readers = readers
+            .iter()
             .filter(|r| r.get_frames_received() > 0)
             .count();
-        assert!(active_readers > 0, "At least some readers should receive frames");
+        assert!(
+            active_readers > 0,
+            "At least some readers should receive frames"
+        );
     }
 
     #[test]
@@ -1083,9 +1156,15 @@ mod tests {
 
         let results = vec![
             ValidWake,
-            SpuriousWake { reason: "test reason".to_string() },
-            MissedWake { expected_frame: FrameId(42) },
-            DelayedWake { delay: Duration::from_millis(100) },
+            SpuriousWake {
+                reason: "test reason".to_string(),
+            },
+            MissedWake {
+                expected_frame: FrameId(42),
+            },
+            DelayedWake {
+                delay: Duration::from_millis(100),
+            },
         ];
 
         for result in results {

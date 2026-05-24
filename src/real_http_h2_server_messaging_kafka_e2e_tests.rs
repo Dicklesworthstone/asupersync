@@ -30,11 +30,11 @@
 
 use crate::bytes::{Bytes, BytesMut};
 use crate::cx::{Cx, CxInner, Registry};
-use crate::http::h2::connection::{FrameCodec, ConnectionState};
-use crate::http::h2::frame::{Frame, FrameType, HeadersFrame, DataFrame};
-use crate::messaging::kafka::{KafkaProducer, KafkaError, ProducerConfig, Acks};
+use crate::http::h2::connection::{ConnectionState, FrameCodec};
+use crate::http::h2::frame::{DataFrame, Frame, FrameType, HeadersFrame};
+use crate::messaging::kafka::{Acks, KafkaError, KafkaProducer, ProducerConfig};
 use crate::net::TcpStream;
-use crate::types::{Outcome, CancelReason};
+use crate::types::{CancelReason, Outcome};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -293,7 +293,11 @@ impl HttpKafkaServer {
     }
 
     /// Handle an incoming HTTP request
-    async fn handle_request(&self, cx: &Cx, request: HttpRequest) -> Result<HttpResponse, HttpKafkaError> {
+    async fn handle_request(
+        &self,
+        cx: &Cx,
+        request: HttpRequest,
+    ) -> Result<HttpResponse, HttpKafkaError> {
         self.increment_stat(|s| s.requests_received += 1);
 
         // Check for backpressure
@@ -304,7 +308,9 @@ impl HttpKafkaServer {
         }
 
         // Extract Kafka publishing information from request
-        let kafka_topic = request.kafka_topic.clone()
+        let kafka_topic = request
+            .kafka_topic
+            .clone()
             .unwrap_or_else(|| "default-topic".to_string());
         let kafka_key = request.kafka_key.as_deref().map(|s| s.as_bytes());
 
@@ -314,8 +320,10 @@ impl HttpKafkaServer {
         // Publish to Kafka with timeout
         let publish_result = crate::time::timeout(
             self.config.kafka_timeout,
-            self.kafka_producer.send(cx, &kafka_topic, kafka_key, &kafka_payload)
-        ).await;
+            self.kafka_producer
+                .send(cx, &kafka_topic, kafka_key, &kafka_payload),
+        )
+        .await;
 
         match publish_result {
             Ok(Ok(_)) => {
@@ -327,8 +335,11 @@ impl HttpKafkaServer {
                 Ok(HttpResponse {
                     status_code: 200,
                     headers: [("content-type".to_string(), "application/json".to_string())]
-                        .into_iter().collect(),
-                    body: Bytes::from(r#"{"status":"published","topic":"#.to_string() + &kafka_topic + r#""}"#),
+                        .into_iter()
+                        .collect(),
+                    body: Bytes::from(
+                        r#"{"status":"published","topic":"#.to_string() + &kafka_topic + r#""}"#,
+                    ),
                 })
             }
             Ok(Err(kafka_error)) => {
@@ -337,8 +348,12 @@ impl HttpKafkaServer {
                 Ok(HttpResponse {
                     status_code: 500,
                     headers: [("content-type".to_string(), "application/json".to_string())]
-                        .into_iter().collect(),
-                    body: Bytes::from(format!(r#"{{"error":"kafka_error","message":"{}"}}"#, kafka_error)),
+                        .into_iter()
+                        .collect(),
+                    body: Bytes::from(format!(
+                        r#"{{"error":"kafka_error","message":"{}"}}"#,
+                        kafka_error
+                    )),
                 })
             }
             Err(_timeout) => {
@@ -347,7 +362,8 @@ impl HttpKafkaServer {
                 Ok(HttpResponse {
                     status_code: 503,
                     headers: [("content-type".to_string(), "application/json".to_string())]
-                        .into_iter().collect(),
+                        .into_iter()
+                        .collect(),
                     body: Bytes::from(r#"{"error":"timeout","message":"Kafka publish timeout"}"#),
                 })
             }
@@ -359,7 +375,10 @@ impl HttpKafkaServer {
         producer_state.stats.pending_count >= self.config.backpressure_threshold
     }
 
-    async fn handle_backpressure_request(&self, request: HttpRequest) -> Result<HttpResponse, HttpKafkaError> {
+    async fn handle_backpressure_request(
+        &self,
+        request: HttpRequest,
+    ) -> Result<HttpResponse, HttpKafkaError> {
         self.increment_stat(|s| {
             s.requests_rejected += 1;
             s.backpressure_events += 1;
@@ -379,8 +398,12 @@ impl HttpKafkaServer {
             headers: [
                 ("content-type".to_string(), "application/json".to_string()),
                 ("retry-after".to_string(), "1".to_string()),
-            ].into_iter().collect(),
-            body: Bytes::from(r#"{"error":"backpressure","message":"Kafka producer overloaded","retry_after":1}"#),
+            ]
+            .into_iter()
+            .collect(),
+            body: Bytes::from(
+                r#"{"error":"backpressure","message":"Kafka producer overloaded","retry_after":1}"#,
+            ),
         })
     }
 
@@ -436,7 +459,13 @@ impl MockKafkaProducer {
     }
 
     /// Send a message with simulated acknowledgment delay
-    async fn send(&self, cx: &Cx, topic: &str, key: Option<&[u8]>, payload: &[u8]) -> Result<(), KafkaError> {
+    async fn send(
+        &self,
+        cx: &Cx,
+        topic: &str,
+        key: Option<&[u8]>,
+        payload: &[u8],
+    ) -> Result<(), KafkaError> {
         let message_id = {
             let mut state = self.state.lock().unwrap();
             let id = state.next_message_id;
@@ -484,9 +513,10 @@ impl MockKafkaProducer {
     ) {
         // Calculate acknowledgment delay
         let delay = if ack_config.slow_acks {
-            ack_config.base_delay + Duration::from_millis(
-                (message_id % 100) * ack_config.delay_variance.as_millis() as u64 / 100
-            )
+            ack_config.base_delay
+                + Duration::from_millis(
+                    (message_id % 100) * ack_config.delay_variance.as_millis() as u64 / 100,
+                )
         } else {
             ack_config.base_delay
         };
@@ -500,7 +530,8 @@ impl MockKafkaProducer {
             if let Some(message) = producer_state.pending_messages.get_mut(&message_id) {
                 message.ack_status = AckStatus::Acknowledged;
                 producer_state.stats.messages_acked += 1;
-                producer_state.stats.pending_count = producer_state.stats.pending_count.saturating_sub(1);
+                producer_state.stats.pending_count =
+                    producer_state.stats.pending_count.saturating_sub(1);
 
                 // Update average acknowledgment time
                 let ack_time = message.sent_at.elapsed().as_millis() as f64;
@@ -581,7 +612,9 @@ mod tests {
             headers: [
                 ("content-type".to_string(), "application/json".to_string()),
                 ("user-agent".to_string(), "test-client/1.0".to_string()),
-            ].into_iter().collect(),
+            ]
+            .into_iter()
+            .collect(),
             body: Bytes::from(r#"{"message":"test data","id":123}"#),
             kafka_topic,
             kafka_key: Some("test-key".to_string()),
@@ -596,7 +629,9 @@ mod tests {
         crate::lab::runtime::block_on(async {
             let request = create_test_request("/api/publish", Some("test-topic".to_string()));
 
-            let response = server.handle_request(&cx, request).await
+            let response = server
+                .handle_request(&cx, request)
+                .await
                 .expect("Request should succeed");
 
             assert_eq!(response.status_code, 200);
@@ -641,10 +676,12 @@ mod tests {
             for i in 1..=5 {
                 let request = create_test_request(
                     &format!("/api/publish/{}", i),
-                    Some("backpressure-topic".to_string())
+                    Some("backpressure-topic".to_string()),
                 );
 
-                let response = server.handle_request(&cx, request).await
+                let response = server
+                    .handle_request(&cx, request)
+                    .await
                     .expect("Request should be handled");
 
                 responses.push(response);
@@ -654,18 +691,20 @@ mod tests {
             }
 
             // Check that some requests were successful and some hit backpressure
-            let success_count = responses.iter()
-                .filter(|r| r.status_code == 200)
-                .count();
-            let backpressure_count = responses.iter()
-                .filter(|r| r.status_code == 429)
-                .count();
+            let success_count = responses.iter().filter(|r| r.status_code == 200).count();
+            let backpressure_count = responses.iter().filter(|r| r.status_code == 429).count();
 
             assert!(success_count > 0, "Some requests should succeed");
-            assert!(backpressure_count > 0, "Some requests should hit backpressure");
+            assert!(
+                backpressure_count > 0,
+                "Some requests should hit backpressure"
+            );
 
             let server_stats = server.get_stats();
-            assert!(server_stats.backpressure_events > 0, "Backpressure events should be recorded");
+            assert!(
+                server_stats.backpressure_events > 0,
+                "Backpressure events should be recorded"
+            );
             assert_eq!(server_stats.requests_received, 5);
         });
     }
@@ -681,7 +720,7 @@ mod tests {
                 .map(|i| {
                     let request = create_test_request(
                         &format!("/api/concurrent/{}", i),
-                        Some(format!("topic-{}", i))
+                        Some(format!("topic-{}", i)),
                     );
                     server.handle_request(&cx, request)
                 })
@@ -726,9 +765,12 @@ mod tests {
         let cx = Cx::root();
 
         crate::lab::runtime::block_on(async {
-            let request = create_test_request("/api/timeout-test", Some("timeout-topic".to_string()));
+            let request =
+                create_test_request("/api/timeout-test", Some("timeout-topic".to_string()));
 
-            let response = server.handle_request(&cx, request).await
+            let response = server
+                .handle_request(&cx, request)
+                .await
                 .expect("Request should be handled");
 
             // Should get timeout error response
@@ -750,8 +792,8 @@ mod tests {
                 ..Default::default()
             });
 
-        let server = HttpKafkaServer::new(ServerConfig::default())
-            .with_kafka_producer(kafka_producer);
+        let server =
+            HttpKafkaServer::new(ServerConfig::default()).with_kafka_producer(kafka_producer);
         let cx = Cx::root();
 
         crate::lab::runtime::block_on(async {
@@ -761,25 +803,26 @@ mod tests {
             for i in 1..=10 {
                 let request = create_test_request(
                     &format!("/api/error-test/{}", i),
-                    Some("error-topic".to_string())
+                    Some("error-topic".to_string()),
                 );
 
-                let response = server.handle_request(&cx, request).await
+                let response = server
+                    .handle_request(&cx, request)
+                    .await
                     .expect("Request should be handled");
 
                 responses.push(response);
             }
 
             // Check for mix of success and error responses
-            let success_count = responses.iter()
-                .filter(|r| r.status_code == 200)
-                .count();
-            let error_count = responses.iter()
-                .filter(|r| r.status_code == 500)
-                .count();
+            let success_count = responses.iter().filter(|r| r.status_code == 200).count();
+            let error_count = responses.iter().filter(|r| r.status_code == 500).count();
 
             assert!(success_count > 0, "Some requests should succeed");
-            assert!(error_count > 0, "Some requests should fail due to Kafka errors");
+            assert!(
+                error_count > 0,
+                "Some requests should fail due to Kafka errors"
+            );
 
             let server_stats = server.get_stats();
             assert_eq!(server_stats.requests_received, 10);
@@ -810,10 +853,12 @@ mod tests {
             for i in 1..=5 {
                 let request = create_test_request(
                     &format!("/api/recovery-test/{}", i),
-                    Some("recovery-topic".to_string())
+                    Some("recovery-topic".to_string()),
                 );
 
-                let _response = server.handle_request(&cx, request).await
+                let _response = server
+                    .handle_request(&cx, request)
+                    .await
                     .expect("Request should be handled");
             }
 
@@ -822,11 +867,16 @@ mod tests {
             assert!(backpressure_state.active || server.kafka_producer.get_pending_count() > 0);
 
             // Phase 2: Wait for acknowledgments to clear
-            crate::time::sleep(Duration::from_millis(1000)).await.unwrap();
+            crate::time::sleep(Duration::from_millis(1000))
+                .await
+                .unwrap();
 
             // Phase 3: Send new request, should succeed
-            let recovery_request = create_test_request("/api/recovery-success", Some("recovery-topic".to_string()));
-            let recovery_response = server.handle_request(&cx, recovery_request).await
+            let recovery_request =
+                create_test_request("/api/recovery-success", Some("recovery-topic".to_string()));
+            let recovery_response = server
+                .handle_request(&cx, recovery_request)
+                .await
                 .expect("Recovery request should succeed");
 
             assert_eq!(recovery_response.status_code, 200);
@@ -845,11 +895,16 @@ mod tests {
         crate::lab::runtime::block_on(async {
             let request = create_test_request("/api/format-test", Some("format-topic".to_string()));
 
-            let response = server.handle_request(&cx, request).await
+            let response = server
+                .handle_request(&cx, request)
+                .await
                 .expect("Request should succeed");
 
             assert_eq!(response.status_code, 200);
-            assert_eq!(response.headers.get("content-type"), Some(&"application/json".to_string()));
+            assert_eq!(
+                response.headers.get("content-type"),
+                Some(&"application/json".to_string())
+            );
 
             let body_str = String::from_utf8_lossy(&response.body);
             assert!(body_str.contains("status"));
@@ -876,7 +931,9 @@ mod tests {
             ];
 
             for request in requests {
-                let _response = server.handle_request(&cx, request).await
+                let _response = server
+                    .handle_request(&cx, request)
+                    .await
                     .expect("Request should succeed");
             }
 
@@ -909,7 +966,7 @@ mod tests {
                     .map(|i| {
                         let request = create_test_request(
                             &format!("/api/load/batch-{}/item-{}", batch, i),
-                            Some("load-topic".to_string())
+                            Some("load-topic".to_string()),
                         );
                         server.handle_request(&cx, request)
                     })
@@ -921,7 +978,9 @@ mod tests {
                 }
 
                 // Small delay between batches
-                crate::time::sleep(Duration::from_millis(100)).await.unwrap();
+                crate::time::sleep(Duration::from_millis(100))
+                    .await
+                    .unwrap();
             }
 
             // Verify resource usage is reasonable

@@ -5,14 +5,14 @@
 //! security authentication/verification in realistic scenarios.
 
 use crate::cx::Cx;
-use crate::security::{AuthKey, SecurityContext, AuthMode, AuthenticatedSymbol, AuthError};
+use crate::security::{AuthError, AuthKey, AuthMode, AuthenticatedSymbol, SecurityContext};
+use crate::time::Duration;
 use crate::transport::{
-    channel, SymbolRouter, SymbolDispatcher, EndpointId, LoadBalanceStrategy,
-    RoutingTable, RouteKey, SymbolSink, SymbolStream, SymbolSinkExt, SymbolStreamExt,
-    MultipathAggregator, PathId, PathSelectionPolicy, AggregatorConfig,
+    AggregatorConfig, EndpointId, LoadBalanceStrategy, MultipathAggregator, PathId,
+    PathSelectionPolicy, RouteKey, RoutingTable, SymbolDispatcher, SymbolRouter, SymbolSink,
+    SymbolSinkExt, SymbolStream, SymbolStreamExt, channel,
 };
 use crate::types::{Symbol, SymbolId, SymbolKind};
-use crate::time::Duration;
 use crate::util::det_rng::DetRng;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -76,11 +76,7 @@ struct AuthenticatedEndpoint {
 }
 
 impl AuthenticatedEndpoint {
-    fn new(
-        endpoint_id: EndpointId,
-        auth_config: &AuthTestConfig,
-        channel_capacity: usize,
-    ) -> Self {
+    fn new(endpoint_id: EndpointId, auth_config: &AuthTestConfig, channel_capacity: usize) -> Self {
         let auth_key = AuthKey::from_seed(auth_config.key_seed);
         let security_context = SecurityContext::new_with_mode(auth_key, auth_config.mode);
         let (sink, stream) = channel(channel_capacity);
@@ -97,7 +93,11 @@ impl AuthenticatedEndpoint {
     }
 
     /// Send an authenticated symbol through this endpoint.
-    async fn send_authenticated_symbol(&self, cx: &Cx, symbol: Symbol) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_authenticated_symbol(
+        &self,
+        cx: &Cx,
+        symbol: Symbol,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Sign the symbol using the endpoint's security context
         let authenticated_symbol = self.security_context.sign_symbol(&symbol);
 
@@ -105,32 +105,46 @@ impl AuthenticatedEndpoint {
         self.sink.send(authenticated_symbol).await?;
         self.symbols_sent.fetch_add(1, Ordering::Relaxed);
 
-        cx.trace("authenticated_symbol_sent", &format!(
-            "endpoint={:?} symbol_id={:?}",
-            self.endpoint_id, symbol.id()
-        ));
+        cx.trace(
+            "authenticated_symbol_sent",
+            &format!(
+                "endpoint={:?} symbol_id={:?}",
+                self.endpoint_id,
+                symbol.id()
+            ),
+        );
 
         Ok(())
     }
 
     /// Receive and verify an authenticated symbol from this endpoint.
-    async fn receive_authenticated_symbol(&self, cx: &Cx) -> Result<Option<Symbol>, Box<dyn std::error::Error>> {
+    async fn receive_authenticated_symbol(
+        &self,
+        cx: &Cx,
+    ) -> Result<Option<Symbol>, Box<dyn std::error::Error>> {
         if let Some(mut authenticated_symbol) = self.stream.next().await {
-            match self.security_context.verify_authenticated_symbol(&mut authenticated_symbol) {
+            match self
+                .security_context
+                .verify_authenticated_symbol(&mut authenticated_symbol)
+            {
                 Ok(()) => {
                     self.symbols_received.fetch_add(1, Ordering::Relaxed);
-                    cx.trace("authenticated_symbol_received", &format!(
-                        "endpoint={:?} symbol_id={:?} verified=true",
-                        self.endpoint_id, authenticated_symbol.symbol().id()
-                    ));
+                    cx.trace(
+                        "authenticated_symbol_received",
+                        &format!(
+                            "endpoint={:?} symbol_id={:?} verified=true",
+                            self.endpoint_id,
+                            authenticated_symbol.symbol().id()
+                        ),
+                    );
                     Ok(Some(authenticated_symbol.into_symbol()))
                 }
                 Err(auth_error) => {
                     self.auth_failures.fetch_add(1, Ordering::Relaxed);
-                    cx.trace("authentication_failure", &format!(
-                        "endpoint={:?} error={:?}",
-                        self.endpoint_id, auth_error
-                    ));
+                    cx.trace(
+                        "authentication_failure",
+                        &format!("endpoint={:?} error={:?}", self.endpoint_id, auth_error),
+                    );
                     Err(Box::new(auth_error))
                 }
             }
@@ -200,7 +214,9 @@ impl AuthenticatedRoutingNetwork {
         target_id: EndpointId,
         symbol_count: usize,
     ) -> Result<Vec<Symbol>, Box<dyn std::error::Error>> {
-        let source_endpoint = self.endpoints.get(&source_id)
+        let source_endpoint = self
+            .endpoints
+            .get(&source_id)
             .ok_or("Source endpoint not found")?;
 
         let mut sent_symbols = Vec::new();
@@ -208,23 +224,28 @@ impl AuthenticatedRoutingNetwork {
         for i in 0..symbol_count {
             // Create a test symbol
             let symbol_id = SymbolId::new_for_test(
-                1,           // object_id
-                i as u32,    // block_index
-                i as u32,    // esi
+                1,        // object_id
+                i as u32, // block_index
+                i as u32, // esi
             );
             let payload = format!("test_data_{}_{}", source_id.as_u16(), i).into_bytes();
             let symbol = Symbol::new(symbol_id, payload, SymbolKind::Source);
 
             // Send through authenticated endpoint
-            source_endpoint.send_authenticated_symbol(cx, symbol.clone()).await?;
+            source_endpoint
+                .send_authenticated_symbol(cx, symbol.clone())
+                .await?;
             sent_symbols.push(symbol);
 
             // Route to target endpoint (simplified routing for this test)
             let route_result = self.router.route_symbol(&symbol, target_id)?;
-            cx.trace("symbol_routed", &format!(
-                "source={:?} target={:?} route_result={:?}",
-                source_id, target_id, route_result
-            ));
+            cx.trace(
+                "symbol_routed",
+                &format!(
+                    "source={:?} target={:?} route_result={:?}",
+                    source_id, target_id, route_result
+                ),
+            );
         }
 
         Ok(sent_symbols)
@@ -238,7 +259,9 @@ impl AuthenticatedRoutingNetwork {
         expected_count: usize,
         timeout_duration: Duration,
     ) -> Result<Vec<Symbol>, Box<dyn std::error::Error>> {
-        let endpoint = self.endpoints.get(&endpoint_id)
+        let endpoint = self
+            .endpoints
+            .get(&endpoint_id)
             .ok_or("Target endpoint not found")?;
 
         let mut received_symbols = Vec::new();
@@ -252,19 +275,24 @@ impl AuthenticatedRoutingNetwork {
             match endpoint.receive_authenticated_symbol(cx).await {
                 Ok(Some(symbol)) => {
                     received_symbols.push(symbol);
-                    cx.trace("symbol_collected", &format!(
-                        "endpoint={:?} count={}/{}",
-                        endpoint_id, received_symbols.len(), expected_count
-                    ));
+                    cx.trace(
+                        "symbol_collected",
+                        &format!(
+                            "endpoint={:?} count={}/{}",
+                            endpoint_id,
+                            received_symbols.len(),
+                            expected_count
+                        ),
+                    );
                 }
                 Ok(None) => {
                     break; // Stream closed
                 }
                 Err(auth_error) => {
-                    cx.trace("collection_auth_failure", &format!(
-                        "endpoint={:?} error={:?}",
-                        endpoint_id, auth_error
-                    ));
+                    cx.trace(
+                        "collection_auth_failure",
+                        &format!("endpoint={:?} error={:?}", endpoint_id, auth_error),
+                    );
                     // Continue collecting despite auth failures in permissive modes
                 }
             }
@@ -274,7 +302,8 @@ impl AuthenticatedRoutingNetwork {
     }
 
     fn network_stats(&self) -> HashMap<EndpointId, (u32, u32, u32)> {
-        self.endpoints.iter()
+        self.endpoints
+            .iter()
             .map(|(&id, endpoint)| (id, endpoint.stats()))
             .collect()
     }
@@ -283,7 +312,7 @@ impl AuthenticatedRoutingNetwork {
 #[cfg(test)]
 mod authenticated_transport_tests {
     use super::*;
-    use crate::test_utils::{init_test_logging, TestRuntime};
+    use crate::test_utils::{TestRuntime, init_test_logging};
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -309,20 +338,19 @@ mod authenticated_transport_tests {
             let target_id = EndpointId::from_index(1);
 
             // Send symbols from source to target
-            let sent_symbols = network.send_symbols_between_endpoints(
-                &cx,
-                source_id,
-                target_id,
-                config.symbol_batch_size,
-            ).await?;
+            let sent_symbols = network
+                .send_symbols_between_endpoints(&cx, source_id, target_id, config.symbol_batch_size)
+                .await?;
 
             // Collect symbols at target with authentication verification
-            let received_symbols = network.collect_symbols_from_endpoint(
-                &cx,
-                target_id,
-                config.symbol_batch_size,
-                Duration::from_seconds(10),
-            ).await?;
+            let received_symbols = network
+                .collect_symbols_from_endpoint(
+                    &cx,
+                    target_id,
+                    config.symbol_batch_size,
+                    Duration::from_seconds(10),
+                )
+                .await?;
 
             // Verify transmission integrity
             assert_eq!(
@@ -338,21 +366,13 @@ mod authenticated_transport_tests {
 
             // Verify symbol content integrity
             for (sent, received) in sent_symbols.iter().zip(received_symbols.iter()) {
-                assert_eq!(
-                    sent.id(),
-                    received.id(),
-                    "Symbol IDs should match"
-                );
+                assert_eq!(sent.id(), received.id(), "Symbol IDs should match");
                 assert_eq!(
                     sent.payload(),
                     received.payload(),
                     "Symbol payloads should match"
                 );
-                assert_eq!(
-                    sent.kind(),
-                    received.kind(),
-                    "Symbol kinds should match"
-                );
+                assert_eq!(sent.kind(), received.kind(), "Symbol kinds should match");
             }
 
             let stats = network.network_stats();
@@ -361,16 +381,26 @@ mod authenticated_transport_tests {
 
             assert_eq!(source_sent as usize, config.symbol_batch_size);
             assert_eq!(target_received as usize, config.symbol_batch_size);
-            assert_eq!(source_failures, 0, "No auth failures expected in strict mode");
-            assert_eq!(target_failures, 0, "No auth failures expected in strict mode");
+            assert_eq!(
+                source_failures, 0,
+                "No auth failures expected in strict mode"
+            );
+            assert_eq!(
+                target_failures, 0,
+                "No auth failures expected in strict mode"
+            );
 
-            cx.trace("test_authenticated_point_to_point_transmission_complete", &format!(
-                "sent={} received={} auth_failures={}",
-                source_sent, target_received, target_failures
-            ));
+            cx.trace(
+                "test_authenticated_point_to_point_transmission_complete",
+                &format!(
+                    "sent={} received={} auth_failures={}",
+                    source_sent, target_received, target_failures
+                ),
+            );
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         crate::test_complete!("test_authenticated_point_to_point_transmission");
     }
@@ -424,26 +454,36 @@ mod authenticated_transport_tests {
 
             // Send symbols through the routing ring
             for (source_id, target_id) in &routing_pairs {
-                let sent_symbols = network.send_symbols_between_endpoints(
-                    &cx,
-                    *source_id,
-                    *target_id,
-                    config.symbol_batch_size,
-                ).await?;
+                let sent_symbols = network
+                    .send_symbols_between_endpoints(
+                        &cx,
+                        *source_id,
+                        *target_id,
+                        config.symbol_batch_size,
+                    )
+                    .await?;
                 all_sent_symbols.extend(sent_symbols);
 
-                let received_symbols = network.collect_symbols_from_endpoint(
-                    &cx,
-                    *target_id,
-                    config.symbol_batch_size,
-                    Duration::from_seconds(15),
-                ).await?;
+                let received_symbols = network
+                    .collect_symbols_from_endpoint(
+                        &cx,
+                        *target_id,
+                        config.symbol_batch_size,
+                        Duration::from_seconds(15),
+                    )
+                    .await?;
                 all_received_symbols.extend(received_symbols);
 
-                cx.trace("routing_pair_complete", &format!(
-                    "source={:?} target={:?} sent={} received={}",
-                    source_id, target_id, config.symbol_batch_size, received_symbols.len()
-                ));
+                cx.trace(
+                    "routing_pair_complete",
+                    &format!(
+                        "source={:?} target={:?} sent={} received={}",
+                        source_id,
+                        target_id,
+                        config.symbol_batch_size,
+                        received_symbols.len()
+                    ),
+                );
             }
 
             // Verify overall network statistics
@@ -454,7 +494,10 @@ mod authenticated_transport_tests {
 
             let expected_total = (config.symbol_batch_size * routing_pairs.len()) as u32;
 
-            assert_eq!(total_sent, expected_total, "Total symbols sent should match expected");
+            assert_eq!(
+                total_sent, expected_total,
+                "Total symbols sent should match expected"
+            );
             assert!(
                 total_received >= (expected_total as f64 * 0.9) as u32,
                 "At least 90% of symbols should be received (accounting for auth modes)"
@@ -462,7 +505,8 @@ mod authenticated_transport_tests {
 
             // Verify different authentication modes behave appropriately
             for (&endpoint_id, &(sent, received, failures)) in &stats {
-                let auth_config = &config.auth_configs[endpoint_id.as_u16() as usize % config.auth_configs.len()];
+                let auth_config =
+                    &config.auth_configs[endpoint_id.as_u16() as usize % config.auth_configs.len()];
 
                 match auth_config.mode {
                     AuthMode::Strict => {
@@ -480,19 +524,24 @@ mod authenticated_transport_tests {
                         assert!(
                             success_rate >= auth_config.expected_success_rate * 0.9,
                             "Permissive mode success rate too low: got {}, expected >= {}",
-                            success_rate, auth_config.expected_success_rate * 0.9
+                            success_rate,
+                            auth_config.expected_success_rate * 0.9
                         );
                     }
                 }
             }
 
-            cx.trace("test_multi_endpoint_authenticated_routing_complete", &format!(
-                "total_sent={} total_received={} total_failures={} endpoints={}",
-                total_sent, total_received, total_failures, config.endpoint_count
-            ));
+            cx.trace(
+                "test_multi_endpoint_authenticated_routing_complete",
+                &format!(
+                    "total_sent={} total_received={} total_failures={} endpoints={}",
+                    total_sent, total_received, total_failures, config.endpoint_count
+                ),
+            );
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         crate::test_complete!("test_multi_endpoint_authenticated_routing");
     }
@@ -511,17 +560,17 @@ mod authenticated_transport_tests {
                 auth_configs: vec![
                     AuthTestConfig {
                         mode: AuthMode::Strict,
-                        key_seed: 99999,  // Different key
+                        key_seed: 99999,            // Different key
                         expected_success_rate: 0.0, // Expect failures
                     },
                     AuthTestConfig {
                         mode: AuthMode::Permissive,
-                        key_seed: 88888,  // Different key
+                        key_seed: 88888,            // Different key
                         expected_success_rate: 0.3, // Some tolerance
                     },
                     AuthTestConfig {
                         mode: AuthMode::Strict,
-                        key_seed: 77777,  // Different key
+                        key_seed: 77777,            // Different key
                         expected_success_rate: 0.0, // Expect failures
                     },
                 ],
@@ -533,20 +582,25 @@ mod authenticated_transport_tests {
             let target_id = EndpointId::from_index(1); // Permissive mode
 
             // Send symbols that should mostly fail authentication
-            let _sent_symbols = network.send_symbols_between_endpoints(
-                &cx,
-                source_id,
-                target_id,
-                mismatched_config.symbol_batch_size,
-            ).await?;
+            let _sent_symbols = network
+                .send_symbols_between_endpoints(
+                    &cx,
+                    source_id,
+                    target_id,
+                    mismatched_config.symbol_batch_size,
+                )
+                .await?;
 
             // Attempt to collect symbols (expecting mostly failures)
-            let received_symbols = network.collect_symbols_from_endpoint(
-                &cx,
-                target_id,
-                mismatched_config.symbol_batch_size,
-                Duration::from_seconds(10),
-            ).await.unwrap_or_else(|_| Vec::new()); // Don't fail if auth fails
+            let received_symbols = network
+                .collect_symbols_from_endpoint(
+                    &cx,
+                    target_id,
+                    mismatched_config.symbol_batch_size,
+                    Duration::from_seconds(10),
+                )
+                .await
+                .unwrap_or_else(|_| Vec::new()); // Don't fail if auth fails
 
             let stats = network.network_stats();
             let (source_sent, _, source_failures) = stats[&source_id];
@@ -565,13 +619,17 @@ mod authenticated_transport_tests {
                 success_rate
             );
 
-            cx.trace("test_authentication_failure_scenarios_complete", &format!(
-                "sent={} received={} failures={} success_rate={:.2}",
-                source_sent, target_received, target_failures, success_rate
-            ));
+            cx.trace(
+                "test_authentication_failure_scenarios_complete",
+                &format!(
+                    "sent={} received={} failures={} success_rate={:.2}",
+                    source_sent, target_received, target_failures, success_rate
+                ),
+            );
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         crate::test_complete!("test_authentication_failure_scenarios");
     }
@@ -585,13 +643,11 @@ mod authenticated_transport_tests {
             endpoint_count: 5,
             channel_capacity: 20,
             symbol_batch_size: 50,
-            auth_configs: vec![
-                AuthTestConfig {
-                    mode: AuthMode::Strict,
-                    key_seed: 55555,
-                    expected_success_rate: 1.0,
-                },
-            ],
+            auth_configs: vec![AuthTestConfig {
+                mode: AuthMode::Strict,
+                key_seed: 55555,
+                expected_success_rate: 1.0,
+            }],
         };
 
         TestRuntime::run_with_timeout(Duration::from_seconds(45), async move |cx| {
@@ -621,37 +677,48 @@ mod authenticated_transport_tests {
                 let path_id = PathId::from_index(path_index as u16);
 
                 // Send through this path
-                let path_symbols = network.send_symbols_between_endpoints(
-                    &cx,
-                    source_id,
-                    intermediate_id,
-                    config.symbol_batch_size / intermediate_ids.len(),
-                ).await?;
+                let path_symbols = network
+                    .send_symbols_between_endpoints(
+                        &cx,
+                        source_id,
+                        intermediate_id,
+                        config.symbol_batch_size / intermediate_ids.len(),
+                    )
+                    .await?;
 
                 // Route from intermediate to target
-                let _target_symbols = network.send_symbols_between_endpoints(
-                    &cx,
-                    intermediate_id,
-                    target_id,
-                    path_symbols.len(),
-                ).await?;
+                let _target_symbols = network
+                    .send_symbols_between_endpoints(
+                        &cx,
+                        intermediate_id,
+                        target_id,
+                        path_symbols.len(),
+                    )
+                    .await?;
 
                 path_stats.insert(path_id, path_symbols.len());
 
-                cx.trace("multipath_segment_complete", &format!(
-                    "path_id={:?} intermediate={:?} symbols={}",
-                    path_id, intermediate_id, path_symbols.len()
-                ));
+                cx.trace(
+                    "multipath_segment_complete",
+                    &format!(
+                        "path_id={:?} intermediate={:?} symbols={}",
+                        path_id,
+                        intermediate_id,
+                        path_symbols.len()
+                    ),
+                );
             }
 
             // Collect all symbols at target
             let total_expected = config.symbol_batch_size;
-            let received_symbols = network.collect_symbols_from_endpoint(
-                &cx,
-                target_id,
-                total_expected,
-                Duration::from_seconds(20),
-            ).await?;
+            let received_symbols = network
+                .collect_symbols_from_endpoint(
+                    &cx,
+                    target_id,
+                    total_expected,
+                    Duration::from_seconds(20),
+                )
+                .await?;
 
             let stats = network.network_stats();
             let (_, target_received, target_failures) = stats[&target_id];
@@ -675,17 +742,25 @@ mod authenticated_transport_tests {
                 assert!(
                     utilization_ratio >= 0.5 && utilization_ratio <= 1.5,
                     "Path {} should have balanced utilization: {} symbols (ratio: {:.2})",
-                    path_id.as_u16(), symbol_count, utilization_ratio
+                    path_id.as_u16(),
+                    symbol_count,
+                    utilization_ratio
                 );
             }
 
-            cx.trace("test_authenticated_multipath_aggregation_complete", &format!(
-                "total_received={} target_failures={} paths={} load_balance_ok=true",
-                target_received, target_failures, intermediate_ids.len()
-            ));
+            cx.trace(
+                "test_authenticated_multipath_aggregation_complete",
+                &format!(
+                    "total_received={} target_failures={} paths={} load_balance_ok=true",
+                    target_received,
+                    target_failures,
+                    intermediate_ids.len()
+                ),
+            );
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         crate::test_complete!("test_authenticated_multipath_aggregation");
     }

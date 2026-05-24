@@ -31,25 +31,28 @@
 
 #![cfg(all(test, feature = "real-service-e2e"))]
 
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering}};
-use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+};
+use std::time::{Duration, Instant};
 
 use crate::cx::{Cx, Scope};
-use crate::types::{Budget, Outcome, Time, TaskId, RegionId};
-use crate::runtime::test_util::create_test_runtime;
+use crate::obligation::lyapunov::StateSnapshot;
 use crate::plan::{
-    PlanDag, PlanNode, PlanHash, PlanId,
-    certificate::{PlanCertificate, CertificateChain, RewriteStep},
-    analysis::{PlanAnalysis, ObligationSafety, CancelSafety},
+    PlanDag, PlanHash, PlanId, PlanNode,
+    analysis::{CancelSafety, ObligationSafety, PlanAnalysis},
+    certificate::{CertificateChain, PlanCertificate, RewriteStep},
     rewrite::{RewritePolicy, RewriteReport},
 };
 use crate::runtime::scheduler::{
     SchedulerDecisionContract,
-    three_lane::{ThreeLaneScheduler, LaneMetrics, DispatchMetrics},
-    decision_contract::{state, action},
+    decision_contract::{action, state},
+    three_lane::{DispatchMetrics, LaneMetrics, ThreeLaneScheduler},
 };
-use crate::obligation::lyapunov::StateSnapshot;
+use crate::runtime::test_util::create_test_runtime;
+use crate::types::{Budget, Outcome, RegionId, TaskId, Time};
 
 /// Test configuration for heavy workload scenarios.
 #[derive(Clone, Debug)]
@@ -107,7 +110,10 @@ impl SchedulerCertificateMetrics {
 
     fn record_certificate_generated(&self, generation_time: Duration) {
         self.certificates_generated.fetch_add(1, Ordering::Relaxed);
-        self.cert_generation_times.lock().unwrap().push(generation_time);
+        self.cert_generation_times
+            .lock()
+            .unwrap()
+            .push(generation_time);
     }
 
     fn record_state_transition(&self) {
@@ -301,7 +307,10 @@ async fn verify_certificate_chain_integrity(
             return Err(format!(
                 "Certificate chain break at position {}: expected hash {}, got {}",
                 i,
-                prev_cert.next_hash().map(|h| h.to_hex()).unwrap_or_else(|| "None".to_string()),
+                prev_cert
+                    .next_hash()
+                    .map(|h| h.to_hex())
+                    .unwrap_or_else(|| "None".to_string()),
                 curr_cert.hash().to_hex()
             ));
         }
@@ -369,7 +378,8 @@ async fn test_plan_certificate_scheduler_state_correlation() {
                 // Generate workload that exercises different scheduler lanes
                 for round in 0..5 {
                     // Create state-dependent workload
-                    let workload_results = create_heavy_workload_scenario(cx, &config, &metrics).await?;
+                    let workload_results =
+                        create_heavy_workload_scenario(cx, &config, &metrics).await?;
 
                     // Simulate scheduler state transition
                     let state_snapshot = StateSnapshot {
@@ -415,7 +425,10 @@ async fn test_plan_certificate_scheduler_state_correlation() {
                     let new_cert = PlanCertificate::new(
                         plan_dag.hash(),
                         vec![rewrite_step],
-                        format!("scheduler_state_round_{}_depth_{}", round, state_snapshot.ready_queue_depth),
+                        format!(
+                            "scheduler_state_round_{}_depth_{}",
+                            round, state_snapshot.ready_queue_depth
+                        ),
                     );
                     metrics.record_certificate_generated(cert_start.elapsed());
                     certificates.push(new_cert);
@@ -433,15 +446,22 @@ async fn test_plan_certificate_scheduler_state_correlation() {
                     steal_attempts: 10,
                 };
 
-                let chain_valid = verify_certificate_chain_integrity(
-                    &certificates,
-                    &mock_lane_metrics,
-                    &metrics,
-                ).await?;
+                let chain_valid =
+                    verify_certificate_chain_integrity(&certificates, &mock_lane_metrics, &metrics)
+                        .await?;
 
-                assert!(chain_valid, "Certificate chain should reflect scheduler state transitions");
-                assert!(certificates.len() >= 5, "Should generate certificates for each scheduler state");
-                assert!(scheduler_states.len() == 5, "Should capture all scheduler state transitions");
+                assert!(
+                    chain_valid,
+                    "Certificate chain should reflect scheduler state transitions"
+                );
+                assert!(
+                    certificates.len() >= 5,
+                    "Should generate certificates for each scheduler state"
+                );
+                assert!(
+                    scheduler_states.len() == 5,
+                    "Should capture all scheduler state transitions"
+                );
 
                 // Verify certificate content matches scheduler decisions
                 for (i, cert) in certificates.iter().enumerate().skip(1) {
@@ -449,35 +469,62 @@ async fn test_plan_certificate_scheduler_state_correlation() {
                     let cert_description = cert.description();
 
                     // Certificate description should reflect scheduler state
-                    assert!(cert_description.contains(&format!("round_{}", i - 1)),
-                           "Certificate {} should reference correct round", i);
+                    assert!(
+                        cert_description.contains(&format!("round_{}", i - 1)),
+                        "Certificate {} should reference correct round",
+                        i
+                    );
 
                     match state.ready_queue_depth {
-                        0..=20 => assert!(cert_description.contains("healthy"),
-                                         "Certificate should reflect healthy scheduler state"),
-                        21..=50 => assert!(cert_description.contains("congested"),
-                                          "Certificate should reflect congested scheduler state"),
-                        _ => assert!(cert_description.contains("partitioned"),
-                                    "Certificate should reflect partitioned scheduler state"),
+                        0..=20 => assert!(
+                            cert_description.contains("healthy"),
+                            "Certificate should reflect healthy scheduler state"
+                        ),
+                        21..=50 => assert!(
+                            cert_description.contains("congested"),
+                            "Certificate should reflect congested scheduler state"
+                        ),
+                        _ => assert!(
+                            cert_description.contains("partitioned"),
+                            "Certificate should reflect partitioned scheduler state"
+                        ),
                     }
                 }
 
-                Ok(format!("Generated {} certificates reflecting {} scheduler states",
-                          certificates.len(), scheduler_states.len()))
-            }).await
+                Ok(format!(
+                    "Generated {} certificates reflecting {} scheduler states",
+                    certificates.len(),
+                    scheduler_states.len()
+                ))
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Certificate-scheduler correlation test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Certificate-scheduler correlation test should complete: {:?}",
+        result
+    );
 
     let (decisions, certs, states, _collisions, rewrites, _posteriors) = metrics.get_totals();
     assert!(decisions > 0, "Should record scheduler decisions");
     assert!(certs >= 5, "Should generate certificates: got {}", certs);
-    assert!(states >= 5, "Should capture state transitions: got {}", states);
-    assert!(rewrites >= 5, "Should perform plan rewrites: got {}", rewrites);
+    assert!(
+        states >= 5,
+        "Should capture state transitions: got {}",
+        states
+    );
+    assert!(
+        rewrites >= 5,
+        "Should perform plan rewrites: got {}",
+        rewrites
+    );
 
-    println!("✓ Certificate generation: decisions={}, certs={}, states={}, rewrites={}",
-             decisions, certs, states, rewrites);
+    println!(
+        "✓ Certificate generation: decisions={}, certs={}, states={}, rewrites={}",
+        decisions, certs, states, rewrites
+    );
 }
 
 /// Test certificate stability under concurrent heavy workload.
@@ -546,17 +593,17 @@ async fn test_certificate_stability_under_concurrent_load() {
                             local_certificates.push(cert);
 
                             // Create heavy concurrent workload
-                            let _workload_results = create_heavy_workload_scenario(
-                                cx,
-                                &config,
-                                &metrics_clone,
-                            ).await?;
+                            let _workload_results =
+                                create_heavy_workload_scenario(cx, &config, &metrics_clone).await?;
 
                             cx.sleep(config.cert_check_interval).await;
                         }
 
                         // Add to shared collector
-                        collector_clone.lock().unwrap().extend(local_certificates.clone());
+                        collector_clone
+                            .lock()
+                            .unwrap()
+                            .extend(local_certificates.clone());
                         Ok(local_certificates.len())
                     });
                     cert_tasks.push(cert_task);
@@ -568,7 +615,9 @@ async fn test_certificate_stability_under_concurrent_load() {
                     match cert_task.join().await {
                         Outcome::Ok(count) => total_certs_generated += count,
                         Outcome::Err(e) => return Err(format!("Certificate task failed: {}", e)),
-                        Outcome::Cancelled(_) => return Err("Certificate task was cancelled".into()),
+                        Outcome::Cancelled(_) => {
+                            return Err("Certificate task was cancelled".into());
+                        }
                         Outcome::Panicked(_) => return Err("Certificate task panicked".into()),
                     }
                 }
@@ -577,22 +626,32 @@ async fn test_certificate_stability_under_concurrent_load() {
                 let all_certificates = certificate_collector.lock().unwrap();
                 let hash_frequencies = hash_tracker.lock().unwrap();
 
-                assert!(all_certificates.len() == total_certs_generated,
-                       "All generated certificates should be collected");
+                assert!(
+                    all_certificates.len() == total_certs_generated,
+                    "All generated certificates should be collected"
+                );
 
                 // Check for excessive hash collisions (should be rare with SHA-256)
                 let collision_count = metrics.hash_collisions.load(Ordering::Relaxed);
                 let collision_rate = collision_count as f64 / total_certs_generated as f64;
-                assert!(collision_rate < 0.01,
-                       "Hash collision rate too high: {:.2}% ({} collisions in {} certificates)",
-                       collision_rate * 100.0, collision_count, total_certs_generated);
+                assert!(
+                    collision_rate < 0.01,
+                    "Hash collision rate too high: {:.2}% ({} collisions in {} certificates)",
+                    collision_rate * 100.0,
+                    collision_count,
+                    total_certs_generated
+                );
 
                 // Verify certificate generation rate meets expectations
-                let actual_rate = total_certs_generated as f64 / config.stress_duration.as_secs_f64();
+                let actual_rate =
+                    total_certs_generated as f64 / config.stress_duration.as_secs_f64();
                 let expected_rate = config.expected_cert_rate as f64;
-                assert!(actual_rate >= expected_rate * 0.5,
-                       "Certificate generation rate too low: {:.0} certs/sec (expected ≥ {:.0})",
-                       actual_rate, expected_rate * 0.5);
+                assert!(
+                    actual_rate >= expected_rate * 0.5,
+                    "Certificate generation rate too low: {:.0} certs/sec (expected ≥ {:.0})",
+                    actual_rate,
+                    expected_rate * 0.5
+                );
 
                 // Verify certificate timestamp ordering within acceptable tolerance
                 let mut prev_timestamp = None;
@@ -607,32 +666,61 @@ async fn test_certificate_stability_under_concurrent_load() {
                     prev_timestamp = Some(cert_time);
                 }
 
-                let ordering_violation_rate = ordering_violations as f64 / all_certificates.len() as f64;
-                assert!(ordering_violation_rate < 0.05,
-                       "Too many timestamp ordering violations: {:.2}% ({} in {})",
-                       ordering_violation_rate * 100.0, ordering_violations, all_certificates.len());
+                let ordering_violation_rate =
+                    ordering_violations as f64 / all_certificates.len() as f64;
+                assert!(
+                    ordering_violation_rate < 0.05,
+                    "Too many timestamp ordering violations: {:.2}% ({} in {})",
+                    ordering_violation_rate * 100.0,
+                    ordering_violations,
+                    all_certificates.len()
+                );
 
                 Ok(format!(
                     "Generated {} certificates at {:.0} certs/sec with {:.3}% collision rate",
-                    total_certs_generated, actual_rate, collision_rate * 100.0
+                    total_certs_generated,
+                    actual_rate,
+                    collision_rate * 100.0
                 ))
-            }).await
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Concurrent certificate stability test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Concurrent certificate stability test should complete: {:?}",
+        result
+    );
 
     let (decisions, certs, _states, collisions, _rewrites, _posteriors) = metrics.get_totals();
     let avg_cert_time = metrics.average_cert_generation_time();
 
-    assert!(decisions > 0, "Should record scheduler decisions under load");
-    assert!(certs >= 100, "Should generate substantial certificates under load: got {}", certs);
-    assert!(collisions < certs / 10, "Collision rate should be low: {} collisions in {} certs", collisions, certs);
-    assert!(avg_cert_time < Duration::from_millis(10),
-           "Certificate generation should be fast: {:?}", avg_cert_time);
+    assert!(
+        decisions > 0,
+        "Should record scheduler decisions under load"
+    );
+    assert!(
+        certs >= 100,
+        "Should generate substantial certificates under load: got {}",
+        certs
+    );
+    assert!(
+        collisions < certs / 10,
+        "Collision rate should be low: {} collisions in {} certs",
+        collisions,
+        certs
+    );
+    assert!(
+        avg_cert_time < Duration::from_millis(10),
+        "Certificate generation should be fast: {:?}",
+        avg_cert_time
+    );
 
-    println!("✓ Concurrent load: decisions={}, certs={}, collisions={}, avg_time={:?}",
-             decisions, certs, collisions, avg_cert_time);
+    println!(
+        "✓ Concurrent load: decisions={}, certs={}, collisions={}, avg_time={:?}",
+        decisions, certs, collisions, avg_cert_time
+    );
 }
 
 // ============================================================================
@@ -780,60 +868,122 @@ async fn test_three_lane_scheduler_decision_certificate_capture() {
 
                 // Verify cancel lane certificates
                 let cancel_certs = certificates_by_lane.get("cancel").unwrap();
-                assert_eq!(cancel_certs.len(), 10, "Should generate certificate for each cancel dispatch");
+                assert_eq!(
+                    cancel_certs.len(),
+                    10,
+                    "Should generate certificate for each cancel dispatch"
+                );
                 for (i, cert) in cancel_certs.iter().enumerate() {
-                    assert!(cert.description().contains("cancel_dispatch"),
-                           "Cancel certificate {} should reference cancel dispatch", i);
-                    assert!(cert.rewrite_steps().iter().any(|step| step.rule_name() == "cancel_lane_dispatch"),
-                           "Cancel certificate should contain cancel lane rewrite step");
+                    assert!(
+                        cert.description().contains("cancel_dispatch"),
+                        "Cancel certificate {} should reference cancel dispatch",
+                        i
+                    );
+                    assert!(
+                        cert.rewrite_steps()
+                            .iter()
+                            .any(|step| step.rule_name() == "cancel_lane_dispatch"),
+                        "Cancel certificate should contain cancel lane rewrite step"
+                    );
                 }
 
                 // Verify timed lane certificates
                 let timed_certs = certificates_by_lane.get("timed").unwrap();
-                assert_eq!(timed_certs.len(), 8, "Should generate certificate for each timed dispatch");
+                assert_eq!(
+                    timed_certs.len(),
+                    8,
+                    "Should generate certificate for each timed dispatch"
+                );
                 for (i, cert) in timed_certs.iter().enumerate() {
-                    assert!(cert.description().contains("timed_dispatch"),
-                           "Timed certificate {} should reference timed dispatch", i);
-                    assert!(cert.rewrite_steps().iter().any(|step| step.rule_name() == "timed_lane_dispatch"),
-                           "Timed certificate should contain timed lane rewrite step");
+                    assert!(
+                        cert.description().contains("timed_dispatch"),
+                        "Timed certificate {} should reference timed dispatch",
+                        i
+                    );
+                    assert!(
+                        cert.rewrite_steps()
+                            .iter()
+                            .any(|step| step.rule_name() == "timed_lane_dispatch"),
+                        "Timed certificate should contain timed lane rewrite step"
+                    );
                 }
 
                 // Verify ready lane certificates
                 let ready_certs = certificates_by_lane.get("ready").unwrap();
-                assert_eq!(ready_certs.len(), 12, "Should generate certificate for each ready dispatch");
+                assert_eq!(
+                    ready_certs.len(),
+                    12,
+                    "Should generate certificate for each ready dispatch"
+                );
                 for (i, cert) in ready_certs.iter().enumerate() {
-                    assert!(cert.description().contains("ready_dispatch"),
-                           "Ready certificate {} should reference ready dispatch", i);
-                    assert!(cert.rewrite_steps().iter().any(|step| step.rule_name() == "ready_lane_dispatch"),
-                           "Ready certificate should contain ready lane rewrite step");
+                    assert!(
+                        cert.description().contains("ready_dispatch"),
+                        "Ready certificate {} should reference ready dispatch",
+                        i
+                    );
+                    assert!(
+                        cert.rewrite_steps()
+                            .iter()
+                            .any(|step| step.rule_name() == "ready_lane_dispatch"),
+                        "Ready certificate should contain ready lane rewrite step"
+                    );
                 }
 
                 // Verify scheduler metrics correlation
-                assert_eq!(final_metrics.cancel_dispatched, 10, "Should track cancel dispatches");
-                assert_eq!(final_metrics.timed_dispatched, 8, "Should track timed dispatches");
-                assert_eq!(final_metrics.ready_dispatched, 12, "Should track ready dispatches");
+                assert_eq!(
+                    final_metrics.cancel_dispatched, 10,
+                    "Should track cancel dispatches"
+                );
+                assert_eq!(
+                    final_metrics.timed_dispatched, 8,
+                    "Should track timed dispatches"
+                );
+                assert_eq!(
+                    final_metrics.ready_dispatched, 12,
+                    "Should track ready dispatches"
+                );
 
-                let total_dispatches = final_metrics.cancel_dispatched +
-                                     final_metrics.timed_dispatched +
-                                     final_metrics.ready_dispatched;
+                let total_dispatches = final_metrics.cancel_dispatched
+                    + final_metrics.timed_dispatched
+                    + final_metrics.ready_dispatched;
                 let total_certificates = cancel_certs.len() + timed_certs.len() + ready_certs.len();
 
-                assert_eq!(total_dispatches as usize, total_certificates,
-                          "Certificate count should match dispatch count");
+                assert_eq!(
+                    total_dispatches as usize, total_certificates,
+                    "Certificate count should match dispatch count"
+                );
 
-                Ok(format!("Captured {} lane decisions in {} certificates",
-                          total_dispatches, total_certificates))
-            }).await
+                Ok(format!(
+                    "Captured {} lane decisions in {} certificates",
+                    total_dispatches, total_certificates
+                ))
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Three-lane scheduler certificate capture should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Three-lane scheduler certificate capture should complete: {:?}",
+        result
+    );
 
     let (decisions, certs, _states, _collisions, _rewrites, _posteriors) = metrics.get_totals();
-    assert!(decisions >= 30, "Should record decisions for all three lanes: got {}", decisions);
-    assert!(certs >= 30, "Should generate certificates for all lane dispatches: got {}", certs);
+    assert!(
+        decisions >= 30,
+        "Should record decisions for all three lanes: got {}",
+        decisions
+    );
+    assert!(
+        certs >= 30,
+        "Should generate certificates for all lane dispatches: got {}",
+        certs
+    );
 
-    println!("✓ Three-lane capture: decisions={}, certs={}", decisions, certs);
+    println!(
+        "✓ Three-lane capture: decisions={}, certs={}",
+        decisions, certs
+    );
 }
 
 // ============================================================================
@@ -1101,20 +1251,50 @@ async fn test_comprehensive_plan_scheduler_certificate_integration() {
         },
     );
 
-    assert!(result.is_ok(), "Comprehensive integration test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Comprehensive integration test should complete: {:?}",
+        result
+    );
 
     let (decisions, certs, states, collisions, rewrites, posteriors) = metrics.get_totals();
     let avg_cert_time = metrics.average_cert_generation_time();
 
     // Verify comprehensive metrics
-    assert!(decisions >= 1000, "Should record substantial scheduler decisions: got {}", decisions);
-    assert!(certs >= 500, "Should generate substantial certificates: got {}", certs);
-    assert!(states >= 200, "Should capture many state transitions: got {}", states);
-    assert!(rewrites >= 1000, "Should perform many plan rewrites: got {}", rewrites);
-    assert!(collisions < certs / 20, "Low collision rate: {} in {}", collisions, certs);
-    assert!(avg_cert_time < Duration::from_millis(5),
-           "Fast certificate generation: {:?}", avg_cert_time);
+    assert!(
+        decisions >= 1000,
+        "Should record substantial scheduler decisions: got {}",
+        decisions
+    );
+    assert!(
+        certs >= 500,
+        "Should generate substantial certificates: got {}",
+        certs
+    );
+    assert!(
+        states >= 200,
+        "Should capture many state transitions: got {}",
+        states
+    );
+    assert!(
+        rewrites >= 1000,
+        "Should perform many plan rewrites: got {}",
+        rewrites
+    );
+    assert!(
+        collisions < certs / 20,
+        "Low collision rate: {} in {}",
+        collisions,
+        certs
+    );
+    assert!(
+        avg_cert_time < Duration::from_millis(5),
+        "Fast certificate generation: {:?}",
+        avg_cert_time
+    );
 
-    println!("✓ Comprehensive integration: decisions={}, certs={}, states={}, rewrites={}, collisions={}, avg_time={:?}",
-             decisions, certs, states, rewrites, collisions, avg_cert_time);
+    println!(
+        "✓ Comprehensive integration: decisions={}, certs={}, states={}, rewrites={}, collisions={}, avg_time={:?}",
+        decisions, certs, states, rewrites, collisions, avg_cert_time
+    );
 }

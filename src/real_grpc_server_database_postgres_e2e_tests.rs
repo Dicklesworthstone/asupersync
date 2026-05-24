@@ -30,10 +30,10 @@
 
 use crate::cx::{Cx, CxInner, Registry};
 use crate::database::postgres::{PgConnection, PgError, PgRow};
-use crate::grpc::server::{GrpcServer, ConnectionState};
-use crate::grpc::status::{Status, TransportErrorKind};
-use crate::grpc::streaming::{Request, Response, Metadata};
+use crate::grpc::server::{ConnectionState, GrpcServer};
 use crate::grpc::service::{NamedService, ServiceHandler};
+use crate::grpc::status::{Status, TransportErrorKind};
+use crate::grpc::streaming::{Metadata, Request, Response};
 use crate::net::TcpListener;
 use crate::types::{CancelReason, Outcome};
 use std::collections::HashMap;
@@ -160,7 +160,8 @@ impl MockDbPool {
     /// Get a connection from the pool
     fn get_connection(&mut self) -> Result<&mut MockDbConnection, PgError> {
         // Simple round-robin for testing
-        let conn = self.connections
+        let conn = self
+            .connections
             .iter_mut()
             .find(|c| c.active_queries.len() < 5)
             .ok_or_else(|| PgError::Protocol("No available connections".to_string()))?;
@@ -168,11 +169,7 @@ impl MockDbPool {
     }
 
     /// Execute a query with cancellation support
-    async fn execute_query(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-    ) -> Outcome<MockQueryResult, PgError> {
+    async fn execute_query(&mut self, cx: &Cx, sql: &str) -> Outcome<MockQueryResult, PgError> {
         let conn = self.get_connection()?;
         conn.execute_query(cx, sql).await
     }
@@ -202,11 +199,7 @@ impl MockDbConnection {
         }
     }
 
-    async fn execute_query(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-    ) -> Outcome<MockQueryResult, PgError> {
+    async fn execute_query(&mut self, cx: &Cx, sql: &str) -> Outcome<MockQueryResult, PgError> {
         let query_id = self.active_queries.len() + 1;
         let query = ActiveQuery {
             id: query_id,
@@ -254,18 +247,21 @@ impl MockDbConnection {
 
     fn generate_mock_result(&self, sql: &str) -> MockQueryResult {
         if sql.contains("SELECT") && sql.contains("users") {
-            MockQueryResult::Rows(vec![
-                MockRow {
-                    columns: vec![
-                        ("user_id".to_string(), "1".to_string()),
-                        ("username".to_string(), "testuser".to_string()),
-                        ("email".to_string(), "test@example.com".to_string()),
-                        ("created_at".to_string(), "2024-01-01T00:00:00Z".to_string()),
-                    ].into_iter().collect(),
-                },
-            ])
+            MockQueryResult::Rows(vec![MockRow {
+                columns: vec![
+                    ("user_id".to_string(), "1".to_string()),
+                    ("username".to_string(), "testuser".to_string()),
+                    ("email".to_string(), "test@example.com".to_string()),
+                    ("created_at".to_string(), "2024-01-01T00:00:00Z".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            }])
         } else if sql.contains("INSERT") && sql.contains("users") {
-            MockQueryResult::Insert { rows_affected: 1, last_insert_id: Some(42) }
+            MockQueryResult::Insert {
+                rows_affected: 1,
+                last_insert_id: Some(42),
+            }
         } else if sql.contains("UPDATE") || sql.contains("DELETE") {
             MockQueryResult::Update { rows_affected: 1 }
         } else {
@@ -277,8 +273,13 @@ impl MockDbConnection {
 #[derive(Debug, Clone)]
 enum MockQueryResult {
     Rows(Vec<MockRow>),
-    Insert { rows_affected: u64, last_insert_id: Option<i64> },
-    Update { rows_affected: u64 },
+    Insert {
+        rows_affected: u64,
+        last_insert_id: Option<i64>,
+    },
+    Update {
+        rows_affected: u64,
+    },
     Empty,
 }
 
@@ -289,7 +290,8 @@ struct MockRow {
 
 impl MockRow {
     fn get_str(&self, column: &str) -> Result<&str, PgError> {
-        self.columns.get(column)
+        self.columns
+            .get(column)
             .map(|s| s.as_str())
             .ok_or_else(|| PgError::Protocol(format!("Column not found: {}", column)))
     }
@@ -328,7 +330,9 @@ impl UserService {
         let result = {
             // Acquire connection without holding pool lock across async operation
             let connection = {
-                let pool = self.db_pool.lock()
+                let pool = self
+                    .db_pool
+                    .lock()
                     .map_err(|_| Status::internal("Database pool mutex poisoned"))?;
                 pool.get_connection()
                     .map_err(|e| Status::internal(format!("Failed to get connection: {}", e)))?
@@ -349,9 +353,17 @@ impl UserService {
             Ok(MockQueryResult::Rows(rows)) if !rows.is_empty() => {
                 let row = &rows[0];
                 Ok(GetUserResponse {
-                    user_id: row.get_i64("user_id").map_err(|e| Status::internal(format!("Parse error: {}", e)))?,
-                    username: row.get_str("username").map_err(|e| Status::internal(format!("Parse error: {}", e)))?.to_string(),
-                    email: row.get_str("email").map_err(|e| Status::internal(format!("Parse error: {}", e)))?.to_string(),
+                    user_id: row
+                        .get_i64("user_id")
+                        .map_err(|e| Status::internal(format!("Parse error: {}", e)))?,
+                    username: row
+                        .get_str("username")
+                        .map_err(|e| Status::internal(format!("Parse error: {}", e)))?
+                        .to_string(),
+                    email: row
+                        .get_str("email")
+                        .map_err(|e| Status::internal(format!("Parse error: {}", e)))?
+                        .to_string(),
                     created_at: row.get_str("created_at").unwrap_or("").to_string(),
                     last_login: if request.include_details {
                         Some(row.get_str("last_login").unwrap_or("").to_string())
@@ -373,7 +385,11 @@ impl UserService {
     }
 
     /// Handle ListUsers RPC with database query
-    async fn list_users(&self, cx: &Cx, request: ListUsersRequest) -> Result<ListUsersResponse, Status> {
+    async fn list_users(
+        &self,
+        cx: &Cx,
+        request: ListUsersRequest,
+    ) -> Result<ListUsersResponse, Status> {
         self.increment_stat(|s| s.requests_handled += 1);
 
         let sql = if let Some(filter) = &request.filter {
@@ -426,7 +442,11 @@ impl UserService {
     }
 
     /// Handle CreateUser RPC with transaction
-    async fn create_user(&self, cx: &Cx, request: CreateUserRequest) -> Result<CreateUserResponse, Status> {
+    async fn create_user(
+        &self,
+        cx: &Cx,
+        request: CreateUserRequest,
+    ) -> Result<CreateUserResponse, Status> {
         self.increment_stat(|s| s.requests_handled += 1);
 
         // Simulate transaction-based creation
@@ -443,12 +463,13 @@ impl UserService {
         self.increment_stat(|s| s.queries_executed += 1);
 
         match result {
-            Ok(MockQueryResult::Insert { last_insert_id: Some(id), .. }) => {
-                Ok(CreateUserResponse {
-                    user_id: id,
-                    created_at: "2024-01-01T00:00:00Z".to_string(),
-                })
-            }
+            Ok(MockQueryResult::Insert {
+                last_insert_id: Some(id),
+                ..
+            }) => Ok(CreateUserResponse {
+                user_id: id,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+            }),
             Err(PgError::Cancelled(_)) => {
                 self.increment_stat(|s| s.cancellations_received += 1);
                 Err(Status::cancelled("Request was cancelled"))
@@ -537,7 +558,13 @@ impl GrpcDatabaseIntegration {
     async fn unary_call<T, U>(
         &mut self,
         cx: &Cx,
-        handler: impl Fn(&UserService, &Cx, T) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<U, Status>> + Send>>,
+        handler: impl Fn(
+            &UserService,
+            &Cx,
+            T,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<U, Status>> + Send>,
+        >,
         request: T,
     ) -> Result<U, Status> {
         self.server.stats.requests_received += 1;
@@ -648,9 +675,11 @@ mod tests {
             };
 
             let response = integration
-                .unary_call(&cx, |service, cx, req| {
-                    Box::pin(service.get_user(cx, req))
-                }, request)
+                .unary_call(
+                    &cx,
+                    |service, cx, req| Box::pin(service.get_user(cx, req)),
+                    request,
+                )
                 .await;
 
             assert!(response.is_ok(), "Basic gRPC-to-DB query should succeed");
@@ -681,9 +710,11 @@ mod tests {
             };
 
             // Create a future that will be cancelled
-            let future = integration.unary_call(&cx, |service, cx, req| {
-                Box::pin(service.get_user(cx, req))
-            }, request);
+            let future = integration.unary_call(
+                &cx,
+                |service, cx, req| Box::pin(service.get_user(cx, req)),
+                request,
+            );
 
             // Cancel the context to simulate gRPC request cancellation
             // In a real test, this would be done via proper cancellation mechanisms
@@ -716,9 +747,11 @@ mod tests {
                         include_details: i % 2 == 0,
                     };
 
-                    integration.unary_call(&cx, |service, cx, req| {
-                        Box::pin(service.get_user(cx, req))
-                    }, request)
+                    integration.unary_call(
+                        &cx,
+                        |service, cx, req| Box::pin(service.get_user(cx, req)),
+                        request,
+                    )
                 })
                 .collect::<Vec<_>>();
 
@@ -749,9 +782,11 @@ mod tests {
             };
 
             let response = integration
-                .unary_call(&cx, |service, cx, req| {
-                    Box::pin(service.create_user(cx, req))
-                }, request)
+                .unary_call(
+                    &cx,
+                    |service, cx, req| Box::pin(service.create_user(cx, req)),
+                    request,
+                )
                 .await;
 
             assert!(response.is_ok(), "User creation should succeed");
@@ -780,9 +815,11 @@ mod tests {
             };
 
             let response = integration
-                .unary_call(&cx, |service, cx, req| {
-                    Box::pin(service.get_user(cx, req))
-                }, request)
+                .unary_call(
+                    &cx,
+                    |service, cx, req| Box::pin(service.get_user(cx, req)),
+                    request,
+                )
                 .await;
 
             // Should get a gRPC error status
@@ -790,8 +827,8 @@ mod tests {
                 Err(status) => {
                     // Verify proper error mapping
                     assert!(
-                        status.code() == Status::not_found("").code() ||
-                        status.code() == Status::internal("").code()
+                        status.code() == Status::not_found("").code()
+                            || status.code() == Status::internal("").code()
                     );
                 }
                 Ok(_) => {
@@ -819,9 +856,11 @@ mod tests {
             };
 
             let response = integration
-                .unary_call(&cx, |service, cx, req| {
-                    Box::pin(service.list_users(cx, req))
-                }, request)
+                .unary_call(
+                    &cx,
+                    |service, cx, req| Box::pin(service.list_users(cx, req)),
+                    request,
+                )
                 .await;
 
             assert!(response.is_ok(), "List users should succeed");
@@ -853,9 +892,11 @@ mod tests {
                 };
 
                 let result = integration
-                    .unary_call(&cx, |service, cx, req| {
-                        Box::pin(service.get_user(cx, req))
-                    }, request)
+                    .unary_call(
+                        &cx,
+                        |service, cx, req| Box::pin(service.get_user(cx, req)),
+                        request,
+                    )
                     .await;
 
                 assert!(result.is_ok(), "Request {} should succeed", i);
@@ -894,9 +935,8 @@ mod tests {
 
         crate::lab::runtime::block_on(async {
             // Start multiple requests
-            let request_ids: Vec<u32> = (0..5)
-                .map(|_| integration.client.start_request())
-                .collect();
+            let request_ids: Vec<u32> =
+                (0..5).map(|_| integration.client.start_request()).collect();
 
             // Cancel all requests
             for &request_id in &request_ids {

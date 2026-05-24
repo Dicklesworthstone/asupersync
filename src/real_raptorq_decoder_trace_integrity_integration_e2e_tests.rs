@@ -41,22 +41,22 @@ mod tests {
 
     use crate::raptorq::{
         decoder::{DecodeError, DecodeResult, Decoder, ReceivedSymbol},
-        systematic::{SystematicParams, SystematicError},
         gf256::Gf256,
         rfc6330::RFC6330_K_MAX,
+        systematic::{SystematicError, SystematicParams},
     };
     use crate::trace::{
+        file::{TRACE_FILE_VERSION, TraceMetadata},
         integrity::{IntegrityIssue, VerificationOptions, VerificationResult},
-        file::{TraceMetadata, TRACE_FILE_VERSION},
     };
     use crate::types::{ObjectId, Time};
-    use std::collections::{HashMap, BTreeMap};
+    use sha2::{Digest, Sha256};
+    use std::collections::{BTreeMap, HashMap};
+    use std::fmt::Write;
     use std::sync::{
         Arc, RwLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
-    };
-    use sha2::{Sha256, Digest};
-    use std::fmt::Write; // For hex encoding
+    }; // For hex encoding
 
     // ────────────────────────────────────────────────────────────────────────────────
     // RaptorQ Decoder + Trace Integrity Integration Test Framework
@@ -224,7 +224,8 @@ mod tests {
 
         /// Returns hex representation for debugging
         pub fn to_hex(&self) -> String {
-            self.0.iter()
+            self.0
+                .iter()
                 .map(|b| format!("{:02x}", b))
                 .collect::<String>()
         }
@@ -261,7 +262,8 @@ mod tests {
                 peeling_iterations: decode_result.stats.peeling_iterations,
                 gaussian_eliminations: decode_result.stats.gaussian_eliminations,
                 symbols_solved: decode_result.stats.symbols_solved,
-                matrix_operations: decode_result.stats.peeling_iterations + decode_result.stats.gaussian_eliminations,
+                matrix_operations: decode_result.stats.peeling_iterations
+                    + decode_result.stats.gaussian_eliminations,
             };
 
             let entry = IntegrityEntry {
@@ -287,7 +289,9 @@ mod tests {
             new_signature: IntegritySignature,
             timestamp: Time,
         ) -> Result<bool, String> {
-            let entry = self.entries.get_mut(&object_id)
+            let entry = self
+                .entries
+                .get_mut(&object_id)
                 .ok_or_else(|| format!("Object {:?} not found in integrity table", object_id))?;
 
             let consistency_verified = entry.signature.verify_consistency(&new_signature);
@@ -315,7 +319,8 @@ mod tests {
         /// Checks for signature collisions across all objects
         pub fn verify_no_signature_collisions(&self) -> Result<(), Vec<String>> {
             let mut errors = Vec::new();
-            let mut signature_to_objects: HashMap<&IntegritySignature, Vec<ObjectId>> = HashMap::new();
+            let mut signature_to_objects: HashMap<&IntegritySignature, Vec<ObjectId>> =
+                HashMap::new();
 
             for (object_id, entry) in &self.entries {
                 signature_to_objects
@@ -334,7 +339,11 @@ mod tests {
                 }
             }
 
-            if errors.is_empty() { Ok(()) } else { Err(errors) }
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(errors)
+            }
         }
 
         /// Gets decode history for analysis
@@ -374,7 +383,8 @@ mod tests {
             result.phase = RaptorQIntegrityTestPhase::ObjectCreation;
 
             // Create test object with known parameters
-            let test_object = match self.create_test_object(ObjectId::new_for_test(1, 1), 10, 1024) {
+            let test_object = match self.create_test_object(ObjectId::new_for_test(1, 1), 10, 1024)
+            {
                 Ok(obj) => obj,
                 Err(e) => {
                     result.error = Some(format!("Failed to create test object: {}", e));
@@ -413,7 +423,12 @@ mod tests {
 
             // Add to integrity table
             let timestamp = Time::from_nanos(start_time.elapsed().as_nanos() as u64);
-            match self.add_integrity_entry(test_object.object_id, signature.clone(), &decode_result, timestamp) {
+            match self.add_integrity_entry(
+                test_object.object_id,
+                signature.clone(),
+                &decode_result,
+                timestamp,
+            ) {
                 Ok(()) => {
                     self.increment_integrity_stat("integrity_entries_created", 1);
                     self.increment_integrity_stat("unique_signatures_generated", 1);
@@ -459,7 +474,8 @@ mod tests {
             result.phase = RaptorQIntegrityTestPhase::ObjectCreation;
 
             // Create test object
-            let test_object = match self.create_test_object(ObjectId::new_for_test(2, 1), 15, 2048) {
+            let test_object = match self.create_test_object(ObjectId::new_for_test(2, 1), 15, 2048)
+            {
                 Ok(obj) => obj,
                 Err(e) => {
                     result.error = Some(format!("Failed to create test object: {}", e));
@@ -490,7 +506,12 @@ mod tests {
             );
 
             let timestamp = Time::from_nanos(start_time.elapsed().as_nanos() as u64);
-            if let Err(e) = self.add_integrity_entry(test_object.object_id, initial_signature.clone(), &initial_decode, timestamp) {
+            if let Err(e) = self.add_integrity_entry(
+                test_object.object_id,
+                initial_signature.clone(),
+                &initial_decode,
+                timestamp,
+            ) {
                 result.error = Some(format!("Failed to add initial integrity entry: {}", e));
                 return result;
             }
@@ -537,8 +558,13 @@ mod tests {
                 }
 
                 // Update integrity table
-                let update_timestamp = Time::from_nanos((start_time.elapsed().as_nanos() + (i as u128 * 1000)) as u64);
-                match self.update_integrity_entry(test_object.object_id, redecode_signature, update_timestamp) {
+                let update_timestamp =
+                    Time::from_nanos((start_time.elapsed().as_nanos() + (i as u128 * 1000)) as u64);
+                match self.update_integrity_entry(
+                    test_object.object_id,
+                    redecode_signature,
+                    update_timestamp,
+                ) {
                     Ok(is_consistent) => {
                         if is_consistent {
                             self.increment_integrity_stat("signature_verifications", 1);
@@ -571,7 +597,9 @@ mod tests {
         }
 
         /// Tests multiple objects with distinct integrity signatures
-        pub async fn test_multi_object_distinct_signatures(&mut self) -> RaptorQIntegrityTestResult {
+        pub async fn test_multi_object_distinct_signatures(
+            &mut self,
+        ) -> RaptorQIntegrityTestResult {
             let start_time = std::time::Instant::now();
             let mut result = RaptorQIntegrityTestResult {
                 test_name: "test_multi_object_distinct_signatures".to_string(),
@@ -601,7 +629,10 @@ mod tests {
                 let test_object = match self.create_test_object(object_id, k_symbols, symbol_size) {
                     Ok(obj) => obj,
                     Err(e) => {
-                        result.error = Some(format!("Failed to create test object {:?}: {}", object_id, e));
+                        result.error = Some(format!(
+                            "Failed to create test object {:?}: {}",
+                            object_id, e
+                        ));
                         return result;
                     }
                 };
@@ -616,7 +647,8 @@ mod tests {
                         res
                     }
                     Err(e) => {
-                        result.error = Some(format!("Decode failed for object {:?}: {:?}", object_id, e));
+                        result.error =
+                            Some(format!("Decode failed for object {:?}: {:?}", object_id, e));
                         return result;
                     }
                 };
@@ -634,8 +666,16 @@ mod tests {
 
                 // Add to integrity table
                 let timestamp = Time::from_nanos(start_time.elapsed().as_nanos() as u64);
-                if let Err(e) = self.add_integrity_entry(test_object.object_id, signature.clone(), &decode_result, timestamp) {
-                    result.error = Some(format!("Failed to add integrity entry for {:?}: {}", object_id, e));
+                if let Err(e) = self.add_integrity_entry(
+                    test_object.object_id,
+                    signature.clone(),
+                    &decode_result,
+                    timestamp,
+                ) {
+                    result.error = Some(format!(
+                        "Failed to add integrity entry for {:?}: {}",
+                        object_id, e
+                    ));
                     return result;
                 }
 
@@ -668,7 +708,10 @@ mod tests {
                     result.signatures_verified = object_signatures.len() as u64;
                 }
                 Err(errors) => {
-                    result.error = Some(format!("Signature collision verification failed: {:?}", errors));
+                    result.error = Some(format!(
+                        "Signature collision verification failed: {:?}",
+                        errors
+                    ));
                     return result;
                 }
             }
@@ -681,7 +724,9 @@ mod tests {
         }
 
         /// Comprehensive integration test combining all patterns
-        pub async fn test_comprehensive_raptorq_integrity_integration(&mut self) -> RaptorQIntegrityTestResult {
+        pub async fn test_comprehensive_raptorq_integrity_integration(
+            &mut self,
+        ) -> RaptorQIntegrityTestResult {
             let start_time = std::time::Instant::now();
             let mut result = RaptorQIntegrityTestResult {
                 test_name: "test_comprehensive_raptorq_integrity_integration".to_string(),
@@ -698,8 +743,14 @@ mod tests {
             // Run all test components
             let tests = vec![
                 ("basic_decode_integrity", self.test_basic_decode_integrity()),
-                ("redecode_consistency", self.test_redecode_signature_consistency()),
-                ("multi_object_distinct", self.test_multi_object_distinct_signatures()),
+                (
+                    "redecode_consistency",
+                    self.test_redecode_signature_consistency(),
+                ),
+                (
+                    "multi_object_distinct",
+                    self.test_multi_object_distinct_signatures(),
+                ),
             ];
 
             let mut successful_tests = 0;
@@ -711,7 +762,10 @@ mod tests {
                     successful_tests += 1;
                     total_signatures_verified += test_result.signatures_verified;
                 } else {
-                    result.error = Some(format!("Comprehensive test component '{}' failed: {:?}", test_name, test_result.error));
+                    result.error = Some(format!(
+                        "Comprehensive test component '{}' failed: {:?}",
+                        test_name, test_result.error
+                    ));
                     break;
                 }
             }
@@ -730,7 +784,10 @@ mod tests {
                     result.success = true;
                     result.signatures_verified = total_signatures_verified;
                 } else {
-                    result.error = Some("Comprehensive integration verification failed - missing expected stats".to_string());
+                    result.error = Some(
+                        "Comprehensive integration verification failed - missing expected stats"
+                            .to_string(),
+                    );
                 }
             }
 
@@ -750,7 +807,10 @@ mod tests {
             symbol_size: usize,
         ) -> Result<TestRaptorQObject, String> {
             if k_symbols > RFC6330_K_MAX {
-                return Err(format!("k_symbols {} exceeds RFC6330_K_MAX {}", k_symbols, RFC6330_K_MAX));
+                return Err(format!(
+                    "k_symbols {} exceeds RFC6330_K_MAX {}",
+                    k_symbols, RFC6330_K_MAX
+                ));
             }
 
             // Generate deterministic source data
@@ -759,22 +819,29 @@ mod tests {
                 let mut symbol = vec![0u8; symbol_size];
                 // Fill with deterministic pattern based on object_id and symbol index
                 for (j, byte) in symbol.iter_mut().enumerate() {
-                    *byte = (object_id.as_bytes()[0].wrapping_add(i as u8).wrapping_add(j as u8)) ^ 0xAA;
+                    *byte = (object_id.as_bytes()[0]
+                        .wrapping_add(i as u8)
+                        .wrapping_add(j as u8))
+                        ^ 0xAA;
                 }
                 source_data.push(symbol);
             }
 
             // Create systematic parameters
-            let systematic_params = match SystematicParams::new(k_symbols as u32, symbol_size as u16) {
-                Ok(params) => params,
-                Err(e) => return Err(format!("Failed to create systematic params: {:?}", e)),
-            };
+            let systematic_params =
+                match SystematicParams::new(k_symbols as u32, symbol_size as u16) {
+                    Ok(params) => params,
+                    Err(e) => return Err(format!("Failed to create systematic params: {:?}", e)),
+                };
 
             // Create decoder
             let decoder = Decoder::new(systematic_params.clone());
 
             // Register decoder
-            self.decoder_registry.write().unwrap().insert(object_id, decoder);
+            self.decoder_registry
+                .write()
+                .unwrap()
+                .insert(object_id, decoder);
 
             // Generate received symbols (systematic symbols + some repair symbols)
             let mut received_symbols = Vec::new();
@@ -799,13 +866,20 @@ mod tests {
             })
         }
 
-        fn decode_object(&self, test_object: &TestRaptorQObject) -> Result<DecodeResult, DecodeError> {
-            let decoder = self.decoder_registry
+        fn decode_object(
+            &self,
+            test_object: &TestRaptorQObject,
+        ) -> Result<DecodeResult, DecodeError> {
+            let decoder = self
+                .decoder_registry
                 .read()
                 .unwrap()
                 .get(&test_object.object_id)
                 .cloned()
-                .ok_or(DecodeError::InsufficientSymbols { received: 0, required: 1 })?;
+                .ok_or(DecodeError::InsufficientSymbols {
+                    received: 0,
+                    required: 1,
+                })?;
 
             decoder.decode(&test_object.received_symbols)
         }
@@ -817,10 +891,12 @@ mod tests {
             decode_result: &DecodeResult,
             timestamp: Time,
         ) -> Result<(), String> {
-            self.integrity_table
-                .write()
-                .unwrap()
-                .add_entry(object_id, signature, decode_result, timestamp)
+            self.integrity_table.write().unwrap().add_entry(
+                object_id,
+                signature,
+                decode_result,
+                timestamp,
+            )
         }
 
         fn update_integrity_entry(
@@ -835,7 +911,11 @@ mod tests {
                 .update_entry(object_id, signature, timestamp)
         }
 
-        fn verify_integrity_entry_exists(&self, object_id: ObjectId, signature: &IntegritySignature) -> bool {
+        fn verify_integrity_entry_exists(
+            &self,
+            object_id: ObjectId,
+            signature: &IntegritySignature,
+        ) -> bool {
             if let Some(entry) = self.integrity_table.read().unwrap().get_entry(object_id) {
                 entry.signature.verify_consistency(signature)
             } else {
@@ -904,14 +984,19 @@ mod tests {
             let mut harness = RaptorQIntegrityTestHarness::new("basic_decode_integrity");
             let result = harness.test_basic_decode_integrity().await;
 
-            assert!(result.success, "Basic decode integrity test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Basic decode integrity test failed: {:?}",
+                result.error
+            );
             assert!(result.raptorq_stats.objects_decoded >= 1);
             assert!(result.raptorq_stats.decode_operations >= 1);
             assert!(result.integrity_stats.integrity_entries_created >= 1);
             assert!(result.integrity_stats.signature_computations >= 1);
             assert_eq!(result.signatures_verified, 1);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -920,13 +1005,18 @@ mod tests {
             let mut harness = RaptorQIntegrityTestHarness::new("redecode_signature_consistency");
             let result = harness.test_redecode_signature_consistency().await;
 
-            assert!(result.success, "Re-decode signature consistency test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Re-decode signature consistency test failed: {:?}",
+                result.error
+            );
             assert!(result.raptorq_stats.decode_operations >= 5);
             assert!(result.integrity_stats.signature_verifications >= 5);
             assert!(result.integrity_stats.consistency_checks_passed >= 5);
             assert!(result.signatures_verified >= 6); // Initial + 5 re-decodes
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -935,21 +1025,32 @@ mod tests {
             let mut harness = RaptorQIntegrityTestHarness::new("multi_object_distinct_signatures");
             let result = harness.test_multi_object_distinct_signatures().await;
 
-            assert!(result.success, "Multi-object distinct signatures test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Multi-object distinct signatures test failed: {:?}",
+                result.error
+            );
             assert!(result.raptorq_stats.objects_decoded >= 3);
             assert!(result.integrity_stats.unique_signatures_generated >= 3);
             assert_eq!(result.signatures_verified, 3);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn test_raptorq_comprehensive_integration() {
         crate::lab::runtime::test_with_lab(|cx| async move {
             let mut harness = RaptorQIntegrityTestHarness::new("comprehensive_raptorq_integrity");
-            let result = harness.test_comprehensive_raptorq_integrity_integration().await;
+            let result = harness
+                .test_comprehensive_raptorq_integrity_integration()
+                .await;
 
-            assert!(result.success, "Comprehensive RaptorQ-integrity integration test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Comprehensive RaptorQ-integrity integration test failed: {:?}",
+                result.error
+            );
             let raptorq_stats = result.raptorq_stats;
             let integrity_stats = result.integrity_stats;
 
@@ -960,6 +1061,7 @@ mod tests {
             assert!(integrity_stats.consistency_checks_passed > 0);
             assert!(result.signatures_verified > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

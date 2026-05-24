@@ -40,18 +40,18 @@ mod tests {
         dead_code
     )]
 
-    use crate::messaging::kafka::{
-        KafkaConfig, KafkaProducer, KafkaRecord, KafkaTransaction,
-        AckMode, CompressionType, SecurityConfig,
-    };
-    use crate::tls::{TlsConnector, TlsConnectorBuilder, TlsStream};
-    use crate::net::tcp::TcpStream;
     use crate::cx::Cx;
+    use crate::messaging::kafka::{
+        AckMode, CompressionType, KafkaConfig, KafkaProducer, KafkaRecord, KafkaTransaction,
+        SecurityConfig,
+    };
+    use crate::net::tcp::TcpStream;
+    use crate::tls::{TlsConnector, TlsConnectorBuilder, TlsStream};
     use crate::types::{Outcome, Time};
     use std::collections::{HashMap, VecDeque};
     use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     /// Test phases for TLS-Kafka integration testing
@@ -241,7 +241,11 @@ mod tests {
         }
 
         /// Generate test message batch for integrity verification
-        fn generate_test_message_batch(&self, count: usize, batch_prefix: &str) -> Vec<KafkaRecord> {
+        fn generate_test_message_batch(
+            &self,
+            count: usize,
+            batch_prefix: &str,
+        ) -> Vec<KafkaRecord> {
             let mut messages = Vec::new();
 
             for i in 0..count {
@@ -255,7 +259,8 @@ mod tests {
                 };
 
                 // Register expected message for verification
-                self.integrity_verifier.register_expected_message(message_content);
+                self.integrity_verifier
+                    .register_expected_message(message_content);
                 messages.push(record);
             }
 
@@ -287,7 +292,10 @@ mod tests {
                 }
 
                 // Send message (in a real integration, this would go through TLS)
-                match self.simulate_kafka_send_over_tls(cx, producer, message.clone()).await {
+                match self
+                    .simulate_kafka_send_over_tls(cx, producer, message.clone())
+                    .await
+                {
                     Ok(_) => {
                         sent_count += 1;
                         self.increment_kafka_stat("message_sent", 1);
@@ -365,13 +373,17 @@ mod tests {
             result.kafka_stats.messages_sent = test_messages.len() as u64;
 
             // Send messages over TLS
-            match self.send_messages_with_rekey_simulation(cx, &kafka_producer, test_messages).await {
+            match self
+                .send_messages_with_rekey_simulation(cx, &kafka_producer, test_messages)
+                .await
+            {
                 Ok(sent_count) => {
                     result.kafka_stats.messages_delivered = sent_count;
                     result.phase = TlsKafkaTestPhase::MessageIntegrityVerification;
 
                     // Verify message integrity
-                    result.message_integrity_preserved = self.integrity_verifier.verify_batch_integrity();
+                    result.message_integrity_preserved =
+                        self.integrity_verifier.verify_batch_integrity();
 
                     if result.message_integrity_preserved {
                         result.success = true;
@@ -420,27 +432,34 @@ mod tests {
             result.phase = TlsKafkaTestPhase::TlsRekeyingTriggered;
 
             // Send messages with simulated TLS rekey events
-            match self.send_messages_with_rekey_simulation(cx, &kafka_producer, test_messages).await {
+            match self
+                .send_messages_with_rekey_simulation(cx, &kafka_producer, test_messages)
+                .await
+            {
                 Ok(sent_count) => {
                     result.kafka_stats.messages_delivered = sent_count;
-                    result.tls_stats.rekeying_events = self.rekey_simulator.get_rekey_count() as u32;
-                    result.tls_stats.connection_survivals = self.rekey_simulator.get_survival_count() as u32;
+                    result.tls_stats.rekeying_events =
+                        self.rekey_simulator.get_rekey_count() as u32;
+                    result.tls_stats.connection_survivals =
+                        self.rekey_simulator.get_survival_count() as u32;
 
                     result.phase = TlsKafkaTestPhase::MessageIntegrityVerification;
 
                     // Verify rekey tolerance
-                    result.rekey_tolerance_verified = result.tls_stats.rekeying_events > 0 &&
-                                                      result.tls_stats.connection_survivals > 0;
+                    result.rekey_tolerance_verified = result.tls_stats.rekeying_events > 0
+                        && result.tls_stats.connection_survivals > 0;
 
                     // Verify message integrity despite rekeying
-                    result.message_integrity_preserved = self.integrity_verifier.verify_batch_integrity();
+                    result.message_integrity_preserved =
+                        self.integrity_verifier.verify_batch_integrity();
 
                     if result.rekey_tolerance_verified && result.message_integrity_preserved {
                         result.kafka_stats.rekey_survivals = 1;
                         result.success = true;
                         result.phase = TlsKafkaTestPhase::Complete;
                     } else {
-                        result.error = Some("TLS rekey tolerance or message integrity failed".to_string());
+                        result.error =
+                            Some("TLS rekey tolerance or message integrity failed".to_string());
                     }
                 }
                 Err(e) => {
@@ -481,14 +500,18 @@ mod tests {
             result.kafka_stats.messages_sent = test_messages.len() as u64;
 
             // Send large batch with multiple potential rekey points
-            match self.send_messages_with_rekey_simulation(cx, &kafka_producer, test_messages).await {
+            match self
+                .send_messages_with_rekey_simulation(cx, &kafka_producer, test_messages)
+                .await
+            {
                 Ok(sent_count) => {
                     result.kafka_stats.messages_delivered = sent_count;
                     result.kafka_stats.batches_completed = 1;
 
                     // Verify all messages preserved despite large batch size
-                    result.message_integrity_preserved = self.integrity_verifier.verify_batch_integrity() &&
-                                                         !self.integrity_verifier.has_integrity_violations();
+                    result.message_integrity_preserved =
+                        self.integrity_verifier.verify_batch_integrity()
+                            && !self.integrity_verifier.has_integrity_violations();
 
                     result.rekey_tolerance_verified = self.rekey_simulator.get_rekey_count() > 0;
 
@@ -506,7 +529,10 @@ mod tests {
         }
 
         /// Test comprehensive TLS-Kafka integration
-        async fn test_comprehensive_tls_kafka_integration(&mut self, cx: &Cx) -> TlsKafkaTestResult {
+        async fn test_comprehensive_tls_kafka_integration(
+            &mut self,
+            cx: &Cx,
+        ) -> TlsKafkaTestResult {
             let mut result = TlsKafkaTestResult {
                 success: false,
                 phase: TlsKafkaTestPhase::Initial,
@@ -523,39 +549,45 @@ mod tests {
             let large_batch_result = self.test_large_batch_preservation(cx).await;
 
             // Aggregate statistics
-            result.kafka_stats.messages_sent = basic_result.kafka_stats.messages_sent +
-                rekey_result.kafka_stats.messages_sent +
-                large_batch_result.kafka_stats.messages_sent;
+            result.kafka_stats.messages_sent = basic_result.kafka_stats.messages_sent
+                + rekey_result.kafka_stats.messages_sent
+                + large_batch_result.kafka_stats.messages_sent;
 
-            result.kafka_stats.messages_delivered = basic_result.kafka_stats.messages_delivered +
-                rekey_result.kafka_stats.messages_delivered +
-                large_batch_result.kafka_stats.messages_delivered;
+            result.kafka_stats.messages_delivered = basic_result.kafka_stats.messages_delivered
+                + rekey_result.kafka_stats.messages_delivered
+                + large_batch_result.kafka_stats.messages_delivered;
 
-            result.tls_stats.connections_established = basic_result.tls_stats.connections_established +
-                rekey_result.tls_stats.connections_established +
-                large_batch_result.tls_stats.connections_established;
+            result.tls_stats.connections_established =
+                basic_result.tls_stats.connections_established
+                    + rekey_result.tls_stats.connections_established
+                    + large_batch_result.tls_stats.connections_established;
 
             result.tls_stats.rekeying_events = self.rekey_simulator.get_rekey_count() as u32;
-            result.tls_stats.connection_survivals = self.rekey_simulator.get_survival_count() as u32;
+            result.tls_stats.connection_survivals =
+                self.rekey_simulator.get_survival_count() as u32;
 
             // Check overall success
-            result.success = basic_result.success && rekey_result.success && large_batch_result.success;
-            result.message_integrity_preserved = basic_result.message_integrity_preserved &&
-                rekey_result.message_integrity_preserved &&
-                large_batch_result.message_integrity_preserved;
-            result.rekey_tolerance_verified = rekey_result.rekey_tolerance_verified &&
-                large_batch_result.rekey_tolerance_verified;
+            result.success =
+                basic_result.success && rekey_result.success && large_batch_result.success;
+            result.message_integrity_preserved = basic_result.message_integrity_preserved
+                && rekey_result.message_integrity_preserved
+                && large_batch_result.message_integrity_preserved;
+            result.rekey_tolerance_verified = rekey_result.rekey_tolerance_verified
+                && large_batch_result.rekey_tolerance_verified;
 
             // Verify no integrity violations across all tests
             if self.integrity_verifier.has_integrity_violations() {
-                result.error = Some("Message integrity violations detected across tests".to_string());
+                result.error =
+                    Some("Message integrity violations detected across tests".to_string());
                 result.success = false;
             }
 
             if result.success {
                 result.phase = TlsKafkaTestPhase::Complete;
             } else {
-                result.error = result.error.or_else(|| Some("One or more TLS-Kafka integration tests failed".to_string()));
+                result.error = result
+                    .error
+                    .or_else(|| Some("One or more TLS-Kafka integration tests failed".to_string()));
             }
 
             result
@@ -568,13 +600,18 @@ mod tests {
             let mut harness = TlsKafkaTestHarness::new("basic_tls_kafka");
             let result = harness.test_basic_tls_kafka_send(&cx).await;
 
-            assert!(result.success, "Basic TLS Kafka send failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Basic TLS Kafka send failed: {:?}",
+                result.error
+            );
             assert!(result.message_integrity_preserved);
             assert_eq!(result.phase, TlsKafkaTestPhase::Complete);
             assert!(result.kafka_stats.messages_delivered > 0);
             assert!(result.tls_stats.connections_established > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -583,14 +620,19 @@ mod tests {
             let mut harness = TlsKafkaTestHarness::new("rekey_tolerance");
             let result = harness.test_mid_batch_rekey_tolerance(&cx).await;
 
-            assert!(result.success, "Mid-batch rekey tolerance failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Mid-batch rekey tolerance failed: {:?}",
+                result.error
+            );
             assert!(result.message_integrity_preserved);
             assert!(result.rekey_tolerance_verified);
             assert!(result.tls_stats.rekeying_events > 0);
             assert!(result.tls_stats.connection_survivals > 0);
             assert!(result.kafka_stats.rekey_survivals > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -599,13 +641,18 @@ mod tests {
             let mut harness = TlsKafkaTestHarness::new("large_batch");
             let result = harness.test_large_batch_preservation(&cx).await;
 
-            assert!(result.success, "Large batch preservation failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Large batch preservation failed: {:?}",
+                result.error
+            );
             assert!(result.message_integrity_preserved);
             assert!(result.rekey_tolerance_verified);
             assert!(result.kafka_stats.messages_sent > 40); // Large batch
             assert!(result.kafka_stats.batches_completed > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -614,7 +661,11 @@ mod tests {
             let mut harness = TlsKafkaTestHarness::new("comprehensive_tls_kafka");
             let result = harness.test_comprehensive_tls_kafka_integration(&cx).await;
 
-            assert!(result.success, "Comprehensive TLS-Kafka integration failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Comprehensive TLS-Kafka integration failed: {:?}",
+                result.error
+            );
             assert!(result.message_integrity_preserved);
             assert!(result.rekey_tolerance_verified);
             let tls_stats = result.tls_stats;
@@ -627,6 +678,7 @@ mod tests {
             assert!(kafka_stats.messages_delivered > 0);
             assert_eq!(kafka_stats.messages_lost, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

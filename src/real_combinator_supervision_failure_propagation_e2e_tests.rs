@@ -30,23 +30,23 @@
 
 #![cfg(all(test, feature = "real-service-e2e"))]
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use crate::cx::{Cx, Scope};
-use crate::types::{Budget, Outcome, Time};
-use crate::runtime::test_util::create_test_runtime;
 use crate::combinator::{
-    bracket::{bracket, BracketError},
-    bulkhead::{Bulkhead, BulkheadPolicy, BulkheadError},
-    quorum::{quorum, QuorumError},
+    bracket::{BracketError, bracket},
+    bulkhead::{Bulkhead, BulkheadError, BulkheadPolicy},
+    quorum::{QuorumError, quorum},
 };
+use crate::cx::{Cx, Scope};
+use crate::runtime::test_util::create_test_runtime;
 use crate::supervision::{
-    SupervisionStrategy, RestartConfig, BackoffStrategy, ChildName,
-    Supervisor, SupervisorRestartPlan,
+    BackoffStrategy, ChildName, RestartConfig, SupervisionStrategy, Supervisor,
+    SupervisorRestartPlan,
 };
+use crate::types::{Budget, Outcome, Time};
 
 /// Test configuration for E2E scenarios.
 #[derive(Clone, Debug)]
@@ -194,17 +194,17 @@ async fn test_bracket_cleanup_failure_propagates_to_stop_strategy() {
                         Ok::<_, String>(format!("Used resource {}", resource.id))
                     },
                     // Release: will fail during cleanup
-                    move |resource| async move {
-                        resource.cleanup().await
-                    },
+                    move |resource| async move { resource.cleanup().await },
                 );
 
                 // Spawn with Stop supervision strategy
-                let task_handle = scope.spawn_with_supervision(
-                    ChildName::new("bracket_task"),
-                    SupervisionStrategy::Stop,
-                    bracket_future,
-                ).map_err(|e| format!("Failed to spawn: {:?}", e))?;
+                let task_handle = scope
+                    .spawn_with_supervision(
+                        ChildName::new("bracket_task"),
+                        SupervisionStrategy::Stop,
+                        bracket_future,
+                    )
+                    .map_err(|e| format!("Failed to spawn: {:?}", e))?;
 
                 // Cancel the task to trigger cleanup path
                 cx.sleep(Duration::from_millis(100)).await;
@@ -230,18 +230,32 @@ async fn test_bracket_cleanup_failure_propagates_to_stop_strategy() {
                 }
 
                 // Verify resource cleanup was attempted
-                assert!(resource_clone.cleanup_attempt_count() > 0,
-                       "Resource cleanup should have been attempted");
+                assert!(
+                    resource_clone.cleanup_attempt_count() > 0,
+                    "Resource cleanup should have been attempted"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Test should complete successfully: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Test should complete successfully: {:?}",
+        result
+    );
 
     let (stops, restarts, escalations, exhaustions) = counter.totals();
-    assert!(stops >= 1, "Expected at least one Stop decision, got: stops={}, restarts={}, escalations={}, exhaustions={}", stops, restarts, escalations, exhaustions);
+    assert!(
+        stops >= 1,
+        "Expected at least one Stop decision, got: stops={}, restarts={}, escalations={}, exhaustions={}",
+        stops,
+        restarts,
+        escalations,
+        exhaustions
+    );
 }
 
 /// Test bracket resource acquisition failure with Restart supervision strategy.
@@ -274,20 +288,21 @@ async fn test_bracket_acquisition_failure_with_restart_strategy() {
                         Ok::<_, String>(format!("Used resource {}", resource.id))
                     },
                     // Release: clean release
-                    move |resource| async move {
-                        resource.cleanup().await
-                    },
+                    move |resource| async move { resource.cleanup().await },
                 );
 
                 // Spawn with Restart supervision strategy
-                let restart_config = RestartConfig::new(config.max_restart_attempts, Duration::from_secs(5))
-                    .with_backoff(BackoffStrategy::Fixed(Duration::from_millis(100)));
+                let restart_config =
+                    RestartConfig::new(config.max_restart_attempts, Duration::from_secs(5))
+                        .with_backoff(BackoffStrategy::Fixed(Duration::from_millis(100)));
 
-                let task_handle = scope.spawn_with_supervision(
-                    ChildName::new("bracket_restart_task"),
-                    SupervisionStrategy::Restart(restart_config),
-                    bracket_future,
-                ).map_err(|e| format!("Failed to spawn: {:?}", e))?;
+                let task_handle = scope
+                    .spawn_with_supervision(
+                        ChildName::new("bracket_restart_task"),
+                        SupervisionStrategy::Restart(restart_config),
+                        bracket_future,
+                    )
+                    .map_err(|e| format!("Failed to spawn: {:?}", e))?;
 
                 // Wait for task completion with restarts
                 match task_handle.join().await {
@@ -297,7 +312,9 @@ async fn test_bracket_acquisition_failure_with_restart_strategy() {
                         counter.record_restart();
                     }
                     Outcome::Err(BracketError::Inner(err)) => {
-                        if acquisition_attempts.load(Ordering::SeqCst) >= config.max_restart_attempts {
+                        if acquisition_attempts.load(Ordering::SeqCst)
+                            >= config.max_restart_attempts
+                        {
                             // Restart budget exhausted
                             counter.record_restart_exhaustion();
                         } else {
@@ -313,20 +330,32 @@ async fn test_bracket_acquisition_failure_with_restart_strategy() {
                 }
 
                 // Verify multiple acquisition attempts were made
-                assert!(acquisition_attempts.load(Ordering::SeqCst) >= 2,
-                       "Expected multiple acquisition attempts due to restart strategy");
+                assert!(
+                    acquisition_attempts.load(Ordering::SeqCst) >= 2,
+                    "Expected multiple acquisition attempts due to restart strategy"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Test should complete successfully: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Test should complete successfully: {:?}",
+        result
+    );
 
     let (stops, restarts, escalations, exhaustions) = counter.totals();
-    assert!(restarts >= 1 || exhaustions >= 1,
-           "Expected restart attempts or exhaustion, got: stops={}, restarts={}, escalations={}, exhaustions={}",
-           stops, restarts, escalations, exhaustions);
+    assert!(
+        restarts >= 1 || exhaustions >= 1,
+        "Expected restart attempts or exhaustion, got: stops={}, restarts={}, escalations={}, exhaustions={}",
+        stops,
+        restarts,
+        escalations,
+        exhaustions
+    );
 }
 
 // ============================================================================
@@ -347,32 +376,45 @@ async fn test_quorum_insufficient_completions_escalate_strategy() {
                 // Create parent region that will receive escalation
                 cx.scope(|parent_scope| async move {
                     // Create quorum requiring 3 of 5 successes, but most will fail
-                    let work_futures = (0..5).map(|i| {
-                        let work_id = i;
-                        async move {
-                            // Only work_id 0 will succeed (20% success rate)
-                            simulated_work(cx, work_id, 0.2, Duration::from_millis(100)).await
-                        }
-                    }).collect::<Vec<_>>();
+                    let work_futures = (0..5)
+                        .map(|i| {
+                            let work_id = i;
+                            async move {
+                                // Only work_id 0 will succeed (20% success rate)
+                                simulated_work(cx, work_id, 0.2, Duration::from_millis(100)).await
+                            }
+                        })
+                        .collect::<Vec<_>>();
 
                     let quorum_future = quorum(3, work_futures); // Need 3, will only get ~1
 
                     // Spawn with Escalate supervision strategy
-                    let task_handle = parent_scope.spawn_with_supervision(
-                        ChildName::new("quorum_escalate_task"),
-                        SupervisionStrategy::Escalate,
-                        quorum_future,
-                    ).map_err(|e| format!("Failed to spawn: {:?}", e))?;
+                    let task_handle = parent_scope
+                        .spawn_with_supervision(
+                            ChildName::new("quorum_escalate_task"),
+                            SupervisionStrategy::Escalate,
+                            quorum_future,
+                        )
+                        .map_err(|e| format!("Failed to spawn: {:?}", e))?;
 
                     // Wait for quorum completion
                     match task_handle.join().await {
                         Outcome::Ok(_) => {
-                            return Err("Expected quorum to fail due to insufficient completions".into());
+                            return Err(
+                                "Expected quorum to fail due to insufficient completions".into()
+                            );
                         }
-                        Outcome::Err(QuorumError::InsufficientCompletions { required, achieved }) => {
+                        Outcome::Err(QuorumError::InsufficientCompletions {
+                            required,
+                            achieved,
+                        }) => {
                             // Verify quorum requirements not met
                             assert_eq!(required, 3);
-                            assert!(achieved < 3, "Expected fewer than 3 successes, got {}", achieved);
+                            assert!(
+                                achieved < 3,
+                                "Expected fewer than 3 successes, got {}",
+                                achieved
+                            );
                             counter.record_escalation();
                         }
                         Outcome::Cancelled(_) => {
@@ -385,17 +427,28 @@ async fn test_quorum_insufficient_completions_escalate_strategy() {
                     }
 
                     Ok(())
-                }).await
-            }).await
+                })
+                .await
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Test should complete successfully: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Test should complete successfully: {:?}",
+        result
+    );
 
     let (stops, restarts, escalations, exhaustions) = counter.totals();
-    assert!(escalations >= 1,
-           "Expected escalation decision, got: stops={}, restarts={}, escalations={}, exhaustions={}",
-           stops, restarts, escalations, exhaustions);
+    assert!(
+        escalations >= 1,
+        "Expected escalation decision, got: stops={}, restarts={}, escalations={}, exhaustions={}",
+        stops,
+        restarts,
+        escalations,
+        exhaustions
+    );
 }
 
 /// Test quorum mixed outcomes with supervision decision aggregation.
@@ -410,29 +463,36 @@ async fn test_quorum_mixed_outcomes_supervision_aggregation() {
         |cx| async move {
             cx.scope(|scope| async move {
                 // Create quorum with mixed success/failure outcomes
-                let work_futures = (0..6).map(|i| {
-                    let work_id = i;
-                    async move {
-                        // 50% success rate, deterministic based on work_id
-                        simulated_work(cx, work_id, 0.5, Duration::from_millis(50)).await
-                    }
-                }).collect::<Vec<_>>();
+                let work_futures = (0..6)
+                    .map(|i| {
+                        let work_id = i;
+                        async move {
+                            // 50% success rate, deterministic based on work_id
+                            simulated_work(cx, work_id, 0.5, Duration::from_millis(50)).await
+                        }
+                    })
+                    .collect::<Vec<_>>();
 
                 let quorum_future = quorum(2, work_futures); // Need 2 of 6, should succeed
 
                 // Spawn with Stop supervision for successful quorum
-                let task_handle = scope.spawn_with_supervision(
-                    ChildName::new("quorum_mixed_task"),
-                    SupervisionStrategy::Stop, // Won't trigger since quorum should succeed
-                    quorum_future,
-                ).map_err(|e| format!("Failed to spawn: {:?}", e))?;
+                let task_handle = scope
+                    .spawn_with_supervision(
+                        ChildName::new("quorum_mixed_task"),
+                        SupervisionStrategy::Stop, // Won't trigger since quorum should succeed
+                        quorum_future,
+                    )
+                    .map_err(|e| format!("Failed to spawn: {:?}", e))?;
 
                 // Wait for quorum completion
                 match task_handle.join().await {
                     Outcome::Ok(successful_results) => {
                         // Verify we got at least 2 successful results
-                        assert!(successful_results.len() >= 2,
-                               "Expected at least 2 successful results, got {}", successful_results.len());
+                        assert!(
+                            successful_results.len() >= 2,
+                            "Expected at least 2 successful results, got {}",
+                            successful_results.len()
+                        );
                         // No supervision action needed since quorum succeeded
                     }
                     Outcome::Err(QuorumError::InsufficientCompletions { required, achieved }) => {
@@ -440,7 +500,10 @@ async fn test_quorum_mixed_outcomes_supervision_aggregation() {
                             // Quorum failed, Stop strategy should trigger
                             counter.record_stop();
                         } else {
-                            return Err(format!("Unexpected quorum failure: required={}, achieved={}", required, achieved));
+                            return Err(format!(
+                                "Unexpected quorum failure: required={}, achieved={}",
+                                required, achieved
+                            ));
                         }
                     }
                     Outcome::Cancelled(_) => {
@@ -452,11 +515,16 @@ async fn test_quorum_mixed_outcomes_supervision_aggregation() {
                 }
 
                 Ok(())
-            }).await
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Test should complete successfully: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Test should complete successfully: {:?}",
+        result
+    );
 
     // Test validates both successful quorum (no supervision action) and
     // potential quorum failure (Stop action), depending on deterministic work results
@@ -512,21 +580,22 @@ async fn test_bulkhead_resource_exhaustion_restart_strategy() {
                         Err(BulkheadError::QueueTimeout) => {
                             Err(format!("Queue timeout on attempt {}", attempt))
                         }
-                        Err(e) => {
-                            Err(format!("Unexpected bulkhead error: {:?}", e))
-                        }
+                        Err(e) => Err(format!("Unexpected bulkhead error: {:?}", e)),
                     }
                 };
 
                 // Spawn with Restart supervision strategy
-                let restart_config = RestartConfig::new(config.max_restart_attempts, Duration::from_secs(2))
-                    .with_backoff(BackoffStrategy::Fixed(Duration::from_millis(50)));
+                let restart_config =
+                    RestartConfig::new(config.max_restart_attempts, Duration::from_secs(2))
+                        .with_backoff(BackoffStrategy::Fixed(Duration::from_millis(50)));
 
-                let task_handle = scope.spawn_with_supervision(
-                    ChildName::new("bulkhead_restart_task"),
-                    SupervisionStrategy::Restart(restart_config),
-                    bulkhead_work,
-                ).map_err(|e| format!("Failed to spawn: {:?}", e))?;
+                let task_handle = scope
+                    .spawn_with_supervision(
+                        ChildName::new("bulkhead_restart_task"),
+                        SupervisionStrategy::Restart(restart_config),
+                        bulkhead_work,
+                    )
+                    .map_err(|e| format!("Failed to spawn: {:?}", e))?;
 
                 // Create concurrent load to stress bulkhead
                 let mut concurrent_tasks = Vec::new();
@@ -538,9 +607,7 @@ async fn test_bulkhead_resource_exhaustion_restart_strategy() {
                                 cx.sleep(Duration::from_millis(150)).await;
                                 Ok(format!("Stress task {} completed", i))
                             }
-                            Err(_) => {
-                                Err(format!("Stress task {} rejected", i))
-                            }
+                            Err(_) => Err(format!("Stress task {} rejected", i)),
                         }
                     });
                     concurrent_tasks.push(stress_task);
@@ -554,9 +621,12 @@ async fn test_bulkhead_resource_exhaustion_restart_strategy() {
                         counter.record_restart();
                     }
                     Outcome::Err(err) => {
-                        if exhaustion_attempts.load(Ordering::SeqCst) >= config.max_restart_attempts {
+                        if exhaustion_attempts.load(Ordering::SeqCst) >= config.max_restart_attempts
+                        {
                             // Restart budget exhausted due to persistent bulkhead exhaustion
-                            assert!(err.contains("Bulkhead exhausted") || err.contains("Queue timeout"));
+                            assert!(
+                                err.contains("Bulkhead exhausted") || err.contains("Queue timeout")
+                            );
                             counter.record_restart_exhaustion();
                         } else {
                             return Err(format!("Unexpected bulkhead error: {}", err));
@@ -576,20 +646,32 @@ async fn test_bulkhead_resource_exhaustion_restart_strategy() {
                 }
 
                 // Verify multiple attempts were made due to bulkhead pressure
-                assert!(exhaustion_attempts.load(Ordering::SeqCst) >= 1,
-                       "Expected attempts to be made under bulkhead pressure");
+                assert!(
+                    exhaustion_attempts.load(Ordering::SeqCst) >= 1,
+                    "Expected attempts to be made under bulkhead pressure"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Test should complete successfully: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Test should complete successfully: {:?}",
+        result
+    );
 
     let (stops, restarts, escalations, exhaustions) = counter.totals();
-    assert!(restarts >= 1 || exhaustions >= 1,
-           "Expected restart attempts or exhaustion under bulkhead pressure, got: stops={}, restarts={}, escalations={}, exhaustions={}",
-           stops, restarts, escalations, exhaustions);
+    assert!(
+        restarts >= 1 || exhaustions >= 1,
+        "Expected restart attempts or exhaustion under bulkhead pressure, got: stops={}, restarts={}, escalations={}, exhaustions={}",
+        stops,
+        restarts,
+        escalations,
+        exhaustions
+    );
 }
 
 /// Test bulkhead queue timeout with Stop supervision strategy.
@@ -606,8 +688,8 @@ async fn test_bulkhead_queue_timeout_stop_strategy() {
                 // Create bulkhead with immediate timeout
                 let bulkhead_policy = BulkheadPolicy {
                     name: "timeout_bulkhead".to_string(),
-                    max_concurrent: 1,  // Single worker
-                    max_queue: 2,       // Small queue
+                    max_concurrent: 1,                        // Single worker
+                    max_queue: 2,                             // Small queue
                     queue_timeout: Duration::from_millis(10), // Very short timeout
                     weighted: false,
                     on_full: None,
@@ -624,7 +706,7 @@ async fn test_bulkhead_queue_timeout_stop_strategy() {
                             cx.sleep(Duration::from_millis(200)).await;
                             Ok("Holder task completed")
                         }
-                        Err(e) => Err(format!("Holder task failed: {:?}", e))
+                        Err(e) => Err(format!("Holder task failed: {:?}", e)),
                     }
                 });
 
@@ -635,24 +717,22 @@ async fn test_bulkhead_queue_timeout_stop_strategy() {
                 let bulkhead_clone = bulkhead.clone();
                 let timeout_work = async move {
                     match bulkhead_clone.try_acquire(1).await {
-                        Ok(_permit) => {
-                            Ok("Work should not succeed due to timeout".to_string())
-                        }
+                        Ok(_permit) => Ok("Work should not succeed due to timeout".to_string()),
                         Err(BulkheadError::QueueTimeout) => {
                             Err("Queue timeout as expected".to_string())
                         }
-                        Err(e) => {
-                            Err(format!("Unexpected error: {:?}", e))
-                        }
+                        Err(e) => Err(format!("Unexpected error: {:?}", e)),
                     }
                 };
 
                 // Spawn with Stop supervision strategy
-                let task_handle = scope.spawn_with_supervision(
-                    ChildName::new("bulkhead_timeout_task"),
-                    SupervisionStrategy::Stop,
-                    timeout_work,
-                ).map_err(|e| format!("Failed to spawn: {:?}", e))?;
+                let task_handle = scope
+                    .spawn_with_supervision(
+                        ChildName::new("bulkhead_timeout_task"),
+                        SupervisionStrategy::Stop,
+                        timeout_work,
+                    )
+                    .map_err(|e| format!("Failed to spawn: {:?}", e))?;
 
                 // Wait for task completion
                 match task_handle.join().await {
@@ -661,7 +741,11 @@ async fn test_bulkhead_queue_timeout_stop_strategy() {
                     }
                     Outcome::Err(err) => {
                         // Verify queue timeout propagated through supervision
-                        assert!(err.contains("Queue timeout"), "Expected queue timeout error, got: {}", err);
+                        assert!(
+                            err.contains("Queue timeout"),
+                            "Expected queue timeout error, got: {}",
+                            err
+                        );
                         counter.record_stop();
                     }
                     Outcome::Cancelled(_) => {
@@ -677,16 +761,26 @@ async fn test_bulkhead_queue_timeout_stop_strategy() {
                 let _ = holder_task.join().await;
 
                 Ok(())
-            }).await
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Test should complete successfully: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Test should complete successfully: {:?}",
+        result
+    );
 
     let (stops, restarts, escalations, exhaustions) = counter.totals();
-    assert!(stops >= 1,
-           "Expected Stop decision on queue timeout, got: stops={}, restarts={}, escalations={}, exhaustions={}",
-           stops, restarts, escalations, exhaustions);
+    assert!(
+        stops >= 1,
+        "Expected Stop decision on queue timeout, got: stops={}, restarts={}, escalations={}, exhaustions={}",
+        stops,
+        restarts,
+        escalations,
+        exhaustions
+    );
 }
 
 // ============================================================================
@@ -732,9 +826,12 @@ async fn test_comprehensive_combinator_supervision_failure_propagation() {
                 )?;
 
                 // Test 2: Quorum failure + Escalate strategy
-                let quorum_futures = (0..4).map(|i| {
-                    async move { simulated_work(cx, i, 0.25, Duration::from_millis(30)).await }
-                }).collect();
+                let quorum_futures =
+                    (0..4)
+                        .map(|i| async move {
+                            simulated_work(cx, i, 0.25, Duration::from_millis(30)).await
+                        })
+                        .collect();
                 let quorum_future = quorum(3, quorum_futures); // Need 3, likely get 1
 
                 let quorum_handle = scope.spawn_with_supervision(
@@ -760,11 +857,12 @@ async fn test_comprehensive_combinator_supervision_failure_propagation() {
                             cx.sleep(Duration::from_millis(100)).await;
                             Ok("Bulkhead work completed".to_string())
                         }
-                        Err(e) => Err(format!("Bulkhead error: {:?}", e))
+                        Err(e) => Err(format!("Bulkhead error: {:?}", e)),
                     }
                 };
 
-                let restart_config = RestartConfig::new(config.max_restart_attempts, Duration::from_secs(1));
+                let restart_config =
+                    RestartConfig::new(config.max_restart_attempts, Duration::from_secs(1));
                 let bulkhead_handle = scope.spawn_with_supervision(
                     ChildName::new("comprehensive_bulkhead"),
                     SupervisionStrategy::Restart(restart_config),
@@ -778,7 +876,7 @@ async fn test_comprehensive_combinator_supervision_failure_propagation() {
                             cx.sleep(Duration::from_millis(200)).await;
                             Ok("Stress completed")
                         }
-                        Err(_) => Err("Stress rejected")
+                        Err(_) => Err("Stress rejected"),
                     }
                 });
 
@@ -830,7 +928,8 @@ async fn test_comprehensive_combinator_supervision_failure_propagation() {
                     Outcome::Err(err) => {
                         if err.contains("Bulkhead error") {
                             counter.record_restart_exhaustion();
-                            test_results.push("Bulkhead restart exhausted due to persistent failure");
+                            test_results
+                                .push("Bulkhead restart exhausted due to persistent failure");
                         } else {
                             test_results.push("Bulkhead error unexpected");
                         }
@@ -842,11 +941,16 @@ async fn test_comprehensive_combinator_supervision_failure_propagation() {
                 assert!(resource_clone.cleanup_attempt_count() > 0);
 
                 Ok(test_results)
-            }).await
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Comprehensive test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Comprehensive test should complete: {:?}",
+        result
+    );
 
     if let Ok(results) = result {
         assert!(!results.is_empty(), "Should have collected test results");
@@ -858,14 +962,29 @@ async fn test_comprehensive_combinator_supervision_failure_propagation() {
     let (stops, restarts, escalations, exhaustions) = counter.totals();
     let total_decisions = stops + restarts + escalations + exhaustions;
 
-    assert!(total_decisions >= 3,
-           "Expected supervision decisions from all combinator types, got: stops={}, restarts={}, escalations={}, exhaustions={} (total={})",
-           stops, restarts, escalations, exhaustions, total_decisions);
+    assert!(
+        total_decisions >= 3,
+        "Expected supervision decisions from all combinator types, got: stops={}, restarts={}, escalations={}, exhaustions={} (total={})",
+        stops,
+        restarts,
+        escalations,
+        exhaustions,
+        total_decisions
+    );
 
     // Verify each supervision strategy was exercised
-    assert!(stops >= 1, "Expected at least one Stop decision from bracket cleanup failure");
-    assert!(escalations >= 1, "Expected at least one Escalate decision from quorum failure");
-    assert!(restarts >= 1 || exhaustions >= 1, "Expected Restart attempts or exhaustion from bulkhead stress");
+    assert!(
+        stops >= 1,
+        "Expected at least one Stop decision from bracket cleanup failure"
+    );
+    assert!(
+        escalations >= 1,
+        "Expected at least one Escalate decision from quorum failure"
+    );
+    assert!(
+        restarts >= 1 || exhaustions >= 1,
+        "Expected Restart attempts or exhaustion from bulkhead stress"
+    );
 }
 
 /// Test supervision strategy escalation chain under combinator failure pressure.
@@ -880,142 +999,154 @@ async fn test_supervision_escalation_chain_under_combinator_pressure() {
         |cx| async move {
             cx.scope(|root_scope| async move {
                 // Create multi-level supervision hierarchy
-                root_scope.scope(|parent_scope| async move {
-                    parent_scope.scope(|child_scope| async move {
-                        // Child level: Bulkhead with Escalate strategy
-                        let bulkhead = Arc::new(Bulkhead::new(BulkheadPolicy {
-                            name: "escalation_test".to_string(),
-                            max_concurrent: 1,
-                            max_queue: 0, // No queue - immediate failure
-                            queue_timeout: Duration::from_millis(1),
-                            weighted: false,
-                            on_full: None,
-                        }));
+                root_scope
+                    .scope(|parent_scope| async move {
+                        parent_scope
+                            .scope(|child_scope| async move {
+                                // Child level: Bulkhead with Escalate strategy
+                                let bulkhead = Arc::new(Bulkhead::new(BulkheadPolicy {
+                                    name: "escalation_test".to_string(),
+                                    max_concurrent: 1,
+                                    max_queue: 0, // No queue - immediate failure
+                                    queue_timeout: Duration::from_millis(1),
+                                    weighted: false,
+                                    on_full: None,
+                                }));
 
-                        // Create holder task that blocks the bulkhead
-                        let holder_bulkhead = bulkhead.clone();
-                        let holder = child_scope.spawn(async move {
-                            match holder_bulkhead.try_acquire(1).await {
-                                Ok(_permit) => {
-                                    cx.sleep(Duration::from_millis(300)).await;
-                                    Ok("Holder completed")
-                                }
-                                Err(e) => Err(format!("Holder failed: {:?}", e))
-                            }
-                        });
-
-                        // Give holder time to acquire
-                        cx.sleep(Duration::from_millis(10)).await;
-
-                        // Child task: Quorum with bulkhead operations (will escalate)
-                        let bulkhead_clone = bulkhead.clone();
-                        let quorum_futures = (0..3).map(|i| {
-                            let bulkhead_ref = bulkhead_clone.clone();
-                            async move {
-                                match bulkhead_ref.try_acquire(1).await {
-                                    Ok(_permit) => {
-                                        Ok(format!("Quorum task {} succeeded", i))
+                                // Create holder task that blocks the bulkhead
+                                let holder_bulkhead = bulkhead.clone();
+                                let holder = child_scope.spawn(async move {
+                                    match holder_bulkhead.try_acquire(1).await {
+                                        Ok(_permit) => {
+                                            cx.sleep(Duration::from_millis(300)).await;
+                                            Ok("Holder completed")
+                                        }
+                                        Err(e) => Err(format!("Holder failed: {:?}", e)),
                                     }
-                                    Err(BulkheadError::ResourceExhausted) => {
-                                        Err(format!("Quorum task {} bulkhead exhausted", i))
-                                    }
-                                    Err(e) => {
-                                        Err(format!("Quorum task {} error: {:?}", i, e))
-                                    }
-                                }
-                            }
-                        }).collect();
+                                });
 
-                        let quorum_future = quorum(2, quorum_futures); // Need 2, will fail
+                                // Give holder time to acquire
+                                cx.sleep(Duration::from_millis(10)).await;
 
-                        let child_handle = child_scope.spawn_with_supervision(
-                            ChildName::new("escalating_child"),
-                            SupervisionStrategy::Escalate, // Will escalate to parent
-                            quorum_future,
-                        )?;
+                                // Child task: Quorum with bulkhead operations (will escalate)
+                                let bulkhead_clone = bulkhead.clone();
+                                let quorum_futures = (0..3)
+                                    .map(|i| {
+                                        let bulkhead_ref = bulkhead_clone.clone();
+                                        async move {
+                                            match bulkhead_ref.try_acquire(1).await {
+                                                Ok(_permit) => {
+                                                    Ok(format!("Quorum task {} succeeded", i))
+                                                }
+                                                Err(BulkheadError::ResourceExhausted) => Err(
+                                                    format!("Quorum task {} bulkhead exhausted", i),
+                                                ),
+                                                Err(e) => {
+                                                    Err(format!("Quorum task {} error: {:?}", i, e))
+                                                }
+                                            }
+                                        }
+                                    })
+                                    .collect();
 
-                        // Parent level: Handle escalation with Restart strategy
-                        let restart_config = RestartConfig::new(2, Duration::from_secs(1));
-                        let parent_handle = parent_scope.spawn_with_supervision(
-                            ChildName::new("restarting_parent"),
-                            SupervisionStrategy::Restart(restart_config),
-                            async move {
-                                match child_handle.join().await {
-                                    Outcome::Ok(_) => Ok("Child succeeded"),
-                                    Outcome::Err(QuorumError::InsufficientCompletions { .. }) => {
-                                        Err("Child quorum failed due to bulkhead exhaustion")
-                                    }
-                                    Outcome::Cancelled(_) => {
-                                        Err("Child was cancelled")
-                                    }
-                                    Outcome::Panicked(_) => {
-                                        Err("Child panicked")
-                                    }
-                                }
-                            },
-                        )?;
+                                let quorum_future = quorum(2, quorum_futures); // Need 2, will fail
 
-                        // Root level: Ultimate Stop strategy
-                        let root_handle = root_scope.spawn_with_supervision(
-                            ChildName::new("stopping_root"),
-                            SupervisionStrategy::Stop,
-                            async move {
-                                match parent_handle.join().await {
-                                    Outcome::Ok(_) => Ok("Parent eventually succeeded"),
+                                let child_handle = child_scope.spawn_with_supervision(
+                                    ChildName::new("escalating_child"),
+                                    SupervisionStrategy::Escalate, // Will escalate to parent
+                                    quorum_future,
+                                )?;
+
+                                // Parent level: Handle escalation with Restart strategy
+                                let restart_config = RestartConfig::new(2, Duration::from_secs(1));
+                                let parent_handle = parent_scope.spawn_with_supervision(
+                                    ChildName::new("restarting_parent"),
+                                    SupervisionStrategy::Restart(restart_config),
+                                    async move {
+                                        match child_handle.join().await {
+                                            Outcome::Ok(_) => Ok("Child succeeded"),
+                                            Outcome::Err(
+                                                QuorumError::InsufficientCompletions { .. },
+                                            ) => Err(
+                                                "Child quorum failed due to bulkhead exhaustion",
+                                            ),
+                                            Outcome::Cancelled(_) => Err("Child was cancelled"),
+                                            Outcome::Panicked(_) => Err("Child panicked"),
+                                        }
+                                    },
+                                )?;
+
+                                // Root level: Ultimate Stop strategy
+                                let root_handle = root_scope.spawn_with_supervision(
+                                    ChildName::new("stopping_root"),
+                                    SupervisionStrategy::Stop,
+                                    async move {
+                                        match parent_handle.join().await {
+                                            Outcome::Ok(_) => Ok("Parent eventually succeeded"),
+                                            Outcome::Err(err) => {
+                                                Err(format!("Parent failed: {}", err))
+                                            }
+                                            Outcome::Cancelled(_) => Err("Parent was cancelled"),
+                                            Outcome::Panicked(_) => Err("Parent panicked"),
+                                        }
+                                    },
+                                )?;
+
+                                // Wait for the full escalation chain to complete
+                                match root_handle.join().await {
+                                    Outcome::Ok(_) => {
+                                        // Unlikely but possible if restarts eventually succeed
+                                        counter.record_restart();
+                                    }
                                     Outcome::Err(err) => {
-                                        Err(format!("Parent failed: {}", err))
+                                        // Expected path: escalation -> restart exhaustion -> stop
+                                        assert!(
+                                            err.contains("Parent failed")
+                                                || err.contains("quorum failed")
+                                        );
+                                        counter.record_escalation();
+                                        counter.record_restart_exhaustion();
+                                        counter.record_stop();
                                     }
                                     Outcome::Cancelled(_) => {
-                                        Err("Parent was cancelled")
+                                        // Also acceptable - Stop strategy may cancel
+                                        counter.record_stop();
                                     }
                                     Outcome::Panicked(_) => {
-                                        Err("Parent panicked")
+                                        return Err("Unexpected panic in escalation chain".into());
                                     }
                                 }
-                            },
-                        )?;
 
-                        // Wait for the full escalation chain to complete
-                        match root_handle.join().await {
-                            Outcome::Ok(_) => {
-                                // Unlikely but possible if restarts eventually succeed
-                                counter.record_restart();
-                            }
-                            Outcome::Err(err) => {
-                                // Expected path: escalation -> restart exhaustion -> stop
-                                assert!(err.contains("Parent failed") || err.contains("quorum failed"));
-                                counter.record_escalation();
-                                counter.record_restart_exhaustion();
-                                counter.record_stop();
-                            }
-                            Outcome::Cancelled(_) => {
-                                // Also acceptable - Stop strategy may cancel
-                                counter.record_stop();
-                            }
-                            Outcome::Panicked(_) => {
-                                return Err("Unexpected panic in escalation chain".into());
-                            }
-                        }
+                                // Wait for holder to complete
+                                let _ = holder.join().await;
 
-                        // Wait for holder to complete
-                        let _ = holder.join().await;
-
-                        Ok(())
-                    }).await
-                }).await
-            }).await
+                                Ok(())
+                            })
+                            .await
+                    })
+                    .await
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Escalation chain test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Escalation chain test should complete: {:?}",
+        result
+    );
 
     let (stops, restarts, escalations, exhaustions) = counter.totals();
 
     // Verify the escalation chain was exercised
     assert!(escalations >= 1, "Expected escalation from child to parent");
-    assert!(stops >= 1 || restarts >= 1 || exhaustions >= 1,
-           "Expected supervision action at some level");
+    assert!(
+        stops >= 1 || restarts >= 1 || exhaustions >= 1,
+        "Expected supervision action at some level"
+    );
 
-    println!("Supervision decisions: stops={}, restarts={}, escalations={}, exhaustions={}",
-             stops, restarts, escalations, exhaustions);
+    println!(
+        "Supervision decisions: stops={}, restarts={}, escalations={}, exhaustions={}",
+        stops, restarts, escalations, exhaustions
+    );
 }

@@ -265,7 +265,9 @@ mod real_obligation_leak_check_e2e {
             let max_backoff = Duration::from_millis(100);
 
             while polls < max_polls && start.elapsed() < timeout {
-                let check = self.perform_leak_check(&format!("cleanup_poll_{}", polls)).await;
+                let check = self
+                    .perform_leak_check(&format!("cleanup_poll_{}", polls))
+                    .await;
 
                 if check.leaked_obligations == 0 && check.ledger_consistent {
                     return Ok(check);
@@ -275,7 +277,7 @@ mod real_obligation_leak_check_e2e {
                 sleep(backoff).await;
                 backoff = std::cmp::min(
                     Duration::from_millis((backoff.as_millis() as f64 * 1.5) as u64),
-                    max_backoff
+                    max_backoff,
                 );
             }
 
@@ -931,7 +933,9 @@ mod real_obligation_leak_check_e2e {
         stress_task.await;
 
         // Wait for all resources to be properly cleaned up
-        let final_check = harness.wait_for_leak_free_state(100, Duration::from_secs(10)).await
+        let final_check = harness
+            .wait_for_leak_free_state(100, Duration::from_secs(10))
+            .await
             .expect("All obligations should be cleaned up after stress test");
         let total_operations = operation_counter.load(Ordering::Relaxed);
 

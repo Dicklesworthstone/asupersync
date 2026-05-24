@@ -24,23 +24,21 @@ use crate::{
     error::Outcome,
     lab::{
         chaos::{ChaosConfig, ChaosEvent, ChaosInjector, ChaosType},
-        replay::{
-            ReplayConfig, ReplayEngine, ReplayEvent, ReplaySession, ReplayStats,
-        },
+        replay::{ReplayConfig, ReplayEngine, ReplayEvent, ReplaySession, ReplayStats},
         runtime::{LabRuntime, LabRuntimeConfig, VirtualTime},
     },
     runtime::{RuntimeBuilder, TaskHandle},
     sync::{Barrier, Mutex, Semaphore},
     time::{Duration, Sleep},
     trace::{
-        recorder::{
-            DecisionPoint, DivergenceReport, ExecutionTrace, RecorderConfig,
-            RecorderEvent, TraceRecorder, TraceReplayComparator,
-        },
-        event::{TraceEvent, TraceId, EventId},
+        event::{EventId, TraceEvent, TraceId},
         minimizer::TraceMinimizer,
+        recorder::{
+            DecisionPoint, DivergenceReport, ExecutionTrace, RecorderConfig, RecorderEvent,
+            TraceRecorder, TraceReplayComparator,
+        },
     },
-    types::{Budget, TaskId, RegionId},
+    types::{Budget, RegionId, TaskId},
     util::{
         det_rng::{DetRng, RngSeed},
         entropy::EntropySource,
@@ -49,8 +47,8 @@ use crate::{
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -87,7 +85,8 @@ impl DivergenceTracker {
     }
 
     fn record_original_decision(&self) {
-        self.original_decisions_recorded.fetch_add(1, Ordering::Relaxed);
+        self.original_decisions_recorded
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_divergent_decision(&self) {
@@ -95,27 +94,25 @@ impl DivergenceTracker {
     }
 
     fn record_divergence_point(&self) {
-        self.divergence_points_detected.fetch_add(1, Ordering::Relaxed);
+        self.divergence_points_detected
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_chaos_induced_divergence(&self) {
-        self.chaos_induced_divergences.fetch_add(1, Ordering::Relaxed);
+        self.chaos_induced_divergences
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_replay_completed(&self) {
-        self.replay_sessions_completed.fetch_add(1, Ordering::Relaxed);
+        self.replay_sessions_completed
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_replay_failed(&self) {
         self.replay_sessions_failed.fetch_add(1, Ordering::Relaxed);
     }
 
-    async fn record_divergence_event(
-        &self,
-        cx: &Cx,
-        event_id: EventId,
-        trace_event: TraceEvent,
-    ) {
+    async fn record_divergence_event(&self, cx: &Cx, event_id: EventId, trace_event: TraceEvent) {
         let mut timeline = self.divergence_timeline.lock(cx).await;
         timeline.push((event_id, trace_event, std::time::Instant::now()));
     }
@@ -182,7 +179,9 @@ impl NonDeterministicComputation {
             };
 
             // Record the decision point
-            recorder.record_decision_point(cx, decision_point.clone()).await?;
+            recorder
+                .record_decision_point(cx, decision_point.clone())
+                .await?;
             self.divergence_tracker.record_original_decision();
 
             // Make a random decision
@@ -192,7 +191,12 @@ impl NonDeterministicComputation {
             // Record the decision outcome
             let trace_event = TraceEvent::DecisionMade {
                 decision_id: decision_point.id,
-                chosen_alternative: if decision % 2 == 0 { "path_a" } else { "path_b" }.to_string(),
+                chosen_alternative: if decision % 2 == 0 {
+                    "path_a"
+                } else {
+                    "path_b"
+                }
+                .to_string(),
                 outcome_value: decision,
             };
 
@@ -242,7 +246,10 @@ impl NonDeterministicComputation {
             };
 
             // Check for chaos injection at this decision point
-            if let Some(chaos_event) = chaos_injector.maybe_inject_chaos(cx, &decision_point).await? {
+            if let Some(chaos_event) = chaos_injector
+                .maybe_inject_chaos(cx, &decision_point)
+                .await?
+            {
                 match chaos_event.chaos_type {
                     ChaosType::SchedulingDelay => {
                         // Inject scheduling delay
@@ -305,7 +312,12 @@ impl NonDeterministicComputation {
             // Record the replay decision
             let trace_event = TraceEvent::DecisionMade {
                 decision_id: decision_point.id,
-                chosen_alternative: if decision % 2 == 0 { "path_a" } else { "path_b" }.to_string(),
+                chosen_alternative: if decision % 2 == 0 {
+                    "path_a"
+                } else {
+                    "path_b"
+                }
+                .to_string(),
                 outcome_value: decision,
             };
 
@@ -609,9 +621,11 @@ async fn test_replay_recorder_multiple_chaos_strategies() -> Outcome<()> {
 
                     recorder.start_recording(cx).await?;
 
-                    let baseline_result = lab_runtime.run_deterministic(cx, async {
-                        computation.execute_original(cx, &recorder).await
-                    }).await?;
+                    let baseline_result = lab_runtime
+                        .run_deterministic(cx, async {
+                            computation.execute_original(cx, &recorder).await
+                        })
+                        .await?;
 
                     let baseline_trace = recorder.stop_recording(cx).await?;
 
@@ -619,28 +633,40 @@ async fn test_replay_recorder_multiple_chaos_strategies() -> Outcome<()> {
 
                     // Test different chaos strategies
                     let chaos_strategies = vec![
-                        ("low_intensity", ChaosConfig {
-                            injection_probability: 0.1,
-                            chaos_types: vec![ChaosType::SchedulingDelay],
-                            intensity: 0.2,
-                            seed: RngSeed::new(33333),
-                        }),
-                        ("medium_intensity", ChaosConfig {
-                            injection_probability: 0.3,
-                            chaos_types: vec![ChaosType::SchedulingDelay, ChaosType::TaskPreemption],
-                            intensity: 0.5,
-                            seed: RngSeed::new(44444),
-                        }),
-                        ("high_intensity", ChaosConfig {
-                            injection_probability: 0.5,
-                            chaos_types: vec![
-                                ChaosType::SchedulingDelay,
-                                ChaosType::TaskPreemption,
-                                ChaosType::ResourceContention,
-                            ],
-                            intensity: 0.8,
-                            seed: RngSeed::new(55555),
-                        }),
+                        (
+                            "low_intensity",
+                            ChaosConfig {
+                                injection_probability: 0.1,
+                                chaos_types: vec![ChaosType::SchedulingDelay],
+                                intensity: 0.2,
+                                seed: RngSeed::new(33333),
+                            },
+                        ),
+                        (
+                            "medium_intensity",
+                            ChaosConfig {
+                                injection_probability: 0.3,
+                                chaos_types: vec![
+                                    ChaosType::SchedulingDelay,
+                                    ChaosType::TaskPreemption,
+                                ],
+                                intensity: 0.5,
+                                seed: RngSeed::new(44444),
+                            },
+                        ),
+                        (
+                            "high_intensity",
+                            ChaosConfig {
+                                injection_probability: 0.5,
+                                chaos_types: vec![
+                                    ChaosType::SchedulingDelay,
+                                    ChaosType::TaskPreemption,
+                                    ChaosType::ResourceContention,
+                                ],
+                                intensity: 0.8,
+                                seed: RngSeed::new(55555),
+                            },
+                        ),
                     ];
 
                     let replay_config = ReplayConfig {
@@ -656,10 +682,8 @@ async fn test_replay_recorder_multiple_chaos_strategies() -> Outcome<()> {
                         println!("Testing chaos strategy: {}", strategy_name);
 
                         let chaos_injector = ChaosInjector::new(chaos_config);
-                        let replay_session = ReplaySession::new(
-                            baseline_trace.clone(),
-                            chaos_injector.clone(),
-                        );
+                        let replay_session =
+                            ReplaySession::new(baseline_trace.clone(), chaos_injector.clone());
 
                         recorder.start_recording(cx).await?;
 
@@ -707,7 +731,10 @@ async fn test_replay_recorder_multiple_chaos_strategies() -> Outcome<()> {
 
                     // Should have at least some successful replays
                     assert!(
-                        divergence_tracker.replay_sessions_completed.load(Ordering::Relaxed) > 0,
+                        divergence_tracker
+                            .replay_sessions_completed
+                            .load(Ordering::Relaxed)
+                            > 0,
                         "Should have completed at least some replay sessions"
                     );
 
@@ -769,8 +796,7 @@ async fn test_trace_recorder_decision_point_precision() -> Outcome<()> {
                     for (i, decision_point) in decision_points.iter().enumerate() {
                         let expected_context = format!("computation_3_decision_{}", i);
                         assert_eq!(
-                            decision_point.context,
-                            expected_context,
+                            decision_point.context, expected_context,
                             "Decision point {} should have exact context",
                             i
                         );
@@ -819,19 +845,23 @@ async fn test_trace_recorder_decision_point_precision() -> Outcome<()> {
                         "Should have 5 decision made events"
                     );
 
-                    for (i, (decision_id, chosen_alternative, outcome_value)) in decision_events.iter().enumerate() {
+                    for (i, (decision_id, chosen_alternative, outcome_value)) in
+                        decision_events.iter().enumerate()
+                    {
                         let expected_decision_id = EventId::new(3 * 1000 + i as u64);
                         assert_eq!(
-                            **decision_id,
-                            expected_decision_id,
+                            **decision_id, expected_decision_id,
                             "Decision event {} should have correct ID",
                             i
                         );
 
-                        let expected_alternative = if *outcome_value % 2 == 0 { "path_a" } else { "path_b" };
+                        let expected_alternative = if *outcome_value % 2 == 0 {
+                            "path_a"
+                        } else {
+                            "path_b"
+                        };
                         assert_eq!(
-                            chosen_alternative,
-                            expected_alternative,
+                            chosen_alternative, expected_alternative,
                             "Decision event {} should have correct alternative",
                             i
                         );
@@ -861,9 +891,15 @@ mod tests {
         let tracker = DivergenceTracker::new();
 
         // Verify initial state
-        assert_eq!(tracker.original_decisions_recorded.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            tracker.original_decisions_recorded.load(Ordering::Relaxed),
+            0
+        );
         assert_eq!(tracker.divergent_decisions.load(Ordering::Relaxed), 0);
-        assert_eq!(tracker.divergence_points_detected.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            tracker.divergence_points_detected.load(Ordering::Relaxed),
+            0
+        );
         assert_eq!(tracker.chaos_induced_divergences.load(Ordering::Relaxed), 0);
         assert_eq!(tracker.replay_sessions_completed.load(Ordering::Relaxed), 0);
         assert_eq!(tracker.replay_sessions_failed.load(Ordering::Relaxed), 0);
@@ -881,9 +917,15 @@ mod tests {
         tracker.record_replay_completed();
 
         // Verify tracking
-        assert_eq!(tracker.original_decisions_recorded.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            tracker.original_decisions_recorded.load(Ordering::Relaxed),
+            1
+        );
         assert_eq!(tracker.divergent_decisions.load(Ordering::Relaxed), 1);
-        assert_eq!(tracker.divergence_points_detected.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            tracker.divergence_points_detected.load(Ordering::Relaxed),
+            1
+        );
         assert_eq!(tracker.chaos_induced_divergences.load(Ordering::Relaxed), 1);
         assert_eq!(tracker.replay_sessions_completed.load(Ordering::Relaxed), 1);
 
@@ -895,12 +937,8 @@ mod tests {
     #[test]
     fn test_non_deterministic_computation_creation() {
         let divergence_tracker = DivergenceTracker::new();
-        let computation = NonDeterministicComputation::new(
-            42,
-            10,
-            RngSeed::new(12345),
-            divergence_tracker,
-        );
+        let computation =
+            NonDeterministicComputation::new(42, 10, RngSeed::new(12345), divergence_tracker);
 
         assert_eq!(computation.id, 42);
         assert_eq!(computation.decision_count, 10);

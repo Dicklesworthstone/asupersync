@@ -20,30 +20,30 @@
 //! - Bound propagation and verification in re-planned execution paths
 
 use crate::{
-    plan::{
-        certificate::{
-            PlanCertificate, CertificateBuilder, CertificateValidator, LatencyBound,
-            CertificateProof, CertificateWitness, BoundValidation, CertificateSynthesis,
-            CertificateVersion, CertificateIntegrity, LatencyAssertion,
-        },
-        latency_algebra::{
-            LatencyAlgebra, LatencyExpression, LatencyTerm, AlgebraicBound,
-            LatencyCalculation, BoundComposition, LatencyOperator, AlgebraicValidation,
-            TransportLatencyModel, LatencyInvariant, BoundPropagation,
-        },
-        PlanId, PlanGraph, PlanNode, PlanEdge, ExecutionPath, PlanRewrite,
-        TransportSLA, SLAViolation, RePlanner, PlanOptimizer,
-    },
-    transport::{
-        TransportId, TransportMetrics, TransportPerformance, SLAMetric,
-        PerformanceCharacteristics, LatencyProfile, ThroughputProfile,
-    },
     cx::{Cx, Scope},
     error::Outcome,
+    plan::{
+        ExecutionPath, PlanEdge, PlanGraph, PlanId, PlanNode, PlanOptimizer, PlanRewrite,
+        RePlanner, SLAViolation, TransportSLA,
+        certificate::{
+            BoundValidation, CertificateBuilder, CertificateIntegrity, CertificateProof,
+            CertificateSynthesis, CertificateValidator, CertificateVersion, CertificateWitness,
+            LatencyAssertion, LatencyBound, PlanCertificate,
+        },
+        latency_algebra::{
+            AlgebraicBound, AlgebraicValidation, BoundComposition, BoundPropagation,
+            LatencyAlgebra, LatencyCalculation, LatencyExpression, LatencyInvariant,
+            LatencyOperator, LatencyTerm, TransportLatencyModel,
+        },
+    },
     runtime::RuntimeBuilder,
     sync::{Mutex, RwLock},
-    time::{Duration, Sleep, Instant, Timeout},
-    types::{Budget, TaskId, Cancel},
+    time::{Duration, Instant, Sleep, Timeout},
+    transport::{
+        LatencyProfile, PerformanceCharacteristics, SLAMetric, ThroughputProfile, TransportId,
+        TransportMetrics, TransportPerformance,
+    },
+    types::{Budget, Cancel, TaskId},
     util::{
         det_rng::{DetRng, RngSeed},
         entropy::EntropySource,
@@ -51,19 +51,19 @@ use crate::{
 };
 
 use std::{
-    collections::{HashMap, BTreeMap, VecDeque, BTreeSet},
-    sync::{
-        atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering},
-        Arc,
-    },
-    pin::Pin,
-    task::{Context, Poll},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    },
+    task::{Context, Poll},
 };
 
 use futures::{
-    stream::{Stream, StreamExt},
     ready,
+    stream::{Stream, StreamExt},
 };
 
 /// Configuration for plan certificate latency algebra integration tests
@@ -437,13 +437,13 @@ impl PlanCertificateLatencyTracker {
 
         // Verify that bounds remain valid after each replan
         for replan in replans.iter() {
-            let post_replan_validations = validations.iter()
+            let post_replan_validations = validations
+                .iter()
                 .filter(|v| v.timestamp > replan.timestamp)
                 .filter(|v| v.validation_type == BoundValidationType::ReplanCompatibility);
 
-            let all_valid = post_replan_validations.all(|v| {
-                matches!(v.validation_result, BoundValidationResult::Valid { .. })
-            });
+            let all_valid = post_replan_validations
+                .all(|v| matches!(v.validation_result, BoundValidationResult::Valid { .. }));
 
             if !all_valid {
                 return false;
@@ -455,9 +455,9 @@ impl PlanCertificateLatencyTracker {
 
     fn verify_algebraic_consistency(&self) -> bool {
         let consistency_checks = self.bound_consistency_checks.lock().unwrap();
-        consistency_checks.iter().all(|check| {
-            matches!(check.consistency_result, ConsistencyResult::Consistent)
-        })
+        consistency_checks
+            .iter()
+            .all(|check| matches!(check.consistency_result, ConsistencyResult::Consistent))
     }
 
     fn verify_sla_shift_handling(&self) -> bool {
@@ -468,8 +468,7 @@ impl PlanCertificateLatencyTracker {
         sla_shifts.iter().all(|shift| {
             shift.triggered_replans.iter().all(|plan_id| {
                 replans.iter().any(|replan| {
-                    replan.affected_plan == *plan_id &&
-                    replan.timestamp >= shift.timestamp
+                    replan.affected_plan == *plan_id && replan.timestamp >= shift.timestamp
                 })
             })
         })
@@ -481,17 +480,25 @@ impl PlanCertificateLatencyTracker {
 
         // Verify certificate bounds are consistent with algebraic calculations
         certificates.iter().all(|cert_event| {
-            let corresponding_calculations = algebra_events.iter()
+            let corresponding_calculations = algebra_events
+                .iter()
                 .filter(|calc| calc.timestamp <= cert_event.timestamp)
                 .filter(|calc| calc.calculation_type == CalculationType::BoundComposition);
 
             corresponding_calculations.any(|calc| {
-                self.bounds_are_consistent(&cert_event.latency_bounds, &calc.algebraic_result.computed_bounds)
+                self.bounds_are_consistent(
+                    &cert_event.latency_bounds,
+                    &calc.algebraic_result.computed_bounds,
+                )
             })
         })
     }
 
-    fn bounds_are_consistent(&self, cert_bounds: &[LatencyBound], algebra_bounds: &[AlgebraicBound]) -> bool {
+    fn bounds_are_consistent(
+        &self,
+        cert_bounds: &[LatencyBound],
+        algebra_bounds: &[AlgebraicBound],
+    ) -> bool {
         // Mock implementation - would check actual bound consistency
         cert_bounds.len() == algebra_bounds.len()
     }
@@ -514,7 +521,8 @@ impl PlanCertificateLatencyTracker {
             return 1.0;
         }
 
-        let successful = validations.iter()
+        let successful = validations
+            .iter()
             .filter(|v| matches!(v.validation_result, BoundValidationResult::Valid { .. }))
             .count();
 
@@ -574,7 +582,8 @@ impl MockPlanCertificateSystem {
         synthesis_type: SynthesisType,
         tracker: Arc<PlanCertificateLatencyTracker>,
     ) -> Result<CertificateId, Box<dyn std::error::Error>> {
-        let certificate_id = CertificateId(self.certificate_id_counter.fetch_add(1, Ordering::Release));
+        let certificate_id =
+            CertificateId(self.certificate_id_counter.fetch_add(1, Ordering::Release));
         let timestamp = Instant::now();
 
         // Get plan graph and transport SLAs
@@ -583,15 +592,19 @@ impl MockPlanCertificateSystem {
             let slas = self.transport_slas.lock().unwrap();
             (
                 plans.get(&plan_id).cloned().ok_or("Plan not found")?,
-                slas.values().cloned().collect::<Vec<_>>()
+                slas.values().cloned().collect::<Vec<_>>(),
             )
         };
 
         // Calculate latency bounds using algebra
-        let latency_bounds = self.calculate_plan_latency_bounds(&plan_graph, &transport_slas, tracker.clone()).await?;
+        let latency_bounds = self
+            .calculate_plan_latency_bounds(&plan_graph, &transport_slas, tracker.clone())
+            .await?;
 
         // Create algebraic foundation
-        let algebraic_foundation = self.build_algebraic_foundation(&plan_graph, &latency_bounds).await;
+        let algebraic_foundation = self
+            .build_algebraic_foundation(&plan_graph, &latency_bounds)
+            .await;
 
         // Build certificate
         let certificate = self.certificate_builder.build_certificate(
@@ -602,7 +615,10 @@ impl MockPlanCertificateSystem {
         )?;
 
         // Store certificate
-        self.certificates.lock().unwrap().insert(certificate_id, certificate);
+        self.certificates
+            .lock()
+            .unwrap()
+            .insert(certificate_id, certificate);
 
         // Record synthesis event
         let synthesis_event = CertificateSynthesisEvent {
@@ -622,7 +638,8 @@ impl MockPlanCertificateSystem {
         tracker.record_certificate_synthesis(synthesis_event);
 
         // Validate certificate bounds
-        self.validate_certificate_bounds(certificate_id, tracker.clone()).await?;
+        self.validate_certificate_bounds(certificate_id, tracker.clone())
+            .await?;
 
         Ok(certificate_id)
     }
@@ -637,14 +654,18 @@ impl MockPlanCertificateSystem {
         let timestamp = Instant::now();
 
         // Build transport models
-        let transport_models: Vec<TransportLatencyModel> = transport_slas.iter()
+        let transport_models: Vec<TransportLatencyModel> = transport_slas
+            .iter()
             .map(|sla| self.latency_algebra.build_transport_model(sla))
             .collect();
 
         // Calculate bounds for each execution path
         let mut computed_bounds = Vec::new();
         for path in &plan_graph.execution_paths {
-            let path_bound = self.latency_algebra.calculate_path_latency(path, &transport_models).await;
+            let path_bound = self
+                .latency_algebra
+                .calculate_path_latency(path, &transport_models)
+                .await;
             computed_bounds.push(path_bound);
         }
 
@@ -678,7 +699,8 @@ impl MockPlanCertificateSystem {
         tracker.record_latency_calculation(calculation_event);
 
         // Convert algebraic bounds to latency bounds
-        let latency_bounds = final_bounds.into_iter()
+        let latency_bounds = final_bounds
+            .into_iter()
             .map(|bound| LatencyBound::from_algebraic(bound))
             .collect();
 
@@ -690,11 +712,18 @@ impl MockPlanCertificateSystem {
         plan_graph: &PlanGraph,
         latency_bounds: &[LatencyBound],
     ) -> AlgebraicFoundation {
-        let base_expressions = self.latency_algebra.derive_base_expressions(plan_graph).await;
-        let composed_bounds = latency_bounds.iter()
+        let base_expressions = self
+            .latency_algebra
+            .derive_base_expressions(plan_graph)
+            .await;
+        let composed_bounds = latency_bounds
+            .iter()
             .map(|bound| bound.to_algebraic())
             .collect();
-        let invariant_proofs = self.latency_algebra.generate_invariant_proofs(&base_expressions).await;
+        let invariant_proofs = self
+            .latency_algebra
+            .generate_invariant_proofs(&base_expressions)
+            .await;
 
         AlgebraicFoundation {
             base_expressions,
@@ -756,9 +785,14 @@ impl MockPlanCertificateSystem {
 
         // Trigger re-planning if necessary
         for plan_id in triggered_replans {
-            self.trigger_replan(plan_id, RePlanTriggerCause::SLADegradation {
-                degradation_factor: change_magnitude,
-            }, tracker.clone()).await?;
+            self.trigger_replan(
+                plan_id,
+                RePlanTriggerCause::SLADegradation {
+                    degradation_factor: change_magnitude,
+                },
+                tracker.clone(),
+            )
+            .await?;
         }
 
         Ok(())
@@ -782,7 +816,9 @@ impl MockPlanCertificateSystem {
                     RePlanScope::LocalOptimization
                 }
             }
-            _ => RePlanScope::SubgraphReplan { affected_nodes: Vec::new() }
+            _ => RePlanScope::SubgraphReplan {
+                affected_nodes: Vec::new(),
+            },
         };
 
         // Record replan trigger
@@ -797,13 +833,17 @@ impl MockPlanCertificateSystem {
         tracker.record_replan_trigger(replan_event);
 
         // Perform re-planning
-        let new_plan = self.replanner.replan(plan_id, replan_scope, timestamp).await?;
+        let new_plan = self
+            .replanner
+            .replan(plan_id, replan_scope, timestamp)
+            .await?;
 
         // Update plan graph
         self.plan_graphs.lock().unwrap().insert(plan_id, new_plan);
 
         // Re-synthesize certificate for updated plan
-        self.synthesize_certificate(plan_id, SynthesisType::Replan, tracker.clone()).await?;
+        self.synthesize_certificate(plan_id, SynthesisType::Replan, tracker.clone())
+            .await?;
 
         Ok(())
     }
@@ -819,7 +859,9 @@ impl MockPlanCertificateSystem {
         // Get certificate
         let certificate = {
             let certificates = self.certificates.lock().unwrap();
-            certificates.get(&certificate_id).cloned()
+            certificates
+                .get(&certificate_id)
+                .cloned()
                 .ok_or("Certificate not found")?
         };
 
@@ -831,7 +873,7 @@ impl MockPlanCertificateSystem {
             BoundValidationResult::Valid { confidence: 0.95 }
         } else {
             BoundValidationResult::Invalid {
-                violation_reason: "Algebraic inconsistency detected".to_string()
+                violation_reason: "Algebraic inconsistency detected".to_string(),
             }
         };
 
@@ -849,7 +891,10 @@ impl MockPlanCertificateSystem {
         Ok(())
     }
 
-    async fn verify_algebraic_soundness(&self, certificate: &PlanCertificate) -> AlgebraicVerification {
+    async fn verify_algebraic_soundness(
+        &self,
+        certificate: &PlanCertificate,
+    ) -> AlgebraicVerification {
         // Mock verification - would perform actual algebraic verification
         AlgebraicVerification {
             proof_steps: Vec::new(),
@@ -858,12 +903,21 @@ impl MockPlanCertificateSystem {
         }
     }
 
-    fn calculate_sla_change_magnitude(&self, old_sla: &TransportSLA, new_sla: &TransportSLA) -> f64 {
+    fn calculate_sla_change_magnitude(
+        &self,
+        old_sla: &TransportSLA,
+        new_sla: &TransportSLA,
+    ) -> f64 {
         // Mock calculation - would compute actual SLA change magnitude
-        (new_sla.latency_p99.as_secs_f64() - old_sla.latency_p99.as_secs_f64()) / old_sla.latency_p99.as_secs_f64()
+        (new_sla.latency_p99.as_secs_f64() - old_sla.latency_p99.as_secs_f64())
+            / old_sla.latency_p99.as_secs_f64()
     }
 
-    async fn assess_sla_impact(&self, sla_change: &SLAChange, tracker: Arc<PlanCertificateLatencyTracker>) -> ImpactAssessment {
+    async fn assess_sla_impact(
+        &self,
+        sla_change: &SLAChange,
+        tracker: Arc<PlanCertificateLatencyTracker>,
+    ) -> ImpactAssessment {
         let certificates = self.certificates.lock().unwrap();
         let affected_certificates: Vec<CertificateId> = certificates.keys().cloned().collect();
 
@@ -895,7 +949,7 @@ impl MockPlanCertificateSystem {
                 let plans = self.plan_graphs.lock().unwrap();
                 plans.keys().cloned().collect()
             }
-            _ => Vec::new()
+            _ => Vec::new(),
         }
     }
 
@@ -967,7 +1021,11 @@ impl MockLatencyAlgebra {
         }
     }
 
-    async fn calculate_path_latency(&self, path: &ExecutionPath, models: &[TransportLatencyModel]) -> AlgebraicBound {
+    async fn calculate_path_latency(
+        &self,
+        path: &ExecutionPath,
+        models: &[TransportLatencyModel],
+    ) -> AlgebraicBound {
         // Mock path latency calculation
         let total_latency = path.expected_latency.as_millis() as f64;
         AlgebraicBound {
@@ -986,7 +1044,10 @@ impl MockLatencyAlgebra {
 
         // Mock bound composition - take worst case
         let max_upper = bounds.iter().map(|b| b.upper_bound).fold(0.0f64, f64::max);
-        let min_lower = bounds.iter().map(|b| b.lower_bound).fold(f64::INFINITY, f64::min);
+        let min_lower = bounds
+            .iter()
+            .map(|b| b.lower_bound)
+            .fold(f64::INFINITY, f64::min);
 
         vec![AlgebraicBound {
             bound_id: BoundId(rand::random()),
@@ -1006,7 +1067,10 @@ impl MockLatencyAlgebra {
         }]
     }
 
-    async fn generate_invariant_proofs(&self, _expressions: &[LatencyExpression]) -> Vec<LatencyInvariant> {
+    async fn generate_invariant_proofs(
+        &self,
+        _expressions: &[LatencyExpression],
+    ) -> Vec<LatencyInvariant> {
         // Mock invariant proof generation
         vec![LatencyInvariant {
             invariant_id: InvariantId(rand::random()),
@@ -1025,11 +1089,18 @@ impl MockRePlanner {
         }
     }
 
-    async fn replan(&self, plan_id: PlanId, scope: RePlanScope, timestamp: Instant) -> Result<PlanGraph, Box<dyn std::error::Error>> {
+    async fn replan(
+        &self,
+        plan_id: PlanId,
+        scope: RePlanScope,
+        timestamp: Instant,
+    ) -> Result<PlanGraph, Box<dyn std::error::Error>> {
         // Record replan
         let record = RePlanRecord {
             plan_id,
-            trigger_cause: RePlanTriggerCause::SLADegradation { degradation_factor: 0.25 },
+            trigger_cause: RePlanTriggerCause::SLADegradation {
+                degradation_factor: 0.25,
+            },
             replan_scope: scope,
             timestamp,
         };
@@ -1084,20 +1155,27 @@ mod tests {
 
         // Create plan graph
         let plan_graph = cert_system.create_plan_graph(plan_id, config.plan_graph_size);
-        cert_system.plan_graphs.lock().unwrap().insert(plan_id, plan_graph);
+        cert_system
+            .plan_graphs
+            .lock()
+            .unwrap()
+            .insert(plan_id, plan_graph);
 
         // Create initial transport SLAs
         for (i, transport_id) in transport_ids.iter().enumerate() {
             let sla = cert_system.create_transport_sla(*transport_id, 100 + (i * 50) as u64);
-            cert_system.transport_slas.lock().unwrap().insert(*transport_id, sla);
+            cert_system
+                .transport_slas
+                .lock()
+                .unwrap()
+                .insert(*transport_id, sla);
         }
 
         // Synthesize initial certificate
-        let initial_cert_id = cert_system.synthesize_certificate(
-            plan_id,
-            SynthesisType::Initial,
-            tracker.clone(),
-        ).await.unwrap();
+        let initial_cert_id = cert_system
+            .synthesize_certificate(plan_id, SynthesisType::Initial, tracker.clone())
+            .await
+            .unwrap();
 
         // Simulate SLA shifts that trigger re-planning
         for i in 0..config.sla_shift_count {
@@ -1114,7 +1192,10 @@ mod tests {
             };
 
             // Apply SLA shift
-            cert_system.handle_sla_shift(transport_id, degraded_sla, tracker.clone()).await.unwrap();
+            cert_system
+                .handle_sla_shift(transport_id, degraded_sla, tracker.clone())
+                .await
+                .unwrap();
 
             // Small delay between shifts
             Sleep::new(Instant::now() + Duration::from_millis(100)).await;
@@ -1124,29 +1205,49 @@ mod tests {
         Sleep::new(Instant::now() + Duration::from_millis(500)).await;
 
         // Verify bound validity across re-plans
-        assert!(tracker.verify_bound_validity_across_replan(),
-                "Certificate bounds should remain valid after SLA-triggered re-plans");
+        assert!(
+            tracker.verify_bound_validity_across_replan(),
+            "Certificate bounds should remain valid after SLA-triggered re-plans"
+        );
 
         // Verify algebraic consistency
-        assert!(tracker.verify_algebraic_consistency(),
-                "Algebraic foundations should remain consistent across re-plans");
+        assert!(
+            tracker.verify_algebraic_consistency(),
+            "Algebraic foundations should remain consistent across re-plans"
+        );
 
         // Verify SLA shift handling
-        assert!(tracker.verify_sla_shift_handling(),
-                "SLA shifts should trigger appropriate re-planning");
+        assert!(
+            tracker.verify_sla_shift_handling(),
+            "SLA shifts should trigger appropriate re-planning"
+        );
 
         // Verify certificate-bound consistency
-        assert!(tracker.verify_certificate_bound_consistency(),
-                "Certificates should be consistent with algebraic calculations");
+        assert!(
+            tracker.verify_certificate_bound_consistency(),
+            "Certificates should be consistent with algebraic calculations"
+        );
 
         // Check event counts
-        assert!(tracker.get_certificate_synthesis_count() > 1, "Should synthesize multiple certificates");
-        assert!(tracker.get_replan_trigger_count() > 0, "Should trigger re-planning");
-        assert_eq!(tracker.get_sla_shift_count(), config.sla_shift_count as usize, "Should handle all SLA shifts");
+        assert!(
+            tracker.get_certificate_synthesis_count() > 1,
+            "Should synthesize multiple certificates"
+        );
+        assert!(
+            tracker.get_replan_trigger_count() > 0,
+            "Should trigger re-planning"
+        );
+        assert_eq!(
+            tracker.get_sla_shift_count(),
+            config.sla_shift_count as usize,
+            "Should handle all SLA shifts"
+        );
 
         // Check validation success rate
-        assert!(tracker.get_bound_validation_success_rate() > 0.8,
-                "Should have high validation success rate");
+        assert!(
+            tracker.get_bound_validation_success_rate() > 0.8,
+            "Should have high validation success rate"
+        );
     }
 
     #[tokio::test]
@@ -1168,54 +1269,72 @@ mod tests {
 
         for plan_id in &plan_ids {
             let plan_graph = cert_system.create_plan_graph(*plan_id, config.plan_graph_size);
-            cert_system.plan_graphs.lock().unwrap().insert(*plan_id, plan_graph);
+            cert_system
+                .plan_graphs
+                .lock()
+                .unwrap()
+                .insert(*plan_id, plan_graph);
         }
 
         // Create transport SLA
         let initial_sla = cert_system.create_transport_sla(transport_id, 200);
-        cert_system.transport_slas.lock().unwrap().insert(transport_id, initial_sla);
+        cert_system
+            .transport_slas
+            .lock()
+            .unwrap()
+            .insert(transport_id, initial_sla);
 
         // Synthesize certificates for all plans
         let mut certificate_ids = Vec::new();
         for plan_id in &plan_ids {
-            let cert_id = cert_system.synthesize_certificate(
-                *plan_id,
-                SynthesisType::Initial,
-                tracker.clone(),
-            ).await.unwrap();
+            let cert_id = cert_system
+                .synthesize_certificate(*plan_id, SynthesisType::Initial, tracker.clone())
+                .await
+                .unwrap();
             certificate_ids.push(cert_id);
         }
 
         // Perform major SLA degradation
         let severely_degraded_sla = TransportSLA {
             transport_id,
-            latency_p50: Duration::from_millis(500),  // 2.5x degradation
+            latency_p50: Duration::from_millis(500), // 2.5x degradation
             latency_p95: Duration::from_millis(1000),
             latency_p99: Duration::from_millis(1500),
             throughput_target: 400.0,
             availability_target: 0.995,
         };
 
-        cert_system.handle_sla_shift(transport_id, severely_degraded_sla, tracker.clone()).await.unwrap();
+        cert_system
+            .handle_sla_shift(transport_id, severely_degraded_sla, tracker.clone())
+            .await
+            .unwrap();
 
         // Wait for re-planning cascade
         Sleep::new(Instant::now() + Duration::from_millis(400)).await;
 
         // Verify algebraic consistency across all plans
-        assert!(tracker.verify_algebraic_consistency(),
-                "Algebraic calculations should remain consistent during major replan");
+        assert!(
+            tracker.verify_algebraic_consistency(),
+            "Algebraic calculations should remain consistent during major replan"
+        );
 
         // Verify bound validity for all certificates
-        assert!(tracker.verify_bound_validity_across_replan(),
-                "All certificate bounds should remain valid after major SLA degradation");
+        assert!(
+            tracker.verify_bound_validity_across_replan(),
+            "All certificate bounds should remain valid after major SLA degradation"
+        );
 
         // Check that replan was triggered for affected plans
-        assert!(tracker.get_replan_trigger_count() >= plan_ids.len(),
-                "Should trigger replan for all affected plans");
+        assert!(
+            tracker.get_replan_trigger_count() >= plan_ids.len(),
+            "Should trigger replan for all affected plans"
+        );
 
         // Verify validation results
-        assert!(tracker.get_bound_validation_success_rate() > 0.7,
-                "Should maintain reasonable validation success rate during stress");
+        assert!(
+            tracker.get_bound_validation_success_rate() > 0.7,
+            "Should maintain reasonable validation success rate during stress"
+        );
     }
 
     #[tokio::test]
@@ -1237,20 +1356,27 @@ mod tests {
 
         // Create complex plan graph
         let plan_graph = cert_system.create_plan_graph(plan_id, config.plan_graph_size);
-        cert_system.plan_graphs.lock().unwrap().insert(plan_id, plan_graph);
+        cert_system
+            .plan_graphs
+            .lock()
+            .unwrap()
+            .insert(plan_id, plan_graph);
 
         // Initialize transport SLAs
         for transport_id in &transport_ids {
             let sla = cert_system.create_transport_sla(*transport_id, 100);
-            cert_system.transport_slas.lock().unwrap().insert(*transport_id, sla);
+            cert_system
+                .transport_slas
+                .lock()
+                .unwrap()
+                .insert(*transport_id, sla);
         }
 
         // Initial certificate
-        let cert_id = cert_system.synthesize_certificate(
-            plan_id,
-            SynthesisType::Initial,
-            tracker.clone(),
-        ).await.unwrap();
+        let cert_id = cert_system
+            .synthesize_certificate(plan_id, SynthesisType::Initial, tracker.clone())
+            .await
+            .unwrap();
 
         // Progressive SLA degradation
         for i in 0..config.sla_shift_count {
@@ -1268,7 +1394,10 @@ mod tests {
                 availability_target: 0.999,
             };
 
-            cert_system.handle_sla_shift(transport_id, degraded_sla, tracker.clone()).await.unwrap();
+            cert_system
+                .handle_sla_shift(transport_id, degraded_sla, tracker.clone())
+                .await
+                .unwrap();
 
             Sleep::new(Instant::now() + Duration::from_millis(80)).await;
         }
@@ -1277,16 +1406,25 @@ mod tests {
         Sleep::new(Instant::now() + Duration::from_millis(300)).await;
 
         // Verify progressive adaptation
-        assert!(tracker.verify_bound_validity_across_replan(),
-                "Bounds should adapt progressively to SLA changes");
-        assert!(tracker.verify_sla_shift_handling(),
-                "Progressive SLA shifts should be handled properly");
+        assert!(
+            tracker.verify_bound_validity_across_replan(),
+            "Bounds should adapt progressively to SLA changes"
+        );
+        assert!(
+            tracker.verify_sla_shift_handling(),
+            "Progressive SLA shifts should be handled properly"
+        );
 
         // Check adaptation metrics
-        assert!(tracker.get_certificate_synthesis_count() > config.sla_shift_count as usize / 2,
-                "Should synthesize certificates for significant changes");
-        assert_eq!(tracker.get_sla_shift_count(), config.sla_shift_count as usize,
-                "Should handle all progressive SLA shifts");
+        assert!(
+            tracker.get_certificate_synthesis_count() > config.sla_shift_count as usize / 2,
+            "Should synthesize certificates for significant changes"
+        );
+        assert_eq!(
+            tracker.get_sla_shift_count(),
+            config.sla_shift_count as usize,
+            "Should handle all progressive SLA shifts"
+        );
     }
 
     #[test]
@@ -1312,7 +1450,10 @@ mod tests {
         };
 
         let magnitude = cert_system.calculate_sla_change_magnitude(&old_sla, &degraded_sla);
-        assert!((magnitude - 0.2).abs() < 0.01, "Should calculate 20% degradation");
+        assert!(
+            (magnitude - 0.2).abs() < 0.01,
+            "Should calculate 20% degradation"
+        );
 
         let improved_sla = TransportSLA {
             transport_id: TransportId(1),
@@ -1323,8 +1464,12 @@ mod tests {
             availability_target: 0.999,
         };
 
-        let improvement_magnitude = cert_system.calculate_sla_change_magnitude(&old_sla, &improved_sla);
-        assert!((improvement_magnitude + 0.2).abs() < 0.01, "Should calculate 20% improvement");
+        let improvement_magnitude =
+            cert_system.calculate_sla_change_magnitude(&old_sla, &improved_sla);
+        assert!(
+            (improvement_magnitude + 0.2).abs() < 0.01,
+            "Should calculate 20% improvement"
+        );
     }
 }
 

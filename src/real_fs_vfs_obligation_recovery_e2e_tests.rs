@@ -6,29 +6,40 @@
 #![allow(clippy::too_many_lines)]
 
 use crate::cx::Cx;
-use crate::fs::vfs::{Vfs, VfsFile, UnixVfs};
 use crate::fs::open_options::OpenOptions;
-use crate::io::{AsyncRead, AsyncWrite, AsyncSeek, ReadBuf};
-use crate::obligation::recovery::{RecoveryConfig, RecoveryGovernor, RecoveryAction, RecoveryTickResult};
+use crate::fs::vfs::{UnixVfs, Vfs, VfsFile};
+use crate::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf};
 use crate::obligation::crdt::CrdtObligationLedger;
+use crate::obligation::recovery::{
+    RecoveryAction, RecoveryConfig, RecoveryGovernor, RecoveryTickResult,
+};
 use crate::types::ObligationId;
-use std::collections::{HashMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::io::{self, SeekFrom};
+use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
+use std::io::{self, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// VFS operation type for tracking and recovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VfsOperation {
     /// Read operation on a file
-    Read { path: PathBuf, offset: u64, length: usize },
+    Read {
+        path: PathBuf,
+        offset: u64,
+        length: usize,
+    },
     /// Write operation on a file
-    Write { path: PathBuf, offset: u64, data_hash: u64, length: usize },
+    Write {
+        path: PathBuf,
+        offset: u64,
+        data_hash: u64,
+        length: usize,
+    },
     /// Create operation for a new file
     Create { path: PathBuf, truncate: bool },
     /// Delete operation on a file
@@ -48,24 +59,42 @@ pub enum VfsOperation {
 impl std::fmt::Display for VfsOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Read { path, offset, length } =>
-                write!(f, "read({}:{}+{})", path.display(), offset, length),
-            Self::Write { path, offset, length, data_hash } =>
-                write!(f, "write({}:{}+{}, hash={})", path.display(), offset, length, data_hash),
-            Self::Create { path, truncate } =>
-                write!(f, "create({}, truncate={})", path.display(), truncate),
-            Self::Delete { path } =>
-                write!(f, "delete({})", path.display()),
-            Self::Sync { path, sync_data_only } =>
-                write!(f, "sync({}, data_only={})", path.display(), sync_data_only),
-            Self::Rename { from, to } =>
-                write!(f, "rename({} -> {})", from.display(), to.display()),
-            Self::Copy { from, to } =>
-                write!(f, "copy({} -> {})", from.display(), to.display()),
-            Self::CreateDir { path, recursive } =>
-                write!(f, "mkdir({}, recursive={})", path.display(), recursive),
-            Self::RemoveDir { path, recursive } =>
-                write!(f, "rmdir({}, recursive={})", path.display(), recursive),
+            Self::Read {
+                path,
+                offset,
+                length,
+            } => write!(f, "read({}:{}+{})", path.display(), offset, length),
+            Self::Write {
+                path,
+                offset,
+                length,
+                data_hash,
+            } => write!(
+                f,
+                "write({}:{}+{}, hash={})",
+                path.display(),
+                offset,
+                length,
+                data_hash
+            ),
+            Self::Create { path, truncate } => {
+                write!(f, "create({}, truncate={})", path.display(), truncate)
+            }
+            Self::Delete { path } => write!(f, "delete({})", path.display()),
+            Self::Sync {
+                path,
+                sync_data_only,
+            } => write!(f, "sync({}, data_only={})", path.display(), sync_data_only),
+            Self::Rename { from, to } => {
+                write!(f, "rename({} -> {})", from.display(), to.display())
+            }
+            Self::Copy { from, to } => write!(f, "copy({} -> {})", from.display(), to.display()),
+            Self::CreateDir { path, recursive } => {
+                write!(f, "mkdir({}, recursive={})", path.display(), recursive)
+            }
+            Self::RemoveDir { path, recursive } => {
+                write!(f, "rmdir({}, recursive={})", path.display(), recursive)
+            }
         }
     }
 }
@@ -242,9 +271,10 @@ impl<V: Vfs> ObligationAwareVfs<V> {
     /// Create new obligation-aware VFS wrapper.
     pub fn new(inner: V, recovery_config: RecoveryConfig) -> Self {
         let ledger = Arc::new(Mutex::new(CrdtObligationLedger::new()));
-        let recovery_governor = Arc::new(Mutex::new(
-            RecoveryGovernor::new(recovery_config, Arc::clone(&ledger))
-        ));
+        let recovery_governor = Arc::new(Mutex::new(RecoveryGovernor::new(
+            recovery_config,
+            Arc::clone(&ledger),
+        )));
 
         Self {
             inner,
@@ -271,11 +301,12 @@ impl<V: Vfs> ObligationAwareVfs<V> {
     fn simulate_crash_if_enabled(&self) -> Result<(), io::Error> {
         if self.crash_simulation.load(Ordering::SeqCst) {
             // Randomly crash with ~20% probability
-            if rand::random::<u8>() < 51 { // ~20% = 51/255
+            if rand::random::<u8>() < 51 {
+                // ~20% = 51/255
                 self.metrics.record_midwrite_crash();
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
-                    "Simulated mid-operation crash for testing"
+                    "Simulated mid-operation crash for testing",
                 ));
             }
         }
@@ -283,7 +314,11 @@ impl<V: Vfs> ObligationAwareVfs<V> {
     }
 
     /// Track a VFS operation with the obligation recovery system.
-    fn track_operation(&self, operation: VfsOperation, timeout_ns: u64) -> Result<ObligationId, io::Error> {
+    fn track_operation(
+        &self,
+        operation: VfsOperation,
+        timeout_ns: u64,
+    ) -> Result<ObligationId, io::Error> {
         let obligation_id = ObligationId::from_u64(self.sequence.fetch_add(1, Ordering::SeqCst));
         let current_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -316,7 +351,10 @@ impl<V: Vfs> ObligationAwareVfs<V> {
                 io::Error::new(io::ErrorKind::Other, "Obligation ledger lock poisoned")
             })?;
             if let Err(e) = ledger.acquire(obligation_id, current_ns) {
-                eprintln!("Warning: Failed to acquire obligation {}: {}", obligation_id, e);
+                eprintln!(
+                    "Warning: Failed to acquire obligation {}: {}",
+                    obligation_id, e
+                );
             }
         }
 
@@ -325,7 +363,11 @@ impl<V: Vfs> ObligationAwareVfs<V> {
     }
 
     /// Update operation state.
-    fn update_operation_state(&self, obligation_id: ObligationId, new_state: VfsOperationState) -> Result<(), io::Error> {
+    fn update_operation_state(
+        &self,
+        obligation_id: ObligationId,
+        new_state: VfsOperationState,
+    ) -> Result<(), io::Error> {
         let current_ns = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -355,13 +397,19 @@ impl<V: Vfs> ObligationAwareVfs<V> {
                 }
                 VfsOperationState::Committed => {
                     if let Err(e) = ledger.commit(obligation_id, current_ns) {
-                        eprintln!("Warning: Failed to commit obligation {}: {}", obligation_id, e);
+                        eprintln!(
+                            "Warning: Failed to commit obligation {}: {}",
+                            obligation_id, e
+                        );
                     }
                     self.metrics.record_operation_completed();
                 }
                 VfsOperationState::Aborted => {
                     if let Err(e) = ledger.abort(obligation_id, current_ns) {
-                        eprintln!("Warning: Failed to abort obligation {}: {}", obligation_id, e);
+                        eprintln!(
+                            "Warning: Failed to abort obligation {}: {}",
+                            obligation_id, e
+                        );
                     }
                     self.metrics.record_operation_aborted();
                 }
@@ -395,12 +443,15 @@ impl<V: Vfs> ObligationAwareVfs<V> {
             self.metrics.record_recovery_action();
 
             match action {
-                RecoveryAction::StaleAbort { id, .. } |
-                RecoveryAction::ConflictResolved { id } |
-                RecoveryAction::ViolationAborted { id, .. } => {
+                RecoveryAction::StaleAbort { id, .. }
+                | RecoveryAction::ConflictResolved { id }
+                | RecoveryAction::ViolationAborted { id, .. } => {
                     // Mark operation as aborted in our tracking
                     if let Err(e) = self.update_operation_state(*id, VfsOperationState::Aborted) {
-                        eprintln!("Failed to update operation state for recovery action: {}", e);
+                        eprintln!(
+                            "Failed to update operation state for recovery action: {}",
+                            e
+                        );
                     }
                     self.metrics.record_operation_recovered();
                 }
@@ -436,8 +487,10 @@ impl<V: Vfs> ObligationAwareVfs<V> {
 
                         // Attempt to resolve by aborting stale operation
                         if record.can_retry() {
-                            println!("Detected stale operation {} for {}, attempting recovery",
-                                obligation_id, record.operation);
+                            println!(
+                                "Detected stale operation {} for {}, attempting recovery",
+                                obligation_id, record.operation
+                            );
                             self.metrics.record_crash_recovery();
                         }
 
@@ -533,7 +586,11 @@ impl<V: Vfs> Vfs for ObligationAwareVfs<V> {
         self.inner.symlink_metadata(path).await
     }
 
-    async fn set_permissions(&self, path: &Path, perm: crate::fs::metadata::Permissions) -> io::Result<()> {
+    async fn set_permissions(
+        &self,
+        path: &Path,
+        perm: crate::fs::metadata::Permissions,
+    ) -> io::Result<()> {
         let operation = VfsOperation::Write {
             path: path.to_path_buf(),
             offset: 0,
@@ -807,7 +864,7 @@ impl Default for VfsRecoveryTestScenario {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{init_test_logging, TimeBudget};
+    use crate::test_utils::{TimeBudget, init_test_logging};
     use tempfile::TempDir;
 
     fn init_test(name: &str) -> TimeBudget {
@@ -860,7 +917,10 @@ mod tests {
             match vfs.execute_recovery() {
                 Ok(result) => {
                     println!("Recovery cycle completed: {:?}", result);
-                    assert!(result.is_quiescent, "System should be quiescent after basic operations");
+                    assert!(
+                        result.is_quiescent,
+                        "System should be quiescent after basic operations"
+                    );
                 }
                 Err(e) => {
                     println!("Recovery cycle failed: {}", e);
@@ -871,9 +931,18 @@ mod tests {
             let metrics = vfs.metrics().snapshot();
             println!("Final metrics: {:?}", metrics);
 
-            assert!(metrics.operations_tracked > 0, "Should have tracked operations");
-            assert!(metrics.operations_completed > 0, "Should have completed operations");
-            assert_eq!(metrics.operations_aborted, 0, "Should not have aborted operations in basic test");
+            assert!(
+                metrics.operations_tracked > 0,
+                "Should have tracked operations"
+            );
+            assert!(
+                metrics.operations_completed > 0,
+                "Should have completed operations"
+            );
+            assert_eq!(
+                metrics.operations_aborted, 0,
+                "Should not have aborted operations in basic test"
+            );
         });
 
         crate::test_complete!("vfs_obligation_basic_tracking");
@@ -902,7 +971,10 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("create runtime");
 
         rt.block_on(async {
-            println!("Starting crash recovery test with {} operations", scenario.operation_count);
+            println!(
+                "Starting crash recovery test with {} operations",
+                scenario.operation_count
+            );
 
             // Perform file operations with crash simulation
             let mut successful_ops = 0;
@@ -932,7 +1004,10 @@ mod tests {
                 }
             }
 
-            println!("Operations completed: {} successful, {} failed", successful_ops, failed_ops);
+            println!(
+                "Operations completed: {} successful, {} failed",
+                successful_ops, failed_ops
+            );
 
             // Run multiple recovery cycles
             for cycle in 0..scenario.recovery_cycles {
@@ -940,8 +1015,12 @@ mod tests {
 
                 match vfs.execute_recovery() {
                     Ok(result) => {
-                        println!("Recovery cycle {}: {} actions, quiescent={}",
-                            cycle, result.action_count(), result.is_quiescent);
+                        println!(
+                            "Recovery cycle {}: {} actions, quiescent={}",
+                            cycle,
+                            result.action_count(),
+                            result.is_quiescent
+                        );
 
                         if !result.actions.is_empty() {
                             for action in &result.actions {
@@ -964,17 +1043,32 @@ mod tests {
             println!("Final crash recovery metrics: {:?}", metrics);
 
             // Verify crash recovery behavior
-            assert!(metrics.operations_tracked > 0, "Should have tracked operations");
+            assert!(
+                metrics.operations_tracked > 0,
+                "Should have tracked operations"
+            );
 
             if metrics.midwrite_crashes > 0 {
                 println!("Crashes simulated: {}", metrics.midwrite_crashes);
-                assert!(metrics.operations_aborted > 0, "Should have aborted operations due to crashes");
-                assert!(metrics.recovery_cycles > 0, "Should have run recovery cycles");
-                assert!(metrics.recovery_actions_taken > 0, "Should have taken recovery actions");
+                assert!(
+                    metrics.operations_aborted > 0,
+                    "Should have aborted operations due to crashes"
+                );
+                assert!(
+                    metrics.recovery_cycles > 0,
+                    "Should have run recovery cycles"
+                );
+                assert!(
+                    metrics.recovery_actions_taken > 0,
+                    "Should have taken recovery actions"
+                );
             }
 
             // At least some operations should succeed despite crashes
-            assert!(metrics.operations_completed > 0, "Should have completed some operations");
+            assert!(
+                metrics.operations_completed > 0,
+                "Should have completed some operations"
+            );
         });
 
         crate::test_complete!("vfs_recovery_from_crashes");
@@ -1021,12 +1115,17 @@ mod tests {
             let mut operation_results = Vec::new();
             for i in 0..scenario.operation_count {
                 let subdir = i % 5;
-                let file_path = scenario.test_dir
+                let file_path = scenario
+                    .test_dir
                     .join(format!("test_subdir_{}", subdir))
                     .join(format!("high_load_file_{}.txt", i));
 
-                let content = format!("High load test content {} {}", i, "x".repeat(scenario.file_size))
-                    .into_bytes();
+                let content = format!(
+                    "High load test content {} {}",
+                    i,
+                    "x".repeat(scenario.file_size)
+                )
+                .into_bytes();
 
                 let result = vfs.write(&file_path, &content).await;
                 operation_results.push(result.is_ok());
@@ -1043,8 +1142,12 @@ mod tests {
 
             // Phase 3: File operations (copy, rename, delete)
             for i in 0..10 {
-                let src_path = scenario.test_dir.join(format!("test_subdir_0/high_load_file_{}.txt", i));
-                let dst_path = scenario.test_dir.join(format!("test_subdir_1/copied_file_{}.txt", i));
+                let src_path = scenario
+                    .test_dir
+                    .join(format!("test_subdir_0/high_load_file_{}.txt", i));
+                let dst_path = scenario
+                    .test_dir
+                    .join(format!("test_subdir_1/copied_file_{}.txt", i));
 
                 // Copy operation
                 match vfs.copy(&src_path, &dst_path).await {
@@ -1053,7 +1156,9 @@ mod tests {
                 }
 
                 // Rename operation
-                let renamed_path = scenario.test_dir.join(format!("test_subdir_1/renamed_file_{}.txt", i));
+                let renamed_path = scenario
+                    .test_dir
+                    .join(format!("test_subdir_1/renamed_file_{}.txt", i));
                 match vfs.rename(&dst_path, &renamed_path).await {
                     Ok(()) => println!("Renamed file {}", i),
                     Err(e) => println!("Rename failed for file {}: {}", i, e),
@@ -1070,8 +1175,13 @@ mod tests {
 
                 match vfs.execute_recovery() {
                     Ok(result) => {
-                        println!("Recovery cycle {}: {} actions, {} pending, quiescent={}",
-                            cycle, result.action_count(), result.remaining_pending, result.is_quiescent);
+                        println!(
+                            "Recovery cycle {}: {} actions, {} pending, quiescent={}",
+                            cycle,
+                            result.action_count(),
+                            result.remaining_pending,
+                            result.is_quiescent
+                        );
                     }
                     Err(e) => {
                         println!("Recovery cycle {} failed: {}", cycle, e);
@@ -1096,27 +1206,41 @@ mod tests {
 
             // Final recovery to ensure clean state
             let final_recovery = vfs.execute_recovery().expect("final recovery");
-            println!("Final recovery: {} actions, quiescent={}",
-                final_recovery.action_count(), final_recovery.is_quiescent);
+            println!(
+                "Final recovery: {} actions, quiescent={}",
+                final_recovery.action_count(),
+                final_recovery.is_quiescent
+            );
 
             // Comprehensive metrics analysis
             let metrics = vfs.metrics().snapshot();
             println!("Comprehensive test metrics: {:?}", metrics);
 
             // Verify comprehensive behavior
-            assert!(metrics.operations_tracked >= scenario.operation_count as u64,
-                "Should have tracked all operations");
+            assert!(
+                metrics.operations_tracked >= scenario.operation_count as u64,
+                "Should have tracked all operations"
+            );
 
             let success_rate = operation_results.iter().filter(|&&success| success).count() as f64
                 / operation_results.len() as f64;
             println!("Operation success rate: {:.2}%", success_rate * 100.0);
 
             // Under load with crashes, expect some failures but overall system should work
-            assert!(success_rate > 0.3, "Should have >30% success rate even under load with crashes");
-            assert!(metrics.recovery_cycles > 0, "Should have executed recovery cycles");
+            assert!(
+                success_rate > 0.3,
+                "Should have >30% success rate even under load with crashes"
+            );
+            assert!(
+                metrics.recovery_cycles > 0,
+                "Should have executed recovery cycles"
+            );
 
             if metrics.midwrite_crashes > 0 {
-                assert!(metrics.crash_recoveries > 0, "Should have performed crash recoveries");
+                assert!(
+                    metrics.crash_recoveries > 0,
+                    "Should have performed crash recoveries"
+                );
             }
 
             println!("Comprehensive high-load test completed successfully");

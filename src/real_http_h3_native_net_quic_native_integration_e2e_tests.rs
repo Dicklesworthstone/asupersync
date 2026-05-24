@@ -18,11 +18,12 @@
 //! 4. **Resource Management**: No stream state leaks after cascade cleanup
 
 use crate::{
+    Result,
     cx::Cx,
     http::{
         h3_native::{
-            H3Connection, H3Error, H3Frame, H3FrameType, H3Request, H3Response,
-            H3Stream, H3StreamId, H3StreamReset, H3StreamState, ResetReason,
+            H3Connection, H3Error, H3Frame, H3FrameType, H3Request, H3Response, H3Stream,
+            H3StreamId, H3StreamReset, H3StreamState, ResetReason,
         },
         headers::{HeaderMap, HeaderName, HeaderValue},
         method::Method,
@@ -30,32 +31,27 @@ use crate::{
         uri::Uri,
     },
     net::{
+        SocketAddr,
         quic_native::{
             connection::{QuicConnection, QuicConnectionEvent, QuicConnectionState},
             frame::{QuicFrame, QuicFrameType, StopSendingFrame},
             stream::{
-                QuicStream, QuicStreamId, QuicStreamState, QuicStreamType,
-                StreamStateTracker, StreamCloseReason,
+                QuicStream, QuicStreamId, QuicStreamState, QuicStreamType, StreamCloseReason,
+                StreamStateTracker,
             },
             transport::{QuicTransport, TransportConfig, TransportError},
         },
-        SocketAddr,
     },
-    runtime::{RuntimeBuilder, LabRuntime, LabRuntimeBuilder},
+    runtime::{LabRuntime, LabRuntimeBuilder, RuntimeBuilder},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
     types::{
-        budget::Budget,
-        cancel::CancelToken,
-        outcome::Outcome,
-        region::RegionId,
-        task::TaskId,
+        budget::Budget, cancel::CancelToken, outcome::Outcome, region::RegionId, task::TaskId,
     },
     util::{rng::DetRng, time::TimeSource},
-    Result,
 };
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -211,11 +207,8 @@ impl H3QuicCascadeCoordinator {
         quic_stream_id: QuicStreamId,
         reset_reason: ResetReason,
     ) -> Result<()> {
-        let cascade_event = StreamResetCascadeEvent::new(
-            h3_stream_id,
-            quic_stream_id,
-            reset_reason,
-        );
+        let cascade_event =
+            StreamResetCascadeEvent::new(h3_stream_id, quic_stream_id, reset_reason);
 
         {
             let mut events = self.cascade_events.write();
@@ -251,7 +244,8 @@ impl H3QuicCascadeCoordinator {
         close_reason: StreamCloseReason,
     ) -> Result<()> {
         // Record stream cleanup in state monitor
-        self.state_monitor.record_stream_cleanup(stream_id, close_reason);
+        self.state_monitor
+            .record_stream_cleanup(stream_id, close_reason);
 
         // Update corresponding cascade event
         {
@@ -346,7 +340,8 @@ impl CascadeMetrics {
     }
 
     fn record_stop_sending_sent(&self) {
-        self.stop_sending_frames_sent.fetch_add(1, Ordering::Release);
+        self.stop_sending_frames_sent
+            .fetch_add(1, Ordering::Release);
     }
 
     fn record_state_freed(&self) {
@@ -400,10 +395,9 @@ impl H3QuicIntegrationTestHarness {
             let quic_stream_id = QuicStreamId::new(i as u64 * 4);
 
             // Register QUIC stream in monitor
-            self.coordinator.get_state_monitor().register_stream(
-                quic_stream_id,
-                QuicStreamState::Open,
-            );
+            self.coordinator
+                .get_state_monitor()
+                .register_stream(quic_stream_id, QuicStreamState::Open);
 
             cx.sleep(scenario.delay_before_reset).await;
 
@@ -423,15 +417,14 @@ impl H3QuicIntegrationTestHarness {
                 timestamp: Instant::now(),
             };
 
-            self.coordinator.handle_stop_sending_frame(stop_sending_frame)?;
+            self.coordinator
+                .handle_stop_sending_frame(stop_sending_frame)?;
 
             // Phase 4: Simulate QUIC stream state cleanup
             cx.sleep(Duration::from_millis(20)).await; // Cleanup delay
 
-            self.coordinator.handle_stream_state_cleanup(
-                quic_stream_id,
-                StreamCloseReason::Reset,
-            )?;
+            self.coordinator
+                .handle_stream_state_cleanup(quic_stream_id, StreamCloseReason::Reset)?;
         }
 
         // Phase 5: Allow any pending cascades to complete
@@ -454,7 +447,8 @@ impl H3QuicIntegrationTestHarness {
         }
 
         // Verify metrics
-        let (initiated, frames_sent, states_freed, _) = self.coordinator.cascade_metrics.get_stats();
+        let (initiated, frames_sent, states_freed, _) =
+            self.coordinator.cascade_metrics.get_stats();
 
         if initiated == 0 {
             return Err(format!("No cascade events were initiated").into());
@@ -464,21 +458,21 @@ impl H3QuicIntegrationTestHarness {
             return Err(format!(
                 "STOP_SENDING frame count mismatch: {} sent vs {} expected",
                 frames_sent, initiated
-            ).into());
+            )
+            .into());
         }
 
         if states_freed != initiated {
             return Err(format!(
                 "State cleanup count mismatch: {} freed vs {} expected",
                 states_freed, initiated
-            ).into());
+            )
+            .into());
         }
 
         println!(
             "H3/QUIC integration verified: {} cascades completed, {} STOP_SENDING frames, {} states freed",
-            verification_result.completed_cascades,
-            frames_sent,
-            states_freed
+            verification_result.completed_cascades, frames_sent, states_freed
         );
 
         Ok(())
@@ -594,25 +588,28 @@ mod tests {
         let harness = H3QuicIntegrationTestHarness::new(Duration::from_millis(500));
 
         // Create single stream reset scenario
-        let scenario = StreamResetScenario::new(
-            ResetReason::RequestCancelled,
-            Duration::from_millis(50),
-        );
+        let scenario =
+            StreamResetScenario::new(ResetReason::RequestCancelled, Duration::from_millis(50));
 
         // Run cascade simulation
-        harness.simulate_h3_quic_stream_reset_cascade(
-            &cx,
-            vec![scenario],
-        ).await?;
+        harness
+            .simulate_h3_quic_stream_reset_cascade(&cx, vec![scenario])
+            .await?;
 
         // Verify cascade completion
         let verification_result = harness.coordinator.verify_cascade_completion()?;
-        assert!(verification_result.is_successful(), "Basic cascade should complete successfully");
+        assert!(
+            verification_result.is_successful(),
+            "Basic cascade should complete successfully"
+        );
 
         // Verify stream cleanup
         let stream_id = QuicStreamId::new(0);
         assert!(
-            harness.coordinator.get_state_monitor().verify_stream_cleanup(stream_id),
+            harness
+                .coordinator
+                .get_state_monitor()
+                .verify_stream_cleanup(stream_id),
             "Stream should be properly cleaned up"
         );
 
@@ -627,23 +624,31 @@ mod tests {
         let harness = H3QuicIntegrationTestHarness::new(Duration::from_millis(300));
 
         // Create scenario that should generate STOP_SENDING frame
-        let scenario = StreamResetScenario::new(
-            ResetReason::InternalError,
-            Duration::from_millis(25),
-        );
+        let scenario =
+            StreamResetScenario::new(ResetReason::InternalError, Duration::from_millis(25));
 
         // Run simulation
-        harness.simulate_h3_quic_stream_reset_cascade(
-            &cx,
-            vec![scenario],
-        ).await?;
+        harness
+            .simulate_h3_quic_stream_reset_cascade(&cx, vec![scenario])
+            .await?;
 
         // Verify STOP_SENDING frame was generated
-        let stop_sending_frames = harness.coordinator.get_state_monitor().get_stop_sending_frames();
-        assert_eq!(stop_sending_frames.len(), 1, "Should generate exactly one STOP_SENDING frame");
+        let stop_sending_frames = harness
+            .coordinator
+            .get_state_monitor()
+            .get_stop_sending_frames();
+        assert_eq!(
+            stop_sending_frames.len(),
+            1,
+            "Should generate exactly one STOP_SENDING frame"
+        );
 
         let frame = &stop_sending_frames[0];
-        assert_eq!(frame.stream_id, QuicStreamId::new(0), "Frame should reference correct stream");
+        assert_eq!(
+            frame.stream_id,
+            QuicStreamId::new(0),
+            "Frame should reference correct stream"
+        );
         assert_eq!(
             frame.application_error_code,
             map_reset_reason_to_error_code(ResetReason::InternalError),
@@ -668,12 +673,22 @@ mod tests {
         ];
 
         // Run cascades
-        harness.simulate_h3_quic_stream_reset_cascade(&cx, scenarios).await?;
+        harness
+            .simulate_h3_quic_stream_reset_cascade(&cx, scenarios)
+            .await?;
 
         // Verify all stream states were cleaned up
         let state_monitor = harness.coordinator.get_state_monitor();
-        assert_eq!(state_monitor.get_active_stream_count(), 0, "No streams should remain active");
-        assert_eq!(state_monitor.get_freed_stream_count(), 3, "All 3 streams should be freed");
+        assert_eq!(
+            state_monitor.get_active_stream_count(),
+            0,
+            "No streams should remain active"
+        );
+        assert_eq!(
+            state_monitor.get_freed_stream_count(),
+            3,
+            "All 3 streams should be freed"
+        );
 
         // Verify individual stream cleanup
         for i in 0..3 {
@@ -700,10 +715,10 @@ mod tests {
         let h3_stream_id = H3StreamId::new(0);
         let quic_stream_id = QuicStreamId::new(0);
 
-        harness.coordinator.get_state_monitor().register_stream(
-            quic_stream_id,
-            QuicStreamState::Open,
-        );
+        harness
+            .coordinator
+            .get_state_monitor()
+            .register_stream(quic_stream_id, QuicStreamState::Open);
 
         harness.coordinator.initiate_h3_stream_reset(
             h3_stream_id,
@@ -716,9 +731,18 @@ mod tests {
 
         // Verify timeout is detected
         let verification_result = harness.coordinator.verify_cascade_completion()?;
-        assert!(!verification_result.is_successful(), "Incomplete cascade should not be successful");
-        assert_eq!(verification_result.timed_out_cascades, 1, "Should detect timeout");
-        assert_eq!(verification_result.completed_cascades, 0, "No cascades should be complete");
+        assert!(
+            !verification_result.is_successful(),
+            "Incomplete cascade should not be successful"
+        );
+        assert_eq!(
+            verification_result.timed_out_cascades, 1,
+            "Should detect timeout"
+        );
+        assert_eq!(
+            verification_result.completed_cascades, 0,
+            "No cascades should be complete"
+        );
 
         Ok(())
     }
@@ -740,7 +764,9 @@ mod tests {
         ];
 
         // Run comprehensive cascade simulation
-        harness.simulate_h3_quic_stream_reset_cascade(&cx, scenarios).await?;
+        harness
+            .simulate_h3_quic_stream_reset_cascade(&cx, scenarios)
+            .await?;
 
         // Verify comprehensive integration properties
         harness.verify_integration_properties()?;
@@ -752,20 +778,34 @@ mod tests {
         assert_eq!(initiated, 5, "Should initiate 5 cascades");
         assert_eq!(frames_sent, 5, "Should send 5 STOP_SENDING frames");
         assert_eq!(states_freed, 5, "Should free 5 stream states");
-        assert_eq!(cascade_times.len(), 0, "No cascade times recorded in this test");
+        assert_eq!(
+            cascade_times.len(),
+            0,
+            "No cascade times recorded in this test"
+        );
 
         // Verify final verification result
         let verification_result = harness.coordinator.verify_cascade_completion()?;
-        assert!(verification_result.is_successful(), "Comprehensive integration should be successful");
-        assert_eq!(verification_result.total_cascades, 5, "Should track 5 total cascades");
-        assert_eq!(verification_result.completed_cascades, 5, "All cascades should complete");
-        assert_eq!(verification_result.active_streams_remaining, 0, "No streams should remain active");
+        assert!(
+            verification_result.is_successful(),
+            "Comprehensive integration should be successful"
+        );
+        assert_eq!(
+            verification_result.total_cascades, 5,
+            "Should track 5 total cascades"
+        );
+        assert_eq!(
+            verification_result.completed_cascades, 5,
+            "All cascades should complete"
+        );
+        assert_eq!(
+            verification_result.active_streams_remaining, 0,
+            "No streams should remain active"
+        );
 
         println!(
             "Comprehensive H3/QUIC integration test completed: {} cascades, {} frames, {} cleanups",
-            verification_result.completed_cascades,
-            frames_sent,
-            states_freed
+            verification_result.completed_cascades, frames_sent, states_freed
         );
 
         Ok(())

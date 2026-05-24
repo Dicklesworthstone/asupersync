@@ -11,10 +11,10 @@
 #[cfg(test)]
 mod tests {
     use crate::cx::Cx;
-    use crate::session::{Session, Send, Recv, End, Choose, Left, Right, channel};
-    use crate::server::connection::{ConnectionManager, ConnectionGuard, ConnectionId};
     use crate::evidence_sink::{CollectorSink, EvidenceSink};
     use crate::runtime::region;
+    use crate::server::connection::{ConnectionGuard, ConnectionId, ConnectionManager};
+    use crate::session::{Choose, End, Left, Recv, Right, Send, Session, channel};
     use crate::types::Time;
     use franken_evidence::EvidenceLedger;
     use std::collections::HashMap;
@@ -67,12 +67,16 @@ mod tests {
     }
 
     // Session type definitions for our protocol
-    type ClientProtocol = Send<TestClientRequest,
-                          Recv<TestServerResponse,
-                          Choose<
-                              Send<TestClientRequest, End>,  // Left: another request
-                              End                            // Right: disconnect
-                          >>>;
+    type ClientProtocol = Send<
+        TestClientRequest,
+        Recv<
+            TestServerResponse,
+            Choose<
+                Send<TestClientRequest, End>, // Left: another request
+                End,                          // Right: disconnect
+            >,
+        >,
+    >;
 
     type ServerProtocol = <ClientProtocol as Session>::Dual;
 
@@ -102,10 +106,19 @@ mod tests {
             format!("test_payload_{}", req_id).into_bytes()
         }
 
-        fn create_response(&self, success: bool, msg: &str, sub_count: usize) -> TestServerResponse {
+        fn create_response(
+            &self,
+            success: bool,
+            msg: &str,
+            sub_count: usize,
+        ) -> TestServerResponse {
             TestServerResponse {
                 success,
-                message: format!("{}_req_{}", msg, self.request_counter.load(Ordering::Relaxed)),
+                message: format!(
+                    "{}_req_{}",
+                    msg,
+                    self.request_counter.load(Ordering::Relaxed)
+                ),
                 subscription_count: sub_count,
             }
         }
@@ -135,8 +148,13 @@ mod tests {
 
         fn log_event(&self, event: &str) {
             let timestamp = crate::time::wall_now();
-            let entry = format!("{{\"test\":\"{}\",\"phase\":\"{}\",\"event\":\"{}\",\"ts\":{}}}",
-                self.test_name, self.phase, event, timestamp.as_nanos());
+            let entry = format!(
+                "{{\"test\":\"{}\",\"phase\":\"{}\",\"event\":\"{}\",\"ts\":{}}}",
+                self.test_name,
+                self.phase,
+                event,
+                timestamp.as_nanos()
+            );
             self.events.lock().push(entry);
             eprintln!("{}", entry);
         }
@@ -172,7 +190,7 @@ mod tests {
             logger.phase("server_init");
 
             let connection_manager = ConnectionManager::new(
-                100, // max_connections
+                100,                     // max_connections
                 Duration::from_secs(30), // idle_timeout
             );
 
@@ -188,7 +206,10 @@ mod tests {
             }
         }
 
-        async fn accept_connection(&mut self, cx: &Cx) -> Result<(ConnectionId, ConnectionGuard), String> {
+        async fn accept_connection(
+            &mut self,
+            cx: &Cx,
+        ) -> Result<(ConnectionId, ConnectionGuard), String> {
             self.logger.log_event("accept_connection_start");
 
             // Emit evidence about connection acceptance
@@ -201,12 +222,14 @@ mod tests {
             // Register connection with manager using dynamic port
             let test_port = allocate_test_port().expect("Failed to allocate test port");
             let remote_addr = format!("127.0.0.1:{}", test_port).parse().unwrap();
-            let (conn_id, guard) = self.connection_manager
+            let (conn_id, guard) = self
+                .connection_manager
                 .register_connection(remote_addr)
                 .map_err(|e| format!("Connection registration failed: {:?}", e))?;
 
             self.logger.connection_event(conn_id, "registered");
-            self.logger.evidence_event(self.evidence_sink.entries().len());
+            self.logger
+                .evidence_event(self.evidence_sink.entries().len());
 
             Ok((conn_id, guard))
         }
@@ -220,10 +243,13 @@ mod tests {
             self.logger.session_event(0, "protocol_start");
 
             // Receive initial client request
-            let (request, next_endpoint) = server_endpoint.recv().await
+            let (request, next_endpoint) = server_endpoint
+                .recv()
+                .await
                 .map_err(|e| format!("Failed to receive request: {:?}", e))?;
 
-            self.logger.session_event(request.client_id, "request_received");
+            self.logger
+                .session_event(request.client_id, "request_received");
 
             // Emit evidence about request processing
             let evidence = EvidenceLedger::builder()
@@ -236,30 +262,39 @@ mod tests {
             let response = self.process_request(&request).await;
 
             // Send response
-            let choice_endpoint = next_endpoint.send(response).await
+            let choice_endpoint = next_endpoint
+                .send(response)
+                .await
                 .map_err(|e| format!("Failed to send response: {:?}", e))?;
 
-            self.logger.session_event(request.client_id, "response_sent");
+            self.logger
+                .session_event(request.client_id, "response_sent");
 
             // Offer choice to client: continue or end
             match choice_endpoint.offer().await {
                 Ok(crate::session::Branch::Left(continue_endpoint)) => {
-                    self.logger.session_event(request.client_id, "client_chose_continue");
+                    self.logger
+                        .session_event(request.client_id, "client_chose_continue");
 
                     // Handle additional request
-                    let (second_request, end_endpoint) = continue_endpoint.recv().await
+                    let (second_request, end_endpoint) = continue_endpoint
+                        .recv()
+                        .await
                         .map_err(|e| format!("Failed to receive second request: {:?}", e))?;
 
-                    self.logger.session_event(second_request.client_id, "second_request_received");
+                    self.logger
+                        .session_event(second_request.client_id, "second_request_received");
 
                     // Process and end
                     let _second_response = self.process_request(&second_request).await;
                     end_endpoint.close();
 
-                    self.logger.session_event(second_request.client_id, "protocol_completed");
+                    self.logger
+                        .session_event(second_request.client_id, "protocol_completed");
                 }
                 Ok(crate::session::Branch::Right(end_endpoint)) => {
-                    self.logger.session_event(request.client_id, "client_chose_disconnect");
+                    self.logger
+                        .session_event(request.client_id, "client_chose_disconnect");
                     end_endpoint.close();
                 }
                 Err(e) => {
@@ -276,11 +311,13 @@ mod tests {
 
             match &request.request_type {
                 RequestType::Subscribe { topic } => {
-                    subscriptions.entry(topic.clone())
+                    subscriptions
+                        .entry(topic.clone())
                         .or_insert_with(Vec::new)
                         .push(request.client_id);
 
-                    self.logger.session_event(request.client_id, &format!("subscribed:{}", topic));
+                    self.logger
+                        .session_event(request.client_id, &format!("subscribed:{}", topic));
 
                     TestServerResponse {
                         success: true,
@@ -296,7 +333,8 @@ mod tests {
                         }
                     }
 
-                    self.logger.session_event(request.client_id, &format!("unsubscribed:{}", topic));
+                    self.logger
+                        .session_event(request.client_id, &format!("unsubscribed:{}", topic));
 
                     TestServerResponse {
                         success: true,
@@ -309,7 +347,7 @@ mod tests {
 
                     self.logger.session_event(
                         request.client_id,
-                        &format!("published:{}:to_{}_subscribers", topic, subscriber_count)
+                        &format!("published:{}:to_{}_subscribers", topic, subscriber_count),
                     );
 
                     TestServerResponse {
@@ -345,7 +383,9 @@ mod tests {
             logger.phase("connection_acceptance");
 
             // Accept a connection (simulating real network client)
-            let (conn_id, _connection_guard) = server.accept_connection(&cx).await
+            let (conn_id, _connection_guard) = server
+                .accept_connection(&cx)
+                .await
                 .expect("Connection acceptance should succeed");
 
             assert_eq!(server.get_active_connections(), 1);
@@ -363,9 +403,9 @@ mod tests {
                 let mut client_endpoint = client_endpoint;
 
                 // Send initial request
-                let request = client_factory.create_client_request(
-                    RequestType::Subscribe { topic: "test_topic".to_string() }
-                );
+                let request = client_factory.create_client_request(RequestType::Subscribe {
+                    topic: "test_topic".to_string(),
+                });
 
                 let recv_endpoint = client_endpoint.send(request).await?;
 
@@ -377,25 +417,28 @@ mod tests {
                 // Choose to send another request
                 let send_endpoint = choice_endpoint.choose_left().await?;
 
-                let second_request = client_factory.create_client_request(
-                    RequestType::PublishMessage {
+                let second_request =
+                    client_factory.create_client_request(RequestType::PublishMessage {
                         topic: "test_topic".to_string(),
                         message: "Hello subscribers!".to_string(),
-                    }
-                );
+                    });
 
                 let end_endpoint = send_endpoint.send(second_request).await?;
                 end_endpoint.close();
 
                 Ok::<(), Box<dyn std::error::Error>>(())
-            }).expect("Client task spawn should succeed");
+            })
+            .expect("Client task spawn should succeed");
 
             // Handle server side of protocol
-            server.handle_session_protocol(&cx, conn_id, server_endpoint).await
+            server
+                .handle_session_protocol(&cx, conn_id, server_endpoint)
+                .await
                 .expect("Session protocol should complete successfully");
 
             // Wait for client to complete
-            client_handle.await
+            client_handle
+                .await
                 .expect("Client task should complete")
                 .expect("Client protocol should succeed");
 
@@ -404,20 +447,25 @@ mod tests {
             // Verify evidence was collected
             let evidence_entries = server.get_evidence_entries();
             assert!(!evidence_entries.is_empty(), "Evidence should be collected");
-            assert!(evidence_entries.len() >= 2, "Should have evidence for connection accept and request processing");
+            assert!(
+                evidence_entries.len() >= 2,
+                "Should have evidence for connection accept and request processing"
+            );
 
             logger.evidence_event(evidence_entries.len());
 
             // Verify evidence contains expected decision types
-            let decision_types: std::collections::HashSet<_> = evidence_entries
-                .iter()
-                .map(|e| e.decision_type())
-                .collect();
+            let decision_types: std::collections::HashSet<_> =
+                evidence_entries.iter().map(|e| e.decision_type()).collect();
 
-            assert!(decision_types.contains("connection_accept"),
-                "Should have connection acceptance evidence");
-            assert!(decision_types.contains("request_processing"),
-                "Should have request processing evidence");
+            assert!(
+                decision_types.contains("connection_accept"),
+                "Should have connection acceptance evidence"
+            );
+            assert!(
+                decision_types.contains("request_processing"),
+                "Should have request processing evidence"
+            );
 
             logger.log_event("evidence_verification_passed");
 
@@ -437,15 +485,20 @@ mod tests {
             assert!(!events.is_empty(), "Should have logged structured events");
 
             // Verify event sequence
-            let phase_events: Vec<_> = events.iter()
+            let phase_events: Vec<_> = events
+                .iter()
                 .filter(|e| e.contains("phase_start"))
                 .collect();
 
-            assert!(phase_events.len() >= 5, "Should have gone through multiple phases");
+            assert!(
+                phase_events.len() >= 5,
+                "Should have gone through multiple phases"
+            );
             logger.log_event("test_completed_successfully");
 
             Ok(())
-        }).expect("Test should complete successfully");
+        })
+        .expect("Test should complete successfully");
     }
 
     #[test]
@@ -472,11 +525,13 @@ mod tests {
             let remote_addr3 = test_addrs[2];
 
             // First two connections should succeed
-            let (conn1_id, _guard1) = connection_manager.register_connection(remote_addr1)
+            let (conn1_id, _guard1) = connection_manager
+                .register_connection(remote_addr1)
                 .expect("First connection should succeed");
             logger.connection_event(conn1_id, "first_connection_registered");
 
-            let (conn2_id, _guard2) = connection_manager.register_connection(remote_addr2)
+            let (conn2_id, _guard2) = connection_manager
+                .register_connection(remote_addr2)
                 .expect("Second connection should succeed");
             logger.connection_event(conn2_id, "second_connection_registered");
 
@@ -503,7 +558,8 @@ mod tests {
             logger.connection_event(conn1_id, "connection_released");
 
             // Now third connection should succeed
-            let (conn3_id, _guard3) = connection_manager.register_connection(remote_addr3)
+            let (conn3_id, _guard3) = connection_manager
+                .register_connection(remote_addr3)
                 .expect("Third connection should now succeed");
             logger.connection_event(conn3_id, "third_connection_registered_after_release");
 
@@ -512,7 +568,10 @@ mod tests {
 
             // Verify evidence collection
             let entries = evidence_sink.entries();
-            assert!(!entries.is_empty(), "Should have capacity enforcement evidence");
+            assert!(
+                !entries.is_empty(),
+                "Should have capacity enforcement evidence"
+            );
             logger.evidence_event(entries.len());
 
             logger.phase("cleanup");
@@ -523,7 +582,8 @@ mod tests {
             logger.log_event("all_connections_cleaned_up");
 
             Ok(())
-        }).expect("Capacity limit test should complete successfully");
+        })
+        .expect("Capacity limit test should complete successfully");
     }
 
     #[test]
@@ -537,7 +597,9 @@ mod tests {
             let mut server = TestServer::new("error_handling_test");
 
             // Accept connection
-            let (conn_id, _guard) = server.accept_connection(&cx).await
+            let (conn_id, _guard) = server
+                .accept_connection(&cx)
+                .await
                 .expect("Connection should succeed");
             logger.connection_event(conn_id, "connection_established_for_error_test");
 
@@ -552,8 +614,13 @@ mod tests {
             logger.log_event("client_endpoint_dropped_to_simulate_error");
 
             // Server should handle the error gracefully
-            let result = server.handle_session_protocol(&cx, conn_id, server_endpoint).await;
-            assert!(result.is_err(), "Should get error when client drops connection");
+            let result = server
+                .handle_session_protocol(&cx, conn_id, server_endpoint)
+                .await;
+            assert!(
+                result.is_err(),
+                "Should get error when client drops connection"
+            );
 
             logger.log_event("server_handled_error_gracefully");
 
@@ -561,18 +628,26 @@ mod tests {
 
             // Verify evidence was still collected despite error
             let evidence_entries = server.get_evidence_entries();
-            assert!(!evidence_entries.is_empty(), "Evidence should be collected even on error");
+            assert!(
+                !evidence_entries.is_empty(),
+                "Evidence should be collected even on error"
+            );
 
             // Should at least have connection acceptance evidence
-            let has_connection_evidence = evidence_entries.iter()
+            let has_connection_evidence = evidence_entries
+                .iter()
                 .any(|e| e.decision_type() == "connection_accept");
-            assert!(has_connection_evidence, "Should have connection acceptance evidence");
+            assert!(
+                has_connection_evidence,
+                "Should have connection acceptance evidence"
+            );
 
             logger.evidence_event(evidence_entries.len());
             logger.log_event("error_handling_test_completed");
 
             Ok(())
-        }).expect("Error handling test should complete successfully");
+        })
+        .expect("Error handling test should complete successfully");
     }
 
     #[test]
@@ -585,7 +660,9 @@ mod tests {
 
             // Create server with connection tracking
             let mut server = TestServer::new("backpressure_test");
-            let (conn_id, _guard) = server.accept_connection(&cx).await
+            let (conn_id, _guard) = server
+                .accept_connection(&cx)
+                .await
                 .expect("Connection should succeed");
 
             logger.phase("backpressure_simulation");
@@ -599,9 +676,9 @@ mod tests {
                 let mut client_endpoint = client_endpoint;
 
                 // Send initial request
-                let request = client_factory.create_client_request(
-                    RequestType::Subscribe { topic: "high_volume_topic".to_string() }
-                );
+                let request = client_factory.create_client_request(RequestType::Subscribe {
+                    topic: "high_volume_topic".to_string(),
+                });
 
                 let recv_endpoint = client_endpoint.send(request).await?;
 
@@ -628,8 +705,13 @@ mod tests {
             })?;
 
             // Handle server side with backpressure monitoring
-            let result = server.handle_session_protocol(&cx, conn_id, server_endpoint).await;
-            assert!(result.is_ok(), "Server should handle large messages gracefully");
+            let result = server
+                .handle_session_protocol(&cx, conn_id, server_endpoint)
+                .await;
+            assert!(
+                result.is_ok(),
+                "Server should handle large messages gracefully"
+            );
 
             // Wait for client
             backpressure_handle.await??;
@@ -638,13 +720,17 @@ mod tests {
 
             // Verify evidence was collected during backpressure scenario
             let evidence_entries = server.get_evidence_entries();
-            assert!(!evidence_entries.is_empty(), "Should collect evidence during backpressure");
+            assert!(
+                !evidence_entries.is_empty(),
+                "Should collect evidence during backpressure"
+            );
 
             logger.evidence_event(evidence_entries.len());
             logger.log_event("backpressure_test_completed");
 
             Ok(())
-        }).expect("Backpressure test should complete successfully");
+        })
+        .expect("Backpressure test should complete successfully");
     }
 
     #[test]
@@ -656,7 +742,7 @@ mod tests {
 
             // Create connection manager with short idle timeout
             let connection_manager = ConnectionManager::new(
-                10, // max_connections
+                10,                         // max_connections
                 Duration::from_millis(100), // very short idle timeout for testing
             );
 
@@ -666,7 +752,8 @@ mod tests {
 
             let test_port = allocate_test_port().expect("Failed to allocate test port");
             let remote_addr = format!("127.0.0.1:{}", test_port).parse().unwrap();
-            let (conn_id, guard) = connection_manager.register_connection(remote_addr)
+            let (conn_id, guard) = connection_manager
+                .register_connection(remote_addr)
                 .expect("Connection should be registered");
 
             logger.connection_event(conn_id, "registered_for_timeout_test");
@@ -695,17 +782,25 @@ mod tests {
 
             // Verify evidence collection
             let entries = evidence_sink.entries();
-            assert!(!entries.is_empty(), "Should have timeout monitoring evidence");
+            assert!(
+                !entries.is_empty(),
+                "Should have timeout monitoring evidence"
+            );
 
-            let has_timeout_evidence = entries.iter()
+            let has_timeout_evidence = entries
+                .iter()
                 .any(|e| e.decision_type() == "idle_timeout_monitoring");
-            assert!(has_timeout_evidence, "Should have idle timeout monitoring evidence");
+            assert!(
+                has_timeout_evidence,
+                "Should have idle timeout monitoring evidence"
+            );
 
             logger.evidence_event(entries.len());
             logger.log_event("idle_timeout_test_completed");
 
             Ok(())
-        }).expect("Idle timeout test should complete successfully");
+        })
+        .expect("Idle timeout test should complete successfully");
     }
 
     #[test]
@@ -734,7 +829,8 @@ mod tests {
                 let handle = crate::cx::spawn(&cx, async move {
                     // Each task gets its own connection
                     let remote_addr = format!("127.0.0.1:{}", 20000 + i).parse().unwrap();
-                    let (_conn_id, _guard) = connection_manager.register_connection(remote_addr)
+                    let (_conn_id, _guard) = connection_manager
+                        .register_connection(remote_addr)
                         .expect("Connection should succeed");
 
                     // Emit evidence from this concurrent session
@@ -748,11 +844,9 @@ mod tests {
                     let (client_endpoint, _server_endpoint) = channel::<ClientProtocol>();
 
                     // Simulate some client work
-                    let request = factory_clone.create_client_request(
-                        RequestType::Subscribe {
-                            topic: format!("topic_{}", i)
-                        }
-                    );
+                    let request = factory_clone.create_client_request(RequestType::Subscribe {
+                        topic: format!("topic_{}", i),
+                    });
 
                     // Just create the request to exercise the factory
                     assert_eq!(request.client_id, i + 1); // Factories start at 1
@@ -774,19 +868,26 @@ mod tests {
 
             // Verify evidence from all concurrent sessions was collected
             let evidence_entries = evidence_sink.entries();
-            assert!(evidence_entries.len() >= num_concurrent,
-                "Should have evidence from all concurrent sessions");
+            assert!(
+                evidence_entries.len() >= num_concurrent,
+                "Should have evidence from all concurrent sessions"
+            );
 
-            let concurrent_evidence_count = evidence_entries.iter()
+            let concurrent_evidence_count = evidence_entries
+                .iter()
                 .filter(|e| e.decision_type() == "concurrent_session")
                 .count();
-            assert_eq!(concurrent_evidence_count, num_concurrent,
-                "Should have exactly {} concurrent session evidence entries", num_concurrent);
+            assert_eq!(
+                concurrent_evidence_count, num_concurrent,
+                "Should have exactly {} concurrent session evidence entries",
+                num_concurrent
+            );
 
             logger.evidence_event(evidence_entries.len());
             logger.log_event("concurrent_test_completed_successfully");
 
             Ok(())
-        }).expect("Concurrent sessions test should complete successfully");
+        })
+        .expect("Concurrent sessions test should complete successfully");
     }
 }

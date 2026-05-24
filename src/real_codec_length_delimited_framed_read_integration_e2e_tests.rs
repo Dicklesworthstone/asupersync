@@ -40,16 +40,16 @@ mod tests {
         dead_code
     )]
 
+    use crate::bytes::{BufMut, Bytes, BytesMut};
     use crate::codec::{
-        length_delimited::{LengthDelimitedCodec, LengthDelimitedCodecBuilder},
-        framed_read::FramedRead,
-        framed::Framed,
         decoder::Decoder,
         encoder::Encoder,
+        framed::Framed,
+        framed_read::FramedRead,
+        length_delimited::{LengthDelimitedCodec, LengthDelimitedCodecBuilder},
     };
-    use crate::bytes::{Bytes, BytesMut, BufMut};
     use crate::cx::Cx;
-    use crate::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
+    use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use crate::net::tcp::{TcpListener, TcpStream};
     use crate::time::{Duration, sleep};
     use crate::types::Budget;
@@ -158,11 +158,40 @@ mod tests {
 
             // Test various length field configurations
             let codec_configs = vec![
-                ("1-byte-length", LengthDelimitedCodec::builder().length_field_length(1).new_codec()),
-                ("2-byte-be-length", LengthDelimitedCodec::builder().length_field_length(2).big_endian().new_codec()),
-                ("2-byte-le-length", LengthDelimitedCodec::builder().length_field_length(2).little_endian().new_codec()),
-                ("4-byte-be-length", LengthDelimitedCodec::builder().length_field_length(4).big_endian().new_codec()),
-                ("8-byte-le-length", LengthDelimitedCodec::builder().length_field_length(8).little_endian().new_codec()),
+                (
+                    "1-byte-length",
+                    LengthDelimitedCodec::builder()
+                        .length_field_length(1)
+                        .new_codec(),
+                ),
+                (
+                    "2-byte-be-length",
+                    LengthDelimitedCodec::builder()
+                        .length_field_length(2)
+                        .big_endian()
+                        .new_codec(),
+                ),
+                (
+                    "2-byte-le-length",
+                    LengthDelimitedCodec::builder()
+                        .length_field_length(2)
+                        .little_endian()
+                        .new_codec(),
+                ),
+                (
+                    "4-byte-be-length",
+                    LengthDelimitedCodec::builder()
+                        .length_field_length(4)
+                        .big_endian()
+                        .new_codec(),
+                ),
+                (
+                    "8-byte-le-length",
+                    LengthDelimitedCodec::builder()
+                        .length_field_length(8)
+                        .little_endian()
+                        .new_codec(),
+                ),
             ];
 
             result.phase = CodecTestPhase::VariableLengthFrameEncoding;
@@ -199,7 +228,8 @@ mod tests {
                         self.increment_stat("variable_length_encodings", test_frames.len() as u64);
                     }
                     Err(e) => {
-                        result.error = Some(format!("Configuration '{}' failed: {}", config_name, e));
+                        result.error =
+                            Some(format!("Configuration '{}' failed: {}", config_name, e));
                         break;
                     }
                 }
@@ -232,9 +262,12 @@ mod tests {
             let codec = LengthDelimitedCodec::new();
 
             // Create test frame with multiple chunks
-            let test_payload = Bytes::from("This is a test frame that will be split across multiple reads");
+            let test_payload =
+                Bytes::from("This is a test frame that will be split across multiple reads");
             let mut encoded_frame = BytesMut::new();
-            codec.encode(test_payload.clone(), &mut encoded_frame).unwrap();
+            codec
+                .encode(test_payload.clone(), &mut encoded_frame)
+                .unwrap();
 
             result.phase = CodecTestPhase::PartialReadSimulation;
 
@@ -249,18 +282,27 @@ mod tests {
                     self.test_stats.clone(),
                 );
 
-                match self.test_partial_frame_assembly(codec.clone(), partial_reader).await {
+                match self
+                    .test_partial_frame_assembly(codec.clone(), partial_reader)
+                    .await
+                {
                     Ok(decoded_payload) => {
                         if decoded_payload == test_payload {
                             successful_partial_reads += 1;
                             self.increment_stat("partial_reads_processed", 1);
                         } else {
-                            result.error = Some(format!("Partial read with chunk size {} produced incorrect payload", chunk_size));
+                            result.error = Some(format!(
+                                "Partial read with chunk size {} produced incorrect payload",
+                                chunk_size
+                            ));
                             break;
                         }
                     }
                     Err(e) => {
-                        result.error = Some(format!("Partial read test failed for chunk size {}: {}", chunk_size, e));
+                        result.error = Some(format!(
+                            "Partial read test failed for chunk size {}: {}",
+                            chunk_size, e
+                        ));
                         break;
                     }
                 }
@@ -295,24 +337,35 @@ mod tests {
             // Create a frame that will be split across segments
             let test_payload = Bytes::from(&vec![0x55; 100]); // 100-byte payload
             let mut encoded_frame = BytesMut::new();
-            codec.encode(test_payload.clone(), &mut encoded_frame).unwrap();
+            codec
+                .encode(test_payload.clone(), &mut encoded_frame)
+                .unwrap();
 
             result.phase = CodecTestPhase::TcpSegmentBoundaryTest;
 
             // Test various segment boundary scenarios
             let boundary_scenarios = vec![
-                ("header_split", vec![
-                    encoded_frame.slice(0..2),      // Partial header
-                    encoded_frame.slice(2..),       // Rest of header + payload
-                ]),
-                ("header_payload_split", vec![
-                    encoded_frame.slice(0..4),      // Complete header
-                    encoded_frame.slice(4..50),     // Partial payload
-                    encoded_frame.slice(50..),      // Rest of payload
-                ]),
-                ("byte_by_byte", (0..encoded_frame.len())
-                    .map(|i| encoded_frame.slice(i..i+1))
-                    .collect()),
+                (
+                    "header_split",
+                    vec![
+                        encoded_frame.slice(0..2), // Partial header
+                        encoded_frame.slice(2..),  // Rest of header + payload
+                    ],
+                ),
+                (
+                    "header_payload_split",
+                    vec![
+                        encoded_frame.slice(0..4),  // Complete header
+                        encoded_frame.slice(4..50), // Partial payload
+                        encoded_frame.slice(50..),  // Rest of payload
+                    ],
+                ),
+                (
+                    "byte_by_byte",
+                    (0..encoded_frame.len())
+                        .map(|i| encoded_frame.slice(i..i + 1))
+                        .collect(),
+                ),
             ];
 
             let mut successful_boundary_tests = 0;
@@ -320,18 +373,27 @@ mod tests {
             for (scenario_name, segments) in boundary_scenarios {
                 let segment_stream = SegmentBoundaryStream::new(segments, self.test_stats.clone());
 
-                match self.test_segment_boundary_assembly(codec.clone(), segment_stream).await {
+                match self
+                    .test_segment_boundary_assembly(codec.clone(), segment_stream)
+                    .await
+                {
                     Ok(decoded_payload) => {
                         if decoded_payload == test_payload {
                             successful_boundary_tests += 1;
                             self.increment_stat("tcp_segment_boundary_spans", 1);
                         } else {
-                            result.error = Some(format!("Segment boundary test '{}' produced incorrect payload", scenario_name));
+                            result.error = Some(format!(
+                                "Segment boundary test '{}' produced incorrect payload",
+                                scenario_name
+                            ));
                             break;
                         }
                     }
                     Err(e) => {
-                        result.error = Some(format!("Segment boundary test '{}' failed: {}", scenario_name, e));
+                        result.error = Some(format!(
+                            "Segment boundary test '{}' failed: {}",
+                            scenario_name, e
+                        ));
                         break;
                     }
                 }
@@ -397,7 +459,8 @@ mod tests {
                         current_pos += 4 + frame.len(); // 4-byte header + payload
                         boundaries.push(current_pos);
                     }
-                    boundaries.windows(2)
+                    boundaries
+                        .windows(2)
                         .map(|w| all_encoded.slice(w[0]..w[1]))
                         .collect()
                 }),
@@ -408,13 +471,19 @@ mod tests {
             for (scenario_name, segments) in multi_frame_scenarios {
                 let segment_stream = SegmentBoundaryStream::new(segments, self.test_stats.clone());
 
-                match self.test_multi_frame_decoding(codec.clone(), segment_stream, test_frames.clone()).await {
+                match self
+                    .test_multi_frame_decoding(codec.clone(), segment_stream, test_frames.clone())
+                    .await
+                {
                     Ok(_) => {
                         successful_multi_frame_tests += 1;
                         self.increment_stat("buffer_accumulations", 1);
                     }
                     Err(e) => {
-                        result.error = Some(format!("Multi-frame test '{}' failed: {}", scenario_name, e));
+                        result.error = Some(format!(
+                            "Multi-frame test '{}' failed: {}",
+                            scenario_name, e
+                        ));
                         break;
                     }
                 }
@@ -467,7 +536,9 @@ mod tests {
             );
 
             // Test FramedRead integration
-            let stream_result = self.test_framed_read_stream(codec, partial_reader, test_frames).await;
+            let stream_result = self
+                .test_framed_read_stream(codec, partial_reader, test_frames)
+                .await;
 
             match stream_result {
                 Ok(_) => {
@@ -500,9 +571,15 @@ mod tests {
 
             // Run all test components
             let tests = vec![
-                ("variable_length", self.test_variable_length_frame_encoding(cx)),
+                (
+                    "variable_length",
+                    self.test_variable_length_frame_encoding(cx),
+                ),
                 ("partial_reads", self.test_partial_read_handling(cx)),
-                ("segment_boundaries", self.test_tcp_segment_boundary_spanning(cx)),
+                (
+                    "segment_boundaries",
+                    self.test_tcp_segment_boundary_spanning(cx),
+                ),
                 ("multi_frame", self.test_multi_frame_assembly(cx)),
                 ("stream_integration", self.test_stream_integration(cx)),
             ];
@@ -513,7 +590,10 @@ mod tests {
                 if test_result.success {
                     successful_tests += 1;
                 } else {
-                    result.error = Some(format!("Comprehensive test component '{}' failed: {:?}", test_name, test_result.error));
+                    result.error = Some(format!(
+                        "Comprehensive test component '{}' failed: {:?}",
+                        test_name, test_result.error
+                    ));
                     break;
                 }
             }
@@ -528,7 +608,10 @@ mod tests {
                 {
                     result.success = true;
                 } else {
-                    result.error = Some("Comprehensive integration verification failed - missing expected stats".to_string());
+                    result.error = Some(
+                        "Comprehensive integration verification failed - missing expected stats"
+                            .to_string(),
+                    );
                 }
             }
 
@@ -548,8 +631,14 @@ mod tests {
             for frame_data in test_frames {
                 // Encode frame
                 let mut encoded = BytesMut::new();
-                codec.encode(frame_data.payload.clone(), &mut encoded)
-                    .map_err(|e| format!("Encoding failed for {}: {}", frame_data.frame_description, e))?;
+                codec
+                    .encode(frame_data.payload.clone(), &mut encoded)
+                    .map_err(|e| {
+                        format!(
+                            "Encoding failed for {}: {}",
+                            frame_data.frame_description, e
+                        )
+                    })?;
 
                 self.increment_stat("frames_encoded", 1);
 
@@ -558,12 +647,25 @@ mod tests {
                 match codec.decode(&mut decode_buffer) {
                     Ok(Some(decoded)) => {
                         if decoded != frame_data.payload {
-                            return Err(format!("Payload mismatch for {}", frame_data.frame_description));
+                            return Err(format!(
+                                "Payload mismatch for {}",
+                                frame_data.frame_description
+                            ));
                         }
                         self.increment_stat("frames_decoded", 1);
                     }
-                    Ok(None) => return Err(format!("Incomplete decode for {}", frame_data.frame_description)),
-                    Err(e) => return Err(format!("Decode error for {}: {}", frame_data.frame_description, e)),
+                    Ok(None) => {
+                        return Err(format!(
+                            "Incomplete decode for {}",
+                            frame_data.frame_description
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "Decode error for {}: {}",
+                            frame_data.frame_description, e
+                        ));
+                    }
                 }
             }
 
@@ -626,7 +728,11 @@ mod tests {
                 ));
             }
 
-            for (i, (expected, received)) in expected_frames.iter().zip(received_frames.iter()).enumerate() {
+            for (i, (expected, received)) in expected_frames
+                .iter()
+                .zip(received_frames.iter())
+                .enumerate()
+            {
                 if expected != received {
                     return Err(format!("Frame {} content mismatch", i));
                 }
@@ -670,7 +776,7 @@ mod tests {
                     "variable_length_encodings" => stats.variable_length_encodings += count,
                     "stream_operations" => stats.stream_operations += count,
                     "error_recoveries" => stats.error_recoveries += count,
-                    _ => {},
+                    _ => {}
                 }
             }
         }
@@ -759,7 +865,8 @@ mod tests {
             let available = current.len() - self.segment_position;
             let to_read = std::cmp::min(available, buf.len());
 
-            buf[..to_read].copy_from_slice(&current[self.segment_position..self.segment_position + to_read]);
+            buf[..to_read]
+                .copy_from_slice(&current[self.segment_position..self.segment_position + to_read]);
             self.segment_position += to_read;
 
             Poll::Ready(Ok(to_read))
@@ -773,7 +880,10 @@ mod tests {
             _cx: &mut Context<'_>,
             _buf: &[u8],
         ) -> Poll<io::Result<usize>> {
-            Poll::Ready(Err(io::Error::new(io::ErrorKind::Unsupported, "write not supported")))
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "write not supported",
+            )))
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -792,7 +902,10 @@ mod tests {
             _cx: &mut Context<'_>,
             _buf: &[u8],
         ) -> Poll<io::Result<usize>> {
-            Poll::Ready(Err(io::Error::new(io::ErrorKind::Unsupported, "write not supported")))
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "write not supported",
+            )))
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -814,12 +927,17 @@ mod tests {
             let mut harness = LengthDelimitedFramedTestHarness::new("variable_length_encoding");
             let result = harness.test_variable_length_frame_encoding(&cx).await;
 
-            assert!(result.success, "Variable-length frame encoding test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Variable-length frame encoding test failed: {:?}",
+                result.error
+            );
             assert!(result.codec_stats.frames_encoded > 0);
             assert!(result.codec_stats.frames_decoded > 0);
             assert!(result.codec_stats.variable_length_encodings > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -828,10 +946,15 @@ mod tests {
             let mut harness = LengthDelimitedFramedTestHarness::new("partial_read_handling");
             let result = harness.test_partial_read_handling(&cx).await;
 
-            assert!(result.success, "Partial read handling test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Partial read handling test failed: {:?}",
+                result.error
+            );
             assert!(result.codec_stats.partial_reads_processed > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -840,10 +963,15 @@ mod tests {
             let mut harness = LengthDelimitedFramedTestHarness::new("tcp_segment_boundary");
             let result = harness.test_tcp_segment_boundary_spanning(&cx).await;
 
-            assert!(result.success, "TCP segment boundary spanning test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "TCP segment boundary spanning test failed: {:?}",
+                result.error
+            );
             assert!(result.codec_stats.tcp_segment_boundary_spans > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -852,10 +980,15 @@ mod tests {
             let mut harness = LengthDelimitedFramedTestHarness::new("multi_frame_assembly");
             let result = harness.test_multi_frame_assembly(&cx).await;
 
-            assert!(result.success, "Multi-frame assembly test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Multi-frame assembly test failed: {:?}",
+                result.error
+            );
             assert!(result.codec_stats.buffer_accumulations > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -864,10 +997,15 @@ mod tests {
             let mut harness = LengthDelimitedFramedTestHarness::new("stream_integration");
             let result = harness.test_stream_integration(&cx).await;
 
-            assert!(result.success, "Stream integration test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Stream integration test failed: {:?}",
+                result.error
+            );
             assert!(result.codec_stats.stream_operations > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -876,7 +1014,11 @@ mod tests {
             let mut harness = LengthDelimitedFramedTestHarness::new("comprehensive_integration");
             let result = harness.test_comprehensive_integration(&cx).await;
 
-            assert!(result.success, "Comprehensive integration test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Comprehensive integration test failed: {:?}",
+                result.error
+            );
             let stats = result.codec_stats;
             assert!(stats.frames_encoded > 0);
             assert!(stats.frames_decoded > 0);
@@ -884,6 +1026,7 @@ mod tests {
             assert!(stats.tcp_segment_boundary_spans > 0);
             assert!(stats.stream_operations > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

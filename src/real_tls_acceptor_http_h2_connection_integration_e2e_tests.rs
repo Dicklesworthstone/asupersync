@@ -21,28 +21,28 @@
 use crate::{
     cx::{Cx, Scope},
     error::Outcome,
-    tls::{
-        acceptor::{
-            TlsAcceptor, TlsAcceptorConfig, TlsHandshake, TlsHandshakeError,
-            TlsAcceptorStats, AcceptorEvent,
-        },
-        TlsStream, TlsConfig, CertificateChain, PrivateKey,
-    },
     http::{
+        HeaderMap, Request, Response, StatusCode,
         h2::{
             connection::{
-                H2Connection, H2ConnectionConfig, H2ConnectionState, H2Stream,
-                H2StreamId, H2StreamState, ConnectionEvent, StreamEvent,
+                ConnectionEvent, H2Connection, H2ConnectionConfig, H2ConnectionState, H2Stream,
+                H2StreamId, H2StreamState, StreamEvent,
             },
-            frame::{H2Frame, FrameType, SettingsFrame, WindowUpdateFrame},
+            frame::{FrameType, H2Frame, SettingsFrame, WindowUpdateFrame},
             hpack::HpackEncoder,
         },
-        Request, Response, StatusCode, HeaderMap,
     },
     net::{TcpListener, TcpStream},
     runtime::RuntimeBuilder,
     sync::{Barrier, Mutex},
-    time::{Duration, Sleep, Instant},
+    time::{Duration, Instant, Sleep},
+    tls::{
+        CertificateChain, PrivateKey, TlsConfig, TlsStream,
+        acceptor::{
+            AcceptorEvent, TlsAcceptor, TlsAcceptorConfig, TlsAcceptorStats, TlsHandshake,
+            TlsHandshakeError,
+        },
+    },
     types::{Budget, TaskId},
     util::{
         det_rng::{DetRng, RngSeed},
@@ -53,8 +53,8 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -105,11 +105,13 @@ impl TlsH2CleanupTracker {
     }
 
     fn record_h2_connection_established(&self) -> u64 {
-        self.h2_connections_established.fetch_add(1, Ordering::Relaxed)
+        self.h2_connections_established
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     fn record_h2_connection_torn_down(&self) -> u64 {
-        self.h2_connections_torn_down.fetch_add(1, Ordering::Relaxed)
+        self.h2_connections_torn_down
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     fn record_h2_stream_created(&self) -> u64 {
@@ -128,12 +130,7 @@ impl TlsH2CleanupTracker {
         self.connection_cleanups.fetch_add(1, Ordering::Relaxed)
     }
 
-    async fn record_cleanup_event(
-        &self,
-        cx: &Cx,
-        event_type: String,
-        details: String,
-    ) {
+    async fn record_cleanup_event(&self, cx: &Cx, event_type: String, details: String) {
         let mut timeline = self.cleanup_timeline.lock(cx).await;
         timeline.push((Instant::now(), event_type, details));
     }
@@ -177,11 +174,7 @@ struct TlsHandshakeFailureSimulator {
 }
 
 impl TlsHandshakeFailureSimulator {
-    fn new(
-        failure_probability: f64,
-        seed: RngSeed,
-        cleanup_tracker: TlsH2CleanupTracker,
-    ) -> Self {
+    fn new(failure_probability: f64, seed: RngSeed, cleanup_tracker: TlsH2CleanupTracker) -> Self {
         let failure_types = vec![
             TlsHandshakeError::CertificateVerificationFailed,
             TlsHandshakeError::ProtocolVersionMismatch,
@@ -218,9 +211,8 @@ impl TlsHandshakeFailureSimulator {
         let combined_probability = self.failure_probability * stage_probability;
 
         if rng.gen_range(0.0..1.0) < combined_probability {
-            let failure_type = self.failure_types[
-                rng.gen_range(0..self.failure_types.len())
-            ].clone();
+            let failure_type =
+                self.failure_types[rng.gen_range(0..self.failure_types.len())].clone();
 
             self.cleanup_tracker
                 .record_cleanup_event(
@@ -283,18 +275,31 @@ impl FailureInjectingTlsAcceptor {
             .await;
 
         // Simulate handshake stages with potential failures
-        let handshake_stages = ["client_hello", "server_hello", "certificate", "key_exchange", "finished"];
+        let handshake_stages = [
+            "client_hello",
+            "server_hello",
+            "certificate",
+            "key_exchange",
+            "finished",
+        ];
 
         for stage in &handshake_stages {
             // Check for failure injection at this stage
-            if let Some(failure) = self.failure_simulator.should_inject_failure(cx, stage).await {
+            if let Some(failure) = self
+                .failure_simulator
+                .should_inject_failure(cx, stage)
+                .await
+            {
                 self.cleanup_tracker.record_tls_handshake_failure();
 
                 self.cleanup_tracker
                     .record_cleanup_event(
                         cx,
                         "tls_handshake_failed".to_string(),
-                        format!("handshake_id={}, stage={}, error={:?}", handshake_id, stage, failure),
+                        format!(
+                            "handshake_id={}, stage={}, error={:?}",
+                            handshake_id, stage, failure
+                        ),
                     )
                     .await;
 
@@ -386,7 +391,11 @@ impl StreamTrackingH2Connection {
             .record_cleanup_event(
                 cx,
                 "h2_stream_created".to_string(),
-                format!("connection_id={}, stream_id={}", self.connection_id, stream_id.value()),
+                format!(
+                    "connection_id={}, stream_id={}",
+                    self.connection_id,
+                    stream_id.value()
+                ),
             )
             .await;
 
@@ -415,7 +424,11 @@ impl StreamTrackingH2Connection {
                     .record_cleanup_event(
                         cx,
                         "h2_stream_rst_sent".to_string(),
-                        format!("connection_id={}, stream_id={}", self.connection_id, stream_id.value()),
+                        format!(
+                            "connection_id={}, stream_id={}",
+                            self.connection_id,
+                            stream_id.value()
+                        ),
                     )
                     .await;
             }
@@ -434,7 +447,10 @@ impl StreamTrackingH2Connection {
             .record_cleanup_event(
                 cx,
                 "h2_connection_teardown_complete".to_string(),
-                format!("connection_id={}, streams_cleaned={}", self.connection_id, stream_count),
+                format!(
+                    "connection_id={}, streams_cleaned={}",
+                    self.connection_id, stream_count
+                ),
             )
             .await;
 
@@ -454,7 +470,10 @@ impl StreamTrackingH2Connection {
                 .record_cleanup_event(
                     cx,
                     "stream_leak_detected".to_string(),
-                    format!("connection_id={}, leaked_streams={}", self.connection_id, leaked_count),
+                    format!(
+                        "connection_id={}, leaked_streams={}",
+                        self.connection_id, leaked_count
+                    ),
                 )
                 .await;
         }
@@ -807,7 +826,8 @@ async fn test_tls_failure_timing_edge_cases() -> Outcome<()> {
                     h2_connection.handle_tls_failure(cx, early_error).await?;
 
                     assert_eq!(
-                        h2_connection.get_active_stream_count(cx).await, 0,
+                        h2_connection.get_active_stream_count(cx).await,
+                        0,
                         "Should have no streams after early TLS failure"
                     );
 
@@ -819,7 +839,8 @@ async fn test_tls_failure_timing_edge_cases() -> Outcome<()> {
                     );
 
                     // Simulate successful connection
-                    let mock_stream = TcpStream::connect(cx, "127.0.0.1:80").await
+                    let mock_stream = TcpStream::connect(cx, "127.0.0.1:80")
+                        .await
                         .unwrap_or_else(|_| TcpStream::mock_for_testing());
                     let mock_tls = TlsStream::mock_from_tcp(mock_stream);
                     h2_connection_late.initialize(cx, mock_tls).await?;
@@ -835,10 +856,13 @@ async fn test_tls_failure_timing_edge_cases() -> Outcome<()> {
 
                     // Now inject late failure
                     let late_error = TlsHandshakeError::CertificateVerificationFailed;
-                    h2_connection_late.handle_tls_failure(cx, late_error).await?;
+                    h2_connection_late
+                        .handle_tls_failure(cx, late_error)
+                        .await?;
 
                     assert_eq!(
-                        h2_connection_late.get_active_stream_count(cx).await, 0,
+                        h2_connection_late.get_active_stream_count(cx).await,
+                        0,
                         "Should have no streams after late TLS failure cleanup"
                     );
 
@@ -889,44 +913,42 @@ async fn test_concurrent_tls_failures_multiple_h2_connections() -> Outcome<()> {
                         let tracker = cleanup_tracker.clone();
                         let config = h2_config.clone();
 
-                        let handle = cx.spawn(&format!("concurrent_connection_{}", i), async move |cx| {
-                            let h2_connection = StreamTrackingH2Connection::new(
-                                i,
-                                config,
-                                tracker,
-                            );
+                        let handle =
+                            cx.spawn(&format!("concurrent_connection_{}", i), async move |cx| {
+                                let h2_connection =
+                                    StreamTrackingH2Connection::new(i, config, tracker);
 
-                            // Simulate connection establishment
-                            let mock_stream = TcpStream::mock_for_testing();
-                            let mock_tls = TlsStream::mock_from_tcp(mock_stream);
-                            h2_connection.initialize(cx, mock_tls).await?;
+                                // Simulate connection establishment
+                                let mock_stream = TcpStream::mock_for_testing();
+                                let mock_tls = TlsStream::mock_from_tcp(mock_stream);
+                                h2_connection.initialize(cx, mock_tls).await?;
 
-                            // Create streams
-                            for j in 0..5 {
-                                let request = Request::get("/concurrent")
-                                    .header("connection", &i.to_string())
-                                    .header("stream", &j.to_string())
-                                    .body(format!("concurrent_conn_{}_stream_{}", i, j))?;
+                                // Create streams
+                                for j in 0..5 {
+                                    let request = Request::get("/concurrent")
+                                        .header("connection", &i.to_string())
+                                        .header("stream", &j.to_string())
+                                        .body(format!("concurrent_conn_{}_stream_{}", i, j))?;
 
-                                h2_connection.create_stream(cx, request).await?;
-                            }
+                                    h2_connection.create_stream(cx, request).await?;
+                                }
 
-                            // Simulate TLS failure after a random delay
-                            let delay_ms = (i * 10) + 20;
-                            Sleep::new(Duration::from_millis(delay_ms)).await;
+                                // Simulate TLS failure after a random delay
+                                let delay_ms = (i * 10) + 20;
+                                Sleep::new(Duration::from_millis(delay_ms)).await;
 
-                            let failure_error = if i % 2 == 0 {
-                                TlsHandshakeError::HandshakeTimeout
-                            } else {
-                                TlsHandshakeError::CipherSuiteNegotiationFailed
-                            };
+                                let failure_error = if i % 2 == 0 {
+                                    TlsHandshakeError::HandshakeTimeout
+                                } else {
+                                    TlsHandshakeError::CipherSuiteNegotiationFailed
+                                };
 
-                            h2_connection.handle_tls_failure(cx, failure_error).await?;
+                                h2_connection.handle_tls_failure(cx, failure_error).await?;
 
-                            // Verify cleanup
-                            let leaked = h2_connection.check_for_stream_leaks(cx).await;
-                            Ok(leaked)
-                        })?;
+                                // Verify cleanup
+                                let leaked = h2_connection.check_for_stream_leaks(cx).await;
+                                Ok(leaked)
+                            })?;
 
                         connection_handles.push(handle);
                     }
@@ -938,7 +960,10 @@ async fn test_concurrent_tls_failures_multiple_h2_connections() -> Outcome<()> {
                             Ok(Ok(leaked_streams)) => {
                                 total_leaks += leaked_streams;
                                 if leaked_streams > 0 {
-                                    println!("Concurrent connection {} had {} leaked streams", i, leaked_streams);
+                                    println!(
+                                        "Concurrent connection {} had {} leaked streams",
+                                        i, leaked_streams
+                                    );
                                 }
                             }
                             Ok(Err(e)) => {
@@ -950,16 +975,27 @@ async fn test_concurrent_tls_failures_multiple_h2_connections() -> Outcome<()> {
                         }
                     }
 
-                    assert_eq!(total_leaks, 0, "Should have no leaks from concurrent failures");
+                    assert_eq!(
+                        total_leaks, 0,
+                        "Should have no leaks from concurrent failures"
+                    );
 
                     // Verify tracking results
                     assert!(cleanup_tracker.verify_clean_teardown());
                     assert!(cleanup_tracker.verify_no_stream_leaks());
 
-                    let concurrent_teardowns = cleanup_tracker.h2_connections_torn_down.load(Ordering::Relaxed);
-                    assert!(concurrent_teardowns >= 8, "Should have torn down all concurrent connections");
+                    let concurrent_teardowns = cleanup_tracker
+                        .h2_connections_torn_down
+                        .load(Ordering::Relaxed);
+                    assert!(
+                        concurrent_teardowns >= 8,
+                        "Should have torn down all concurrent connections"
+                    );
 
-                    println!("Concurrent TLS failure test completed: {} connections torn down", concurrent_teardowns);
+                    println!(
+                        "Concurrent TLS failure test completed: {} connections torn down",
+                        concurrent_teardowns
+                    );
 
                     Ok(())
                 })
@@ -979,7 +1015,10 @@ mod tests {
         // Verify initial state
         assert_eq!(tracker.tls_handshake_attempts.load(Ordering::Relaxed), 0);
         assert_eq!(tracker.tls_handshake_failures.load(Ordering::Relaxed), 0);
-        assert_eq!(tracker.h2_connections_established.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            tracker.h2_connections_established.load(Ordering::Relaxed),
+            0
+        );
         assert_eq!(tracker.h2_connections_torn_down.load(Ordering::Relaxed), 0);
         assert_eq!(tracker.h2_streams_created.load(Ordering::Relaxed), 0);
         assert_eq!(tracker.h2_streams_cleaned_up.load(Ordering::Relaxed), 0);
@@ -1002,7 +1041,10 @@ mod tests {
         // Verify tracking
         assert_eq!(tracker.tls_handshake_attempts.load(Ordering::Relaxed), 1);
         assert_eq!(tracker.tls_handshake_failures.load(Ordering::Relaxed), 1);
-        assert_eq!(tracker.h2_connections_established.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            tracker.h2_connections_established.load(Ordering::Relaxed),
+            1
+        );
         assert_eq!(tracker.h2_connections_torn_down.load(Ordering::Relaxed), 1);
         assert_eq!(tracker.h2_streams_created.load(Ordering::Relaxed), 1);
         assert_eq!(tracker.h2_streams_cleaned_up.load(Ordering::Relaxed), 1);

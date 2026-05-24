@@ -23,17 +23,15 @@ use crate::{
     cx::{Cx, Scope},
     error::Outcome,
     fs::{
+        File, OpenOptions,
         uring::{
             IoUring, IoUringConfig, IoUringStats, SubmissionQueue, SubmissionQueueEntry,
             UringEvent, UringSubmissionError,
         },
-        File, OpenOptions,
     },
     io::{
-        buf_writer::{
-            BufWriter, BufWriterConfig, BufWriterStats, FlushEvent, WriteBackpressure,
-        },
         AsyncWrite, Write,
+        buf_writer::{BufWriter, BufWriterConfig, BufWriterStats, FlushEvent, WriteBackpressure},
     },
     runtime::RuntimeBuilder,
     sync::{Barrier, Mutex, Semaphore},
@@ -48,8 +46,8 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -116,12 +114,7 @@ impl BackpressureTracker {
         self.flushes_completed.fetch_add(1, Ordering::Relaxed)
     }
 
-    async fn record_backpressure_timeline(
-        &self,
-        cx: &Cx,
-        sequence: u64,
-        event_type: String,
-    ) {
+    async fn record_backpressure_timeline(&self, cx: &Cx, sequence: u64, event_type: String) {
         let mut timeline = self.backpressure_timeline.lock(cx).await;
         timeline.push((sequence, std::time::Instant::now(), event_type));
     }
@@ -362,7 +355,10 @@ impl UringBufWriter {
 
                     return Ok(());
                 }
-                Err(UringSubmissionError::QueueFull { current_depth, max_depth }) => {
+                Err(UringSubmissionError::QueueFull {
+                    current_depth,
+                    max_depth,
+                }) => {
                     // Queue overflow detected, apply backpressure
                     let backpressure_id = self.backpressure_tracker.record_backpressure_event();
 
@@ -382,7 +378,8 @@ impl UringBufWriter {
                         return Err(format!(
                             "Failed to submit after {} retries due to queue overflow",
                             MAX_RETRIES
-                        ).into());
+                        )
+                        .into());
                     }
 
                     // Exponential backoff with jitter
@@ -412,8 +409,14 @@ impl UringBufWriter {
         BufWriterStats {
             buffer_size: buffer.len(),
             buffer_capacity: self.buffer_capacity,
-            writes_completed: self.backpressure_tracker.writes_completed.load(Ordering::Relaxed),
-            flushes_completed: self.backpressure_tracker.flushes_completed.load(Ordering::Relaxed),
+            writes_completed: self
+                .backpressure_tracker
+                .writes_completed
+                .load(Ordering::Relaxed),
+            flushes_completed: self
+                .backpressure_tracker
+                .flushes_completed
+                .load(Ordering::Relaxed),
             bytes_written: self.file_position.load(Ordering::Relaxed),
         }
     }
@@ -777,7 +780,7 @@ async fn test_buf_writer_overflow_recovery() -> Outcome<()> {
                     );
 
                     let buf_writer_config = BufWriterConfig {
-                        buffer_size: 6144, // 6KB buffer
+                        buffer_size: 6144,     // 6KB buffer
                         flush_threshold: 3072, // Flush at 50% capacity
                         sync_on_drop: true,
                     };
@@ -806,8 +809,12 @@ async fn test_buf_writer_overflow_recovery() -> Outcome<()> {
                         }
                     }
 
-                    let overflow_count = backpressure_tracker.queue_overflows.load(Ordering::Relaxed);
-                    assert!(overflow_count > 0, "Should have triggered overflow conditions");
+                    let overflow_count =
+                        backpressure_tracker.queue_overflows.load(Ordering::Relaxed);
+                    assert!(
+                        overflow_count > 0,
+                        "Should have triggered overflow conditions"
+                    );
 
                     // Phase 2: Disable overflow and verify recovery
                     uring_simulator.enable_overflow_simulation(false);

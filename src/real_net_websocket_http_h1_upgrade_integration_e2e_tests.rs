@@ -40,24 +40,24 @@ mod tests {
         dead_code
     )]
 
+    use crate::bytes::{Bytes, BytesMut};
     use crate::cx::Cx;
-    use crate::http::h1::{HttpRequest, HttpResponse, H1Client};
+    use crate::error::Error;
+    use crate::http::h1::{H1Client, HttpRequest, HttpResponse};
+    use crate::io::{AsyncReadExt, AsyncWriteExt};
     use crate::net::{
         tcp::{TcpListener, TcpStream},
         websocket::{
-            client::WebSocket,
-            handshake::{ClientHandshake, ServerHandshake, AcceptResponse},
-            server::{WebSocketAcceptor, ServerWebSocket},
-            frame::{Frame, Opcode},
-            close::{CloseReason, CloseCode},
             Message, WebSocketConfig,
+            client::WebSocket,
+            close::{CloseCode, CloseReason},
+            frame::{Frame, Opcode},
+            handshake::{AcceptResponse, ClientHandshake, ServerHandshake},
+            server::{ServerWebSocket, WebSocketAcceptor},
         },
     };
-    use crate::bytes::{Bytes, BytesMut};
-    use crate::error::Error;
-    use crate::io::{AsyncReadExt, AsyncWriteExt};
     use crate::time::{Duration, sleep};
-    use crate::types::{Outcome, Budget};
+    use crate::types::{Budget, Outcome};
     use std::collections::VecDeque;
     use std::sync::{
         Arc, RwLock,
@@ -181,14 +181,18 @@ mod tests {
 
             // Phase 3: Perform upgrade handshake
             result.phase = UpgradeTestPhase::UpgradeHandshakeInitiation;
-            let upgrade_result = self.perform_upgrade_handshake(cx, &client, &mut server).await;
+            let upgrade_result = self
+                .perform_upgrade_handshake(cx, &client, &mut server)
+                .await;
 
             match upgrade_result {
                 Ok((mut ws_client, mut ws_server)) => {
                     result.phase = UpgradeTestPhase::FrameModeTransition;
 
                     // Verify frame mode transition by exchanging frames
-                    let frame_exchange = self.test_frame_exchange(cx, &mut ws_client, &mut ws_server).await;
+                    let frame_exchange = self
+                        .test_frame_exchange(cx, &mut ws_client, &mut ws_server)
+                        .await;
 
                     match frame_exchange {
                         Ok(_) => {
@@ -239,7 +243,9 @@ mod tests {
             let client = UpgradeCapableHttpClient::new(self.test_stats.clone());
 
             result.phase = UpgradeTestPhase::UpgradeHandshakeInitiation;
-            let upgrade_result = self.perform_upgrade_handshake(cx, &client, &mut server).await;
+            let upgrade_result = self
+                .perform_upgrade_handshake(cx, &client, &mut server)
+                .await;
 
             match upgrade_result {
                 Ok((mut ws_client, mut ws_server)) => {
@@ -254,12 +260,16 @@ mod tests {
 
                     let mut frames_exchanged = 0;
                     for (test_name, message) in frame_tests {
-                        match self.exchange_single_frame(cx, &mut ws_client, &mut ws_server, message).await {
+                        match self
+                            .exchange_single_frame(cx, &mut ws_client, &mut ws_server, message)
+                            .await
+                        {
                             Ok(_) => {
                                 frames_exchanged += 1;
                             }
                             Err(e) => {
-                                result.error = Some(format!("Frame test '{}' failed: {}", test_name, e));
+                                result.error =
+                                    Some(format!("Frame test '{}' failed: {}", test_name, e));
                                 break;
                             }
                         }
@@ -309,7 +319,9 @@ mod tests {
             let client = UpgradeCapableHttpClient::new(self.test_stats.clone());
 
             result.phase = UpgradeTestPhase::UpgradeHandshakeInitiation;
-            let upgrade_result = self.perform_upgrade_handshake(cx, &client, &mut server).await;
+            let upgrade_result = self
+                .perform_upgrade_handshake(cx, &client, &mut server)
+                .await;
 
             match upgrade_result {
                 Ok((mut ws_client, mut ws_server)) => {
@@ -317,14 +329,22 @@ mod tests {
 
                     // Create large frames to trigger back-pressure
                     let large_payload = vec![0x42; 64 * 1024]; // 64KB frames
-                    let pressure_test = self.trigger_send_queue_pressure(cx, &mut ws_client, large_payload).await;
+                    let pressure_test = self
+                        .trigger_send_queue_pressure(cx, &mut ws_client, large_payload)
+                        .await;
 
                     match pressure_test {
                         Ok(pressure_detected) => {
                             if pressure_detected {
                                 result.phase = UpgradeTestPhase::CleanConnectionClose;
                                 // Test clean close after back-pressure
-                                let close_result = self.test_clean_close_after_pressure(cx, &mut ws_client, &mut ws_server).await;
+                                let close_result = self
+                                    .test_clean_close_after_pressure(
+                                        cx,
+                                        &mut ws_client,
+                                        &mut ws_server,
+                                    )
+                                    .await;
 
                                 match close_result {
                                     Ok(_) => {
@@ -337,7 +357,8 @@ mod tests {
                                     }
                                 }
                             } else {
-                                result.error = Some("Back-pressure was not triggered as expected".to_string());
+                                result.error =
+                                    Some("Back-pressure was not triggered as expected".to_string());
                             }
                         }
                         Err(e) => {
@@ -386,13 +407,16 @@ mod tests {
                 // Parse the request to extract headers
                 match HttpRequest::parse(&request_bytes) {
                     Ok(request) => {
-                        let server_handshake = ServerHandshake::accept(&request, &WebSocketConfig::default());
+                        let server_handshake =
+                            ServerHandshake::accept(&request, &WebSocketConfig::default());
                         match server_handshake {
                             Ok(accept_response) => {
                                 let response_bytes = accept_response.response_bytes();
                                 match HttpResponse::parse(&response_bytes) {
                                     Ok(response) => {
-                                        if let Some(accept_header) = response.headers().get("sec-websocket-accept") {
+                                        if let Some(accept_header) =
+                                            response.headers().get("sec-websocket-accept")
+                                        {
                                             if accept_header == expected_accept {
                                                 validations_passed += 1;
                                             } else {
@@ -403,12 +427,15 @@ mod tests {
                                                 break;
                                             }
                                         } else {
-                                            result.error = Some("Missing Sec-WebSocket-Accept header".to_string());
+                                            result.error = Some(
+                                                "Missing Sec-WebSocket-Accept header".to_string(),
+                                            );
                                             break;
                                         }
                                     }
                                     Err(e) => {
-                                        result.error = Some(format!("Response parse failed: {}", e));
+                                        result.error =
+                                            Some(format!("Response parse failed: {}", e));
                                         break;
                                     }
                                 }
@@ -466,7 +493,9 @@ mod tests {
 
             // Step 1: Upgrade handshake
             result.phase = UpgradeTestPhase::UpgradeHandshakeInitiation;
-            let upgrade_result = self.perform_upgrade_handshake(cx, &client, &mut server).await;
+            let upgrade_result = self
+                .perform_upgrade_handshake(cx, &client, &mut server)
+                .await;
 
             let (mut ws_client, mut ws_server) = match upgrade_result {
                 Ok(pair) => pair,
@@ -479,7 +508,9 @@ mod tests {
 
             // Step 2: Frame exchange verification
             result.phase = UpgradeTestPhase::WebSocketFrameExchange;
-            let frame_test = self.test_frame_exchange(cx, &mut ws_client, &mut ws_server).await;
+            let frame_test = self
+                .test_frame_exchange(cx, &mut ws_client, &mut ws_server)
+                .await;
             if let Err(e) = frame_test {
                 result.error = Some(format!("Frame exchange failed: {}", e));
                 result.duration_ms = start_time.elapsed().as_millis() as u64;
@@ -507,7 +538,8 @@ mod tests {
             {
                 result.success = true;
             } else {
-                result.error = Some("Integration verification failed - missing expected stats".to_string());
+                result.error =
+                    Some("Integration verification failed - missing expected stats".to_string());
             }
 
             result.phase = UpgradeTestPhase::Teardown;
@@ -518,7 +550,10 @@ mod tests {
 
         // ── Helper Methods ──────────────────────────────────────────────────────────
 
-        async fn setup_websocket_server(&self, cx: &Cx) -> Result<UpgradeCapableWebSocketServer, Error> {
+        async fn setup_websocket_server(
+            &self,
+            cx: &Cx,
+        ) -> Result<UpgradeCapableWebSocketServer, Error> {
             let listener = TcpListener::bind(cx, "127.0.0.1:0").await?;
             let local_addr = listener.local_addr()?;
 
@@ -541,8 +576,11 @@ mod tests {
             server: &mut UpgradeCapableWebSocketServer,
         ) -> Result<(WebSocket, ServerWebSocket), Error> {
             // Create handshake request
-            let handshake = ClientHandshake::new("ws://127.0.0.1/chat", &mut crate::util::det_rng::DetRng::new(42))?
-                .protocol("chat");
+            let handshake = ClientHandshake::new(
+                "ws://127.0.0.1/chat",
+                &mut crate::util::det_rng::DetRng::new(42),
+            )?
+            .protocol("chat");
             let request_bytes = handshake.request_bytes();
 
             // Connect to server
@@ -572,7 +610,8 @@ mod tests {
             self.increment_stat("upgrade_responses_received", 1);
 
             // Create client WebSocket
-            let ws_client = WebSocket::from_upgraded(stream, &WebSocketConfig::default(), &response)?;
+            let ws_client =
+                WebSocket::from_upgraded(stream, &WebSocketConfig::default(), &response)?;
 
             Ok((ws_client, ws_server))
         }
@@ -690,7 +729,7 @@ mod tests {
                     "send_queue_pressure_events" => stats.send_queue_pressure_events += count,
                     "clean_close_handshakes" => stats.clean_close_handshakes += count,
                     "connection_pool_removals" => stats.connection_pool_removals += count,
-                    _ => {},
+                    _ => {}
                 }
             }
         }
@@ -723,13 +762,18 @@ mod tests {
             let mut harness = WebSocketUpgradeTestHarness::new("basic_upgrade_flow");
             let result = harness.test_basic_websocket_upgrade(&cx).await;
 
-            assert!(result.success, "Basic WebSocket upgrade test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Basic WebSocket upgrade test failed: {:?}",
+                result.error
+            );
             assert!(result.upgrade_stats.upgrade_requests_sent > 0);
             assert!(result.upgrade_stats.upgrade_responses_received > 0);
             assert!(result.upgrade_stats.websocket_frames_sent > 0);
             assert!(result.upgrade_stats.websocket_frames_received > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -738,11 +782,16 @@ mod tests {
             let mut harness = WebSocketUpgradeTestHarness::new("frame_mode_verification");
             let result = harness.test_frame_mode_verification(&cx).await;
 
-            assert!(result.success, "Frame mode verification test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Frame mode verification test failed: {:?}",
+                result.error
+            );
             assert_eq!(result.upgrade_stats.websocket_frames_sent, 6); // 3 types × 2 directions
             assert_eq!(result.upgrade_stats.websocket_frames_received, 6);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -751,11 +800,16 @@ mod tests {
             let mut harness = WebSocketUpgradeTestHarness::new("send_queue_backpressure");
             let result = harness.test_send_queue_backpressure(&cx).await;
 
-            assert!(result.success, "Send queue back-pressure test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Send queue back-pressure test failed: {:?}",
+                result.error
+            );
             assert!(result.upgrade_stats.send_queue_pressure_events > 0);
             assert!(result.upgrade_stats.clean_close_handshakes > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -764,11 +818,16 @@ mod tests {
             let mut harness = WebSocketUpgradeTestHarness::new("handshake_validation");
             let result = harness.test_handshake_validation(&cx).await;
 
-            assert!(result.success, "Handshake validation test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Handshake validation test failed: {:?}",
+                result.error
+            );
             assert_eq!(result.upgrade_stats.upgrade_requests_sent, 3); // 3 test cases
             assert_eq!(result.upgrade_stats.upgrade_responses_received, 3);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -777,7 +836,11 @@ mod tests {
             let mut harness = WebSocketUpgradeTestHarness::new("comprehensive_integration");
             let result = harness.test_comprehensive_integration(&cx).await;
 
-            assert!(result.success, "Comprehensive integration test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Comprehensive integration test failed: {:?}",
+                result.error
+            );
             let stats = result.upgrade_stats;
             assert!(stats.upgrade_requests_sent > 0);
             assert!(stats.upgrade_responses_received > 0);
@@ -785,6 +848,7 @@ mod tests {
             assert!(stats.websocket_frames_received > 0);
             assert!(stats.clean_close_handshakes > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

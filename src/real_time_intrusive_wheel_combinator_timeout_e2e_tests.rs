@@ -44,10 +44,11 @@ mod tests {
     use crate::lab::{LabConfig, LabRuntime};
     use crate::runtime::Runtime;
     use crate::time::{
-        intrusive_wheel::{TimerWheel, TimerNode},
+        Duration, Instant, TimerDriverHandle,
+        intrusive_wheel::{TimerNode, TimerWheel},
+        sleep,
         sleep::Sleep,
         timeout_future::{TimeoutFuture, timeout, timeout_at},
-        Duration, Instant, sleep, TimerDriverHandle,
     };
     use crate::types::{CancelKind, CancelReason, Outcome, Time};
     use std::collections::{HashMap, VecDeque};
@@ -212,7 +213,10 @@ mod tests {
                 timer_nodes_leaked: false,
             };
 
-            self.timeout_chains.lock().unwrap().insert(chain_id, tracker);
+            self.timeout_chains
+                .lock()
+                .unwrap()
+                .insert(chain_id, tracker);
 
             let mut stats = self.wheel_monitor.stats.lock().unwrap();
             stats.timeout_chains_created += 1;
@@ -245,7 +249,14 @@ mod tests {
             }
         }
 
-        pub fn record_timer_node_activity(&self, node_id: usize, linked: bool, slot: usize, chain_id: u64, level: u32) {
+        pub fn record_timer_node_activity(
+            &self,
+            node_id: usize,
+            linked: bool,
+            slot: usize,
+            chain_id: u64,
+            level: u32,
+        ) {
             let mut stats = self.wheel_monitor.stats.lock().unwrap();
 
             if linked {
@@ -258,7 +269,11 @@ mod tests {
                     chain_id,
                     timeout_level: level,
                 };
-                self.wheel_monitor.active_nodes.lock().unwrap().insert(node_id, node_info);
+                self.wheel_monitor
+                    .active_nodes
+                    .lock()
+                    .unwrap()
+                    .insert(node_id, node_info);
 
                 let mut slot_usage = self.wheel_monitor.wheel_slot_usage.lock().unwrap();
                 slot_usage[slot] += 1;
@@ -270,10 +285,18 @@ mod tests {
                     slot_index: slot,
                     chain_id,
                 };
-                self.wheel_monitor.cleanup_events.lock().unwrap().push_back(cleanup_event);
+                self.wheel_monitor
+                    .cleanup_events
+                    .lock()
+                    .unwrap()
+                    .push_back(cleanup_event);
             } else {
                 stats.timer_nodes_unlinked += 1;
-                self.wheel_monitor.active_nodes.lock().unwrap().remove(&node_id);
+                self.wheel_monitor
+                    .active_nodes
+                    .lock()
+                    .unwrap()
+                    .remove(&node_id);
 
                 let mut slot_usage = self.wheel_monitor.wheel_slot_usage.lock().unwrap();
                 if slot_usage[slot] > 0 {
@@ -287,12 +310,17 @@ mod tests {
                     slot_index: slot,
                     chain_id,
                 };
-                self.wheel_monitor.cleanup_events.lock().unwrap().push_back(cleanup_event);
+                self.wheel_monitor
+                    .cleanup_events
+                    .lock()
+                    .unwrap()
+                    .push_back(cleanup_event);
             }
         }
 
         pub async fn run_nested_timeout_scenario<F>(&self, chain_id: u64, operation: F)
-        where F: Future + Unpin,
+        where
+            F: Future + Unpin,
         {
             let chain = {
                 let chains = self.timeout_chains.lock().unwrap();
@@ -343,9 +371,13 @@ mod tests {
             if let Some(chain) = chains.get(&chain_id) {
                 if chain.completion_order.len() >= 2 {
                     // Check if outer timeout expiration properly cancelled inner first
-                    let outer_expired = chain.completion_order.iter()
+                    let outer_expired = chain
+                        .completion_order
+                        .iter()
                         .position(|&event| event == TimeoutEvent::OuterExpired);
-                    let inner_cancelled = chain.completion_order.iter()
+                    let inner_cancelled = chain
+                        .completion_order
+                        .iter()
                         .position(|&event| event == TimeoutEvent::InnerCancelled);
 
                     match (inner_cancelled, outer_expired) {
@@ -377,7 +409,13 @@ mod tests {
         }
 
         pub fn get_cleanup_events(&self) -> Vec<CleanupEvent> {
-            self.wheel_monitor.cleanup_events.lock().unwrap().iter().cloned().collect()
+            self.wheel_monitor
+                .cleanup_events
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect()
         }
     }
 
@@ -399,19 +437,36 @@ mod tests {
             "completed"
         };
 
-        harness.run_nested_timeout_scenario(chain_id, operation).await;
+        harness
+            .run_nested_timeout_scenario(chain_id, operation)
+            .await;
 
         // Verify inner timeout expired naturally (before outer)
         let stats = harness.get_stats_snapshot();
         assert_eq!(stats.timeout_chains_created, 1);
-        assert_eq!(stats.inner_timeouts_expired, 1, "Inner timeout should expire first");
-        assert_eq!(stats.outer_timeouts_expired, 0, "Outer timeout should not expire");
+        assert_eq!(
+            stats.inner_timeouts_expired, 1,
+            "Inner timeout should expire first"
+        );
+        assert_eq!(
+            stats.outer_timeouts_expired, 0,
+            "Outer timeout should not expire"
+        );
 
-        assert!(harness.verify_timer_wheel_cleanup(), "Timer wheel should be clean");
+        assert!(
+            harness.verify_timer_wheel_cleanup(),
+            "Timer wheel should be clean"
+        );
 
         let events = harness.get_cleanup_events();
-        let linked_events = events.iter().filter(|e| e.event_type == CleanupEventType::NodeLinked).count();
-        let unlinked_events = events.iter().filter(|e| e.event_type == CleanupEventType::NodeUnlinked).count();
+        let linked_events = events
+            .iter()
+            .filter(|e| e.event_type == CleanupEventType::NodeLinked)
+            .count();
+        let unlinked_events = events
+            .iter()
+            .filter(|e| e.event_type == CleanupEventType::NodeUnlinked)
+            .count();
 
         assert_eq!(linked_events, 2, "Should link outer and inner timer nodes");
         assert_eq!(unlinked_events, 2, "Should unlink all timer nodes");
@@ -435,27 +490,45 @@ mod tests {
             "completed"
         };
 
-        harness.run_nested_timeout_scenario(chain_id, operation).await;
+        harness
+            .run_nested_timeout_scenario(chain_id, operation)
+            .await;
 
         // Verify outer timeout cancelled inner timeout first
-        assert!(harness.verify_cancellation_order(chain_id),
-               "Inner timeout should be cancelled before outer expires");
+        assert!(
+            harness.verify_cancellation_order(chain_id),
+            "Inner timeout should be cancelled before outer expires"
+        );
 
         let stats = harness.get_stats_snapshot();
-        assert_eq!(stats.outer_timeouts_expired, 1, "Outer timeout should expire");
-        assert_eq!(stats.inner_timeouts_cancelled, 1, "Inner should be cancelled by outer");
+        assert_eq!(
+            stats.outer_timeouts_expired, 1,
+            "Outer timeout should expire"
+        );
+        assert_eq!(
+            stats.inner_timeouts_cancelled, 1,
+            "Inner should be cancelled by outer"
+        );
 
-        assert!(harness.verify_timer_wheel_cleanup(), "Timer wheel should be clean");
+        assert!(
+            harness.verify_timer_wheel_cleanup(),
+            "Timer wheel should be clean"
+        );
 
         let events = harness.get_cleanup_events();
-        let cleanup_sequence = events.iter()
+        let cleanup_sequence = events
+            .iter()
             .filter(|e| e.event_type == CleanupEventType::NodeUnlinked)
             .map(|e| e.timeout_level)
             .collect::<Vec<_>>();
 
         // Should unlink inner (level 1) before outer (level 0) when outer expires first
         // But this depends on implementation details, so just verify both are cleaned
-        assert_eq!(cleanup_sequence.len(), 2, "Should clean up both timeout levels");
+        assert_eq!(
+            cleanup_sequence.len(),
+            2,
+            "Should clean up both timeout levels"
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -480,20 +553,30 @@ mod tests {
                 sleep(Duration::from_millis(150)).await; // Fixed operation time
                 "completed"
             };
-            harness.run_nested_timeout_scenario(chain_id, operation).await;
+            harness
+                .run_nested_timeout_scenario(chain_id, operation)
+                .await;
         }
 
         let stats = harness.get_stats_snapshot();
         assert_eq!(stats.timeout_chains_created, 3);
 
         // Verify all chains handled correctly
-        assert!(stats.timer_nodes_linked >= 6, "Should link nodes for all chains");
+        assert!(
+            stats.timer_nodes_linked >= 6,
+            "Should link nodes for all chains"
+        );
         assert!(stats.timer_nodes_unlinked >= 6, "Should unlink all nodes");
 
-        assert!(harness.verify_timer_wheel_cleanup(), "Timer wheel should be completely clean");
+        assert!(
+            harness.verify_timer_wheel_cleanup(),
+            "Timer wheel should be completely clean"
+        );
 
-        println!("✅ Deep Nesting: {} chains, {} nodes linked/unlinked, clean wheel",
-                stats.timeout_chains_created, stats.timer_nodes_linked);
+        println!(
+            "✅ Deep Nesting: {} chains, {} nodes linked/unlinked, clean wheel",
+            stats.timeout_chains_created, stats.timer_nodes_linked
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -516,14 +599,15 @@ mod tests {
             chains.push(harness.create_timeout_chain(outer_ms, inner_ms, operation_ms));
         }
 
-
         for (i, chain_id) in chains.into_iter().enumerate() {
             let operation_ms = 75 + (i as u64 * 10);
             let operation = async move {
                 sleep(Duration::from_millis(operation_ms)).await;
                 format!("chain-{}", i)
             };
-            harness.run_nested_timeout_scenario(chain_id, operation).await;
+            harness
+                .run_nested_timeout_scenario(chain_id, operation)
+                .await;
         }
 
         let stats = harness.get_stats_snapshot();
@@ -533,10 +617,16 @@ mod tests {
         assert_eq!(stats.timer_nodes_linked, (chain_count * 2) as u64);
         assert_eq!(stats.timer_nodes_unlinked, (chain_count * 2) as u64);
 
-        assert!(harness.verify_timer_wheel_cleanup(), "All concurrent chains should clean up");
+        assert!(
+            harness.verify_timer_wheel_cleanup(),
+            "All concurrent chains should clean up"
+        );
 
-        println!("✅ Concurrent Chains: {} chains, {} total timer operations, clean wheel",
-                chain_count, stats.timer_nodes_linked + stats.timer_nodes_unlinked);
+        println!(
+            "✅ Concurrent Chains: {} chains, {} total timer operations, clean wheel",
+            chain_count,
+            stats.timer_nodes_linked + stats.timer_nodes_unlinked
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -564,7 +654,9 @@ mod tests {
                 format!("scenario-{}", i)
             };
 
-            harness.run_nested_timeout_scenario(chain_id, operation).await;
+            harness
+                .run_nested_timeout_scenario(chain_id, operation)
+                .await;
 
             // Verify cleanup after each scenario
             let intermediate_cleanup = harness.verify_timer_wheel_cleanup();
@@ -578,24 +670,40 @@ mod tests {
         assert_eq!(final_stats.timeout_chains_created, 4);
 
         // All timer nodes should be properly managed
-        assert!(final_stats.timer_nodes_linked > 0, "Should have linked timer nodes");
-        assert_eq!(final_stats.timer_nodes_linked, final_stats.timer_nodes_unlinked,
-                  "All linked nodes should be unlinked");
+        assert!(
+            final_stats.timer_nodes_linked > 0,
+            "Should have linked timer nodes"
+        );
+        assert_eq!(
+            final_stats.timer_nodes_linked, final_stats.timer_nodes_unlinked,
+            "All linked nodes should be unlinked"
+        );
 
-        assert!(harness.verify_timer_wheel_cleanup(), "Timer wheel must be completely clean");
+        assert!(
+            harness.verify_timer_wheel_cleanup(),
+            "Timer wheel must be completely clean"
+        );
 
         let cleanup_events = harness.get_cleanup_events();
-        let final_linked = cleanup_events.iter()
+        let final_linked = cleanup_events
+            .iter()
             .filter(|e| e.event_type == CleanupEventType::NodeLinked)
             .count();
-        let final_unlinked = cleanup_events.iter()
+        let final_unlinked = cleanup_events
+            .iter()
             .filter(|e| e.event_type == CleanupEventType::NodeUnlinked)
             .count();
 
-        assert_eq!(final_linked, final_unlinked, "Link/unlink events should balance");
+        assert_eq!(
+            final_linked, final_unlinked,
+            "Link/unlink events should balance"
+        );
 
-        println!("✅ Cleanup Verification: {} scenarios, {} link/unlink pairs, clean wheel",
-                scenarios.len(), final_linked);
+        println!(
+            "✅ Cleanup Verification: {} scenarios, {} link/unlink pairs, clean wheel",
+            scenarios.len(),
+            final_linked
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -609,11 +717,11 @@ mod tests {
 
         // Complex integration scenario: mixed timeout patterns with wheel monitoring
         let complex_scenarios = vec![
-            (100, 200, 50),   // Operation completes first
-            (200, 100, 150),  // Inner expires first
-            (100, 300, 250),  // Outer expires first, inner cancelled
-            (300, 150, 400),  // Inner expires, outer doesn't
-            (80, 90, 200),    // Both expire, outer first
+            (100, 200, 50),  // Operation completes first
+            (200, 100, 150), // Inner expires first
+            (100, 300, 250), // Outer expires first, inner cancelled
+            (300, 150, 400), // Inner expires, outer doesn't
+            (80, 90, 200),   // Both expire, outer first
         ];
 
         let mut completed_chains = Vec::new();
@@ -625,7 +733,9 @@ mod tests {
                 sleep(Duration::from_millis(*operation_ms)).await;
                 format!("complex-scenario-{}", i)
             };
-            harness.run_nested_timeout_scenario(chain_id, operation).await;
+            harness
+                .run_nested_timeout_scenario(chain_id, operation)
+                .await;
             completed_chains.push(chain_id);
         }
 
@@ -640,25 +750,44 @@ mod tests {
         // Comprehensive final verification
         let final_stats = harness.get_stats_snapshot();
 
-        assert_eq!(final_stats.timeout_chains_created, 5, "Should create all timeout chains");
-        assert_eq!(order_violations, 0, "No cancellation order violations allowed");
-        assert_eq!(final_stats.timer_nodes_linked, final_stats.timer_nodes_unlinked,
-                  "All timer nodes must be properly cleaned up");
-        assert!(harness.verify_timer_wheel_cleanup(),
-               "Timer wheel must be completely clean after all scenarios");
+        assert_eq!(
+            final_stats.timeout_chains_created, 5,
+            "Should create all timeout chains"
+        );
+        assert_eq!(
+            order_violations, 0,
+            "No cancellation order violations allowed"
+        );
+        assert_eq!(
+            final_stats.timer_nodes_linked, final_stats.timer_nodes_unlinked,
+            "All timer nodes must be properly cleaned up"
+        );
+        assert!(
+            harness.verify_timer_wheel_cleanup(),
+            "Timer wheel must be completely clean after all scenarios"
+        );
 
         // Verify we tested different timeout behaviors
-        assert!(final_stats.inner_timeouts_expired > 0 || final_stats.inner_timeouts_cancelled > 0,
-               "Should test inner timeout behavior");
-        assert!(final_stats.outer_timeouts_expired > 0,
-               "Should test outer timeout expiration");
+        assert!(
+            final_stats.inner_timeouts_expired > 0 || final_stats.inner_timeouts_cancelled > 0,
+            "Should test inner timeout behavior"
+        );
+        assert!(
+            final_stats.outer_timeouts_expired > 0,
+            "Should test outer timeout expiration"
+        );
 
         println!("✅ Timer Wheel ↔ Timeout Combinator Integration Test Complete");
         println!("📊 Final Stats: {:?}", final_stats);
-        println!("🎯 Scenarios: {} chains, {} timer ops, {} cancellation violations",
-                final_stats.timeout_chains_created,
-                final_stats.timer_nodes_linked + final_stats.timer_nodes_unlinked,
-                order_violations);
-        println!("🧹 Cleanup: Timer wheel clean = {}", harness.verify_timer_wheel_cleanup());
+        println!(
+            "🎯 Scenarios: {} chains, {} timer ops, {} cancellation violations",
+            final_stats.timeout_chains_created,
+            final_stats.timer_nodes_linked + final_stats.timer_nodes_unlinked,
+            order_violations
+        );
+        println!(
+            "🧹 Cleanup: Timer wheel clean = {}",
+            harness.verify_timer_wheel_cleanup()
+        );
     }
 }

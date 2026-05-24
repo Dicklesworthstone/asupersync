@@ -23,16 +23,16 @@ use crate::{
     cx::{Cx, Scope},
     error::Outcome,
     http::{
-        pool::{ConnectionPool, PoolConfig, PoolStats},
         HttpClient, Request, Response, StatusCode,
+        pool::{ConnectionPool, PoolConfig, PoolStats},
     },
     net::{TcpListener, TcpStream},
     runtime::RuntimeBuilder,
     service::{
+        Service, ServiceExt,
         discover::{
             DiscoveryConfig, DiscoveryEvent, ServiceDiscovery, ServiceEndpoint, ServiceRecord,
         },
-        Service, ServiceExt,
     },
     sync::{Barrier, Mutex},
     time::{Duration, Instant, Sleep},
@@ -42,8 +42,8 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -245,10 +245,7 @@ struct MockHttpServer {
 }
 
 impl MockHttpServer {
-    async fn new(
-        cx: &Cx,
-        lifecycle_tracker: ConnectionLifecycleTracker,
-    ) -> Outcome<Self> {
+    async fn new(cx: &Cx, lifecycle_tracker: ConnectionLifecycleTracker) -> Outcome<Self> {
         let listener = TcpListener::bind(cx, "127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
 
@@ -542,10 +539,8 @@ async fn test_pool_discover_rapid_ttl_cycling() -> Outcome<()> {
 
                     // Very short TTL for rapid cycling
                     let ttl_duration = Duration::from_millis(100);
-                    let discovery = MockServiceDiscovery::new(
-                        ttl_duration,
-                        lifecycle_tracker.clone(),
-                    );
+                    let discovery =
+                        MockServiceDiscovery::new(ttl_duration, lifecycle_tracker.clone());
 
                     // Start multiple servers for endpoint rotation
                     let mut servers = Vec::new();
@@ -677,10 +672,8 @@ async fn test_pool_discover_ttl_expiration_during_connect() -> Outcome<()> {
 
                     // Short TTL that will expire during connection establishment
                     let ttl_duration = Duration::from_millis(50);
-                    let discovery = MockServiceDiscovery::new(
-                        ttl_duration,
-                        lifecycle_tracker.clone(),
-                    );
+                    let discovery =
+                        MockServiceDiscovery::new(ttl_duration, lifecycle_tracker.clone());
 
                     let server = MockHttpServer::new(cx, lifecycle_tracker.clone()).await?;
                     let server_addr = server.addr();
@@ -714,8 +707,8 @@ async fn test_pool_discover_ttl_expiration_during_connect() -> Outcome<()> {
                     let request_handle = cx.spawn("request", {
                         let client = client.clone();
                         async move |cx| {
-                            let request = Request::get("http://test-service/test")
-                                .body(Vec::new())?;
+                            let request =
+                                Request::get("http://test-service/test").body(Vec::new())?;
 
                             client.send(cx, request).await.map(|_| ())
                         }

@@ -31,22 +31,25 @@
 
 #![cfg(all(test, feature = "real-service-e2e"))]
 
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering}};
-use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+};
+use std::time::{Duration, Instant};
 
 use crate::cx::{Cx, Scope};
-use crate::types::{Budget, Outcome, Time, RegionId, TaskId, ObligationId};
+use crate::obligation::leak_check::{LeakCheckConfig, ObligationLeakChecker};
+use crate::record::obligation::{ObligationKind, ObligationRecord, ObligationState};
+use crate::record::region::RegionState;
+use crate::runtime::state::RuntimeState;
 use crate::runtime::test_util::create_test_runtime;
 use crate::time::{
     TimerDriverHandle, TimerHandle,
-    wheel::{TimerWheel, TimerWheelConfig, WakerBatch},
     sleep::Sleep,
+    wheel::{TimerWheel, TimerWheelConfig, WakerBatch},
 };
-use crate::runtime::state::RuntimeState;
-use crate::record::region::RegionState;
-use crate::record::obligation::{ObligationRecord, ObligationState, ObligationKind};
-use crate::obligation::leak_check::{ObligationLeakChecker, LeakCheckConfig};
+use crate::types::{Budget, ObligationId, Outcome, RegionId, TaskId, Time};
 
 /// Configuration for timer wheel region drain testing scenarios.
 #[derive(Clone, Debug)]
@@ -120,7 +123,8 @@ impl TimerRegionMetrics {
     }
 
     fn record_wheel_cascade_during_drain(&self) {
-        self.wheel_cascades_during_drain.fetch_add(1, Ordering::Relaxed);
+        self.wheel_cascades_during_drain
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_region_close_initiated(&self) {
@@ -166,19 +170,27 @@ async fn create_timer_heavy_workload(
             let sleep_future = cx.sleep(timer_delay);
 
             // Record timer firing when it completes
-            match cx.timeout(timer_delay + Duration::from_millis(100), sleep_future).await {
+            match cx
+                .timeout(timer_delay + Duration::from_millis(100), sleep_future)
+                .await
+            {
                 Ok(_) => {
                     // Timer fired successfully - check if region is draining
                     let region_draining = cx.is_region_draining(); // Mock method for test
                     metrics_clone.record_timer_firing(region_draining);
 
-                    Ok(format!("Timer {} in {} fired successfully (during_drain: {})",
-                              timer_id, region_name, region_draining))
+                    Ok(format!(
+                        "Timer {} in {} fired successfully (during_drain: {})",
+                        timer_id, region_name, region_draining
+                    ))
                 }
                 Err(_) => {
                     // Timer was cancelled or timed out - likely due to region drain
                     metrics_clone.record_timer_invalidation();
-                    Err(format!("Timer {} in {} was invalidated", timer_id, region_name))
+                    Err(format!(
+                        "Timer {} in {} was invalidated",
+                        timer_id, region_name
+                    ))
                 }
             }
         });
@@ -224,18 +236,16 @@ async fn create_drainable_region_with_timers(
         };
 
         // Start timer-heavy workload in this region
-        let workload_results = create_timer_heavy_workload(
-            cx,
-            &region_name,
-            config,
-            metrics,
-        ).await?;
+        let workload_results =
+            create_timer_heavy_workload(cx, &region_name, config, metrics).await?;
 
         // Simulate region close initiation after some timers are active
         cx.sleep(Duration::from_millis(25)).await;
 
         // Begin region drain - this should properly handle active timers
-        scope.close_and_drain_with_timeout(config.drain_timeout).await
+        scope
+            .close_and_drain_with_timeout(config.drain_timeout)
+            .await
             .map_err(|e| format!("Region drain failed: {:?}", e))?;
 
         metrics.record_successful_drain();
@@ -246,20 +256,23 @@ async fn create_drainable_region_with_timers(
             for _ in 0..leak_count {
                 metrics.record_obligation_leak();
             }
-            return Err(format!("Region {} had {} obligation leaks during timer drain",
-                              region_name, leak_count));
+            return Err(format!(
+                "Region {} had {} obligation leaks during timer drain",
+                region_name, leak_count
+            ));
         }
 
-        Ok(format!("Region {} drained successfully with {} timer results",
-                  region_name, workload_results.len()))
-    }).await
+        Ok(format!(
+            "Region {} drained successfully with {} timer results",
+            region_name,
+            workload_results.len()
+        ))
+    })
+    .await
 }
 
 /// Checks for obligation leaks after region drain completion.
-async fn check_obligation_leaks_post_drain(
-    cx: &Cx,
-    region_name: &str,
-) -> Result<u32, String> {
+async fn check_obligation_leaks_post_drain(cx: &Cx, region_name: &str) -> Result<u32, String> {
     // Simulate obligation leak checking
     // In a real implementation, this would check the obligation table
     // for any unresolved obligations from the drained region
@@ -324,7 +337,8 @@ async fn verify_timer_wheel_consistency(
     if memory_usage > expected_usage * 2 {
         return Err(format!(
             "Timer wheel memory usage too high: {} bytes (expected ≤ {} bytes)",
-            memory_usage, expected_usage * 2
+            memory_usage,
+            expected_usage * 2
         ));
     }
 
@@ -404,15 +418,33 @@ async fn test_timer_firings_during_region_drain_no_obligation_leaks() {
         },
     );
 
-    assert!(result.is_ok(), "Timer drain integration test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Timer drain integration test should complete: {:?}",
+        result
+    );
 
-    let (timer_firings, firings_during_drain, successful_drains,
-         obligation_leaks, timer_invalidations, wheel_cascades,
-         region_closes, coalescing) = metrics.get_totals();
+    let (
+        timer_firings,
+        firings_during_drain,
+        successful_drains,
+        obligation_leaks,
+        timer_invalidations,
+        wheel_cascades,
+        region_closes,
+        coalescing,
+    ) = metrics.get_totals();
 
-    println!("✓ Timer drain: regions={}, timers={}, drain_firings={}, leaks={}, invalidations={}, cascades={}, coalescing={}",
-             successful_drains, timer_firings, firings_during_drain, obligation_leaks,
-             timer_invalidations, wheel_cascades, coalescing);
+    println!(
+        "✓ Timer drain: regions={}, timers={}, drain_firings={}, leaks={}, invalidations={}, cascades={}, coalescing={}",
+        successful_drains,
+        timer_firings,
+        firings_during_drain,
+        obligation_leaks,
+        timer_invalidations,
+        wheel_cascades,
+        coalescing
+    );
 }
 
 /// Test hierarchical timer wheel cascading during region close operations.
@@ -466,7 +498,8 @@ async fn test_hierarchical_timer_wheel_cascading_during_region_close() {
                             region_id,
                             &region_config,
                             &metrics_clone,
-                        ).await
+                        )
+                        .await
                     });
                     region_handles.push(region_handle);
 
@@ -507,43 +540,78 @@ async fn test_hierarchical_timer_wheel_cascading_during_region_close() {
                     &timer_wheel,
                     &[], // No active regions should remain
                     &metrics,
-                ).await?;
+                )
+                .await?;
 
-                assert!(wheel_consistent, "Timer wheel should be consistent after drains");
+                assert!(
+                    wheel_consistent,
+                    "Timer wheel should be consistent after drains"
+                );
 
                 // Verify wheel cascading occurred during drain operations
-                let (timer_firings, firings_during_drain, successful_drains,
-                     obligation_leaks, timer_invalidations, wheel_cascades,
-                     region_closes, coalescing) = metrics.get_totals();
+                let (
+                    timer_firings,
+                    firings_during_drain,
+                    successful_drains,
+                    obligation_leaks,
+                    timer_invalidations,
+                    wheel_cascades,
+                    region_closes,
+                    coalescing,
+                ) = metrics.get_totals();
 
-                assert_eq!(successful_drains, config.region_count as u64,
-                          "All regions should drain successfully");
-                assert!(wheel_cascades > 0,
-                        "Timer wheel should perform cascades during drain: got {}", wheel_cascades);
-                assert_eq!(obligation_leaks, 0,
-                          "No obligation leaks during cascading drain");
+                assert_eq!(
+                    successful_drains, config.region_count as u64,
+                    "All regions should drain successfully"
+                );
+                assert!(
+                    wheel_cascades > 0,
+                    "Timer wheel should perform cascades during drain: got {}",
+                    wheel_cascades
+                );
+                assert_eq!(
+                    obligation_leaks, 0,
+                    "No obligation leaks during cascading drain"
+                );
 
                 // Verify cascading efficiency
                 let cascades_per_region = wheel_cascades as f64 / successful_drains as f64;
-                assert!(cascades_per_region <= 5.0,
-                        "Cascading should be efficient: {:.1} cascades per region", cascades_per_region);
+                assert!(
+                    cascades_per_region <= 5.0,
+                    "Cascading should be efficient: {:.1} cascades per region",
+                    cascades_per_region
+                );
 
                 Ok(format!(
                     "Hierarchical cascading: {} regions, {} wheel cascades, {} timer firings",
                     successful_drains, wheel_cascades, timer_firings
                 ))
-            }).await
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Hierarchical cascading test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Hierarchical cascading test should complete: {:?}",
+        result
+    );
 
-    let (timer_firings, firings_during_drain, successful_drains,
-         obligation_leaks, timer_invalidations, wheel_cascades,
-         region_closes, coalescing) = metrics.get_totals();
+    let (
+        timer_firings,
+        firings_during_drain,
+        successful_drains,
+        obligation_leaks,
+        timer_invalidations,
+        wheel_cascades,
+        region_closes,
+        coalescing,
+    ) = metrics.get_totals();
 
-    println!("✓ Hierarchical cascading: regions={}, timers={}, cascades={}, leaks={}, coalescing={}",
-             successful_drains, timer_firings, wheel_cascades, obligation_leaks, coalescing);
+    println!(
+        "✓ Hierarchical cascading: regions={}, timers={}, cascades={}, leaks={}, coalescing={}",
+        successful_drains, timer_firings, wheel_cascades, obligation_leaks, coalescing
+    );
 }
 
 /// Test timer coalescing behavior during region drain with deadline management.
@@ -602,7 +670,8 @@ async fn test_timer_coalescing_during_region_drain_deadline_management() {
 
                                     // Check if this timer was coalesced
                                     let actual_delay = sleep_end - sleep_start;
-                                    let coalesced = actual_delay.abs_diff(timer_delay) > Duration::from_millis(10);
+                                    let coalesced = actual_delay.abs_diff(timer_delay)
+                                        > Duration::from_millis(10);
 
                                     if coalesced && region_draining {
                                         metrics_timer_clone.record_coalescing_during_drain();
@@ -621,8 +690,12 @@ async fn test_timer_coalescing_during_region_drain_deadline_management() {
                             cx.sleep(Duration::from_millis(75)).await;
 
                             // Close region - this should handle coalesced timers properly
-                            region_scope.close_and_drain_with_timeout(config.drain_timeout).await
-                                .map_err(|e| format!("Coalescing region {} drain failed: {:?}", region_id, e))?;
+                            region_scope
+                                .close_and_drain_with_timeout(config.drain_timeout)
+                                .await
+                                .map_err(|e| {
+                                    format!("Coalescing region {} drain failed: {:?}", region_id, e)
+                                })?;
 
                             // Collect timer results
                             let mut timer_results = Vec::new();
@@ -644,18 +717,22 @@ async fn test_timer_coalescing_during_region_drain_deadline_management() {
                             let leak_count = check_obligation_leaks_post_drain(
                                 cx,
                                 &format!("coalescing_region_{}", region_id),
-                            ).await?;
+                            )
+                            .await?;
 
                             if leak_count > 0 {
                                 for _ in 0..leak_count {
                                     metrics_clone.record_obligation_leak();
                                 }
-                                return Err(format!("Coalescing region {} had {} obligation leaks",
-                                                  region_id, leak_count));
+                                return Err(format!(
+                                    "Coalescing region {} had {} obligation leaks",
+                                    region_id, leak_count
+                                ));
                             }
 
                             Ok((region_id, timer_results))
-                        }).await
+                        })
+                        .await
                     });
                     coalescing_tasks.push(coalescing_task);
                 }
@@ -674,50 +751,89 @@ async fn test_timer_coalescing_during_region_drain_deadline_management() {
                 }
 
                 // Verify coalescing behavior and obligation leak prevention
-                let (timer_firings, firings_during_drain, successful_drains,
-                     obligation_leaks, timer_invalidations, wheel_cascades,
-                     region_closes, coalescing_events) = metrics.get_totals();
+                let (
+                    timer_firings,
+                    firings_during_drain,
+                    successful_drains,
+                    obligation_leaks,
+                    timer_invalidations,
+                    wheel_cascades,
+                    region_closes,
+                    coalescing_events,
+                ) = metrics.get_totals();
 
-                assert_eq!(successful_drains, config.region_count as u64,
-                          "All coalescing regions should drain successfully");
-                assert_eq!(obligation_leaks, 0,
-                          "No obligation leaks should occur with timer coalescing");
-                assert!(coalescing_events > 0,
-                        "Timer coalescing should occur during drain: got {}", coalescing_events);
-                assert!(timer_firings > 0,
-                        "Some timers should fire despite coalescing: got {}", timer_firings);
+                assert_eq!(
+                    successful_drains, config.region_count as u64,
+                    "All coalescing regions should drain successfully"
+                );
+                assert_eq!(
+                    obligation_leaks, 0,
+                    "No obligation leaks should occur with timer coalescing"
+                );
+                assert!(
+                    coalescing_events > 0,
+                    "Timer coalescing should occur during drain: got {}",
+                    coalescing_events
+                );
+                assert!(
+                    timer_firings > 0,
+                    "Some timers should fire despite coalescing: got {}",
+                    timer_firings
+                );
 
                 // Verify coalescing efficiency
                 let coalescing_ratio = coalescing_events as f64 / timer_firings as f64;
-                assert!(coalescing_ratio >= 0.1 && coalescing_ratio <= 0.8,
-                        "Coalescing ratio should be reasonable: {:.2} ({} coalesced / {} fired)",
-                        coalescing_ratio, coalescing_events, timer_firings);
+                assert!(
+                    coalescing_ratio >= 0.1 && coalescing_ratio <= 0.8,
+                    "Coalescing ratio should be reasonable: {:.2} ({} coalesced / {} fired)",
+                    coalescing_ratio,
+                    coalescing_events,
+                    timer_firings
+                );
 
                 // Verify timer wheel consistency after coalescing drains
                 let wheel_consistent = verify_timer_wheel_consistency(
                     &timer_wheel,
                     &[], // No active regions
                     &metrics,
-                ).await?;
+                )
+                .await?;
 
-                assert!(wheel_consistent, "Timer wheel should be consistent after coalescing drains");
+                assert!(
+                    wheel_consistent,
+                    "Timer wheel should be consistent after coalescing drains"
+                );
 
                 Ok(format!(
                     "Timer coalescing: {} regions, {} firings, {} coalesced, {} during drain",
                     successful_drains, timer_firings, coalescing_events, firings_during_drain
                 ))
-            }).await
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Timer coalescing drain test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Timer coalescing drain test should complete: {:?}",
+        result
+    );
 
-    let (timer_firings, firings_during_drain, successful_drains,
-         obligation_leaks, timer_invalidations, wheel_cascades,
-         region_closes, coalescing_events) = metrics.get_totals();
+    let (
+        timer_firings,
+        firings_during_drain,
+        successful_drains,
+        obligation_leaks,
+        timer_invalidations,
+        wheel_cascades,
+        region_closes,
+        coalescing_events,
+    ) = metrics.get_totals();
 
-    println!("✓ Timer coalescing: regions={}, firings={}, coalesced={}, leaks={}, during_drain={}",
-             successful_drains, timer_firings, coalescing_events, obligation_leaks, firings_during_drain);
+    println!(
+        "✓ Timer coalescing: regions={}, firings={}, coalesced={}, leaks={}, during_drain={}",
+        successful_drains, timer_firings, coalescing_events, obligation_leaks, firings_during_drain
+    );
 }
 
 /// Test comprehensive timer wheel and region state integration under stress.
@@ -939,17 +1055,44 @@ async fn test_comprehensive_timer_wheel_region_state_integration_stress() {
         },
     );
 
-    assert!(result.is_ok(), "Comprehensive stress test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Comprehensive stress test should complete: {:?}",
+        result
+    );
 
-    let (timer_firings, firings_during_drain, successful_drains,
-         obligation_leaks, timer_invalidations, wheel_cascades,
-         region_closes, coalescing_events) = metrics.get_totals();
+    let (
+        timer_firings,
+        firings_during_drain,
+        successful_drains,
+        obligation_leaks,
+        timer_invalidations,
+        wheel_cascades,
+        region_closes,
+        coalescing_events,
+    ) = metrics.get_totals();
 
-    assert!(successful_drains >= 10, "Should complete many regions under stress");
-    assert_eq!(obligation_leaks, 0, "No obligation leaks under comprehensive stress");
-    assert!(timer_firings + timer_invalidations >= 200, "High timer activity under stress");
+    assert!(
+        successful_drains >= 10,
+        "Should complete many regions under stress"
+    );
+    assert_eq!(
+        obligation_leaks, 0,
+        "No obligation leaks under comprehensive stress"
+    );
+    assert!(
+        timer_firings + timer_invalidations >= 200,
+        "High timer activity under stress"
+    );
 
-    println!("✓ Comprehensive stress: regions={}, timer_ops={}, firings={}, invalidations={}, cascades={}, coalescing={}, leaks={}",
-             successful_drains, timer_firings + timer_invalidations, timer_firings,
-             timer_invalidations, wheel_cascades, coalescing_events, obligation_leaks);
+    println!(
+        "✓ Comprehensive stress: regions={}, timer_ops={}, firings={}, invalidations={}, cascades={}, coalescing={}, leaks={}",
+        successful_drains,
+        timer_firings + timer_invalidations,
+        timer_firings,
+        timer_invalidations,
+        wheel_cascades,
+        coalescing_events,
+        obligation_leaks
+    );
 }

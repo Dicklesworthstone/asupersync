@@ -41,13 +41,13 @@ mod tests {
         dead_code
     )]
 
-    use crate::combinator::bracket::{bracket, BracketError};
-    use crate::combinator::race::{race2_outcomes, Race2Result, RaceWinner};
+    use crate::combinator::bracket::{BracketError, bracket};
+    use crate::combinator::race::{Race2Result, RaceWinner, race2_outcomes};
     use crate::cx::Cx;
-    use crate::types::{Outcome, CancelReason};
+    use crate::types::{CancelReason, Outcome};
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::time::Duration;
 
     /// Test phases for race-bracket integration testing
@@ -142,12 +142,16 @@ mod tests {
         }
 
         fn record_acquisition(&self, resource_id: u32) {
-            self.acquired_resources.lock().insert(resource_id, format!("resource_{}", resource_id));
+            self.acquired_resources
+                .lock()
+                .insert(resource_id, format!("resource_{}", resource_id));
             self.acquisition_count.fetch_add(1, Ordering::Relaxed);
         }
 
         fn record_release(&self, resource_id: u32) {
-            self.released_resources.lock().insert(resource_id, format!("resource_{}", resource_id));
+            self.released_resources
+                .lock()
+                .insert(resource_id, format!("resource_{}", resource_id));
             self.release_count.fetch_add(1, Ordering::Relaxed);
             self.drop_call_count.fetch_add(1, Ordering::Relaxed);
         }
@@ -256,11 +260,13 @@ mod tests {
 
             // Create two competing bracket operations
             let bracket1 = cx.scope(|scope| async move {
-                self.create_bracket_resource_acquisition(cx, type1, duration1).await
+                self.create_bracket_resource_acquisition(cx, type1, duration1)
+                    .await
             });
 
             let bracket2 = cx.scope(|scope| async move {
-                self.create_bracket_resource_acquisition(cx, type2, duration2).await
+                self.create_bracket_resource_acquisition(cx, type2, duration2)
+                    .await
             });
 
             // Execute race between brackets
@@ -270,14 +276,26 @@ mod tests {
             // Determine winner (simulate race by completion order/duration)
             let (winner, winner_outcome, loser_outcome) = if duration1 <= duration2 {
                 self.increment_race_stat("first_bracket_won", 1);
-                (RaceWinner::First,
-                 race_result.map_err(|e| format!("Bracket 1 error: {:?}", e)).into(),
-                 race_result2.map_err(|e| format!("Bracket 2 error: {:?}", e)).into())
+                (
+                    RaceWinner::First,
+                    race_result
+                        .map_err(|e| format!("Bracket 1 error: {:?}", e))
+                        .into(),
+                    race_result2
+                        .map_err(|e| format!("Bracket 2 error: {:?}", e))
+                        .into(),
+                )
             } else {
                 self.increment_race_stat("second_bracket_won", 1);
-                (RaceWinner::Second,
-                 race_result2.map_err(|e| format!("Bracket 2 error: {:?}", e)).into(),
-                 race_result.map_err(|e| format!("Bracket 1 error: {:?}", e)).into())
+                (
+                    RaceWinner::Second,
+                    race_result2
+                        .map_err(|e| format!("Bracket 2 error: {:?}", e))
+                        .into(),
+                    race_result
+                        .map_err(|e| format!("Bracket 1 error: {:?}", e))
+                        .into(),
+                )
             };
 
             // Simulate proper race outcome with loser cancellation
@@ -292,7 +310,10 @@ mod tests {
         }
 
         /// Test basic race-bracket resource cleanup
-        async fn test_basic_race_bracket_resource_cleanup(&mut self, cx: &Cx) -> RaceBracketTestResult {
+        async fn test_basic_race_bracket_resource_cleanup(
+            &mut self,
+            cx: &Cx,
+        ) -> RaceBracketTestResult {
             let mut result = RaceBracketTestResult {
                 success: false,
                 phase: RaceBracketTestPhase::Initial,
@@ -312,8 +333,8 @@ mod tests {
 
             // Create race between two bracket operations with different durations
             let bracket_configs = vec![
-                ("fast_resource", Duration::from_millis(10)),    // Winner (shorter duration)
-                ("slow_resource", Duration::from_millis(50)),    // Loser (longer duration)
+                ("fast_resource", Duration::from_millis(10)), // Winner (shorter duration)
+                ("slow_resource", Duration::from_millis(50)), // Loser (longer duration)
             ];
 
             result.phase = RaceBracketTestPhase::RaceInitiation;
@@ -358,20 +379,25 @@ mod tests {
                     let final_acquisitions = self.resource_tracker.get_acquisition_count();
                     let final_releases = self.resource_tracker.get_release_count();
 
-                    result.leak_stats.resources_acquired = (final_acquisitions - initial_acquisitions) as u32;
-                    result.leak_stats.resources_released = (final_releases - initial_releases) as u32;
+                    result.leak_stats.resources_acquired =
+                        (final_acquisitions - initial_acquisitions) as u32;
+                    result.leak_stats.resources_released =
+                        (final_releases - initial_releases) as u32;
                     result.leak_stats.drop_cleanups = self.resource_tracker.get_drop_count() as u32;
 
                     // Check for resource leaks
                     result.no_leaks_detected = !self.resource_tracker.has_leaks();
-                    result.leak_stats.leaked_resources = self.resource_tracker.get_leak_count() as u32;
+                    result.leak_stats.leaked_resources =
+                        self.resource_tracker.get_leak_count() as u32;
 
                     if result.no_leaks_detected {
                         result.resource_cleanup_verified = true;
                         result.race_stats.bracket_drops = result.leak_stats.drop_cleanups;
                     } else {
-                        result.error = Some(format!("Resource leaks detected: {} resources",
-                                                   result.leak_stats.leaked_resources));
+                        result.error = Some(format!(
+                            "Resource leaks detected: {} resources",
+                            result.leak_stats.leaked_resources
+                        ));
                     }
                 }
                 Err(e) => {
@@ -388,7 +414,10 @@ mod tests {
         }
 
         /// Test multiple bracket race competition
-        async fn test_multiple_bracket_race_competition(&mut self, cx: &Cx) -> RaceBracketTestResult {
+        async fn test_multiple_bracket_race_competition(
+            &mut self,
+            cx: &Cx,
+        ) -> RaceBracketTestResult {
             let mut result = RaceBracketTestResult {
                 success: false,
                 phase: RaceBracketTestPhase::Initial,
@@ -412,8 +441,14 @@ mod tests {
 
             for race_num in 0..race_count {
                 let bracket_configs = vec![
-                    (format!("resource_type_a_{}", race_num).as_str(), Duration::from_millis(15)),
-                    (format!("resource_type_b_{}", race_num).as_str(), Duration::from_millis(25)),
+                    (
+                        format!("resource_type_a_{}", race_num).as_str(),
+                        Duration::from_millis(15),
+                    ),
+                    (
+                        format!("resource_type_b_{}", race_num).as_str(),
+                        Duration::from_millis(25),
+                    ),
                 ];
 
                 match self.execute_bracket_race(cx, bracket_configs).await {
@@ -442,17 +477,23 @@ mod tests {
             // Verify no resource leaks across multiple races
             result.no_leaks_detected = !self.resource_tracker.has_leaks();
             result.leak_stats.leaked_resources = self.resource_tracker.get_leak_count() as u32;
-            result.leak_stats.resources_acquired = (self.resource_tracker.get_acquisition_count() - initial_state) as u32;
+            result.leak_stats.resources_acquired =
+                (self.resource_tracker.get_acquisition_count() - initial_state) as u32;
             result.leak_stats.resources_released = self.resource_tracker.get_release_count() as u32;
 
-            if result.no_leaks_detected && total_winners == race_count && total_losers_cancelled == race_count {
+            if result.no_leaks_detected
+                && total_winners == race_count
+                && total_losers_cancelled == race_count
+            {
                 result.resource_cleanup_verified = true;
                 result.success = true;
                 result.phase = RaceBracketTestPhase::Complete;
             } else if result.leak_stats.leaked_resources > 0 {
-                result.error = Some("Resource leaks detected in multiple race scenario".to_string());
+                result.error =
+                    Some("Resource leaks detected in multiple race scenario".to_string());
             } else {
-                result.error = Some("Race completion counts don't match expected values".to_string());
+                result.error =
+                    Some("Race completion counts don't match expected values".to_string());
             }
 
             result
@@ -474,18 +515,31 @@ mod tests {
 
             // Test complex scenario with varying resource types and durations
             let scenarios = vec![
-                vec![("memory", Duration::from_millis(5)), ("network", Duration::from_millis(20))],
-                vec![("file", Duration::from_millis(15)), ("database", Duration::from_millis(10))],
-                vec![("cache", Duration::from_millis(8)), ("lock", Duration::from_millis(12))],
+                vec![
+                    ("memory", Duration::from_millis(5)),
+                    ("network", Duration::from_millis(20)),
+                ],
+                vec![
+                    ("file", Duration::from_millis(15)),
+                    ("database", Duration::from_millis(10)),
+                ],
+                vec![
+                    ("cache", Duration::from_millis(8)),
+                    ("lock", Duration::from_millis(12)),
+                ],
             ];
 
             result.phase = RaceBracketTestPhase::RaceInitiation;
 
             for (scenario_num, scenario_configs) in scenarios.iter().enumerate() {
-                match self.execute_bracket_race(cx, scenario_configs.clone()).await {
+                match self
+                    .execute_bracket_race(cx, scenario_configs.clone())
+                    .await
+                {
                     Ok((winner_outcome, _, loser_outcome)) => {
                         if !winner_outcome.is_ok() || !loser_outcome.is_cancelled() {
-                            result.error = Some(format!("Scenario {} had unexpected outcomes", scenario_num));
+                            result.error =
+                                Some(format!("Scenario {} had unexpected outcomes", scenario_num));
                             return result;
                         }
                     }
@@ -501,7 +555,8 @@ mod tests {
             // Comprehensive leak detection
             result.no_leaks_detected = !self.resource_tracker.has_leaks();
             result.leak_stats.leaked_resources = self.resource_tracker.get_leak_count() as u32;
-            result.leak_stats.resources_acquired = self.resource_tracker.get_acquisition_count() as u32;
+            result.leak_stats.resources_acquired =
+                self.resource_tracker.get_acquisition_count() as u32;
             result.leak_stats.resources_released = self.resource_tracker.get_release_count() as u32;
             result.leak_stats.drop_cleanups = self.resource_tracker.get_drop_count() as u32;
 
@@ -520,7 +575,10 @@ mod tests {
         }
 
         /// Test comprehensive race-bracket integration
-        async fn test_comprehensive_race_bracket_integration(&mut self, cx: &Cx) -> RaceBracketTestResult {
+        async fn test_comprehensive_race_bracket_integration(
+            &mut self,
+            cx: &Cx,
+        ) -> RaceBracketTestResult {
             let mut result = RaceBracketTestResult {
                 success: false,
                 phase: RaceBracketTestPhase::Initial,
@@ -537,32 +595,34 @@ mod tests {
             let leak_result = self.test_resource_leak_detection(cx).await;
 
             // Aggregate statistics
-            result.race_stats.races_initiated = basic_result.race_stats.races_initiated +
-                multiple_result.race_stats.races_initiated +
-                leak_result.race_stats.races_initiated;
+            result.race_stats.races_initiated = basic_result.race_stats.races_initiated
+                + multiple_result.race_stats.races_initiated
+                + leak_result.race_stats.races_initiated;
 
-            result.race_stats.winners_completed = basic_result.race_stats.winners_completed +
-                multiple_result.race_stats.winners_completed;
+            result.race_stats.winners_completed = basic_result.race_stats.winners_completed
+                + multiple_result.race_stats.winners_completed;
 
-            result.race_stats.losers_cancelled = basic_result.race_stats.losers_cancelled +
-                multiple_result.race_stats.losers_cancelled;
+            result.race_stats.losers_cancelled = basic_result.race_stats.losers_cancelled
+                + multiple_result.race_stats.losers_cancelled;
 
-            result.leak_stats.resources_acquired = self.resource_tracker.get_acquisition_count() as u32;
+            result.leak_stats.resources_acquired =
+                self.resource_tracker.get_acquisition_count() as u32;
             result.leak_stats.resources_released = self.resource_tracker.get_release_count() as u32;
             result.leak_stats.leaked_resources = self.resource_tracker.get_leak_count() as u32;
 
             // Check overall success
             result.success = basic_result.success && multiple_result.success && leak_result.success;
-            result.resource_cleanup_verified = basic_result.resource_cleanup_verified &&
-                multiple_result.resource_cleanup_verified &&
-                leak_result.resource_cleanup_verified;
-            result.no_leaks_detected = basic_result.no_leaks_detected &&
-                multiple_result.no_leaks_detected &&
-                leak_result.no_leaks_detected;
+            result.resource_cleanup_verified = basic_result.resource_cleanup_verified
+                && multiple_result.resource_cleanup_verified
+                && leak_result.resource_cleanup_verified;
+            result.no_leaks_detected = basic_result.no_leaks_detected
+                && multiple_result.no_leaks_detected
+                && leak_result.no_leaks_detected;
 
             // Final leak verification across all tests
             if self.resource_tracker.has_leaks() {
-                result.error = Some("Resource leaks detected across comprehensive test suite".to_string());
+                result.error =
+                    Some("Resource leaks detected across comprehensive test suite".to_string());
                 result.success = false;
                 result.no_leaks_detected = false;
             }
@@ -570,7 +630,9 @@ mod tests {
             if result.success {
                 result.phase = RaceBracketTestPhase::Complete;
             } else {
-                result.error = result.error.or_else(|| Some("One or more race-bracket integration tests failed".to_string()));
+                result.error = result.error.or_else(|| {
+                    Some("One or more race-bracket integration tests failed".to_string())
+                });
             }
 
             result
@@ -583,7 +645,11 @@ mod tests {
             let mut harness = RaceBracketTestHarness::new("basic_resource_cleanup");
             let result = harness.test_basic_race_bracket_resource_cleanup(&cx).await;
 
-            assert!(result.success, "Basic race-bracket resource cleanup failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Basic race-bracket resource cleanup failed: {:?}",
+                result.error
+            );
             assert!(result.resource_cleanup_verified);
             assert!(result.no_leaks_detected);
             assert_eq!(result.phase, RaceBracketTestPhase::Complete);
@@ -591,7 +657,8 @@ mod tests {
             assert!(result.race_stats.losers_cancelled > 0);
             assert_eq!(result.leak_stats.leaked_resources, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -600,14 +667,19 @@ mod tests {
             let mut harness = RaceBracketTestHarness::new("multiple_competition");
             let result = harness.test_multiple_bracket_race_competition(&cx).await;
 
-            assert!(result.success, "Multiple bracket race competition failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Multiple bracket race competition failed: {:?}",
+                result.error
+            );
             assert!(result.resource_cleanup_verified);
             assert!(result.no_leaks_detected);
             assert!(result.race_stats.races_initiated > 1);
             assert!(result.race_stats.losers_drained > 0);
             assert_eq!(result.leak_stats.leaked_resources, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -616,7 +688,11 @@ mod tests {
             let mut harness = RaceBracketTestHarness::new("leak_detection");
             let result = harness.test_resource_leak_detection(&cx).await;
 
-            assert!(result.success, "Resource leak detection test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Resource leak detection test failed: {:?}",
+                result.error
+            );
             assert!(result.resource_cleanup_verified);
             assert!(result.no_leaks_detected);
             assert!(result.leak_stats.resources_acquired > 0);
@@ -624,16 +700,23 @@ mod tests {
             assert_eq!(result.leak_stats.leaked_resources, 0);
             assert!(result.leak_stats.drop_cleanups > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn test_race_bracket_comprehensive_integration() {
         crate::lab::runtime::test_with_lab(|cx| async move {
             let mut harness = RaceBracketTestHarness::new("comprehensive_race_bracket");
-            let result = harness.test_comprehensive_race_bracket_integration(&cx).await;
+            let result = harness
+                .test_comprehensive_race_bracket_integration(&cx)
+                .await;
 
-            assert!(result.success, "Comprehensive race-bracket integration failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Comprehensive race-bracket integration failed: {:?}",
+                result.error
+            );
             assert!(result.resource_cleanup_verified);
             assert!(result.no_leaks_detected);
             let race_stats = result.race_stats;
@@ -646,6 +729,7 @@ mod tests {
             assert!(leak_stats.resources_released > 0);
             assert_eq!(leak_stats.leaked_resources, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

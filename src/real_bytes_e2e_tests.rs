@@ -712,7 +712,8 @@ async fn test_bytes_io_integration_e2e() {
     timeout(Duration::from_secs(15), async {
         let harness = BytesTestHarness::new("bytes_io_integration_e2e");
         harness.test_bytes_io_integration().await;
-    }).await
+    })
+    .await
     .expect("Bytes I/O integration test timed out after 15 seconds");
 }
 

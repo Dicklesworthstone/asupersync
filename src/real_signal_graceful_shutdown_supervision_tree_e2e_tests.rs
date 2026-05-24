@@ -19,16 +19,16 @@ mod tests {
     /// Graceful shutdown configuration for supervision trees
     #[derive(Debug, Clone)]
     struct ShutdownConfig {
-        signal_timeout_ms: u64,        // Timeout for signal propagation
-        drain_timeout_ms: u64,         // Maximum time for each level to drain
-        supervisor_timeout_ms: u64,    // Timeout for supervisor shutdown
-        force_kill_timeout_ms: u64,    // Timeout before force termination
+        signal_timeout_ms: u64,     // Timeout for signal propagation
+        drain_timeout_ms: u64,      // Maximum time for each level to drain
+        supervisor_timeout_ms: u64, // Timeout for supervisor shutdown
+        force_kill_timeout_ms: u64, // Timeout before force termination
 
         // Shutdown behavior
-        parallel_shutdown: bool,       // Shutdown children in parallel vs sequential
-        respect_dependencies: bool,    // Respect dependency order during shutdown
-        graceful_escalation: bool,     // Escalate from graceful to force if needed
-        preserve_state: bool,          // Preserve state during shutdown for recovery
+        parallel_shutdown: bool, // Shutdown children in parallel vs sequential
+        respect_dependencies: bool, // Respect dependency order during shutdown
+        graceful_escalation: bool, // Escalate from graceful to force if needed
+        preserve_state: bool,    // Preserve state during shutdown for recovery
     }
 
     impl Default for ShutdownConfig {
@@ -39,10 +39,10 @@ mod tests {
                 supervisor_timeout_ms: 2000,  // 2 seconds for supervisor shutdown
                 force_kill_timeout_ms: 10000, // 10 seconds before force kill
 
-                parallel_shutdown: true,      // Parallel for efficiency
-                respect_dependencies: true,   // Maintain dependency ordering
-                graceful_escalation: true,    // Escalate if timeouts exceeded
-                preserve_state: false,        // Default to clean shutdown
+                parallel_shutdown: true,    // Parallel for efficiency
+                respect_dependencies: true, // Maintain dependency ordering
+                graceful_escalation: true,  // Escalate if timeouts exceeded
+                preserve_state: false,      // Default to clean shutdown
             }
         }
     }
@@ -64,8 +64,8 @@ mod tests {
         node_type: NodeType,
         parent: Option<NodeId>,
         children: Mutex<Vec<NodeId>>,
-        dependencies: Vec<NodeId>,     // Nodes this depends on
-        dependents: Vec<NodeId>,       // Nodes that depend on this
+        dependencies: Vec<NodeId>, // Nodes this depends on
+        dependents: Vec<NodeId>,   // Nodes that depend on this
 
         state: Mutex<NodeState>,
         shutdown_state: Mutex<ShutdownState>,
@@ -89,17 +89,17 @@ mod tests {
 
     #[derive(Debug, Clone)]
     enum SupervisionStrategy {
-        OneForOne,     // Restart only failed child
-        OneForAll,     // Restart all children if one fails
-        RestForOne,    // Restart failed child and all started after it
+        OneForOne,       // Restart only failed child
+        OneForAll,       // Restart all children if one fails
+        RestForOne,      // Restart failed child and all started after it
         SimpleOneForOne, // Dynamic children with same restart strategy
     }
 
     #[derive(Debug, Clone)]
     enum WorkerType {
-        Transient,     // Only restart on abnormal termination
-        Permanent,     // Always restart
-        Temporary,     // Never restart
+        Transient, // Only restart on abnormal termination
+        Permanent, // Always restart
+        Temporary, // Never restart
     }
 
     #[derive(Debug, Clone)]
@@ -249,9 +249,10 @@ mod tests {
         }
 
         fn is_supervisor(&self) -> bool {
-            matches!(self.node_type,
-                NodeType::RootSupervisor |
-                NodeType::Supervisor { .. })
+            matches!(
+                self.node_type,
+                NodeType::RootSupervisor | NodeType::Supervisor { .. }
+            )
         }
 
         fn get_children(&self) -> Vec<NodeId> {
@@ -325,7 +326,7 @@ mod tests {
             let node = Arc::new(SupervisionNode::new(
                 node_id,
                 NodeType::RootSupervisor,
-                None
+                None,
             ));
 
             let mut nodes = self.nodes.lock().unwrap();
@@ -336,18 +337,23 @@ mod tests {
             Ok(node_id)
         }
 
-        fn create_supervisor(&self, parent_id: NodeId, strategy: SupervisionStrategy) -> Result<NodeId, String> {
+        fn create_supervisor(
+            &self,
+            parent_id: NodeId,
+            strategy: SupervisionStrategy,
+        ) -> Result<NodeId, String> {
             let node_id = self.next_node_id.fetch_add(1, Ordering::Relaxed);
             let node = Arc::new(SupervisionNode::new(
                 node_id,
                 NodeType::Supervisor { strategy },
-                Some(parent_id)
+                Some(parent_id),
             ));
 
             let mut nodes = self.nodes.lock().unwrap();
 
             // Verify parent exists and is a supervisor
-            let parent = nodes.get(&parent_id)
+            let parent = nodes
+                .get(&parent_id)
                 .ok_or_else(|| format!("Parent supervisor {} not found", parent_id))?;
 
             if !parent.is_supervisor() {
@@ -363,18 +369,23 @@ mod tests {
             Ok(node_id)
         }
 
-        fn create_worker(&self, supervisor_id: NodeId, worker_type: WorkerType) -> Result<NodeId, String> {
+        fn create_worker(
+            &self,
+            supervisor_id: NodeId,
+            worker_type: WorkerType,
+        ) -> Result<NodeId, String> {
             let node_id = self.next_node_id.fetch_add(1, Ordering::Relaxed);
             let node = Arc::new(SupervisionNode::new(
                 node_id,
                 NodeType::Worker { worker_type },
-                Some(supervisor_id)
+                Some(supervisor_id),
             ));
 
             let mut nodes = self.nodes.lock().unwrap();
 
             // Verify supervisor exists
-            let supervisor = nodes.get(&supervisor_id)
+            let supervisor = nodes
+                .get(&supervisor_id)
                 .ok_or_else(|| format!("Supervisor {} not found", supervisor_id))?;
 
             if !supervisor.is_supervisor() {
@@ -389,17 +400,22 @@ mod tests {
             Ok(node_id)
         }
 
-        fn create_service(&self, supervisor_id: NodeId, service_type: ServiceType) -> Result<NodeId, String> {
+        fn create_service(
+            &self,
+            supervisor_id: NodeId,
+            service_type: ServiceType,
+        ) -> Result<NodeId, String> {
             let node_id = self.next_node_id.fetch_add(1, Ordering::Relaxed);
             let node = Arc::new(SupervisionNode::new(
                 node_id,
                 NodeType::Service { service_type },
-                Some(supervisor_id)
+                Some(supervisor_id),
             ));
 
             let mut nodes = self.nodes.lock().unwrap();
 
-            let supervisor = nodes.get(&supervisor_id)
+            let supervisor = nodes
+                .get(&supervisor_id)
                 .ok_or_else(|| format!("Supervisor {} not found", supervisor_id))?;
 
             supervisor.add_child(node_id);
@@ -447,9 +463,15 @@ mod tests {
             Ok(())
         }
 
-        fn propagate_shutdown_signal(&self, node_id: NodeId, signal: ShutdownSignal, cascade_start: Instant) -> Result<(), String> {
+        fn propagate_shutdown_signal(
+            &self,
+            node_id: NodeId,
+            signal: ShutdownSignal,
+            cascade_start: Instant,
+        ) -> Result<(), String> {
             let nodes = self.nodes.lock().unwrap();
-            let node = nodes.get(&node_id)
+            let node = nodes
+                .get(&node_id)
                 .ok_or_else(|| format!("Node {} not found during shutdown", node_id))?
                 .clone();
             drop(nodes);
@@ -477,7 +499,13 @@ mod tests {
             Ok(())
         }
 
-        fn signal_children(&self, parent_id: NodeId, children: &[NodeId], signal: ShutdownSignal, cascade_start: Instant) -> Result<(), String> {
+        fn signal_children(
+            &self,
+            parent_id: NodeId,
+            children: &[NodeId],
+            signal: ShutdownSignal,
+            cascade_start: Instant,
+        ) -> Result<(), String> {
             let signal_start = Instant::now();
 
             if self.shutdown_config.parallel_shutdown {
@@ -503,17 +531,17 @@ mod tests {
             }
 
             let signal_duration = signal_start.elapsed();
-            self.stats.signal_propagation_time_ms.fetch_add(
-                signal_duration.as_millis() as u64,
-                Ordering::Relaxed
-            );
+            self.stats
+                .signal_propagation_time_ms
+                .fetch_add(signal_duration.as_millis() as u64, Ordering::Relaxed);
 
             Ok(())
         }
 
         fn begin_node_drain(&self, node_id: NodeId, cascade_start: Instant) -> Result<(), String> {
             let nodes = self.nodes.lock().unwrap();
-            let node = nodes.get(&node_id)
+            let node = nodes
+                .get(&node_id)
                 .ok_or_else(|| format!("Node {} not found during drain", node_id))?
                 .clone();
             drop(nodes);
@@ -547,22 +575,22 @@ mod tests {
         async fn simulate_node_drain(&self, node: &SupervisionNode) -> Result<Duration, String> {
             // Simulate different drain times based on node type
             let base_drain_ms = match &node.node_type {
-                NodeType::RootSupervisor => 100,       // Root supervisor drains quickly
-                NodeType::Supervisor { .. } => 200,    // Regular supervisors
+                NodeType::RootSupervisor => 100,    // Root supervisor drains quickly
+                NodeType::Supervisor { .. } => 200, // Regular supervisors
                 NodeType::Worker { worker_type } => {
                     match worker_type {
                         WorkerType::Transient => 150,
-                        WorkerType::Permanent => 300,  // Permanent workers take longer
-                        WorkerType::Temporary => 50,   // Temporary workers drain fast
+                        WorkerType::Permanent => 300, // Permanent workers take longer
+                        WorkerType::Temporary => 50,  // Temporary workers drain fast
                     }
                 }
                 NodeType::Service { service_type } => {
                     match service_type {
-                        ServiceType::HttpServer => 500,     // HTTP server needs to drain connections
-                        ServiceType::DatabasePool => 800,   // DB pools need to close connections
-                        ServiceType::MessageQueue => 600,   // Message queues need to flush
-                        ServiceType::FileWatcher => 100,    // File watchers shut down quickly
-                        ServiceType::TimerService => 150,   // Timers can stop quickly
+                        ServiceType::HttpServer => 500, // HTTP server needs to drain connections
+                        ServiceType::DatabasePool => 800, // DB pools need to close connections
+                        ServiceType::MessageQueue => 600, // Message queues need to flush
+                        ServiceType::FileWatcher => 100, // File watchers shut down quickly
+                        ServiceType::TimerService => 150, // Timers can stop quickly
                     }
                 }
             };
@@ -579,7 +607,8 @@ mod tests {
 
         fn complete_node_drain(&self, node_id: NodeId, drain_start: Instant) -> Result<(), String> {
             let nodes = self.nodes.lock().unwrap();
-            let node = nodes.get(&node_id)
+            let node = nodes
+                .get(&node_id)
                 .ok_or_else(|| format!("Node {} not found during drain completion", node_id))?
                 .clone();
             drop(nodes);
@@ -593,11 +622,12 @@ mod tests {
             }
 
             // Update statistics
-            node.stats.successful_shutdowns.fetch_add(1, Ordering::Relaxed);
-            node.stats.total_shutdown_time_ms.fetch_add(
-                drain_duration.as_millis() as u64,
-                Ordering::Relaxed
-            );
+            node.stats
+                .successful_shutdowns
+                .fetch_add(1, Ordering::Relaxed);
+            node.stats
+                .total_shutdown_time_ms
+                .fetch_add(drain_duration.as_millis() as u64, Ordering::Relaxed);
 
             // Wait for all children to complete drain
             let children = node.get_children();
@@ -611,16 +641,24 @@ mod tests {
             Ok(())
         }
 
-        fn wait_for_children_drain(&self, parent_id: NodeId, children: &[NodeId]) -> Result<(), String> {
+        fn wait_for_children_drain(
+            &self,
+            parent_id: NodeId,
+            children: &[NodeId],
+        ) -> Result<(), String> {
             let timeout = Duration::from_millis(self.shutdown_config.supervisor_timeout_ms);
             let wait_start = Instant::now();
 
             for &child_id in children {
-                let remaining_timeout = timeout.checked_sub(wait_start.elapsed())
+                let remaining_timeout = timeout
+                    .checked_sub(wait_start.elapsed())
                     .unwrap_or(Duration::ZERO);
 
                 if remaining_timeout.is_zero() {
-                    return Err(format!("Timeout waiting for child {} of parent {}", child_id, parent_id));
+                    return Err(format!(
+                        "Timeout waiting for child {} of parent {}",
+                        child_id, parent_id
+                    ));
                 }
 
                 self.wait_for_node_drain_with_timeout(child_id, remaining_timeout)?;
@@ -642,7 +680,11 @@ mod tests {
             self.wait_for_node_drain_with_timeout(node_id, timeout)
         }
 
-        fn wait_for_node_drain_with_timeout(&self, node_id: NodeId, timeout: Duration) -> Result<(), String> {
+        fn wait_for_node_drain_with_timeout(
+            &self,
+            node_id: NodeId,
+            timeout: Duration,
+        ) -> Result<(), String> {
             let wait_start = Instant::now();
 
             loop {
@@ -665,9 +707,14 @@ mod tests {
             }
         }
 
-        fn handle_drain_timeout(&self, node_id: NodeId, actual_duration: Duration) -> Result<(), String> {
+        fn handle_drain_timeout(
+            &self,
+            node_id: NodeId,
+            actual_duration: Duration,
+        ) -> Result<(), String> {
             let nodes = self.nodes.lock().unwrap();
-            let node = nodes.get(&node_id)
+            let node = nodes
+                .get(&node_id)
                 .ok_or_else(|| format!("Node {} not found during timeout handling", node_id))?
                 .clone();
             drop(nodes);
@@ -698,7 +745,8 @@ mod tests {
 
         fn force_terminate_node(&self, node_id: NodeId) -> Result<(), String> {
             let nodes = self.nodes.lock().unwrap();
-            let node = nodes.get(&node_id)
+            let node = nodes
+                .get(&node_id)
                 .ok_or_else(|| format!("Node {} not found during force termination", node_id))?
                 .clone();
             drop(nodes);
@@ -708,7 +756,9 @@ mod tests {
                 shutdown_state.force_terminated = true;
             }
 
-            node.stats.force_terminations.fetch_add(1, Ordering::Relaxed);
+            node.stats
+                .force_terminations
+                .fetch_add(1, Ordering::Relaxed);
 
             // Force terminate immediately
             self.complete_node_termination(node_id)?;
@@ -718,7 +768,8 @@ mod tests {
 
         fn complete_node_termination(&self, node_id: NodeId) -> Result<(), String> {
             let nodes = self.nodes.lock().unwrap();
-            let node = nodes.get(&node_id)
+            let node = nodes
+                .get(&node_id)
                 .ok_or_else(|| format!("Node {} not found during termination", node_id))?
                 .clone();
             drop(nodes);
@@ -756,27 +807,30 @@ mod tests {
             // Calculate total shutdown time
             if let Some(start_time) = *self.shutdown_started_at.lock().unwrap() {
                 let total_duration = completion_time.duration_since(start_time);
-                self.stats.total_shutdown_time_ms.fetch_add(
-                    total_duration.as_millis() as u64,
-                    Ordering::Relaxed
-                );
+                self.stats
+                    .total_shutdown_time_ms
+                    .fetch_add(total_duration.as_millis() as u64, Ordering::Relaxed);
 
                 let current_max = self.stats.max_shutdown_time_ms.load(Ordering::Relaxed);
                 let new_duration_ms = total_duration.as_millis() as u64;
                 if new_duration_ms > current_max {
-                    self.stats.max_shutdown_time_ms.store(new_duration_ms, Ordering::Relaxed);
+                    self.stats
+                        .max_shutdown_time_ms
+                        .store(new_duration_ms, Ordering::Relaxed);
                 }
             }
 
-            self.stats.successful_cascades.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .successful_cascades
+                .fetch_add(1, Ordering::Relaxed);
             self.shutdown_active.store(false, Ordering::Relaxed);
 
             Ok(())
         }
 
         fn is_shutdown_complete(&self) -> bool {
-            !self.shutdown_active.load(Ordering::Relaxed) &&
-            self.shutdown_completed_at.lock().unwrap().is_some()
+            !self.shutdown_active.load(Ordering::Relaxed)
+                && self.shutdown_completed_at.lock().unwrap().is_some()
         }
 
         fn get_shutdown_statistics(&self) -> ShutdownStatistics {
@@ -787,8 +841,10 @@ mod tests {
                 let state = node.get_state();
                 let shutdown_state = node.shutdown_state.lock().unwrap().clone();
 
-                let timing = if let (Some(started), Some(completed)) =
-                    (shutdown_state.signal_received_at, *node.shutdown_completed_at.lock().unwrap()) {
+                let timing = if let (Some(started), Some(completed)) = (
+                    shutdown_state.signal_received_at,
+                    *node.shutdown_completed_at.lock().unwrap(),
+                ) {
                     Some(completed.duration_since(started))
                 } else {
                     None
@@ -808,20 +864,23 @@ mod tests {
             // Safe dual lock acquisition to prevent deadlock
             let total_time = {
                 // Always acquire locks in consistent order by memory address to prevent deadlock
-                let (first_lock, second_lock) = if &self.shutdown_started_at as *const _ <
-                                                  &self.shutdown_completed_at as *const _ {
+                let (first_lock, second_lock) = if &self.shutdown_started_at as *const _
+                    < &self.shutdown_completed_at as *const _
+                {
                     (&self.shutdown_started_at, &self.shutdown_completed_at)
                 } else {
                     (&self.shutdown_completed_at, &self.shutdown_started_at)
                 };
 
-                let first_guard = first_lock.lock()
+                let first_guard = first_lock
+                    .lock()
                     .map_err(|poison_err| {
                         eprintln!("Shutdown timing mutex poisoned, recovering...");
                         poison_err.into_inner()
                     })
                     .unwrap();
-                let second_guard = second_lock.lock()
+                let second_guard = second_lock
+                    .lock()
                     .map_err(|poison_err| {
                         eprintln!("Shutdown timing mutex poisoned, recovering...");
                         poison_err.into_inner()
@@ -843,12 +902,17 @@ mod tests {
 
             ShutdownStatistics {
                 tree_shutdown_time: total_time,
-                successful_nodes: node_stats.iter().filter(|n| n.final_state == NodeState::Terminated && !n.timeout_exceeded).count(),
+                successful_nodes: node_stats
+                    .iter()
+                    .filter(|n| n.final_state == NodeState::Terminated && !n.timeout_exceeded)
+                    .count(),
                 timeout_nodes: node_stats.iter().filter(|n| n.timeout_exceeded).count(),
                 force_terminated_nodes: node_stats.iter().filter(|n| n.force_terminated).count(),
                 node_statistics: node_stats,
                 cascade_successful: self.stats.successful_cascades.load(Ordering::Relaxed) > 0,
-                bounded_completion: total_time.map_or(false, |t| t.as_millis() <= self.shutdown_config.force_kill_timeout_ms as u128),
+                bounded_completion: total_time.map_or(false, |t| {
+                    t.as_millis() <= self.shutdown_config.force_kill_timeout_ms as u128
+                }),
             }
         }
     }
@@ -920,7 +984,12 @@ mod tests {
             Ok(())
         }
 
-        fn build_tree_level(&mut self, parent_id: NodeId, structure: &TreeStructure, current_depth: usize) -> Result<(), String> {
+        fn build_tree_level(
+            &mut self,
+            parent_id: NodeId,
+            structure: &TreeStructure,
+            current_depth: usize,
+        ) -> Result<(), String> {
             if current_depth >= structure.max_depth {
                 return Ok(());
             }
@@ -929,7 +998,11 @@ mod tests {
             for i in 0..structure.supervisors {
                 let supervisor_id = self.tree.create_supervisor(
                     parent_id,
-                    if i % 2 == 0 { SupervisionStrategy::OneForOne } else { SupervisionStrategy::OneForAll }
+                    if i % 2 == 0 {
+                        SupervisionStrategy::OneForOne
+                    } else {
+                        SupervisionStrategy::OneForAll
+                    },
                 )?;
 
                 // Create workers under this supervisor
@@ -970,10 +1043,12 @@ mod tests {
             let start_time = Instant::now();
 
             // Signal graceful shutdown
-            self.tree.signal_graceful_shutdown(scenario.shutdown_signal)?;
+            self.tree
+                .signal_graceful_shutdown(scenario.shutdown_signal)?;
 
             // Wait for shutdown to complete or timeout
-            let timeout = Duration::from_millis(scenario.expected_completion_time_ms + scenario.tolerance_ms);
+            let timeout =
+                Duration::from_millis(scenario.expected_completion_time_ms + scenario.tolerance_ms);
             let wait_start = Instant::now();
 
             while !self.tree.is_shutdown_complete() {
@@ -991,7 +1066,8 @@ mod tests {
                 total_shutdown_time: total_time,
                 expected_time_ms: scenario.expected_completion_time_ms,
                 tolerance_ms: scenario.tolerance_ms,
-                within_bounds: total_time.as_millis() <= (scenario.expected_completion_time_ms + scenario.tolerance_ms) as u128,
+                within_bounds: total_time.as_millis()
+                    <= (scenario.expected_completion_time_ms + scenario.tolerance_ms) as u128,
                 statistics: stats,
                 success: stats.cascade_successful && stats.bounded_completion,
             })
@@ -1064,27 +1140,38 @@ mod tests {
         harness.generate_test_scenarios();
         let scenario = &harness.test_scenarios[0].clone(); // Simple Tree Shutdown
 
-        let result = harness.execute_shutdown_test(scenario)
+        let result = harness
+            .execute_shutdown_test(scenario)
             .expect("Failed to execute basic SIGTERM cascade test");
 
         assert!(result.success, "Basic SIGTERM cascade failed");
-        assert!(result.within_bounds,
+        assert!(
+            result.within_bounds,
             "Shutdown took {}ms, expected {}ms ± {}ms",
             result.total_shutdown_time.as_millis(),
             result.expected_time_ms,
-            result.tolerance_ms);
-        assert!(result.statistics.cascade_successful, "Shutdown cascade was not successful");
-        assert_eq!(result.statistics.timeout_nodes, 0, "No nodes should timeout in basic test");
+            result.tolerance_ms
+        );
+        assert!(
+            result.statistics.cascade_successful,
+            "Shutdown cascade was not successful"
+        );
+        assert_eq!(
+            result.statistics.timeout_nodes, 0,
+            "No nodes should timeout in basic test"
+        );
 
-        println!("✓ Basic SIGTERM cascade completed in {}ms with {} successful nodes",
-                 result.total_shutdown_time.as_millis(),
-                 result.statistics.successful_nodes);
+        println!(
+            "✓ Basic SIGTERM cascade completed in {}ms with {} successful nodes",
+            result.total_shutdown_time.as_millis(),
+            result.statistics.successful_nodes
+        );
     }
 
     #[test]
     fn test_deep_hierarchy_bounded_shutdown() {
         let config = ShutdownConfig {
-            drain_timeout_ms: 3000,    // Longer timeout for complex tree
+            drain_timeout_ms: 3000, // Longer timeout for complex tree
             supervisor_timeout_ms: 4000,
             ..ShutdownConfig::default()
         };
@@ -1093,22 +1180,31 @@ mod tests {
         harness.generate_test_scenarios();
         let scenario = &harness.test_scenarios[1].clone(); // Deep Hierarchy Shutdown
 
-        let result = harness.execute_shutdown_test(scenario)
+        let result = harness
+            .execute_shutdown_test(scenario)
             .expect("Failed to execute deep hierarchy test");
 
         assert!(result.success, "Deep hierarchy shutdown failed");
-        assert!(result.statistics.bounded_completion,
-            "Shutdown did not complete within bounds");
-        assert!(result.statistics.cascade_successful,
-            "Shutdown cascade failed in deep hierarchy");
+        assert!(
+            result.statistics.bounded_completion,
+            "Shutdown did not complete within bounds"
+        );
+        assert!(
+            result.statistics.cascade_successful,
+            "Shutdown cascade failed in deep hierarchy"
+        );
 
         // Verify all nodes terminated successfully
-        assert_eq!(result.statistics.force_terminated_nodes, 0,
-            "No nodes should require force termination");
+        assert_eq!(
+            result.statistics.force_terminated_nodes, 0,
+            "No nodes should require force termination"
+        );
 
-        println!("✓ Deep hierarchy shutdown completed in {}ms, {} levels processed",
-                 result.total_shutdown_time.as_millis(),
-                 scenario.tree_structure.max_depth);
+        println!(
+            "✓ Deep hierarchy shutdown completed in {}ms, {} levels processed",
+            result.total_shutdown_time.as_millis(),
+            scenario.tree_structure.max_depth
+        );
     }
 
     #[test]
@@ -1124,29 +1220,36 @@ mod tests {
         harness.generate_test_scenarios();
         let scenario = &harness.test_scenarios[2].clone(); // High Load Shutdown
 
-        let result = harness.execute_shutdown_test(scenario)
+        let result = harness
+            .execute_shutdown_test(scenario)
             .expect("Failed to execute high load test");
 
         assert!(result.success, "High load shutdown failed");
-        assert!(result.within_bounds,
+        assert!(
+            result.within_bounds,
             "High load shutdown exceeded time bounds: {}ms > {}ms",
             result.total_shutdown_time.as_millis(),
-            scenario.expected_completion_time_ms + scenario.tolerance_ms);
+            scenario.expected_completion_time_ms + scenario.tolerance_ms
+        );
 
         // Verify parallel shutdown efficiency
         let expected_sequential_time = result.statistics.node_statistics.len() as u64 * 200; // Estimate
-        assert!(result.total_shutdown_time.as_millis() < expected_sequential_time as u128,
-            "Parallel shutdown should be faster than sequential");
+        assert!(
+            result.total_shutdown_time.as_millis() < expected_sequential_time as u128,
+            "Parallel shutdown should be faster than sequential"
+        );
 
-        println!("✓ High load parallel shutdown: {} nodes in {}ms",
-                 result.statistics.node_statistics.len(),
-                 result.total_shutdown_time.as_millis());
+        println!(
+            "✓ High load parallel shutdown: {} nodes in {}ms",
+            result.statistics.node_statistics.len(),
+            result.total_shutdown_time.as_millis()
+        );
     }
 
     #[test]
     fn test_timeout_escalation_handling() {
         let config = ShutdownConfig {
-            drain_timeout_ms: 100,      // Very short timeout to trigger escalation
+            drain_timeout_ms: 100, // Very short timeout to trigger escalation
             graceful_escalation: true,
             force_kill_timeout_ms: 1000,
             ..ShutdownConfig::default()
@@ -1162,10 +1265,14 @@ mod tests {
             max_depth: 2,
         };
 
-        harness.build_test_tree(&structure).expect("Failed to build test tree");
+        harness
+            .build_test_tree(&structure)
+            .expect("Failed to build test tree");
 
         let start_time = Instant::now();
-        harness.tree.signal_graceful_shutdown(ShutdownSignal::Sigterm)
+        harness
+            .tree
+            .signal_graceful_shutdown(ShutdownSignal::Sigterm)
             .expect("Failed to signal shutdown");
 
         // Wait for completion
@@ -1179,14 +1286,21 @@ mod tests {
         let stats = harness.tree.get_shutdown_statistics();
 
         // Should have some timeout nodes that were force terminated
-        assert!(stats.timeout_nodes > 0 || stats.force_terminated_nodes > 0,
-            "Expected some nodes to timeout and be force terminated");
-        assert!(stats.cascade_successful, "Cascade should still succeed with escalation");
+        assert!(
+            stats.timeout_nodes > 0 || stats.force_terminated_nodes > 0,
+            "Expected some nodes to timeout and be force terminated"
+        );
+        assert!(
+            stats.cascade_successful,
+            "Cascade should still succeed with escalation"
+        );
 
-        println!("✓ Timeout escalation: {} timeouts, {} force terminations in {}ms",
-                 stats.timeout_nodes,
-                 stats.force_terminated_nodes,
-                 start_time.elapsed().as_millis());
+        println!(
+            "✓ Timeout escalation: {} timeouts, {} force terminations in {}ms",
+            stats.timeout_nodes,
+            stats.force_terminated_nodes,
+            start_time.elapsed().as_millis()
+        );
     }
 
     #[test]
@@ -1202,10 +1316,14 @@ mod tests {
             max_depth: 3,
         };
 
-        harness.build_test_tree(&structure).expect("Failed to build test tree");
+        harness
+            .build_test_tree(&structure)
+            .expect("Failed to build test tree");
 
         let signal_start = Instant::now();
-        harness.tree.signal_graceful_shutdown(ShutdownSignal::Sigterm)
+        harness
+            .tree
+            .signal_graceful_shutdown(ShutdownSignal::Sigterm)
             .expect("Failed to signal shutdown");
 
         // Measure time until all nodes have received signal
@@ -1217,16 +1335,26 @@ mod tests {
         let propagation_time = stats.tree_shutdown_time.unwrap();
 
         // Signal propagation should be very fast (< 100ms for this size tree)
-        assert!(propagation_time.as_millis() < 5000,
-            "Signal propagation took too long: {}ms", propagation_time.as_millis());
+        assert!(
+            propagation_time.as_millis() < 5000,
+            "Signal propagation took too long: {}ms",
+            propagation_time.as_millis()
+        );
 
         // All nodes should have received the signal
-        assert!(stats.node_statistics.iter().all(|n| n.final_state == NodeState::Terminated),
-            "Not all nodes reached terminated state");
+        assert!(
+            stats
+                .node_statistics
+                .iter()
+                .all(|n| n.final_state == NodeState::Terminated),
+            "Not all nodes reached terminated state"
+        );
 
-        println!("✓ Signal propagation: {} nodes in {}ms",
-                 stats.node_statistics.len(),
-                 propagation_time.as_millis());
+        println!(
+            "✓ Signal propagation: {} nodes in {}ms",
+            stats.node_statistics.len(),
+            propagation_time.as_millis()
+        );
     }
 
     #[test]
@@ -1235,25 +1363,41 @@ mod tests {
         let mut harness = SignalShutdownHarness::new(config);
 
         // Create tree with different supervision strategies
-        let root_id = harness.tree.create_root_supervisor().expect("Failed to create root");
+        let root_id = harness
+            .tree
+            .create_root_supervisor()
+            .expect("Failed to create root");
 
-        let one_for_one_id = harness.tree.create_supervisor(root_id, SupervisionStrategy::OneForOne)
+        let one_for_one_id = harness
+            .tree
+            .create_supervisor(root_id, SupervisionStrategy::OneForOne)
             .expect("Failed to create one-for-one supervisor");
-        let one_for_all_id = harness.tree.create_supervisor(root_id, SupervisionStrategy::OneForAll)
+        let one_for_all_id = harness
+            .tree
+            .create_supervisor(root_id, SupervisionStrategy::OneForAll)
             .expect("Failed to create one-for-all supervisor");
 
         // Add workers to each supervisor
         for _ in 0..3 {
-            harness.tree.create_worker(one_for_one_id, WorkerType::Permanent)
+            harness
+                .tree
+                .create_worker(one_for_one_id, WorkerType::Permanent)
                 .expect("Failed to create worker");
-            harness.tree.create_worker(one_for_all_id, WorkerType::Permanent)
+            harness
+                .tree
+                .create_worker(one_for_all_id, WorkerType::Permanent)
                 .expect("Failed to create worker");
         }
 
-        harness.tree.start_all_nodes().expect("Failed to start nodes");
+        harness
+            .tree
+            .start_all_nodes()
+            .expect("Failed to start nodes");
 
         // Signal shutdown and verify behavior
-        harness.tree.signal_graceful_shutdown(ShutdownSignal::Sigterm)
+        harness
+            .tree
+            .signal_graceful_shutdown(ShutdownSignal::Sigterm)
             .expect("Failed to signal shutdown");
 
         while !harness.tree.is_shutdown_complete() {
@@ -1263,17 +1407,25 @@ mod tests {
         let stats = harness.tree.get_shutdown_statistics();
 
         // All nodes should shut down regardless of supervision strategy
-        assert!(stats.cascade_successful, "Shutdown should succeed for all strategies");
-        assert_eq!(stats.timeout_nodes, 0, "No timeouts expected with default config");
+        assert!(
+            stats.cascade_successful,
+            "Shutdown should succeed for all strategies"
+        );
+        assert_eq!(
+            stats.timeout_nodes, 0,
+            "No timeouts expected with default config"
+        );
 
-        println!("✓ Supervision strategy shutdown: {} nodes completed successfully",
-                 stats.successful_nodes);
+        println!(
+            "✓ Supervision strategy shutdown: {} nodes completed successfully",
+            stats.successful_nodes
+        );
     }
 
     #[test]
     fn test_bounded_drain_time_enforcement() {
         let strict_config = ShutdownConfig {
-            drain_timeout_ms: 500,      // Strict 500ms limit
+            drain_timeout_ms: 500, // Strict 500ms limit
             supervisor_timeout_ms: 600,
             force_kill_timeout_ms: 1000,
             graceful_escalation: false, // No escalation - must meet bounds
@@ -1290,10 +1442,14 @@ mod tests {
             max_depth: 2,
         };
 
-        harness.build_test_tree(&structure).expect("Failed to build test tree");
+        harness
+            .build_test_tree(&structure)
+            .expect("Failed to build test tree");
 
         let start_time = Instant::now();
-        harness.tree.signal_graceful_shutdown(ShutdownSignal::Sigterm)
+        harness
+            .tree
+            .signal_graceful_shutdown(ShutdownSignal::Sigterm)
             .expect("Failed to signal shutdown");
 
         while !harness.tree.is_shutdown_complete() {
@@ -1307,16 +1463,23 @@ mod tests {
         let stats = harness.tree.get_shutdown_statistics();
 
         // Should complete within bounded time
-        assert!(total_time.as_millis() <= 1000,
-            "Shutdown exceeded bounded time: {}ms > 1000ms", total_time.as_millis());
+        assert!(
+            total_time.as_millis() <= 1000,
+            "Shutdown exceeded bounded time: {}ms > 1000ms",
+            total_time.as_millis()
+        );
 
         // Should have no timeouts with fast components
-        assert_eq!(stats.timeout_nodes, 0,
-            "No nodes should timeout with fast-draining components");
+        assert_eq!(
+            stats.timeout_nodes, 0,
+            "No nodes should timeout with fast-draining components"
+        );
 
-        println!("✓ Bounded drain time: {} nodes in {}ms (limit: 1000ms)",
-                 stats.node_statistics.len(),
-                 total_time.as_millis());
+        println!(
+            "✓ Bounded drain time: {} nodes in {}ms (limit: 1000ms)",
+            stats.node_statistics.len(),
+            total_time.as_millis()
+        );
     }
 
     #[test]
@@ -1332,10 +1495,14 @@ mod tests {
             max_depth: 2,
         };
 
-        harness_term.build_test_tree(&structure).expect("Failed to build SIGTERM tree");
+        harness_term
+            .build_test_tree(&structure)
+            .expect("Failed to build SIGTERM tree");
 
         let start_term = Instant::now();
-        harness_term.tree.signal_graceful_shutdown(ShutdownSignal::Sigterm)
+        harness_term
+            .tree
+            .signal_graceful_shutdown(ShutdownSignal::Sigterm)
             .expect("Failed to signal SIGTERM");
 
         while !harness_term.tree.is_shutdown_complete() {
@@ -1345,10 +1512,14 @@ mod tests {
 
         // Test SIGINT
         let mut harness_int = SignalShutdownHarness::new(config);
-        harness_int.build_test_tree(&structure).expect("Failed to build SIGINT tree");
+        harness_int
+            .build_test_tree(&structure)
+            .expect("Failed to build SIGINT tree");
 
         let start_int = Instant::now();
-        harness_int.tree.signal_graceful_shutdown(ShutdownSignal::Sigint)
+        harness_int
+            .tree
+            .signal_graceful_shutdown(ShutdownSignal::Sigint)
             .expect("Failed to signal SIGINT");
 
         while !harness_int.tree.is_shutdown_complete() {
@@ -1365,11 +1536,17 @@ mod tests {
 
         // Timing should be similar (both are graceful)
         let time_diff = sigterm_time.as_millis().abs_diff(sigint_time.as_millis());
-        assert!(time_diff < 200, "SIGTERM and SIGINT timing too different: {}ms vs {}ms",
-                sigterm_time.as_millis(), sigint_time.as_millis());
+        assert!(
+            time_diff < 200,
+            "SIGTERM and SIGINT timing too different: {}ms vs {}ms",
+            sigterm_time.as_millis(),
+            sigint_time.as_millis()
+        );
 
-        println!("✓ Signal comparison: SIGTERM {}ms, SIGINT {}ms",
-                 sigterm_time.as_millis(),
-                 sigint_time.as_millis());
+        println!(
+            "✓ Signal comparison: SIGTERM {}ms, SIGINT {}ms",
+            sigterm_time.as_millis(),
+            sigint_time.as_millis()
+        );
     }
 }

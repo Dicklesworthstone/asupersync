@@ -41,13 +41,16 @@ mod tests {
     )]
 
     use crate::cx::{Cx, Registry, Scope};
-    use crate::lab::{LabConfig, LabRuntime, oracle::{OracleSuite, QuiescenceOracle, QuiescenceViolation, Oracle}};
+    use crate::lab::{
+        LabConfig, LabRuntime,
+        oracle::{Oracle, OracleSuite, QuiescenceOracle, QuiescenceViolation},
+    };
     use crate::runtime::{Runtime, state::RuntimeState};
     use crate::sync::{Mutex, Notify};
-    use crate::types::{Outcome, RegionId, TaskId, Time, Budget};
+    use crate::types::{Budget, Outcome, RegionId, TaskId, Time};
     use crate::util::ArenaIndex;
     use std::collections::{HashMap, VecDeque};
-    use std::future::{pending, ready, Future};
+    use std::future::{Future, pending, ready};
     use std::pin::Pin;
     use std::sync::{
         Arc, RwLock,
@@ -119,7 +122,6 @@ mod tests {
         is_synthetic: bool,
     }
 
-
     impl QuiescenceIntegrationTestHarness {
         /// Creates a new test harness for quiescence oracle integration testing
         pub fn new(scenario: &str) -> Self {
@@ -154,32 +156,38 @@ mod tests {
 
             // Phase 2: Create region and spawn tasks
             result.phase = QuiescenceTestPhase::RegionCreation;
-            let region_result = cx.region("simple_quiescence_test", Budget::forever(), |scope| async move {
-                // Phase 3: Spawn some tasks
-                result.phase = QuiescenceTestPhase::TaskSpawning;
-                self.increment_stat("tasks_spawned", 3);
+            let region_result = cx
+                .region(
+                    "simple_quiescence_test",
+                    Budget::forever(),
+                    |scope| async move {
+                        // Phase 3: Spawn some tasks
+                        result.phase = QuiescenceTestPhase::TaskSpawning;
+                        self.increment_stat("tasks_spawned", 3);
 
-                let task1 = scope.spawn("worker_1", || async {
-                    self.simulate_work_with_completion().await;
-                });
+                        let task1 = scope.spawn("worker_1", || async {
+                            self.simulate_work_with_completion().await;
+                        });
 
-                let task2 = scope.spawn("worker_2", || async {
-                    self.simulate_work_with_completion().await;
-                });
+                        let task2 = scope.spawn("worker_2", || async {
+                            self.simulate_work_with_completion().await;
+                        });
 
-                let task3 = scope.spawn("worker_3", || async {
-                    self.simulate_work_with_completion().await;
-                });
+                        let task3 = scope.spawn("worker_3", || async {
+                            self.simulate_work_with_completion().await;
+                        });
 
-                // Phase 4: Wait for all tasks to complete
-                result.phase = QuiescenceTestPhase::TaskCompletion;
-                task1.await.unwrap();
-                task2.await.unwrap();
-                task3.await.unwrap();
+                        // Phase 4: Wait for all tasks to complete
+                        result.phase = QuiescenceTestPhase::TaskCompletion;
+                        task1.await.unwrap();
+                        task2.await.unwrap();
+                        task3.await.unwrap();
 
-                self.increment_stat("tasks_completed", 3);
-                Ok::<(), crate::error::Error>(())
-            }).await;
+                        self.increment_stat("tasks_completed", 3);
+                        Ok::<(), crate::error::Error>(())
+                    },
+                )
+                .await;
 
             // Phase 5: Verify quiescence
             result.phase = QuiescenceTestPhase::OracleVerification;
@@ -188,7 +196,8 @@ mod tests {
                     // Verify oracle detected proper quiescence
                     if let Ok(oracle_suite) = self.oracle_suite.read() {
                         if let Some(violation) = oracle_suite.quiescence.violation() {
-                            result.error = Some(format!("Unexpected quiescence violation: {:?}", violation));
+                            result.error =
+                                Some(format!("Unexpected quiescence violation: {:?}", violation));
                         } else {
                             result.success = true;
                         }
@@ -225,37 +234,44 @@ mod tests {
             self.spurious_wake_controller.store(true, Ordering::Release);
 
             result.phase = QuiescenceTestPhase::RegionCreation;
-            let region_result = cx.region("spurious_wake_test", Budget::forever(), |scope| async move {
-                result.phase = QuiescenceTestPhase::TaskSpawning;
-                self.increment_stat("tasks_spawned", 2);
+            let region_result = cx
+                .region(
+                    "spurious_wake_test",
+                    Budget::forever(),
+                    |scope| async move {
+                        result.phase = QuiescenceTestPhase::TaskSpawning;
+                        self.increment_stat("tasks_spawned", 2);
 
-                // Create tasks that simulate spurious wake tolerance
-                let handle1 = scope.spawn("spurious_worker_1", || async {
-                    // Simulate work that might receive spurious wakes
-                    for _ in 0..50 {
-                        crate::runtime::yield_now().await;
-                    }
-                    self.increment_stat("spurious_wakes_injected", 5); // Simulated count
-                });
+                        // Create tasks that simulate spurious wake tolerance
+                        let handle1 = scope.spawn("spurious_worker_1", || async {
+                            // Simulate work that might receive spurious wakes
+                            for _ in 0..50 {
+                                crate::runtime::yield_now().await;
+                            }
+                            self.increment_stat("spurious_wakes_injected", 5); // Simulated count
+                        });
 
-                let handle2 = scope.spawn("spurious_worker_2", || async {
-                    // More work simulation
-                    for _ in 0..75 {
-                        crate::runtime::yield_now().await;
-                    }
-                    self.increment_stat("spurious_wakes_injected", 3); // Simulated count
-                });
+                        let handle2 = scope.spawn("spurious_worker_2", || async {
+                            // More work simulation
+                            for _ in 0..75 {
+                                crate::runtime::yield_now().await;
+                            }
+                            self.increment_stat("spurious_wakes_injected", 3); // Simulated count
+                        });
 
-                result.phase = QuiescenceTestPhase::TaskCompletion;
-                handle1.await.unwrap();
-                handle2.await.unwrap();
+                        result.phase = QuiescenceTestPhase::TaskCompletion;
+                        handle1.await.unwrap();
+                        handle2.await.unwrap();
 
-                self.increment_stat("tasks_completed", 2);
-                Ok::<(), crate::error::Error>(())
-            }).await;
+                        self.increment_stat("tasks_completed", 2);
+                        Ok::<(), crate::error::Error>(())
+                    },
+                )
+                .await;
 
             // Disable spurious wake injection
-            self.spurious_wake_controller.store(false, Ordering::Release);
+            self.spurious_wake_controller
+                .store(false, Ordering::Release);
 
             result.phase = QuiescenceTestPhase::OracleVerification;
             match region_result {
@@ -263,14 +279,18 @@ mod tests {
                     // Verify oracle was not fooled by spurious wakes
                     if let Ok(oracle_suite) = self.oracle_suite.read() {
                         if let Some(violation) = oracle_suite.quiescence.violation() {
-                            result.error = Some(format!("Oracle incorrectly detected violation due to spurious wakes: {:?}", violation));
+                            result.error = Some(format!(
+                                "Oracle incorrectly detected violation due to spurious wakes: {:?}",
+                                violation
+                            ));
                         } else {
                             // Verify we actually injected spurious wakes
                             let stats = self.get_stats_snapshot();
                             if stats.spurious_wakes_injected > 0 {
                                 result.success = true;
                             } else {
-                                result.error = Some("No spurious wakes were injected during test".to_string());
+                                result.error =
+                                    Some("No spurious wakes were injected during test".to_string());
                             }
                         }
                     }
@@ -302,63 +322,84 @@ mod tests {
             result.phase = QuiescenceTestPhase::OracleInitialization;
 
             result.phase = QuiescenceTestPhase::RegionCreation;
-            let region_result = cx.region("parent_region", Budget::forever(), |parent_scope| async move {
-                self.increment_stat("regions_created", 1);
+            let region_result = cx
+                .region(
+                    "parent_region",
+                    Budget::forever(),
+                    |parent_scope| async move {
+                        self.increment_stat("regions_created", 1);
 
-                // Create child regions with their own tasks
-                let child1_result = parent_scope.scope("child_region_1", Budget::forever(), |child1_scope| async move {
-                    self.increment_stat("regions_created", 1);
-                    self.increment_stat("tasks_spawned", 2);
+                        // Create child regions with their own tasks
+                        let child1_result = parent_scope
+                            .scope(
+                                "child_region_1",
+                                Budget::forever(),
+                                |child1_scope| async move {
+                                    self.increment_stat("regions_created", 1);
+                                    self.increment_stat("tasks_spawned", 2);
 
-                    let task1 = child1_scope.spawn("child1_worker_1", || async {
-                        self.simulate_work_with_completion().await;
-                    });
+                                    let task1 = child1_scope.spawn("child1_worker_1", || async {
+                                        self.simulate_work_with_completion().await;
+                                    });
 
-                    let task2 = child1_scope.spawn("child1_worker_2", || async {
-                        self.simulate_work_with_completion().await;
-                    });
+                                    let task2 = child1_scope.spawn("child1_worker_2", || async {
+                                        self.simulate_work_with_completion().await;
+                                    });
 
-                    task1.await.unwrap();
-                    task2.await.unwrap();
-                    self.increment_stat("tasks_completed", 2);
-                    Ok::<(), crate::error::Error>(())
-                }).await;
+                                    task1.await.unwrap();
+                                    task2.await.unwrap();
+                                    self.increment_stat("tasks_completed", 2);
+                                    Ok::<(), crate::error::Error>(())
+                                },
+                            )
+                            .await;
 
-                let child2_result = parent_scope.scope("child_region_2", Budget::forever(), |child2_scope| async move {
-                    self.increment_stat("regions_created", 1);
-                    self.increment_stat("tasks_spawned", 1);
+                        let child2_result = parent_scope
+                            .scope(
+                                "child_region_2",
+                                Budget::forever(),
+                                |child2_scope| async move {
+                                    self.increment_stat("regions_created", 1);
+                                    self.increment_stat("tasks_spawned", 1);
 
-                    let task = child2_scope.spawn("child2_worker", || async {
-                        self.simulate_work_with_completion().await;
-                    });
+                                    let task = child2_scope.spawn("child2_worker", || async {
+                                        self.simulate_work_with_completion().await;
+                                    });
 
-                    task.await.unwrap();
-                    self.increment_stat("tasks_completed", 1);
-                    Ok::<(), crate::error::Error>(())
-                }).await;
+                                    task.await.unwrap();
+                                    self.increment_stat("tasks_completed", 1);
+                                    Ok::<(), crate::error::Error>(())
+                                },
+                            )
+                            .await;
 
-                // Parent region also has its own work
-                result.phase = QuiescenceTestPhase::TaskSpawning;
-                self.increment_stat("tasks_spawned", 1);
-                let parent_task = parent_scope.spawn("parent_worker", || async {
-                    self.simulate_work_with_completion().await;
-                });
+                        // Parent region also has its own work
+                        result.phase = QuiescenceTestPhase::TaskSpawning;
+                        self.increment_stat("tasks_spawned", 1);
+                        let parent_task = parent_scope.spawn("parent_worker", || async {
+                            self.simulate_work_with_completion().await;
+                        });
 
-                // Wait for everything to complete
-                child1_result.unwrap();
-                child2_result.unwrap();
-                parent_task.await.unwrap();
-                self.increment_stat("tasks_completed", 1);
+                        // Wait for everything to complete
+                        child1_result.unwrap();
+                        child2_result.unwrap();
+                        parent_task.await.unwrap();
+                        self.increment_stat("tasks_completed", 1);
 
-                Ok::<(), crate::error::Error>(())
-            }).await;
+                        Ok::<(), crate::error::Error>(())
+                    },
+                )
+                .await;
 
             result.phase = QuiescenceTestPhase::OracleVerification;
             match region_result {
                 Ok(_) => {
                     if let Ok(oracle_suite) = self.oracle_suite.read() {
                         if let Some(violation) = oracle_suite.quiescence.violation() {
-                            result.error = Some(format!("Unexpected quiescence violation in nested regions: {:?}", violation));
+                            result.error = Some(format!(
+                                "Unexpected quiescence violation in nested regions: {:?}",
+                                violation
+                            ));
                         } else {
                             result.success = true;
                         }
@@ -376,7 +417,10 @@ mod tests {
         }
 
         /// Tests runtime state integration via snapshot hydration
-        pub async fn test_state_integration_verification(&mut self, cx: &Cx) -> QuiescenceTestResult {
+        pub async fn test_state_integration_verification(
+            &mut self,
+            cx: &Cx,
+        ) -> QuiescenceTestResult {
             let start_time = std::time::Instant::now();
             let mut result = QuiescenceTestResult {
                 test_name: "test_state_integration_verification".to_string(),
@@ -391,13 +435,19 @@ mod tests {
             result.phase = QuiescenceTestPhase::RuntimeStatePreparation;
 
             // Execute some work that will create runtime state
-            let _region_result = cx.region("state_integration_test", Budget::forever(), |scope| async move {
-                let task = scope.spawn("state_worker", || async {
-                    self.simulate_work_with_completion().await;
-                });
-                task.await.unwrap();
-                Ok::<(), crate::error::Error>(())
-            }).await;
+            let _region_result = cx
+                .region(
+                    "state_integration_test",
+                    Budget::forever(),
+                    |scope| async move {
+                        let task = scope.spawn("state_worker", || async {
+                            self.simulate_work_with_completion().await;
+                        });
+                        task.await.unwrap();
+                        Ok::<(), crate::error::Error>(())
+                    },
+                )
+                .await;
 
             result.phase = QuiescenceTestPhase::StateIntegrationVerification;
 
@@ -431,33 +481,47 @@ mod tests {
             result.phase = QuiescenceTestPhase::OracleInitialization;
 
             result.phase = QuiescenceTestPhase::RegionCreation;
-            let region_result = cx.region("comprehensive_test", Budget::forever(), |scope| async move {
-                // Create complex nested structure with spurious wakes
-                let nested_result = scope.scope("nested_with_spurious", Budget::forever(), |nested_scope| async move {
-                    // Mix of normal and spurious-wake-aware tasks
-                    let normal_task = nested_scope.spawn("normal", || async {
-                        self.simulate_work_with_completion().await;
-                    });
+            let region_result = cx
+                .region(
+                    "comprehensive_test",
+                    Budget::forever(),
+                    |scope| async move {
+                        // Create complex nested structure with spurious wakes
+                        let nested_result = scope
+                            .scope(
+                                "nested_with_spurious",
+                                Budget::forever(),
+                                |nested_scope| async move {
+                                    // Mix of normal and spurious-wake-aware tasks
+                                    let normal_task = nested_scope.spawn("normal", || async {
+                                        self.simulate_work_with_completion().await;
+                                    });
 
-                    let spurious_handle = nested_scope.spawn("spurious", || async {
-                        // Comprehensive task with simulated spurious wake handling
-                        for _ in 0..100 {
-                            crate::runtime::yield_now().await;
-                        }
-                        self.increment_stat("spurious_wakes_injected", 10); // Comprehensive simulation
-                    });
+                                    let spurious_handle =
+                                        nested_scope.spawn("spurious", || async {
+                                            // Comprehensive task with simulated spurious wake handling
+                                            for _ in 0..100 {
+                                                crate::runtime::yield_now().await;
+                                            }
+                                            self.increment_stat("spurious_wakes_injected", 10); // Comprehensive simulation
+                                        });
 
-                    normal_task.await.unwrap();
-                    spurious_handle.await.unwrap();
+                                    normal_task.await.unwrap();
+                                    spurious_handle.await.unwrap();
 
-                    Ok::<(), crate::error::Error>(())
-                }).await;
+                                    Ok::<(), crate::error::Error>(())
+                                },
+                            )
+                            .await;
 
-                nested_result.unwrap();
-                Ok::<(), crate::error::Error>(())
-            }).await;
+                        nested_result.unwrap();
+                        Ok::<(), crate::error::Error>(())
+                    },
+                )
+                .await;
 
-            self.spurious_wake_controller.store(false, Ordering::Release);
+            self.spurious_wake_controller
+                .store(false, Ordering::Release);
 
             result.phase = QuiescenceTestPhase::OracleVerification;
 
@@ -484,7 +548,8 @@ mod tests {
                     if stats.spurious_wakes_injected > 0 {
                         result.success = true;
                     } else {
-                        result.error = Some("Comprehensive test didn't inject spurious wakes".to_string());
+                        result.error =
+                            Some("Comprehensive test didn't inject spurious wakes".to_string());
                     }
                 }
                 (Err(e), _) => {
@@ -511,7 +576,6 @@ mod tests {
             }
         }
 
-
         fn increment_stat(&self, stat_name: &str, count: u64) {
             if let Ok(mut stats) = self.test_stats.write() {
                 match stat_name {
@@ -520,10 +584,12 @@ mod tests {
                     "tasks_spawned" => stats.tasks_spawned += count,
                     "tasks_completed" => stats.tasks_completed += count,
                     "spurious_wakes_injected" => stats.spurious_wakes_injected += count,
-                    "quiescence_violations_detected" => stats.quiescence_violations_detected += count,
+                    "quiescence_violations_detected" => {
+                        stats.quiescence_violations_detected += count
+                    }
                     "state_integration_snapshots" => stats.state_integration_snapshots += count,
                     "event_streaming_updates" => stats.event_streaming_updates += count,
-                    _ => {},
+                    _ => {}
                 }
             }
         }
@@ -547,11 +613,16 @@ mod tests {
             let mut harness = QuiescenceIntegrationTestHarness::new("simple_region_lifecycle");
             let result = harness.test_simple_region_quiescence(&cx).await;
 
-            assert!(result.success, "Simple region quiescence test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Simple region quiescence test failed: {:?}",
+                result.error
+            );
             assert_eq!(result.oracle_stats.tasks_spawned, 3);
             assert_eq!(result.oracle_stats.tasks_completed, 3);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -560,12 +631,20 @@ mod tests {
             let mut harness = QuiescenceIntegrationTestHarness::new("spurious_wake_tolerance");
             let result = harness.test_spurious_wake_resilience(&cx).await;
 
-            assert!(result.success, "Spurious wake resilience test failed: {:?}", result.error);
-            assert!(result.oracle_stats.spurious_wakes_injected > 0, "No spurious wakes were injected");
+            assert!(
+                result.success,
+                "Spurious wake resilience test failed: {:?}",
+                result.error
+            );
+            assert!(
+                result.oracle_stats.spurious_wakes_injected > 0,
+                "No spurious wakes were injected"
+            );
             assert_eq!(result.oracle_stats.tasks_spawned, 2);
             assert_eq!(result.oracle_stats.tasks_completed, 2);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -574,12 +653,17 @@ mod tests {
             let mut harness = QuiescenceIntegrationTestHarness::new("nested_region_hierarchy");
             let result = harness.test_nested_region_hierarchy(&cx).await;
 
-            assert!(result.success, "Nested region hierarchy test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Nested region hierarchy test failed: {:?}",
+                result.error
+            );
             assert_eq!(result.oracle_stats.regions_created, 3); // parent + 2 children
-            assert_eq!(result.oracle_stats.tasks_spawned, 4);   // 2 + 1 + 1
+            assert_eq!(result.oracle_stats.tasks_spawned, 4); // 2 + 1 + 1
             assert_eq!(result.oracle_stats.tasks_completed, 4);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -588,10 +672,15 @@ mod tests {
             let mut harness = QuiescenceIntegrationTestHarness::new("state_integration");
             let result = harness.test_state_integration_verification(&cx).await;
 
-            assert!(result.success, "State integration test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "State integration test failed: {:?}",
+                result.error
+            );
             assert_eq!(result.oracle_stats.state_integration_snapshots, 1);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -600,9 +689,17 @@ mod tests {
             let mut harness = QuiescenceIntegrationTestHarness::new("comprehensive_integration");
             let result = harness.test_comprehensive_integration(&cx).await;
 
-            assert!(result.success, "Comprehensive integration test failed: {:?}", result.error);
-            assert!(result.oracle_stats.spurious_wakes_injected > 0, "Comprehensive test should inject spurious wakes");
+            assert!(
+                result.success,
+                "Comprehensive integration test failed: {:?}",
+                result.error
+            );
+            assert!(
+                result.oracle_stats.spurious_wakes_injected > 0,
+                "Comprehensive test should inject spurious wakes"
+            );
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

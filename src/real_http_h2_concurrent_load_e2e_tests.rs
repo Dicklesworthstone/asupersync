@@ -527,7 +527,7 @@ mod real_http_h2_concurrent_load_e2e {
             name: &'static str,
             num_clients: usize,
             requests_per_client: usize,
-            expected_success_rate: f64,  // Expected minimum success rate
+            expected_success_rate: f64, // Expected minimum success rate
         }
 
         let concurrency_scenarios = vec![
@@ -535,7 +535,7 @@ mod real_http_h2_concurrent_load_e2e {
                 name: "light_load",
                 num_clients: 1,
                 requests_per_client: 5,
-                expected_success_rate: 1.0,  // 100% success expected
+                expected_success_rate: 1.0, // 100% success expected
             },
             ConcurrencyScenario {
                 name: "moderate_load",
@@ -552,8 +552,10 @@ mod real_http_h2_concurrent_load_e2e {
         ];
 
         for scenario in concurrency_scenarios {
-            println!("Testing HTTP/2 concurrency scenario: {} ({} clients × {} requests)",
-                     scenario.name, scenario.num_clients, scenario.requests_per_client);
+            println!(
+                "Testing HTTP/2 concurrency scenario: {} ({} clients × {} requests)",
+                scenario.name, scenario.num_clients, scenario.requests_per_client
+            );
             let scenario_start = std::time::Instant::now();
 
             let total_expected_requests = scenario.num_clients * scenario.requests_per_client;

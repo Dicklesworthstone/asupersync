@@ -7,7 +7,7 @@
 
 use crate::channel::broadcast;
 use crate::cx::Cx;
-use crate::web::sse::{SseEvent, StreamingSse, StreamingSseSource, StreamingSseError};
+use crate::web::sse::{SseEvent, StreamingSse, StreamingSseError, StreamingSseSource};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -65,10 +65,12 @@ impl<T: Clone + std::fmt::Display> StreamingSseSource for BroadcastSseSource<T> 
             Ok(message) => {
                 self.message_count += 1;
                 let data = format!("{}", message);
-                Ok(Some(SseEvent::default()
-                    .event("broadcast-message")
-                    .data(data)
-                    .id(&format!("{}", self.message_count))))
+                Ok(Some(
+                    SseEvent::default()
+                        .event("broadcast-message")
+                        .data(data)
+                        .id(&format!("{}", self.message_count)),
+                ))
             }
             Err(broadcast::TryRecvError::Empty) => {
                 // No message available right now - return None to indicate end of current batch
@@ -77,10 +79,12 @@ impl<T: Clone + std::fmt::Display> StreamingSseSource for BroadcastSseSource<T> 
             Err(broadcast::TryRecvError::Lagged(count)) => {
                 self.lag_events += 1;
                 // Return a lag notification event
-                Ok(Some(SseEvent::default()
-                    .event("lag-notification")
-                    .data(&format!("Receiver lagged by {} messages", count))
-                    .id(&format!("lag-{}", self.lag_events))))
+                Ok(Some(
+                    SseEvent::default()
+                        .event("lag-notification")
+                        .data(&format!("Receiver lagged by {} messages", count))
+                        .id(&format!("lag-{}", self.lag_events)),
+                ))
             }
             Err(broadcast::TryRecvError::Closed) => {
                 self.disconnect_events += 1;
@@ -105,8 +109,11 @@ struct TestMessage {
 
 impl std::fmt::Display for TestMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{{\"id\":{},\"content\":\"{}\",\"timestamp\":{}}}",
-               self.id, self.content, self.timestamp)
+        write!(
+            f,
+            "{{\"id\":{},\"content\":\"{}\",\"timestamp\":{}}}",
+            self.id, self.content, self.timestamp
+        )
     }
 }
 
@@ -150,7 +157,10 @@ impl SseBroadcastMetrics {
         let mut max_lag = self.max_lag_observed.load(Ordering::SeqCst);
         while count > max_lag {
             match self.max_lag_observed.compare_exchange_weak(
-                max_lag, count, Ordering::SeqCst, Ordering::SeqCst
+                max_lag,
+                count,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
             ) {
                 Ok(_) => break,
                 Err(current) => max_lag = current,
@@ -167,7 +177,9 @@ impl SseBroadcastMetrics {
     }
 
     fn remove_subscriber(&self) -> usize {
-        self.active_subscribers.fetch_sub(1, Ordering::SeqCst).saturating_sub(1)
+        self.active_subscribers
+            .fetch_sub(1, Ordering::SeqCst)
+            .saturating_sub(1)
     }
 
     fn record_backpressure(&self) {
@@ -234,7 +246,8 @@ impl MetricsBroadcastSseSource {
     fn drain_available(&mut self, cx: &Cx) -> Result<(), StreamingSseError> {
         while let Some(event) = self.source.next_event(cx)? {
             self.pending_events.push_back(event);
-            if self.pending_events.len() > 1000 { // Prevent unbounded growth
+            if self.pending_events.len() > 1000 {
+                // Prevent unbounded growth
                 self.metrics.record_backpressure();
                 break;
             }
@@ -353,7 +366,12 @@ impl TestPublisher {
     }
 
     /// Publish a burst of messages
-    fn publish_burst(&self, cx: &Cx, burst_size: usize, prefix: &str) -> Result<Vec<usize>, broadcast::SendError<TestMessage>> {
+    fn publish_burst(
+        &self,
+        cx: &Cx,
+        burst_size: usize,
+        prefix: &str,
+    ) -> Result<Vec<usize>, broadcast::SendError<TestMessage>> {
         let mut results = Vec::with_capacity(burst_size);
         for i in 0..burst_size {
             let content = format!("{}-burst-{}", prefix, i);
@@ -366,7 +384,7 @@ impl TestPublisher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{init_test_logging, TimeBudget};
+    use crate::test_utils::{TimeBudget, init_test_logging};
 
     fn init_test(name: &str) -> TimeBudget {
         init_test_logging();
@@ -403,7 +421,11 @@ mod tests {
         for i in 0..message_count {
             let content = format!("test-message-{}", i);
             let receivers = publisher.publish(&cx, &content).expect("publish message");
-            assert_eq!(receivers, subscriber_count, "All subscribers should receive message {}", i);
+            assert_eq!(
+                receivers, subscriber_count,
+                "All subscribers should receive message {}",
+                i
+            );
 
             if budget.exceeded() {
                 panic!("Test exceeded time budget during publishing phase");
@@ -427,12 +449,19 @@ mod tests {
                 }
 
                 if budget.exceeded() {
-                    panic!("Test exceeded time budget during consumption phase for subscriber {}", i);
+                    panic!(
+                        "Test exceeded time budget during consumption phase for subscriber {}",
+                        i
+                    );
                 }
             }
 
             println!("Subscriber {} received {} messages", i, received_count);
-            assert!(received_count > 0, "Subscriber {} should have received messages", i);
+            assert!(
+                received_count > 0,
+                "Subscriber {} should have received messages",
+                i
+            );
         }
 
         // Verify metrics
@@ -440,8 +469,14 @@ mod tests {
         println!("Final metrics: {:?}", snapshot);
 
         assert_eq!(snapshot.messages_published, message_count as u64);
-        assert!(snapshot.sse_events_delivered > 0, "SSE events should have been delivered");
-        assert_eq!(snapshot.lag_events, 0, "No lag events should occur in basic test");
+        assert!(
+            snapshot.sse_events_delivered > 0,
+            "SSE events should have been delivered"
+        );
+        assert_eq!(
+            snapshot.lag_events, 0,
+            "No lag events should occur in basic test"
+        );
 
         crate::test_complete!("sse_broadcast_basic_fanout");
     }
@@ -476,7 +511,9 @@ mod tests {
             let sub_receiver = sender.subscribe();
             let mut source = MetricsBroadcastSseSource::new(sub_receiver, Arc::clone(&metrics), i);
             source.set_burst_mode(true);
-            sources.push(StreamingSse::from_source(source).max_total_bytes(scenario.sse_max_total_bytes));
+            sources.push(
+                StreamingSse::from_source(source).max_total_bytes(scenario.sse_max_total_bytes),
+            );
             metrics.add_subscriber();
         }
 
@@ -484,21 +521,28 @@ mod tests {
         let burst_count = scenario.message_count / scenario.burst_size;
         for burst_idx in 0..burst_count {
             let prefix = format!("burst-{}", burst_idx);
-            let receivers = publisher.publish_burst(&cx, scenario.burst_size, &prefix)
+            let receivers = publisher
+                .publish_burst(&cx, scenario.burst_size, &prefix)
                 .expect("publish burst");
 
             // Verify all subscribers received the burst
             let expected_receivers = scenario.subscriber_count;
             for &actual_receivers in &receivers {
-                assert_eq!(actual_receivers, expected_receivers,
-                    "Burst {} should reach all {} subscribers", burst_idx, expected_receivers);
+                assert_eq!(
+                    actual_receivers, expected_receivers,
+                    "Burst {} should reach all {} subscribers",
+                    burst_idx, expected_receivers
+                );
             }
 
             // Small delay between bursts to simulate realistic traffic patterns
             std::thread::sleep(Duration::from_millis(scenario.burst_delay_ms));
 
             if budget.exceeded() {
-                panic!("Test exceeded time budget during burst {} publishing", burst_idx);
+                panic!(
+                    "Test exceeded time budget during burst {} publishing",
+                    burst_idx
+                );
             }
         }
 
@@ -526,13 +570,19 @@ mod tests {
                 }
 
                 if budget.exceeded() {
-                    println!("Warning: Test exceeded time budget during consumption for subscriber {}", i);
+                    println!(
+                        "Warning: Test exceeded time budget during consumption for subscriber {}",
+                        i
+                    );
                     break;
                 }
             }
 
             subscriber_results.push((received_count, received_bytes));
-            println!("Subscriber {} received {} messages ({} bytes)", i, received_count, received_bytes);
+            println!(
+                "Subscriber {} received {} messages ({} bytes)",
+                i, received_count, received_bytes
+            );
         }
 
         // Verify results
@@ -541,20 +591,35 @@ mod tests {
 
         // All subscribers should receive messages (allowing for some loss under burst load)
         for (i, &(count, _)) in subscriber_results.iter().enumerate() {
-            assert!(count > 0, "Subscriber {} should have received some messages", i);
+            assert!(
+                count > 0,
+                "Subscriber {} should have received some messages",
+                i
+            );
         }
 
         // Total published messages should match expected
-        assert_eq!(snapshot.messages_published, (burst_count * scenario.burst_size) as u64);
+        assert_eq!(
+            snapshot.messages_published,
+            (burst_count * scenario.burst_size) as u64
+        );
 
         // SSE delivery should have occurred
-        assert!(snapshot.sse_events_delivered > 0, "SSE events should have been delivered");
+        assert!(
+            snapshot.sse_events_delivered > 0,
+            "SSE events should have been delivered"
+        );
 
         // Some lag is acceptable under burst conditions
         if snapshot.lag_events > 0 {
-            println!("Lag events occurred under burst load: {}", snapshot.lag_events);
-            assert!(snapshot.max_lag_observed <= scenario.channel_capacity as u64,
-                "Max lag should not exceed channel capacity");
+            println!(
+                "Lag events occurred under burst load: {}",
+                snapshot.lag_events
+            );
+            assert!(
+                snapshot.max_lag_observed <= scenario.channel_capacity as u64,
+                "Max lag should not exceed channel capacity"
+            );
         }
 
         crate::test_complete!("sse_broadcast_bursty_publishes");
@@ -569,7 +634,7 @@ mod tests {
         let scenario = TestScenario {
             subscriber_count: 4,
             message_count: 50,
-            channel_capacity: 16, // Small capacity to trigger backpressure
+            channel_capacity: 16,      // Small capacity to trigger backpressure
             sse_max_total_bytes: 4096, // Small limit to test backpressure
             ..Default::default()
         };
@@ -590,11 +655,9 @@ mod tests {
 
             // Make some subscribers slow by limiting their total bytes
             let sse_source = if i % 2 == 0 {
-                StreamingSse::from_source(source)
-                    .max_total_bytes(scenario.sse_max_total_bytes / 2) // Very restrictive
+                StreamingSse::from_source(source).max_total_bytes(scenario.sse_max_total_bytes / 2) // Very restrictive
             } else {
-                StreamingSse::from_source(source)
-                    .max_total_bytes(scenario.sse_max_total_bytes)
+                StreamingSse::from_source(source).max_total_bytes(scenario.sse_max_total_bytes)
             };
 
             sources.push(sse_source);
@@ -617,7 +680,10 @@ mod tests {
             }
 
             if budget.exceeded() {
-                println!("Warning: Test exceeded time budget during publishing at message {}", i);
+                println!(
+                    "Warning: Test exceeded time budget during publishing at message {}",
+                    i
+                );
                 break;
             }
         }
@@ -647,13 +713,18 @@ mod tests {
                 }
 
                 if budget.exceeded() {
-                    println!("Warning: Test exceeded time budget during consumption for subscriber {}", i);
+                    println!(
+                        "Warning: Test exceeded time budget during consumption for subscriber {}",
+                        i
+                    );
                     break;
                 }
             }
 
-            println!("Subscriber {} received {} messages, hit_limit: {}",
-                i, received_count, hit_limit);
+            println!(
+                "Subscriber {} received {} messages, hit_limit: {}",
+                i, received_count, hit_limit
+            );
 
             if hit_limit {
                 backpressure_limited_subscribers += 1;
@@ -666,19 +737,31 @@ mod tests {
         let snapshot = metrics.snapshot();
         println!("Final metrics: {:?}", snapshot);
 
-        assert!(snapshot.messages_published > 0, "Messages should have been published");
-        assert!(snapshot.sse_events_delivered > 0, "Some SSE events should have been delivered");
+        assert!(
+            snapshot.messages_published > 0,
+            "Messages should have been published"
+        );
+        assert!(
+            snapshot.sse_events_delivered > 0,
+            "Some SSE events should have been delivered"
+        );
 
         // Under backpressure, some subscribers should hit limits
-        assert!(backpressure_limited_subscribers > 0,
-            "Some subscribers should have hit backpressure limits");
+        assert!(
+            backpressure_limited_subscribers > 0,
+            "Some subscribers should have hit backpressure limits"
+        );
 
         // But at least some should succeed
-        assert!(successful_subscribers > 0 || backpressure_limited_subscribers > 0,
-            "At least some subscribers should have received messages");
+        assert!(
+            successful_subscribers > 0 || backpressure_limited_subscribers > 0,
+            "At least some subscribers should have received messages"
+        );
 
-        println!("Backpressure test completed: {} limited, {} successful",
-            backpressure_limited_subscribers, successful_subscribers);
+        println!(
+            "Backpressure test completed: {} limited, {} successful",
+            backpressure_limited_subscribers, successful_subscribers
+        );
 
         crate::test_complete!("sse_broadcast_slow_consumer_backpressure");
     }
@@ -736,7 +819,10 @@ mod tests {
             metrics.add_subscriber();
         }
 
-        println!("Starting comprehensive high-load test with {} subscribers", scenario.subscriber_count);
+        println!(
+            "Starting comprehensive high-load test with {} subscribers",
+            scenario.subscriber_count
+        );
 
         // Phase 1: Initial burst
         let initial_burst_count = 3;
@@ -754,14 +840,18 @@ mod tests {
         }
 
         // Phase 2: Sustained publishing with mixed patterns
-        let sustained_messages = scenario.message_count - (initial_burst_count * scenario.burst_size);
+        let sustained_messages =
+            scenario.message_count - (initial_burst_count * scenario.burst_size);
         for i in 0..sustained_messages {
             let content = if i % 10 == 0 {
                 // Occasional large messages
                 format!("large-message-{}-{}", i, "data".repeat(200))
             } else if i % 5 == 0 {
                 // JSON-like structured data
-                format!("{{\"msg_id\":{},\"type\":\"event\",\"data\":\"payload-{}\"}}", i, i)
+                format!(
+                    "{{\"msg_id\":{},\"type\":\"event\",\"data\":\"payload-{}\"}}",
+                    i, i
+                )
             } else {
                 // Regular messages
                 format!("message-{}", i)
@@ -781,7 +871,10 @@ mod tests {
             }
 
             if budget.exceeded() {
-                println!("Warning: Time budget exceeded during sustained phase at message {}", i);
+                println!(
+                    "Warning: Time budget exceeded during sustained phase at message {}",
+                    i
+                );
                 break;
             }
         }
@@ -836,8 +929,10 @@ mod tests {
             }
 
             subscriber_results.push((received_count, received_bytes));
-            println!("Subscriber {} final stats: {} messages, {} bytes",
-                i, received_count, received_bytes);
+            println!(
+                "Subscriber {} final stats: {} messages, {} bytes",
+                i, received_count, received_bytes
+            );
         }
 
         // Comprehensive analysis
@@ -852,29 +947,47 @@ mod tests {
         println!("Analysis:");
         println!("  Total messages received: {}", total_received);
         println!("  Total bytes delivered: {}", total_bytes);
-        println!("  Average messages per subscriber: {:.2}", avg_messages_per_subscriber);
+        println!(
+            "  Average messages per subscriber: {:.2}",
+            avg_messages_per_subscriber
+        );
         println!("  Messages published: {}", snapshot.messages_published);
         println!("  SSE events delivered: {}", snapshot.sse_events_delivered);
         println!("  Lag events: {}", snapshot.lag_events);
         println!("  Max lag observed: {}", snapshot.max_lag_observed);
 
         // Verification - at least some delivery should occur
-        assert!(total_received > 0, "At least some messages should be received");
-        assert!(snapshot.messages_published > 0, "Messages should have been published");
-        assert!(snapshot.sse_events_delivered > 0, "SSE events should have been delivered");
+        assert!(
+            total_received > 0,
+            "At least some messages should be received"
+        );
+        assert!(
+            snapshot.messages_published > 0,
+            "Messages should have been published"
+        );
+        assert!(
+            snapshot.sse_events_delivered > 0,
+            "SSE events should have been delivered"
+        );
 
         // All subscribers should receive at least some messages
-        let zero_message_subscribers = subscriber_results.iter()
+        let zero_message_subscribers = subscriber_results
+            .iter()
             .filter(|(count, _)| *count == 0)
             .count();
 
-        assert!(zero_message_subscribers < scenario.subscriber_count / 2,
-            "Most subscribers should receive messages, but {} received none", zero_message_subscribers);
+        assert!(
+            zero_message_subscribers < scenario.subscriber_count / 2,
+            "Most subscribers should receive messages, but {} received none",
+            zero_message_subscribers
+        );
 
         // Under high load, some lag is acceptable
         if snapshot.lag_events > 0 {
-            println!("Acceptable lag under high load: {} events, max lag: {}",
-                snapshot.lag_events, snapshot.max_lag_observed);
+            println!(
+                "Acceptable lag under high load: {} events, max lag: {}",
+                snapshot.lag_events, snapshot.max_lag_observed
+            );
         }
 
         println!("Comprehensive high-load test completed successfully");

@@ -8,6 +8,7 @@
 
 pub mod actor;
 pub mod autotune;
+pub mod diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
 pub mod grant;
@@ -43,6 +44,13 @@ pub use autotune::{
     AtpAutotuneSettings, AtpAutotuneTelemetry, AtpAutotuneTelemetryError,
     AtpAutotuneTelemetryReport, AtpBottleneckKind, AtpBottleneckSignal,
     AtpTransferPressureSnapshot,
+};
+pub use diagnostics::{
+    ATP_RUNTIME_EVIDENCE_DIAGNOSTIC_SCHEMA, ATP_RUNTIME_EVIDENCE_EXPLANATION_SCHEMA,
+    AtpCancellationDrainEvidence, AtpFinalizerEvidence, AtpObligationEvidenceCounts,
+    AtpReplayEvidencePointer, AtpRuntimeDiagnosticDocument, AtpRuntimeEvidenceBridge,
+    AtpRuntimeEvidenceEnvelope, AtpRuntimeEvidenceSignal, AtpRuntimeSignalClass,
+    AtpRuntimeSignalSource,
 };
 pub use grant::{GrantInfo, GrantManager, GrantQuery, GrantStats, PairingCode, PairingManager};
 pub use identity::{DurablePeerIdentity, IdentityError};

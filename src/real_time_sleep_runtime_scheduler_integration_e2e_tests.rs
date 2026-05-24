@@ -41,14 +41,14 @@ mod tests {
         dead_code
     )]
 
-    use crate::runtime::scheduler::priority::Scheduler;
-    use crate::time::{sleep, Sleep};
-    use crate::types::{Time, TaskId};
     use crate::cx::Cx;
     use crate::runtime::region::Region;
+    use crate::runtime::scheduler::priority::Scheduler;
+    use crate::time::{Sleep, sleep};
+    use crate::types::{TaskId, Time};
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     /// Test phases for sleep-scheduler integration testing
@@ -140,9 +140,7 @@ mod tests {
                 return None;
             }
 
-            let total_nanos: u64 = measurements.iter()
-                .map(|d| d.as_nanos() as u64)
-                .sum();
+            let total_nanos: u64 = measurements.iter().map(|d| d.as_nanos() as u64).sum();
             let average_nanos = total_nanos / measurements.len() as u64;
             Some(Duration::from_nanos(average_nanos))
         }
@@ -204,9 +202,11 @@ mod tests {
             sleep(sleep_duration).await;
 
             let actual_wake_time = crate::time::wall_now();
-            self.deadline_tracker.record_actual_wakeup(expected_deadline, actual_wake_time);
+            self.deadline_tracker
+                .record_actual_wakeup(expected_deadline, actual_wake_time);
 
-            let actual_sleep_duration = Duration::from_nanos(actual_wake_time.duration_since(start_time));
+            let actual_sleep_duration =
+                Duration::from_nanos(actual_wake_time.duration_since(start_time));
             Ok(actual_sleep_duration)
         }
 
@@ -241,7 +241,8 @@ mod tests {
                 let task_duration = *duration;
 
                 let task = cx.scope(|scope| async move {
-                    self.create_tracked_sleep_task(cx, task_duration, &task_name).await
+                    self.create_tracked_sleep_task(cx, task_duration, &task_name)
+                        .await
                 });
 
                 sleep_tasks.push(task);
@@ -290,8 +291,10 @@ mod tests {
                     result.phase = SleepSchedulerTestPhase::EDFSchedulingVerification;
 
                     if ordering_correct {
-                        result.sleep_stats.accurate_wakeups = self.deadline_tracker.get_wakeup_count() as u32;
-                        result.deadlines_preserved = !self.deadline_tracker.has_deadline_violations();
+                        result.sleep_stats.accurate_wakeups =
+                            self.deadline_tracker.get_wakeup_count() as u32;
+                        result.deadlines_preserved =
+                            !self.deadline_tracker.has_deadline_violations();
                     } else {
                         result.sleep_stats.deadline_misses = 1;
                         result.error = Some("EDF sleep ordering violations detected".to_string());
@@ -311,7 +314,10 @@ mod tests {
         }
 
         /// Test priority preemption tolerance
-        async fn test_priority_preemption_tolerance(&mut self, cx: &Cx) -> SleepSchedulerTestResult {
+        async fn test_priority_preemption_tolerance(
+            &mut self,
+            cx: &Cx,
+        ) -> SleepSchedulerTestResult {
             let mut result = SleepSchedulerTestResult {
                 success: false,
                 phase: SleepSchedulerTestPhase::Initial,
@@ -327,7 +333,8 @@ mod tests {
             // Start a longer sleep task
             let sleep_duration = Duration::from_millis(200);
             let sleep_task = cx.scope(|scope| async move {
-                self.create_tracked_sleep_task(cx, sleep_duration, "preemptable_sleep").await
+                self.create_tracked_sleep_task(cx, sleep_duration, "preemptable_sleep")
+                    .await
             });
 
             result.phase = SleepSchedulerTestPhase::PriorityWorkInjection;
@@ -335,7 +342,8 @@ mod tests {
             // Inject high-priority work that should preempt
             let priority_work = cx.scope(|scope| async move {
                 crate::time::sleep(Duration::from_millis(50)).await; // Let sleep task start
-                self.inject_priority_work(cx, Duration::from_millis(50)).await;
+                self.inject_priority_work(cx, Duration::from_millis(50))
+                    .await;
                 Ok::<(), String>(())
             });
 
@@ -387,7 +395,8 @@ mod tests {
                 let task_name = format!("load_sleep_{}", i);
 
                 let task = cx.scope(|scope| async move {
-                    self.create_tracked_sleep_task(cx, sleep_duration, &task_name).await
+                    self.create_tracked_sleep_task(cx, sleep_duration, &task_name)
+                        .await
                 });
 
                 sleep_tasks.push(task);
@@ -398,7 +407,8 @@ mod tests {
             // Inject background load
             let load_task = cx.scope(|scope| async move {
                 for _ in 0..10 {
-                    self.inject_priority_work(cx, Duration::from_millis(10)).await;
+                    self.inject_priority_work(cx, Duration::from_millis(10))
+                        .await;
                     crate::time::sleep(Duration::from_millis(5)).await;
                 }
                 Ok::<(), String>(())
@@ -428,7 +438,8 @@ mod tests {
                     result.scheduler_stats.scheduler_operations = 10;
 
                     result.deadlines_preserved = !self.deadline_tracker.has_deadline_violations();
-                    result.edf_ordering_correct = result.deadlines_preserved && completed_count == 5;
+                    result.edf_ordering_correct =
+                        result.deadlines_preserved && completed_count == 5;
 
                     if let Some(avg_accuracy) = self.deadline_tracker.get_average_accuracy() {
                         // Consider accurate if average deviation is less than 10ms
@@ -451,7 +462,10 @@ mod tests {
         }
 
         /// Test comprehensive sleep-scheduler integration
-        async fn test_comprehensive_sleep_scheduler_integration(&mut self, cx: &Cx) -> SleepSchedulerTestResult {
+        async fn test_comprehensive_sleep_scheduler_integration(
+            &mut self,
+            cx: &Cx,
+        ) -> SleepSchedulerTestResult {
             let mut result = SleepSchedulerTestResult {
                 success: false,
                 phase: SleepSchedulerTestPhase::Initial,
@@ -468,26 +482,27 @@ mod tests {
             let load_result = self.test_high_load_sleep_accuracy(cx).await;
 
             // Aggregate statistics
-            result.sleep_stats.sleep_tasks_created = basic_result.sleep_stats.sleep_tasks_created +
-                preemption_result.sleep_stats.sleep_tasks_created +
-                load_result.sleep_stats.sleep_tasks_created;
+            result.sleep_stats.sleep_tasks_created = basic_result.sleep_stats.sleep_tasks_created
+                + preemption_result.sleep_stats.sleep_tasks_created
+                + load_result.sleep_stats.sleep_tasks_created;
 
-            result.sleep_stats.accurate_wakeups = basic_result.sleep_stats.accurate_wakeups +
-                preemption_result.sleep_stats.accurate_wakeups +
-                load_result.sleep_stats.accurate_wakeups;
+            result.sleep_stats.accurate_wakeups = basic_result.sleep_stats.accurate_wakeups
+                + preemption_result.sleep_stats.accurate_wakeups
+                + load_result.sleep_stats.accurate_wakeups;
 
-            result.sleep_stats.edf_registrations = basic_result.sleep_stats.edf_registrations +
-                preemption_result.sleep_stats.edf_registrations +
-                load_result.sleep_stats.edf_registrations;
+            result.sleep_stats.edf_registrations = basic_result.sleep_stats.edf_registrations
+                + preemption_result.sleep_stats.edf_registrations
+                + load_result.sleep_stats.edf_registrations;
 
             // Check overall success
-            result.success = basic_result.success && preemption_result.success && load_result.success;
-            result.edf_ordering_correct = basic_result.edf_ordering_correct &&
-                preemption_result.edf_ordering_correct &&
-                load_result.edf_ordering_correct;
-            result.deadlines_preserved = basic_result.deadlines_preserved &&
-                preemption_result.deadlines_preserved &&
-                load_result.deadlines_preserved;
+            result.success =
+                basic_result.success && preemption_result.success && load_result.success;
+            result.edf_ordering_correct = basic_result.edf_ordering_correct
+                && preemption_result.edf_ordering_correct
+                && load_result.edf_ordering_correct;
+            result.deadlines_preserved = basic_result.deadlines_preserved
+                && preemption_result.deadlines_preserved
+                && load_result.deadlines_preserved;
 
             // Check for any deadline violations across all tests
             if self.deadline_tracker.has_deadline_violations() {
@@ -499,7 +514,9 @@ mod tests {
             if result.success {
                 result.phase = SleepSchedulerTestPhase::Complete;
             } else {
-                result.error = result.error.or_else(|| Some("One or more sleep-scheduler integration tests failed".to_string()));
+                result.error = result.error.or_else(|| {
+                    Some("One or more sleep-scheduler integration tests failed".to_string())
+                });
             }
 
             result
@@ -512,14 +529,19 @@ mod tests {
             let mut harness = SleepSchedulerTestHarness::new("edf_sleep_ordering");
             let result = harness.test_basic_edf_sleep_ordering(&cx).await;
 
-            assert!(result.success, "Basic EDF sleep ordering failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Basic EDF sleep ordering failed: {:?}",
+                result.error
+            );
             assert!(result.edf_ordering_correct);
             assert!(result.deadlines_preserved);
             assert_eq!(result.phase, SleepSchedulerTestPhase::Complete);
             assert!(result.sleep_stats.accurate_wakeups > 0);
             assert_eq!(result.sleep_stats.deadline_misses, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -528,13 +550,18 @@ mod tests {
             let mut harness = SleepSchedulerTestHarness::new("priority_preemption");
             let result = harness.test_priority_preemption_tolerance(&cx).await;
 
-            assert!(result.success, "Priority preemption tolerance failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Priority preemption tolerance failed: {:?}",
+                result.error
+            );
             assert!(result.edf_ordering_correct);
             assert!(result.deadlines_preserved);
             assert!(result.sleep_stats.priority_preemptions > 0);
             assert_eq!(result.scheduler_stats.priority_inversions, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -543,23 +570,34 @@ mod tests {
             let mut harness = SleepSchedulerTestHarness::new("high_load_accuracy");
             let result = harness.test_high_load_sleep_accuracy(&cx).await;
 
-            assert!(result.success, "High load sleep accuracy failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "High load sleep accuracy failed: {:?}",
+                result.error
+            );
             assert!(result.edf_ordering_correct);
             assert!(result.deadlines_preserved);
             assert!(result.sleep_stats.sleep_tasks_created > 0);
             assert!(result.sleep_stats.accurate_wakeups > 0);
             assert!(result.scheduler_stats.scheduler_operations > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn test_sleep_comprehensive_scheduler_integration() {
         crate::lab::runtime::test_with_lab(|cx| async move {
             let mut harness = SleepSchedulerTestHarness::new("comprehensive_sleep_scheduler");
-            let result = harness.test_comprehensive_sleep_scheduler_integration(&cx).await;
+            let result = harness
+                .test_comprehensive_sleep_scheduler_integration(&cx)
+                .await;
 
-            assert!(result.success, "Comprehensive sleep-scheduler integration failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Comprehensive sleep-scheduler integration failed: {:?}",
+                result.error
+            );
             assert!(result.edf_ordering_correct);
             assert!(result.deadlines_preserved);
             let sleep_stats = result.sleep_stats;
@@ -570,6 +608,7 @@ mod tests {
             assert!(sleep_stats.edf_registrations > 0);
             assert_eq!(sleep_stats.deadline_misses, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

@@ -10,24 +10,24 @@
 #[cfg(test)]
 mod tests {
     use crate::cx::Cx;
-    use crate::distributed::bridge::{RegionBridge, RegionMode, BridgeSequence};
-    use crate::distributed::snapshot::{RegionSnapshot, TaskSnapshot, BudgetSnapshot};
-    use crate::obligation::ledger::{ObligationLedger, ObligationToken, LedgerStats};
+    use crate::distributed::bridge::{BridgeSequence, RegionBridge, RegionMode};
+    use crate::distributed::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot};
+    use crate::obligation::ledger::{LedgerStats, ObligationLedger, ObligationToken};
     use crate::record::{
-        ObligationKind, ObligationRecord, ObligationState, ObligationResolution,
-        ObligationAbortReason, SourceLocation, RegionRecord, TaskRecord,
+        ObligationAbortReason, ObligationKind, ObligationRecord, ObligationResolution,
+        ObligationState, RegionRecord, SourceLocation, TaskRecord,
         distributed_region::{
-            DistributedRegionRecord, DistributedRegionState, ConsistencyLevel,
-            DistributedRegionConfig, ReplicaInfo, StateTransition, TransitionReason
-        }
+            ConsistencyLevel, DistributedRegionConfig, DistributedRegionRecord,
+            DistributedRegionState, ReplicaInfo, StateTransition, TransitionReason,
+        },
     };
     use crate::runtime::region;
     use crate::types::{
-        Budget, Time, TaskId, RegionId, ObligationId, Outcome, CancelReason, Policy
+        Budget, CancelReason, ObligationId, Outcome, Policy, RegionId, TaskId, Time,
     };
-    use std::collections::{HashMap, BTreeMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
 
     // Test node representation for distributed scenarios
@@ -70,9 +70,13 @@ mod tests {
             &mut self,
             cx: &Cx,
             region_id: RegionId,
-            config: DistributedRegionConfig
+            config: DistributedRegionConfig,
         ) -> Result<DistributedRegionRecord, Box<dyn std::error::Error>> {
-            self.logger.node_event(self.node_id, "create_distributed_region", &format!("region_{}", region_id.raw()));
+            self.logger.node_event(
+                self.node_id,
+                "create_distributed_region",
+                &format!("region_{}", region_id.raw()),
+            );
 
             let budget = Budget::from_millis(5000);
             let region_record = RegionRecord::new(
@@ -83,13 +87,16 @@ mod tests {
             );
 
             // Create distributed region through bridge
-            let distributed_region = self.region_bridge.promote_to_distributed(
-                region_record,
-                config
-            ).await?;
+            let distributed_region = self
+                .region_bridge
+                .promote_to_distributed(region_record, config)
+                .await?;
 
-            self.logger.node_event(self.node_id, "distributed_region_created",
-                &format!("region_{}_seq_{}", region_id.raw(), self.next_sequence()));
+            self.logger.node_event(
+                self.node_id,
+                "distributed_region_created",
+                &format!("region_{}_seq_{}", region_id.raw(), self.next_sequence()),
+            );
 
             Ok(distributed_region)
         }
@@ -99,12 +106,20 @@ mod tests {
             cx: &Cx,
             task_id: TaskId,
             kind: ObligationKind,
-            target_nodes: &[u64]
+            target_nodes: &[u64],
         ) -> Result<ObligationId, Box<dyn std::error::Error>> {
             let obligation_id = ObligationId::from_raw(self.next_sequence());
 
-            self.logger.node_event(self.node_id, "acquire_cross_node_obligation",
-                &format!("{}:{}:targets_{:?}", obligation_id.raw(), task_id.raw(), target_nodes));
+            self.logger.node_event(
+                self.node_id,
+                "acquire_cross_node_obligation",
+                &format!(
+                    "{}:{}:targets_{:?}",
+                    obligation_id.raw(),
+                    task_id.raw(),
+                    target_nodes
+                ),
+            );
 
             // Create obligation record
             let obligation_record = ObligationRecord::new(
@@ -117,8 +132,11 @@ mod tests {
             // Reserve in local ledger
             self.obligation_ledger.reserve(obligation_record);
 
-            self.logger.node_event(self.node_id, "obligation_reserved_locally",
-                &format!("{}:{:?}", obligation_id.raw(), kind));
+            self.logger.node_event(
+                self.node_id,
+                "obligation_reserved_locally",
+                &format!("{}:{:?}", obligation_id.raw(), kind),
+            );
 
             Ok(obligation_id)
         }
@@ -127,10 +145,13 @@ mod tests {
             &mut self,
             cx: &Cx,
             obligation_id: ObligationId,
-            sequence: BridgeSequence
+            sequence: BridgeSequence,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            self.logger.node_event(self.node_id, "commit_distributed_obligation",
-                &format!("{}:seq_{}", obligation_id.raw(), sequence.sequence_number()));
+            self.logger.node_event(
+                self.node_id,
+                "commit_distributed_obligation",
+                &format!("{}:seq_{}", obligation_id.raw(), sequence.sequence_number()),
+            );
 
             // Create resolution with bridge sequence
             let resolution = ObligationResolution::Committed {
@@ -140,8 +161,11 @@ mod tests {
             // Commit in ledger with sequence coordination
             self.obligation_ledger.commit(obligation_id, resolution);
 
-            self.logger.node_event(self.node_id, "distributed_obligation_committed",
-                &format!("{}:seq_{}", obligation_id.raw(), sequence.sequence_number()));
+            self.logger.node_event(
+                self.node_id,
+                "distributed_obligation_committed",
+                &format!("{}:seq_{}", obligation_id.raw(), sequence.sequence_number()),
+            );
 
             Ok(())
         }
@@ -149,10 +173,13 @@ mod tests {
         async fn synchronize_with_peers(
             &mut self,
             cx: &Cx,
-            peer_nodes: &[&TestNode]
+            peer_nodes: &[&TestNode],
         ) -> Result<BridgeSequence, Box<dyn std::error::Error>> {
-            self.logger.node_event(self.node_id, "synchronize_with_peers",
-                &format!("peers_{}", peer_nodes.len()));
+            self.logger.node_event(
+                self.node_id,
+                "synchronize_with_peers",
+                &format!("peers_{}", peer_nodes.len()),
+            );
 
             // Collect sequence numbers from all peers
             let mut max_sequence = self.sequence_number.load(Ordering::Relaxed);
@@ -168,10 +195,18 @@ mod tests {
             let bridge_sequence = BridgeSequence::new(max_sequence + 1, self.node_id);
 
             // Update local sequence to synchronized value
-            self.sequence_number.store(bridge_sequence.sequence_number(), Ordering::Relaxed);
+            self.sequence_number
+                .store(bridge_sequence.sequence_number(), Ordering::Relaxed);
 
-            self.logger.node_event(self.node_id, "synchronization_complete",
-                &format!("seq_{}_peers_{:?}", bridge_sequence.sequence_number(), peer_sequences));
+            self.logger.node_event(
+                self.node_id,
+                "synchronization_complete",
+                &format!(
+                    "seq_{}_peers_{:?}",
+                    bridge_sequence.sequence_number(),
+                    peer_sequences
+                ),
+            );
 
             Ok(bridge_sequence)
         }
@@ -226,10 +261,20 @@ mod tests {
     // Distributed obligation coordination scenarios
     #[derive(Debug, Clone)]
     enum DistributedObligationScenario {
-        TwoPhaseCommit { participants: Vec<u64> },
-        ConsensusCoordination { replicas: Vec<u64>, quorum_size: usize },
-        SequentialOrdering { ordered_nodes: Vec<u64> },
-        CascadeAbort { primary: u64, secondaries: Vec<u64> },
+        TwoPhaseCommit {
+            participants: Vec<u64>,
+        },
+        ConsensusCoordination {
+            replicas: Vec<u64>,
+            quorum_size: usize,
+        },
+        SequentialOrdering {
+            ordered_nodes: Vec<u64>,
+        },
+        CascadeAbort {
+            primary: u64,
+            secondaries: Vec<u64>,
+        },
     }
 
     // Test data factory for distributed scenarios
@@ -248,7 +293,10 @@ mod tests {
             }
         }
 
-        fn create_distributed_region_config(&self, replication_factor: u32) -> DistributedRegionConfig {
+        fn create_distributed_region_config(
+            &self,
+            replication_factor: u32,
+        ) -> DistributedRegionConfig {
             DistributedRegionConfig {
                 replication_factor,
                 consistency_level: ConsistencyLevel::Quorum,
@@ -257,7 +305,11 @@ mod tests {
             }
         }
 
-        fn create_cross_node_scenario(&self, scenario_type: &str, node_count: usize) -> DistributedObligationScenario {
+        fn create_cross_node_scenario(
+            &self,
+            scenario_type: &str,
+            node_count: usize,
+        ) -> DistributedObligationScenario {
             let node_ids: Vec<u64> = (0..node_count as u64).collect();
 
             match scenario_type {
@@ -311,8 +363,14 @@ mod tests {
 
         fn log_event(&self, category: &str, event: &str, details: &str) {
             let timestamp = crate::time::wall_now();
-            let entry = format!("{{\"test\":\"{}\",\"category\":\"{}\",\"event\":\"{}\",\"details\":\"{}\",\"ts\":{}}}",
-                self.test_name, category, event, details, timestamp.as_nanos());
+            let entry = format!(
+                "{{\"test\":\"{}\",\"category\":\"{}\",\"event\":\"{}\",\"details\":\"{}\",\"ts\":{}}}",
+                self.test_name,
+                category,
+                event,
+                details,
+                timestamp.as_nanos()
+            );
             self.events.lock().push(entry);
             eprintln!("{}", entry);
         }
@@ -366,7 +424,10 @@ mod tests {
     }
 
     impl DistributedObligationHarness {
-        async fn new(test_name: &str, node_count: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        async fn new(
+            test_name: &str,
+            node_count: usize,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
             let logger = TestLogger::new(test_name);
             let mut nodes = HashMap::new();
 
@@ -391,24 +452,41 @@ mod tests {
             &mut self,
             cx: &Cx,
             participating_nodes: &[u64],
-            replication_factor: u32
+            replication_factor: u32,
         ) -> Result<RegionId, Box<dyn std::error::Error>> {
             let region_id = self.factory.next_region_id();
-            self.logger.bridge_event("create_distributed_region",
-                &format!("region_{}_nodes_{:?}_rf_{}", region_id.raw(), participating_nodes, replication_factor));
+            self.logger.bridge_event(
+                "create_distributed_region",
+                &format!(
+                    "region_{}_nodes_{:?}_rf_{}",
+                    region_id.raw(),
+                    participating_nodes,
+                    replication_factor
+                ),
+            );
 
-            let config = self.factory.create_distributed_region_config(replication_factor);
+            let config = self
+                .factory
+                .create_distributed_region_config(replication_factor);
 
             // Create region on all participating nodes
             for &node_id in participating_nodes {
                 if let Some(node) = self.nodes.get_mut(&node_id) {
-                    node.create_distributed_region(cx, region_id, config.clone()).await?;
+                    node.create_distributed_region(cx, region_id, config.clone())
+                        .await?;
                 }
             }
 
-            self.active_regions.insert(region_id, participating_nodes.to_vec());
-            self.logger.bridge_event("distributed_region_created",
-                &format!("region_{}_active_on_{}_nodes", region_id.raw(), participating_nodes.len()));
+            self.active_regions
+                .insert(region_id, participating_nodes.to_vec());
+            self.logger.bridge_event(
+                "distributed_region_created",
+                &format!(
+                    "region_{}_active_on_{}_nodes",
+                    region_id.raw(),
+                    participating_nodes.len()
+                ),
+            );
 
             Ok(region_id)
         }
@@ -416,34 +494,43 @@ mod tests {
         async fn execute_cross_node_obligation(
             &mut self,
             cx: &Cx,
-            scenario: DistributedObligationScenario
+            scenario: DistributedObligationScenario,
         ) -> Result<Vec<ObligationId>, Box<dyn std::error::Error>> {
-            self.logger.coordination_event("execute_cross_node_obligation",
-                &format!("scenario_{:?}", scenario));
+            self.logger.coordination_event(
+                "execute_cross_node_obligation",
+                &format!("scenario_{:?}", scenario),
+            );
 
             match scenario {
                 DistributedObligationScenario::TwoPhaseCommit { participants } => {
                     self.execute_two_phase_commit(cx, participants).await
                 }
-                DistributedObligationScenario::ConsensusCoordination { replicas, quorum_size } => {
-                    self.execute_consensus_coordination(cx, replicas, quorum_size).await
+                DistributedObligationScenario::ConsensusCoordination {
+                    replicas,
+                    quorum_size,
+                } => {
+                    self.execute_consensus_coordination(cx, replicas, quorum_size)
+                        .await
                 }
                 DistributedObligationScenario::SequentialOrdering { ordered_nodes } => {
                     self.execute_sequential_ordering(cx, ordered_nodes).await
                 }
-                DistributedObligationScenario::CascadeAbort { primary, secondaries } => {
-                    self.execute_cascade_abort(cx, primary, secondaries).await
-                }
+                DistributedObligationScenario::CascadeAbort {
+                    primary,
+                    secondaries,
+                } => self.execute_cascade_abort(cx, primary, secondaries).await,
             }
         }
 
         async fn execute_two_phase_commit(
             &mut self,
             cx: &Cx,
-            participants: Vec<u64>
+            participants: Vec<u64>,
         ) -> Result<Vec<ObligationId>, Box<dyn std::error::Error>> {
-            self.logger.coordination_event("two_phase_commit_start",
-                &format!("participants_{:?}", participants));
+            self.logger.coordination_event(
+                "two_phase_commit_start",
+                &format!("participants_{:?}", participants),
+            );
 
             let mut obligation_ids = Vec::new();
 
@@ -451,9 +538,14 @@ mod tests {
             for &node_id in &participants {
                 if let Some(node) = self.nodes.get_mut(&node_id) {
                     let task_id = self.factory.next_task_id();
-                    let obligation_id = node.acquire_cross_node_obligation(
-                        cx, task_id, ObligationKind::Permit, &participants
-                    ).await?;
+                    let obligation_id = node
+                        .acquire_cross_node_obligation(
+                            cx,
+                            task_id,
+                            ObligationKind::Permit,
+                            &participants,
+                        )
+                        .await?;
 
                     // Track cross-node obligation
                     let cross_node_obligation = CrossNodeObligation {
@@ -465,11 +557,14 @@ mod tests {
                         state: CrossNodeObligationState::Reserved,
                     };
 
-                    self.obligation_tracking.insert(obligation_id, cross_node_obligation);
+                    self.obligation_tracking
+                        .insert(obligation_id, cross_node_obligation);
                     obligation_ids.push(obligation_id);
 
-                    self.logger.coordination_event("prepare_phase_complete",
-                        &format!("node_{}_obligation_{}", node_id, obligation_id.raw()));
+                    self.logger.coordination_event(
+                        "prepare_phase_complete",
+                        &format!("node_{}_obligation_{}", node_id, obligation_id.raw()),
+                    );
                 }
             }
 
@@ -477,7 +572,8 @@ mod tests {
             let coordinator_node_id = participants[0];
             if let Some(coordinator) = self.nodes.get_mut(&coordinator_node_id) {
                 // Synchronize with all participants
-                let peer_nodes: Vec<&TestNode> = participants.iter()
+                let peer_nodes: Vec<&TestNode> = participants
+                    .iter()
                     .filter_map(|&id| self.nodes.get(&id))
                     .collect();
 
@@ -486,19 +582,28 @@ mod tests {
                 // Commit all obligations using synchronized sequence
                 for &obligation_id in &obligation_ids {
                     if let Some(node) = self.nodes.get_mut(&coordinator_node_id) {
-                        node.commit_distributed_obligation(cx, obligation_id, bridge_sequence.clone()).await?;
+                        node.commit_distributed_obligation(
+                            cx,
+                            obligation_id,
+                            bridge_sequence.clone(),
+                        )
+                        .await?;
                     }
 
                     // Update tracking state
                     if let Some(tracked) = self.obligation_tracking.get_mut(&obligation_id) {
                         tracked.state = CrossNodeObligationState::Committed;
-                        tracked.sequence_numbers.insert(coordinator_node_id, bridge_sequence.sequence_number());
+                        tracked
+                            .sequence_numbers
+                            .insert(coordinator_node_id, bridge_sequence.sequence_number());
                     }
                 }
             }
 
-            self.logger.coordination_event("two_phase_commit_complete",
-                &format!("committed_{}_obligations", obligation_ids.len()));
+            self.logger.coordination_event(
+                "two_phase_commit_complete",
+                &format!("committed_{}_obligations", obligation_ids.len()),
+            );
 
             Ok(obligation_ids)
         }
@@ -507,10 +612,12 @@ mod tests {
             &mut self,
             cx: &Cx,
             replicas: Vec<u64>,
-            quorum_size: usize
+            quorum_size: usize,
         ) -> Result<Vec<ObligationId>, Box<dyn std::error::Error>> {
-            self.logger.coordination_event("consensus_coordination_start",
-                &format!("replicas_{:?}_quorum_{}", replicas, quorum_size));
+            self.logger.coordination_event(
+                "consensus_coordination_start",
+                &format!("replicas_{:?}_quorum_{}", replicas, quorum_size),
+            );
 
             let task_id = self.factory.next_task_id();
             let mut obligation_ids = Vec::new();
@@ -518,34 +625,44 @@ mod tests {
             // Create obligations on all replicas
             for &replica_id in &replicas {
                 if let Some(node) = self.nodes.get_mut(&replica_id) {
-                    let obligation_id = node.acquire_cross_node_obligation(
-                        cx, task_id, ObligationKind::Ack, &replicas
-                    ).await?;
+                    let obligation_id = node
+                        .acquire_cross_node_obligation(cx, task_id, ObligationKind::Ack, &replicas)
+                        .await?;
                     obligation_ids.push(obligation_id);
                 }
             }
 
             // Achieve consensus through bridge sequencing
-            let participating_nodes: Vec<&TestNode> = replicas.iter()
+            let participating_nodes: Vec<&TestNode> = replicas
+                .iter()
                 .take(quorum_size)
                 .filter_map(|&id| self.nodes.get(&id))
                 .collect();
 
             if let Some(leader) = participating_nodes.first() {
-                let consensus_sequence = leader.synchronize_with_peers(cx, &participating_nodes).await?;
+                let consensus_sequence = leader
+                    .synchronize_with_peers(cx, &participating_nodes)
+                    .await?;
 
                 // Apply consensus decision to quorum
                 for (i, &obligation_id) in obligation_ids.iter().enumerate() {
                     if i < quorum_size {
                         if let Some(node) = self.nodes.get_mut(&replicas[i]) {
-                            node.commit_distributed_obligation(cx, obligation_id, consensus_sequence.clone()).await?;
+                            node.commit_distributed_obligation(
+                                cx,
+                                obligation_id,
+                                consensus_sequence.clone(),
+                            )
+                            .await?;
                         }
                     }
                 }
             }
 
-            self.logger.coordination_event("consensus_coordination_complete",
-                &format!("quorum_{}_of_{}_committed", quorum_size, replicas.len()));
+            self.logger.coordination_event(
+                "consensus_coordination_complete",
+                &format!("quorum_{}_of_{}_committed", quorum_size, replicas.len()),
+            );
 
             Ok(obligation_ids)
         }
@@ -553,10 +670,12 @@ mod tests {
         async fn execute_sequential_ordering(
             &mut self,
             cx: &Cx,
-            ordered_nodes: Vec<u64>
+            ordered_nodes: Vec<u64>,
         ) -> Result<Vec<ObligationId>, Box<dyn std::error::Error>> {
-            self.logger.coordination_event("sequential_ordering_start",
-                &format!("nodes_{:?}", ordered_nodes));
+            self.logger.coordination_event(
+                "sequential_ordering_start",
+                &format!("nodes_{:?}", ordered_nodes),
+            );
 
             let mut obligation_ids = Vec::new();
             let mut current_sequence = 1u64;
@@ -565,25 +684,35 @@ mod tests {
             for (i, &node_id) in ordered_nodes.iter().enumerate() {
                 if let Some(node) = self.nodes.get_mut(&node_id) {
                     let task_id = self.factory.next_task_id();
-                    let obligation_id = node.acquire_cross_node_obligation(
-                        cx, task_id, ObligationKind::Lease, &ordered_nodes
-                    ).await?;
+                    let obligation_id = node
+                        .acquire_cross_node_obligation(
+                            cx,
+                            task_id,
+                            ObligationKind::Lease,
+                            &ordered_nodes,
+                        )
+                        .await?;
 
                     // Create bridge sequence that builds on previous
                     current_sequence += 1;
                     let sequence = BridgeSequence::new(current_sequence, node_id);
 
                     // Commit with ordered sequence
-                    node.commit_distributed_obligation(cx, obligation_id, sequence).await?;
+                    node.commit_distributed_obligation(cx, obligation_id, sequence)
+                        .await?;
                     obligation_ids.push(obligation_id);
 
-                    self.logger.coordination_event("sequential_step_complete",
-                        &format!("step_{}_node_{}_seq_{}", i, node_id, current_sequence));
+                    self.logger.coordination_event(
+                        "sequential_step_complete",
+                        &format!("step_{}_node_{}_seq_{}", i, node_id, current_sequence),
+                    );
                 }
             }
 
-            self.logger.coordination_event("sequential_ordering_complete",
-                &format!("processed_{}_nodes_in_sequence", ordered_nodes.len()));
+            self.logger.coordination_event(
+                "sequential_ordering_complete",
+                &format!("processed_{}_nodes_in_sequence", ordered_nodes.len()),
+            );
 
             Ok(obligation_ids)
         }
@@ -592,10 +721,12 @@ mod tests {
             &mut self,
             cx: &Cx,
             primary: u64,
-            secondaries: Vec<u64>
+            secondaries: Vec<u64>,
         ) -> Result<Vec<ObligationId>, Box<dyn std::error::Error>> {
-            self.logger.coordination_event("cascade_abort_start",
-                &format!("primary_{}_secondaries_{:?}", primary, secondaries));
+            self.logger.coordination_event(
+                "cascade_abort_start",
+                &format!("primary_{}_secondaries_{:?}", primary, secondaries),
+            );
 
             let mut obligation_ids = Vec::new();
 
@@ -604,9 +735,14 @@ mod tests {
             for &node_id in &all_nodes {
                 if let Some(node) = self.nodes.get_mut(&node_id) {
                     let task_id = self.factory.next_task_id();
-                    let obligation_id = node.acquire_cross_node_obligation(
-                        cx, task_id, ObligationKind::Permit, &all_nodes
-                    ).await?;
+                    let obligation_id = node
+                        .acquire_cross_node_obligation(
+                            cx,
+                            task_id,
+                            ObligationKind::Permit,
+                            &all_nodes,
+                        )
+                        .await?;
                     obligation_ids.push(obligation_id);
                 }
             }
@@ -619,10 +755,14 @@ mod tests {
                         reason: ObligationAbortReason::CancelledByParent,
                         timestamp: crate::time::wall_now(),
                     };
-                    primary_node.obligation_ledger.abort(primary_obligation_id, abort_resolution);
+                    primary_node
+                        .obligation_ledger
+                        .abort(primary_obligation_id, abort_resolution);
 
-                    self.logger.coordination_event("primary_aborted",
-                        &format!("obligation_{}", primary_obligation_id.raw()));
+                    self.logger.coordination_event(
+                        "primary_aborted",
+                        &format!("obligation_{}", primary_obligation_id.raw()),
+                    );
                 }
             }
 
@@ -634,22 +774,35 @@ mod tests {
                             reason: ObligationAbortReason::DependencyFailed,
                             timestamp: crate::time::wall_now(),
                         };
-                        secondary_node.obligation_ledger.abort(obligation_id, cascade_resolution);
+                        secondary_node
+                            .obligation_ledger
+                            .abort(obligation_id, cascade_resolution);
 
-                        self.logger.coordination_event("cascade_abort",
-                            &format!("secondary_{}_obligation_{}", secondary_node_id, obligation_id.raw()));
+                        self.logger.coordination_event(
+                            "cascade_abort",
+                            &format!(
+                                "secondary_{}_obligation_{}",
+                                secondary_node_id,
+                                obligation_id.raw()
+                            ),
+                        );
                     }
                 }
             }
 
-            self.logger.coordination_event("cascade_abort_complete",
-                &format!("aborted_{}_obligations", obligation_ids.len()));
+            self.logger.coordination_event(
+                "cascade_abort_complete",
+                &format!("aborted_{}_obligations", obligation_ids.len()),
+            );
 
             Ok(obligation_ids)
         }
 
-        async fn verify_cross_node_consistency(&self) -> Result<DistributedConsistencyReport, Box<dyn std::error::Error>> {
-            self.logger.coordination_event("verify_consistency", "starting_verification");
+        async fn verify_cross_node_consistency(
+            &self,
+        ) -> Result<DistributedConsistencyReport, Box<dyn std::error::Error>> {
+            self.logger
+                .coordination_event("verify_consistency", "starting_verification");
 
             let mut report = DistributedConsistencyReport {
                 total_nodes: self.nodes.len(),
@@ -680,7 +833,9 @@ mod tests {
             }
 
             // Verify sequence number consistency across nodes
-            let sequences: Vec<u64> = self.nodes.values()
+            let sequences: Vec<u64> = self
+                .nodes
+                .values()
                 .map(|node| node.sequence_number.load(Ordering::Relaxed))
                 .collect();
 
@@ -699,9 +854,15 @@ mod tests {
                 }
             }
 
-            self.logger.coordination_event("consistency_verification_complete",
-                &format!("seq_consistent_{}_obl_consistent_{}_bridge_healthy_{}",
-                    report.sequence_consistency, report.obligation_consistency, report.bridge_health));
+            self.logger.coordination_event(
+                "consistency_verification_complete",
+                &format!(
+                    "seq_consistent_{}_obl_consistent_{}_bridge_healthy_{}",
+                    report.sequence_consistency,
+                    report.obligation_consistency,
+                    report.bridge_health
+                ),
+            );
 
             Ok(report)
         }
@@ -785,39 +946,66 @@ mod tests {
 
             // Create distributed region across all nodes
             let participating_nodes = vec![0, 1, 2];
-            let region_id = harness.create_distributed_region(&cx, &participating_nodes, 2).await?;
+            let region_id = harness
+                .create_distributed_region(&cx, &participating_nodes, 2)
+                .await?;
 
             // Execute two-phase commit scenario
-            let scenario = harness.factory.create_cross_node_scenario("two_phase_commit", 3);
+            let scenario = harness
+                .factory
+                .create_cross_node_scenario("two_phase_commit", 3);
             let obligation_ids = harness.execute_cross_node_obligation(&cx, scenario).await?;
 
-            assert_eq!(obligation_ids.len(), 3, "Should create obligation on each node");
+            assert_eq!(
+                obligation_ids.len(),
+                3,
+                "Should create obligation on each node"
+            );
 
             // Verify cross-node consistency
             let consistency_report = harness.verify_cross_node_consistency().await?;
-            assert!(consistency_report.sequence_consistency, "Sequences should be consistent across nodes");
-            assert!(consistency_report.bridge_health, "All bridges should be healthy");
+            assert!(
+                consistency_report.sequence_consistency,
+                "Sequences should be consistent across nodes"
+            );
+            assert!(
+                consistency_report.bridge_health,
+                "All bridges should be healthy"
+            );
 
             // Analyze distributed event sequence
             let analysis = harness.analyze_distributed_events();
-            assert!(analysis.bridge_events > 0, "Should have bridge coordination events");
-            assert!(analysis.coordination_events > 0, "Should have cross-node coordination");
-            assert!(analysis.sequence_synchronizations > 0, "Should have sequence synchronization");
+            assert!(
+                analysis.bridge_events > 0,
+                "Should have bridge coordination events"
+            );
+            assert!(
+                analysis.coordination_events > 0,
+                "Should have cross-node coordination"
+            );
+            assert!(
+                analysis.sequence_synchronizations > 0,
+                "Should have sequence synchronization"
+            );
 
             Ok(())
-        }).expect("Distributed obligation bridge integration test should complete successfully");
+        })
+        .expect("Distributed obligation bridge integration test should complete successfully");
     }
 
     #[test]
     fn test_consensus_obligation_coordination() {
         crate::lab::runtime::test_with_lab(|cx| async move {
-            let mut harness = DistributedObligationHarness::new("consensus_obligation_coordination", 5)
-                .await
-                .expect("Harness creation should succeed");
+            let mut harness =
+                DistributedObligationHarness::new("consensus_obligation_coordination", 5)
+                    .await
+                    .expect("Harness creation should succeed");
 
             // Create distributed region with quorum consensus
             let all_nodes = vec![0, 1, 2, 3, 4];
-            let region_id = harness.create_distributed_region(&cx, &all_nodes, 3).await?;
+            let region_id = harness
+                .create_distributed_region(&cx, &all_nodes, 3)
+                .await?;
 
             // Execute consensus coordination scenario
             let scenario = DistributedObligationScenario::ConsensusCoordination {
@@ -826,18 +1014,29 @@ mod tests {
             };
             let obligation_ids = harness.execute_cross_node_obligation(&cx, scenario).await?;
 
-            assert_eq!(obligation_ids.len(), 5, "Should create obligations on all replicas");
+            assert_eq!(
+                obligation_ids.len(),
+                5,
+                "Should create obligations on all replicas"
+            );
 
             // Verify consensus was achieved
             let consistency_report = harness.verify_cross_node_consistency().await?;
-            assert!(consistency_report.obligation_consistency, "Obligations should be consistent");
+            assert!(
+                consistency_report.obligation_consistency,
+                "Obligations should be consistent"
+            );
 
             // Check that quorum size was respected in coordination
             let analysis = harness.analyze_distributed_events();
-            assert!(analysis.coordination_events >= 3, "Should have sufficient coordination for quorum");
+            assert!(
+                analysis.coordination_events >= 3,
+                "Should have sufficient coordination for quorum"
+            );
 
             Ok(())
-        }).expect("Consensus obligation coordination test should complete successfully");
+        })
+        .expect("Consensus obligation coordination test should complete successfully");
     }
 
     #[test]
@@ -855,15 +1054,27 @@ mod tests {
 
             let obligation_ids = harness.execute_cross_node_obligation(&cx, scenario).await?;
 
-            assert_eq!(obligation_ids.len(), 4, "Should process all nodes sequentially");
+            assert_eq!(
+                obligation_ids.len(),
+                4,
+                "Should process all nodes sequentially"
+            );
 
             // Verify sequential ordering was maintained
             let analysis = harness.analyze_distributed_events();
-            assert!(analysis.sequence_synchronizations >= 4, "Should have sequential synchronizations");
+            assert!(
+                analysis.sequence_synchronizations >= 4,
+                "Should have sequential synchronizations"
+            );
 
             // Check that each node has increasing sequence numbers
-            let sequences: Vec<u64> = ordered_nodes.iter()
-                .map(|&node_id| harness.nodes[&node_id].sequence_number.load(Ordering::Relaxed))
+            let sequences: Vec<u64> = ordered_nodes
+                .iter()
+                .map(|&node_id| {
+                    harness.nodes[&node_id]
+                        .sequence_number
+                        .load(Ordering::Relaxed)
+                })
                 .collect();
 
             for window in sequences.windows(2) {
@@ -871,7 +1082,8 @@ mod tests {
             }
 
             Ok(())
-        }).expect("Sequential bridge sequencing test should complete successfully");
+        })
+        .expect("Sequential bridge sequencing test should complete successfully");
     }
 
     #[test]
@@ -889,57 +1101,95 @@ mod tests {
 
             let obligation_ids = harness.execute_cross_node_obligation(&cx, scenario).await?;
 
-            assert_eq!(obligation_ids.len(), 4, "Should create obligations on all nodes");
+            assert_eq!(
+                obligation_ids.len(),
+                4,
+                "Should create obligations on all nodes"
+            );
 
             // Verify cascade abort was properly coordinated
             let analysis = harness.analyze_distributed_events();
-            assert!(analysis.coordination_events > 0, "Should have coordination events");
+            assert!(
+                analysis.coordination_events > 0,
+                "Should have coordination events"
+            );
 
             // Check that all nodes have consistent abort state
             let consistency_report = harness.verify_cross_node_consistency().await?;
-            assert!(consistency_report.bridge_health, "Bridge should remain healthy after abort");
+            assert!(
+                consistency_report.bridge_health,
+                "Bridge should remain healthy after abort"
+            );
 
             Ok(())
-        }).expect("Cascade abort coordination test should complete successfully");
+        })
+        .expect("Cascade abort coordination test should complete successfully");
     }
 
     #[test]
     fn test_cross_node_obligation_consistency() {
         crate::lab::runtime::test_with_lab(|cx| async move {
-            let mut harness = DistributedObligationHarness::new("cross_node_obligation_consistency", 3)
-                .await
-                .expect("Harness creation should succeed");
+            let mut harness =
+                DistributedObligationHarness::new("cross_node_obligation_consistency", 3)
+                    .await
+                    .expect("Harness creation should succeed");
 
             // Create multiple distributed regions with overlapping nodes
             let region1_nodes = vec![0, 1];
             let region2_nodes = vec![1, 2];
             let region3_nodes = vec![0, 2];
 
-            let region1 = harness.create_distributed_region(&cx, &region1_nodes, 2).await?;
-            let region2 = harness.create_distributed_region(&cx, &region2_nodes, 2).await?;
-            let region3 = harness.create_distributed_region(&cx, &region3_nodes, 2).await?;
+            let region1 = harness
+                .create_distributed_region(&cx, &region1_nodes, 2)
+                .await?;
+            let region2 = harness
+                .create_distributed_region(&cx, &region2_nodes, 2)
+                .await?;
+            let region3 = harness
+                .create_distributed_region(&cx, &region3_nodes, 2)
+                .await?;
 
             // Execute obligations across different region combinations
-            let scenario1 = harness.factory.create_cross_node_scenario("two_phase_commit", 2);
-            let obligations1 = harness.execute_cross_node_obligation(&cx, scenario1).await?;
+            let scenario1 = harness
+                .factory
+                .create_cross_node_scenario("two_phase_commit", 2);
+            let obligations1 = harness
+                .execute_cross_node_obligation(&cx, scenario1)
+                .await?;
 
             let scenario2 = harness.factory.create_cross_node_scenario("consensus", 2);
-            let obligations2 = harness.execute_cross_node_obligation(&cx, scenario2).await?;
+            let obligations2 = harness
+                .execute_cross_node_obligation(&cx, scenario2)
+                .await?;
 
             // Verify overall consistency across all operations
             let final_consistency = harness.verify_cross_node_consistency().await?;
-            assert!(final_consistency.sequence_consistency, "Sequences should remain consistent");
-            assert!(final_consistency.obligation_consistency, "Obligations should be consistent");
+            assert!(
+                final_consistency.sequence_consistency,
+                "Sequences should remain consistent"
+            );
+            assert!(
+                final_consistency.obligation_consistency,
+                "Obligations should be consistent"
+            );
             assert_eq!(final_consistency.total_nodes, 3, "Should track all nodes");
 
             // Verify that all nodes have processed obligations
             for (&node_id, node_report) in &final_consistency.node_reports {
-                assert!(node_report.ledger_stats.total_acquired > 0,
-                    "Node {} should have processed obligations", node_id);
-                assert!(node_report.is_consistent, "Node {} should be consistent", node_id);
+                assert!(
+                    node_report.ledger_stats.total_acquired > 0,
+                    "Node {} should have processed obligations",
+                    node_id
+                );
+                assert!(
+                    node_report.is_consistent,
+                    "Node {} should be consistent",
+                    node_id
+                );
             }
 
             Ok(())
-        }).expect("Cross-node obligation consistency test should complete successfully");
+        })
+        .expect("Cross-node obligation consistency test should complete successfully");
     }
 }

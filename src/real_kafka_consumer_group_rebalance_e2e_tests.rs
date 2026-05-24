@@ -17,20 +17,20 @@ mod tests {
         dead_code
     )]
 
-    use std::collections::{HashMap, BTreeMap, BTreeSet, VecDeque};
+    use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-    use tokio::sync::{RwLock, oneshot, Semaphore};
-    use tokio::time::{timeout, sleep};
+    use tokio::sync::{RwLock, Semaphore, oneshot};
+    use tokio::time::{sleep, timeout};
 
     // Import Kafka consumer and related types
-    use crate::messaging::kafka_consumer::{
-        KafkaConsumer, ConsumerConfig, ConsumerRecord, RebalanceResult,
-        TopicPartitionOffset, AutoOffsetReset
-    };
-    use crate::messaging::kafka::{KafkaError, KafkaSecurityConfig};
     use crate::cx::Cx;
-    use crate::types::{Outcome, CancelReason};
+    use crate::messaging::kafka::{KafkaError, KafkaSecurityConfig};
+    use crate::messaging::kafka_consumer::{
+        AutoOffsetReset, ConsumerConfig, ConsumerRecord, KafkaConsumer, RebalanceResult,
+        TopicPartitionOffset,
+    };
+    use crate::types::{CancelReason, Outcome};
 
     // ---------------------------------------------------------------------------
     // Kafka Consumer Group Rebalance Test Framework
@@ -108,7 +108,13 @@ mod tests {
             );
         }
 
-        async fn log_rebalance_event(&self, consumer_id: &str, generation: u64, assigned: &[(String, i32)], revoked: &[(String, i32)]) {
+        async fn log_rebalance_event(
+            &self,
+            consumer_id: &str,
+            generation: u64,
+            assigned: &[(String, i32)],
+            revoked: &[(String, i32)],
+        ) {
             let elapsed = self.start_time.elapsed().as_millis() as u64;
             eprintln!(
                 "{{\"ts\":\"{}\",\"test\":\"{}\",\"event\":\"rebalance\",\"consumer_id\":\"{}\",\"generation\":{},\"assigned\":{},\"revoked\":{},\"elapsed_ms\":{}}}",
@@ -122,7 +128,13 @@ mod tests {
             );
         }
 
-        async fn log_offset_commit(&self, consumer_id: &str, topic: &str, partition: i32, offset: i64) {
+        async fn log_offset_commit(
+            &self,
+            consumer_id: &str,
+            topic: &str,
+            partition: i32,
+            offset: i64,
+        ) {
             let elapsed = self.start_time.elapsed().as_millis() as u64;
             eprintln!(
                 "{{\"ts\":\"{}\",\"test\":\"{}\",\"event\":\"offset_commit\",\"consumer_id\":\"{}\",\"topic\":\"{}\",\"partition\":{},\"offset\":{},\"elapsed_ms\":{}}}",
@@ -144,11 +156,7 @@ mod tests {
             stat_updater(&mut stats);
         }
 
-        async fn finalize(
-            &self,
-            result: bool,
-            error: Option<String>,
-        ) -> RebalanceTestResult {
+        async fn finalize(&self, result: bool, error: Option<String>) -> RebalanceTestResult {
             let stats = self.stats.read().await.clone();
             RebalanceTestResult {
                 test_name: self.test_name.clone(),
@@ -175,16 +183,17 @@ mod tests {
     }
 
     impl GroupMemberConsumer {
-        pub async fn new(consumer_id: String, group_id: &str, topics: &[&str]) -> Result<Self, KafkaError> {
-            let config = ConsumerConfig::new(
-                vec!["localhost:9092".to_string()],
-                group_id
-            )
-            .client_id(&consumer_id)
-            .session_timeout(Duration::from_secs(10))
-            .heartbeat_interval(Duration::from_secs(3))
-            .auto_offset_reset(AutoOffsetReset::Earliest)
-            .enable_auto_commit(false); // Manual offset management
+        pub async fn new(
+            consumer_id: String,
+            group_id: &str,
+            topics: &[&str],
+        ) -> Result<Self, KafkaError> {
+            let config = ConsumerConfig::new(vec!["localhost:9092".to_string()], group_id)
+                .client_id(&consumer_id)
+                .session_timeout(Duration::from_secs(10))
+                .heartbeat_interval(Duration::from_secs(3))
+                .auto_offset_reset(AutoOffsetReset::Earliest)
+                .enable_auto_commit(false); // Manual offset management
 
             let consumer = Arc::new(KafkaConsumer::new(config)?);
 
@@ -219,9 +228,11 @@ mod tests {
                 // Track consumed message
                 self.consumed_messages.lock().unwrap().push(record.clone());
 
-                logger.increment_stat(|stats| {
-                    stats.messages_consumed_pre_rebalance += 1;
-                }).await;
+                logger
+                    .increment_stat(|stats| {
+                        stats.messages_consumed_pre_rebalance += 1;
+                    })
+                    .await;
 
                 // Simulate processing time during which rebalance might occur
                 sleep(Duration::from_millis(10)).await;
@@ -241,19 +252,25 @@ mod tests {
             let partition_key = (record.topic.clone(), record.partition);
 
             // Track committed offset
-            self.committed_offsets.lock().unwrap()
+            self.committed_offsets
+                .lock()
+                .unwrap()
                 .insert(partition_key, record.offset);
 
-            logger.log_offset_commit(
-                &self.consumer_id,
-                &record.topic,
-                record.partition,
-                record.offset
-            ).await;
+            logger
+                .log_offset_commit(
+                    &self.consumer_id,
+                    &record.topic,
+                    record.partition,
+                    record.offset,
+                )
+                .await;
 
-            logger.increment_stat(|stats| {
-                stats.offset_commits_pre_rebalance += 1;
-            }).await;
+            logger
+                .increment_stat(|stats| {
+                    stats.offset_commits_pre_rebalance += 1;
+                })
+                .await;
 
             // In real implementation, would call consumer.commit_offset()
             Ok(())
@@ -276,19 +293,24 @@ mod tests {
             // Track rebalance in history
             self.rebalance_history.lock().unwrap().push(result.clone());
 
-            logger.log_rebalance_event(
-                &self.consumer_id,
-                result.generation,
-                &result.assigned,
-                &result.revoked
-            ).await;
+            logger
+                .log_rebalance_event(
+                    &self.consumer_id,
+                    result.generation,
+                    &result.assigned,
+                    &result.revoked,
+                )
+                .await;
 
-            logger.increment_stat(|stats| {
-                stats.rebalance_events += 1;
-                stats.partitions_assigned += result.assigned.len() as u64;
-                stats.partitions_revoked += result.revoked.len() as u64;
-                stats.max_rebalance_duration_ms = stats.max_rebalance_duration_ms.max(rebalance_duration);
-            }).await;
+            logger
+                .increment_stat(|stats| {
+                    stats.rebalance_events += 1;
+                    stats.partitions_assigned += result.assigned.len() as u64;
+                    stats.partitions_revoked += result.revoked.len() as u64;
+                    stats.max_rebalance_duration_ms =
+                        stats.max_rebalance_duration_ms.max(rebalance_duration);
+                })
+                .await;
 
             Ok(result)
         }
@@ -312,15 +334,20 @@ mod tests {
                         preserved = false;
                     }
                 } else {
-                    eprintln!("OFFSET_LOST: {}:{} offset lost during rebalance", topic, partition);
+                    eprintln!(
+                        "OFFSET_LOST: {}:{} offset lost during rebalance",
+                        topic, partition
+                    );
                     preserved = false;
                 }
             }
 
             if !preserved {
-                logger.increment_stat(|stats| {
-                    stats.offset_preservation_failures += 1;
-                }).await;
+                logger
+                    .increment_stat(|stats| {
+                        stats.offset_preservation_failures += 1;
+                    })
+                    .await;
             }
 
             preserved
@@ -339,17 +366,21 @@ mod tests {
             if let Some(record) = record {
                 self.consumed_messages.lock().unwrap().push(record.clone());
 
-                logger.increment_stat(|stats| {
-                    stats.messages_consumed_post_rebalance += 1;
-                }).await;
+                logger
+                    .increment_stat(|stats| {
+                        stats.messages_consumed_post_rebalance += 1;
+                    })
+                    .await;
 
                 // Verify consumption resumed from correct offset
                 if record.offset >= expected_continuation_offset {
                     Ok(true)
                 } else {
-                    logger.increment_stat(|stats| {
-                        stats.consumption_gaps += 1;
-                    }).await;
+                    logger
+                        .increment_stat(|stats| {
+                            stats.consumption_gaps += 1;
+                        })
+                        .await;
                     Ok(false)
                 }
             } else {
@@ -359,9 +390,15 @@ mod tests {
 
         // Helper methods for deterministic testing simulation
 
-        async fn simulate_message_fetch(&self, _cx: &Cx) -> Result<Option<ConsumerRecord>, KafkaError> {
+        async fn simulate_message_fetch(
+            &self,
+            _cx: &Cx,
+        ) -> Result<Option<ConsumerRecord>, KafkaError> {
             // Simulate fetching a message
-            let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
 
             // Create deterministic message based on consumer ID
             let message_offset = self.consumed_messages.lock().unwrap().len() as i64;
@@ -377,10 +414,14 @@ mod tests {
             }))
         }
 
-        async fn simulate_rebalance(&self, assignments: &[TopicPartitionOffset]) -> Result<RebalanceResult, KafkaError> {
+        async fn simulate_rebalance(
+            &self,
+            assignments: &[TopicPartitionOffset],
+        ) -> Result<RebalanceResult, KafkaError> {
             // Simulate rebalance result
             let generation = self.rebalance_history.lock().unwrap().len() as u64 + 1;
-            let assigned: Vec<(String, i32)> = assignments.iter()
+            let assigned: Vec<(String, i32)> = assignments
+                .iter()
                 .map(|tpo| (tpo.topic.clone(), tpo.partition))
                 .collect();
 
@@ -416,11 +457,10 @@ mod tests {
 
             for i in 0..consumer_count {
                 let consumer_id = format!("{}-consumer-{}", group_id, i);
-                let member = Arc::new(GroupMemberConsumer::new(
-                    consumer_id.clone(),
-                    &group_id,
-                    &["test-topic"]
-                ).await?);
+                let member = Arc::new(
+                    GroupMemberConsumer::new(consumer_id.clone(), &group_id, &["test-topic"])
+                        .await?,
+                );
                 members.push(member);
             }
 
@@ -441,7 +481,9 @@ mod tests {
             // Wait for some consumers to be actively fetching
             let mut attempts = 0;
             while attempts < 10 {
-                let fetching_count = self.members.iter()
+                let fetching_count = self
+                    .members
+                    .iter()
                     .filter(|member| *member.fetch_in_progress.lock().unwrap())
                     .count();
 
@@ -462,11 +504,16 @@ mod tests {
             // Apply rebalance to all members
             for (i, member) in self.members.iter().enumerate() {
                 if i < new_assignments.len() {
-                    member.handle_rebalance(cx, &new_assignments[i], logger).await?;
+                    member
+                        .handle_rebalance(cx, &new_assignments[i], logger)
+                        .await?;
                 }
             }
 
-            self.rebalance_coordinator.lock().unwrap().rebalance_trigger_count += 1;
+            self.rebalance_coordinator
+                .lock()
+                .unwrap()
+                .rebalance_trigger_count += 1;
             Ok(())
         }
 
@@ -519,7 +566,7 @@ mod tests {
         let group_id = "basic-rebalance-group".to_string();
         let mut logger = RebalanceE2ELogger::new(
             "kafka_consumer_group_basic_rebalance".to_string(),
-            group_id.clone()
+            group_id.clone(),
         );
 
         logger.log_phase(RebalanceTestPhase::Setup).await;
@@ -528,12 +575,16 @@ mod tests {
 
         let result = async {
             // Create consumer group
-            logger.log_phase(RebalanceTestPhase::InitialConsumerGroup).await;
+            logger
+                .log_phase(RebalanceTestPhase::InitialConsumerGroup)
+                .await;
             let group = ConsumerGroupSimulator::new(group_id.clone(), 3).await?;
 
-            logger.increment_stat(|stats| {
-                stats.consumers_created = 3;
-            }).await;
+            logger
+                .increment_stat(|stats| {
+                    stats.consumers_created = 3;
+                })
+                .await;
 
             // Start initial consumption
             logger.log_phase(RebalanceTestPhase::StartConsumption).await;
@@ -544,46 +595,61 @@ mod tests {
                 for _ in 0..5 {
                     if let Some(record) = member.consume_with_offset_tracking(&cx, &logger).await? {
                         member.commit_offset(&cx, &record, &logger).await?;
-                        pre_rebalance_offsets.insert(
-                            (record.topic.clone(), record.partition),
-                            record.offset
-                        );
+                        pre_rebalance_offsets
+                            .insert((record.topic.clone(), record.partition), record.offset);
                     }
                 }
             }
 
             // Trigger rebalance during consumption
-            logger.log_phase(RebalanceTestPhase::MidFetchRebalance).await;
+            logger
+                .log_phase(RebalanceTestPhase::MidFetchRebalance)
+                .await;
             group.trigger_mid_fetch_rebalance(&cx, &logger).await?;
 
             // Verify offset preservation
-            logger.log_phase(RebalanceTestPhase::OffsetVerification).await;
+            logger
+                .log_phase(RebalanceTestPhase::OffsetVerification)
+                .await;
             for member in &group.members {
-                let preserved = member.verify_offset_preservation(&pre_rebalance_offsets, &logger).await;
+                let preserved = member
+                    .verify_offset_preservation(&pre_rebalance_offsets, &logger)
+                    .await;
                 if !preserved {
                     return Err(KafkaError::Config("Offset preservation failed".to_string()));
                 }
             }
 
             // Resume consumption after rebalance
-            logger.log_phase(RebalanceTestPhase::ConsumptionResumption).await;
+            logger
+                .log_phase(RebalanceTestPhase::ConsumptionResumption)
+                .await;
             for member in &group.members {
                 let continuation_offset = 5; // Expected offset after consuming 5 messages
-                let resumed = member.resume_consumption_after_rebalance(&cx, continuation_offset, &logger).await?;
+                let resumed = member
+                    .resume_consumption_after_rebalance(&cx, continuation_offset, &logger)
+                    .await?;
                 if !resumed {
-                    return Err(KafkaError::Config("Failed to resume consumption".to_string()));
+                    return Err(KafkaError::Config(
+                        "Failed to resume consumption".to_string(),
+                    ));
                 }
             }
 
             // Final verification
-            logger.log_phase(RebalanceTestPhase::FinalVerification).await;
+            logger
+                .log_phase(RebalanceTestPhase::FinalVerification)
+                .await;
             let consistent = group.verify_group_offset_consistency(&logger).await;
             if !consistent {
-                return Err(KafkaError::Config("Group offset consistency check failed".to_string()));
+                return Err(KafkaError::Config(
+                    "Group offset consistency check failed".to_string(),
+                ));
             }
 
             Ok::<(), KafkaError>(())
-        }.await;
+        }
+        .await;
 
         let test_result = match result {
             Ok(()) => {
@@ -596,7 +662,11 @@ mod tests {
 
                 logger.finalize(true, None).await
             }
-            Err(e) => logger.finalize(false, Some(format!("Test failed: {e}"))).await,
+            Err(e) => {
+                logger
+                    .finalize(false, Some(format!("Test failed: {e}")))
+                    .await
+            }
         };
 
         logger.log_phase(RebalanceTestPhase::Teardown).await;
@@ -616,7 +686,7 @@ mod tests {
         let group_id = "mid-fetch-rebalance-group".to_string();
         let mut logger = RebalanceE2ELogger::new(
             "kafka_consumer_group_mid_fetch_rebalance".to_string(),
-            group_id.clone()
+            group_id.clone(),
         );
 
         let cx = Cx::new().unwrap();
@@ -625,21 +695,32 @@ mod tests {
             let group = ConsumerGroupSimulator::new(group_id.clone(), 4).await?;
 
             // Start multiple consumers fetching concurrently
-            let handles: Vec<_> = group.members.iter().map(|member| {
-                let member_clone = Arc::clone(member);
-                let cx_clone = cx.clone();
-                let logger_clone = &logger as *const _ as *const RebalanceE2ELogger;
+            let handles: Vec<_> = group
+                .members
+                .iter()
+                .map(|member| {
+                    let member_clone = Arc::clone(member);
+                    let cx_clone = cx.clone();
+                    let logger_clone = &logger as *const _ as *const RebalanceE2ELogger;
 
-                tokio::spawn(async move {
-                    let logger_ref = unsafe { &*logger_clone };
-                    for _ in 0..3 {
-                        if let Some(record) = member_clone.consume_with_offset_tracking(&cx_clone, logger_ref).await.ok().flatten() {
-                            let _ = member_clone.commit_offset(&cx_clone, &record, logger_ref).await;
+                    tokio::spawn(async move {
+                        let logger_ref = unsafe { &*logger_clone };
+                        for _ in 0..3 {
+                            if let Some(record) = member_clone
+                                .consume_with_offset_tracking(&cx_clone, logger_ref)
+                                .await
+                                .ok()
+                                .flatten()
+                            {
+                                let _ = member_clone
+                                    .commit_offset(&cx_clone, &record, logger_ref)
+                                    .await;
+                            }
+                            sleep(Duration::from_millis(50)).await;
                         }
-                        sleep(Duration::from_millis(50)).await;
-                    }
+                    })
                 })
-            }).collect();
+                .collect();
 
             // Trigger rebalance while fetches are in progress
             sleep(Duration::from_millis(25)).await; // Let fetches start
@@ -652,14 +733,19 @@ mod tests {
 
             // Verify all consumers can continue after rebalance
             for member in &group.members {
-                let resumed = member.resume_consumption_after_rebalance(&cx, 0, &logger).await?;
+                let resumed = member
+                    .resume_consumption_after_rebalance(&cx, 0, &logger)
+                    .await?;
                 if !resumed {
-                    return Err(KafkaError::Config("Failed to resume after mid-fetch rebalance".to_string()));
+                    return Err(KafkaError::Config(
+                        "Failed to resume after mid-fetch rebalance".to_string(),
+                    ));
                 }
             }
 
             Ok::<(), KafkaError>(())
-        }.await;
+        }
+        .await;
 
         let test_result = match result {
             Ok(()) => {
@@ -669,10 +755,18 @@ mod tests {
 
                 logger.finalize(true, None).await
             }
-            Err(e) => logger.finalize(false, Some(format!("Mid-fetch rebalance test failed: {e}"))).await,
+            Err(e) => {
+                logger
+                    .finalize(false, Some(format!("Mid-fetch rebalance test failed: {e}")))
+                    .await
+            }
         };
 
-        assert!(test_result.success, "Mid-fetch rebalance test failed: {:?}", test_result.error);
+        assert!(
+            test_result.success,
+            "Mid-fetch rebalance test failed: {:?}",
+            test_result.error
+        );
 
         eprintln!("✅ Kafka consumer group mid-fetch rebalance test completed successfully");
     }
@@ -682,7 +776,7 @@ mod tests {
         let group_id = "partition-reassignment-stress-group".to_string();
         let mut logger = RebalanceE2ELogger::new(
             "kafka_consumer_group_partition_reassignment_stress".to_string(),
-            group_id.clone()
+            group_id.clone(),
         );
 
         let cx = Cx::new().unwrap();
@@ -694,25 +788,31 @@ mod tests {
         let result = async {
             let group = ConsumerGroupSimulator::new(group_id.clone(), NUM_CONSUMERS).await?;
 
-            logger.increment_stat(|stats| {
-                stats.consumers_created = NUM_CONSUMERS as u64;
-            }).await;
+            logger
+                .increment_stat(|stats| {
+                    stats.consumers_created = NUM_CONSUMERS as u64;
+                })
+                .await;
 
             let mut round_offsets = Vec::new();
 
             for round in 0..REBALANCE_ROUNDS {
-                eprintln!("🔄 Starting rebalance round {} of {}", round + 1, REBALANCE_ROUNDS);
+                eprintln!(
+                    "🔄 Starting rebalance round {} of {}",
+                    round + 1,
+                    REBALANCE_ROUNDS
+                );
 
                 // Consume messages
                 let mut current_offsets = HashMap::new();
                 for member in &group.members {
                     for _ in 0..MESSAGES_PER_ROUND {
-                        if let Some(record) = member.consume_with_offset_tracking(&cx, &logger).await? {
+                        if let Some(record) =
+                            member.consume_with_offset_tracking(&cx, &logger).await?
+                        {
                             member.commit_offset(&cx, &record, &logger).await?;
-                            current_offsets.insert(
-                                (record.topic.clone(), record.partition),
-                                record.offset
-                            );
+                            current_offsets
+                                .insert((record.topic.clone(), record.partition), record.offset);
                         }
                     }
                 }
@@ -722,9 +822,14 @@ mod tests {
 
                 // Verify offsets are preserved
                 for member in &group.members {
-                    let preserved = member.verify_offset_preservation(&current_offsets, &logger).await;
+                    let preserved = member
+                        .verify_offset_preservation(&current_offsets, &logger)
+                        .await;
                     if !preserved {
-                        return Err(KafkaError::Config(format!("Offset preservation failed in round {}", round)));
+                        return Err(KafkaError::Config(format!(
+                            "Offset preservation failed in round {}",
+                            round
+                        )));
                     }
                 }
 
@@ -734,29 +839,48 @@ mod tests {
             // Final consistency check across all rounds
             let consistent = group.verify_group_offset_consistency(&logger).await;
             if !consistent {
-                return Err(KafkaError::Config("Final group consistency check failed".to_string()));
+                return Err(KafkaError::Config(
+                    "Final group consistency check failed".to_string(),
+                ));
             }
 
             Ok::<(), KafkaError>(())
-        }.await;
+        }
+        .await;
 
         let test_result = match result {
             Ok(()) => {
                 let stats = logger.stats.read().await;
                 assert_eq!(stats.consumers_created, NUM_CONSUMERS as u64);
                 assert_eq!(stats.rebalance_events, REBALANCE_ROUNDS as u64);
-                assert!(stats.messages_consumed_pre_rebalance >= (NUM_CONSUMERS * MESSAGES_PER_ROUND * REBALANCE_ROUNDS) as u64);
+                assert!(
+                    stats.messages_consumed_pre_rebalance
+                        >= (NUM_CONSUMERS * MESSAGES_PER_ROUND * REBALANCE_ROUNDS) as u64
+                );
                 assert_eq!(stats.offset_preservation_failures, 0);
 
                 logger.finalize(true, None).await
             }
-            Err(e) => logger.finalize(false, Some(format!("Stress test failed: {e}"))).await,
+            Err(e) => {
+                logger
+                    .finalize(false, Some(format!("Stress test failed: {e}")))
+                    .await
+            }
         };
 
-        assert!(test_result.success, "Partition reassignment stress test failed: {:?}", test_result.error);
+        assert!(
+            test_result.success,
+            "Partition reassignment stress test failed: {:?}",
+            test_result.error
+        );
 
-        eprintln!("✅ Kafka consumer group partition reassignment stress test completed successfully");
-        eprintln!("📊 Completed {} rebalance rounds with {} consumers", REBALANCE_ROUNDS, NUM_CONSUMERS);
+        eprintln!(
+            "✅ Kafka consumer group partition reassignment stress test completed successfully"
+        );
+        eprintln!(
+            "📊 Completed {} rebalance rounds with {} consumers",
+            REBALANCE_ROUNDS, NUM_CONSUMERS
+        );
         eprintln!("📊 Final stats: {:?}", test_result.rebalance_stats);
     }
 
@@ -765,7 +889,7 @@ mod tests {
         let group_id = "offset-commit-survival-group".to_string();
         let mut logger = RebalanceE2ELogger::new(
             "kafka_consumer_group_offset_commit_survival".to_string(),
-            group_id.clone()
+            group_id.clone(),
         );
 
         let cx = Cx::new().unwrap();
@@ -779,10 +903,8 @@ mod tests {
                 for i in 0..7 {
                     if let Some(record) = member.consume_with_offset_tracking(&cx, &logger).await? {
                         member.commit_offset(&cx, &record, &logger).await?;
-                        baseline_offsets.insert(
-                            (record.topic.clone(), record.partition),
-                            record.offset
-                        );
+                        baseline_offsets
+                            .insert((record.topic.clone(), record.partition), record.offset);
                     }
                 }
             }
@@ -792,23 +914,32 @@ mod tests {
 
             // Verify ALL committed offsets survived
             for member in &group.members {
-                let preserved = member.verify_offset_preservation(&baseline_offsets, &logger).await;
+                let preserved = member
+                    .verify_offset_preservation(&baseline_offsets, &logger)
+                    .await;
                 if !preserved {
-                    return Err(KafkaError::Config("Critical: Committed offsets not preserved".to_string()));
+                    return Err(KafkaError::Config(
+                        "Critical: Committed offsets not preserved".to_string(),
+                    ));
                 }
             }
 
             // Test resumption with exact offset continuation
             for member in &group.members {
                 let last_committed_offset = baseline_offsets.values().max().unwrap_or(&0);
-                let resumed = member.resume_consumption_after_rebalance(&cx, *last_committed_offset, &logger).await?;
+                let resumed = member
+                    .resume_consumption_after_rebalance(&cx, *last_committed_offset, &logger)
+                    .await?;
                 if !resumed {
-                    return Err(KafkaError::Config("Failed to resume from exact committed offset".to_string()));
+                    return Err(KafkaError::Config(
+                        "Failed to resume from exact committed offset".to_string(),
+                    ));
                 }
             }
 
             Ok::<(), KafkaError>(())
-        }.await;
+        }
+        .await;
 
         let test_result = match result {
             Ok(()) => {
@@ -819,10 +950,18 @@ mod tests {
 
                 logger.finalize(true, None).await
             }
-            Err(e) => logger.finalize(false, Some(format!("Offset survival test failed: {e}"))).await,
+            Err(e) => {
+                logger
+                    .finalize(false, Some(format!("Offset survival test failed: {e}")))
+                    .await
+            }
         };
 
-        assert!(test_result.success, "Offset commit survival test failed: {:?}", test_result.error);
+        assert!(
+            test_result.success,
+            "Offset commit survival test failed: {:?}",
+            test_result.error
+        );
 
         eprintln!("✅ Kafka consumer group offset commit survival test completed successfully");
         eprintln!("🎯 All committed offsets successfully preserved across rebalance");
@@ -848,7 +987,7 @@ mod tests {
         let group_id = "stats-verification-group".to_string();
         let mut logger = RebalanceE2ELogger::new(
             "kafka_consumer_group_stats_verification".to_string(),
-            group_id.clone()
+            group_id.clone(),
         );
 
         let cx = Cx::new().unwrap();
@@ -872,12 +1011,15 @@ mod tests {
             // Resume with exactly 2 messages each
             for member in &group.members {
                 for _ in 0..2 {
-                    let _ = member.resume_consumption_after_rebalance(&cx, 3, &logger).await?;
+                    let _ = member
+                        .resume_consumption_after_rebalance(&cx, 3, &logger)
+                        .await?;
                 }
             }
 
             Ok::<(), KafkaError>(())
-        }.await;
+        }
+        .await;
 
         let test_result = match result {
             Ok(()) => {
@@ -897,10 +1039,18 @@ mod tests {
 
                 logger.finalize(true, None).await
             }
-            Err(e) => logger.finalize(false, Some(format!("Stats verification test failed: {e}"))).await,
+            Err(e) => {
+                logger
+                    .finalize(false, Some(format!("Stats verification test failed: {e}")))
+                    .await
+            }
         };
 
-        assert!(test_result.success, "Stats verification test failed: {:?}", test_result.error);
+        assert!(
+            test_result.success,
+            "Stats verification test failed: {:?}",
+            test_result.error
+        );
 
         eprintln!("✅ Kafka consumer group stats verification test completed successfully");
         eprintln!("📈 All statistics precisely verified");

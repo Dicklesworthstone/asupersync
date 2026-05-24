@@ -23,16 +23,12 @@ use crate::{
     cx::{Cx, Scope},
     error::Outcome,
     raptorq::{
-        decoding::{
-            Decoder, DecoderConfig, DecoderStats, DecodingEvent, SymbolReceiver,
-        },
-        encoding::{
-            Encoder, EncoderConfig, EncodingEvent, EncodingParams, SymbolGenerator,
-        },
+        ObjectId, PayloadId, RepairSymbol, SourceSymbol,
+        decoding::{Decoder, DecoderConfig, DecoderStats, DecodingEvent, SymbolReceiver},
+        encoding::{Encoder, EncoderConfig, EncodingEvent, EncodingParams, SymbolGenerator},
         gf256::Gf256,
         rfc6330::{ObjectTransmissionInformation, SourceBlockNumber, Symbol, SymbolId},
         systematic::SystematicIndex,
-        ObjectId, PayloadId, RepairSymbol, SourceSymbol,
     },
     runtime::RuntimeBuilder,
     sync::{Barrier, Mutex},
@@ -46,8 +42,8 @@ use crate::{
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -84,11 +80,13 @@ impl SymbolDeliveryTracker {
     }
 
     fn record_source_symbol_delivered(&self) {
-        self.source_symbols_delivered.fetch_add(1, Ordering::Relaxed);
+        self.source_symbols_delivered
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_repair_symbol_delivered(&self) {
-        self.repair_symbols_delivered.fetch_add(1, Ordering::Relaxed);
+        self.repair_symbols_delivered
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn record_symbol_lost(&self) {
@@ -107,12 +105,7 @@ impl SymbolDeliveryTracker {
         self.reconstruction_failures.fetch_add(1, Ordering::Relaxed);
     }
 
-    async fn record_symbol_delivery(
-        &self,
-        cx: &Cx,
-        symbol_id: SymbolId,
-        is_repair: bool,
-    ) {
+    async fn record_symbol_delivery(&self, cx: &Cx, symbol_id: SymbolId, is_repair: bool) {
         let mut timeline = self.delivery_timeline.lock(cx).await;
         timeline.push((symbol_id, std::time::Instant::now(), is_repair));
     }
@@ -225,10 +218,7 @@ impl LossySymbolChannel {
         Some((symbol_id, symbol_data))
     }
 
-    async fn flush_reorder_buffer(
-        &self,
-        cx: &Cx,
-    ) -> Vec<(SymbolId, Vec<u8>)> {
+    async fn flush_reorder_buffer(&self, cx: &Cx) -> Vec<(SymbolId, Vec<u8>)> {
         let mut buffer = self.reorder_buffer.lock(cx).await;
         let mut flushed = Vec::new();
 

@@ -23,21 +23,19 @@ use crate::{
     cx::{Cx, Scope},
     error::Outcome,
     grpc::{
+        Message, MethodDescriptor, ServiceDescriptor,
         interceptor::{
             Interceptor, InterceptorChain, InterceptorConfig, InterceptorContext,
             InterceptorResult, RequestInterceptor, ResponseInterceptor,
         },
-        web::{
-            GrpcWebConfig, GrpcWebHandler, GrpcWebRequest, GrpcWebResponse,
-            WebProtocolError, WebTransform, JsonBinaryBoundary,
-        },
+        metadata::{GrpcMetadata, MetadataEntry, MetadataMap},
         status::{GrpcStatus, GrpcStatusCode},
-        metadata::{GrpcMetadata, MetadataMap, MetadataEntry},
-        Message, MethodDescriptor, ServiceDescriptor,
+        web::{
+            GrpcWebConfig, GrpcWebHandler, GrpcWebRequest, GrpcWebResponse, JsonBinaryBoundary,
+            WebProtocolError, WebTransform,
+        },
     },
-    http::{
-        Request, Response, StatusCode, HeaderMap, HeaderName, HeaderValue,
-    },
+    http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode},
     runtime::RuntimeBuilder,
     sync::{Barrier, Mutex},
     time::{Duration, Sleep},
@@ -50,8 +48,8 @@ use crate::{
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -98,7 +96,8 @@ impl MetadataTransformationTracker {
     }
 
     fn record_interceptor_processed(&self) -> u64 {
-        self.interceptor_processed_requests.fetch_add(1, Ordering::Relaxed)
+        self.interceptor_processed_requests
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     fn record_json_to_binary_error(&self) -> u64 {
@@ -118,19 +117,15 @@ impl MetadataTransformationTracker {
     }
 
     fn record_transformation_completed(&self) -> u64 {
-        self.transformations_completed.fetch_add(1, Ordering::Relaxed)
+        self.transformations_completed
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     fn record_transformation_failure(&self) -> u64 {
         self.transformation_failures.fetch_add(1, Ordering::Relaxed)
     }
 
-    async fn record_metadata_event(
-        &self,
-        cx: &Cx,
-        metadata_key: String,
-        event_type: String,
-    ) {
+    async fn record_metadata_event(&self, cx: &Cx, metadata_key: String, event_type: String) {
         let mut timeline = self.metadata_timeline.lock(cx).await;
         timeline.push((metadata_key, std::time::Instant::now(), event_type));
     }
@@ -217,20 +212,17 @@ impl Interceptor for MetadataTrackingInterceptor {
                 self.transformation_tracker.record_metadata_lost();
 
                 self.transformation_tracker
-                    .record_metadata_event(
-                        cx,
-                        key.clone(),
-                        format!("lost_in_request_{}", self.id),
-                    )
+                    .record_metadata_event(cx, key.clone(), format!("lost_in_request_{}", self.id))
                     .await;
             }
         }
 
         // Add interceptor-specific metadata
         let interceptor_metadata = format!("processed_by_{}", self.id);
-        request
-            .metadata_mut()
-            .insert("x-interceptor-chain".to_string(), interceptor_metadata.into_bytes());
+        request.metadata_mut().insert(
+            "x-interceptor-chain".to_string(),
+            interceptor_metadata.into_bytes(),
+        );
 
         self.transformation_tracker.record_metadata_preserved();
 
@@ -282,9 +274,10 @@ impl Interceptor for MetadataTrackingInterceptor {
         }
 
         // Add response processing metadata
-        response
-            .metadata_mut()
-            .insert("x-response-interceptor".to_string(), self.id.as_bytes().to_vec());
+        response.metadata_mut().insert(
+            "x-response-interceptor".to_string(),
+            self.id.as_bytes().to_vec(),
+        );
 
         Ok(())
     }
@@ -301,28 +294,31 @@ struct MockGrpcWebService {
 }
 
 impl MockGrpcWebService {
-    fn new(
-        service_id: String,
-        transformation_tracker: MetadataTransformationTracker,
-    ) -> Self {
+    fn new(service_id: String, transformation_tracker: MetadataTransformationTracker) -> Self {
         let mut methods = HashMap::new();
 
         // Add test methods
-        methods.insert("TestMethod".to_string(), MethodDescriptor {
-            name: "TestMethod".to_string(),
-            input_type: "TestRequest".to_string(),
-            output_type: "TestResponse".to_string(),
-            server_streaming: false,
-            client_streaming: false,
-        });
+        methods.insert(
+            "TestMethod".to_string(),
+            MethodDescriptor {
+                name: "TestMethod".to_string(),
+                input_type: "TestRequest".to_string(),
+                output_type: "TestResponse".to_string(),
+                server_streaming: false,
+                client_streaming: false,
+            },
+        );
 
-        methods.insert("ErrorMethod".to_string(), MethodDescriptor {
-            name: "ErrorMethod".to_string(),
-            input_type: "TestRequest".to_string(),
-            output_type: "TestResponse".to_string(),
-            server_streaming: false,
-            client_streaming: false,
-        });
+        methods.insert(
+            "ErrorMethod".to_string(),
+            MethodDescriptor {
+                name: "ErrorMethod".to_string(),
+                input_type: "TestRequest".to_string(),
+                output_type: "TestResponse".to_string(),
+                server_streaming: false,
+                client_streaming: false,
+            },
+        );
 
         Self {
             service_id,
@@ -340,13 +336,20 @@ impl MockGrpcWebService {
         let request_id = self.transformation_tracker.record_grpc_web_request();
 
         let mut response_metadata = GrpcMetadata::new();
-        response_metadata.insert("x-service-id".to_string(), self.service_id.as_bytes().to_vec());
-        response_metadata.insert("x-request-id".to_string(), request_id.to_string().into_bytes());
+        response_metadata.insert(
+            "x-service-id".to_string(),
+            self.service_id.as_bytes().to_vec(),
+        );
+        response_metadata.insert(
+            "x-request-id".to_string(),
+            request_id.to_string().into_bytes(),
+        );
 
         match method {
             "TestMethod" => {
                 // Successful response with metadata preservation
-                self.transformation_tracker.record_transformation_completed();
+                self.transformation_tracker
+                    .record_transformation_completed();
 
                 // Copy some request metadata to response
                 if let Some(client_id) = request.metadata().get("x-client-id") {
@@ -367,10 +370,15 @@ impl MockGrpcWebService {
 
                 // Add error-specific metadata
                 response_metadata.insert("x-error-type".to_string(), b"test_error".to_vec());
-                response_metadata.insert("x-error-details".to_string(), b"simulated_failure".to_vec());
+                response_metadata
+                    .insert("x-error-details".to_string(), b"simulated_failure".to_vec());
 
                 // Alternate between JSON and binary error formats
-                let format = if request_id % 2 == 0 { "json" } else { "binary" };
+                let format = if request_id % 2 == 0 {
+                    "json"
+                } else {
+                    "binary"
+                };
                 let error_body = if format == "json" {
                     self.transformation_tracker.record_json_to_binary_error();
                     b"{'error': {'code': 13, 'message': 'Internal error'}}".to_vec()
@@ -756,7 +764,8 @@ async fn test_grpc_web_interceptor_error_propagation() -> Outcome<()> {
                     // Test error propagation through the stack
                     for error_type in ["auth_error", "validation_error", "timeout_error"] {
                         let mut error_metadata = GrpcMetadata::new();
-                        error_metadata.insert("x-error-type".to_string(), error_type.as_bytes().to_vec());
+                        error_metadata
+                            .insert("x-error-type".to_string(), error_type.as_bytes().to_vec());
 
                         let error_request = GrpcWebRequest::new(
                             "ErrorMethod".to_string(),
@@ -784,9 +793,8 @@ async fn test_grpc_web_interceptor_error_propagation() -> Outcome<()> {
                                     .intercept_response(cx, &mut response, &context)
                                     .await;
 
-                                let _final_response = grpc_web_handler
-                                    .transform_response(cx, response)
-                                    .await?;
+                                let _final_response =
+                                    grpc_web_handler.transform_response(cx, response).await?;
                             }
                             Err(_interceptor_error) => {
                                 // Error was caught by interceptor - this is expected behavior
@@ -796,8 +804,12 @@ async fn test_grpc_web_interceptor_error_propagation() -> Outcome<()> {
                     }
 
                     // Verify error handling
-                    let error_transformations = transformation_tracker.json_to_binary_errors.load(Ordering::Relaxed)
-                        + transformation_tracker.binary_to_json_errors.load(Ordering::Relaxed);
+                    let error_transformations = transformation_tracker
+                        .json_to_binary_errors
+                        .load(Ordering::Relaxed)
+                        + transformation_tracker
+                            .binary_to_json_errors
+                            .load(Ordering::Relaxed);
 
                     assert!(
                         error_transformations > 0,
@@ -833,8 +845,11 @@ async fn test_grpc_web_metadata_boundary_complex_types() -> Outcome<()> {
                         "x-json-payload",
                         "x-unicode-text",
                         "x-large-header",
-                        "x-special-chars"
-                    ].iter().map(|s| s.to_string()).collect();
+                        "x-special-chars",
+                    ]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
 
                     let boundary_interceptor = MetadataTrackingInterceptor::new(
                         "boundary_test".to_string(),
@@ -868,11 +883,24 @@ async fn test_grpc_web_metadata_boundary_complex_types() -> Outcome<()> {
 
                     // Test with complex metadata
                     let mut complex_metadata = GrpcMetadata::new();
-                    complex_metadata.insert("x-binary-data".to_string(), vec![0x01, 0x02, 0x03, 0xFF, 0x00]);
-                    complex_metadata.insert("x-json-payload".to_string(), b"{\"nested\": {\"key\": \"value\"}}".to_vec());
-                    complex_metadata.insert("x-unicode-text".to_string(), "🚀 测试 Тест".as_bytes().to_vec());
-                    complex_metadata.insert("x-large-header".to_string(), "x".repeat(1000).into_bytes());
-                    complex_metadata.insert("x-special-chars".to_string(), b"!@#$%^&*(){}[]|\\:;\"'<>?/.,`~".to_vec());
+                    complex_metadata.insert(
+                        "x-binary-data".to_string(),
+                        vec![0x01, 0x02, 0x03, 0xFF, 0x00],
+                    );
+                    complex_metadata.insert(
+                        "x-json-payload".to_string(),
+                        b"{\"nested\": {\"key\": \"value\"}}".to_vec(),
+                    );
+                    complex_metadata.insert(
+                        "x-unicode-text".to_string(),
+                        "🚀 测试 Тест".as_bytes().to_vec(),
+                    );
+                    complex_metadata
+                        .insert("x-large-header".to_string(), "x".repeat(1000).into_bytes());
+                    complex_metadata.insert(
+                        "x-special-chars".to_string(),
+                        b"!@#$%^&*(){}[]|\\:;\"'<>?/.,`~".to_vec(),
+                    );
 
                     let complex_request = GrpcWebRequest::new(
                         "TestMethod".to_string(),
@@ -897,12 +925,12 @@ async fn test_grpc_web_metadata_boundary_complex_types() -> Outcome<()> {
                         .intercept_response(cx, &mut response, &context)
                         .await?;
 
-                    let final_response = grpc_web_handler
-                        .transform_response(cx, response)
-                        .await?;
+                    let final_response = grpc_web_handler.transform_response(cx, response).await?;
 
                     // Verify complex metadata preservation
-                    let preserved_count = transformation_tracker.metadata_preserved.load(Ordering::Relaxed);
+                    let preserved_count = transformation_tracker
+                        .metadata_preserved
+                        .load(Ordering::Relaxed);
                     assert!(
                         preserved_count > 0,
                         "Should have preserved complex metadata across boundary"
@@ -930,7 +958,12 @@ mod tests {
 
         // Verify initial state
         assert_eq!(tracker.grpc_web_requests.load(Ordering::Relaxed), 0);
-        assert_eq!(tracker.interceptor_processed_requests.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            tracker
+                .interceptor_processed_requests
+                .load(Ordering::Relaxed),
+            0
+        );
         assert_eq!(tracker.json_to_binary_errors.load(Ordering::Relaxed), 0);
         assert_eq!(tracker.binary_to_json_errors.load(Ordering::Relaxed), 0);
         assert_eq!(tracker.metadata_preserved.load(Ordering::Relaxed), 0);
@@ -953,7 +986,12 @@ mod tests {
 
         // Verify tracking
         assert_eq!(tracker.grpc_web_requests.load(Ordering::Relaxed), 1);
-        assert_eq!(tracker.interceptor_processed_requests.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            tracker
+                .interceptor_processed_requests
+                .load(Ordering::Relaxed),
+            1
+        );
         assert_eq!(tracker.json_to_binary_errors.load(Ordering::Relaxed), 1);
         assert_eq!(tracker.binary_to_json_errors.load(Ordering::Relaxed), 1);
         assert_eq!(tracker.metadata_preserved.load(Ordering::Relaxed), 1);

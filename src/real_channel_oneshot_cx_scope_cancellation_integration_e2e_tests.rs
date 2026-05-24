@@ -40,14 +40,14 @@ mod tests {
         dead_code
     )]
 
+    use crate::cancel::{CancelReason, CancelToken};
     use crate::channel::oneshot::{self, Receiver, SendError, Sender};
     use crate::cx::{Cx, Scope};
-    use crate::cancel::{CancelReason, CancelToken};
     use crate::runtime::region::Region;
     use crate::types::{Outcome, RegionId, TaskId};
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     /// Test phases for oneshot-scope cancellation integration
@@ -167,28 +167,30 @@ mod tests {
             self.increment_scope_stat("scope_drop_simulation", 1);
 
             // Create a child scope that will be dropped
-            let scope_result = cx.scope(|scope| async move {
-                // Start awaiting on the receiver
-                self.increment_channel_stat("receiver_awaiting", 1);
+            let scope_result = cx
+                .scope(|scope| async move {
+                    // Start awaiting on the receiver
+                    self.increment_channel_stat("receiver_awaiting", 1);
 
-                // Register a mock waker to track cleanup
-                let waker_id = self.waker_tracker.register_waker();
+                    // Register a mock waker to track cleanup
+                    let waker_id = self.waker_tracker.register_waker();
 
-                // Attempt to receive (this will be cancelled when scope drops)
-                let result = receiver.recv(&cx).await;
+                    // Attempt to receive (this will be cancelled when scope drops)
+                    let result = receiver.recv(&cx).await;
 
-                // If we reach here, the receive completed before cancellation
-                match result {
-                    Ok(value) => {
-                        self.waker_tracker.cleanup_waker(waker_id);
-                        Ok(Outcome::Ok(value))
+                    // If we reach here, the receive completed before cancellation
+                    match result {
+                        Ok(value) => {
+                            self.waker_tracker.cleanup_waker(waker_id);
+                            Ok(Outcome::Ok(value))
+                        }
+                        Err(e) => {
+                            self.waker_tracker.cleanup_waker(waker_id);
+                            Ok(Outcome::Err(format!("Receive error: {:?}", e)))
+                        }
                     }
-                    Err(e) => {
-                        self.waker_tracker.cleanup_waker(waker_id);
-                        Ok(Outcome::Err(format!("Receive error: {:?}", e)))
-                    }
-                }
-            }).await;
+                })
+                .await;
 
             match scope_result {
                 Ok(outcome) => Ok(outcome),
@@ -209,20 +211,22 @@ mod tests {
             self.increment_channel_stat("reserve_operation_started", 1);
 
             // Attempt to reserve within a scope that will be dropped
-            let reserve_result = cx.scope(|scope| async move {
-                match sender.reserve(&cx).await {
-                    Ok(permit) => {
-                        // Successfully reserved - this shouldn't happen if cancelled quickly
-                        self.increment_channel_stat("reserve_succeeded", 1);
-                        Ok(permit)
+            let reserve_result = cx
+                .scope(|scope| async move {
+                    match sender.reserve(&cx).await {
+                        Ok(permit) => {
+                            // Successfully reserved - this shouldn't happen if cancelled quickly
+                            self.increment_channel_stat("reserve_succeeded", 1);
+                            Ok(permit)
+                        }
+                        Err(e) => {
+                            // Reserve was cancelled or failed
+                            self.increment_channel_stat("reserve_cancelled", 1);
+                            Err(format!("Reserve failed: {:?}", e))
+                        }
                     }
-                    Err(e) => {
-                        // Reserve was cancelled or failed
-                        self.increment_channel_stat("reserve_cancelled", 1);
-                        Err(format!("Reserve failed: {:?}", e))
-                    }
-                }
-            }).await;
+                })
+                .await;
 
             match reserve_result {
                 Ok(_permit) => {
@@ -238,7 +242,10 @@ mod tests {
         }
 
         /// Test basic scope drop cancellation of oneshot receiver
-        async fn test_basic_scope_drop_cancellation(&mut self, cx: &Cx) -> OneshotScopeCancelTestResult {
+        async fn test_basic_scope_drop_cancellation(
+            &mut self,
+            cx: &Cx,
+        ) -> OneshotScopeCancelTestResult {
             let mut result = OneshotScopeCancelTestResult {
                 success: false,
                 phase: OneshotScopeCancelTestPhase::Initial,
@@ -300,8 +307,10 @@ mod tests {
                 result.oneshot_stats.waker_references_cleaned = 1;
             } else {
                 result.no_dangling_wakers = false;
-                result.error = Some(format!("Dangling wakers detected: {} before, {} after",
-                                            initial_wakers, final_wakers));
+                result.error = Some(format!(
+                    "Dangling wakers detected: {} before, {} after",
+                    initial_wakers, final_wakers
+                ));
             }
 
             // Drop the sender to complete cleanup
@@ -317,7 +326,10 @@ mod tests {
         }
 
         /// Test mid-await reserve operation cancellation
-        async fn test_mid_await_reserve_cancellation(&mut self, cx: &Cx) -> OneshotScopeCancelTestResult {
+        async fn test_mid_await_reserve_cancellation(
+            &mut self,
+            cx: &Cx,
+        ) -> OneshotScopeCancelTestResult {
             let mut result = OneshotScopeCancelTestResult {
                 success: false,
                 phase: OneshotScopeCancelTestPhase::Initial,
@@ -344,7 +356,9 @@ mod tests {
                         result.oneshot_stats.cancellations_received = 1;
                         result.scope_stats.graceful_cancellations = 1;
                     } else {
-                        result.error = Some("Expected reserve cancellation but operation completed".to_string());
+                        result.error = Some(
+                            "Expected reserve cancellation but operation completed".to_string(),
+                        );
                     }
                 }
                 Err(e) => {
@@ -371,7 +385,10 @@ mod tests {
         }
 
         /// Test multiple oneshot channels in a cancelled scope
-        async fn test_multiple_oneshot_scope_cancellation(&mut self, cx: &Cx) -> OneshotScopeCancelTestResult {
+        async fn test_multiple_oneshot_scope_cancellation(
+            &mut self,
+            cx: &Cx,
+        ) -> OneshotScopeCancelTestResult {
             let mut result = OneshotScopeCancelTestResult {
                 success: false,
                 phase: OneshotScopeCancelTestPhase::Initial,
@@ -396,29 +413,32 @@ mod tests {
             let initial_wakers = self.waker_tracker.active_wakers.load(Ordering::Relaxed);
 
             // Simulate scope with multiple awaiting receivers being dropped
-            let scope_result = cx.scope(|scope| async move {
-                let mut receivers = Vec::new();
-                for (_sender, receiver) in channels {
-                    receivers.push(receiver);
-                }
+            let scope_result = cx
+                .scope(|scope| async move {
+                    let mut receivers = Vec::new();
+                    for (_sender, receiver) in channels {
+                        receivers.push(receiver);
+                    }
 
-                // All receivers start awaiting
-                for mut receiver in receivers {
-                    self.increment_channel_stat("receiver_awaiting", 1);
-                    let _waker_id = self.waker_tracker.register_waker();
+                    // All receivers start awaiting
+                    for mut receiver in receivers {
+                        self.increment_channel_stat("receiver_awaiting", 1);
+                        let _waker_id = self.waker_tracker.register_waker();
 
-                    // This will be cancelled when scope drops
-                    let _result = receiver.recv(&cx).await;
-                }
+                        // This will be cancelled when scope drops
+                        let _result = receiver.recv(&cx).await;
+                    }
 
-                Ok::<(), String>(())
-            }).await;
+                    Ok::<(), String>(())
+                })
+                .await;
 
             result.phase = OneshotScopeCancelTestPhase::CancellationVerification;
 
             match scope_result {
                 Ok(_) => {
-                    result.error = Some("Expected scope cancellation but completed normally".to_string());
+                    result.error =
+                        Some("Expected scope cancellation but completed normally".to_string());
                 }
                 Err(_) => {
                     result.clean_cancellation = true;
@@ -436,7 +456,8 @@ mod tests {
                 result.oneshot_stats.waker_references_cleaned = 5;
             } else {
                 result.no_dangling_wakers = false;
-                result.error = Some("Multiple dangling wakers after scope cancellation".to_string());
+                result.error =
+                    Some("Multiple dangling wakers after scope cancellation".to_string());
             }
 
             if result.clean_cancellation && result.no_dangling_wakers {
@@ -448,7 +469,10 @@ mod tests {
         }
 
         /// Test comprehensive oneshot-scope cancellation integration
-        async fn test_comprehensive_oneshot_scope_cancellation_integration(&mut self, cx: &Cx) -> OneshotScopeCancelTestResult {
+        async fn test_comprehensive_oneshot_scope_cancellation_integration(
+            &mut self,
+            cx: &Cx,
+        ) -> OneshotScopeCancelTestResult {
             let mut result = OneshotScopeCancelTestResult {
                 success: false,
                 phase: OneshotScopeCancelTestPhase::Initial,
@@ -465,31 +489,35 @@ mod tests {
             let multiple_result = self.test_multiple_oneshot_scope_cancellation(cx).await;
 
             // Aggregate statistics
-            result.oneshot_stats.channels_created = basic_result.oneshot_stats.channels_created +
-                reserve_result.oneshot_stats.channels_created +
-                multiple_result.oneshot_stats.channels_created;
+            result.oneshot_stats.channels_created = basic_result.oneshot_stats.channels_created
+                + reserve_result.oneshot_stats.channels_created
+                + multiple_result.oneshot_stats.channels_created;
 
-            result.oneshot_stats.cancellations_received = basic_result.oneshot_stats.cancellations_received +
-                reserve_result.oneshot_stats.cancellations_received +
-                multiple_result.oneshot_stats.cancellations_received;
+            result.oneshot_stats.cancellations_received =
+                basic_result.oneshot_stats.cancellations_received
+                    + reserve_result.oneshot_stats.cancellations_received
+                    + multiple_result.oneshot_stats.cancellations_received;
 
-            result.oneshot_stats.waker_references_cleaned = basic_result.oneshot_stats.waker_references_cleaned +
-                reserve_result.oneshot_stats.waker_references_cleaned +
-                multiple_result.oneshot_stats.waker_references_cleaned;
+            result.oneshot_stats.waker_references_cleaned =
+                basic_result.oneshot_stats.waker_references_cleaned
+                    + reserve_result.oneshot_stats.waker_references_cleaned
+                    + multiple_result.oneshot_stats.waker_references_cleaned;
 
             // Check overall success
-            result.success = basic_result.success && reserve_result.success && multiple_result.success;
-            result.clean_cancellation = basic_result.clean_cancellation &&
-                reserve_result.clean_cancellation &&
-                multiple_result.clean_cancellation;
-            result.no_dangling_wakers = basic_result.no_dangling_wakers &&
-                reserve_result.no_dangling_wakers &&
-                multiple_result.no_dangling_wakers;
+            result.success =
+                basic_result.success && reserve_result.success && multiple_result.success;
+            result.clean_cancellation = basic_result.clean_cancellation
+                && reserve_result.clean_cancellation
+                && multiple_result.clean_cancellation;
+            result.no_dangling_wakers = basic_result.no_dangling_wakers
+                && reserve_result.no_dangling_wakers
+                && multiple_result.no_dangling_wakers;
 
             if result.success {
                 result.phase = OneshotScopeCancelTestPhase::Complete;
             } else {
-                result.error = Some("One or more cancellation integration tests failed".to_string());
+                result.error =
+                    Some("One or more cancellation integration tests failed".to_string());
             }
 
             result
@@ -502,13 +530,18 @@ mod tests {
             let mut harness = OneshotScopeCancelTestHarness::new("basic_scope_drop");
             let result = harness.test_basic_scope_drop_cancellation(&cx).await;
 
-            assert!(result.success, "Basic scope drop cancellation failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Basic scope drop cancellation failed: {:?}",
+                result.error
+            );
             assert!(result.clean_cancellation);
             assert!(result.no_dangling_wakers);
             assert_eq!(result.phase, OneshotScopeCancelTestPhase::Complete);
             assert!(result.oneshot_stats.cancellations_received > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -517,12 +550,17 @@ mod tests {
             let mut harness = OneshotScopeCancelTestHarness::new("reserve_cancellation");
             let result = harness.test_mid_await_reserve_cancellation(&cx).await;
 
-            assert!(result.success, "Mid-await reserve cancellation failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Mid-await reserve cancellation failed: {:?}",
+                result.error
+            );
             assert!(result.clean_cancellation);
             assert!(result.no_dangling_wakers);
             assert!(result.oneshot_stats.channels_created > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -531,22 +569,33 @@ mod tests {
             let mut harness = OneshotScopeCancelTestHarness::new("multiple_cancellation");
             let result = harness.test_multiple_oneshot_scope_cancellation(&cx).await;
 
-            assert!(result.success, "Multiple oneshot cancellation failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Multiple oneshot cancellation failed: {:?}",
+                result.error
+            );
             assert!(result.clean_cancellation);
             assert!(result.no_dangling_wakers);
             assert_eq!(result.oneshot_stats.channels_created, 5);
             assert!(result.oneshot_stats.waker_references_cleaned > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn test_oneshot_comprehensive_scope_cancellation_integration() {
         crate::lab::runtime::test_with_lab(|cx| async move {
             let mut harness = OneshotScopeCancelTestHarness::new("comprehensive_oneshot_scope");
-            let result = harness.test_comprehensive_oneshot_scope_cancellation_integration(&cx).await;
+            let result = harness
+                .test_comprehensive_oneshot_scope_cancellation_integration(&cx)
+                .await;
 
-            assert!(result.success, "Comprehensive oneshot-scope integration failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Comprehensive oneshot-scope integration failed: {:?}",
+                result.error
+            );
             assert!(result.clean_cancellation);
             assert!(result.no_dangling_wakers);
             let oneshot_stats = result.oneshot_stats;
@@ -555,6 +604,7 @@ mod tests {
             assert!(oneshot_stats.cancellations_received > 0);
             assert!(oneshot_stats.waker_references_cleaned > 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

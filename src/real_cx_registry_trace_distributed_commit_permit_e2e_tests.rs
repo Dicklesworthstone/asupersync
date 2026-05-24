@@ -5,20 +5,20 @@
 //! integrates with distributed tracing to maintain permit tracking and
 //! validation across distributed system boundaries.
 
+use crate::cx::registry::{NameLease, NameLeaseError, NamePermit, NameRegistry};
 use crate::cx::{Cx, Registry, RegistryHandle};
-use crate::cx::registry::{NameRegistry, NameLease, NamePermit, NameLeaseError};
-use crate::trace::distributed::{
-    SymbolTraceContext, DistTraceId, SymbolSpanId, RegionTag, TraceFlags,
-};
+use crate::time::Duration;
 use crate::trace::SymbolTrace;
+use crate::trace::distributed::{
+    DistTraceId, RegionTag, SymbolSpanId, SymbolTraceContext, TraceFlags,
+};
 use crate::types::{Symbol, SymbolId, SymbolKind, Time};
 use crate::util::det_rng::DetRng;
-use crate::time::Duration;
-use std::collections::{HashMap, BTreeMap};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use futures_lite::future;
 use serde_json::json;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Configuration for registry + distributed trace testing.
 #[derive(Debug, Clone)]
@@ -211,19 +211,17 @@ impl DistributedRegistryNode {
         self.permit_store.insert(permit_name.clone(), permit_record);
 
         // Record trace
-        self.record_trace_operation(
-            trace_context,
-            "create_permit",
-            Some(permit_name),
-            cx.now(),
-        );
+        self.record_trace_operation(trace_context, "create_permit", Some(permit_name), cx.now());
 
-        cx.trace("permit_created_with_trace", &json!({
-            "node_id": self.node_id,
-            "permit_name": permit_name,
-            "trace_id": trace_id.to_string(),
-            "span_id": trace_context.span_id().to_string()
-        }));
+        cx.trace(
+            "permit_created_with_trace",
+            &json!({
+                "node_id": self.node_id,
+                "permit_name": permit_name,
+                "trace_id": trace_id.to_string(),
+                "span_id": trace_context.span_id().to_string()
+            }),
+        );
 
         Ok(permit)
     }
@@ -280,7 +278,8 @@ impl DistributedRegistryNode {
                 propagation_context.clone(),
                 target_node.clone(),
                 stats,
-            ).await?;
+            )
+            .await?;
         }
 
         stats.permits_committed.fetch_add(1, Ordering::Relaxed);
@@ -289,12 +288,15 @@ impl DistributedRegistryNode {
             Ordering::Relaxed,
         );
 
-        cx.trace("permit_committed_with_propagation", &json!({
-            "node_id": self.node_id,
-            "permit_name": permit_name,
-            "target_nodes": target_nodes,
-            "baggage_count": propagation_context.baggage().len()
-        }));
+        cx.trace(
+            "permit_committed_with_propagation",
+            &json!({
+                "node_id": self.node_id,
+                "permit_name": permit_name,
+                "target_nodes": target_nodes,
+                "baggage_count": propagation_context.baggage().len()
+            }),
+        );
 
         Ok(lease)
     }
@@ -336,10 +338,13 @@ impl DistributedRegistryNode {
             cx.now(),
         );
 
-        cx.trace("permit_aborted_with_trace", &json!({
-            "node_id": self.node_id,
-            "permit_name": permit_name
-        }));
+        cx.trace(
+            "permit_aborted_with_trace",
+            &json!({
+                "node_id": self.node_id,
+                "permit_name": permit_name
+            }),
+        );
 
         Ok(())
     }
@@ -353,18 +358,19 @@ impl DistributedRegistryNode {
         stats: &Arc<RegistryTraceStats>,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         // Extract permit information from trace baggage
-        let origin_node = trace_context.get_baggage("node_id")
-            .unwrap_or("unknown");
-        let operation = trace_context.get_baggage("operation")
-            .unwrap_or("unknown");
+        let origin_node = trace_context.get_baggage("node_id").unwrap_or("unknown");
+        let operation = trace_context.get_baggage("operation").unwrap_or("unknown");
 
         // Validate trace context integrity
         if trace_context.trace_id().is_nil() {
-            cx.trace("trace_validation_failed", &json!({
-                "node_id": self.node_id,
-                "reason": "nil_trace_id",
-                "permit_name": permit_name
-            }));
+            cx.trace(
+                "trace_validation_failed",
+                &json!({
+                    "node_id": self.node_id,
+                    "reason": "nil_trace_id",
+                    "permit_name": permit_name
+                }),
+            );
             stats.security_violations.fetch_add(1, Ordering::Relaxed);
             return Ok(false);
         }
@@ -373,11 +379,14 @@ impl DistributedRegistryNode {
         let required_baggage = ["permit_name", "node_id", "operation"];
         for key in &required_baggage {
             if trace_context.get_baggage(key).is_none() {
-                cx.trace("trace_validation_failed", &json!({
-                    "node_id": self.node_id,
-                    "reason": format!("missing_baggage_{}", key),
-                    "permit_name": permit_name
-                }));
+                cx.trace(
+                    "trace_validation_failed",
+                    &json!({
+                        "node_id": self.node_id,
+                        "reason": format!("missing_baggage_{}", key),
+                        "permit_name": permit_name
+                    }),
+                );
                 stats.security_violations.fetch_add(1, Ordering::Relaxed);
                 return Ok(false);
             }
@@ -385,7 +394,8 @@ impl DistributedRegistryNode {
 
         // Record successful cross-node validation
         self.record_trace_operation(
-            trace_context.with_baggage("validation_node", &self.node_id)
+            trace_context
+                .with_baggage("validation_node", &self.node_id)
                 .with_baggage("validation_result", "success"),
             "validate_permit",
             Some(permit_name.clone()),
@@ -394,12 +404,15 @@ impl DistributedRegistryNode {
 
         stats.cross_node_validations.fetch_add(1, Ordering::Relaxed);
 
-        cx.trace("cross_node_permit_validated", &json!({
-            "validator_node": self.node_id,
-            "origin_node": origin_node,
-            "operation": operation,
-            "permit_name": permit_name
-        }));
+        cx.trace(
+            "cross_node_permit_validated",
+            &json!({
+                "validator_node": self.node_id,
+                "origin_node": origin_node,
+                "operation": operation,
+                "permit_name": permit_name
+            }),
+        );
 
         Ok(true)
     }
@@ -416,11 +429,14 @@ impl DistributedRegistryNode {
         let trace_bytes = trace_context.to_bytes();
 
         if trace_bytes.is_empty() {
-            cx.trace("trace_propagation_failed", &json!({
-                "source_node": self.node_id,
-                "target_node": target_node,
-                "reason": "serialization_failed"
-            }));
+            cx.trace(
+                "trace_propagation_failed",
+                &json!({
+                    "source_node": self.node_id,
+                    "target_node": target_node,
+                    "reason": "serialization_failed"
+                }),
+            );
             stats.security_violations.fetch_add(1, Ordering::Relaxed);
             return Err("Failed to serialize trace context".into());
         }
@@ -435,11 +451,14 @@ impl DistributedRegistryNode {
 
         stats.traces_propagated.fetch_add(1, Ordering::Relaxed);
 
-        cx.trace("trace_context_propagated", &json!({
-            "source_node": self.node_id,
-            "target_node": target_node,
-            "trace_size_bytes": trace_bytes.len()
-        }));
+        cx.trace(
+            "trace_context_propagated",
+            &json!({
+                "source_node": self.node_id,
+                "target_node": target_node,
+                "trace_size_bytes": trace_bytes.len()
+            }),
+        );
 
         Ok(())
     }
@@ -459,7 +478,9 @@ impl DistributedRegistryNode {
             permit_name,
             node_id: self.node_id.clone(),
             timestamp,
-            baggage: trace_context.baggage().iter()
+            baggage: trace_context
+                .baggage()
+                .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         };
@@ -482,7 +503,9 @@ struct RegistryDistributedTraceHarness {
 }
 
 impl RegistryDistributedTraceHarness {
-    async fn new(config: RegistryDistributedTraceConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn new(
+        config: RegistryDistributedTraceConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut nodes = Vec::with_capacity(config.node_count);
         let mut rng = DetRng::from_seed(12345);
         let stats = Arc::new(RegistryTraceStats::default());
@@ -492,11 +515,7 @@ impl RegistryDistributedTraceHarness {
             let node_id = format!("node-{}", i);
             let region_tag = RegionTag::new(format!("region-{}", i % 3));
 
-            let node = DistributedRegistryNode::new(
-                node_id,
-                region_tag,
-                &mut rng,
-            ).await?;
+            let node = DistributedRegistryNode::new(node_id, region_tag, &mut rng).await?;
 
             nodes.push(node);
         }
@@ -514,13 +533,16 @@ impl RegistryDistributedTraceHarness {
         &mut self,
         cx: &Cx,
     ) -> Result<RegistryTraceStatsSnapshot, Box<dyn std::error::Error>> {
-        cx.trace("test_started", &json!({
-            "config": {
-                "node_count": self.config.node_count,
-                "permits_per_node": self.config.permits_per_node,
-                "commit_rate": self.config.commit_rate
-            }
-        }));
+        cx.trace(
+            "test_started",
+            &json!({
+                "config": {
+                    "node_count": self.config.node_count,
+                    "permits_per_node": self.config.permits_per_node,
+                    "commit_rate": self.config.commit_rate
+                }
+            }),
+        );
 
         // Track all permit operations across nodes
         let mut permit_handles = Vec::new();
@@ -535,11 +557,10 @@ impl RegistryDistributedTraceHarness {
                 let stats = Arc::clone(&self.stats);
 
                 // Create permit with trace context
-                match node.create_permit_with_trace(
-                    cx,
-                    permit_name.clone(),
-                    &mut self.rng,
-                ).await {
+                match node
+                    .create_permit_with_trace(cx, permit_name.clone(), &mut self.rng)
+                    .await
+                {
                     Ok(permit) => {
                         self.stats.permits_created.fetch_add(1, Ordering::Relaxed);
 
@@ -554,11 +575,14 @@ impl RegistryDistributedTraceHarness {
                         permit_handles.push(handle);
                     }
                     Err(e) => {
-                        cx.trace("permit_creation_failed", &json!({
-                            "node_index": node_index,
-                            "permit_name": permit_name,
-                            "error": e.to_string()
-                        }));
+                        cx.trace(
+                            "permit_creation_failed",
+                            &json!({
+                                "node_index": node_index,
+                                "permit_name": permit_name,
+                                "error": e.to_string()
+                            }),
+                        );
                     }
                 }
             }
@@ -571,48 +595,64 @@ impl RegistryDistributedTraceHarness {
             if let Some(permit) = handle.permit.take() {
                 if handle.should_commit {
                     // Commit with cross-node trace propagation
-                    match node.commit_permit_with_trace_propagation(
-                        cx,
-                        permit,
-                        handle.permit_name.clone(),
-                        &handle.target_nodes,
-                        &self.stats,
-                    ).await {
+                    match node
+                        .commit_permit_with_trace_propagation(
+                            cx,
+                            permit,
+                            handle.permit_name.clone(),
+                            &handle.target_nodes,
+                            &self.stats,
+                        )
+                        .await
+                    {
                         Ok(_lease) => {
-                            cx.trace("permit_committed", &json!({
-                                "node_index": handle.node_index,
-                                "permit_name": handle.permit_name
-                            }));
+                            cx.trace(
+                                "permit_committed",
+                                &json!({
+                                    "node_index": handle.node_index,
+                                    "permit_name": handle.permit_name
+                                }),
+                            );
                         }
                         Err(e) => {
-                            cx.trace("permit_commit_failed", &json!({
-                                "node_index": handle.node_index,
-                                "permit_name": handle.permit_name,
-                                "error": e.to_string()
-                            }));
-                            self.stats.security_violations.fetch_add(1, Ordering::Relaxed);
+                            cx.trace(
+                                "permit_commit_failed",
+                                &json!({
+                                    "node_index": handle.node_index,
+                                    "permit_name": handle.permit_name,
+                                    "error": e.to_string()
+                                }),
+                            );
+                            self.stats
+                                .security_violations
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 } else {
                     // Abort with trace recording
-                    match node.abort_permit_with_trace(
-                        cx,
-                        permit,
-                        handle.permit_name.clone(),
-                    ).await {
+                    match node
+                        .abort_permit_with_trace(cx, permit, handle.permit_name.clone())
+                        .await
+                    {
                         Ok(()) => {
                             self.stats.permits_aborted.fetch_add(1, Ordering::Relaxed);
-                            cx.trace("permit_aborted", &json!({
-                                "node_index": handle.node_index,
-                                "permit_name": handle.permit_name
-                            }));
+                            cx.trace(
+                                "permit_aborted",
+                                &json!({
+                                    "node_index": handle.node_index,
+                                    "permit_name": handle.permit_name
+                                }),
+                            );
                         }
                         Err(e) => {
-                            cx.trace("permit_abort_failed", &json!({
-                                "node_index": handle.node_index,
-                                "permit_name": handle.permit_name,
-                                "error": e.to_string()
-                            }));
+                            cx.trace(
+                                "permit_abort_failed",
+                                &json!({
+                                    "node_index": handle.node_index,
+                                    "permit_name": handle.permit_name,
+                                    "error": e.to_string()
+                                }),
+                            );
                         }
                     }
                 }
@@ -626,17 +666,20 @@ impl RegistryDistributedTraceHarness {
 
         let final_stats = self.stats.snapshot();
 
-        cx.trace("test_completed", &json!({
-            "stats": {
-                "permits_created": final_stats.permits_created,
-                "permits_committed": final_stats.permits_committed,
-                "permits_aborted": final_stats.permits_aborted,
-                "traces_propagated": final_stats.traces_propagated,
-                "cross_node_validations": final_stats.cross_node_validations,
-                "security_violations": final_stats.security_violations,
-                "permit_baggage_items": final_stats.permit_baggage_items
-            }
-        }));
+        cx.trace(
+            "test_completed",
+            &json!({
+                "stats": {
+                    "permits_created": final_stats.permits_created,
+                    "permits_committed": final_stats.permits_committed,
+                    "permits_aborted": final_stats.permits_aborted,
+                    "traces_propagated": final_stats.traces_propagated,
+                    "cross_node_validations": final_stats.cross_node_validations,
+                    "security_violations": final_stats.security_violations,
+                    "permit_baggage_items": final_stats.permit_baggage_items
+                }
+            }),
+        );
 
         Ok(final_stats)
     }
@@ -673,7 +716,8 @@ impl RegistryDistributedTraceHarness {
         // Group traces by trace_id to verify propagation chains
         let mut trace_chains: HashMap<DistTraceId, Vec<&TraceRecord>> = HashMap::new();
         for trace in &all_traces {
-            trace_chains.entry(trace.trace_id)
+            trace_chains
+                .entry(trace.trace_id)
                 .or_insert_with(Vec::new)
                 .push(trace);
         }
@@ -686,20 +730,26 @@ impl RegistryDistributedTraceHarness {
 
             if unique_nodes.len() > 1 {
                 multi_node_chains += 1;
-                cx.trace("multi_node_trace_chain_found", &json!({
-                    "trace_id": trace_id.to_string(),
-                    "node_count": unique_nodes.len(),
-                    "nodes": unique_nodes.iter().collect::<Vec<_>>(),
-                    "operation_count": records.len()
-                }));
+                cx.trace(
+                    "multi_node_trace_chain_found",
+                    &json!({
+                        "trace_id": trace_id.to_string(),
+                        "node_count": unique_nodes.len(),
+                        "nodes": unique_nodes.iter().collect::<Vec<_>>(),
+                        "operation_count": records.len()
+                    }),
+                );
             }
         }
 
-        cx.trace("cross_node_propagation_verified", &json!({
-            "total_trace_chains": trace_chains.len(),
-            "multi_node_chains": multi_node_chains,
-            "single_node_chains": trace_chains.len() - multi_node_chains
-        }));
+        cx.trace(
+            "cross_node_propagation_verified",
+            &json!({
+                "total_trace_chains": trace_chains.len(),
+                "multi_node_chains": multi_node_chains,
+                "single_node_chains": trace_chains.len() - multi_node_chains
+            }),
+        );
 
         Ok(())
     }
@@ -717,7 +767,7 @@ struct PermitOperationHandle {
 #[cfg(test)]
 mod registry_distributed_trace_integration_tests {
     use super::*;
-    use crate::test_utils::{init_test_logging, TestRuntime};
+    use crate::test_utils::{TestRuntime, init_test_logging};
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -740,7 +790,9 @@ mod registry_distributed_trace_integration_tests {
         TestRuntime::run_with_timeout(Duration::from_seconds(60), async move |cx| {
             let mut harness = RegistryDistributedTraceHarness::new(config.clone()).await?;
 
-            let stats = harness.run_concurrent_permit_operations_with_trace_propagation(&cx).await?;
+            let stats = harness
+                .run_concurrent_permit_operations_with_trace_propagation(&cx)
+                .await?;
 
             // Verify permit lifecycle consistency
             assert!(
@@ -756,7 +808,8 @@ mod registry_distributed_trace_integration_tests {
             assert!(
                 (actual_commit_rate - config.commit_rate).abs() < commit_rate_tolerance,
                 "Commit rate should be close to expected: actual={:.2}, expected={:.2}",
-                actual_commit_rate, config.commit_rate
+                actual_commit_rate,
+                config.commit_rate
             );
 
             // Verify trace propagation occurred
@@ -783,19 +836,24 @@ mod registry_distributed_trace_integration_tests {
             assert!(
                 stats.permit_baggage_items > stats.permits_created,
                 "Should have permit data in trace baggage: baggage={}, permits={}",
-                stats.permit_baggage_items, stats.permits_created
+                stats.permit_baggage_items,
+                stats.permits_created
             );
 
-            cx.trace("test_commit_permit_distributed_trace_propagation_complete", &json!({
-                "permits_created": stats.permits_created,
-                "permits_committed": stats.permits_committed,
-                "traces_propagated": stats.traces_propagated,
-                "cross_node_validations": stats.cross_node_validations,
-                "baggage_items": stats.permit_baggage_items
-            }));
+            cx.trace(
+                "test_commit_permit_distributed_trace_propagation_complete",
+                &json!({
+                    "permits_created": stats.permits_created,
+                    "permits_committed": stats.permits_committed,
+                    "traces_propagated": stats.traces_propagated,
+                    "cross_node_validations": stats.cross_node_validations,
+                    "baggage_items": stats.permit_baggage_items
+                }),
+            );
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         crate::test_complete!("test_commit_permit_distributed_trace_propagation");
     }
@@ -816,7 +874,9 @@ mod registry_distributed_trace_integration_tests {
         TestRuntime::run_with_timeout(Duration::from_seconds(45), async move |cx| {
             let mut harness = RegistryDistributedTraceHarness::new(config.clone()).await?;
 
-            let stats = harness.run_concurrent_permit_operations_with_trace_propagation(&cx).await?;
+            let stats = harness
+                .run_concurrent_permit_operations_with_trace_propagation(&cx)
+                .await?;
 
             // Verify no capability security violations occurred
             assert_eq!(
@@ -842,17 +902,22 @@ mod registry_distributed_trace_integration_tests {
             assert!(
                 stats.permit_baggage_items >= total_permits,
                 "Each permit should have associated trace baggage: baggage={}, permits={}",
-                stats.permit_baggage_items, total_permits
+                stats.permit_baggage_items,
+                total_permits
             );
 
-            cx.trace("test_capability_security_across_distributed_boundaries_complete", &json!({
-                "security_violations": stats.security_violations,
-                "cross_node_validations": stats.cross_node_validations,
-                "consistency_check": stats.is_consistent()
-            }));
+            cx.trace(
+                "test_capability_security_across_distributed_boundaries_complete",
+                &json!({
+                    "security_violations": stats.security_violations,
+                    "cross_node_validations": stats.cross_node_validations,
+                    "consistency_check": stats.is_consistent()
+                }),
+            );
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         crate::test_complete!("test_capability_security_across_distributed_boundaries");
     }
@@ -873,10 +938,13 @@ mod registry_distributed_trace_integration_tests {
         TestRuntime::run_with_timeout(Duration::from_seconds(75), async move |cx| {
             let mut harness = RegistryDistributedTraceHarness::new(config.clone()).await?;
 
-            let stats = harness.run_concurrent_permit_operations_with_trace_propagation(&cx).await?;
+            let stats = harness
+                .run_concurrent_permit_operations_with_trace_propagation(&cx)
+                .await?;
 
             // Under high concurrency, verify system maintained consistency
-            let resolution_rate = (stats.permits_committed + stats.permits_aborted) as f64 / stats.permits_created as f64;
+            let resolution_rate = (stats.permits_committed + stats.permits_aborted) as f64
+                / stats.permits_created as f64;
             assert!(
                 resolution_rate >= 0.95,
                 "At least 95% of permits should be resolved under high concurrency: rate={:.3}",
@@ -887,11 +955,13 @@ mod registry_distributed_trace_integration_tests {
             assert!(
                 stats.traces_propagated >= stats.permits_created / 2,
                 "Significant trace propagation should occur: propagated={}, created={}",
-                stats.traces_propagated, stats.permits_created
+                stats.traces_propagated,
+                stats.permits_created
             );
 
             // Verify cross-node operations scaled properly
-            let cross_node_rate = stats.cross_node_validations as f64 / stats.permits_created as f64;
+            let cross_node_rate =
+                stats.cross_node_validations as f64 / stats.permits_created as f64;
             assert!(
                 cross_node_rate >= 0.3,
                 "At least 30% of operations should involve cross-node validation: rate={:.3}",
@@ -906,16 +976,20 @@ mod registry_distributed_trace_integration_tests {
                 violation_rate
             );
 
-            cx.trace("test_high_concurrency_distributed_permit_trace_tracking_complete", &json!({
-                "total_permits": stats.permits_created,
-                "resolution_rate": resolution_rate,
-                "cross_node_rate": cross_node_rate,
-                "violation_rate": violation_rate,
-                "trace_propagation_count": stats.traces_propagated
-            }));
+            cx.trace(
+                "test_high_concurrency_distributed_permit_trace_tracking_complete",
+                &json!({
+                    "total_permits": stats.permits_created,
+                    "resolution_rate": resolution_rate,
+                    "cross_node_rate": cross_node_rate,
+                    "violation_rate": violation_rate,
+                    "trace_propagation_count": stats.traces_propagated
+                }),
+            );
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         crate::test_complete!("test_high_concurrency_distributed_permit_trace_tracking");
     }

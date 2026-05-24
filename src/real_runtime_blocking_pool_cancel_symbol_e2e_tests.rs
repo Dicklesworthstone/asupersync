@@ -124,7 +124,6 @@ mod tests {
         PostExecution,
     }
 
-
     impl BlockingCancelTestHarness {
         pub async fn new() -> Self {
             let pool = Arc::new(BlockingPool::new(2, 8));
@@ -195,7 +194,8 @@ mod tests {
                         stats.tasks_cancelled += 1;
 
                         // Determine cancellation phase based on how much work was done
-                        let elapsed_ratio = start_time.elapsed().as_millis() as f64 / work_duration.as_millis() as f64;
+                        let elapsed_ratio = start_time.elapsed().as_millis() as f64
+                            / work_duration.as_millis() as f64;
                         if elapsed_ratio < 0.1 {
                             stats.pre_execution_cancellations += 1;
                         } else if elapsed_ratio < 0.9 {
@@ -219,7 +219,11 @@ mod tests {
             handle
         }
 
-        pub fn trigger_cancellation(&self, token: &SymbolCancelToken, reason: CancelReason) -> bool {
+        pub fn trigger_cancellation(
+            &self,
+            token: &SymbolCancelToken,
+            reason: CancelReason,
+        ) -> bool {
             let now = Time::now();
             token.cancel(&reason, now)
         }
@@ -251,7 +255,10 @@ mod tests {
             let timeout = Duration::from_millis(timeout_ms);
 
             while start.elapsed() < timeout {
-                let all_done = self.task_handles.lock().unwrap()
+                let all_done = self
+                    .task_handles
+                    .lock()
+                    .unwrap()
                     .iter()
                     .all(|handle| handle.is_done() || handle.is_cancelled());
 
@@ -281,7 +288,12 @@ mod tests {
         }
 
         pub fn get_cancellation_events(&self) -> Vec<CancellationEvent> {
-            self.cancellation_events.lock().unwrap().iter().cloned().collect()
+            self.cancellation_events
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect()
         }
     }
 
@@ -305,7 +317,7 @@ mod tests {
         let handle = harness.spawn_blocking_task_with_cancel_monitoring(
             &cancel_token,
             1000, // 1 second of work
-            "pre-exec-cancel-test"
+            "pre-exec-cancel-test",
         );
 
         // Wait for task completion
@@ -336,7 +348,7 @@ mod tests {
         let handle = harness.spawn_blocking_task_with_cancel_monitoring(
             &cancel_token,
             2000, // 2 seconds of work
-            "during-exec-cancel-test"
+            "during-exec-cancel-test",
         );
 
         // Wait a bit for task to start executing
@@ -379,7 +391,7 @@ mod tests {
             let handle = harness.spawn_blocking_task_with_cancel_monitoring(
                 &cancel_token,
                 3000, // 3 seconds of work each
-                &format!("concurrent-task-{}", i)
+                &format!("concurrent-task-{}", i),
             );
 
             tokens.push(cancel_token);
@@ -391,8 +403,7 @@ mod tests {
 
         // Cancel tasks at different times
         for (i, token) in tokens.iter().enumerate() {
-            let reason = CancelReason::new(CancelKind::User)
-                .with_timestamp(Time::now());
+            let reason = CancelReason::new(CancelKind::User).with_timestamp(Time::now());
             harness.trigger_cancellation(token, reason);
 
             // Stagger cancellations
@@ -434,7 +445,7 @@ mod tests {
                 let handle = harness.spawn_blocking_task_with_cancel_monitoring(
                     &cancel_token,
                     1500, // 1.5 seconds each
-                    &format!("cleanup-round-{}-task-{}", round, i)
+                    &format!("cleanup-round-{}-task-{}", round, i),
                 );
 
                 tokens.push(cancel_token);
@@ -498,14 +509,15 @@ mod tests {
         let mut tokens = Vec::new();
         let mut handles = Vec::new();
 
-        for (i, (scenario_name, cancel_delay_ms, work_duration_ms)) in scenarios.iter().enumerate() {
+        for (i, (scenario_name, cancel_delay_ms, work_duration_ms)) in scenarios.iter().enumerate()
+        {
             let object_id = ObjectId(60000 + i as u64);
             let cancel_token = harness.create_cancel_token_with_listener(object_id);
 
             let handle = harness.spawn_blocking_task_with_cancel_monitoring(
                 &cancel_token,
                 *work_duration_ms,
-                &format!("integration-{}", scenario_name)
+                &format!("integration-{}", scenario_name),
             );
 
             tokens.push(cancel_token);
@@ -545,7 +557,10 @@ mod tests {
         assert!(harness.verify_no_thread_leaks().await);
 
         // Verify event ordering and timing
-        assert!(!events.is_empty(), "Should have recorded cancellation events");
+        assert!(
+            !events.is_empty(),
+            "Should have recorded cancellation events"
+        );
 
         println!("✅ Blocking Pool ↔ Symbol Cancel Integration Test Complete");
         println!("📊 Final Stats: {:?}", final_stats);

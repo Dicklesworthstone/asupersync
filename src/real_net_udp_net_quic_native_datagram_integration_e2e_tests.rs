@@ -18,39 +18,35 @@
 //! 4. **Adaptive Sizing**: Datagram sizes adapt to discovered PMTU limits
 
 use crate::{
+    Result,
     cx::Cx,
     net::{
+        IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr,
         quic_native::{
             connection::{QuicConnection, QuicConnectionConfig, QuicConnectionEvent},
             datagram::{
-                QuicDatagram, QuicDatagramConfig, QuicDatagramFrame, QuicDatagramQueue,
-                UnreliableDelivery, DatagramPriority,
+                DatagramPriority, QuicDatagram, QuicDatagramConfig, QuicDatagramFrame,
+                QuicDatagramQueue, UnreliableDelivery,
             },
             frame::{QuicFrame, QuicFrameType},
             transport::{QuicTransport, QuicTransportConfig},
         },
         udp::{
-            socket::{UdpSocket, UdpSocketConfig},
             mtu::{MtuDiscovery, MtuProbeResult, PathMtu, PmtuDiscoveryConfig},
             packet::{UdpPacket, UdpPacketSize},
+            socket::{UdpSocket, UdpSocketConfig},
         },
-        SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr,
     },
-    runtime::{RuntimeBuilder, LabRuntime, LabRuntimeBuilder},
+    runtime::{LabRuntime, LabRuntimeBuilder, RuntimeBuilder},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
     types::{
-        budget::Budget,
-        cancel::CancelToken,
-        outcome::Outcome,
-        region::RegionId,
-        task::TaskId,
+        budget::Budget, cancel::CancelToken, outcome::Outcome, region::RegionId, task::TaskId,
     },
     util::{rng::DetRng, time::TimeSource},
-    Result,
 };
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -153,12 +149,14 @@ impl HolBlockingTracker {
         }
 
         // Verify that smaller datagrams are not blocked
-        let blocking_violations = queue.iter()
+        let blocking_violations = queue
+            .iter()
             .filter(|d| d.size <= pmtu_limit && d.is_blocked())
             .count();
 
         if blocking_violations > 0 {
-            self.blocking_violations.fetch_add(blocking_violations, Ordering::Release);
+            self.blocking_violations
+                .fetch_add(blocking_violations, Ordering::Release);
         }
 
         Ok(())
@@ -268,24 +266,26 @@ impl UdpQuicMtuCoordinator {
             let datagram_id = DatagramId::new(datagram_id_counter);
             datagram_id_counter += 1;
 
-            let tracked_datagram = TrackedDatagram::new(
-                datagram_id,
-                scenario.size,
-                scenario.priority,
-            );
+            let tracked_datagram =
+                TrackedDatagram::new(datagram_id, scenario.size, scenario.priority);
 
-            self.hol_blocking_tracker.enqueue_datagram(tracked_datagram.clone());
+            self.hol_blocking_tracker
+                .enqueue_datagram(tracked_datagram.clone());
 
             // Check if datagram fits current PMTU
             let current_pmtu = *self.current_pmtu.lock();
             if scenario.size <= current_pmtu {
                 // Simulate successful delivery
-                self.hol_blocking_tracker.process_successful_delivery(datagram_id);
-                self.adaptive_sizing_metrics.record_successful_send(scenario.size);
+                self.hol_blocking_tracker
+                    .process_successful_delivery(datagram_id);
+                self.adaptive_sizing_metrics
+                    .record_successful_send(scenario.size);
             } else {
                 // Simulate PMTU drop
-                self.hol_blocking_tracker.process_pmtu_drop(datagram_id, current_pmtu)?;
-                self.adaptive_sizing_metrics.record_pmtu_drop(scenario.size, current_pmtu);
+                self.hol_blocking_tracker
+                    .process_pmtu_drop(datagram_id, current_pmtu)?;
+                self.adaptive_sizing_metrics
+                    .record_pmtu_drop(scenario.size, current_pmtu);
             }
         }
 
@@ -330,7 +330,8 @@ impl UdpQuicMtuCoordinator {
             }
             PmtuRecoveryStrategy::DropOversized => {
                 for datagram_id in &mtu_change.affected_datagrams {
-                    self.hol_blocking_tracker.process_pmtu_drop(*datagram_id, new_pmtu)?;
+                    self.hol_blocking_tracker
+                        .process_pmtu_drop(*datagram_id, new_pmtu)?;
                 }
             }
             PmtuRecoveryStrategy::RetryWithBackoff => {
@@ -341,7 +342,8 @@ impl UdpQuicMtuCoordinator {
             }
         }
 
-        self.adaptive_sizing_metrics.record_mtu_change(previous_pmtu, new_pmtu);
+        self.adaptive_sizing_metrics
+            .record_mtu_change(previous_pmtu, new_pmtu);
 
         Ok(())
     }
@@ -424,10 +426,7 @@ impl AdaptiveSizingMetrics {
 
     fn record_pmtu_drop(&self, size: u16, pmtu_limit: u16) {
         self.pmtu_drops.fetch_add(1, Ordering::Release);
-        self.record_size_adaptation(
-            size,
-            SizeAdaptationType::PmtuDrop { pmtu_limit },
-        );
+        self.record_size_adaptation(size, SizeAdaptationType::PmtuDrop { pmtu_limit });
     }
 
     fn record_fragmentation_event(&self) {
@@ -444,10 +443,7 @@ impl AdaptiveSizingMetrics {
 
     fn record_mtu_change(&self, old_mtu: u16, new_mtu: u16) {
         self.mtu_changes.fetch_add(1, Ordering::Release);
-        self.record_size_adaptation(
-            new_mtu,
-            SizeAdaptationType::MtuChange { old_mtu },
-        );
+        self.record_size_adaptation(new_mtu, SizeAdaptationType::MtuChange { old_mtu });
     }
 
     fn record_size_adaptation(&self, size: u16, adaptation_type: SizeAdaptationType) {
@@ -579,11 +575,9 @@ impl UdpQuicDatagramTestHarness {
         ];
 
         // Run integration simulation
-        self.coordinator.simulate_pmtu_discovery_scenario(
-            cx,
-            datagram_scenarios,
-            mtu_changes,
-        ).await?;
+        self.coordinator
+            .simulate_pmtu_discovery_scenario(cx, datagram_scenarios, mtu_changes)
+            .await?;
 
         // Verify integration properties
         let result = self.coordinator.verify_integration_properties()?;
@@ -713,17 +707,25 @@ mod tests {
         let mtu_changes = vec![];
 
         // Run basic integration
-        harness.coordinator.simulate_pmtu_discovery_scenario(
-            &cx,
-            scenarios,
-            mtu_changes,
-        ).await?;
+        harness
+            .coordinator
+            .simulate_pmtu_discovery_scenario(&cx, scenarios, mtu_changes)
+            .await?;
 
         // Verify basic properties
         let result = harness.coordinator.verify_integration_properties()?;
-        assert!(result.integration_successful, "Basic integration should be successful");
-        assert_eq!(result.hol_blocking_violations, 0, "No HoL blocking should occur");
-        assert!(result.successful_deliveries > 0, "Should have successful deliveries");
+        assert!(
+            result.integration_successful,
+            "Basic integration should be successful"
+        );
+        assert_eq!(
+            result.hol_blocking_violations, 0,
+            "No HoL blocking should occur"
+        );
+        assert!(
+            result.successful_deliveries > 0,
+            "Should have successful deliveries"
+        );
 
         Ok(())
     }
@@ -743,29 +745,37 @@ mod tests {
         ];
 
         // Simulate PMTU drop
-        let mtu_changes = vec![
-            MtuChangeEvent::new(
-                1200,
-                MtuProbeResult::TooLarge,
-                vec![DatagramId::new(1)],
-                PmtuRecoveryStrategy::DropOversized,
-                Duration::from_millis(50),
-            ),
-        ];
+        let mtu_changes = vec![MtuChangeEvent::new(
+            1200,
+            MtuProbeResult::TooLarge,
+            vec![DatagramId::new(1)],
+            PmtuRecoveryStrategy::DropOversized,
+            Duration::from_millis(50),
+        )];
 
         // Run PMTU drop scenario
-        harness.coordinator.simulate_pmtu_discovery_scenario(
-            &cx,
-            scenarios,
-            mtu_changes,
-        ).await?;
+        harness
+            .coordinator
+            .simulate_pmtu_discovery_scenario(&cx, scenarios, mtu_changes)
+            .await?;
 
         // Verify no head-of-line blocking
-        assert!(harness.coordinator.hol_blocking_tracker.verify_no_hol_blocking(),
-            "Large datagram drop should not block smaller datagrams");
+        assert!(
+            harness
+                .coordinator
+                .hol_blocking_tracker
+                .verify_no_hol_blocking(),
+            "Large datagram drop should not block smaller datagrams"
+        );
 
-        let (successful, blocked, violations) = harness.coordinator.hol_blocking_tracker.get_delivery_stats();
-        assert!(successful > 0, "Small datagrams should be delivered successfully");
+        let (successful, blocked, violations) = harness
+            .coordinator
+            .hol_blocking_tracker
+            .get_delivery_stats();
+        assert!(
+            successful > 0,
+            "Small datagrams should be delivered successfully"
+        );
         assert!(blocked > 0, "Large datagram should be blocked");
         assert_eq!(violations, 0, "No HoL blocking violations should occur");
 
@@ -804,19 +814,24 @@ mod tests {
         ];
 
         // Run MTU discovery scenario
-        harness.coordinator.simulate_pmtu_discovery_scenario(
-            &cx,
-            scenarios,
-            mtu_changes,
-        ).await?;
+        harness
+            .coordinator
+            .simulate_pmtu_discovery_scenario(&cx, scenarios, mtu_changes)
+            .await?;
 
         // Verify MTU discovery and adaptation
         let result = harness.coordinator.verify_integration_properties()?;
-        assert!(result.pmtu_discovery_events >= 2, "Should record MTU discovery events");
+        assert!(
+            result.pmtu_discovery_events >= 2,
+            "Should record MTU discovery events"
+        );
 
         let sizing_stats = result.adaptive_sizing_stats;
         assert_eq!(sizing_stats.mtu_changes, 2, "Should record MTU changes");
-        assert!(sizing_stats.fragmentation_events > 0, "Should use fragmentation strategy");
+        assert!(
+            sizing_stats.fragmentation_events > 0,
+            "Should use fragmentation strategy"
+        );
 
         Ok(())
     }
@@ -829,14 +844,31 @@ mod tests {
         let harness = UdpQuicDatagramTestHarness::new();
 
         // Run comprehensive integration test
-        let result = harness.run_comprehensive_udp_quic_datagram_integration(&cx).await?;
+        let result = harness
+            .run_comprehensive_udp_quic_datagram_integration(&cx)
+            .await?;
 
         // Verify comprehensive integration properties
-        assert!(result.integration_successful, "Comprehensive integration should be successful");
-        assert_eq!(result.hol_blocking_violations, 0, "No head-of-line blocking violations");
-        assert!(result.successful_deliveries >= 4, "Multiple successful deliveries expected");
-        assert!(result.blocked_deliveries >= 1, "Some large datagrams should be blocked");
-        assert!(result.pmtu_discovery_events >= 2, "PMTU discovery should occur");
+        assert!(
+            result.integration_successful,
+            "Comprehensive integration should be successful"
+        );
+        assert_eq!(
+            result.hol_blocking_violations, 0,
+            "No head-of-line blocking violations"
+        );
+        assert!(
+            result.successful_deliveries >= 4,
+            "Multiple successful deliveries expected"
+        );
+        assert!(
+            result.blocked_deliveries >= 1,
+            "Some large datagrams should be blocked"
+        );
+        assert!(
+            result.pmtu_discovery_events >= 2,
+            "PMTU discovery should occur"
+        );
 
         // Verify adaptive sizing
         let stats = result.adaptive_sizing_stats;
@@ -888,21 +920,34 @@ mod tests {
         ];
 
         // Run adaptive sizing test
-        harness.coordinator.simulate_pmtu_discovery_scenario(
-            &cx,
-            scenarios,
-            mtu_changes,
-        ).await?;
+        harness
+            .coordinator
+            .simulate_pmtu_discovery_scenario(&cx, scenarios, mtu_changes)
+            .await?;
 
         // Verify adaptive strategies were applied
         let sizing_stats = harness.coordinator.adaptive_sizing_metrics.get_stats();
-        assert!(sizing_stats.fragmentation_events > 0, "Should use fragmentation strategy");
-        assert!(sizing_stats.pmtu_drops > 0, "Should apply drop strategy for small MTU");
-        assert_eq!(sizing_stats.mtu_changes, 2, "Should adapt to both MTU changes");
+        assert!(
+            sizing_stats.fragmentation_events > 0,
+            "Should use fragmentation strategy"
+        );
+        assert!(
+            sizing_stats.pmtu_drops > 0,
+            "Should apply drop strategy for small MTU"
+        );
+        assert_eq!(
+            sizing_stats.mtu_changes, 2,
+            "Should adapt to both MTU changes"
+        );
 
         // Verify no blocking violations
-        assert!(harness.coordinator.hol_blocking_tracker.verify_no_hol_blocking(),
-            "Adaptive strategies should prevent HoL blocking");
+        assert!(
+            harness
+                .coordinator
+                .hol_blocking_tracker
+                .verify_no_hol_blocking(),
+            "Adaptive strategies should prevent HoL blocking"
+        );
 
         Ok(())
     }

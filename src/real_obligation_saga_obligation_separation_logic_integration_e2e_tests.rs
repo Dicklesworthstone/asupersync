@@ -18,35 +18,30 @@
 //! 4. **Frame Reasoning**: Local reasoning about obligation ownership preserved
 
 use crate::{
+    Result,
     cx::Cx,
     obligation::{
+        Obligation, ObligationId, ObligationKind, ObligationState,
+        ledger::{LedgerEntry, ObligationLedger},
         saga::{
-            Saga, SagaConfig, SagaExecution, SagaRollback, SagaStep, SagaState,
-            SagaTransaction, CompensationAction, SagaParticipant,
+            CompensationAction, Saga, SagaConfig, SagaExecution, SagaParticipant, SagaRollback,
+            SagaState, SagaStep, SagaTransaction,
         },
         separation_logic::{
-            SeparationLogic, SeparationLogicConfig, ResourceOwnership,
-            LogicalAssertion, FrameRule, SeparationConjunction,
-            OwnershipTransfer, AccessPermission, HeapAssertion,
+            AccessPermission, FrameRule, HeapAssertion, LogicalAssertion, OwnershipTransfer,
+            ResourceOwnership, SeparationConjunction, SeparationLogic, SeparationLogicConfig,
         },
-        ledger::{ObligationLedger, LedgerEntry},
-        Obligation, ObligationId, ObligationState, ObligationKind,
     },
+    runtime::{LabRuntime, LabRuntimeBuilder, RuntimeBuilder},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
     types::{
-        budget::Budget,
-        cancel::CancelToken,
-        outcome::Outcome,
-        region::RegionId,
-        task::TaskId,
+        budget::Budget, cancel::CancelToken, outcome::Outcome, region::RegionId, task::TaskId,
     },
-    runtime::{RuntimeBuilder, LabRuntime, LabRuntimeBuilder},
     util::{rng::DetRng, time::TimeSource},
-    Result,
 };
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -313,18 +308,22 @@ impl SagaSeparationLogicCoordinator {
             }
 
             // Set up initial separation logic invariants
-            let initial_invariants = self.setup_initial_invariants(&scenario.obligations, &scenario.participants);
-            self.invariant_tracker.register_invariants(saga_id, initial_invariants.clone());
+            let initial_invariants =
+                self.setup_initial_invariants(&scenario.obligations, &scenario.participants);
+            self.invariant_tracker
+                .register_invariants(saga_id, initial_invariants.clone());
 
             // Phase 1: Execute saga steps with concurrent acquisitions
             for (step_index, step) in scenario.saga_steps.iter().enumerate() {
                 // Simulate concurrent obligation acquisitions during saga execution
-                let concurrent_futures = self.simulate_concurrent_acquisitions(
-                    cx,
-                    &scenario.concurrent_operations,
-                    saga_id,
-                    step_index,
-                ).await?;
+                let concurrent_futures = self
+                    .simulate_concurrent_acquisitions(
+                        cx,
+                        &scenario.concurrent_operations,
+                        saga_id,
+                        step_index,
+                    )
+                    .await?;
 
                 // Execute saga step
                 self.execute_saga_step(saga_id, step.clone()).await?;
@@ -339,7 +338,8 @@ impl SagaSeparationLogicCoordinator {
                     saga_id,
                     scenario.rollback_reason,
                     &scenario.obligations,
-                ).await?;
+                )
+                .await?;
             }
 
             // Phase 3: Verify separation logic invariants post-operation
@@ -372,12 +372,15 @@ impl SagaSeparationLogicCoordinator {
                 );
 
                 // Attempt concurrent acquisition
-                let acquisition_result = self.attempt_concurrent_acquisition(&acquisition_event).await?;
+                let acquisition_result = self
+                    .attempt_concurrent_acquisition(&acquisition_event)
+                    .await?;
 
                 if acquisition_result.success {
                     let mut acquisitions = self.concurrent_acquisitions.write();
                     acquisitions.push(acquisition_event);
-                    self.concurrent_safety_metrics.record_successful_acquisition();
+                    self.concurrent_safety_metrics
+                        .record_successful_acquisition();
                 } else {
                     self.concurrent_safety_metrics.record_blocked_acquisition();
                 }
@@ -404,7 +407,8 @@ impl SagaSeparationLogicCoordinator {
         );
 
         // Execute rollback with compensation actions
-        let compensation_actions = self.generate_compensation_actions(saga_id, affected_obligations);
+        let compensation_actions =
+            self.generate_compensation_actions(saga_id, affected_obligations);
         rollback_event.compensation_actions = compensation_actions.clone();
 
         for action in compensation_actions {
@@ -412,7 +416,8 @@ impl SagaSeparationLogicCoordinator {
         }
 
         // Update separation logic state after rollback
-        self.update_separation_logic_after_rollback(saga_id, affected_obligations).await?;
+        self.update_separation_logic_after_rollback(saga_id, affected_obligations)
+            .await?;
 
         // Capture invariants after rollback and check for violations
         let invariants_after = self.verify_invariants_after_rollback(saga_id, affected_obligations);
@@ -448,7 +453,10 @@ impl SagaSeparationLogicCoordinator {
                 acquisition_event.acquisition_type,
             )?;
 
-            Ok(AcquisitionResult { success: true, reason: None })
+            Ok(AcquisitionResult {
+                success: true,
+                reason: None,
+            })
         } else {
             Ok(AcquisitionResult {
                 success: false,
@@ -471,11 +479,8 @@ impl SagaSeparationLogicCoordinator {
                 AccessPermission::Write { obligation_id },
             ];
 
-            let invariant = ObligationOwnershipInvariant::new(
-                obligation_id,
-                owner,
-                access_permissions,
-            );
+            let invariant =
+                ObligationOwnershipInvariant::new(obligation_id, owner, access_permissions);
 
             invariants.push(invariant);
         }
@@ -494,7 +499,8 @@ impl SagaSeparationLogicCoordinator {
 
     fn get_saga_state(&self, saga_id: SagaId) -> Result<SagaState> {
         let executions = self.saga_executions.read();
-        executions.get(&saga_id)
+        executions
+            .get(&saga_id)
             .map(|exec| exec.get_current_state())
             .ok_or_else(|| format!("Saga {} not found", saga_id.0).into())
     }
@@ -504,7 +510,8 @@ impl SagaSeparationLogicCoordinator {
         saga_id: SagaId,
         affected_obligations: &[ObligationId],
     ) -> Vec<CompensationAction> {
-        affected_obligations.iter()
+        affected_obligations
+            .iter()
             .map(|&obligation_id| CompensationAction {
                 action_type: CompensationActionType::ReleaseObligation,
                 target_obligation: obligation_id,
@@ -584,7 +591,8 @@ impl SagaSeparationLogicCoordinator {
                 return Err(format!(
                     "Invariant violation detected for obligation {:?}",
                     invariant.obligation_id
-                ).into());
+                )
+                .into());
             }
         }
 
@@ -639,7 +647,8 @@ impl SagaSeparationLogicResult {
     fn is_successful(&self) -> bool {
         self.invariant_violations == 0
             && self.frame_reasoning_preserved
-            && (self.total_rollbacks == 0 || self.invariant_preserving_rollbacks == self.total_rollbacks)
+            && (self.total_rollbacks == 0
+                || self.invariant_preserving_rollbacks == self.total_rollbacks)
     }
 }
 
@@ -718,7 +727,9 @@ impl SagaSeparationLogicTestHarness {
         let scenarios = self.create_comprehensive_scenarios();
 
         // Run integration simulation
-        self.coordinator.simulate_concurrent_saga_with_acquisitions(cx, scenarios).await?;
+        self.coordinator
+            .simulate_concurrent_saga_with_acquisitions(cx, scenarios)
+            .await?;
 
         // Verify integration properties
         let result = self.coordinator.verify_integration_properties()?;
@@ -749,15 +760,13 @@ impl SagaSeparationLogicTestHarness {
                     SagaStep::new("acquire_resource_2".to_string()),
                     SagaStep::new("process_transaction".to_string()),
                 ],
-                concurrent_operations: vec![
-                    ConcurrentOperation {
-                        participant_id: participants[1],
-                        obligation_id: obligations[1],
-                        acquisition_type: AcquisitionType::Shared,
-                        trigger_step: 0,
-                        delay: Duration::from_millis(10),
-                    },
-                ],
+                concurrent_operations: vec![ConcurrentOperation {
+                    participant_id: participants[1],
+                    obligation_id: obligations[1],
+                    acquisition_type: AcquisitionType::Shared,
+                    trigger_step: 0,
+                    delay: Duration::from_millis(10),
+                }],
                 should_rollback: false,
                 rollback_reason: RollbackReason::TransactionFailure,
                 delay_before_saga: Duration::from_millis(20),
@@ -770,15 +779,13 @@ impl SagaSeparationLogicTestHarness {
                     SagaStep::new("acquire_exclusive_resource".to_string()),
                     SagaStep::new("failing_operation".to_string()),
                 ],
-                concurrent_operations: vec![
-                    ConcurrentOperation {
-                        participant_id: participants[2],
-                        obligation_id: obligations[0],
-                        acquisition_type: AcquisitionType::Exclusive,
-                        trigger_step: 1,
-                        delay: Duration::from_millis(5),
-                    },
-                ],
+                concurrent_operations: vec![ConcurrentOperation {
+                    participant_id: participants[2],
+                    obligation_id: obligations[0],
+                    acquisition_type: AcquisitionType::Exclusive,
+                    trigger_step: 1,
+                    delay: Duration::from_millis(5),
+                }],
                 should_rollback: true,
                 rollback_reason: RollbackReason::ConcurrentConflict,
                 delay_before_saga: Duration::from_millis(50),
@@ -957,9 +964,7 @@ impl SeparationLogicState {
         acquisition_type: AcquisitionType,
     ) -> bool {
         match acquisition_type {
-            AcquisitionType::Exclusive => {
-                !self.obligation_ownership.contains_key(obligation_id)
-            }
+            AcquisitionType::Exclusive => !self.obligation_ownership.contains_key(obligation_id),
             AcquisitionType::Shared => {
                 // Allow shared access if not exclusively owned
                 if let Some(owner) = self.obligation_ownership.get(obligation_id) {
@@ -978,7 +983,8 @@ impl SeparationLogicState {
         participant: &ParticipantId,
         _acquisition_type: AcquisitionType,
     ) -> Result<()> {
-        self.obligation_ownership.insert(*obligation_id, *participant);
+        self.obligation_ownership
+            .insert(*obligation_id, *participant);
         Ok(())
     }
 
@@ -1015,18 +1021,21 @@ mod tests {
             vec![AccessPermission::Read { obligation_id }],
         );
 
-        harness.coordinator.invariant_tracker.register_invariants(
-            SagaId::new(),
-            vec![invariant],
-        );
+        harness
+            .coordinator
+            .invariant_tracker
+            .register_invariants(SagaId::new(), vec![invariant]);
 
         // Verify invariant tracking
         let logic_state = harness.coordinator.separation_logic_state.read();
-        assert!(logic_state.can_acquire_obligation(
-            &obligation_id,
-            &participant_id,
-            AcquisitionType::Shared
-        ), "Should allow shared acquisition");
+        assert!(
+            logic_state.can_acquire_obligation(
+                &obligation_id,
+                &participant_id,
+                AcquisitionType::Shared
+            ),
+            "Should allow shared acquisition"
+        );
 
         Ok(())
     }
@@ -1043,11 +1052,14 @@ mod tests {
         let participant_id = ParticipantId::new(1);
 
         // Execute saga rollback
-        harness.coordinator.execute_saga_rollback(
-            saga_id,
-            RollbackReason::TransactionFailure,
-            &[obligation_id],
-        ).await?;
+        harness
+            .coordinator
+            .execute_saga_rollback(
+                saga_id,
+                RollbackReason::TransactionFailure,
+                &[obligation_id],
+            )
+            .await?;
 
         // Verify rollback was recorded
         let rollback_events = harness.coordinator.rollback_events.read();
@@ -1055,7 +1067,11 @@ mod tests {
 
         let event = &rollback_events[0];
         assert_eq!(event.saga_id, saga_id, "Should match saga ID");
-        assert_eq!(event.rollback_reason, RollbackReason::TransactionFailure, "Should match rollback reason");
+        assert_eq!(
+            event.rollback_reason,
+            RollbackReason::TransactionFailure,
+            "Should match rollback reason"
+        );
 
         Ok(())
     }
@@ -1074,7 +1090,11 @@ mod tests {
         // First participant acquires exclusively
         {
             let mut logic_state = harness.coordinator.separation_logic_state.write();
-            logic_state.acquire_obligation(&obligation_id, &participant1, AcquisitionType::Exclusive)?;
+            logic_state.acquire_obligation(
+                &obligation_id,
+                &participant1,
+                AcquisitionType::Exclusive,
+            )?;
         }
 
         // Second participant attempts concurrent acquisition
@@ -1086,11 +1106,20 @@ mod tests {
             harness.coordinator.separation_logic_state.read().clone(),
         );
 
-        let result = harness.coordinator.attempt_concurrent_acquisition(&acquisition_event).await?;
-        assert!(!result.success, "Concurrent exclusive acquisition should fail");
+        let result = harness
+            .coordinator
+            .attempt_concurrent_acquisition(&acquisition_event)
+            .await?;
+        assert!(
+            !result.success,
+            "Concurrent exclusive acquisition should fail"
+        );
 
         // Record concurrent safety metrics
-        harness.coordinator.concurrent_safety_metrics.record_blocked_acquisition();
+        harness
+            .coordinator
+            .concurrent_safety_metrics
+            .record_blocked_acquisition();
 
         let (successful, blocked) = harness.coordinator.concurrent_safety_metrics.get_stats();
         assert_eq!(successful, 0, "No successful acquisitions");
@@ -1107,12 +1136,20 @@ mod tests {
         let harness = SagaSeparationLogicTestHarness::new();
 
         // Run comprehensive integration test
-        let result = harness.run_comprehensive_saga_separation_logic_integration(&cx).await?;
+        let result = harness
+            .run_comprehensive_saga_separation_logic_integration(&cx)
+            .await?;
 
         // Verify integration properties
         assert!(result.is_successful(), "Integration should be successful");
-        assert!(result.frame_reasoning_preserved, "Frame reasoning should be preserved");
-        assert_eq!(result.invariant_violations, 0, "No invariant violations should occur");
+        assert!(
+            result.frame_reasoning_preserved,
+            "Frame reasoning should be preserved"
+        );
+        assert_eq!(
+            result.invariant_violations, 0,
+            "No invariant violations should occur"
+        );
 
         println!(
             "Saga/separation logic integration test completed: {}/{} rollbacks preserved invariants, {} concurrent acquisitions",
@@ -1143,7 +1180,9 @@ mod tests {
         );
 
         // Detect violations (simplified - would normally involve state corruption)
-        let violations = harness.coordinator.detect_invariant_violations(saga_id, &[invariant]);
+        let violations = harness
+            .coordinator
+            .detect_invariant_violations(saga_id, &[invariant]);
 
         // In a real violation scenario, this would detect ownership violations
         // For this test, we verify the detection mechanism works

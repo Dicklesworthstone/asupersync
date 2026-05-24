@@ -19,30 +19,28 @@
 //! - Consumer group rebalancing with obligation migration
 
 use crate::{
-    messaging::{
-        jetstream::{
-            JetStreamConsumer, JetStreamProducer, JetStreamConfig, ConsumerConfig,
-            JetStreamMessage, JetStreamAck, JetStreamError, ConsumerInfo,
-            StreamInfo, ConsumerLag, LagMetrics, BackpressureSignal,
-            ConsumerGroupConfig, ConsumerGroup, RebalanceEvent,
-        },
-        MessageId, MessagePayload, MessageHeaders,
-    },
-    obligation::{
-        dialectica::{
-            DialecticaProof, DialecticaSystem, ObligationUpgrade, LinearResource,
-            SequenceInvariant, LinearProof, ResourceTracking, ProofTerm,
-            LinearContext, ObligationSequence, DialecticaValidator,
-            UpgradeWitness, SequencePreservation, ProofWitness,
-        },
-        ObligationId, ObligationState, ObligationTracker,
-    },
     cx::{Cx, Scope},
     error::Outcome,
+    messaging::{
+        MessageHeaders, MessageId, MessagePayload,
+        jetstream::{
+            BackpressureSignal, ConsumerConfig, ConsumerGroup, ConsumerGroupConfig, ConsumerInfo,
+            ConsumerLag, JetStreamAck, JetStreamConfig, JetStreamConsumer, JetStreamError,
+            JetStreamMessage, JetStreamProducer, LagMetrics, RebalanceEvent, StreamInfo,
+        },
+    },
+    obligation::{
+        ObligationId, ObligationState, ObligationTracker,
+        dialectica::{
+            DialecticaProof, DialecticaSystem, DialecticaValidator, LinearContext, LinearProof,
+            LinearResource, ObligationSequence, ObligationUpgrade, ProofTerm, ProofWitness,
+            ResourceTracking, SequenceInvariant, SequencePreservation, UpgradeWitness,
+        },
+    },
     runtime::RuntimeBuilder,
     sync::{Barrier, Mutex, RwLock, Semaphore},
-    time::{Duration, Sleep, Instant, Timeout},
-    types::{Budget, TaskId, Cancel},
+    time::{Duration, Instant, Sleep, Timeout},
+    types::{Budget, Cancel, TaskId},
     util::{
         det_rng::{DetRng, RngSeed},
         entropy::EntropySource,
@@ -50,20 +48,20 @@ use crate::{
 };
 
 use std::{
-    collections::{HashMap, BTreeMap, VecDeque, BTreeSet},
-    sync::{
-        atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering},
-        Arc,
-    },
-    pin::Pin,
-    task::{Context, Poll},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    },
+    task::{Context, Poll},
 };
 
 use futures::{
-    stream::{Stream, StreamExt},
-    sink::{Sink, SinkExt},
     ready,
+    sink::{Sink, SinkExt},
+    stream::{Stream, StreamExt},
 };
 
 /// Configuration for JetStream-Dialectica integration tests
@@ -305,11 +303,13 @@ impl JetStreamDialecticaIntegrationTracker {
         let upgrades = self.upgrade_events.lock().unwrap();
 
         // Verify that high lag measurements triggered appropriate upgrades
-        let high_lag_count = lag_measurements.iter()
+        let high_lag_count = lag_measurements
+            .iter()
             .filter(|m| m.current_lag > m.lag_threshold)
             .count();
 
-        let lag_triggered_upgrades = upgrades.iter()
+        let lag_triggered_upgrades = upgrades
+            .iter()
             .filter(|u| matches!(u.upgrade_reason, UpgradeReason::ConsumerLag { .. }))
             .count();
 
@@ -320,16 +320,17 @@ impl JetStreamDialecticaIntegrationTracker {
         let invariant_checks = self.invariant_checks.lock().unwrap();
 
         // Verify no sequence invariants were violated
-        invariant_checks.iter().all(|check| {
-            !matches!(check.check_result, InvariantCheckResult::Violated { .. })
-        })
+        invariant_checks
+            .iter()
+            .all(|check| !matches!(check.check_result, InvariantCheckResult::Violated { .. }))
     }
 
     fn verify_proof_validity(&self) -> bool {
         let validations = self.proof_validations.lock().unwrap();
 
         // Verify that all proofs remained valid after upgrades
-        let invalid_proofs = validations.iter()
+        let invalid_proofs = validations
+            .iter()
             .filter(|v| matches!(v.validation_result, ProofValidationResult::Invalid { .. }))
             .count();
 
@@ -341,7 +342,9 @@ impl JetStreamDialecticaIntegrationTracker {
     }
 
     fn get_max_observed_lag(&self) -> u64 {
-        self.lag_measurements.lock().unwrap()
+        self.lag_measurements
+            .lock()
+            .unwrap()
             .iter()
             .map(|m| m.current_lag)
             .max()
@@ -438,12 +441,13 @@ impl MockJetStreamConsumer {
                     current_lag,
                     tracker.clone(),
                     dialectica_system.clone(),
-                ).await?;
+                )
+                .await?;
             }
 
             // Simulate message processing with lag-induced delay
-            let processing_delay = self.lag_simulation.processing_delay
-                + Duration::from_millis(current_lag);
+            let processing_delay =
+                self.lag_simulation.processing_delay + Duration::from_millis(current_lag);
 
             Sleep::new(Instant::now() + processing_delay).await;
 
@@ -459,10 +463,12 @@ impl MockJetStreamConsumer {
         let growth_component = (elapsed.as_secs_f64() * self.lag_simulation.lag_growth_rate) as u64;
 
         // Check for lag spikes
-        let spike_component = self.lag_simulation.lag_spikes.iter()
+        let spike_component = self
+            .lag_simulation
+            .lag_spikes
+            .iter()
             .filter(|spike| {
-                elapsed >= spike.start_time &&
-                elapsed <= spike.start_time + spike.duration
+                elapsed >= spike.start_time && elapsed <= spike.start_time + spike.duration
             })
             .map(|spike| spike.spike_amount)
             .sum::<u64>();
@@ -507,11 +513,9 @@ impl MockJetStreamConsumer {
         if lag_event.triggered_upgrade {
             // Trigger dialectica obligation upgrade
             let obligation_id = ObligationId::new(self.consumer_id.0 as u64);
-            dialectica_system.trigger_lag_based_upgrade(
-                obligation_id,
-                actual_lag,
-                tracker.clone(),
-            ).await?;
+            dialectica_system
+                .trigger_lag_based_upgrade(obligation_id, actual_lag, tracker.clone())
+                .await?;
         }
 
         self.lag_detector.lag_history.push(actual_lag);
@@ -610,7 +614,10 @@ impl MockDialecticaSystem {
             upgrade_count: 0,
         };
 
-        self.obligations.lock().unwrap().insert(obligation_id, obligation);
+        self.obligations
+            .lock()
+            .unwrap()
+            .insert(obligation_id, obligation);
 
         // Initialize sequence tracking
         let mut tracker = self.sequence_tracker.lock().unwrap();
@@ -632,13 +639,16 @@ impl MockDialecticaSystem {
         // Get current obligation state
         let (current_proof, upgrade_count) = {
             let obligations = self.obligations.lock().unwrap();
-            let obligation = obligations.get(&obligation_id)
+            let obligation = obligations
+                .get(&obligation_id)
                 .ok_or("Obligation not found")?;
             (obligation.current_proof.clone(), obligation.upgrade_count)
         };
 
         // Check upgrade policy
-        let policy = self.upgrade_policies.get(&UpgradeReason::ConsumerLag { lag_amount: 0 })
+        let policy = self
+            .upgrade_policies
+            .get(&UpgradeReason::ConsumerLag { lag_amount: 0 })
             .ok_or("No policy for consumer lag upgrades")?;
 
         if lag_amount < policy.upgrade_threshold {
@@ -654,7 +664,8 @@ impl MockDialecticaSystem {
 
         // Validate sequence preservation if required
         let sequence_preserved = if policy.sequence_preservation_required {
-            self.validate_sequence_preservation(obligation_id, &upgraded_proof).await?
+            self.validate_sequence_preservation(obligation_id, &upgraded_proof)
+                .await?
         } else {
             true
         };
@@ -672,10 +683,10 @@ impl MockDialecticaSystem {
         };
 
         let validation_start = Instant::now();
-        let validation_result = self.proof_validator.validate_proof(
-            &upgraded_proof,
-            &validation_context,
-        ).await;
+        let validation_result = self
+            .proof_validator
+            .validate_proof(&upgraded_proof, &validation_context)
+            .await;
         let validation_duration = validation_start.elapsed();
 
         let validation_event = ProofValidationEvent {
@@ -695,7 +706,9 @@ impl MockDialecticaSystem {
         {
             let mut obligations = self.obligations.lock().unwrap();
             if let Some(obligation) = obligations.get_mut(&obligation_id) {
-                obligation.proof_history.push(obligation.current_proof.clone());
+                obligation
+                    .proof_history
+                    .push(obligation.current_proof.clone());
                 obligation.current_proof = upgraded_proof.clone();
                 obligation.upgrade_count += 1;
             }
@@ -756,16 +769,19 @@ impl MockDialecticaSystem {
 
         if !sequence_check {
             let mut tracker = self.sequence_tracker.lock().unwrap();
-            tracker.invariant_violations.push(
-                format!("Sequence violation in obligation {:?}", obligation_id)
-            );
+            tracker.invariant_violations.push(format!(
+                "Sequence violation in obligation {:?}",
+                obligation_id
+            ));
         }
 
         Ok(sequence_check)
     }
 
     fn get_obligation_upgrade_count(&self, obligation_id: ObligationId) -> u32 {
-        self.obligations.lock().unwrap()
+        self.obligations
+            .lock()
+            .unwrap()
             .get(&obligation_id)
             .map(|o| o.upgrade_count)
             .unwrap_or(0)
@@ -776,7 +792,12 @@ impl MockDialecticaSystem {
     }
 
     fn has_sequence_violations(&self) -> bool {
-        !self.sequence_tracker.lock().unwrap().invariant_violations.is_empty()
+        !self
+            .sequence_tracker
+            .lock()
+            .unwrap()
+            .invariant_violations
+            .is_empty()
     }
 }
 
@@ -815,13 +836,11 @@ mod tests {
                 base_lag: 10,
                 lag_growth_rate: if i == 0 { 30.0 } else { 5.0 }, // First consumer grows lag quickly
                 max_lag: 200,
-                lag_spikes: vec![
-                    LagSpike {
-                        start_time: Duration::from_millis(800),
-                        duration: Duration::from_millis(400),
-                        spike_amount: if i == 0 { 100 } else { 20 },
-                    },
-                ],
+                lag_spikes: vec![LagSpike {
+                    start_time: Duration::from_millis(800),
+                    duration: Duration::from_millis(400),
+                    spike_amount: if i == 0 { 100 } else { 20 },
+                }],
                 processing_delay: Duration::from_millis(20),
             };
 
@@ -835,14 +854,19 @@ mod tests {
         }
 
         // Start consumer simulations
-        let consumer_handles: Vec<_> = consumers.into_iter().map(|mut consumer| {
-            let tracker = tracker.clone();
-            let dialectica_system = dialectica_system.clone();
+        let consumer_handles: Vec<_> = consumers
+            .into_iter()
+            .map(|mut consumer| {
+                let tracker = tracker.clone();
+                let dialectica_system = dialectica_system.clone();
 
-            tokio::spawn(async move {
-                consumer.simulate_consumption(tracker, dialectica_system).await
+                tokio::spawn(async move {
+                    consumer
+                        .simulate_consumption(tracker, dialectica_system)
+                        .await
+                })
             })
-        }).collect();
+            .collect();
 
         // Run test
         Sleep::new(Instant::now() + config.test_duration).await;
@@ -853,21 +877,46 @@ mod tests {
         }
 
         // Verify results
-        assert!(tracker.verify_upgrade_sequence_preservation(), "Sequence invariants should be preserved");
-        assert!(tracker.verify_lag_triggered_upgrades(), "High lag should trigger upgrades");
-        assert!(tracker.verify_invariant_preservation(), "No sequence invariants should be violated");
-        assert!(tracker.verify_proof_validity(), "All proofs should remain valid after upgrades");
+        assert!(
+            tracker.verify_upgrade_sequence_preservation(),
+            "Sequence invariants should be preserved"
+        );
+        assert!(
+            tracker.verify_lag_triggered_upgrades(),
+            "High lag should trigger upgrades"
+        );
+        assert!(
+            tracker.verify_invariant_preservation(),
+            "No sequence invariants should be violated"
+        );
+        assert!(
+            tracker.verify_proof_validity(),
+            "All proofs should remain valid after upgrades"
+        );
 
         // Verify upgrade activity
-        assert!(tracker.get_upgrade_count() > 0, "Should have triggered upgrades");
-        assert!(tracker.get_max_observed_lag() >= config.lag_threshold, "Should observe significant lag");
+        assert!(
+            tracker.get_upgrade_count() > 0,
+            "Should have triggered upgrades"
+        );
+        assert!(
+            tracker.get_max_observed_lag() >= config.lag_threshold,
+            "Should observe significant lag"
+        );
 
         // Verify dialectica system state
-        assert!(!dialectica_system.has_sequence_violations(), "Should not have sequence violations");
+        assert!(
+            !dialectica_system.has_sequence_violations(),
+            "Should not have sequence violations"
+        );
 
-        let obligation_with_upgrades = obligation_ids.iter()
+        let obligation_with_upgrades = obligation_ids
+            .iter()
             .any(|&id| dialectica_system.get_obligation_upgrade_count(id) > 0);
-        assert!(obligation_with_upgrades, "At least one obligation should be upgraded");
+        assert!(
+            obligation_with_upgrades,
+            "At least one obligation should be upgraded"
+        );
     }
 
     #[tokio::test]
@@ -925,14 +974,19 @@ mod tests {
         }
 
         // Start concurrent consumption
-        let consumer_handles: Vec<_> = consumers.into_iter().map(|mut consumer| {
-            let tracker = tracker.clone();
-            let dialectica_system = dialectica_system.clone();
+        let consumer_handles: Vec<_> = consumers
+            .into_iter()
+            .map(|mut consumer| {
+                let tracker = tracker.clone();
+                let dialectica_system = dialectica_system.clone();
 
-            tokio::spawn(async move {
-                consumer.simulate_consumption(tracker, dialectica_system).await
+                tokio::spawn(async move {
+                    consumer
+                        .simulate_consumption(tracker, dialectica_system)
+                        .await
+                })
             })
-        }).collect();
+            .collect();
 
         // Run test with concurrent upgrades
         Sleep::new(Instant::now() + config.test_duration).await;
@@ -943,21 +997,40 @@ mod tests {
         }
 
         // Verify concurrent upgrade handling
-        assert!(tracker.verify_upgrade_sequence_preservation(), "Concurrent upgrades should preserve sequence");
-        assert!(tracker.verify_invariant_preservation(), "Sequence invariants should be maintained");
-        assert!(tracker.verify_proof_validity(), "All proofs should remain valid");
+        assert!(
+            tracker.verify_upgrade_sequence_preservation(),
+            "Concurrent upgrades should preserve sequence"
+        );
+        assert!(
+            tracker.verify_invariant_preservation(),
+            "Sequence invariants should be maintained"
+        );
+        assert!(
+            tracker.verify_proof_validity(),
+            "All proofs should remain valid"
+        );
 
         // Verify multiple upgrades occurred
-        assert!(tracker.get_upgrade_count() >= 2, "Should have multiple concurrent upgrades");
+        assert!(
+            tracker.get_upgrade_count() >= 2,
+            "Should have multiple concurrent upgrades"
+        );
 
         // Verify no sequence violations in dialectica system
-        assert!(!dialectica_system.has_sequence_violations(), "No sequence violations should occur");
+        assert!(
+            !dialectica_system.has_sequence_violations(),
+            "No sequence violations should occur"
+        );
 
         // Check that upgrades were distributed across obligations
-        let upgraded_obligations = obligation_ids.iter()
+        let upgraded_obligations = obligation_ids
+            .iter()
             .filter(|&&id| dialectica_system.get_obligation_upgrade_count(id) > 0)
             .count();
-        assert!(upgraded_obligations >= 2, "Multiple obligations should be upgraded");
+        assert!(
+            upgraded_obligations >= 2,
+            "Multiple obligations should be upgraded"
+        );
     }
 
     #[tokio::test]
@@ -989,13 +1062,11 @@ mod tests {
                 base_lag: 35,
                 lag_growth_rate: 40.0, // Rapid lag growth
                 max_lag: 300,
-                lag_spikes: vec![
-                    LagSpike {
-                        start_time: Duration::from_millis(200),
-                        duration: Duration::from_millis(400),
-                        spike_amount: 150, // Large spike
-                    },
-                ],
+                lag_spikes: vec![LagSpike {
+                    start_time: Duration::from_millis(200),
+                    duration: Duration::from_millis(400),
+                    spike_amount: 150, // Large spike
+                }],
                 processing_delay: Duration::from_millis(25), // Slow processing
             };
 
@@ -1009,14 +1080,19 @@ mod tests {
         }
 
         // Start consumption with backpressure monitoring
-        let consumer_handles: Vec<_> = consumers.into_iter().map(|mut consumer| {
-            let tracker = tracker.clone();
-            let dialectica_system = dialectica_system.clone();
+        let consumer_handles: Vec<_> = consumers
+            .into_iter()
+            .map(|mut consumer| {
+                let tracker = tracker.clone();
+                let dialectica_system = dialectica_system.clone();
 
-            tokio::spawn(async move {
-                consumer.simulate_consumption(tracker, dialectica_system).await
+                tokio::spawn(async move {
+                    consumer
+                        .simulate_consumption(tracker, dialectica_system)
+                        .await
+                })
             })
-        }).collect();
+            .collect();
 
         // Simulate backpressure events
         let backpressure_handle = {
@@ -1032,10 +1108,7 @@ mod tests {
                         backpressure_signal: BackpressureSignal::SlowDown {
                             reduction_factor: 0.5,
                         },
-                        propagation_path: vec![
-                            "jetstream".to_string(),
-                            "dialectica".to_string(),
-                        ],
+                        propagation_path: vec!["jetstream".to_string(), "dialectica".to_string()],
                         affected_obligations: vec![ObligationId::new(i % 3)],
                     };
                     tracker.record_backpressure_event(backpressure_event);
@@ -1055,16 +1128,35 @@ mod tests {
         backpressure_handle.abort();
 
         // Verify backpressure handling
-        assert!(tracker.verify_upgrade_sequence_preservation(), "Sequence preservation under backpressure");
-        assert!(tracker.verify_proof_validity(), "Proof validity under backpressure");
-        assert!(tracker.get_backpressure_propagation_count() > 0, "Backpressure events should be recorded");
+        assert!(
+            tracker.verify_upgrade_sequence_preservation(),
+            "Sequence preservation under backpressure"
+        );
+        assert!(
+            tracker.verify_proof_validity(),
+            "Proof validity under backpressure"
+        );
+        assert!(
+            tracker.get_backpressure_propagation_count() > 0,
+            "Backpressure events should be recorded"
+        );
 
         // Verify upgrades occurred despite backpressure
-        assert!(tracker.get_upgrade_count() > 0, "Upgrades should occur despite backpressure");
+        assert!(
+            tracker.get_upgrade_count() > 0,
+            "Upgrades should occur despite backpressure"
+        );
 
         // Verify system stability
-        assert!(!dialectica_system.has_sequence_violations(), "System should remain stable");
-        assert_eq!(dialectica_system.get_total_obligations(), obligation_ids.len(), "All obligations should be maintained");
+        assert!(
+            !dialectica_system.has_sequence_violations(),
+            "System should remain stable"
+        );
+        assert_eq!(
+            dialectica_system.get_total_obligations(),
+            obligation_ids.len(),
+            "All obligations should be maintained"
+        );
     }
 
     #[test]
@@ -1073,22 +1165,16 @@ mod tests {
             base_lag: 10,
             lag_growth_rate: 5.0,
             max_lag: 100,
-            lag_spikes: vec![
-                LagSpike {
-                    start_time: Duration::from_secs(1),
-                    duration: Duration::from_millis(500),
-                    spike_amount: 40,
-                },
-            ],
+            lag_spikes: vec![LagSpike {
+                start_time: Duration::from_secs(1),
+                duration: Duration::from_millis(500),
+                spike_amount: 40,
+            }],
             processing_delay: Duration::from_millis(20),
         };
 
-        let consumer = MockJetStreamConsumer::new(
-            ConsumerId(1),
-            "test-stream".to_string(),
-            lag_config,
-            50,
-        );
+        let consumer =
+            MockJetStreamConsumer::new(ConsumerId(1), "test-stream".to_string(), lag_config, 50);
 
         // Test base lag
         let lag_at_start = consumer.calculate_current_lag(Duration::ZERO);
@@ -1331,8 +1417,14 @@ impl LinearProof {
 #[derive(Debug, Clone)]
 enum ProofTerm {
     Identity,
-    Enhanced { base_term: Box<ProofTerm>, enhancement: String },
-    Composition { left: Box<ProofTerm>, right: Box<ProofTerm> },
+    Enhanced {
+        base_term: Box<ProofTerm>,
+        enhancement: String,
+    },
+    Composition {
+        left: Box<ProofTerm>,
+        right: Box<ProofTerm>,
+    },
 }
 
 #[derive(Debug, Clone)]

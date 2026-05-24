@@ -45,9 +45,9 @@ mod tests {
     use crate::runtime::{Runtime, spawn};
     use crate::server::shutdown::{ShutdownPhase, ShutdownSignal, ShutdownStats};
     use crate::signal::{
-        graceful::{with_graceful_shutdown, GracefulOutcome},
-        shutdown::ShutdownController,
         Signal, SignalKind,
+        graceful::{GracefulOutcome, with_graceful_shutdown},
+        shutdown::ShutdownController,
     };
     use crate::time::{Duration, Instant, sleep, timeout};
     use crate::types::{CancelReason, Outcome, Time};
@@ -188,12 +188,18 @@ mod tests {
 
             match phase {
                 ShutdownPhase::Draining => {
-                    let active_requests = self.request_trackers.lock().unwrap()
+                    let active_requests = self
+                        .request_trackers
+                        .lock()
+                        .unwrap()
                         .values()
                         .filter(|r| r.completed_at.is_none())
                         .count() as u64;
 
-                    let active_connections = self.connection_trackers.lock().unwrap()
+                    let active_connections = self
+                        .connection_trackers
+                        .lock()
+                        .unwrap()
                         .values()
                         .filter(|c| c.closed_at.is_none())
                         .count() as u64;
@@ -219,14 +225,18 @@ mod tests {
                 dropped_during_shutdown: false,
             };
 
-            self.request_trackers.lock().unwrap().insert(request_id, tracker);
+            self.request_trackers
+                .lock()
+                .unwrap()
+                .insert(request_id, tracker);
         }
 
         pub fn complete_request(&self, request_id: u64, successful: bool) {
             if let Some(tracker) = self.request_trackers.lock().unwrap().get_mut(&request_id) {
                 let now = Instant::now();
                 tracker.completed_at = Some(now);
-                tracker.duration_ms = Some(now.duration_since(tracker.started_at).as_millis() as u64);
+                tracker.duration_ms =
+                    Some(now.duration_since(tracker.started_at).as_millis() as u64);
                 tracker.completed_successfully = successful;
 
                 let mut stats = self.stats.lock().unwrap();
@@ -250,11 +260,19 @@ mod tests {
                 force_closed: false,
             };
 
-            self.connection_trackers.lock().unwrap().insert(connection_id, tracker);
+            self.connection_trackers
+                .lock()
+                .unwrap()
+                .insert(connection_id, tracker);
         }
 
         pub fn close_connection(&self, connection_id: u64, graceful: bool) {
-            if let Some(tracker) = self.connection_trackers.lock().unwrap().get_mut(&connection_id) {
+            if let Some(tracker) = self
+                .connection_trackers
+                .lock()
+                .unwrap()
+                .get_mut(&connection_id)
+            {
                 tracker.closed_at = Some(Instant::now());
                 tracker.gracefully_closed = graceful;
                 tracker.force_closed = !graceful;
@@ -268,7 +286,11 @@ mod tests {
             }
         }
 
-        pub async fn simulate_server_with_requests(&self, request_count: u32, request_duration_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
+        pub async fn simulate_server_with_requests(
+            &self,
+            request_count: u32,
+            request_duration_ms: u64,
+        ) -> Result<(), Box<dyn std::error::Error>> {
             let shutdown_receiver = self.shutdown_controller.subscribe();
 
             // Simulate server accepting connections and handling requests
@@ -304,8 +326,9 @@ mod tests {
                     }
                     "Server completed"
                 },
-                shutdown_receiver
-            ).await;
+                shutdown_receiver,
+            )
+            .await;
 
             // Handle shutdown phases
             match server_result {
@@ -342,7 +365,10 @@ mod tests {
 
             while start.elapsed() < timeout_duration {
                 let phases = self.shutdown_phases.lock().unwrap();
-                if phases.iter().any(|(phase, _)| *phase == ShutdownPhase::Stopped) {
+                if phases
+                    .iter()
+                    .any(|(phase, _)| *phase == ShutdownPhase::Stopped)
+                {
                     return true;
                 }
                 drop(phases);
@@ -358,7 +384,12 @@ mod tests {
         }
 
         pub fn get_shutdown_phase_timeline(&self) -> Vec<(ShutdownPhase, Instant)> {
-            self.shutdown_phases.lock().unwrap().iter().cloned().collect()
+            self.shutdown_phases
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect()
         }
 
         pub fn verify_graceful_shutdown(&self) -> bool {
@@ -369,8 +400,12 @@ mod tests {
             let requests_not_dropped = stats.requests_dropped == 0;
 
             // Check that shutdown phases progressed correctly
-            let has_drain_phase = timeline.iter().any(|(phase, _)| *phase == ShutdownPhase::Draining);
-            let has_stopped_phase = timeline.iter().any(|(phase, _)| *phase == ShutdownPhase::Stopped);
+            let has_drain_phase = timeline
+                .iter()
+                .any(|(phase, _)| *phase == ShutdownPhase::Draining);
+            let has_stopped_phase = timeline
+                .iter()
+                .any(|(phase, _)| *phase == ShutdownPhase::Stopped);
 
             // Check that connections were gracefully closed
             let graceful_connections = stats.connections_force_closed == 0;
@@ -411,7 +446,11 @@ mod tests {
         assert_eq!(stats.requests_dropped, 0);
 
         let timeline = harness.get_shutdown_phase_timeline();
-        assert!(timeline.iter().any(|(phase, _)| *phase == ShutdownPhase::Stopped));
+        assert!(
+            timeline
+                .iter()
+                .any(|(phase, _)| *phase == ShutdownPhase::Stopped)
+        );
 
         assert!(harness.verify_graceful_shutdown());
     }
@@ -444,14 +483,27 @@ mod tests {
 
         let stats = harness.get_stats_snapshot();
         assert_eq!(stats.sigterm_signals, 1);
-        assert!(stats.requests_active_at_signal > 0, "Should have active requests at signal time");
-        assert_eq!(stats.requests_completed_during_drain, stats.requests_active_at_signal);
-        assert_eq!(stats.requests_dropped, 0, "No requests should be dropped during graceful shutdown");
+        assert!(
+            stats.requests_active_at_signal > 0,
+            "Should have active requests at signal time"
+        );
+        assert_eq!(
+            stats.requests_completed_during_drain,
+            stats.requests_active_at_signal
+        );
+        assert_eq!(
+            stats.requests_dropped, 0,
+            "No requests should be dropped during graceful shutdown"
+        );
 
         assert!(harness.verify_graceful_shutdown());
 
-        println!("✅ In-Flight Completion: {} requests active, {} completed, {} dropped",
-                stats.requests_active_at_signal, stats.requests_completed_during_drain, stats.requests_dropped);
+        println!(
+            "✅ In-Flight Completion: {} requests active, {} completed, {} dropped",
+            stats.requests_active_at_signal,
+            stats.requests_completed_during_drain,
+            stats.requests_dropped
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -505,8 +557,10 @@ mod tests {
 
         assert!(harness.verify_graceful_shutdown());
 
-        println!("✅ Multi-Connection Drain: {} connections graceful, {} force closed",
-                stats.connections_gracefully_closed, stats.connections_force_closed);
+        println!(
+            "✅ Multi-Connection Drain: {} connections graceful, {} force closed",
+            stats.connections_gracefully_closed, stats.connections_force_closed
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -552,16 +606,23 @@ mod tests {
 
         let stats = harness.get_stats_snapshot();
         assert_eq!(stats.sigterm_signals, 1);
-        assert_eq!(stats.force_close_triggered, 1, "Should trigger force close on timeout");
+        assert_eq!(
+            stats.force_close_triggered, 1,
+            "Should trigger force close on timeout"
+        );
         assert_eq!(stats.connections_force_closed, 1);
         assert_eq!(stats.requests_dropped, 1);
 
         let timeline = harness.get_shutdown_phase_timeline();
-        let has_force_close = timeline.iter().any(|(phase, _)| *phase == ShutdownPhase::ForceClosing);
+        let has_force_close = timeline
+            .iter()
+            .any(|(phase, _)| *phase == ShutdownPhase::ForceClosing);
         assert!(has_force_close, "Should escalate to force close phase");
 
-        println!("✅ Timeout Escalation: force_close_triggered={}, connections_force_closed={}",
-                stats.force_close_triggered, stats.connections_force_closed);
+        println!(
+            "✅ Timeout Escalation: force_close_triggered={}, connections_force_closed={}",
+            stats.force_close_triggered, stats.connections_force_closed
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -621,8 +682,10 @@ mod tests {
 
         assert!(harness.verify_graceful_shutdown());
 
-        println!("✅ Stress Test: {} connections, {} requests completed, integrity maintained",
-                stats.connections_gracefully_closed, stats.requests_completed_during_drain);
+        println!(
+            "✅ Stress Test: {} connections, {} requests completed, integrity maintained",
+            stats.connections_gracefully_closed, stats.requests_completed_during_drain
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -645,7 +708,10 @@ mod tests {
         ];
 
         for (connection_id, request_id, duration_ms) in &scenarios {
-            let client_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), (*connection_id as u16) % 10000 + 20000);
+            let client_addr = SocketAddr::new(
+                Ipv4Addr::new(127, 0, 0, 1).into(),
+                (*connection_id as u16) % 10000 + 20000,
+            );
             harness.start_connection(*connection_id, client_addr);
             harness.start_request(*request_id, *connection_id);
         }
@@ -673,23 +739,46 @@ mod tests {
         let timeline = harness.get_shutdown_phase_timeline();
 
         // Comprehensive verification
-        assert_eq!(final_stats.sigterm_signals, 1, "Should receive exactly one SIGTERM");
-        assert!(final_stats.requests_active_at_signal > 0, "Should have active requests during signal");
-        assert_eq!(final_stats.requests_dropped, 0, "No requests should be dropped");
-        assert!(final_stats.connections_gracefully_closed > 0, "Connections should close gracefully");
-        assert_eq!(final_stats.connections_force_closed, 0, "No connections should be force closed");
+        assert_eq!(
+            final_stats.sigterm_signals, 1,
+            "Should receive exactly one SIGTERM"
+        );
+        assert!(
+            final_stats.requests_active_at_signal > 0,
+            "Should have active requests during signal"
+        );
+        assert_eq!(
+            final_stats.requests_dropped, 0,
+            "No requests should be dropped"
+        );
+        assert!(
+            final_stats.connections_gracefully_closed > 0,
+            "Connections should close gracefully"
+        );
+        assert_eq!(
+            final_stats.connections_force_closed, 0,
+            "No connections should be force closed"
+        );
 
         // Verify shutdown phase progression
         let phases: Vec<ShutdownPhase> = timeline.iter().map(|(phase, _)| *phase).collect();
-        assert!(phases.contains(&ShutdownPhase::Draining), "Should enter drain phase");
-        assert!(phases.contains(&ShutdownPhase::Stopped), "Should complete shutdown");
+        assert!(
+            phases.contains(&ShutdownPhase::Draining),
+            "Should enter drain phase"
+        );
+        assert!(
+            phases.contains(&ShutdownPhase::Stopped),
+            "Should complete shutdown"
+        );
 
         assert!(harness.verify_graceful_shutdown());
 
         println!("✅ Signal ↔ Server Shutdown Integration Test Complete");
         println!("📊 Final Stats: {:?}", final_stats);
-        println!("🎯 Graceful Shutdown: {} requests preserved, {} connections drained",
-                final_stats.requests_completed_during_drain, final_stats.connections_gracefully_closed);
+        println!(
+            "🎯 Graceful Shutdown: {} requests preserved, {} connections drained",
+            final_stats.requests_completed_during_drain, final_stats.connections_gracefully_closed
+        );
         println!("🏁 Milestone 60 Achieved!");
     }
 }

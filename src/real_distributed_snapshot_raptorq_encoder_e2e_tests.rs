@@ -41,19 +41,19 @@ mod tests {
     /// RaptorQ encoding configuration for snapshots
     #[derive(Debug, Clone)]
     struct SnapshotEncodingConfig {
-        source_symbols: usize,      // K parameter - number of source symbols
-        repair_symbols: usize,      // Number of repair symbols to generate
-        symbol_size: usize,         // T parameter - symbol size in bytes
-        redundancy_ratio: f64,      // Ratio of repair symbols to source symbols
+        source_symbols: usize, // K parameter - number of source symbols
+        repair_symbols: usize, // Number of repair symbols to generate
+        symbol_size: usize,    // T parameter - symbol size in bytes
+        redundancy_ratio: f64, // Ratio of repair symbols to source symbols
     }
 
     impl Default for SnapshotEncodingConfig {
         fn default() -> Self {
             Self {
-                source_symbols: 16,     // K=16 source symbols
-                repair_symbols: 8,      // 8 repair symbols (50% redundancy)
-                symbol_size: 1024,      // 1KB symbols
-                redundancy_ratio: 0.5,  // 50% redundancy for replication resilience
+                source_symbols: 16,    // K=16 source symbols
+                repair_symbols: 8,     // 8 repair symbols (50% redundancy)
+                symbol_size: 1024,     // 1KB symbols
+                redundancy_ratio: 0.5, // 50% redundancy for replication resilience
             }
         }
     }
@@ -62,8 +62,8 @@ mod tests {
     #[derive(Debug, Clone)]
     struct EncodedSnapshot {
         snapshot_id: String,
-        source_symbols: Vec<Vec<u8>>,     // Systematic symbols (original data)
-        repair_symbols: Vec<Vec<u8>>,     // Repair symbols for recovery
+        source_symbols: Vec<Vec<u8>>, // Systematic symbols (original data)
+        repair_symbols: Vec<Vec<u8>>, // Repair symbols for recovery
         encoding_config: SnapshotEncodingConfig,
         encoding_timestamp: Instant,
         total_size_bytes: usize,
@@ -73,7 +73,7 @@ mod tests {
     #[derive(Debug)]
     struct ReplicationNode {
         node_id: String,
-        stored_symbols: Mutex<HashMap<String, Vec<Vec<u8>>>>,  // snapshot_id -> symbols
+        stored_symbols: Mutex<HashMap<String, Vec<Vec<u8>>>>, // snapshot_id -> symbols
         availability: AtomicBool,
         failure_simulation: AtomicBool,
         stats: ReplicationStats,
@@ -118,8 +118,12 @@ mod tests {
             storage.insert(snapshot_id.to_string(), symbols.clone());
 
             self.stats.snapshots_stored.fetch_add(1, Ordering::Relaxed);
-            self.stats.symbols_stored.fetch_add(symbols.len(), Ordering::Relaxed);
-            self.stats.bytes_stored.fetch_add(total_bytes as u64, Ordering::Relaxed);
+            self.stats
+                .symbols_stored
+                .fetch_add(symbols.len(), Ordering::Relaxed);
+            self.stats
+                .bytes_stored
+                .fetch_add(total_bytes as u64, Ordering::Relaxed);
 
             Ok(())
         }
@@ -130,7 +134,8 @@ mod tests {
             }
 
             let storage = self.stored_symbols.lock().unwrap();
-            storage.get(snapshot_id)
+            storage
+                .get(snapshot_id)
                 .cloned()
                 .ok_or_else(|| "Snapshot not found".to_string())
         }
@@ -140,7 +145,8 @@ mod tests {
         }
 
         fn is_available(&self) -> bool {
-            self.availability.load(Ordering::Relaxed) && !self.failure_simulation.load(Ordering::Relaxed)
+            self.availability.load(Ordering::Relaxed)
+                && !self.failure_simulation.load(Ordering::Relaxed)
         }
     }
 
@@ -151,7 +157,7 @@ mod tests {
     struct DistributedSnapshotSystem {
         nodes: Vec<Arc<ReplicationNode>>,
         encoding_config: SnapshotEncodingConfig,
-        replication_factor: usize,  // Number of nodes to replicate to
+        replication_factor: usize, // Number of nodes to replicate to
         stats: SystemStats,
     }
 
@@ -183,7 +189,10 @@ mod tests {
         }
 
         /// Create and encode state snapshot for distributed storage
-        fn create_encoded_snapshot(&self, snapshot: StateSnapshot) -> Result<EncodedSnapshot, String> {
+        fn create_encoded_snapshot(
+            &self,
+            snapshot: StateSnapshot,
+        ) -> Result<EncodedSnapshot, String> {
             let start_time = Instant::now();
             self.stats.snapshots_created.fetch_add(1, Ordering::Relaxed);
 
@@ -200,11 +209,12 @@ mod tests {
             let repair_symbols = self.generate_repair_symbols(&source_symbols)?;
 
             let encoding_duration = start_time.elapsed();
-            self.stats.encoding_time_ms.fetch_add(
-                encoding_duration.as_millis() as u64,
-                Ordering::Relaxed
-            );
-            self.stats.encoding_operations.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .encoding_time_ms
+                .fetch_add(encoding_duration.as_millis() as u64, Ordering::Relaxed);
+            self.stats
+                .encoding_operations
+                .fetch_add(1, Ordering::Relaxed);
 
             Ok(EncodedSnapshot {
                 snapshot_id: snapshot.snapshot_id.clone(),
@@ -217,14 +227,20 @@ mod tests {
         }
 
         /// Replicate encoded snapshot across distributed nodes
-        fn replicate_snapshot(&self, encoded_snapshot: &EncodedSnapshot) -> Result<ReplicationResult, String> {
+        fn replicate_snapshot(
+            &self,
+            encoded_snapshot: &EncodedSnapshot,
+        ) -> Result<ReplicationResult, String> {
             let start_time = Instant::now();
-            self.stats.replication_operations.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .replication_operations
+                .fetch_add(1, Ordering::Relaxed);
 
             let all_symbols: Vec<Vec<u8>> = [
                 encoded_snapshot.source_symbols.clone(),
                 encoded_snapshot.repair_symbols.clone(),
-            ].concat();
+            ]
+            .concat();
 
             let mut successful_replications = 0;
             let mut failed_replications = 0;
@@ -241,7 +257,7 @@ mod tests {
                     let symbols_for_node = self.select_symbols_for_node(
                         &all_symbols,
                         i,
-                        &encoded_snapshot.encoding_config
+                        &encoded_snapshot.encoding_config,
                     );
 
                     match node.store_symbols(&encoded_snapshot.snapshot_id, symbols_for_node) {
@@ -275,7 +291,9 @@ mod tests {
         /// Recover snapshot from distributed nodes using RaptorQ decoding
         fn recover_snapshot(&self, snapshot_id: &str) -> Result<StateSnapshot, String> {
             let start_time = Instant::now();
-            self.stats.recovery_operations.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .recovery_operations
+                .fetch_add(1, Ordering::Relaxed);
 
             let mut collected_symbols = Vec::new();
             let mut contributing_nodes = Vec::new();
@@ -313,16 +331,19 @@ mod tests {
             let snapshot = self.deserialize_snapshot(&unpadded_data)?;
 
             let recovery_duration = start_time.elapsed();
-            self.stats.recovery_time_ms.fetch_add(
-                recovery_duration.as_millis() as u64,
-                Ordering::Relaxed
-            );
+            self.stats
+                .recovery_time_ms
+                .fetch_add(recovery_duration.as_millis() as u64, Ordering::Relaxed);
 
             Ok(snapshot)
         }
 
         /// Test snapshot resilience by simulating node failures
-        fn test_resilience(&self, snapshot: StateSnapshot, failure_count: usize) -> Result<ResilienceTestResult, String> {
+        fn test_resilience(
+            &self,
+            snapshot: StateSnapshot,
+            failure_count: usize,
+        ) -> Result<ResilienceTestResult, String> {
             // Create and replicate snapshot
             let encoded = self.create_encoded_snapshot(snapshot.clone())?;
             let replication_result = self.replicate_snapshot(&encoded)?;
@@ -342,7 +363,8 @@ mod tests {
 
             Ok(ResilienceTestResult {
                 original_snapshot: snapshot,
-                replication_successful: replication_result.successful_nodes >= self.replication_factor,
+                replication_successful: replication_result.successful_nodes
+                    >= self.replication_factor,
                 failed_node_count: failure_count,
                 failed_nodes,
                 recovery_successful: recovery_result.is_ok(),
@@ -367,7 +389,9 @@ mod tests {
 
         fn deserialize_snapshot(&self, data: &[u8]) -> Result<StateSnapshot, String> {
             // Simple deserialization matching serialize_snapshot
-            let separator_pos = data.iter().position(|&b| b == 0)
+            let separator_pos = data
+                .iter()
+                .position(|&b| b == 0)
                 .ok_or("Invalid snapshot format: no separator found")?;
 
             let snapshot_id = String::from_utf8(data[..separator_pos].to_vec())
@@ -378,18 +402,19 @@ mod tests {
                 return Err("Insufficient data for metadata".to_string());
             }
 
-            let version = u64::from_le_bytes(data[offset..offset+8].try_into().unwrap());
+            let version = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
             offset += 8;
-            let checksum = u64::from_le_bytes(data[offset..offset+8].try_into().unwrap());
+            let checksum = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
             offset += 8;
-            let data_len = u64::from_le_bytes(data[offset..offset+8].try_into().unwrap()) as usize;
+            let data_len =
+                u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
             offset += 8;
 
             if data.len() < offset + data_len {
                 return Err("Insufficient data for state data".to_string());
             }
 
-            let state_data = data[offset..offset+data_len].to_vec();
+            let state_data = data[offset..offset + data_len].to_vec();
 
             Ok(StateSnapshot {
                 snapshot_id,
@@ -418,7 +443,9 @@ mod tests {
 
         fn remove_padding(&self, data: &[u8]) -> Result<Vec<u8>, String> {
             // Find the last non-zero byte to remove padding
-            let last_data = data.iter().rposition(|&b| b != 0)
+            let last_data = data
+                .iter()
+                .rposition(|&b| b != 0)
                 .map(|pos| pos + 1)
                 .unwrap_or(0);
             Ok(data[..last_data].to_vec())
@@ -433,13 +460,16 @@ mod tests {
                 let start = i * symbol_size;
                 let end = std::cmp::min(start + symbol_size, data.len());
                 let mut symbol = vec![0u8; symbol_size];
-                symbol[..end-start].copy_from_slice(&data[start..end]);
+                symbol[..end - start].copy_from_slice(&data[start..end]);
                 symbols.push(symbol);
             }
             Ok(symbols)
         }
 
-        fn generate_repair_symbols(&self, source_symbols: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, String> {
+        fn generate_repair_symbols(
+            &self,
+            source_symbols: &[Vec<u8>],
+        ) -> Result<Vec<Vec<u8>>, String> {
             // Simulate RaptorQ repair symbol generation
             let repair_count = self.encoding_config.repair_symbols;
             let symbol_size = self.encoding_config.symbol_size;
@@ -480,9 +510,15 @@ mod tests {
             Ok(decoded_data)
         }
 
-        fn select_symbols_for_node(&self, symbols: &[Vec<u8>], node_index: usize, _config: &SnapshotEncodingConfig) -> Vec<Vec<u8>> {
+        fn select_symbols_for_node(
+            &self,
+            symbols: &[Vec<u8>],
+            node_index: usize,
+            _config: &SnapshotEncodingConfig,
+        ) -> Vec<Vec<u8>> {
             // Simple round-robin distribution (in production, use more sophisticated)
-            symbols.iter()
+            symbols
+                .iter()
                 .enumerate()
                 .filter(|(i, _)| i % self.nodes.len() == node_index)
                 .map(|(_, symbol)| symbol.clone())
@@ -491,9 +527,7 @@ mod tests {
 
         fn simulate_node_failures(&self, failure_count: usize) -> Result<Vec<String>, String> {
             let mut failed_nodes = Vec::new();
-            let available_nodes: Vec<_> = self.nodes.iter()
-                .filter(|n| n.is_available())
-                .collect();
+            let available_nodes: Vec<_> = self.nodes.iter().filter(|n| n.is_available()).collect();
 
             if failure_count > available_nodes.len() {
                 return Err("Cannot fail more nodes than available".to_string());
@@ -557,8 +591,15 @@ mod tests {
 
         fn generate_test_snapshots(&mut self, count: usize) {
             for i in 0..count {
-                let state_data = format!("test-state-data-{}-{}", i, SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos())
-                    .into_bytes();
+                let state_data = format!(
+                    "test-state-data-{}-{}",
+                    i,
+                    SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                )
+                .into_bytes();
 
                 let snapshot = StateSnapshot {
                     snapshot_id: format!("snapshot-{}", i),
@@ -579,11 +620,15 @@ mod tests {
             data.iter().map(|&b| b as u64).sum()
         }
 
-        fn verify_snapshot_integrity(&self, original: &StateSnapshot, recovered: &StateSnapshot) -> bool {
-            original.snapshot_id == recovered.snapshot_id &&
-            original.state_data == recovered.state_data &&
-            original.metadata.version == recovered.metadata.version &&
-            original.metadata.checksum == recovered.metadata.checksum
+        fn verify_snapshot_integrity(
+            &self,
+            original: &StateSnapshot,
+            recovered: &StateSnapshot,
+        ) -> bool {
+            original.snapshot_id == recovered.snapshot_id
+                && original.state_data == recovered.state_data
+                && original.metadata.version == recovered.metadata.version
+                && original.metadata.checksum == recovered.metadata.checksum
         }
     }
 
@@ -595,22 +640,34 @@ mod tests {
         let snapshot = harness.test_snapshots[0].clone();
 
         // Create encoded snapshot
-        let encoded = harness.system.create_encoded_snapshot(snapshot.clone())
+        let encoded = harness
+            .system
+            .create_encoded_snapshot(snapshot.clone())
             .expect("Failed to encode snapshot");
 
         assert_eq!(encoded.snapshot_id, snapshot.snapshot_id);
-        assert_eq!(encoded.source_symbols.len(), harness.system.encoding_config.source_symbols);
-        assert_eq!(encoded.repair_symbols.len(), harness.system.encoding_config.repair_symbols);
+        assert_eq!(
+            encoded.source_symbols.len(),
+            harness.system.encoding_config.source_symbols
+        );
+        assert_eq!(
+            encoded.repair_symbols.len(),
+            harness.system.encoding_config.repair_symbols
+        );
 
         // Replicate across nodes
-        let replication = harness.system.replicate_snapshot(&encoded)
+        let replication = harness
+            .system
+            .replicate_snapshot(&encoded)
             .expect("Failed to replicate snapshot");
 
         assert!(replication.successful_nodes >= 3);
         assert_eq!(replication.snapshot_id, snapshot.snapshot_id);
 
         // Verify recovery
-        let recovered = harness.system.recover_snapshot(&snapshot.snapshot_id)
+        let recovered = harness
+            .system
+            .recover_snapshot(&snapshot.snapshot_id)
             .expect("Failed to recover snapshot");
 
         assert!(harness.verify_snapshot_integrity(&snapshot, &recovered));
@@ -626,18 +683,23 @@ mod tests {
         let snapshot = harness.test_snapshots[0].clone();
 
         // Test resilience with multiple node failures
-        let resilience_result = harness.system.test_resilience(snapshot.clone(), 3)
+        let resilience_result = harness
+            .system
+            .test_resilience(snapshot.clone(), 3)
             .expect("Resilience test failed");
 
         assert!(resilience_result.replication_successful);
         assert_eq!(resilience_result.failed_node_count, 3);
-        assert!(resilience_result.recovery_successful,
+        assert!(
+            resilience_result.recovery_successful,
             "Recovery should succeed with {} nodes failed when threshold is {}",
-            resilience_result.failed_node_count,
-            resilience_result.resilience_threshold);
+            resilience_result.failed_node_count, resilience_result.resilience_threshold
+        );
 
-        println!("✓ Erasure coding resilience test passed with {} node failures",
-                 resilience_result.failed_node_count);
+        println!(
+            "✓ Erasure coding resilience test passed with {} node failures",
+            resilience_result.failed_node_count
+        );
     }
 
     #[test]
@@ -649,16 +711,22 @@ mod tests {
 
         // Fail too many nodes (more than can be tolerated)
         let excessive_failures = harness.system.encoding_config.source_symbols - 2;
-        let resilience_result = harness.system.test_resilience(snapshot.clone(), excessive_failures)
+        let resilience_result = harness
+            .system
+            .test_resilience(snapshot.clone(), excessive_failures)
             .expect("Resilience test setup failed");
 
         assert!(resilience_result.replication_successful);
-        assert!(!resilience_result.recovery_successful,
-            "Recovery should fail when too many nodes are lost");
+        assert!(
+            !resilience_result.recovery_successful,
+            "Recovery should fail when too many nodes are lost"
+        );
         assert!(resilience_result.recovery_error.is_some());
 
-        println!("✓ Recovery correctly failed with excessive node failures ({} nodes)",
-                 excessive_failures);
+        println!(
+            "✓ Recovery correctly failed with excessive node failures ({} nodes)",
+            excessive_failures
+        );
     }
 
     #[test]
@@ -670,7 +738,9 @@ mod tests {
 
         // Encode multiple snapshots
         for snapshot in &harness.test_snapshots {
-            let encoded = harness.system.create_encoded_snapshot(snapshot.clone())
+            let encoded = harness
+                .system
+                .create_encoded_snapshot(snapshot.clone())
                 .expect("Failed to encode snapshot");
             encoded_snapshots.push(encoded);
         }
@@ -678,7 +748,9 @@ mod tests {
         // Replicate all snapshots
         let mut replication_results = Vec::new();
         for encoded in &encoded_snapshots {
-            let result = harness.system.replicate_snapshot(encoded)
+            let result = harness
+                .system
+                .replicate_snapshot(encoded)
                 .expect("Failed to replicate snapshot");
             replication_results.push(result);
         }
@@ -694,14 +766,18 @@ mod tests {
 
         // Recover all snapshots
         for (i, snapshot) in harness.test_snapshots.iter().enumerate() {
-            let recovered = harness.system.recover_snapshot(&snapshot.snapshot_id)
+            let recovered = harness
+                .system
+                .recover_snapshot(&snapshot.snapshot_id)
                 .expect(&format!("Failed to recover snapshot {}", i));
 
             assert!(harness.verify_snapshot_integrity(snapshot, &recovered));
         }
 
-        println!("✓ Concurrent snapshot operations successful with {} snapshots",
-                 harness.test_snapshots.len());
+        println!(
+            "✓ Concurrent snapshot operations successful with {} snapshots",
+            harness.test_snapshots.len()
+        );
     }
 
     #[test]
@@ -723,22 +799,31 @@ mod tests {
         };
 
         // Encode large snapshot
-        let encoded = harness.system.create_encoded_snapshot(large_snapshot.clone())
+        let encoded = harness
+            .system
+            .create_encoded_snapshot(large_snapshot.clone())
             .expect("Failed to encode large snapshot");
 
         assert!(encoded.total_size_bytes >= large_data.len());
 
         // Replicate and recover
-        let _replication = harness.system.replicate_snapshot(&encoded)
+        let _replication = harness
+            .system
+            .replicate_snapshot(&encoded)
             .expect("Failed to replicate large snapshot");
 
-        let recovered = harness.system.recover_snapshot(&large_snapshot.snapshot_id)
+        let recovered = harness
+            .system
+            .recover_snapshot(&large_snapshot.snapshot_id)
             .expect("Failed to recover large snapshot");
 
         assert!(harness.verify_snapshot_integrity(&large_snapshot, &recovered));
         assert_eq!(recovered.state_data.len(), large_data.len());
 
-        println!("✓ Large snapshot handling successful ({} bytes)", large_data.len());
+        println!(
+            "✓ Large snapshot handling successful ({} bytes)",
+            large_data.len()
+        );
     }
 
     #[test]
@@ -760,13 +845,19 @@ mod tests {
         };
 
         // Full encode -> replicate -> recover cycle
-        let encoded = harness.system.create_encoded_snapshot(snapshot.clone())
+        let encoded = harness
+            .system
+            .create_encoded_snapshot(snapshot.clone())
             .expect("Failed to encode snapshot");
 
-        let _replication = harness.system.replicate_snapshot(&encoded)
+        let _replication = harness
+            .system
+            .replicate_snapshot(&encoded)
             .expect("Failed to replicate snapshot");
 
-        let recovered = harness.system.recover_snapshot(&snapshot.snapshot_id)
+        let recovered = harness
+            .system
+            .recover_snapshot(&snapshot.snapshot_id)
             .expect("Failed to recover snapshot");
 
         // Verify metadata preservation
@@ -785,7 +876,9 @@ mod tests {
         let start_time = Instant::now();
 
         for snapshot in &harness.test_snapshots {
-            let _encoded = harness.system.create_encoded_snapshot(snapshot.clone())
+            let _encoded = harness
+                .system
+                .create_encoded_snapshot(snapshot.clone())
                 .expect("Failed to encode snapshot");
         }
 
@@ -793,21 +886,33 @@ mod tests {
         let avg_encoding_time = total_encoding_time / harness.test_snapshots.len() as u32;
 
         // Performance assertions
-        assert!(avg_encoding_time < Duration::from_millis(100),
+        assert!(
+            avg_encoding_time < Duration::from_millis(100),
             "Average encoding time {} ms exceeds threshold",
-            avg_encoding_time.as_millis());
+            avg_encoding_time.as_millis()
+        );
 
         // Check system stats
-        let encoding_ops = harness.system.stats.encoding_operations.load(Ordering::Relaxed);
+        let encoding_ops = harness
+            .system
+            .stats
+            .encoding_operations
+            .load(Ordering::Relaxed);
         assert_eq!(encoding_ops, harness.test_snapshots.len());
 
-        let total_encoding_ms = harness.system.stats.encoding_time_ms.load(Ordering::Relaxed);
+        let total_encoding_ms = harness
+            .system
+            .stats
+            .encoding_time_ms
+            .load(Ordering::Relaxed);
         assert!(total_encoding_ms > 0);
 
-        println!("✓ Encoding performance: {} snapshots in {} ms (avg {} ms)",
-                 harness.test_snapshots.len(),
-                 total_encoding_time.as_millis(),
-                 avg_encoding_time.as_millis());
+        println!(
+            "✓ Encoding performance: {} snapshots in {} ms (avg {} ms)",
+            harness.test_snapshots.len(),
+            total_encoding_time.as_millis(),
+            avg_encoding_time.as_millis()
+        );
     }
 
     #[test]
@@ -816,7 +921,9 @@ mod tests {
         harness.generate_test_snapshots(1);
 
         let snapshot = harness.test_snapshots[0].clone();
-        let encoded = harness.system.create_encoded_snapshot(snapshot.clone())
+        let encoded = harness
+            .system
+            .create_encoded_snapshot(snapshot.clone())
             .expect("Failed to encode snapshot");
 
         // Fail some nodes before replication
@@ -824,23 +931,32 @@ mod tests {
         harness.system.nodes[1].simulate_failure(true);
         harness.system.nodes[2].simulate_failure(true);
 
-        let replication = harness.system.replicate_snapshot(&encoded)
+        let replication = harness
+            .system
+            .replicate_snapshot(&encoded)
             .expect("Failed to replicate snapshot");
 
         // Should still achieve target replication factor
-        assert!(replication.successful_nodes >= 7,
+        assert!(
+            replication.successful_nodes >= 7,
             "Expected {} successful replications, got {}",
-            7, replication.successful_nodes);
+            7,
+            replication.successful_nodes
+        );
 
         // Verify recovery still works
-        let recovered = harness.system.recover_snapshot(&snapshot.snapshot_id)
+        let recovered = harness
+            .system
+            .recover_snapshot(&snapshot.snapshot_id)
             .expect("Failed to recover snapshot after partial replication");
 
         assert!(harness.verify_snapshot_integrity(&snapshot, &recovered));
 
-        println!("✓ Replication factor enforcement successful: {}/{} nodes active, {} successful replications",
-                 harness.system.nodes.len() - 3,
-                 harness.system.nodes.len(),
-                 replication.successful_nodes);
+        println!(
+            "✓ Replication factor enforcement successful: {}/{} nodes active, {} successful replications",
+            harness.system.nodes.len() - 3,
+            harness.system.nodes.len(),
+            replication.successful_nodes
+        );
     }
 }

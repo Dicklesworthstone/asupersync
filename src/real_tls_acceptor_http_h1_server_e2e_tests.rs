@@ -24,16 +24,16 @@
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod tests {
     use super::*;
-    use crate::http::h1;
-    use crate::tls;
-    use crate::net::tcp;
     use crate::cx::Cx;
+    use crate::http::h1;
+    use crate::net::tcp;
     use crate::time::{Duration, Instant};
+    use crate::tls;
     use std::collections::HashMap;
     use std::io;
     use std::net::{SocketAddr, TcpListener};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use tokio::sync::{Mutex, RwLock};
 
     /// Allocate a test port dynamically to avoid conflicts with parallel tests
@@ -601,20 +601,23 @@ mod tests {
             let connection_id = self.generate_connection_id();
             let start_time = Instant::now();
 
-            self.stats.handshakes_attempted.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .handshakes_attempted
+                .fetch_add(1, Ordering::Relaxed);
 
             // Perform TLS handshake
             let handshake_result = self.perform_tls_handshake(connection_id, client_addr).await;
 
             let handshake_duration = start_time.elapsed();
-            self.stats.avg_handshake_duration_ms.store(
-                handshake_duration.as_millis() as u64,
-                Ordering::Relaxed
-            );
+            self.stats
+                .avg_handshake_duration_ms
+                .store(handshake_duration.as_millis() as u64, Ordering::Relaxed);
 
             match handshake_result {
                 Ok(tls_state) => {
-                    self.stats.handshakes_successful.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .handshakes_successful
+                        .fetch_add(1, Ordering::Relaxed);
 
                     // Create HTTP session only after successful TLS handshake
                     let http_session = self.create_http_session(true).await;
@@ -724,18 +727,27 @@ mod tests {
             request_data: &[u8],
         ) -> Result<HttpResponse, String> {
             let connections = self.connections.read().await;
-            let connection = connections.get(&connection_id)
+            let connection = connections
+                .get(&connection_id)
                 .ok_or("Connection not found")?;
 
             // CRITICAL: Verify TLS handshake is complete before processing HTTP
             if connection.tls_state.handshake_state != HandshakeState::Complete {
-                self.stats.http_requests_rejected.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .http_requests_rejected
+                    .fetch_add(1, Ordering::Relaxed);
                 return Err("TLS handshake not complete - rejecting HTTP request".to_string());
             }
 
             // Only process HTTP if handshake is complete
-            if connection.http_session.http_processing_enabled.load(Ordering::Relaxed) {
-                self.stats.http_requests_processed.fetch_add(1, Ordering::Relaxed);
+            if connection
+                .http_session
+                .http_processing_enabled
+                .load(Ordering::Relaxed)
+            {
+                self.stats
+                    .http_requests_processed
+                    .fetch_add(1, Ordering::Relaxed);
 
                 // Parse and process the HTTP request
                 let request = self.parse_http_request(request_data)?;
@@ -743,15 +755,16 @@ mod tests {
 
                 Ok(response)
             } else {
-                self.stats.http_requests_rejected.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .http_requests_rejected
+                    .fetch_add(1, Ordering::Relaxed);
                 Err("HTTP processing disabled - TLS handshake required".to_string())
             }
         }
 
         /// Parse HTTP request from raw data
         fn parse_http_request(&self, data: &[u8]) -> Result<HttpRequest, String> {
-            let request_str = std::str::from_utf8(data)
-                .map_err(|_| "Invalid UTF-8 in request")?;
+            let request_str = std::str::from_utf8(data).map_err(|_| "Invalid UTF-8 in request")?;
 
             let lines: Vec<&str> = request_str.lines().collect();
             if lines.is_empty() {
@@ -785,13 +798,18 @@ mod tests {
         }
 
         /// Generate HTTP response
-        async fn generate_http_response(&self, request: &HttpRequest) -> Result<HttpResponse, String> {
+        async fn generate_http_response(
+            &self,
+            request: &HttpRequest,
+        ) -> Result<HttpResponse, String> {
             let mut headers = HashMap::new();
             headers.insert("Content-Type".to_string(), "text/plain".to_string());
             headers.insert("Server".to_string(), "TlsHttpServer/1.0".to_string());
 
-            let body = format!("Hello from secure server! Method: {}, URI: {}",
-                             request.method, request.uri);
+            let body = format!(
+                "Hello from secure server! Method: {}, URI: {}",
+                request.method, request.uri
+            );
 
             Ok(HttpResponse {
                 status_code: 200,
@@ -809,22 +827,36 @@ mod tests {
             reason: RenegotiationReason,
         ) -> Result<(), String> {
             let connections = self.connections.read().await;
-            let connection = connections.get(&connection_id)
+            let connection = connections
+                .get(&connection_id)
                 .ok_or("Connection not found")?;
 
             // Mark renegotiation as in progress
-            connection.tls_state.renegotiation_state.in_progress.store(true, Ordering::Relaxed);
+            connection
+                .tls_state
+                .renegotiation_state
+                .in_progress
+                .store(true, Ordering::Relaxed);
 
             // Perform renegotiation (simplified for testing)
             tokio::time::sleep(Duration::from_millis(50)).await;
 
             // Update renegotiation statistics
-            connection.tls_state.renegotiation_state.renegotiation_count
+            connection
+                .tls_state
+                .renegotiation_state
+                .renegotiation_count
                 .fetch_add(1, Ordering::Relaxed);
-            self.stats.cipher_renegotiations.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .cipher_renegotiations
+                .fetch_add(1, Ordering::Relaxed);
 
             // Clear in-progress flag
-            connection.tls_state.renegotiation_state.in_progress.store(false, Ordering::Relaxed);
+            connection
+                .tls_state
+                .renegotiation_state
+                .in_progress
+                .store(false, Ordering::Relaxed);
 
             Ok(())
         }
@@ -837,13 +869,27 @@ mod tests {
         /// Get server statistics
         fn get_stats(&self) -> ServerStats {
             ServerStats {
-                handshakes_attempted: AtomicU64::new(self.stats.handshakes_attempted.load(Ordering::Relaxed)),
-                handshakes_successful: AtomicU64::new(self.stats.handshakes_successful.load(Ordering::Relaxed)),
-                handshakes_failed: AtomicU64::new(self.stats.handshakes_failed.load(Ordering::Relaxed)),
-                http_requests_processed: AtomicU64::new(self.stats.http_requests_processed.load(Ordering::Relaxed)),
-                http_requests_rejected: AtomicU64::new(self.stats.http_requests_rejected.load(Ordering::Relaxed)),
-                cipher_renegotiations: AtomicU64::new(self.stats.cipher_renegotiations.load(Ordering::Relaxed)),
-                avg_handshake_duration_ms: AtomicU64::new(self.stats.avg_handshake_duration_ms.load(Ordering::Relaxed)),
+                handshakes_attempted: AtomicU64::new(
+                    self.stats.handshakes_attempted.load(Ordering::Relaxed),
+                ),
+                handshakes_successful: AtomicU64::new(
+                    self.stats.handshakes_successful.load(Ordering::Relaxed),
+                ),
+                handshakes_failed: AtomicU64::new(
+                    self.stats.handshakes_failed.load(Ordering::Relaxed),
+                ),
+                http_requests_processed: AtomicU64::new(
+                    self.stats.http_requests_processed.load(Ordering::Relaxed),
+                ),
+                http_requests_rejected: AtomicU64::new(
+                    self.stats.http_requests_rejected.load(Ordering::Relaxed),
+                ),
+                cipher_renegotiations: AtomicU64::new(
+                    self.stats.cipher_renegotiations.load(Ordering::Relaxed),
+                ),
+                avg_handshake_duration_ms: AtomicU64::new(
+                    self.stats.avg_handshake_duration_ms.load(Ordering::Relaxed),
+                ),
             }
         }
     }
@@ -892,11 +938,14 @@ mod tests {
     impl ResponseGenerator {
         fn new() -> Self {
             let mut templates = HashMap::new();
-            templates.insert("default".to_string(), ResponseTemplate {
-                status_code: 200,
-                headers: HashMap::new(),
-                body_template: "Default response".to_string(),
-            });
+            templates.insert(
+                "default".to_string(),
+                ResponseTemplate {
+                    status_code: 200,
+                    headers: HashMap::new(),
+                    body_template: "Default response".to_string(),
+                },
+            );
 
             Self {
                 response_templates: templates,
@@ -944,7 +993,10 @@ mod tests {
         }
 
         /// Perform TLS handshake with server
-        async fn perform_handshake(&mut self, server: &TlsHttpServer) -> Result<ConnectionId, String> {
+        async fn perform_handshake(
+            &mut self,
+            server: &TlsHttpServer,
+        ) -> Result<ConnectionId, String> {
             let start_time = Instant::now();
 
             // Apply behavior-specific handshake modifications
@@ -955,21 +1007,25 @@ mod tests {
                 }
                 ClientBehavior::ProtocolMismatch { attempted_version } => {
                     // This would cause handshake failure in real implementation
-                    self.connection_state.errors.push(
-                        format!("Protocol version {:?} not supported", attempted_version)
-                    );
+                    self.connection_state.errors.push(format!(
+                        "Protocol version {:?} not supported",
+                        attempted_version
+                    ));
                     return Err("Protocol mismatch".to_string());
                 }
                 ClientBehavior::InvalidCertificate => {
                     // This would cause certificate validation failure
-                    self.connection_state.errors.push("Invalid certificate".to_string());
+                    self.connection_state
+                        .errors
+                        .push("Invalid certificate".to_string());
                     return Err("Certificate validation failed".to_string());
                 }
                 _ => {}
             }
 
             // Perform normal handshake with dynamic port allocation
-            let test_port = allocate_test_port().map_err(|e| format!("Port allocation failed: {}", e))?;
+            let test_port =
+                allocate_test_port().map_err(|e| format!("Port allocation failed: {}", e))?;
             let client_addr = format!("127.0.0.1:{}", test_port).parse().unwrap();
             let connection_id = server.accept_connection(client_addr).await?;
 
@@ -992,9 +1048,13 @@ mod tests {
                 ClientBehavior::EarlyHttpAttempt => {
                     if !self.connection_state.handshake_complete {
                         // Attempt HTTP before handshake completion
-                        let result = server.process_http_request(connection_id, request.as_bytes()).await;
+                        let result = server
+                            .process_http_request(connection_id, request.as_bytes())
+                            .await;
                         if result.is_err() {
-                            self.connection_state.errors.push("HTTP request rejected - handshake not complete".to_string());
+                            self.connection_state
+                                .errors
+                                .push("HTTP request rejected - handshake not complete".to_string());
                         }
                         return result;
                     }
@@ -1008,7 +1068,9 @@ mod tests {
             }
 
             let request_start = Instant::now();
-            let response = server.process_http_request(connection_id, request.as_bytes()).await?;
+            let response = server
+                .process_http_request(connection_id, request.as_bytes())
+                .await?;
             let request_time = request_start.elapsed();
 
             self.client_stats.http_request_times.push(request_time);
@@ -1024,10 +1086,14 @@ mod tests {
             server: &TlsHttpServer,
             connection_id: ConnectionId,
         ) -> Result<(), String> {
-            server.initiate_renegotiation(connection_id, RenegotiationReason::ClientRequested).await?;
+            server
+                .initiate_renegotiation(connection_id, RenegotiationReason::ClientRequested)
+                .await?;
 
             self.connection_state.renegotiations_performed += 1;
-            self.client_stats.renegotiations_initiated.fetch_add(1, Ordering::Relaxed);
+            self.client_stats
+                .renegotiations_initiated
+                .fetch_add(1, Ordering::Relaxed);
 
             Ok(())
         }
@@ -1069,7 +1135,9 @@ mod tests {
                 match client.perform_handshake(&self.server).await {
                     Ok(connection_id) => {
                         connection_ids.push(Some(connection_id));
-                        self.test_stats.successful_handshakes.fetch_add(1, Ordering::Relaxed);
+                        self.test_stats
+                            .successful_handshakes
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                     Err(_) => {
                         connection_ids.push(None);
@@ -1086,21 +1154,37 @@ mod tests {
                             request_num
                         );
 
-                        match client.send_http_request(&self.server, connection_id, &request).await {
+                        match client
+                            .send_http_request(&self.server, connection_id, &request)
+                            .await
+                        {
                             Ok(_) => {
-                                self.test_stats.post_handshake_http_requests.fetch_add(1, Ordering::Relaxed);
+                                self.test_stats
+                                    .post_handshake_http_requests
+                                    .fetch_add(1, Ordering::Relaxed);
                             }
                             Err(_) => {
-                                self.test_stats.pre_handshake_http_rejections.fetch_add(1, Ordering::Relaxed);
+                                self.test_stats
+                                    .pre_handshake_http_rejections
+                                    .fetch_add(1, Ordering::Relaxed);
                             }
                         }
 
                         // Test renegotiation if configured
                         if self.test_config.test_renegotiation {
-                            if let ClientBehavior::RenegotiationRequester { renegotiate_after_requests } = &client.behavior {
+                            if let ClientBehavior::RenegotiationRequester {
+                                renegotiate_after_requests,
+                            } = &client.behavior
+                            {
                                 if (request_num + 1) % renegotiate_after_requests == 0 {
-                                    if client.request_renegotiation(&self.server, connection_id).await.is_ok() {
-                                        self.test_stats.renegotiations_completed.fetch_add(1, Ordering::Relaxed);
+                                    if client
+                                        .request_renegotiation(&self.server, connection_id)
+                                        .await
+                                        .is_ok()
+                                    {
+                                        self.test_stats
+                                            .renegotiations_completed
+                                            .fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
                             }
@@ -1123,15 +1207,18 @@ mod tests {
 
         /// Collect results from all clients
         fn collect_client_results(&self) -> Vec<ClientResult> {
-            self.clients.iter().map(|client| ClientResult {
-                client_id: client.client_id,
-                handshake_successful: client.connection_state.handshake_complete,
-                http_requests_sent: client.connection_state.http_requests_sent,
-                http_responses_received: client.connection_state.http_responses_received,
-                renegotiations_performed: client.connection_state.renegotiations_performed,
-                errors: client.connection_state.errors.clone(),
-                handshake_duration: client.client_stats.handshake_duration,
-            }).collect()
+            self.clients
+                .iter()
+                .map(|client| ClientResult {
+                    client_id: client.client_id,
+                    handshake_successful: client.connection_state.handshake_complete,
+                    http_requests_sent: client.connection_state.http_requests_sent,
+                    http_responses_received: client.connection_state.http_responses_received,
+                    renegotiations_performed: client.connection_state.renegotiations_performed,
+                    errors: client.connection_state.errors.clone(),
+                    handshake_duration: client.client_stats.handshake_duration,
+                })
+                .collect()
         }
 
         /// Verify handshake-before-HTTP requirements
@@ -1150,7 +1237,9 @@ mod tests {
                 http_requests_processed_post_handshake: http_processed,
                 http_requests_rejected_pre_handshake: http_rejected,
                 successful_handshakes: handshakes_successful,
-                renegotiations_completed: server_stats.cipher_renegotiations.load(Ordering::Relaxed),
+                renegotiations_completed: server_stats
+                    .cipher_renegotiations
+                    .load(Ordering::Relaxed),
             }
         }
     }
@@ -1243,22 +1332,37 @@ mod tests {
         let result = harness.run_integration_test().await;
 
         assert!(result.success, "Basic TLS-HTTP integration should succeed");
-        assert!(result.handshake_verification.handshake_before_http_enforced,
-                "Handshake completion should be required before HTTP processing");
+        assert!(
+            result.handshake_verification.handshake_before_http_enforced,
+            "Handshake completion should be required before HTTP processing"
+        );
 
         // All clients should complete handshakes and send HTTP requests
         for client_result in &result.client_results {
-            assert!(client_result.handshake_successful,
-                   "Client {} should complete TLS handshake", client_result.client_id);
-            assert_eq!(client_result.http_requests_sent, 5,
-                      "Client {} should send 5 HTTP requests", client_result.client_id);
-            assert_eq!(client_result.http_responses_received, 5,
-                      "Client {} should receive 5 HTTP responses", client_result.client_id);
+            assert!(
+                client_result.handshake_successful,
+                "Client {} should complete TLS handshake",
+                client_result.client_id
+            );
+            assert_eq!(
+                client_result.http_requests_sent, 5,
+                "Client {} should send 5 HTTP requests",
+                client_result.client_id
+            );
+            assert_eq!(
+                client_result.http_responses_received, 5,
+                "Client {} should receive 5 HTTP responses",
+                client_result.client_id
+            );
         }
 
-        println!("✅ Basic TLS handshake before HTTP: {} successful handshakes, {} HTTP requests processed",
-                result.handshake_verification.successful_handshakes,
-                result.handshake_verification.http_requests_processed_post_handshake);
+        println!(
+            "✅ Basic TLS handshake before HTTP: {} successful handshakes, {} HTTP requests processed",
+            result.handshake_verification.successful_handshakes,
+            result
+                .handshake_verification
+                .http_requests_processed_post_handshake
+        );
     }
 
     #[tokio::test]
@@ -1301,7 +1405,9 @@ mod tests {
             tls_version: TlsVersion::Tls13,
         };
 
-        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config).await.unwrap();
+        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config)
+            .await
+            .unwrap();
 
         // Add one normal client and one that attempts HTTP before handshake
         harness.add_client(ClientBehavior::Normal);
@@ -1312,20 +1418,33 @@ mod tests {
         assert!(result.success, "Early HTTP rejection test should succeed");
 
         // Should have some HTTP requests rejected due to incomplete handshake
-        assert!(result.handshake_verification.http_requests_rejected_pre_handshake > 0,
-               "Some HTTP requests should be rejected before handshake completion");
+        assert!(
+            result
+                .handshake_verification
+                .http_requests_rejected_pre_handshake
+                > 0,
+            "Some HTTP requests should be rejected before handshake completion"
+        );
 
         // Verify early HTTP client has errors
-        let early_http_client = result.client_results.iter()
+        let early_http_client = result
+            .client_results
+            .iter()
             .find(|c| c.client_id == 1)
             .expect("Should find early HTTP client");
 
-        assert!(!early_http_client.errors.is_empty(),
-               "Early HTTP client should have recorded errors");
+        assert!(
+            !early_http_client.errors.is_empty(),
+            "Early HTTP client should have recorded errors"
+        );
 
-        println!("✅ Early HTTP rejection: {} requests rejected pre-handshake, {} errors recorded",
-                result.handshake_verification.http_requests_rejected_pre_handshake,
-                early_http_client.errors.len());
+        println!(
+            "✅ Early HTTP rejection: {} requests rejected pre-handshake, {} errors recorded",
+            result
+                .handshake_verification
+                .http_requests_rejected_pre_handshake,
+            early_http_client.errors.len()
+        );
     }
 
     #[tokio::test]
@@ -1371,29 +1490,41 @@ mod tests {
             tls_version: TlsVersion::Tls13,
         };
 
-        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config).await.unwrap();
+        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config)
+            .await
+            .unwrap();
 
         // Add normal client and renegotiation client
         harness.add_client(ClientBehavior::Normal);
-        harness.add_client(ClientBehavior::RenegotiationRequester { renegotiate_after_requests: 3 });
+        harness.add_client(ClientBehavior::RenegotiationRequester {
+            renegotiate_after_requests: 3,
+        });
 
         let result = harness.run_integration_test().await;
 
         assert!(result.success, "Cipher renegotiation test should succeed");
-        assert!(result.handshake_verification.renegotiations_completed > 0,
-               "Should complete at least one cipher renegotiation");
+        assert!(
+            result.handshake_verification.renegotiations_completed > 0,
+            "Should complete at least one cipher renegotiation"
+        );
 
         // Verify renegotiation client performed renegotiations
-        let renego_client = result.client_results.iter()
+        let renego_client = result
+            .client_results
+            .iter()
             .find(|c| c.client_id == 1)
             .expect("Should find renegotiation client");
 
-        assert!(renego_client.renegotiations_performed > 0,
-               "Renegotiation client should perform cipher renegotiations");
+        assert!(
+            renego_client.renegotiations_performed > 0,
+            "Renegotiation client should perform cipher renegotiations"
+        );
 
-        println!("✅ Cipher renegotiation: {} total renegotiations, client performed {}",
-                result.handshake_verification.renegotiations_completed,
-                renego_client.renegotiations_performed);
+        println!(
+            "✅ Cipher renegotiation: {} total renegotiations, client performed {}",
+            result.handshake_verification.renegotiations_completed,
+            renego_client.renegotiations_performed
+        );
     }
 
     #[tokio::test]
@@ -1436,11 +1567,15 @@ mod tests {
             tls_version: TlsVersion::Tls13,
         };
 
-        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config).await.unwrap();
+        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config)
+            .await
+            .unwrap();
 
         // Add clients with different failure scenarios
         harness.add_client(ClientBehavior::Normal);
-        harness.add_client(ClientBehavior::ProtocolMismatch { attempted_version: TlsVersion::Tls12 });
+        harness.add_client(ClientBehavior::ProtocolMismatch {
+            attempted_version: TlsVersion::Tls12,
+        });
         harness.add_client(ClientBehavior::InvalidCertificate);
         harness.add_client(ClientBehavior::Normal);
 
@@ -1449,27 +1584,41 @@ mod tests {
         assert!(result.success, "Handshake failure test should succeed");
 
         // Should have some successful and some failed handshakes
-        let successful_count = result.client_results.iter()
+        let successful_count = result
+            .client_results
+            .iter()
             .filter(|c| c.handshake_successful)
             .count();
-        let failed_count = result.client_results.iter()
+        let failed_count = result
+            .client_results
+            .iter()
             .filter(|c| !c.handshake_successful)
             .count();
 
-        assert!(successful_count >= 2, "Should have at least 2 successful handshakes");
-        assert!(failed_count >= 2, "Should have at least 2 failed handshakes");
+        assert!(
+            successful_count >= 2,
+            "Should have at least 2 successful handshakes"
+        );
+        assert!(
+            failed_count >= 2,
+            "Should have at least 2 failed handshakes"
+        );
 
         // Failed handshake clients should not send HTTP requests
         for client_result in &result.client_results {
             if !client_result.handshake_successful {
-                assert_eq!(client_result.http_requests_sent, 0,
-                          "Failed handshake client {} should not send HTTP requests",
-                          client_result.client_id);
+                assert_eq!(
+                    client_result.http_requests_sent, 0,
+                    "Failed handshake client {} should not send HTTP requests",
+                    client_result.client_id
+                );
             }
         }
 
-        println!("✅ Handshake failure scenarios: {} successful, {} failed handshakes",
-                successful_count, failed_count);
+        println!(
+            "✅ Handshake failure scenarios: {} successful, {} failed handshakes",
+            successful_count, failed_count
+        );
     }
 
     #[tokio::test]
@@ -1515,12 +1664,16 @@ mod tests {
             tls_version: TlsVersion::Tls13,
         };
 
-        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config).await.unwrap();
+        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config)
+            .await
+            .unwrap();
 
         // Add multiple concurrent clients with different behaviors
         for i in 0..8 {
             let behavior = if i % 3 == 0 {
-                ClientBehavior::SlowHandshake { delay_per_step_ms: 20 }
+                ClientBehavior::SlowHandshake {
+                    delay_per_step_ms: 20,
+                }
             } else {
                 ClientBehavior::Normal
             };
@@ -1532,22 +1685,34 @@ mod tests {
         assert!(result.success, "Concurrent connections test should succeed");
 
         // Most clients should complete handshakes successfully
-        let successful_handshakes = result.client_results.iter()
+        let successful_handshakes = result
+            .client_results
+            .iter()
             .filter(|c| c.handshake_successful)
             .count();
 
-        assert!(successful_handshakes >= 6, "Should have at least 6 successful handshakes");
+        assert!(
+            successful_handshakes >= 6,
+            "Should have at least 6 successful handshakes"
+        );
 
         // Verify HTTP processing for successful connections
-        let total_http_requests: u32 = result.client_results.iter()
+        let total_http_requests: u32 = result
+            .client_results
+            .iter()
             .filter(|c| c.handshake_successful)
             .map(|c| c.http_requests_sent)
             .sum();
 
-        assert!(total_http_requests >= 20, "Should process many HTTP requests concurrently");
+        assert!(
+            total_http_requests >= 20,
+            "Should process many HTTP requests concurrently"
+        );
 
-        println!("✅ Concurrent connections: {} successful handshakes, {} HTTP requests processed",
-                successful_handshakes, total_http_requests);
+        println!(
+            "✅ Concurrent connections: {} successful handshakes, {} HTTP requests processed",
+            successful_handshakes, total_http_requests
+        );
     }
 
     #[tokio::test]
@@ -1593,7 +1758,9 @@ mod tests {
             tls_version: TlsVersion::Tls13,
         };
 
-        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config).await.unwrap();
+        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config)
+            .await
+            .unwrap();
 
         // Add clients with different TLS version preferences
         harness.add_client(ClientBehavior::Normal); // TLS 1.3 preferred
@@ -1602,21 +1769,38 @@ mod tests {
 
         let result = harness.run_integration_test().await;
 
-        assert!(result.success, "TLS version negotiation test should succeed");
+        assert!(
+            result.success,
+            "TLS version negotiation test should succeed"
+        );
 
         // All clients should successfully negotiate TLS version and complete handshakes
-        assert_eq!(result.client_results.len(), 3, "Should have 3 client results");
+        assert_eq!(
+            result.client_results.len(),
+            3,
+            "Should have 3 client results"
+        );
 
         for client_result in &result.client_results {
-            assert!(client_result.handshake_successful,
-                   "Client {} should successfully negotiate TLS version", client_result.client_id);
-            assert_eq!(client_result.http_requests_sent, 3,
-                      "Client {} should send HTTP requests after TLS negotiation", client_result.client_id);
+            assert!(
+                client_result.handshake_successful,
+                "Client {} should successfully negotiate TLS version",
+                client_result.client_id
+            );
+            assert_eq!(
+                client_result.http_requests_sent, 3,
+                "Client {} should send HTTP requests after TLS negotiation",
+                client_result.client_id
+            );
         }
 
-        println!("✅ TLS version negotiation: {} successful negotiations, {} HTTP requests",
-                result.handshake_verification.successful_handshakes,
-                result.handshake_verification.http_requests_processed_post_handshake);
+        println!(
+            "✅ TLS version negotiation: {} successful negotiations, {} HTTP requests",
+            result.handshake_verification.successful_handshakes,
+            result
+                .handshake_verification
+                .http_requests_processed_post_handshake
+        );
     }
 
     #[tokio::test]
@@ -1659,7 +1843,9 @@ mod tests {
             tls_version: TlsVersion::Tls13,
         };
 
-        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config).await.unwrap();
+        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config)
+            .await
+            .unwrap();
 
         // Add clients that can test session resumption
         harness.add_client(ClientBehavior::Normal);
@@ -1671,21 +1857,35 @@ mod tests {
 
         // Both clients should complete handshakes and process HTTP requests
         for client_result in &result.client_results {
-            assert!(client_result.handshake_successful,
-                   "Client {} should complete TLS handshake", client_result.client_id);
-            assert_eq!(client_result.http_requests_sent, 4,
-                      "Client {} should send HTTP requests", client_result.client_id);
+            assert!(
+                client_result.handshake_successful,
+                "Client {} should complete TLS handshake",
+                client_result.client_id
+            );
+            assert_eq!(
+                client_result.http_requests_sent, 4,
+                "Client {} should send HTTP requests",
+                client_result.client_id
+            );
         }
 
         // Verify that handshake durations are reasonable (session resumption should be faster)
-        let handshake_durations: Vec<_> = result.client_results.iter()
+        let handshake_durations: Vec<_> = result
+            .client_results
+            .iter()
             .filter_map(|c| c.handshake_duration)
             .collect();
 
-        assert_eq!(handshake_durations.len(), 2, "Should have handshake durations for both clients");
+        assert_eq!(
+            handshake_durations.len(),
+            2,
+            "Should have handshake durations for both clients"
+        );
 
-        println!("✅ TLS session resumption: {} successful handshakes with resumption support",
-                result.handshake_verification.successful_handshakes);
+        println!(
+            "✅ TLS session resumption: {} successful handshakes with resumption support",
+            result.handshake_verification.successful_handshakes
+        );
     }
 
     #[tokio::test]
@@ -1728,12 +1928,16 @@ mod tests {
             tls_version: TlsVersion::Tls13,
         };
 
-        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config).await.unwrap();
+        let mut harness = TlsHttpIntegrationHarness::new(tls_config, http_config, test_config)
+            .await
+            .unwrap();
 
         // Add mix of successful and failing clients
         harness.add_client(ClientBehavior::Normal);
         harness.add_client(ClientBehavior::InvalidCertificate);
-        harness.add_client(ClientBehavior::ProtocolMismatch { attempted_version: TlsVersion::Tls12 });
+        harness.add_client(ClientBehavior::ProtocolMismatch {
+            attempted_version: TlsVersion::Tls12,
+        });
         harness.add_client(ClientBehavior::Normal);
         harness.add_client(ClientBehavior::EarlyHttpAttempt);
         harness.add_client(ClientBehavior::Normal);
@@ -1743,21 +1947,38 @@ mod tests {
         assert!(result.success, "Resource cleanup test should succeed");
 
         // Should have mix of successful and failed operations
-        let successful_handshakes = result.client_results.iter()
+        let successful_handshakes = result
+            .client_results
+            .iter()
             .filter(|c| c.handshake_successful)
             .count();
-        let failed_handshakes = result.client_results.iter()
+        let failed_handshakes = result
+            .client_results
+            .iter()
             .filter(|c| !c.handshake_successful)
             .count();
 
-        assert!(successful_handshakes >= 3, "Should have successful handshakes");
-        assert!(failed_handshakes >= 2, "Should have failed handshakes for testing cleanup");
+        assert!(
+            successful_handshakes >= 3,
+            "Should have successful handshakes"
+        );
+        assert!(
+            failed_handshakes >= 2,
+            "Should have failed handshakes for testing cleanup"
+        );
 
         // Server should continue functioning despite failures
-        assert!(result.handshake_verification.http_requests_processed_post_handshake > 0,
-               "Server should process HTTP requests despite some TLS failures");
+        assert!(
+            result
+                .handshake_verification
+                .http_requests_processed_post_handshake
+                > 0,
+            "Server should process HTTP requests despite some TLS failures"
+        );
 
-        println!("✅ Resource cleanup: {} successful, {} failed handshakes, server remained stable",
-                successful_handshakes, failed_handshakes);
+        println!(
+            "✅ Resource cleanup: {} successful, {} failed handshakes, server remained stable",
+            successful_handshakes, failed_handshakes
+        );
     }
 }

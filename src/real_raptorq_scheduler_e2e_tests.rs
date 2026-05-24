@@ -10,14 +10,16 @@
 #[cfg(test)]
 mod tests {
     use crate::cx::Cx;
-    use crate::raptorq::systematic::{SystematicParams, SystematicEncoder, SystematicDecoder};
+    use crate::raptorq::systematic::{SystematicDecoder, SystematicEncoder, SystematicParams};
     use crate::runtime::scheduler::priority::{PriorityScheduler, SchedulerLane};
-    use crate::runtime::scheduler::three_lane::{ThreeLaneScheduler, SchedulerConfig, FairnessPolicy};
+    use crate::runtime::scheduler::three_lane::{
+        FairnessPolicy, SchedulerConfig, ThreeLaneScheduler,
+    };
     use crate::runtime::{region, spawn_blocking};
-    use crate::types::{Budget, Time, TaskId, RegionId, Policy, Priority};
-    use std::collections::{HashMap, BTreeMap, VecDeque};
+    use crate::types::{Budget, Policy, Priority, RegionId, TaskId, Time};
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::time::Duration;
 
     // RaptorQ decode work unit representation
@@ -35,10 +37,10 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq)]
     enum DecodeComplexity {
-        Trivial,        // All systematic symbols available
-        Moderate,       // Some repair symbols needed
-        Heavy,          // Many repair symbols needed, complex matrix operations
-        Critical,       // Near minimal symbols, maximum decode complexity
+        Trivial,  // All systematic symbols available
+        Moderate, // Some repair symbols needed
+        Heavy,    // Many repair symbols needed, complex matrix operations
+        Critical, // Near minimal symbols, maximum decode complexity
     }
 
     #[derive(Debug, Clone)]
@@ -52,9 +54,9 @@ mod tests {
     // Scheduler lane assignment for decode work
     #[derive(Debug, Clone, Copy, PartialEq)]
     enum DecodeSchedulerLane {
-        Cancel,    // High priority decode (critical data, immediate deadline)
-        Timed,     // Deadline-driven decode (EDF scheduling)
-        Ready,     // Background decode (best-effort)
+        Cancel, // High priority decode (critical data, immediate deadline)
+        Timed,  // Deadline-driven decode (EDF scheduling)
+        Ready,  // Background decode (best-effort)
     }
 
     // Test data factory for RaptorQ decode scenarios
@@ -71,28 +73,43 @@ mod tests {
             }
         }
 
-        fn create_decode_work_unit(&self, complexity: DecodeComplexity, lane: DecodeSchedulerLane) -> DecodeWorkUnit {
+        fn create_decode_work_unit(
+            &self,
+            complexity: DecodeComplexity,
+            lane: DecodeSchedulerLane,
+        ) -> DecodeWorkUnit {
             let work_id = self.work_counter.fetch_add(1, Ordering::Relaxed);
             let block_id = self.block_counter.load(Ordering::Relaxed);
 
-            let (priority, deadline, loss_rate, symbols_needed, symbols_available) = match (complexity, lane) {
-                (DecodeComplexity::Critical, DecodeSchedulerLane::Cancel) => {
-                    (Priority::Critical, Some(Time::from_millis(50)), 0.8, 1000, 256)
-                }
-                (DecodeComplexity::Heavy, DecodeSchedulerLane::Timed) => {
-                    (Priority::High, Some(Time::from_millis(200)), 0.6, 800, 400)
-                }
-                (DecodeComplexity::Moderate, DecodeSchedulerLane::Ready) => {
-                    (Priority::Normal, None, 0.3, 500, 400)
-                }
-                (DecodeComplexity::Trivial, DecodeSchedulerLane::Ready) => {
-                    (Priority::Low, None, 0.1, 256, 256)
-                }
-                _ => {
-                    // Default case for other combinations
-                    (Priority::Normal, Some(Time::from_millis(1000)), 0.4, 600, 350)
-                }
-            };
+            let (priority, deadline, loss_rate, symbols_needed, symbols_available) =
+                match (complexity, lane) {
+                    (DecodeComplexity::Critical, DecodeSchedulerLane::Cancel) => (
+                        Priority::Critical,
+                        Some(Time::from_millis(50)),
+                        0.8,
+                        1000,
+                        256,
+                    ),
+                    (DecodeComplexity::Heavy, DecodeSchedulerLane::Timed) => {
+                        (Priority::High, Some(Time::from_millis(200)), 0.6, 800, 400)
+                    }
+                    (DecodeComplexity::Moderate, DecodeSchedulerLane::Ready) => {
+                        (Priority::Normal, None, 0.3, 500, 400)
+                    }
+                    (DecodeComplexity::Trivial, DecodeSchedulerLane::Ready) => {
+                        (Priority::Low, None, 0.1, 256, 256)
+                    }
+                    _ => {
+                        // Default case for other combinations
+                        (
+                            Priority::Normal,
+                            Some(Time::from_millis(1000)),
+                            0.4,
+                            600,
+                            350,
+                        )
+                    }
+                };
 
             DecodeWorkUnit {
                 work_id,
@@ -109,12 +126,20 @@ mod tests {
         fn create_symbol_loss_burst(&self, burst_type: &str) -> SymbolLossBurst {
             match burst_type {
                 "sporadic" => SymbolLossBurst::Sporadic { loss_rate: 0.2 },
-                "clustered" => SymbolLossBurst::Clustered { burst_size: 20, burst_rate: 0.7 },
+                "clustered" => SymbolLossBurst::Clustered {
+                    burst_size: 20,
+                    burst_rate: 0.7,
+                },
                 "adversarial" => {
-                    let pattern = vec![true, true, false, true, false, false, true, true, false, true];
+                    let pattern = vec![
+                        true, true, false, true, false, false, true, true, false, true,
+                    ];
                     SymbolLossBurst::Adversarial { pattern }
                 }
-                "progressive" => SymbolLossBurst::Progressive { initial_rate: 0.1, escalation: 1.2 },
+                "progressive" => SymbolLossBurst::Progressive {
+                    initial_rate: 0.1,
+                    escalation: 1.2,
+                },
                 _ => SymbolLossBurst::Sporadic { loss_rate: 0.3 },
             }
         }
@@ -217,8 +242,8 @@ mod tests {
     impl ScheduledRaptorQDecoder {
         fn new(
             decoder_id: u64,
-            k: usize,  // number of source symbols
-            logger: TestLogger
+            k: usize, // number of source symbols
+            logger: TestLogger,
         ) -> Result<Self, Box<dyn std::error::Error>> {
             // Create systematic parameters for this decoder
             let systematic_params = SystematicParams::new(k)?;
@@ -237,29 +262,45 @@ mod tests {
         async fn submit_decode_work(
             &mut self,
             cx: &Cx,
-            work_unit: DecodeWorkUnit
+            work_unit: DecodeWorkUnit,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            self.logger.raptorq_event("submit_decode_work",
-                &format!("work_{}_block_{}_complexity_{:?}",
-                    work_unit.work_id, work_unit.source_block_id, work_unit.decode_complexity));
+            self.logger.raptorq_event(
+                "submit_decode_work",
+                &format!(
+                    "work_{}_block_{}_complexity_{:?}",
+                    work_unit.work_id, work_unit.source_block_id, work_unit.decode_complexity
+                ),
+            );
 
             // Assign scheduler lane based on work unit characteristics
             let lane = self.determine_scheduler_lane(&work_unit);
-            self.scheduler_lane_assignments.insert(work_unit.work_id, lane);
+            self.scheduler_lane_assignments
+                .insert(work_unit.work_id, lane);
 
             self.pending_work.push_back(work_unit);
 
-            self.logger.scheduler_event("work_queued",
-                &format!("work_{}_lane_{:?}", self.pending_work.back().unwrap().work_id, lane));
+            self.logger.scheduler_event(
+                "work_queued",
+                &format!(
+                    "work_{}_lane_{:?}",
+                    self.pending_work.back().unwrap().work_id,
+                    lane
+                ),
+            );
 
             Ok(())
         }
 
         fn determine_scheduler_lane(&self, work_unit: &DecodeWorkUnit) -> DecodeSchedulerLane {
-            match (&work_unit.decode_complexity, work_unit.deadline, work_unit.priority) {
+            match (
+                &work_unit.decode_complexity,
+                work_unit.deadline,
+                work_unit.priority,
+            ) {
                 // Critical complexity or very high priority -> Cancel lane
-                (DecodeComplexity::Critical, _, _) |
-                (_, _, Priority::Critical) => DecodeSchedulerLane::Cancel,
+                (DecodeComplexity::Critical, _, _) | (_, _, Priority::Critical) => {
+                    DecodeSchedulerLane::Cancel
+                }
 
                 // Has deadline -> Timed lane
                 (_, Some(_), _) => DecodeSchedulerLane::Timed,
@@ -272,10 +313,16 @@ mod tests {
         async fn execute_decode_work(
             &mut self,
             cx: &Cx,
-            scheduler: &mut dyn SchedulerInterface
+            scheduler: &mut dyn SchedulerInterface,
         ) -> Result<Vec<DecodeResult>, Box<dyn std::error::Error>> {
-            self.logger.scheduler_event("execute_decode_work",
-                &format!("pending_{}_active_{}", self.pending_work.len(), self.active_decodes.len()));
+            self.logger.scheduler_event(
+                "execute_decode_work",
+                &format!(
+                    "pending_{}_active_{}",
+                    self.pending_work.len(),
+                    self.active_decodes.len()
+                ),
+            );
 
             let mut results = Vec::new();
 
@@ -290,7 +337,7 @@ mod tests {
 
         async fn get_next_scheduled_work(
             &mut self,
-            scheduler: &mut dyn SchedulerInterface
+            scheduler: &mut dyn SchedulerInterface,
         ) -> Result<Option<DecodeWorkUnit>, Box<dyn std::error::Error>> {
             if self.pending_work.is_empty() {
                 return Ok(None);
@@ -299,19 +346,24 @@ mod tests {
             // Query scheduler for next lane to process
             let next_lane = scheduler.next_priority_lane().await?;
 
-            self.logger.scheduler_event("scheduler_lane_selected", &format!("{:?}", next_lane));
+            self.logger
+                .scheduler_event("scheduler_lane_selected", &format!("{:?}", next_lane));
 
             // Find work unit matching the selected lane
             for (i, work_unit) in self.pending_work.iter().enumerate() {
-                if let Some(&assigned_lane) = self.scheduler_lane_assignments.get(&work_unit.work_id) {
+                if let Some(&assigned_lane) =
+                    self.scheduler_lane_assignments.get(&work_unit.work_id)
+                {
                     if self.lane_matches(assigned_lane, next_lane) {
                         let work_unit = self.pending_work.remove(i).unwrap();
 
                         // Record dispatch for fairness tracking
                         self.fairness_stats.record_dispatch(assigned_lane);
 
-                        self.logger.scheduler_event("work_dispatched",
-                            &format!("work_{}_lane_{:?}", work_unit.work_id, assigned_lane));
+                        self.logger.scheduler_event(
+                            "work_dispatched",
+                            &format!("work_{}_lane_{:?}", work_unit.work_id, assigned_lane),
+                        );
 
                         return Ok(Some(work_unit));
                     }
@@ -322,7 +374,11 @@ mod tests {
             Ok(None)
         }
 
-        fn lane_matches(&self, assigned: DecodeSchedulerLane, scheduler: SchedulerLaneType) -> bool {
+        fn lane_matches(
+            &self,
+            assigned: DecodeSchedulerLane,
+            scheduler: SchedulerLaneType,
+        ) -> bool {
             match (assigned, scheduler) {
                 (DecodeSchedulerLane::Cancel, SchedulerLaneType::Cancel) => true,
                 (DecodeSchedulerLane::Timed, SchedulerLaneType::Timed) => true,
@@ -334,11 +390,15 @@ mod tests {
         async fn process_decode_work_unit(
             &mut self,
             cx: &Cx,
-            work_unit: DecodeWorkUnit
+            work_unit: DecodeWorkUnit,
         ) -> Result<DecodeResult, Box<dyn std::error::Error>> {
-            self.logger.raptorq_event("process_decode_start",
-                &format!("work_{}_symbols_needed_{}_available_{}",
-                    work_unit.work_id, work_unit.symbols_needed, work_unit.symbols_available));
+            self.logger.raptorq_event(
+                "process_decode_start",
+                &format!(
+                    "work_{}_symbols_needed_{}_available_{}",
+                    work_unit.work_id, work_unit.symbols_needed, work_unit.symbols_available
+                ),
+            );
 
             let start_time = crate::time::wall_now();
 
@@ -349,13 +409,21 @@ mod tests {
             let decode_duration = end_time.saturating_sub(start_time);
 
             // Check if deadline was met
-            let deadline_met = work_unit.deadline.map_or(true, |deadline| end_time <= deadline);
+            let deadline_met = work_unit
+                .deadline
+                .map_or(true, |deadline| end_time <= deadline);
 
             if !deadline_met {
                 self.fairness_stats.record_deadline_miss();
-                self.logger.scheduler_event("deadline_missed",
-                    &format!("work_{}_deadline_{:?}_actual_{}",
-                        work_unit.work_id, work_unit.deadline, end_time.as_nanos()));
+                self.logger.scheduler_event(
+                    "deadline_missed",
+                    &format!(
+                        "work_{}_deadline_{:?}_actual_{}",
+                        work_unit.work_id,
+                        work_unit.deadline,
+                        end_time.as_nanos()
+                    ),
+                );
             }
 
             let result = DecodeResult {
@@ -364,17 +432,29 @@ mod tests {
                 decode_duration,
                 deadline_met,
                 symbols_processed: work_unit.symbols_available,
-                scheduler_lane: *self.scheduler_lane_assignments.get(&work_unit.work_id).unwrap(),
+                scheduler_lane: *self
+                    .scheduler_lane_assignments
+                    .get(&work_unit.work_id)
+                    .unwrap(),
             };
 
-            self.logger.raptorq_event("decode_complete",
-                &format!("work_{}_outcome_{:?}_duration_{}ms",
-                    work_unit.work_id, decode_outcome, decode_duration.as_millis()));
+            self.logger.raptorq_event(
+                "decode_complete",
+                &format!(
+                    "work_{}_outcome_{:?}_duration_{}ms",
+                    work_unit.work_id,
+                    decode_outcome,
+                    decode_duration.as_millis()
+                ),
+            );
 
             Ok(result)
         }
 
-        async fn simulate_raptorq_decode(&self, work_unit: &DecodeWorkUnit) -> Result<DecodeOutcome, Box<dyn std::error::Error>> {
+        async fn simulate_raptorq_decode(
+            &self,
+            work_unit: &DecodeWorkUnit,
+        ) -> Result<DecodeOutcome, Box<dyn std::error::Error>> {
             // Simulate decode based on symbol loss and complexity
             let symbols_lost = work_unit.symbols_needed - work_unit.symbols_available;
             let loss_rate = symbols_lost as f64 / work_unit.symbols_needed as f64;
@@ -382,29 +462,43 @@ mod tests {
             match work_unit.decode_complexity {
                 DecodeComplexity::Trivial => {
                     // All systematic symbols available - trivial decode
-                    Ok(DecodeOutcome::Success { repair_symbols_used: 0 })
+                    Ok(DecodeOutcome::Success {
+                        repair_symbols_used: 0,
+                    })
                 }
                 DecodeComplexity::Moderate => {
                     if loss_rate <= 0.3 {
-                        Ok(DecodeOutcome::Success { repair_symbols_used: symbols_lost })
+                        Ok(DecodeOutcome::Success {
+                            repair_symbols_used: symbols_lost,
+                        })
                     } else {
-                        Ok(DecodeOutcome::PartialSuccess { symbols_recovered: work_unit.symbols_available })
+                        Ok(DecodeOutcome::PartialSuccess {
+                            symbols_recovered: work_unit.symbols_available,
+                        })
                     }
                 }
                 DecodeComplexity::Heavy => {
                     if loss_rate <= 0.5 {
                         // Simulate complex matrix operations
-                        Ok(DecodeOutcome::Success { repair_symbols_used: symbols_lost })
+                        Ok(DecodeOutcome::Success {
+                            repair_symbols_used: symbols_lost,
+                        })
                     } else {
-                        Ok(DecodeOutcome::Failed { reason: "Insufficient symbols for decode".to_string() })
+                        Ok(DecodeOutcome::Failed {
+                            reason: "Insufficient symbols for decode".to_string(),
+                        })
                     }
                 }
                 DecodeComplexity::Critical => {
                     if symbols_lost <= 50 {
                         // Near-minimal decode scenario
-                        Ok(DecodeOutcome::Success { repair_symbols_used: symbols_lost })
+                        Ok(DecodeOutcome::Success {
+                            repair_symbols_used: symbols_lost,
+                        })
                     } else {
-                        Ok(DecodeOutcome::Failed { reason: "Too many symbols lost for recovery".to_string() })
+                        Ok(DecodeOutcome::Failed {
+                            reason: "Too many symbols lost for recovery".to_string(),
+                        })
                     }
                 }
             }
@@ -412,7 +506,8 @@ mod tests {
 
         fn analyze_fairness(&self) -> FairnessAnalysis {
             let stats = self.fairness_stats.get_stats();
-            let total_dispatches = stats.cancel_dispatches + stats.timed_dispatches + stats.ready_dispatches;
+            let total_dispatches =
+                stats.cancel_dispatches + stats.timed_dispatches + stats.ready_dispatches;
 
             let cancel_ratio = if total_dispatches > 0 {
                 stats.cancel_dispatches as f64 / total_dispatches as f64
@@ -440,7 +535,11 @@ mod tests {
                 cancel_ratio,
                 timed_ratio,
                 ready_ratio,
-                deadline_miss_rate: if total_dispatches > 0 { stats.deadline_misses as f64 / total_dispatches as f64 } else { 0.0 },
+                deadline_miss_rate: if total_dispatches > 0 {
+                    stats.deadline_misses as f64 / total_dispatches as f64
+                } else {
+                    0.0
+                },
                 is_fair,
                 fairness_stats: stats,
             }
@@ -485,8 +584,14 @@ mod tests {
 
     #[async_trait::async_trait]
     trait SchedulerInterface: Send + Sync {
-        async fn next_priority_lane(&mut self) -> Result<SchedulerLaneType, Box<dyn std::error::Error>>;
-        async fn report_workload(&mut self, lane: SchedulerLaneType, count: usize) -> Result<(), Box<dyn std::error::Error>>;
+        async fn next_priority_lane(
+            &mut self,
+        ) -> Result<SchedulerLaneType, Box<dyn std::error::Error>>;
+        async fn report_workload(
+            &mut self,
+            lane: SchedulerLaneType,
+            count: usize,
+        ) -> Result<(), Box<dyn std::error::Error>>;
     }
 
     // Real three-lane scheduler integration for E2E testing
@@ -511,8 +616,14 @@ mod tests {
 
         fn log_event(&self, category: &str, event: &str, details: &str) {
             let timestamp = crate::time::wall_now();
-            let entry = format!("{{\"test\":\"{}\",\"category\":\"{}\",\"event\":\"{}\",\"details\":\"{}\",\"ts\":{}}}",
-                self.test_name, category, event, details, timestamp.as_nanos());
+            let entry = format!(
+                "{{\"test\":\"{}\",\"category\":\"{}\",\"event\":\"{}\",\"details\":\"{}\",\"ts\":{}}}",
+                self.test_name,
+                category,
+                event,
+                details,
+                timestamp.as_nanos()
+            );
             self.events.lock().push(entry);
             eprintln!("{}", entry);
         }
@@ -548,20 +659,25 @@ mod tests {
     }
 
     impl RaptorQSchedulerHarness {
-        async fn new(test_name: &str, k_symbols: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        async fn new(
+            test_name: &str,
+            k_symbols: usize,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
             let logger = TestLogger::new(test_name);
             let decoder = ScheduledRaptorQDecoder::new(1, k_symbols, logger.clone())?;
             let scheduler_config = SchedulerConfig {
-                cancel_limit: 5,  // Allow up to 5 consecutive cancel dispatches
-                timed_limit: 3,   // Allow up to 3 consecutive timed dispatches
+                cancel_limit: 5, // Allow up to 5 consecutive cancel dispatches
+                timed_limit: 3,  // Allow up to 3 consecutive timed dispatches
                 fairness_policy: FairnessPolicy::BoundedStreaks,
             };
             let scheduler = ThreeLaneScheduler::new(scheduler_config);
             let factory = RaptorQDecodeFactory::new();
             let symbol_loss_scenario = factory.create_symbol_loss_burst("sporadic");
 
-            logger.integration_event("harness_created",
-                &format!("k_symbols_{}_decoder_{}", k_symbols, 1));
+            logger.integration_event(
+                "harness_created",
+                &format!("k_symbols_{}_decoder_{}", k_symbols, 1),
+            );
 
             Ok(Self {
                 decoder,
@@ -575,9 +691,12 @@ mod tests {
         async fn simulate_symbol_loss_burst(
             &mut self,
             cx: &Cx,
-            burst_scenario: SymbolLossBurst
+            burst_scenario: SymbolLossBurst,
         ) -> Result<Vec<DecodeWorkUnit>, Box<dyn std::error::Error>> {
-            self.logger.integration_event("simulate_symbol_loss_burst", &format!("{:?}", burst_scenario));
+            self.logger.integration_event(
+                "simulate_symbol_loss_burst",
+                &format!("{:?}", burst_scenario),
+            );
             self.symbol_loss_scenario = burst_scenario;
 
             let mut work_units = Vec::new();
@@ -605,7 +724,10 @@ mod tests {
                     }
                 }
 
-                SymbolLossBurst::Clustered { burst_size, burst_rate } => {
+                SymbolLossBurst::Clustered {
+                    burst_size,
+                    burst_rate,
+                } => {
                     // Create work units with clustered losses
                     for i in 0..*burst_size {
                         let complexity = if *burst_rate > 0.6 {
@@ -615,9 +737,9 @@ mod tests {
                         };
 
                         // Critical work goes to cancel lane
-                        let work_unit = self.factory.create_decode_work_unit(
-                            complexity, DecodeSchedulerLane::Cancel
-                        );
+                        let work_unit = self
+                            .factory
+                            .create_decode_work_unit(complexity, DecodeSchedulerLane::Cancel);
                         work_units.push(work_unit);
                     }
                 }
@@ -626,7 +748,11 @@ mod tests {
                     // Create work units based on adversarial pattern
                     for (i, &is_lost) in pattern.iter().enumerate() {
                         let complexity = if is_lost {
-                            if i % 2 == 0 { DecodeComplexity::Critical } else { DecodeComplexity::Heavy }
+                            if i % 2 == 0 {
+                                DecodeComplexity::Critical
+                            } else {
+                                DecodeComplexity::Heavy
+                            }
                         } else {
                             DecodeComplexity::Trivial
                         };
@@ -642,7 +768,10 @@ mod tests {
                     }
                 }
 
-                SymbolLossBurst::Progressive { initial_rate, escalation } => {
+                SymbolLossBurst::Progressive {
+                    initial_rate,
+                    escalation,
+                } => {
                     // Create work units with progressively increasing losses
                     let mut current_rate = *initial_rate;
                     for i in 0..8 {
@@ -672,7 +801,9 @@ mod tests {
 
             // Submit work units to decoder
             for work_unit in &work_units {
-                self.decoder.submit_decode_work(cx, work_unit.clone()).await?;
+                self.decoder
+                    .submit_decode_work(cx, work_unit.clone())
+                    .await?;
             }
 
             // Update scheduler workload counts
@@ -691,42 +822,57 @@ mod tests {
                 self.scheduler.report_workload(lane, count).await?;
             }
 
-            self.logger.integration_event("symbol_loss_burst_created",
-                &format!("work_units_{}", work_units.len()));
+            self.logger.integration_event(
+                "symbol_loss_burst_created",
+                &format!("work_units_{}", work_units.len()),
+            );
 
             Ok(work_units)
         }
 
         async fn execute_scheduled_decode(
             &mut self,
-            cx: &Cx
+            cx: &Cx,
         ) -> Result<Vec<DecodeResult>, Box<dyn std::error::Error>> {
-            self.logger.integration_event("execute_scheduled_decode", "starting");
+            self.logger
+                .integration_event("execute_scheduled_decode", "starting");
 
-            let results = self.decoder.execute_decode_work(cx, &mut self.scheduler).await?;
+            let results = self
+                .decoder
+                .execute_decode_work(cx, &mut self.scheduler)
+                .await?;
 
-            self.logger.integration_event("scheduled_decode_complete",
-                &format!("results_{}", results.len()));
+            self.logger.integration_event(
+                "scheduled_decode_complete",
+                &format!("results_{}", results.len()),
+            );
 
             Ok(results)
         }
 
-        async fn verify_scheduler_fairness(&self) -> Result<FairnessVerificationReport, Box<dyn std::error::Error>> {
+        async fn verify_scheduler_fairness(
+            &self,
+        ) -> Result<FairnessVerificationReport, Box<dyn std::error::Error>> {
             self.logger.fairness_event("verify_fairness", "starting");
 
             let fairness_analysis = self.decoder.analyze_fairness();
 
             let report = FairnessVerificationReport {
                 fairness_analysis: fairness_analysis.clone(),
-                priority_lane_respected: fairness_analysis.cancel_ratio >= fairness_analysis.ready_ratio,
+                priority_lane_respected: fairness_analysis.cancel_ratio
+                    >= fairness_analysis.ready_ratio,
                 deadline_compliance: fairness_analysis.deadline_miss_rate < 0.1,
                 no_starvation: fairness_analysis.fairness_stats.starvation_events == 0,
                 overall_fair: fairness_analysis.is_fair,
             };
 
-            self.logger.fairness_event("fairness_verified",
-                &format!("fair_{}_priority_respected_{}_deadline_compliance_{}",
-                    report.overall_fair, report.priority_lane_respected, report.deadline_compliance));
+            self.logger.fairness_event(
+                "fairness_verified",
+                &format!(
+                    "fair_{}_priority_respected_{}_deadline_compliance_{}",
+                    report.overall_fair, report.priority_lane_respected, report.deadline_compliance
+                ),
+            );
 
             Ok(report)
         }
@@ -802,22 +948,39 @@ mod tests {
             // Execute scheduled decode work
             let results = harness.execute_scheduled_decode(&cx).await?;
 
-            assert_eq!(results.len(), work_units.len(), "Should process all work units");
+            assert_eq!(
+                results.len(),
+                work_units.len(),
+                "Should process all work units"
+            );
 
             // Verify scheduler fairness
             let fairness_report = harness.verify_scheduler_fairness().await?;
-            assert!(fairness_report.priority_lane_respected, "Priority lanes should be respected");
-            assert!(fairness_report.deadline_compliance, "Deadline compliance should be maintained");
+            assert!(
+                fairness_report.priority_lane_respected,
+                "Priority lanes should be respected"
+            );
+            assert!(
+                fairness_report.deadline_compliance,
+                "Deadline compliance should be maintained"
+            );
             assert!(fairness_report.no_starvation, "No lane should be starved");
 
             // Analyze integration
             let analysis = harness.analyze_integration_events();
             assert!(analysis.raptorq_events > 0, "Should have RaptorQ events");
-            assert!(analysis.scheduler_events > 0, "Should have scheduler events");
-            assert!(analysis.decode_operations > 0, "Should have decode operations");
+            assert!(
+                analysis.scheduler_events > 0,
+                "Should have scheduler events"
+            );
+            assert!(
+                analysis.decode_operations > 0,
+                "Should have decode operations"
+            );
 
             Ok(())
-        }).expect("RaptorQ scheduler integration test should complete successfully");
+        })
+        .expect("RaptorQ scheduler integration test should complete successfully");
     }
 
     #[test]
@@ -828,25 +991,38 @@ mod tests {
                 .expect("Harness creation should succeed");
 
             // Simulate clustered symbol loss (high priority work)
-            let clustered_loss = SymbolLossBurst::Clustered { burst_size: 15, burst_rate: 0.8 };
-            let work_units = harness.simulate_symbol_loss_burst(&cx, clustered_loss).await?;
+            let clustered_loss = SymbolLossBurst::Clustered {
+                burst_size: 15,
+                burst_rate: 0.8,
+            };
+            let work_units = harness
+                .simulate_symbol_loss_burst(&cx, clustered_loss)
+                .await?;
 
             // Execute decode work
             let results = harness.execute_scheduled_decode(&cx).await?;
 
             // Verify that critical work was prioritized
-            let cancel_lane_results: Vec<_> = results.iter()
+            let cancel_lane_results: Vec<_> = results
+                .iter()
                 .filter(|r| r.scheduler_lane == DecodeSchedulerLane::Cancel)
                 .collect();
 
-            assert!(!cancel_lane_results.is_empty(), "Should have cancel lane work");
+            assert!(
+                !cancel_lane_results.is_empty(),
+                "Should have cancel lane work"
+            );
 
             // Verify fairness under high priority load
             let fairness_report = harness.verify_scheduler_fairness().await?;
-            assert!(fairness_report.priority_lane_respected, "Priority should be respected under load");
+            assert!(
+                fairness_report.priority_lane_respected,
+                "Priority should be respected under load"
+            );
 
             Ok(())
-        }).expect("Priority lanes under symbol loss test should complete successfully");
+        })
+        .expect("Priority lanes under symbol loss test should complete successfully");
     }
 
     #[test]
@@ -857,26 +1033,35 @@ mod tests {
                 .expect("Harness creation should succeed");
 
             // Simulate adversarial symbol loss pattern
-            let adversarial_pattern = vec![true, true, false, true, false, false, true, true, false, true];
-            let adversarial_loss = SymbolLossBurst::Adversarial { pattern: adversarial_pattern };
-            let work_units = harness.simulate_symbol_loss_burst(&cx, adversarial_loss).await?;
+            let adversarial_pattern = vec![
+                true, true, false, true, false, false, true, true, false, true,
+            ];
+            let adversarial_loss = SymbolLossBurst::Adversarial {
+                pattern: adversarial_pattern,
+            };
+            let work_units = harness
+                .simulate_symbol_loss_burst(&cx, adversarial_loss)
+                .await?;
 
             // Execute decode work
             let results = harness.execute_scheduled_decode(&cx).await?;
 
             // Verify scheduler maintained fairness despite adversarial pattern
             let fairness_report = harness.verify_scheduler_fairness().await?;
-            assert!(fairness_report.overall_fair, "Should maintain fairness under adversarial patterns");
+            assert!(
+                fairness_report.overall_fair,
+                "Should maintain fairness under adversarial patterns"
+            );
             assert!(fairness_report.no_starvation, "Should prevent starvation");
 
             // Verify mixed lane processing
-            let lane_types: std::collections::HashSet<_> = results.iter()
-                .map(|r| r.scheduler_lane)
-                .collect();
+            let lane_types: std::collections::HashSet<_> =
+                results.iter().map(|r| r.scheduler_lane).collect();
             assert!(lane_types.len() > 1, "Should process multiple lane types");
 
             Ok(())
-        }).expect("Fairness under adversarial loss test should complete successfully");
+        })
+        .expect("Fairness under adversarial loss test should complete successfully");
     }
 
     #[test]
@@ -887,30 +1072,43 @@ mod tests {
                 .expect("Harness creation should succeed");
 
             // Simulate progressive symbol loss escalation
-            let progressive_loss = SymbolLossBurst::Progressive { initial_rate: 0.1, escalation: 1.3 };
-            let work_units = harness.simulate_symbol_loss_burst(&cx, progressive_loss).await?;
+            let progressive_loss = SymbolLossBurst::Progressive {
+                initial_rate: 0.1,
+                escalation: 1.3,
+            };
+            let work_units = harness
+                .simulate_symbol_loss_burst(&cx, progressive_loss)
+                .await?;
 
             // Execute decode work
             let results = harness.execute_scheduled_decode(&cx).await?;
 
             // Verify scheduler adapted to increasing loss severity
             let analysis = harness.analyze_integration_events();
-            assert!(analysis.scheduler_dispatches >= work_units.len(), "Should dispatch all work");
+            assert!(
+                analysis.scheduler_dispatches >= work_units.len(),
+                "Should dispatch all work"
+            );
 
             // Check that later work (higher loss) was prioritized appropriately
             let fairness_report = harness.verify_scheduler_fairness().await?;
-            assert!(fairness_report.priority_lane_respected, "Should adapt priority to loss severity");
+            assert!(
+                fairness_report.priority_lane_respected,
+                "Should adapt priority to loss severity"
+            );
 
             Ok(())
-        }).expect("Progressive loss scheduling test should complete successfully");
+        })
+        .expect("Progressive loss scheduling test should complete successfully");
     }
 
     #[test]
     fn test_decode_complexity_lane_assignment() {
         crate::lab::runtime::test_with_lab(|cx| async move {
-            let mut harness = RaptorQSchedulerHarness::new("decode_complexity_lane_assignment", 256)
-                .await
-                .expect("Harness creation should succeed");
+            let mut harness =
+                RaptorQSchedulerHarness::new("decode_complexity_lane_assignment", 256)
+                    .await
+                    .expect("Harness creation should succeed");
 
             // Create work units of different complexities
             let complexities = vec![
@@ -923,28 +1121,42 @@ mod tests {
             for complexity in complexities {
                 let work_unit = harness.factory.create_decode_work_unit(
                     complexity.clone(),
-                    DecodeSchedulerLane::Ready  // Let scheduler determine actual lane
+                    DecodeSchedulerLane::Ready, // Let scheduler determine actual lane
                 );
                 harness.decoder.submit_decode_work(&cx, work_unit).await?;
             }
 
             // Update scheduler workloads
-            harness.scheduler.report_workload(SchedulerLaneType::Cancel, 1).await?;
-            harness.scheduler.report_workload(SchedulerLaneType::Timed, 1).await?;
-            harness.scheduler.report_workload(SchedulerLaneType::Ready, 2).await?;
+            harness
+                .scheduler
+                .report_workload(SchedulerLaneType::Cancel, 1)
+                .await?;
+            harness
+                .scheduler
+                .report_workload(SchedulerLaneType::Timed, 1)
+                .await?;
+            harness
+                .scheduler
+                .report_workload(SchedulerLaneType::Ready, 2)
+                .await?;
 
             // Execute decode work
             let results = harness.execute_scheduled_decode(&cx).await?;
 
             // Verify lane assignment based on complexity
-            let critical_in_cancel = results.iter()
+            let critical_in_cancel = results
+                .iter()
                 .any(|r| r.scheduler_lane == DecodeSchedulerLane::Cancel);
             assert!(critical_in_cancel, "Critical work should be in cancel lane");
 
             let analysis = harness.analyze_integration_events();
-            assert_eq!(analysis.decode_operations, 4, "Should process all complexity types");
+            assert_eq!(
+                analysis.decode_operations, 4,
+                "Should process all complexity types"
+            );
 
             Ok(())
-        }).expect("Decode complexity lane assignment test should complete successfully");
+        })
+        .expect("Decode complexity lane assignment test should complete successfully");
     }
 }

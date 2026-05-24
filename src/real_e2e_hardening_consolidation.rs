@@ -144,9 +144,9 @@ lab_runtime.advance_virtual_time(drain_duration);
             "real_websocket_server_channel_broadcast_e2e_tests.rs".to_string(),
         ]);
 
-        issues.tokio_contamination_files.extend([
-            "real_tls_acceptor_http_h1_server_e2e_tests.rs".to_string(),
-        ]);
+        issues
+            .tokio_contamination_files
+            .extend(["real_tls_acceptor_http_h1_server_e2e_tests.rs".to_string()]);
 
         issues.simulation_instead_of_integration.extend([
             "real_signal_graceful_shutdown_supervision_tree_e2e_tests.rs".to_string(),
@@ -168,17 +168,44 @@ lab_runtime.advance_virtual_time(drain_duration);
         ]);
 
         // Verify we identified the issues
-        assert!(!issues.mock_leakage_files.is_empty(), "Mock leakage issues identified");
-        assert!(!issues.simulation_instead_of_integration.is_empty(), "Simulation issues identified");
-        assert!(!issues.brittle_timing_patterns.is_empty(), "Timing issues identified");
-        assert!(!issues.missing_real_integration.is_empty(), "Integration issues identified");
+        assert!(
+            !issues.mock_leakage_files.is_empty(),
+            "Mock leakage issues identified"
+        );
+        assert!(
+            !issues.simulation_instead_of_integration.is_empty(),
+            "Simulation issues identified"
+        );
+        assert!(
+            !issues.brittle_timing_patterns.is_empty(),
+            "Timing issues identified"
+        );
+        assert!(
+            !issues.missing_real_integration.is_empty(),
+            "Integration issues identified"
+        );
 
         println!("\n✓ E2E Test Issues Analysis Complete:");
-        println!("  - Mock leakage files: {}", issues.mock_leakage_files.len());
-        println!("  - Tokio contamination: {}", issues.tokio_contamination_files.len());
-        println!("  - Simulation instead of integration: {}", issues.simulation_instead_of_integration.len());
-        println!("  - Brittle timing patterns: {}", issues.brittle_timing_patterns.len());
-        println!("  - Missing real integration: {}", issues.missing_real_integration.len());
+        println!(
+            "  - Mock leakage files: {}",
+            issues.mock_leakage_files.len()
+        );
+        println!(
+            "  - Tokio contamination: {}",
+            issues.tokio_contamination_files.len()
+        );
+        println!(
+            "  - Simulation instead of integration: {}",
+            issues.simulation_instead_of_integration.len()
+        );
+        println!(
+            "  - Brittle timing patterns: {}",
+            issues.brittle_timing_patterns.len()
+        );
+        println!(
+            "  - Missing real integration: {}",
+            issues.missing_real_integration.len()
+        );
     }
 }
 
@@ -186,10 +213,10 @@ lab_runtime.advance_virtual_time(drain_duration);
 mod hardened_examples {
     use super::*;
     use crate::cx::Cx;
+    use crate::lab::LabRuntime;
+    use crate::runtime::RuntimeState;
     use crate::sync::{Mutex, RwLock};
     use crate::types::{Budget, RegionId, TaskId, Time};
-    use crate::runtime::RuntimeState;
-    use crate::lab::LabRuntime;
 
     /// Example of properly hardened e2e test using real asupersync integration
     #[test]
@@ -207,17 +234,20 @@ mod hardened_examples {
             // ✅ Real region creation using runtime APIs
             let region_id = {
                 let mut state_guard = state.write().await;
-                state_guard.create_region(cx, None)
+                state_guard
+                    .create_region(cx, None)
                     .expect("Failed to create region")
             };
 
             // ✅ Real task spawning using runtime APIs
             let task_id = {
                 let mut state_guard = state.write().await;
-                state_guard.spawn_task(cx, region_id, || async {
-                    // Real async work using cx
-                    Ok(())
-                }).expect("Failed to spawn task")
+                state_guard
+                    .spawn_task(cx, region_id, || async {
+                        // Real async work using cx
+                        Ok(())
+                    })
+                    .expect("Failed to spawn task")
             };
 
             // ✅ Verify real runtime state
@@ -228,26 +258,28 @@ mod hardened_examples {
             println!("✓ Hardened test: real runtime integration verified");
 
             Ok(())
-        }).expect("Hardened test failed");
+        })
+        .expect("Hardened test failed");
     }
 
     /// Example of hardened TLS integration test using real tls module
     #[test]
     fn test_hardened_tls_integration_example() {
         // ✅ Import real TLS modules
-        use crate::tls::{TlsAcceptor, TlsAcceptorBuilder};
         use crate::net::tcp::TcpListener;
+        use crate::tls::{TlsAcceptor, TlsAcceptorBuilder};
 
         let lab = LabRuntime::new();
         let budget = Budget::new(Time::from_secs(5));
 
         lab.block_on(budget, async |cx: &Cx| {
             // ✅ Real TLS acceptor creation (would need real certs in full test)
-            let acceptor_result = TlsAcceptorBuilder::new()
-                .with_single_cert(test_certificate(), test_private_key());
+            let acceptor_result =
+                TlsAcceptorBuilder::new().with_single_cert(test_certificate(), test_private_key());
 
             // ✅ Real TCP listener using asupersync net primitives
-            let listener = TcpListener::bind(cx, "127.0.0.1:0").await
+            let listener = TcpListener::bind(cx, "127.0.0.1:0")
+                .await
                 .expect("Failed to bind TCP listener");
 
             println!("✓ Real TLS and TCP integration - modules imported and callable");
@@ -256,14 +288,15 @@ mod hardened_examples {
             // This demonstrates the integration approach
 
             Ok(())
-        }).expect("TLS integration test failed");
+        })
+        .expect("TLS integration test failed");
     }
 
     /// Example of hardened supervision integration using real supervision module
     #[test]
     fn test_hardened_supervision_integration_example() {
         // ✅ Import real supervision modules
-        use crate::supervision::{SupervisionStrategy, RestartConfig, ChildName};
+        use crate::supervision::{ChildName, RestartConfig, SupervisionStrategy};
 
         let lab = LabRuntime::new();
         let budget = Budget::new(Time::from_secs(5));
@@ -291,7 +324,8 @@ mod hardened_examples {
             assert_eq!(child_name.as_str(), "test_child");
 
             Ok(())
-        }).expect("Supervision integration test failed");
+        })
+        .expect("Supervision integration test failed");
     }
 
     // Helper functions for test setup (would be in test utilities)
@@ -447,28 +481,28 @@ mod hardening_validation {
     impl HardeningCriteria {
         fn evaluate_test_file(test_content: &str) -> Self {
             Self {
-                uses_real_asupersync_sync: test_content.contains("crate::sync::") &&
-                                           !test_content.contains("std::sync::"),
+                uses_real_asupersync_sync: test_content.contains("crate::sync::")
+                    && !test_content.contains("std::sync::"),
                 uses_lab_runtime: test_content.contains("LabRuntime::new()"),
-                uses_real_modules: test_content.contains("crate::tls::") ||
-                                   test_content.contains("crate::supervision::") ||
-                                   test_content.contains("crate::signal::"),
-                deterministic_timing: !test_content.contains("std::thread::sleep") &&
-                                      !test_content.contains("SystemTime::now()"),
-                robust_assertions: !test_content.contains("assert_eq!(") ||
-                                   test_content.contains("range check"),
-                no_mock_leakage: !test_content.contains("tokio::sync::") &&
-                                 !test_content.contains("MockTls") &&
-                                 !test_content.contains("SimulatedSupervisor"),
+                uses_real_modules: test_content.contains("crate::tls::")
+                    || test_content.contains("crate::supervision::")
+                    || test_content.contains("crate::signal::"),
+                deterministic_timing: !test_content.contains("std::thread::sleep")
+                    && !test_content.contains("SystemTime::now()"),
+                robust_assertions: !test_content.contains("assert_eq!(")
+                    || test_content.contains("range check"),
+                no_mock_leakage: !test_content.contains("tokio::sync::")
+                    && !test_content.contains("MockTls")
+                    && !test_content.contains("SimulatedSupervisor"),
             }
         }
 
         fn is_fully_hardened(&self) -> bool {
-            self.uses_real_asupersync_sync &&
-            self.uses_lab_runtime &&
-            self.uses_real_modules &&
-            self.deterministic_timing &&
-            self.no_mock_leakage
+            self.uses_real_asupersync_sync
+                && self.uses_lab_runtime
+                && self.uses_real_modules
+                && self.deterministic_timing
+                && self.no_mock_leakage
         }
     }
 
@@ -486,7 +520,10 @@ mod hardening_validation {
         "#;
 
         let unhardened_criteria = HardeningCriteria::evaluate_test_file(unhardened_content);
-        assert!(!unhardened_criteria.is_fully_hardened(), "Unhardened test should not pass criteria");
+        assert!(
+            !unhardened_criteria.is_fully_hardened(),
+            "Unhardened test should not pass criteria"
+        );
 
         // Example of hardened test content (target state)
         let hardened_content = r#"
@@ -498,10 +535,19 @@ mod hardening_validation {
         "#;
 
         let hardened_criteria = HardeningCriteria::evaluate_test_file(hardened_content);
-        assert!(hardened_criteria.uses_real_asupersync_sync, "Should use real asupersync sync");
+        assert!(
+            hardened_criteria.uses_real_asupersync_sync,
+            "Should use real asupersync sync"
+        );
         assert!(hardened_criteria.uses_lab_runtime, "Should use lab runtime");
-        assert!(hardened_criteria.uses_real_modules, "Should use real modules");
-        assert!(hardened_criteria.no_mock_leakage, "Should have no mock leakage");
+        assert!(
+            hardened_criteria.uses_real_modules,
+            "Should use real modules"
+        );
+        assert!(
+            hardened_criteria.no_mock_leakage,
+            "Should have no mock leakage"
+        );
 
         println!("✓ Hardening criteria validation working");
         println!("✓ Can distinguish hardened from unhardened tests");

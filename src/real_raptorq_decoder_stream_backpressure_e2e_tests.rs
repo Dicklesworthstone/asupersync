@@ -31,27 +31,26 @@
 
 #![cfg(all(test, feature = "real-service-e2e"))]
 
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicU32, AtomicBool, Ordering}};
-use std::time::{Duration, Instant};
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
+use crate::channel::mpsc;
 use crate::cx::{Cx, Scope};
-use crate::types::{Budget, Outcome, Time};
-use crate::runtime::test_util::create_test_runtime;
 use crate::raptorq::{
-    decoder::{RaptorQDecoder, ReceivedSymbol, DecodeError, DecodeResult},
-    systematic::{SystematicParams, ConstraintMatrix},
+    decoder::{DecodeError, DecodeResult, RaptorQDecoder, ReceivedSymbol},
     gf256::Gf256,
     proof::{DecodeConfig, DecodeProof},
+    systematic::{ConstraintMatrix, SystematicParams},
 };
-use crate::stream::{
-    Stream, StreamExt,
-    buffered::Buffered,
-    throttle::Throttle,
-};
-use crate::channel::mpsc;
+use crate::runtime::test_util::create_test_runtime;
+use crate::stream::{Stream, StreamExt, buffered::Buffered, throttle::Throttle};
+use crate::types::{Budget, Outcome, Time};
 
 /// Configuration for decoder stream backpressure testing.
 #[derive(Clone, Debug)]
@@ -191,7 +190,11 @@ impl MockRaptorQDecoder {
     }
 
     /// Simulate decoding process that produces symbols incrementally.
-    async fn decode_batch(&mut self, cx: &Cx, metrics: &DecoderStreamMetrics) -> Result<Vec<Vec<u8>>, DecodeError> {
+    async fn decode_batch(
+        &mut self,
+        cx: &Cx,
+        metrics: &DecoderStreamMetrics,
+    ) -> Result<Vec<Vec<u8>>, DecodeError> {
         if self.is_complete {
             return Ok(Vec::new());
         }
@@ -321,7 +324,8 @@ async fn slow_consumer_processor(
 
                 // Check if consumer is falling behind
                 let elapsed = consumer_start.elapsed();
-                let expected_consumption_rate = consumed_symbols.len() as f64 / elapsed.as_secs_f64();
+                let expected_consumption_rate =
+                    consumed_symbols.len() as f64 / elapsed.as_secs_f64();
                 if expected_consumption_rate < (config.max_stream_rate as f64 * 0.5) {
                     metrics.record_consumer_stall();
                 }
@@ -347,12 +351,8 @@ fn create_buffered_decoder_stream(
     metrics: DecoderStreamMetrics,
     cx: &Cx,
 ) -> impl Stream<Item = Result<Vec<u8>, DecodeError>> {
-    let decoder_stream = DecoderSymbolStream::new(
-        decoder,
-        config.stream_buffer_size,
-        metrics.clone(),
-        cx,
-    );
+    let decoder_stream =
+        DecoderSymbolStream::new(decoder, config.stream_buffer_size, metrics.clone(), cx);
 
     // Apply buffering for backpressure management
     decoder_stream
@@ -367,23 +367,31 @@ async fn verify_symbol_ordering_through_stream(
 ) -> Result<bool, String> {
     for (i, symbol) in symbols.iter().enumerate() {
         if symbol.len() != config.symbol_size {
-            return Err(format!("Symbol {} has wrong size: {} (expected {})",
-                              i, symbol.len(), config.symbol_size));
+            return Err(format!(
+                "Symbol {} has wrong size: {} (expected {})",
+                i,
+                symbol.len(),
+                config.symbol_size
+            ));
         }
 
         // Verify the pattern matches expected
         let expected_first_byte = (i % 256) as u8;
         if symbol[0] != expected_first_byte {
-            return Err(format!("Symbol {} ordering violation: got first byte {}, expected {}",
-                              i, symbol[0], expected_first_byte));
+            return Err(format!(
+                "Symbol {} ordering violation: got first byte {}, expected {}",
+                i, symbol[0], expected_first_byte
+            ));
         }
 
         // Verify full pattern
         for (j, &byte) in symbol.iter().enumerate() {
             let expected_byte = ((i * 256 + j) % 256) as u8;
             if byte != expected_byte {
-                return Err(format!("Symbol {} pattern violation at position {}: got {}, expected {}",
-                                  i, j, byte, expected_byte));
+                return Err(format!(
+                    "Symbol {} pattern violation at position {}: got {}, expected {}",
+                    i, j, byte, expected_byte
+                ));
             }
         }
     }
@@ -410,12 +418,8 @@ async fn test_raptorq_decoder_stream_basic_backpressure() {
                 let decoder = MockRaptorQDecoder::new(&config);
 
                 // Create buffered stream with backpressure
-                let decoder_stream = create_buffered_decoder_stream(
-                    decoder,
-                    &config,
-                    metrics.clone(),
-                    cx,
-                );
+                let decoder_stream =
+                    create_buffered_decoder_stream(decoder, &config, metrics.clone(), cx);
 
                 // Consume stream with normal speed
                 let consumer_config = DecoderStreamTestConfig {
@@ -428,54 +432,85 @@ async fn test_raptorq_decoder_stream_basic_backpressure() {
                     Box::pin(decoder_stream),
                     &consumer_config,
                     &metrics,
-                ).await?;
+                )
+                .await?;
 
                 // Verify symbol consumption and ordering
-                assert_eq!(consumed_symbols.len(), config.source_symbol_count as usize,
-                          "Should consume all source symbols");
+                assert_eq!(
+                    consumed_symbols.len(),
+                    config.source_symbol_count as usize,
+                    "Should consume all source symbols"
+                );
 
-                let ordering_valid = verify_symbol_ordering_through_stream(
-                    &consumed_symbols,
-                    &config,
-                ).await?;
+                let ordering_valid =
+                    verify_symbol_ordering_through_stream(&consumed_symbols, &config).await?;
 
-                assert!(ordering_valid, "Symbol ordering should be preserved through stream");
+                assert!(
+                    ordering_valid,
+                    "Symbol ordering should be preserved through stream"
+                );
 
                 // Check metrics
-                let (decoded, consumed, backpressure, overruns, pauses, throttling, violations, stalls) = metrics.get_totals();
+                let (
+                    decoded,
+                    consumed,
+                    backpressure,
+                    overruns,
+                    pauses,
+                    throttling,
+                    violations,
+                    stalls,
+                ) = metrics.get_totals();
 
-                assert_eq!(decoded, config.source_symbol_count as u64,
-                          "All symbols should be decoded");
-                assert_eq!(consumed, config.source_symbol_count as u64,
-                          "All symbols should be consumed");
-                assert_eq!(violations, 0,
-                          "No ordering violations should occur");
+                assert_eq!(
+                    decoded, config.source_symbol_count as u64,
+                    "All symbols should be decoded"
+                );
+                assert_eq!(
+                    consumed, config.source_symbol_count as u64,
+                    "All symbols should be consumed"
+                );
+                assert_eq!(violations, 0, "No ordering violations should occur");
 
                 // Some backpressure events are expected with buffering
-                assert!(backpressure <= consumed / 2,
-                        "Backpressure events should be reasonable: {} (consumed: {})", backpressure, consumed);
+                assert!(
+                    backpressure <= consumed / 2,
+                    "Backpressure events should be reasonable: {} (consumed: {})",
+                    backpressure,
+                    consumed
+                );
                 assert_eq!(overruns, 0, "No buffer overruns with proper backpressure");
 
-                Ok(format!("Basic backpressure: decoded={}, consumed={}, backpressure={}, stalls={}",
-                          decoded, consumed, backpressure, stalls))
-            }).await
+                Ok(format!(
+                    "Basic backpressure: decoded={}, consumed={}, backpressure={}, stalls={}",
+                    decoded, consumed, backpressure, stalls
+                ))
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Basic backpressure test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Basic backpressure test should complete: {:?}",
+        result
+    );
 
-    let (decoded, consumed, backpressure, overruns, pauses, throttling, violations, stalls) = metrics.get_totals();
-    println!("✓ Basic backpressure: decoded={}, consumed={}, backpressure={}, violations={}, stalls={}",
-             decoded, consumed, backpressure, violations, stalls);
+    let (decoded, consumed, backpressure, overruns, pauses, throttling, violations, stalls) =
+        metrics.get_totals();
+    println!(
+        "✓ Basic backpressure: decoded={}, consumed={}, backpressure={}, violations={}, stalls={}",
+        decoded, consumed, backpressure, violations, stalls
+    );
 }
 
 /// Test slow consumer handling with aggressive backpressure.
 #[tokio::test]
 async fn test_slow_consumer_backpressure_handling() {
     let config = DecoderStreamTestConfig {
-        stream_buffer_size: 16, // Smaller buffer for more pressure
+        stream_buffer_size: 16,                     // Smaller buffer for more pressure
         consumer_delay: Duration::from_millis(100), // Very slow consumer
-        max_stream_rate: 20, // Lower throughput limit
+        max_stream_rate: 20,                        // Lower throughput limit
         ..DecoderStreamTestConfig::default()
     };
 
@@ -489,64 +524,98 @@ async fn test_slow_consumer_backpressure_handling() {
                 // Create decoder with slow consumer scenario
                 let decoder = MockRaptorQDecoder::new(&config);
 
-                let decoder_stream = create_buffered_decoder_stream(
-                    decoder,
-                    &config,
-                    metrics.clone(),
-                    cx,
-                );
+                let decoder_stream =
+                    create_buffered_decoder_stream(decoder, &config, metrics.clone(), cx);
 
                 // Add extra buffering and throttling for slow consumer
                 let throttled_stream = decoder_stream
                     .buffered(config.stream_buffer_size * 2)
                     .throttle(Duration::from_millis(100)); // Additional throttling
 
-                let consumed_symbols = slow_consumer_processor(
-                    cx,
-                    Box::pin(throttled_stream),
-                    &config,
-                    &metrics,
-                ).await?;
+                let consumed_symbols =
+                    slow_consumer_processor(cx, Box::pin(throttled_stream), &config, &metrics)
+                        .await?;
 
                 // Verify consumption despite slow processing
-                assert!(consumed_symbols.len() >= (config.source_symbol_count / 2) as usize,
-                       "Should consume substantial symbols despite slow consumer: got {}",
-                       consumed_symbols.len());
+                assert!(
+                    consumed_symbols.len() >= (config.source_symbol_count / 2) as usize,
+                    "Should consume substantial symbols despite slow consumer: got {}",
+                    consumed_symbols.len()
+                );
 
                 // Verify ordering is maintained under pressure
                 let ordering_valid = verify_symbol_ordering_through_stream(
                     &consumed_symbols[..consumed_symbols.len().min(50)],
-                    &DecoderStreamTestConfig { source_symbol_count: 50, ..config },
-                ).await?;
+                    &DecoderStreamTestConfig {
+                        source_symbol_count: 50,
+                        ..config
+                    },
+                )
+                .await?;
 
-                assert!(ordering_valid, "Ordering should be maintained under backpressure");
+                assert!(
+                    ordering_valid,
+                    "Ordering should be maintained under backpressure"
+                );
 
                 // Check backpressure metrics
-                let (decoded, consumed, backpressure, overruns, pauses, throttling, violations, stalls) = metrics.get_totals();
+                let (
+                    decoded,
+                    consumed,
+                    backpressure,
+                    overruns,
+                    pauses,
+                    throttling,
+                    violations,
+                    stalls,
+                ) = metrics.get_totals();
 
                 assert!(consumed > 0, "Some symbols should be consumed");
-                assert!(backpressure > 0, "Backpressure should be triggered with slow consumer");
-                assert!(throttling > 0 || stalls > 0, "Throttling or stalls should occur");
+                assert!(
+                    backpressure > 0,
+                    "Backpressure should be triggered with slow consumer"
+                );
+                assert!(
+                    throttling > 0 || stalls > 0,
+                    "Throttling or stalls should occur"
+                );
 
                 // Ordering violations should be minimal even under pressure
-                assert!(violations <= consumed / 20,
-                        "Ordering violations should be rare: {} violations in {} consumed",
-                        violations, consumed);
+                assert!(
+                    violations <= consumed / 20,
+                    "Ordering violations should be rare: {} violations in {} consumed",
+                    violations,
+                    consumed
+                );
 
-                Ok(format!("Slow consumer: consumed={}, backpressure={}, throttling={}, stalls={}",
-                          consumed, backpressure, throttling, stalls))
-            }).await
+                Ok(format!(
+                    "Slow consumer: consumed={}, backpressure={}, throttling={}, stalls={}",
+                    consumed, backpressure, throttling, stalls
+                ))
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Slow consumer test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Slow consumer test should complete: {:?}",
+        result
+    );
 
-    let (decoded, consumed, backpressure, overruns, pauses, throttling, violations, stalls) = metrics.get_totals();
+    let (decoded, consumed, backpressure, overruns, pauses, throttling, violations, stalls) =
+        metrics.get_totals();
     assert!(backpressure > 0, "Backpressure should be triggered");
-    assert!(consumed > 20, "Should consume reasonable number of symbols: {}", consumed);
+    assert!(
+        consumed > 20,
+        "Should consume reasonable number of symbols: {}",
+        consumed
+    );
 
-    println!("✓ Slow consumer: consumed={}, backpressure={}, throttling={}, stalls={}, violations={}",
-             consumed, backpressure, throttling, stalls, violations);
+    println!(
+        "✓ Slow consumer: consumed={}, backpressure={}, throttling={}, stalls={}, violations={}",
+        consumed, backpressure, throttling, stalls, violations
+    );
 }
 
 /// Test multi-consumer stream splitting with different consumption rates.
@@ -568,12 +637,8 @@ async fn test_multi_consumer_stream_splitting_backpressure() {
             cx.scope(|scope| async move {
                 // Create shared decoder stream
                 let decoder = MockRaptorQDecoder::new(&config);
-                let decoder_stream = create_buffered_decoder_stream(
-                    decoder,
-                    &config,
-                    metrics.clone(),
-                    cx,
-                );
+                let decoder_stream =
+                    create_buffered_decoder_stream(decoder, &config, metrics.clone(), cx);
 
                 // Create channel for stream distribution
                 let (tx, rx) = mpsc::channel(config.stream_buffer_size);
@@ -617,12 +682,8 @@ async fn test_multi_consumer_stream_splitting_backpressure() {
                 };
                 let fast_metrics = metrics.clone();
                 let fast_consumer_handle = scope.spawn(async move {
-                    slow_consumer_processor(
-                        cx,
-                        Box::pin(rx),
-                        &fast_consumer_config,
-                        &fast_metrics,
-                    ).await
+                    slow_consumer_processor(cx, Box::pin(rx), &fast_consumer_config, &fast_metrics)
+                        .await
                 });
 
                 // Slow consumer
@@ -632,12 +693,8 @@ async fn test_multi_consumer_stream_splitting_backpressure() {
                 };
                 let slow_metrics = DecoderStreamMetrics::default(); // Separate metrics
                 let slow_consumer_handle = scope.spawn(async move {
-                    slow_consumer_processor(
-                        cx,
-                        Box::pin(rx2),
-                        &slow_consumer_config,
-                        &slow_metrics,
-                    ).await
+                    slow_consumer_processor(cx, Box::pin(rx2), &slow_consumer_config, &slow_metrics)
+                        .await
                 });
 
                 // Wait for all tasks
@@ -647,47 +704,90 @@ async fn test_multi_consumer_stream_splitting_backpressure() {
 
                 // Verify results
                 match (distributor_result, fast_result, slow_result) {
-                    (Outcome::Ok(distributed), Outcome::Ok(fast_consumed), Outcome::Ok(slow_consumed)) => {
-                        assert!(distributed > 0, "Should distribute symbols: {}", distributed);
-                        assert!(fast_consumed.len() > 0, "Fast consumer should consume symbols");
-                        assert!(slow_consumed.len() > 0, "Slow consumer should consume symbols");
+                    (
+                        Outcome::Ok(distributed),
+                        Outcome::Ok(fast_consumed),
+                        Outcome::Ok(slow_consumed),
+                    ) => {
+                        assert!(
+                            distributed > 0,
+                            "Should distribute symbols: {}",
+                            distributed
+                        );
+                        assert!(
+                            fast_consumed.len() > 0,
+                            "Fast consumer should consume symbols"
+                        );
+                        assert!(
+                            slow_consumed.len() > 0,
+                            "Slow consumer should consume symbols"
+                        );
 
                         // Fast consumer should consume more or equal to slow consumer
-                        assert!(fast_consumed.len() >= slow_consumed.len(),
-                               "Fast consumer ({}) should keep up with slow consumer ({})",
-                               fast_consumed.len(), slow_consumed.len());
+                        assert!(
+                            fast_consumed.len() >= slow_consumed.len(),
+                            "Fast consumer ({}) should keep up with slow consumer ({})",
+                            fast_consumed.len(),
+                            slow_consumed.len()
+                        );
 
                         // Both should maintain ordering
                         if !fast_consumed.is_empty() {
                             let fast_ordering_valid = verify_symbol_ordering_through_stream(
                                 &fast_consumed[..fast_consumed.len().min(20)],
-                                &DecoderStreamTestConfig { source_symbol_count: 20, ..config },
-                            ).await?;
-                            assert!(fast_ordering_valid, "Fast consumer should maintain ordering");
+                                &DecoderStreamTestConfig {
+                                    source_symbol_count: 20,
+                                    ..config
+                                },
+                            )
+                            .await?;
+                            assert!(
+                                fast_ordering_valid,
+                                "Fast consumer should maintain ordering"
+                            );
                         }
 
                         if !slow_consumed.is_empty() {
                             let slow_ordering_valid = verify_symbol_ordering_through_stream(
                                 &slow_consumed[..slow_consumed.len().min(15)],
-                                &DecoderStreamTestConfig { source_symbol_count: 15, ..config },
-                            ).await?;
-                            assert!(slow_ordering_valid, "Slow consumer should maintain ordering");
+                                &DecoderStreamTestConfig {
+                                    source_symbol_count: 15,
+                                    ..config
+                                },
+                            )
+                            .await?;
+                            assert!(
+                                slow_ordering_valid,
+                                "Slow consumer should maintain ordering"
+                            );
                         }
 
-                        Ok(format!("Multi-consumer: distributed={}, fast={}, slow={}",
-                                  distributed, fast_consumed.len(), slow_consumed.len()))
+                        Ok(format!(
+                            "Multi-consumer: distributed={}, fast={}, slow={}",
+                            distributed,
+                            fast_consumed.len(),
+                            slow_consumed.len()
+                        ))
                     }
                     _ => Err("One or more consumers failed".into()),
                 }
-            }).await
+            })
+            .await
         },
     );
 
-    assert!(result.is_ok(), "Multi-consumer test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Multi-consumer test should complete: {:?}",
+        result
+    );
 
-    let (decoded, consumed, backpressure, overruns, pauses, throttling, violations, stalls) = metrics.get_totals();
-    println!("✓ Multi-consumer: decoded={}, consumed={}, backpressure={}, violations={}, stalls={}",
-             decoded, consumed, backpressure, violations, stalls);
+    let (decoded, consumed, backpressure, overruns, pauses, throttling, violations, stalls) =
+        metrics.get_totals();
+    println!(
+        "✓ Multi-consumer: decoded={}, consumed={}, backpressure={}, violations={}, stalls={}",
+        decoded, consumed, backpressure, violations, stalls
+    );
 }
 
 /// Test comprehensive RaptorQ decoder and stream integration under high load.
@@ -695,7 +795,7 @@ async fn test_multi_consumer_stream_splitting_backpressure() {
 async fn test_comprehensive_decoder_stream_integration_high_load() {
     let config = DecoderStreamTestConfig {
         source_symbol_count: 200,
-        symbol_size: 2048, // Larger symbols
+        symbol_size: 2048,          // Larger symbols
         total_encoded_symbols: 250, // 25% overhead
         stream_buffer_size: 48,
         consumer_delay: Duration::from_millis(25),
@@ -861,16 +961,34 @@ async fn test_comprehensive_decoder_stream_integration_high_load() {
         },
     );
 
-    assert!(result.is_ok(), "Comprehensive high load test should complete: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Comprehensive high load test should complete: {:?}",
+        result
+    );
 
-    let (decoded, consumed, backpressure, overruns, pauses, throttling, violations, stalls) = metrics.get_totals();
+    let (decoded, consumed, backpressure, overruns, pauses, throttling, violations, stalls) =
+        metrics.get_totals();
 
     // Verify comprehensive integration under load
-    assert!(decoded >= 100, "Should decode substantial symbols under load: {}", decoded);
-    assert!(consumed >= 50, "Should consume substantial symbols under load: {}", consumed);
+    assert!(
+        decoded >= 100,
+        "Should decode substantial symbols under load: {}",
+        decoded
+    );
+    assert!(
+        consumed >= 50,
+        "Should consume substantial symbols under load: {}",
+        consumed
+    );
     assert!(backpressure > 0, "Should handle backpressure under load");
-    assert!(violations <= consumed / 20, "Should maintain ordering under load");
+    assert!(
+        violations <= consumed / 20,
+        "Should maintain ordering under load"
+    );
 
-    println!("✓ High load: decoded={}, consumed={}, backpressure={}, overruns={}, throttling={}, violations={}, stalls={}",
-             decoded, consumed, backpressure, overruns, throttling, violations, stalls);
+    println!(
+        "✓ High load: decoded={}, consumed={}, backpressure={}, overruns={}, throttling={}, violations={}, stalls={}",
+        decoded, consumed, backpressure, overruns, throttling, violations, stalls
+    );
 }

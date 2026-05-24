@@ -42,24 +42,24 @@ mod tests {
 
     use crate::cx::Cx;
     use crate::distributed::{
-        bridge::{RegionBridge, RegionMode, RegionSnapshot, BridgeConfig},
         assignment::{SymbolAssigner, SymbolAssignment},
-        distribution::{SymbolDistributor, DistributionConfig},
-        encoding::{StateEncoder, EncodingConfig},
-        snapshot::{RecoveryOrchestrator, RecoveryConfig},
-    };
-    use crate::trace::distributed::{
-        sheaf::{SagaConsistencyChecker, NodeSnapshot, SagaConstraint, ConsistencyReport},
-        vclock::{VectorClock, LamportClock, HybridClock, CausalTracker},
-        context::{SymbolTraceContext, TraceFlags},
-        collector::{SymbolTraceCollector, TraceSummary},
-        lattice::{ObligationLattice, LatticeState},
-        DistTraceId, SymbolSpan,
+        bridge::{BridgeConfig, RegionBridge, RegionMode, RegionSnapshot},
+        distribution::{DistributionConfig, SymbolDistributor},
+        encoding::{EncodingConfig, StateEncoder},
+        snapshot::{RecoveryConfig, RecoveryOrchestrator},
     };
     use crate::record::{ObligationState, RegionRecord};
-    use crate::types::{RegionId, Time, Budget};
+    use crate::trace::distributed::{
+        DistTraceId, SymbolSpan,
+        collector::{SymbolTraceCollector, TraceSummary},
+        context::{SymbolTraceContext, TraceFlags},
+        lattice::{LatticeState, ObligationLattice},
+        sheaf::{ConsistencyReport, NodeSnapshot, SagaConsistencyChecker, SagaConstraint},
+        vclock::{CausalTracker, HybridClock, LamportClock, VectorClock},
+    };
+    use crate::types::{Budget, RegionId, Time};
     use crate::util::{ArenaIndex, det_rng::DetRng};
-    use std::collections::{HashMap, BTreeMap};
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::{
         Arc, RwLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -162,7 +162,10 @@ mod tests {
         }
 
         /// Tests basic bridge trace propagation across two regions
-        pub async fn test_basic_bridge_trace_propagation(&mut self, cx: &Cx) -> BridgeTraceTestResult {
+        pub async fn test_basic_bridge_trace_propagation(
+            &mut self,
+            cx: &Cx,
+        ) -> BridgeTraceTestResult {
             let start_time = std::time::Instant::now();
             let mut result = BridgeTraceTestResult {
                 test_name: "test_basic_bridge_trace_propagation".to_string(),
@@ -190,7 +193,9 @@ mod tests {
 
             // Phase 2: Establish bridge connection
             result.phase = BridgeTraceTestPhase::BridgeConnectionEstablishment;
-            let bridge_result = self.establish_bridge_connection(cx, &mut region_a, &mut region_b).await;
+            let bridge_result = self
+                .establish_bridge_connection(cx, &mut region_a, &mut region_b)
+                .await;
 
             if let Err(e) = bridge_result {
                 result.error = Some(format!("Bridge connection failed: {}", e));
@@ -203,7 +208,9 @@ mod tests {
             let trace = self.create_cross_region_trace(&region_a, &region_b);
 
             result.phase = BridgeTraceTestPhase::CrossRegionPropagation;
-            let propagation_result = self.propagate_trace_across_bridge(cx, &mut region_a, &mut region_b, trace).await;
+            let propagation_result = self
+                .propagate_trace_across_bridge(cx, &mut region_a, &mut region_b, trace)
+                .await;
 
             match propagation_result {
                 Ok(_) => {
@@ -223,7 +230,10 @@ mod tests {
         }
 
         /// Tests vector clock synchronization during cross-region operations
-        pub async fn test_vector_clock_synchronization(&mut self, cx: &Cx) -> BridgeTraceTestResult {
+        pub async fn test_vector_clock_synchronization(
+            &mut self,
+            cx: &Cx,
+        ) -> BridgeTraceTestResult {
             let start_time = std::time::Instant::now();
             let mut result = BridgeTraceTestResult {
                 test_name: "test_vector_clock_synchronization".to_string(),
@@ -252,9 +262,18 @@ mod tests {
 
             // Test various vector clock scenarios
             let clock_test_scenarios = vec![
-                ("concurrent_events", self.test_concurrent_vector_clocks(&mut region_a, &mut region_b)),
-                ("causal_ordering", self.test_causal_vector_clock_ordering(&mut region_a, &mut region_b)),
-                ("clock_merging", self.test_vector_clock_merging(&mut region_a, &mut region_b)),
+                (
+                    "concurrent_events",
+                    self.test_concurrent_vector_clocks(&mut region_a, &mut region_b),
+                ),
+                (
+                    "causal_ordering",
+                    self.test_causal_vector_clock_ordering(&mut region_a, &mut region_b),
+                ),
+                (
+                    "clock_merging",
+                    self.test_vector_clock_merging(&mut region_a, &mut region_b),
+                ),
             ];
 
             let mut successful_scenarios = 0;
@@ -265,7 +284,10 @@ mod tests {
                         self.increment_stat("vector_clock_merges", 1);
                     }
                     Err(e) => {
-                        result.error = Some(format!("Vector clock test '{}' failed: {}", scenario_name, e));
+                        result.error = Some(format!(
+                            "Vector clock test '{}' failed: {}",
+                            scenario_name, e
+                        ));
                         break;
                     }
                 }
@@ -283,7 +305,10 @@ mod tests {
         }
 
         /// Tests saga consistency verification across regions
-        pub async fn test_saga_consistency_verification(&mut self, cx: &Cx) -> BridgeTraceTestResult {
+        pub async fn test_saga_consistency_verification(
+            &mut self,
+            cx: &Cx,
+        ) -> BridgeTraceTestResult {
             let start_time = std::time::Instant::now();
             let mut result = BridgeTraceTestResult {
                 test_name: "test_saga_consistency_verification".to_string(),
@@ -302,7 +327,8 @@ mod tests {
                 self.create_distributed_region(cx, "region-a"),
                 self.create_distributed_region(cx, "region-b"),
                 self.create_distributed_region(cx, "region-c"),
-            ).await;
+            )
+            .await;
 
             let (mut region_a, mut region_b, mut region_c) = match region_results {
                 Ok(regions) => regions,
@@ -322,7 +348,10 @@ mod tests {
             let consistency_tests = vec![
                 ("all_committed", self.test_saga_all_committed(&saga)),
                 ("phantom_detection", self.test_saga_phantom_detection(&saga)),
-                ("conflict_resolution", self.test_saga_conflict_resolution(&saga)),
+                (
+                    "conflict_resolution",
+                    self.test_saga_conflict_resolution(&saga),
+                ),
             ];
 
             let mut consistency_checks_passed = 0;
@@ -333,7 +362,10 @@ mod tests {
                         self.increment_stat("saga_consistency_checks", 1);
                     }
                     Err(e) => {
-                        result.error = Some(format!("Saga consistency test '{}' failed: {}", test_name, e));
+                        result.error = Some(format!(
+                            "Saga consistency test '{}' failed: {}",
+                            test_name, e
+                        ));
                         break;
                     }
                 }
@@ -350,7 +382,10 @@ mod tests {
         }
 
         /// Tests bridge snapshot synchronization with trace metadata
-        pub async fn test_bridge_snapshot_synchronization(&mut self, cx: &Cx) -> BridgeTraceTestResult {
+        pub async fn test_bridge_snapshot_synchronization(
+            &mut self,
+            cx: &Cx,
+        ) -> BridgeTraceTestResult {
             let start_time = std::time::Instant::now();
             let mut result = BridgeTraceTestResult {
                 test_name: "test_bridge_snapshot_synchronization".to_string(),
@@ -378,7 +413,9 @@ mod tests {
             result.phase = BridgeTraceTestPhase::BridgeSnapshotSynchronization;
 
             // Create snapshot with trace metadata
-            let snapshot_result = self.create_bridge_snapshot_with_traces(cx, &mut region_a).await;
+            let snapshot_result = self
+                .create_bridge_snapshot_with_traces(cx, &mut region_a)
+                .await;
 
             let snapshot = match snapshot_result {
                 Ok(s) => s,
@@ -390,7 +427,9 @@ mod tests {
             };
 
             // Apply snapshot to target region
-            let apply_result = self.apply_snapshot_with_trace_preservation(cx, &mut region_b, snapshot).await;
+            let apply_result = self
+                .apply_snapshot_with_trace_preservation(cx, &mut region_b, snapshot)
+                .await;
 
             match apply_result {
                 Ok(_) => {
@@ -429,7 +468,8 @@ mod tests {
                 self.create_distributed_region(cx, "region-primary"),
                 self.create_distributed_region(cx, "region-secondary"),
                 self.create_distributed_region(cx, "region-tertiary"),
-            ).await;
+            )
+            .await;
 
             let (mut region_a, mut region_b, mut region_c) = match region_results {
                 Ok(regions) => regions,
@@ -445,7 +485,8 @@ mod tests {
             let bridge_connections = futures::future::try_join(
                 self.establish_bridge_connection(cx, &mut region_a, &mut region_b),
                 self.establish_bridge_connection(cx, &mut region_b, &mut region_c),
-            ).await;
+            )
+            .await;
 
             if let Err(e) = bridge_connections {
                 result.error = Some(format!("Bridge establishment failed: {}", e));
@@ -456,7 +497,9 @@ mod tests {
             // Step 2: Trace propagation
             result.phase = BridgeTraceTestPhase::CrossRegionPropagation;
             let trace = self.create_cross_region_trace(&region_a, &region_c);
-            let propagation = self.propagate_trace_across_bridge(cx, &mut region_a, &mut region_c, trace).await;
+            let propagation = self
+                .propagate_trace_across_bridge(cx, &mut region_a, &mut region_c, trace)
+                .await;
 
             if let Err(e) = propagation {
                 result.error = Some(format!("Trace propagation failed: {}", e));
@@ -483,7 +526,10 @@ mod tests {
             {
                 result.success = true;
             } else {
-                result.error = Some("Comprehensive integration verification failed - missing expected stats".to_string());
+                result.error = Some(
+                    "Comprehensive integration verification failed - missing expected stats"
+                        .to_string(),
+                );
             }
 
             result.phase = BridgeTraceTestPhase::Teardown;
@@ -494,11 +540,13 @@ mod tests {
 
         // ── Helper Methods ──────────────────────────────────────────────────────────
 
-        async fn create_distributed_region(&self, cx: &Cx, region_name: &str) -> Result<DistributedRegion, crate::error::Error> {
-            let region_id = RegionId::from_arena(ArenaIndex::new(
-                self.get_next_region_counter(),
-                0
-            ));
+        async fn create_distributed_region(
+            &self,
+            cx: &Cx,
+            region_name: &str,
+        ) -> Result<DistributedRegion, crate::error::Error> {
+            let region_id =
+                RegionId::from_arena(ArenaIndex::new(self.get_next_region_counter(), 0));
 
             // Create bridge in distributed mode
             let bridge_config = BridgeConfig::default();
@@ -593,7 +641,9 @@ mod tests {
                 metadata: trace.trace_context.clone(),
             };
 
-            origin_region.trace_collector.record_span(encode_span.clone());
+            origin_region
+                .trace_collector
+                .record_span(encode_span.clone());
             trace.spans.push(encode_span);
 
             // Transmit across bridge (simulated)
@@ -605,7 +655,9 @@ mod tests {
                 metadata: trace.trace_context.clone(),
             };
 
-            origin_region.trace_collector.record_span(transmit_span.clone());
+            origin_region
+                .trace_collector
+                .record_span(transmit_span.clone());
             trace.spans.push(transmit_span);
 
             // Receive in target region
@@ -617,7 +669,9 @@ mod tests {
                 metadata: trace.trace_context.clone(),
             };
 
-            target_region.trace_collector.record_span(receive_span.clone());
+            target_region
+                .trace_collector
+                .record_span(receive_span.clone());
             trace.spans.push(receive_span);
 
             // Merge vector clocks
@@ -643,7 +697,9 @@ mod tests {
             // These events should be concurrent
             let ordering = region_a.local_clock.causal_order(&region_b.local_clock);
             if ordering != crate::trace::distributed::vclock::CausalOrder::Concurrent {
-                return Err(crate::error::Error::from("Concurrent events not detected correctly"));
+                return Err(crate::error::Error::from(
+                    "Concurrent events not detected correctly",
+                ));
             }
 
             Ok(())
@@ -709,7 +765,7 @@ mod tests {
             for (region, region_id) in [
                 (region_a, "region-a"),
                 (region_b, "region-b"),
-                (region_c, "region-c")
+                (region_c, "region-c"),
             ] {
                 let mut region_obligations = HashMap::new();
                 region_obligations.insert("obligation-1".to_string(), LatticeState::Reserved);
@@ -720,13 +776,20 @@ mod tests {
 
             DistributedSaga {
                 saga_id,
-                participating_regions: vec![region_a.region_id, region_b.region_id, region_c.region_id],
+                participating_regions: vec![
+                    region_a.region_id,
+                    region_b.region_id,
+                    region_c.region_id,
+                ],
                 obligation_states,
                 vector_clocks,
             }
         }
 
-        fn test_saga_all_committed(&self, saga: &DistributedSaga) -> Result<(), crate::error::Error> {
+        fn test_saga_all_committed(
+            &self,
+            saga: &DistributedSaga,
+        ) -> Result<(), crate::error::Error> {
             // Simulate all obligations committed across all regions
             let mut node_snapshots = Vec::new();
 
@@ -748,13 +811,18 @@ mod tests {
             let report = checker.check(&node_snapshots, &constraint);
 
             if !report.is_consistent() {
-                return Err(crate::error::Error::from("All-committed saga should be consistent"));
+                return Err(crate::error::Error::from(
+                    "All-committed saga should be consistent",
+                ));
             }
 
             Ok(())
         }
 
-        fn test_saga_phantom_detection(&self, saga: &DistributedSaga) -> Result<(), crate::error::Error> {
+        fn test_saga_phantom_detection(
+            &self,
+            saga: &DistributedSaga,
+        ) -> Result<(), crate::error::Error> {
             // Create a phantom commit scenario
             let mut node_snapshots = Vec::new();
 
@@ -788,7 +856,10 @@ mod tests {
             Ok(())
         }
 
-        fn test_saga_conflict_resolution(&self, saga: &DistributedSaga) -> Result<(), crate::error::Error> {
+        fn test_saga_conflict_resolution(
+            &self,
+            saga: &DistributedSaga,
+        ) -> Result<(), crate::error::Error> {
             // Create a conflict scenario
             let mut node_snapshots = Vec::new();
 
@@ -858,7 +929,7 @@ mod tests {
                     "bridge_snapshots_applied" => stats.bridge_snapshots_applied += count,
                     "causal_ordering_verifications" => stats.causal_ordering_verifications += count,
                     "distributed_traces_completed" => stats.distributed_traces_completed += count,
-                    _ => {},
+                    _ => {}
                 }
             }
         }
@@ -892,13 +963,18 @@ mod tests {
             let mut harness = BridgeTraceSheafTestHarness::new("basic_propagation");
             let result = harness.test_basic_bridge_trace_propagation(&cx).await;
 
-            assert!(result.success, "Basic bridge trace propagation test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Basic bridge trace propagation test failed: {:?}",
+                result.error
+            );
             assert!(result.bridge_trace_stats.regions_created >= 2);
             assert!(result.bridge_trace_stats.bridges_established >= 1);
             assert!(result.bridge_trace_stats.cross_region_propagations >= 1);
             assert!(result.bridge_trace_stats.distributed_traces_completed >= 1);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -907,11 +983,16 @@ mod tests {
             let mut harness = BridgeTraceSheafTestHarness::new("vector_clock_sync");
             let result = harness.test_vector_clock_synchronization(&cx).await;
 
-            assert!(result.success, "Vector clock synchronization test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Vector clock synchronization test failed: {:?}",
+                result.error
+            );
             assert_eq!(result.bridge_trace_stats.vector_clock_merges, 3); // 3 test scenarios
             assert_eq!(result.bridge_trace_stats.causal_ordering_verifications, 3);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -920,10 +1001,15 @@ mod tests {
             let mut harness = BridgeTraceSheafTestHarness::new("saga_consistency");
             let result = harness.test_saga_consistency_verification(&cx).await;
 
-            assert!(result.success, "Saga consistency verification test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Saga consistency verification test failed: {:?}",
+                result.error
+            );
             assert_eq!(result.bridge_trace_stats.saga_consistency_checks, 3); // 3 consistency tests
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -932,11 +1018,16 @@ mod tests {
             let mut harness = BridgeTraceSheafTestHarness::new("snapshot_sync");
             let result = harness.test_bridge_snapshot_synchronization(&cx).await;
 
-            assert!(result.success, "Bridge snapshot synchronization test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Bridge snapshot synchronization test failed: {:?}",
+                result.error
+            );
             assert_eq!(result.bridge_trace_stats.bridge_snapshots_created, 1);
             assert_eq!(result.bridge_trace_stats.bridge_snapshots_applied, 1);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -945,7 +1036,11 @@ mod tests {
             let mut harness = BridgeTraceSheafTestHarness::new("comprehensive_integration");
             let result = harness.test_comprehensive_integration(&cx).await;
 
-            assert!(result.success, "Comprehensive integration test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Comprehensive integration test failed: {:?}",
+                result.error
+            );
             let stats = result.bridge_trace_stats;
             assert!(stats.regions_created >= 3);
             assert!(stats.bridges_established >= 2);
@@ -953,6 +1048,7 @@ mod tests {
             assert!(stats.vector_clock_merges >= 1);
             assert!(stats.saga_consistency_checks >= 1);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

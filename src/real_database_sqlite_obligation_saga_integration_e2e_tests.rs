@@ -39,21 +39,21 @@ mod tests {
         dead_code
     )]
 
+    use crate::cx::Cx;
     use crate::database::{
         sqlite::{SqliteConnection, SqliteError, SqliteValue},
         transaction::{RetryPolicy, TransactionReplaySafety},
     };
     use crate::obligation::{
+        calm::Monotonicity as CalmMonotonicity,
         saga::{
             Lattice, Monotonicity, SagaBatch, SagaExecutionPlan, SagaOpKind, SagaPlan, SagaStep,
         },
-        calm::Monotonicity as CalmMonotonicity,
     };
-    use crate::cx::Cx;
     use crate::types::{Budget, Outcome, Time};
-    use std::collections::{HashMap, BTreeMap};
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::{
-        Arc, RwLock, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     };
 
@@ -198,7 +198,8 @@ mod tests {
                     Monotonicity::NonMonotone => {
                         // Flush any accumulated monotone batch
                         if !current_monotone_batch.is_empty() {
-                            batches.push(SagaBatch::CoordinationFree(current_monotone_batch.clone()));
+                            batches
+                                .push(SagaBatch::CoordinationFree(current_monotone_batch.clone()));
                             current_monotone_batch.clear();
                         }
 
@@ -228,13 +229,21 @@ mod tests {
     }
 
     impl PageTracker {
-        pub fn allocate_page(&mut self, page_id: u64, table_name: Option<String>, operation_id: Option<u64>, saga_id: Option<String>) {
+        pub fn allocate_page(
+            &mut self,
+            page_id: u64,
+            table_name: Option<String>,
+            operation_id: Option<u64>,
+            saga_id: Option<String>,
+        ) {
             let page_info = PageInfo {
                 page_id,
-                allocation_time: Time::from_nanos(std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64),
+                allocation_time: Time::from_nanos(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64,
+                ),
                 table_name,
                 operation_id,
                 saga_id,
@@ -340,12 +349,18 @@ mod tests {
 
             let execution_plan = SagaExecutionPlan::from_plan("saga_1".to_string(), &saga_plan);
             self.increment_saga_stat("sagas_created", 1);
-            self.increment_saga_stat("coordination_barriers", execution_plan.coordination_barrier_count() as u64);
+            self.increment_saga_stat(
+                "coordination_barriers",
+                execution_plan.coordination_barrier_count() as u64,
+            );
 
             result.phase = SqliteSagaTestPhase::TransactionBegin;
 
             // Begin transaction and execute saga
-            match self.execute_saga_with_database(cx, &db_connection, saga_plan, execution_plan).await {
+            match self
+                .execute_saga_with_database(cx, &db_connection, saga_plan, execution_plan)
+                .await
+            {
                 Ok(success) => {
                     if success {
                         self.increment_saga_stat("saga_completions", 1);
@@ -375,7 +390,10 @@ mod tests {
         }
 
         /// Tests multi-statement transaction rollback via saga coordination
-        pub async fn test_multi_statement_saga_rollback(&mut self, cx: &Cx) -> SqliteSagaTestResult {
+        pub async fn test_multi_statement_saga_rollback(
+            &mut self,
+            cx: &Cx,
+        ) -> SqliteSagaTestResult {
             let start_time = std::time::Instant::now();
             let mut result = SqliteSagaTestResult {
                 test_name: "test_multi_statement_saga_rollback".to_string(),
@@ -431,7 +449,10 @@ mod tests {
             let initial_page_count = self.get_allocated_page_count();
 
             // Execute saga with designed failure to trigger rollback
-            match self.execute_failing_saga_with_rollback(cx, &db_connection, saga_plan, execution_plan).await {
+            match self
+                .execute_failing_saga_with_rollback(cx, &db_connection, saga_plan, execution_plan)
+                .await
+            {
                 Ok(rollback_success) => {
                     if rollback_success {
                         self.increment_saga_stat("saga_rollbacks_triggered", 1);
@@ -451,7 +472,8 @@ mod tests {
                             ));
                         }
                     } else {
-                        result.error = Some("Saga rollback did not complete successfully".to_string());
+                        result.error =
+                            Some("Saga rollback did not complete successfully".to_string());
                     }
                 }
                 Err(e) => {
@@ -467,7 +489,10 @@ mod tests {
         }
 
         /// Tests concurrent saga operations on the same database
-        pub async fn test_concurrent_saga_database_operations(&mut self, cx: &Cx) -> SqliteSagaTestResult {
+        pub async fn test_concurrent_saga_database_operations(
+            &mut self,
+            cx: &Cx,
+        ) -> SqliteSagaTestResult {
             let start_time = std::time::Instant::now();
             let mut result = SqliteSagaTestResult {
                 test_name: "test_concurrent_saga_database_operations".to_string(),
@@ -533,10 +558,14 @@ mod tests {
             // Execute sagas concurrently and verify coordination
             let mut successful_sagas = 0;
             for (i, saga_plan) in saga_plans.into_iter().enumerate() {
-                let execution_plan = SagaExecutionPlan::from_plan(format!("concurrent_saga_{}", i + 1), &saga_plan);
+                let execution_plan =
+                    SagaExecutionPlan::from_plan(format!("concurrent_saga_{}", i + 1), &saga_plan);
                 self.increment_saga_stat("sagas_created", 1);
 
-                match self.execute_saga_with_database(cx, &db_connection, saga_plan, execution_plan).await {
+                match self
+                    .execute_saga_with_database(cx, &db_connection, saga_plan, execution_plan)
+                    .await
+                {
                     Ok(success) => {
                         if success {
                             successful_sagas += 1;
@@ -559,10 +588,16 @@ mod tests {
                     result.page_integrity_verified = true;
                     result.success = true;
                 } else {
-                    result.error = Some(format!("Concurrent operations resulted in {} orphaned pages", orphan_count));
+                    result.error = Some(format!(
+                        "Concurrent operations resulted in {} orphaned pages",
+                        orphan_count
+                    ));
                 }
             } else {
-                result.error = Some(format!("Only {}/3 concurrent sagas completed successfully", successful_sagas));
+                result.error = Some(format!(
+                    "Only {}/3 concurrent sagas completed successfully",
+                    successful_sagas
+                ));
             }
 
             result.phase = SqliteSagaTestPhase::Teardown;
@@ -573,7 +608,10 @@ mod tests {
         }
 
         /// Comprehensive integration test combining all patterns
-        pub async fn test_comprehensive_sqlite_saga_integration(&mut self, cx: &Cx) -> SqliteSagaTestResult {
+        pub async fn test_comprehensive_sqlite_saga_integration(
+            &mut self,
+            cx: &Cx,
+        ) -> SqliteSagaTestResult {
             let start_time = std::time::Instant::now();
             let mut result = SqliteSagaTestResult {
                 test_name: "test_comprehensive_sqlite_saga_integration".to_string(),
@@ -589,9 +627,18 @@ mod tests {
 
             // Run all test components
             let tests = vec![
-                ("basic_saga_transaction", Box::pin(self.test_basic_saga_transaction(cx))),
-                ("multi_statement_rollback", Box::pin(self.test_multi_statement_saga_rollback(cx))),
-                ("concurrent_saga_operations", Box::pin(self.test_concurrent_saga_database_operations(cx))),
+                (
+                    "basic_saga_transaction",
+                    Box::pin(self.test_basic_saga_transaction(cx)),
+                ),
+                (
+                    "multi_statement_rollback",
+                    Box::pin(self.test_multi_statement_saga_rollback(cx)),
+                ),
+                (
+                    "concurrent_saga_operations",
+                    Box::pin(self.test_concurrent_saga_database_operations(cx)),
+                ),
             ];
 
             let mut successful_tests = 0;
@@ -620,7 +667,10 @@ mod tests {
                     result.success = true;
                     result.page_integrity_verified = true;
                 } else {
-                    result.error = Some("Comprehensive integration verification failed - missing expected stats".to_string());
+                    result.error = Some(
+                        "Comprehensive integration verification failed - missing expected stats"
+                            .to_string(),
+                    );
                 }
             }
 
@@ -648,7 +698,9 @@ mod tests {
                     SagaBatch::CoordinationFree(steps) => {
                         self.increment_saga_stat("monotone_batches", 1);
                         for step in steps {
-                            if let Err(e) = self.execute_database_step(cx, db_connection, step).await {
+                            if let Err(e) =
+                                self.execute_database_step(cx, db_connection, step).await
+                            {
                                 self.increment_sqlite_stat("transactions_rolled_back", 1);
                                 return Err(format!("Database step execution failed: {}", e));
                             }
@@ -690,13 +742,17 @@ mod tests {
                             // Simulate failure on the last step
                             if executed_steps >= saga_plan.steps.len() {
                                 // Trigger rollback
-                                self.execute_saga_rollback(cx, db_connection, executed_steps).await?;
+                                self.execute_saga_rollback(cx, db_connection, executed_steps)
+                                    .await?;
                                 self.increment_sqlite_stat("transactions_rolled_back", 1);
                                 return Ok(true);
                             }
 
-                            if let Err(e) = self.execute_database_step(cx, db_connection, step).await {
-                                self.execute_saga_rollback(cx, db_connection, executed_steps).await?;
+                            if let Err(e) =
+                                self.execute_database_step(cx, db_connection, step).await
+                            {
+                                self.execute_saga_rollback(cx, db_connection, executed_steps)
+                                    .await?;
                                 self.increment_sqlite_stat("transactions_rolled_back", 1);
                                 return Err(format!("Database step execution failed: {}", e));
                             }
@@ -708,13 +764,15 @@ mod tests {
 
                         if executed_steps >= saga_plan.steps.len() {
                             // Trigger rollback on the final coordinated step
-                            self.execute_saga_rollback(cx, db_connection, executed_steps).await?;
+                            self.execute_saga_rollback(cx, db_connection, executed_steps)
+                                .await?;
                             self.increment_sqlite_stat("transactions_rolled_back", 1);
                             return Ok(true);
                         }
 
                         if let Err(e) = self.execute_database_step(cx, db_connection, step).await {
-                            self.execute_saga_rollback(cx, db_connection, executed_steps).await?;
+                            self.execute_saga_rollback(cx, db_connection, executed_steps)
+                                .await?;
                             self.increment_sqlite_stat("transactions_rolled_back", 1);
                             return Err(format!("Coordinated database step failed: {}", e));
                         }
@@ -783,21 +841,37 @@ mod tests {
 
         fn get_sql_for_saga_step(&self, step: &SagaStep) -> String {
             match step.label.as_str() {
-                "create_users_table" => "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)".to_string(),
+                "create_users_table" => {
+                    "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)".to_string()
+                }
                 "insert_user_alice" => "INSERT INTO users (name) VALUES ('Alice')".to_string(),
                 "insert_user_bob" => "INSERT INTO users (name) VALUES ('Bob')".to_string(),
-                "create_accounts_table" => "CREATE TABLE accounts (id INTEGER PRIMARY KEY, balance REAL)".to_string(),
+                "create_accounts_table" => {
+                    "CREATE TABLE accounts (id INTEGER PRIMARY KEY, balance REAL)".to_string()
+                }
                 "insert_account_1" => "INSERT INTO accounts (balance) VALUES (100.0)".to_string(),
                 "insert_account_2" => "INSERT INTO accounts (balance) VALUES (200.0)".to_string(),
                 "insert_account_3" => "INSERT INTO accounts (balance) VALUES (300.0)".to_string(),
-                "insert_invalid_account" => "INSERT INTO accounts (balance) VALUES ('invalid')".to_string(), // This will fail
-                "create_products_table" => "CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT)".to_string(),
-                "insert_product_1" => "INSERT INTO products (name) VALUES ('Product A')".to_string(),
-                "insert_product_2" => "INSERT INTO products (name) VALUES ('Product B')".to_string(),
-                "create_orders_table" => "CREATE TABLE orders (id INTEGER PRIMARY KEY, amount REAL)".to_string(),
+                "insert_invalid_account" => {
+                    "INSERT INTO accounts (balance) VALUES ('invalid')".to_string()
+                } // This will fail
+                "create_products_table" => {
+                    "CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT)".to_string()
+                }
+                "insert_product_1" => {
+                    "INSERT INTO products (name) VALUES ('Product A')".to_string()
+                }
+                "insert_product_2" => {
+                    "INSERT INTO products (name) VALUES ('Product B')".to_string()
+                }
+                "create_orders_table" => {
+                    "CREATE TABLE orders (id INTEGER PRIMARY KEY, amount REAL)".to_string()
+                }
                 "insert_order_1" => "INSERT INTO orders (amount) VALUES (50.0)".to_string(),
                 "insert_order_2" => "INSERT INTO orders (amount) VALUES (75.0)".to_string(),
-                "create_inventory_table" => "CREATE TABLE inventory (id INTEGER PRIMARY KEY, quantity INTEGER)".to_string(),
+                "create_inventory_table" => {
+                    "CREATE TABLE inventory (id INTEGER PRIMARY KEY, quantity INTEGER)".to_string()
+                }
                 "insert_inventory_1" => "INSERT INTO inventory (quantity) VALUES (100)".to_string(),
                 _ => format!("-- Unknown step: {}", step.label),
             }
@@ -812,10 +886,12 @@ mod tests {
             let page_id = operation_id; // Simplified: use operation_id as page_id
             let table_name = self.extract_table_name(&step.label);
 
-            self.page_tracker
-                .write()
-                .unwrap()
-                .allocate_page(page_id, table_name, Some(operation_id), Some("saga_id".to_string()));
+            self.page_tracker.write().unwrap().allocate_page(
+                page_id,
+                table_name,
+                Some(operation_id),
+                Some("saga_id".to_string()),
+            );
 
             self.increment_sqlite_stat("pages_allocated", 1);
         }
@@ -918,14 +994,19 @@ mod tests {
             let mut harness = SqliteSagaTestHarness::new("basic_saga_transaction");
             let result = harness.test_basic_saga_transaction(&cx).await;
 
-            assert!(result.success, "Basic saga transaction test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Basic saga transaction test failed: {:?}",
+                result.error
+            );
             assert!(result.page_integrity_verified);
             assert!(result.sqlite_stats.transactions_started >= 1);
             assert!(result.sqlite_stats.statements_executed >= 3);
             assert!(result.saga_stats.sagas_created >= 1);
             assert!(result.saga_stats.saga_completions >= 1);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -934,13 +1015,18 @@ mod tests {
             let mut harness = SqliteSagaTestHarness::new("multi_statement_saga_rollback");
             let result = harness.test_multi_statement_saga_rollback(&cx).await;
 
-            assert!(result.success, "Multi-statement saga rollback test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Multi-statement saga rollback test failed: {:?}",
+                result.error
+            );
             assert!(result.page_integrity_verified);
             assert!(result.sqlite_stats.transactions_rolled_back >= 1);
             assert!(result.saga_stats.saga_rollbacks_triggered >= 1);
             assert_eq!(result.sqlite_stats.orphaned_pages_detected, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -949,22 +1035,33 @@ mod tests {
             let mut harness = SqliteSagaTestHarness::new("concurrent_saga_database_operations");
             let result = harness.test_concurrent_saga_database_operations(&cx).await;
 
-            assert!(result.success, "Concurrent saga database operations test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Concurrent saga database operations test failed: {:?}",
+                result.error
+            );
             assert!(result.page_integrity_verified);
             assert!(result.saga_stats.sagas_created >= 3);
             assert!(result.saga_stats.saga_completions >= 3);
             assert_eq!(result.sqlite_stats.orphaned_pages_detected, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn test_sqlite_comprehensive_saga_integration() {
         crate::lab::runtime::test_with_lab(|cx| async move {
             let mut harness = SqliteSagaTestHarness::new("comprehensive_sqlite_saga");
-            let result = harness.test_comprehensive_sqlite_saga_integration(&cx).await;
+            let result = harness
+                .test_comprehensive_sqlite_saga_integration(&cx)
+                .await;
 
-            assert!(result.success, "Comprehensive SQLite-saga integration test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Comprehensive SQLite-saga integration test failed: {:?}",
+                result.error
+            );
             assert!(result.page_integrity_verified);
             let sqlite_stats = result.sqlite_stats;
             let saga_stats = result.saga_stats;
@@ -975,6 +1072,7 @@ mod tests {
             assert!(saga_stats.saga_completions > 0);
             assert_eq!(sqlite_stats.orphaned_pages_detected, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

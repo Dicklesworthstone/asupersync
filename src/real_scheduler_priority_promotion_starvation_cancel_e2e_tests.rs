@@ -16,20 +16,20 @@ mod tests {
         dead_code
     )]
 
-    use std::collections::{HashMap, BTreeMap, VecDeque};
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::{Arc, Mutex, RwLock};
     use std::time::{Duration, Instant};
-    use tokio::sync::{Semaphore, Barrier, oneshot};
-    use tokio::time::{timeout, sleep};
+    use tokio::sync::{Barrier, Semaphore, oneshot};
+    use tokio::time::{sleep, timeout};
 
     // Import scheduler types and testing utilities
-    use crate::runtime::scheduler::priority::{PriorityScheduler, SchedulerEntry, DispatchLane};
-    use crate::runtime::scheduler::priority_inversion_oracle::{
-        PriorityInversionOracle, PriorityInversion, InversionType, Priority, ResourceId
-    };
-    use crate::runtime::scheduler::three_lane::{ThreeLaneScheduler, PreemptionMetrics};
-    use crate::types::{TaskId, Time, Outcome, CancelReason};
     use crate::cx::Cx;
+    use crate::runtime::scheduler::priority::{DispatchLane, PriorityScheduler, SchedulerEntry};
+    use crate::runtime::scheduler::priority_inversion_oracle::{
+        InversionType, Priority, PriorityInversion, PriorityInversionOracle, ResourceId,
+    };
+    use crate::runtime::scheduler::three_lane::{PreemptionMetrics, ThreeLaneScheduler};
+    use crate::types::{CancelReason, Outcome, TaskId, Time};
 
     // ---------------------------------------------------------------------------
     // Priority Promotion Test Framework
@@ -109,7 +109,12 @@ mod tests {
             );
         }
 
-        async fn log_promotion_event(&self, task_id: TaskId, from_priority: Priority, to_priority: Priority) {
+        async fn log_promotion_event(
+            &self,
+            task_id: TaskId,
+            from_priority: Priority,
+            to_priority: Priority,
+        ) {
             let elapsed = self.start_time.elapsed().as_millis() as u64;
             eprintln!(
                 "{{\"ts\":\"{}\",\"test\":\"{}\",\"event\":\"priority_promotion\",\"task_id\":{},\"from_priority\":{},\"to_priority\":{},\"elapsed_ms\":{}}}",
@@ -143,11 +148,7 @@ mod tests {
             stat_updater(&mut stats);
         }
 
-        async fn finalize(
-            &self,
-            result: bool,
-            error: Option<String>,
-        ) -> PromotionTestResult {
+        async fn finalize(&self, result: bool, error: Option<String>) -> PromotionTestResult {
             let stats = self.stats.read().unwrap().clone();
             PromotionTestResult {
                 test_name: self.test_name.clone(),
@@ -248,9 +249,9 @@ mod tests {
         }
 
         pub fn promotion_delay(&self) -> Option<Duration> {
-            self.promotion_history.first().map(|event| {
-                event.timestamp.duration_since(self.creation_time)
-            })
+            self.promotion_history
+                .first()
+                .map(|event| event.timestamp.duration_since(self.creation_time))
         }
     }
 
@@ -306,7 +307,9 @@ mod tests {
                 timed_queue: Arc::new(Mutex::new(VecDeque::new())),
                 ready_queue: Arc::new(Mutex::new(BTreeMap::new())),
                 cancel_streak_count: Arc::new(Mutex::new(0)),
-                starvation_detector: Arc::new(Mutex::new(StarvationDetector::new(starvation_threshold_us))),
+                starvation_detector: Arc::new(Mutex::new(StarvationDetector::new(
+                    starvation_threshold_us,
+                ))),
             }
         }
 
@@ -326,7 +329,9 @@ mod tests {
                     self.timed_queue.lock().unwrap().push_back(task_id);
                 }
                 DispatchLane::Ready => {
-                    self.ready_queue.lock().unwrap()
+                    self.ready_queue
+                        .lock()
+                        .unwrap()
                         .entry(priority)
                         .or_insert_with(VecDeque::new)
                         .push_back(task_id);
@@ -351,15 +356,20 @@ mod tests {
                 // Resource is owned, task gets blocked
                 if let Some(task) = tasks.get_mut(&task_id) {
                     task.execution_state = TaskExecutionState::Blocked;
-                    blocked.entry(task_id).or_insert_with(Vec::new).push(resource_id);
+                    blocked
+                        .entry(task_id)
+                        .or_insert_with(Vec::new)
+                        .push(resource_id);
 
                     // Check for priority inversion
                     if let Some(blocking_task) = tasks.get(owner) {
                         if task.current_priority > blocking_task.current_priority {
                             // Priority inversion detected
-                            logger.increment_stat(|stats| {
-                                stats.inversion_events_detected += 1;
-                            }).await;
+                            logger
+                                .increment_stat(|stats| {
+                                    stats.inversion_events_detected += 1;
+                                })
+                                .await;
 
                             return Ok(false); // Task is blocked
                         }
@@ -391,14 +401,21 @@ mod tests {
                 self.cancel_queue.lock().unwrap().push_back(task_id);
 
                 // Record starvation timing
-                self.starvation_detector.lock().unwrap()
-                    .starved_cancel_requests.push((task_id, Instant::now()));
+                self.starvation_detector
+                    .lock()
+                    .unwrap()
+                    .starved_cancel_requests
+                    .push((task_id, Instant::now()));
 
-                logger.increment_stat(|stats| {
-                    stats.cancel_requests_issued += 1;
-                }).await;
+                logger
+                    .increment_stat(|stats| {
+                        stats.cancel_requests_issued += 1;
+                    })
+                    .await;
 
-                logger.log_cancel_event(task_id, "cancel_requested", false).await;
+                logger
+                    .log_cancel_event(task_id, "cancel_requested", false)
+                    .await;
 
                 Ok(())
             } else {
@@ -415,14 +432,16 @@ mod tests {
             let mut promoted_tasks = Vec::new();
 
             // Check for starved cancel requests
-            let starved_tasks = self.starvation_detector.lock().unwrap()
+            let starved_tasks = self
+                .starvation_detector
+                .lock()
+                .unwrap()
                 .detect_starvation(now);
 
             for starved_task_id in starved_tasks {
-                let promoted = self.promote_blocking_tasks_for_cancel(
-                    starved_task_id,
-                    logger
-                ).await?;
+                let promoted = self
+                    .promote_blocking_tasks_for_cancel(starved_task_id, logger)
+                    .await?;
                 promoted_tasks.extend(promoted);
             }
 
@@ -446,11 +465,12 @@ mod tests {
                     if let Some(blocking_task_id) = ownership.get(resource_id) {
                         if let Some(blocking_task) = tasks.get_mut(blocking_task_id) {
                             // Get the priority of the cancel task
-                            let cancel_priority = if let Some(cancel_task) = tasks.get(&cancel_task_id) {
-                                cancel_task.current_priority
-                            } else {
-                                continue;
-                            };
+                            let cancel_priority =
+                                if let Some(cancel_task) = tasks.get(&cancel_task_id) {
+                                    cancel_task.current_priority
+                                } else {
+                                    continue;
+                                };
 
                             // Promote the blocking task if it has lower priority
                             if blocking_task.current_priority < cancel_priority {
@@ -458,23 +478,27 @@ mod tests {
 
                                 blocking_task.promote(
                                     cancel_priority,
-                                    PromotionReason::CancelStarvationPrevention
+                                    PromotionReason::CancelStarvationPrevention,
                                 );
 
                                 let promotion_delay = promotion_start.elapsed().as_micros() as u64;
 
-                                logger.log_promotion_event(
-                                    *blocking_task_id,
-                                    blocking_task.original_priority,
-                                    cancel_priority
-                                ).await;
+                                logger
+                                    .log_promotion_event(
+                                        *blocking_task_id,
+                                        blocking_task.original_priority,
+                                        cancel_priority,
+                                    )
+                                    .await;
 
-                                logger.increment_stat(|stats| {
-                                    stats.priority_promotions += 1;
-                                    stats.max_promotion_delay_us =
-                                        stats.max_promotion_delay_us.max(promotion_delay);
-                                    stats.total_promotion_time_us += promotion_delay;
-                                }).await;
+                                logger
+                                    .increment_stat(|stats| {
+                                        stats.priority_promotions += 1;
+                                        stats.max_promotion_delay_us =
+                                            stats.max_promotion_delay_us.max(promotion_delay);
+                                        stats.total_promotion_time_us += promotion_delay;
+                                    })
+                                    .await;
 
                                 promoted_tasks.push(*blocking_task_id);
                             }
@@ -540,12 +564,16 @@ mod tests {
                 if let Some(task) = tasks.get_mut(&task_id) {
                     if task.is_cancel_target {
                         task.execution_state = TaskExecutionState::Completed;
-                        logger.log_cancel_event(task_id, "cancel_completed", true).await;
+                        logger
+                            .log_cancel_event(task_id, "cancel_completed", true)
+                            .await;
 
-                        logger.increment_stat(|stats| {
-                            stats.cancel_propagations_completed += 1;
-                            stats.successful_cancel_completions += 1;
-                        }).await;
+                        logger
+                            .increment_stat(|stats| {
+                                stats.cancel_propagations_completed += 1;
+                                stats.successful_cancel_completions += 1;
+                            })
+                            .await;
                     } else {
                         task.execution_state = TaskExecutionState::Completed;
                     }
@@ -575,11 +603,15 @@ mod tests {
             let tasks = self.tasks.lock().unwrap();
             let total = tasks.len();
             let promoted = tasks.values().filter(|t| t.was_promoted()).count();
-            let completed = tasks.values()
+            let completed = tasks
+                .values()
                 .filter(|t| t.execution_state == TaskExecutionState::Completed)
                 .count();
-            let cancelled = tasks.values()
-                .filter(|t| t.is_cancel_target && t.execution_state == TaskExecutionState::Completed)
+            let cancelled = tasks
+                .values()
+                .filter(|t| {
+                    t.is_cancel_target && t.execution_state == TaskExecutionState::Completed
+                })
                 .count();
 
             (total, promoted, completed, cancelled)
@@ -595,18 +627,22 @@ mod tests {
         let scheduler_id = "basic-cancel-starvation".to_string();
         let mut logger = PromotionE2ELogger::new(
             "scheduler_priority_promotion_basic_cancel_starvation".to_string(),
-            scheduler_id.clone()
+            scheduler_id.clone(),
         );
 
         logger.log_phase(PromotionTestPhase::Setup).await;
 
         let result = async {
             // Create scheduler with 1ms starvation threshold
-            logger.log_phase(PromotionTestPhase::SchedulerInitialization).await;
+            logger
+                .log_phase(PromotionTestPhase::SchedulerInitialization)
+                .await;
             let scheduler = PromotionTestScheduler::new(scheduler_id.clone(), 1000); // 1ms
 
             // Create low-priority tasks that will hold resources
-            logger.log_phase(PromotionTestPhase::LowPriorityTasksStart).await;
+            logger
+                .log_phase(PromotionTestPhase::LowPriorityTasksStart)
+                .await;
             let resource1 = ResourceId::new(1);
             let resource2 = ResourceId::new(2);
 
@@ -619,17 +655,23 @@ mod tests {
 
             scheduler.add_task(low_priority_task).await;
 
-            logger.increment_stat(|stats| {
-                stats.low_priority_tasks_created += 1;
-            }).await;
+            logger
+                .increment_stat(|stats| {
+                    stats.low_priority_tasks_created += 1;
+                })
+                .await;
 
             // Simulate resource blocking
             logger.log_phase(PromotionTestPhase::ResourceBlocking).await;
-            let blocked = scheduler.request_resource(TaskId::new(1), resource1, &logger).await?;
+            let blocked = scheduler
+                .request_resource(TaskId::new(1), resource1, &logger)
+                .await?;
             assert!(blocked, "Low-priority task should acquire resource");
 
             // Create high-priority cancel task that needs the same resource
-            logger.log_phase(PromotionTestPhase::HighPriorityCancelRequest).await;
+            logger
+                .log_phase(PromotionTestPhase::HighPriorityCancelRequest)
+                .await;
             let high_priority_task = PromotionTestTask::new(
                 TaskId::new(2),
                 100, // High priority
@@ -638,16 +680,23 @@ mod tests {
             );
 
             scheduler.add_task(high_priority_task).await;
-            logger.increment_stat(|stats| {
-                stats.high_priority_tasks_created += 1;
-            }).await;
+            logger
+                .increment_stat(|stats| {
+                    stats.high_priority_tasks_created += 1;
+                })
+                .await;
 
             // Request cancellation (this should trigger starvation)
             scheduler.request_cancel(TaskId::new(2), &logger).await?;
 
             // Simulate high-priority task getting blocked
-            let grant = scheduler.request_resource(TaskId::new(2), resource1, &logger).await?;
-            assert!(!grant, "High-priority task should be blocked by low-priority task");
+            let grant = scheduler
+                .request_resource(TaskId::new(2), resource1, &logger)
+                .await?;
+            assert!(
+                !grant,
+                "High-priority task should be blocked by low-priority task"
+            );
 
             // Wait for starvation threshold to be exceeded
             sleep(Duration::from_millis(2)).await; // Exceed 1ms threshold
@@ -656,18 +705,34 @@ mod tests {
             logger.log_phase(PromotionTestPhase::PromotionTrigger).await;
             let promoted_tasks = scheduler.check_and_promote_starved_tasks(&logger).await?;
 
-            logger.log_phase(PromotionTestPhase::PromotionVerification).await;
-            assert!(!promoted_tasks.is_empty(), "At least one task should be promoted");
-            assert!(promoted_tasks.contains(&TaskId::new(1)), "Low-priority task should be promoted");
+            logger
+                .log_phase(PromotionTestPhase::PromotionVerification)
+                .await;
+            assert!(
+                !promoted_tasks.is_empty(),
+                "At least one task should be promoted"
+            );
+            assert!(
+                promoted_tasks.contains(&TaskId::new(1)),
+                "Low-priority task should be promoted"
+            );
 
             // Verify the task was actually promoted
             let tasks = scheduler.tasks.lock().unwrap();
             let promoted_task = tasks.get(&TaskId::new(1)).unwrap();
-            assert!(promoted_task.was_promoted(), "Task should have promotion history");
-            assert_eq!(promoted_task.current_priority, 100, "Task should be promoted to high priority");
+            assert!(
+                promoted_task.was_promoted(),
+                "Task should have promotion history"
+            );
+            assert_eq!(
+                promoted_task.current_priority, 100,
+                "Task should be promoted to high priority"
+            );
 
             // Execute tasks and verify cancel propagation
-            logger.log_phase(PromotionTestPhase::CancelPropagation).await;
+            logger
+                .log_phase(PromotionTestPhase::CancelPropagation)
+                .await;
 
             // Execute promoted task first (it should complete quickly)
             let executed1 = scheduler.dispatch_next_task(&logger).await?;
@@ -685,7 +750,8 @@ mod tests {
             assert_eq!(cancelled, 1, "Should have 1 completed cancel task");
 
             Ok::<(), String>(())
-        }.await;
+        }
+        .await;
 
         let test_result = match result {
             Ok(()) => {
@@ -698,7 +764,11 @@ mod tests {
 
                 logger.finalize(true, None).await
             }
-            Err(e) => logger.finalize(false, Some(format!("Test failed: {e}"))).await,
+            Err(e) => {
+                logger
+                    .finalize(false, Some(format!("Test failed: {e}")))
+                    .await
+            }
         };
 
         logger.log_phase(PromotionTestPhase::Teardown).await;
@@ -718,7 +788,7 @@ mod tests {
         let scheduler_id = "chain-blocking".to_string();
         let mut logger = PromotionE2ELogger::new(
             "scheduler_priority_promotion_chain_blocking".to_string(),
-            scheduler_id.clone()
+            scheduler_id.clone(),
         );
 
         let result = async {
@@ -755,40 +825,65 @@ mod tests {
             );
             scheduler.add_task(task1).await;
 
-            logger.increment_stat(|stats| {
-                stats.low_priority_tasks_created += 1;
-                stats.high_priority_tasks_created += 2; // tasks 1 and 2
-            }).await;
+            logger
+                .increment_stat(|stats| {
+                    stats.low_priority_tasks_created += 1;
+                    stats.high_priority_tasks_created += 2; // tasks 1 and 2
+                })
+                .await;
 
             // Set up blocking chain
-            let _r2_grant = scheduler.request_resource(TaskId::new(3), resource2, &logger).await?;
-            let _r1_grant = scheduler.request_resource(TaskId::new(2), resource1, &logger).await?;
-            let _r2_block = scheduler.request_resource(TaskId::new(2), resource2, &logger).await?; // Blocked by task3
+            let _r2_grant = scheduler
+                .request_resource(TaskId::new(3), resource2, &logger)
+                .await?;
+            let _r1_grant = scheduler
+                .request_resource(TaskId::new(2), resource1, &logger)
+                .await?;
+            let _r2_block = scheduler
+                .request_resource(TaskId::new(2), resource2, &logger)
+                .await?; // Blocked by task3
 
             scheduler.request_cancel(TaskId::new(1), &logger).await?;
-            let _r1_block = scheduler.request_resource(TaskId::new(1), resource1, &logger).await?; // Blocked by task2
+            let _r1_block = scheduler
+                .request_resource(TaskId::new(1), resource1, &logger)
+                .await?; // Blocked by task2
 
             // Wait and trigger promotion
             sleep(Duration::from_millis(1)).await;
             let promoted_tasks = scheduler.check_and_promote_starved_tasks(&logger).await?;
 
             // Both blocking tasks in the chain should be promoted
-            assert!(promoted_tasks.len() >= 1, "At least one task should be promoted");
+            assert!(
+                promoted_tasks.len() >= 1,
+                "At least one task should be promoted"
+            );
 
             // Verify priority inheritance propagated down the chain
             let tasks = scheduler.tasks.lock().unwrap();
             let task3_promoted = tasks.get(&TaskId::new(3)).unwrap();
-            assert!(task3_promoted.was_promoted(), "Lowest priority task should be promoted to break the chain");
+            assert!(
+                task3_promoted.was_promoted(),
+                "Lowest priority task should be promoted to break the chain"
+            );
 
             Ok::<(), String>(())
-        }.await;
+        }
+        .await;
 
         let test_result = match result {
             Ok(()) => logger.finalize(true, None).await,
-            Err(e) => logger.finalize(false, Some(format!("Chain blocking test failed: {e}"))).await,
+            Err(e) => {
+                logger
+                    .finalize(false, Some(format!("Chain blocking test failed: {e}")))
+                    .await
+            }
         };
 
-        assert!(test_result.success, "Chain blocking test failed: {:?}", test_result.error);
+        assert!(
+            test_result.success,
+            "Chain blocking test failed: {:?}",
+            test_result.error
+        );
 
         eprintln!("✅ Scheduler priority promotion chain blocking test completed successfully");
     }
@@ -798,7 +893,7 @@ mod tests {
         let scheduler_id = "promotion-stress".to_string();
         let mut logger = PromotionE2ELogger::new(
             "scheduler_priority_promotion_stress".to_string(),
-            scheduler_id.clone()
+            scheduler_id.clone(),
         );
 
         const NUM_LOW_PRIORITY: usize = 8;
@@ -820,7 +915,9 @@ mod tests {
 
                 // Grant them their resources
                 let resource_id = ResourceId::new(i % NUM_RESOURCES as u64);
-                scheduler.request_resource(TaskId::new(i as u64 + 100), resource_id, &logger).await?;
+                scheduler
+                    .request_resource(TaskId::new(i as u64 + 100), resource_id, &logger)
+                    .await?;
             }
 
             // Create high-priority cancel tasks that need those same resources
@@ -832,25 +929,33 @@ mod tests {
                     vec![ResourceId::new(i % NUM_RESOURCES as u64)],
                 );
                 scheduler.add_task(task).await;
-                scheduler.request_cancel(TaskId::new(i as u64 + 200), &logger).await?;
+                scheduler
+                    .request_cancel(TaskId::new(i as u64 + 200), &logger)
+                    .await?;
 
                 // They get blocked
                 let resource_id = ResourceId::new(i % NUM_RESOURCES as u64);
-                scheduler.request_resource(TaskId::new(i as u64 + 200), resource_id, &logger).await?;
+                scheduler
+                    .request_resource(TaskId::new(i as u64 + 200), resource_id, &logger)
+                    .await?;
             }
 
-            logger.increment_stat(|stats| {
-                stats.low_priority_tasks_created = NUM_LOW_PRIORITY as u64;
-                stats.high_priority_tasks_created = NUM_HIGH_PRIORITY as u64;
-            }).await;
+            logger
+                .increment_stat(|stats| {
+                    stats.low_priority_tasks_created = NUM_LOW_PRIORITY as u64;
+                    stats.high_priority_tasks_created = NUM_HIGH_PRIORITY as u64;
+                })
+                .await;
 
             // Wait for starvation and trigger mass promotion
             sleep(Duration::from_millis(1)).await;
             let promoted_tasks = scheduler.check_and_promote_starved_tasks(&logger).await?;
 
             // Should promote at least as many tasks as we have blocked cancel tasks
-            assert!(promoted_tasks.len() >= NUM_HIGH_PRIORITY,
-                "Should promote enough tasks to unblock cancel operations");
+            assert!(
+                promoted_tasks.len() >= NUM_HIGH_PRIORITY,
+                "Should promote enough tasks to unblock cancel operations"
+            );
 
             // Execute all tasks and verify system reaches quiescence
             while let Some(_) = scheduler.dispatch_next_task(&logger).await? {
@@ -859,11 +964,18 @@ mod tests {
 
             let (total, promoted, completed, cancelled) = scheduler.get_task_stats().await;
             assert_eq!(total, NUM_LOW_PRIORITY + NUM_HIGH_PRIORITY);
-            assert!(promoted >= NUM_HIGH_PRIORITY, "Should have promoted enough tasks");
-            assert_eq!(cancelled, NUM_HIGH_PRIORITY, "All cancel requests should complete");
+            assert!(
+                promoted >= NUM_HIGH_PRIORITY,
+                "Should have promoted enough tasks"
+            );
+            assert_eq!(
+                cancelled, NUM_HIGH_PRIORITY,
+                "All cancel requests should complete"
+            );
 
             Ok::<(), String>(())
-        }.await;
+        }
+        .await;
 
         let test_result = match result {
             Ok(()) => {
@@ -871,17 +983,31 @@ mod tests {
                 assert_eq!(stats.low_priority_tasks_created, NUM_LOW_PRIORITY as u64);
                 assert_eq!(stats.high_priority_tasks_created, NUM_HIGH_PRIORITY as u64);
                 assert!(stats.priority_promotions > 0, "Should have some promotions");
-                assert_eq!(stats.successful_cancel_completions, NUM_HIGH_PRIORITY as u64);
+                assert_eq!(
+                    stats.successful_cancel_completions,
+                    NUM_HIGH_PRIORITY as u64
+                );
 
                 logger.finalize(true, None).await
             }
-            Err(e) => logger.finalize(false, Some(format!("Stress test failed: {e}"))).await,
+            Err(e) => {
+                logger
+                    .finalize(false, Some(format!("Stress test failed: {e}")))
+                    .await
+            }
         };
 
-        assert!(test_result.success, "Stress test failed: {:?}", test_result.error);
+        assert!(
+            test_result.success,
+            "Stress test failed: {:?}",
+            test_result.error
+        );
 
         eprintln!("✅ Scheduler priority promotion stress test completed successfully");
-        eprintln!("🎯 Handled {} low-priority and {} high-priority tasks", NUM_LOW_PRIORITY, NUM_HIGH_PRIORITY);
+        eprintln!(
+            "🎯 Handled {} low-priority and {} high-priority tasks",
+            NUM_LOW_PRIORITY, NUM_HIGH_PRIORITY
+        );
     }
 
     #[tokio::test]
@@ -889,24 +1015,23 @@ mod tests {
         let scheduler_id = "timing-verification".to_string();
         let mut logger = PromotionE2ELogger::new(
             "scheduler_priority_promotion_timing_verification".to_string(),
-            scheduler_id.clone()
+            scheduler_id.clone(),
         );
 
         let result = async {
             let starvation_threshold_us = 100;
-            let scheduler = PromotionTestScheduler::new(scheduler_id.clone(), starvation_threshold_us);
+            let scheduler =
+                PromotionTestScheduler::new(scheduler_id.clone(), starvation_threshold_us);
 
             let resource_id = ResourceId::new(1);
 
             // Low-priority blocking task
-            let blocking_task = PromotionTestTask::new(
-                TaskId::new(1),
-                20,
-                DispatchLane::Ready,
-                vec![resource_id],
-            );
+            let blocking_task =
+                PromotionTestTask::new(TaskId::new(1), 20, DispatchLane::Ready, vec![resource_id]);
             scheduler.add_task(blocking_task).await;
-            scheduler.request_resource(TaskId::new(1), resource_id, &logger).await?;
+            scheduler
+                .request_resource(TaskId::new(1), resource_id, &logger)
+                .await?;
 
             // High-priority cancel task
             let cancel_task = PromotionTestTask::new(
@@ -919,12 +1044,17 @@ mod tests {
 
             let request_time = Instant::now();
             scheduler.request_cancel(TaskId::new(2), &logger).await?;
-            scheduler.request_resource(TaskId::new(2), resource_id, &logger).await?; // Gets blocked
+            scheduler
+                .request_resource(TaskId::new(2), resource_id, &logger)
+                .await?; // Gets blocked
 
             // Wait just under threshold - should not promote
             sleep(Duration::from_micros(starvation_threshold_us / 2)).await;
             let early_promoted = scheduler.check_and_promote_starved_tasks(&logger).await?;
-            assert!(early_promoted.is_empty(), "Should not promote before threshold");
+            assert!(
+                early_promoted.is_empty(),
+                "Should not promote before threshold"
+            );
 
             // Wait past threshold - should promote
             sleep(Duration::from_micros(starvation_threshold_us)).await;
@@ -934,27 +1064,42 @@ mod tests {
             assert!(!promoted_tasks.is_empty(), "Should promote after threshold");
 
             let total_delay = promotion_time.duration_since(request_time);
-            assert!(total_delay.as_micros() as u64 >= starvation_threshold_us,
-                "Promotion should occur after starvation threshold");
+            assert!(
+                total_delay.as_micros() as u64 >= starvation_threshold_us,
+                "Promotion should occur after starvation threshold"
+            );
 
             // Verify promotion timing is recorded
             let tasks = scheduler.tasks.lock().unwrap();
             let promoted_task = tasks.get(&TaskId::new(1)).unwrap();
             let delay = promoted_task.promotion_delay().unwrap();
-            assert!(delay.as_micros() as u64 >= starvation_threshold_us,
-                "Recorded promotion delay should meet threshold");
+            assert!(
+                delay.as_micros() as u64 >= starvation_threshold_us,
+                "Recorded promotion delay should meet threshold"
+            );
 
             Ok::<(), String>(())
-        }.await;
+        }
+        .await;
 
         let test_result = match result {
             Ok(()) => logger.finalize(true, None).await,
-            Err(e) => logger.finalize(false, Some(format!("Timing test failed: {e}"))).await,
+            Err(e) => {
+                logger
+                    .finalize(false, Some(format!("Timing test failed: {e}")))
+                    .await
+            }
         };
 
-        assert!(test_result.success, "Timing verification test failed: {:?}", test_result.error);
+        assert!(
+            test_result.success,
+            "Timing verification test failed: {:?}",
+            test_result.error
+        );
 
-        eprintln!("✅ Scheduler priority promotion timing verification test completed successfully");
+        eprintln!(
+            "✅ Scheduler priority promotion timing verification test completed successfully"
+        );
         eprintln!("⏱️  Starvation threshold enforcement verified");
     }
 
@@ -978,7 +1123,7 @@ mod tests {
         let scheduler_id = "stats-accuracy".to_string();
         let mut logger = PromotionE2ELogger::new(
             "scheduler_priority_promotion_stats_accuracy".to_string(),
-            scheduler_id.clone()
+            scheduler_id.clone(),
         );
 
         let result = async {
@@ -996,7 +1141,9 @@ mod tests {
                     vec![resource_id],
                 );
                 scheduler.add_task(blocking_task).await;
-                scheduler.request_resource(TaskId::new(i + 10), resource_id, &logger).await?;
+                scheduler
+                    .request_resource(TaskId::new(i + 10), resource_id, &logger)
+                    .await?;
 
                 // High-priority cancel task
                 let cancel_task = PromotionTestTask::new(
@@ -1006,8 +1153,12 @@ mod tests {
                     vec![resource_id],
                 );
                 scheduler.add_task(cancel_task).await;
-                scheduler.request_cancel(TaskId::new(i + 20), &logger).await?;
-                scheduler.request_resource(TaskId::new(i + 20), resource_id, &logger).await?;
+                scheduler
+                    .request_cancel(TaskId::new(i + 20), &logger)
+                    .await?;
+                scheduler
+                    .request_resource(TaskId::new(i + 20), resource_id, &logger)
+                    .await?;
             }
 
             // Wait and trigger promotions
@@ -1021,7 +1172,8 @@ mod tests {
             }
 
             Ok::<(), String>(())
-        }.await;
+        }
+        .await;
 
         let test_result = match result {
             Ok(()) => {
@@ -1036,14 +1188,25 @@ mod tests {
 
                 assert_eq!(stats.low_priority_tasks_created, 2);
                 assert_eq!(stats.high_priority_tasks_created, 2);
-                assert!(stats.total_promotion_time_us > 0, "Should track promotion timing");
+                assert!(
+                    stats.total_promotion_time_us > 0,
+                    "Should track promotion timing"
+                );
 
                 logger.finalize(true, None).await
             }
-            Err(e) => logger.finalize(false, Some(format!("Stats accuracy test failed: {e}"))).await,
+            Err(e) => {
+                logger
+                    .finalize(false, Some(format!("Stats accuracy test failed: {e}")))
+                    .await
+            }
         };
 
-        assert!(test_result.success, "Stats accuracy test failed: {:?}", test_result.error);
+        assert!(
+            test_result.success,
+            "Stats accuracy test failed: {:?}",
+            test_result.error
+        );
 
         eprintln!("✅ Scheduler priority promotion stats accuracy test completed successfully");
         eprintln!("📈 All statistics precisely verified");

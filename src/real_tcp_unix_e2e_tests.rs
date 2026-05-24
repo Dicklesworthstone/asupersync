@@ -69,17 +69,18 @@ mod tcp_unix_e2e_tests {
                 Err(_) => {
                     attempts += 1;
                     let _ = sleep(&Cx::root(), backoff).await;
-                    backoff = Duration::from_millis(
-                        std::cmp::min(
-                            (backoff.as_millis() as f64 * config.backoff_multiplier) as u64,
-                            config.max_delay.as_millis() as u64
-                        )
-                    );
+                    backoff = Duration::from_millis(std::cmp::min(
+                        (backoff.as_millis() as f64 * config.backoff_multiplier) as u64,
+                        config.max_delay.as_millis() as u64,
+                    ));
                 }
             }
         }
 
-        Err(format!("Server not ready after {} attempts at {}", config.max_attempts, addr))
+        Err(format!(
+            "Server not ready after {} attempts at {}",
+            config.max_attempts, addr
+        ))
     }
 
     /// Real TCP server for E2E testing with actual socket binding
@@ -642,7 +643,8 @@ mod tcp_unix_e2e_tests {
             };
 
             // Wait for server to be ready for connections
-            wait_for_server_ready(server_addr, PollingConfig::server_startup()).await
+            wait_for_server_ready(server_addr, PollingConfig::server_startup())
+                .await
                 .expect("Server should become ready for connections");
 
             // Connect as client and send test message
@@ -701,7 +703,8 @@ mod tcp_unix_e2e_tests {
 
             eprintln!("TCP E2E structured log:\n{}", logger.export_json());
             Ok::<(), Box<dyn std::error::Error>>(())
-        }).await
+        })
+        .await
         .map_err(|_| "TCP echo server test timed out after 45 seconds".into())
     }
 
@@ -889,10 +892,7 @@ mod tcp_unix_e2e_tests {
         // Test connection to non-existent port
         let unreachable_addr = "127.0.0.1:1".parse::<SocketAddr>().unwrap();
         let result = TcpStream::connect(unreachable_addr).await;
-        assert!(
-            result.is_err(),
-            "Should fail to connect to unused port 1"
-        );
+        assert!(result.is_err(), "Should fail to connect to unused port 1");
 
         // Test bind to invalid address (should fail)
         let invalid_bind_addr = "999.999.999.999:8080".parse::<SocketAddr>();
@@ -934,7 +934,8 @@ mod tcp_unix_e2e_tests {
         let start = Instant::now();
         let result = timeout(Duration::from_millis(100), async {
             TcpStream::connect(non_routable_addr).await
-        }).await;
+        })
+        .await;
 
         let elapsed = start.elapsed();
         assert!(

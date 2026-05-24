@@ -23,24 +23,24 @@ use crate::{
     cx::{Cx, Scope},
     error::Outcome,
     raptorq::{
-        proof::{
-            ProofGenerator, ProofValidator, RaptorQProof, ProofConfig, ProofVerificationResult,
-            CorrectnessProof, DecodingProof, ProofStats,
-        },
-        regression::{
-            RegressionDetector, RegressionConfig, RegressionEvent, QualityRegression,
-            RegressionReport, RegressionThreshold, PerformanceBaseline,
-        },
-        gf256::Gf256,
-        rfc6330::{ObjectTransmissionInformation, SourceBlockNumber, Symbol, SymbolId},
-        systematic::SystematicIndex,
+        ObjectId, PayloadId, RepairSymbol, SourceSymbol,
         decoder::{Decoder, DecoderConfig, DecoderStats},
         encoder::{Encoder, EncoderConfig, EncodingParams},
-        ObjectId, PayloadId, SourceSymbol, RepairSymbol,
+        gf256::Gf256,
+        proof::{
+            CorrectnessProof, DecodingProof, ProofConfig, ProofGenerator, ProofStats,
+            ProofValidator, ProofVerificationResult, RaptorQProof,
+        },
+        regression::{
+            PerformanceBaseline, QualityRegression, RegressionConfig, RegressionDetector,
+            RegressionEvent, RegressionReport, RegressionThreshold,
+        },
+        rfc6330::{ObjectTransmissionInformation, SourceBlockNumber, Symbol, SymbolId},
+        systematic::SystematicIndex,
     },
     runtime::RuntimeBuilder,
     sync::{Barrier, Mutex},
-    time::{Duration, Sleep, Instant},
+    time::{Duration, Instant, Sleep},
     types::{Budget, TaskId},
     util::{
         det_rng::{DetRng, RngSeed},
@@ -50,8 +50,8 @@ use crate::{
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -99,7 +99,8 @@ impl RegressionProofTracker {
     }
 
     fn record_proof_validation_failure(&self) -> u64 {
-        self.proof_validation_failures.fetch_add(1, Ordering::Relaxed)
+        self.proof_validation_failures
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     fn record_regression_detected(&self) -> u64 {
@@ -107,15 +108,18 @@ impl RegressionProofTracker {
     }
 
     fn record_regression_source_block(&self) -> u64 {
-        self.regression_source_blocks.fetch_add(1, Ordering::Relaxed)
+        self.regression_source_blocks
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     fn record_synthetic_regression_injected(&self) -> u64 {
-        self.synthetic_regressions_injected.fetch_add(1, Ordering::Relaxed)
+        self.synthetic_regressions_injected
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     fn record_quality_threshold_violation(&self) -> u64 {
-        self.quality_threshold_violations.fetch_add(1, Ordering::Relaxed)
+        self.quality_threshold_violations
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     async fn record_regression_event(
@@ -187,9 +191,13 @@ impl SyntheticRegressionInjector {
         regression_tracker: RegressionProofTracker,
     ) -> Self {
         let regression_types = vec![
-            RegressionType::SlowDecoding { slowdown_factor: 2.0 },
+            RegressionType::SlowDecoding {
+                slowdown_factor: 2.0,
+            },
             RegressionType::SymbolErrorRate { error_rate: 0.05 },
-            RegressionType::MemoryRegression { overhead_factor: 1.5 },
+            RegressionType::MemoryRegression {
+                overhead_factor: 1.5,
+            },
             RegressionType::ConvergenceFailure { failure_rate: 0.1 },
         ];
 
@@ -213,11 +221,11 @@ impl SyntheticRegressionInjector {
 
         let mut rng = self.rng.lock(cx).await;
         if rng.gen_range(0.0..1.0) < self.injection_probability {
-            let regression_type = self.regression_types[
-                rng.gen_range(0..self.regression_types.len())
-            ].clone();
+            let regression_type =
+                self.regression_types[rng.gen_range(0..self.regression_types.len())].clone();
 
-            self.regression_tracker.record_synthetic_regression_injected();
+            self.regression_tracker
+                .record_synthetic_regression_injected();
             Some(regression_type)
         } else {
             None
@@ -231,11 +239,7 @@ impl SyntheticRegressionInjector {
         regression_type: &RegressionType,
     ) -> RegressionEvent {
         self.regression_tracker
-            .record_regression_event(
-                cx,
-                source_block,
-                format!("synthetic_{:?}", regression_type),
-            )
+            .record_regression_event(cx, source_block, format!("synthetic_{:?}", regression_type))
             .await;
 
         match regression_type {
@@ -251,14 +255,12 @@ impl SyntheticRegressionInjector {
                     regression_factor: *slowdown_factor,
                 }
             }
-            RegressionType::SymbolErrorRate { error_rate } => {
-                RegressionEvent::QualityRegression {
-                    source_block,
-                    baseline_quality: 0.999,
-                    observed_quality: 1.0 - error_rate,
-                    error_threshold: 0.01,
-                }
-            }
+            RegressionType::SymbolErrorRate { error_rate } => RegressionEvent::QualityRegression {
+                source_block,
+                baseline_quality: 0.999,
+                observed_quality: 1.0 - error_rate,
+                error_threshold: 0.01,
+            },
             RegressionType::MemoryRegression { overhead_factor } => {
                 RegressionEvent::MemoryRegression {
                     source_block,
@@ -335,7 +337,7 @@ impl ProofEnabledRaptorQDecoder {
             regression_event = Some(
                 self.regression_injector
                     .inject_regression(cx, source_block, &regression_type)
-                    .await
+                    .await,
             );
 
             self.regression_tracker.record_regression_detected();
@@ -401,15 +403,18 @@ impl ProofEnabledRaptorQDecoder {
                 "Proof validation failed for source block {}: {:?}",
                 source_block.value(),
                 proof_result.failure_reason()
-            ).into());
+            )
+            .into());
         }
 
         // Check for performance regression
         let mut baselines = self.baselines.lock(cx).await;
         let performance_regression = if let Some(baseline) = baselines.get(&source_block) {
-            let regression_factor = decode_duration.as_millis() as f64 / baseline.decode_time.as_millis() as f64;
+            let regression_factor =
+                decode_duration.as_millis() as f64 / baseline.decode_time.as_millis() as f64;
 
-            if regression_factor > 1.5 { // 50% slowdown threshold
+            if regression_factor > 1.5 {
+                // 50% slowdown threshold
                 self.regression_tracker.record_regression_detected();
                 self.regression_tracker.record_regression_source_block();
 
@@ -428,19 +433,24 @@ impl ProofEnabledRaptorQDecoder {
             }
         } else {
             // Establish baseline for future comparison
-            baselines.insert(source_block, PerformanceBaseline {
-                decode_time: decode_duration,
-                memory_usage: 1024 * 1024, // Simplified
-                success_rate: 1.0,
-                quality_score: 1.0,
-            });
+            baselines.insert(
+                source_block,
+                PerformanceBaseline {
+                    decode_time: decode_duration,
+                    memory_usage: 1024 * 1024, // Simplified
+                    success_rate: 1.0,
+                    quality_score: 1.0,
+                },
+            );
             None
         };
 
         // Report any detected regression
         let final_regression = regression_event.or(performance_regression);
         if let Some(regression) = &final_regression {
-            self.regression_detector.report_regression(cx, regression.clone()).await?;
+            self.regression_detector
+                .report_regression(cx, regression.clone())
+                .await?;
         }
 
         Ok((decoded_data, Some(proof), final_regression))
@@ -762,7 +772,7 @@ async fn test_proof_validation_failure_regression_correlation() -> Outcome<()> {
 
                     let regression_config = RegressionConfig {
                         performance_threshold: 1.2, // Lower threshold
-                        quality_threshold: 0.98, // Higher quality requirement
+                        quality_threshold: 0.98,    // Higher quality requirement
                         memory_threshold: 1.1,
                         convergence_threshold: 0.98,
                         baseline_window_size: 50,
@@ -776,9 +786,8 @@ async fn test_proof_validation_failure_regression_correlation() -> Outcome<()> {
                     };
 
                     // Target blocks that will trigger validation failures
-                    let failure_target_blocks: HashSet<SourceBlockNumber> = (10..15)
-                        .map(|i| SourceBlockNumber::new(i))
-                        .collect();
+                    let failure_target_blocks: HashSet<SourceBlockNumber> =
+                        (10..15).map(|i| SourceBlockNumber::new(i)).collect();
 
                     let regression_injector = SyntheticRegressionInjector::new(
                         0.9, // High injection rate
@@ -794,7 +803,8 @@ async fn test_proof_validation_failure_regression_correlation() -> Outcome<()> {
                         regression_config,
                         regression_injector,
                         regression_tracker.clone(),
-                    ).await?;
+                    )
+                    .await?;
 
                     // Test proof validation failures with regression correlation
                     for &source_block in &failure_target_blocks {
@@ -844,8 +854,12 @@ async fn test_proof_validation_failure_regression_correlation() -> Outcome<()> {
                     }
 
                     // Verify that proof validation failures were detected
-                    let validation_failures = regression_tracker.proof_validation_failures.load(Ordering::Relaxed);
-                    let regressions_detected = regression_tracker.regressions_detected.load(Ordering::Relaxed);
+                    let validation_failures = regression_tracker
+                        .proof_validation_failures
+                        .load(Ordering::Relaxed);
+                    let regressions_detected = regression_tracker
+                        .regressions_detected
+                        .load(Ordering::Relaxed);
 
                     println!(
                         "Strict validation test: {} validation failures, {} regressions detected",
@@ -1046,8 +1060,16 @@ mod tests {
         assert_eq!(tracker.proof_validation_failures.load(Ordering::Relaxed), 0);
         assert_eq!(tracker.regressions_detected.load(Ordering::Relaxed), 0);
         assert_eq!(tracker.regression_source_blocks.load(Ordering::Relaxed), 0);
-        assert_eq!(tracker.synthetic_regressions_injected.load(Ordering::Relaxed), 0);
-        assert_eq!(tracker.quality_threshold_violations.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            tracker
+                .synthetic_regressions_injected
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            tracker.quality_threshold_violations.load(Ordering::Relaxed),
+            0
+        );
     }
 
     #[test]
@@ -1066,7 +1088,12 @@ mod tests {
         assert_eq!(tracker.proof_validations.load(Ordering::Relaxed), 1);
         assert_eq!(tracker.regressions_detected.load(Ordering::Relaxed), 1);
         assert_eq!(tracker.regression_source_blocks.load(Ordering::Relaxed), 1);
-        assert_eq!(tracker.synthetic_regressions_injected.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            tracker
+                .synthetic_regressions_injected
+                .load(Ordering::Relaxed),
+            1
+        );
 
         // Verify verification methods
         assert!(tracker.verify_regression_detection());
@@ -1162,9 +1189,13 @@ mod tests {
     #[test]
     fn test_regression_type_cloning() {
         let regression_types = vec![
-            RegressionType::SlowDecoding { slowdown_factor: 2.0 },
+            RegressionType::SlowDecoding {
+                slowdown_factor: 2.0,
+            },
             RegressionType::SymbolErrorRate { error_rate: 0.05 },
-            RegressionType::MemoryRegression { overhead_factor: 1.5 },
+            RegressionType::MemoryRegression {
+                overhead_factor: 1.5,
+            },
             RegressionType::ConvergenceFailure { failure_rate: 0.1 },
         ];
 

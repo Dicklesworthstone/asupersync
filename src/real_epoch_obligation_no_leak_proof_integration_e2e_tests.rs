@@ -201,7 +201,9 @@ mod tests {
         }
 
         /// Tests basic epoch rollover with persistent obligations
-        pub async fn test_basic_epoch_rollover_with_obligations(&mut self) -> EpochObligationTestResult {
+        pub async fn test_basic_epoch_rollover_with_obligations(
+            &mut self,
+        ) -> EpochObligationTestResult {
             let start_time = std::time::Instant::now();
             let mut result = EpochObligationTestResult {
                 test_name: "test_basic_epoch_rollover_with_obligations".to_string(),
@@ -449,7 +451,11 @@ mod tests {
                         }
                     }
                     Err(e) => {
-                        result.error = Some(format!("Failed to advance to epoch {}: {}", epoch_idx + 2, e));
+                        result.error = Some(format!(
+                            "Failed to advance to epoch {}: {}",
+                            epoch_idx + 2,
+                            e
+                        ));
                         return result;
                     }
                 }
@@ -458,12 +464,16 @@ mod tests {
             result.phase = EpochObligationTestPhase::CrossEpochVerification;
 
             // Verify all obligations were resolved correctly
-            let unresolved_count = cross_epoch_obligations.iter()
+            let unresolved_count = cross_epoch_obligations
+                .iter()
                 .filter(|o| !o.resolved)
                 .count();
 
             if unresolved_count > 0 {
-                result.error = Some(format!("Found {} unresolved cross-epoch obligations", unresolved_count));
+                result.error = Some(format!(
+                    "Found {} unresolved cross-epoch obligations",
+                    unresolved_count
+                ));
                 return result;
             }
 
@@ -481,7 +491,8 @@ mod tests {
                         result.proof_results = vec![proof_result];
                     } else {
                         if !proof_result.is_verified() {
-                            result.error = Some("Multi-epoch no-leak proof verification failed".to_string());
+                            result.error =
+                                Some("Multi-epoch no-leak proof verification failed".to_string());
                         } else {
                             self.increment_obligation_stat("false_positive_leaks_detected", 1);
                             result.error = Some(format!(
@@ -492,7 +503,10 @@ mod tests {
                     }
                 }
                 Err(e) => {
-                    result.error = Some(format!("Multi-epoch no-leak proof verification error: {}", e));
+                    result.error = Some(format!(
+                        "Multi-epoch no-leak proof verification error: {}",
+                        e
+                    ));
                 }
             }
 
@@ -591,7 +605,10 @@ mod tests {
                             operation_time,
                             MarkingEventKind::Commit {
                                 obligation: operation.obligation_id,
-                                region: RegionId::new_for_test((operation.operation_id + 1) as u32, 1),
+                                region: RegionId::new_for_test(
+                                    (operation.operation_id + 1) as u32,
+                                    1,
+                                ),
                                 kind: ObligationKind::SendPermit,
                             },
                         );
@@ -602,7 +619,10 @@ mod tests {
                             operation_time,
                             MarkingEventKind::Abort {
                                 obligation: operation.obligation_id,
-                                region: RegionId::new_for_test((operation.operation_id + 1) as u32, 1),
+                                region: RegionId::new_for_test(
+                                    (operation.operation_id + 1) as u32,
+                                    1,
+                                ),
                                 kind: ObligationKind::SendPermit,
                                 reason: "Test abort during rollover".to_string(),
                             },
@@ -634,12 +654,16 @@ mod tests {
             result.phase = EpochObligationTestPhase::CrossEpochVerification;
 
             // Verify all operations completed successfully
-            let incomplete_operations = rollover_operations.iter()
+            let incomplete_operations = rollover_operations
+                .iter()
                 .filter(|op| !op.completed)
                 .count();
 
             if incomplete_operations > 0 {
-                result.error = Some(format!("Found {} incomplete rollover operations", incomplete_operations));
+                result.error = Some(format!(
+                    "Found {} incomplete rollover operations",
+                    incomplete_operations
+                ));
                 return result;
             }
 
@@ -657,7 +681,9 @@ mod tests {
                         result.proof_results = vec![proof_result];
                     } else {
                         if !proof_result.is_verified() {
-                            result.error = Some("Concurrent rollover no-leak proof verification failed".to_string());
+                            result.error = Some(
+                                "Concurrent rollover no-leak proof verification failed".to_string(),
+                            );
                         } else {
                             self.increment_obligation_stat("false_positive_leaks_detected", 1);
                             result.error = Some(format!(
@@ -668,7 +694,10 @@ mod tests {
                     }
                 }
                 Err(e) => {
-                    result.error = Some(format!("Concurrent rollover no-leak proof verification error: {}", e));
+                    result.error = Some(format!(
+                        "Concurrent rollover no-leak proof verification error: {}",
+                        e
+                    ));
                 }
             }
 
@@ -680,7 +709,9 @@ mod tests {
         }
 
         /// Comprehensive integration test combining all patterns
-        pub async fn test_comprehensive_epoch_obligation_integration(&mut self) -> EpochObligationTestResult {
+        pub async fn test_comprehensive_epoch_obligation_integration(
+            &mut self,
+        ) -> EpochObligationTestResult {
             let start_time = std::time::Instant::now();
             let mut result = EpochObligationTestResult {
                 test_name: "test_comprehensive_epoch_obligation_integration".to_string(),
@@ -696,9 +727,15 @@ mod tests {
 
             // Run all test components
             let tests = vec![
-                ("basic_rollover", self.test_basic_epoch_rollover_with_obligations()),
+                (
+                    "basic_rollover",
+                    self.test_basic_epoch_rollover_with_obligations(),
+                ),
                 ("multi_epoch", self.test_multi_epoch_obligations()),
-                ("concurrent_rollover", self.test_concurrent_rollover_operations()),
+                (
+                    "concurrent_rollover",
+                    self.test_concurrent_rollover_operations(),
+                ),
             ];
 
             let mut successful_tests = 0;
@@ -707,7 +744,10 @@ mod tests {
                 if test_result.success {
                     successful_tests += 1;
                 } else {
-                    result.error = Some(format!("Comprehensive test component '{}' failed: {:?}", test_name, test_result.error));
+                    result.error = Some(format!(
+                        "Comprehensive test component '{}' failed: {:?}",
+                        test_name, test_result.error
+                    ));
                     break;
                 }
             }
@@ -725,7 +765,10 @@ mod tests {
                 {
                     result.success = true;
                 } else {
-                    result.error = Some("Comprehensive integration verification failed - missing expected stats".to_string());
+                    result.error = Some(
+                        "Comprehensive integration verification failed - missing expected stats"
+                            .to_string(),
+                    );
                 }
             }
 
@@ -755,7 +798,8 @@ mod tests {
             creation_epoch: EpochId,
             current_epoch: EpochId,
         ) -> bool {
-            if let Some(&mapped_epoch) = self.epoch_obligation_mapping
+            if let Some(&mapped_epoch) = self
+                .epoch_obligation_mapping
                 .read()
                 .unwrap()
                 .get(&obligation_id)
@@ -767,7 +811,8 @@ mod tests {
         }
 
         fn run_no_leak_proof_verification(&self) -> Result<ProofResult, String> {
-            let events: Vec<MarkingEvent> = self.marking_events
+            let events: Vec<MarkingEvent> = self
+                .marking_events
                 .lock()
                 .unwrap()
                 .iter()
@@ -784,7 +829,9 @@ mod tests {
                     "epochs_created" => stats.epochs_created += count,
                     "epoch_rollover_count" => stats.epoch_rollover_count += count,
                     "active_epoch_transitions" => stats.active_epoch_transitions += count,
-                    "concurrent_operations_during_rollover" => stats.concurrent_operations_during_rollover += count,
+                    "concurrent_operations_during_rollover" => {
+                        stats.concurrent_operations_during_rollover += count
+                    }
                     _ => {}
                 }
             }
@@ -831,7 +878,11 @@ mod tests {
             let mut harness = EpochObligationTestHarness::new("basic_rollover_obligations");
             let result = harness.test_basic_epoch_rollover_with_obligations().await;
 
-            assert!(result.success, "Basic epoch rollover with obligations test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Basic epoch rollover with obligations test failed: {:?}",
+                result.error
+            );
             assert!(result.epoch_stats.epochs_created >= 2);
             assert!(result.epoch_stats.epoch_rollover_count >= 1);
             assert!(result.obligation_stats.obligations_created >= 1);
@@ -839,7 +890,8 @@ mod tests {
             assert!(result.obligation_stats.cross_epoch_obligations >= 1);
             assert_eq!(result.obligation_stats.false_positive_leaks_detected, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -848,7 +900,11 @@ mod tests {
             let mut harness = EpochObligationTestHarness::new("multi_epoch_obligations");
             let result = harness.test_multi_epoch_obligations().await;
 
-            assert!(result.success, "Multi-epoch obligations test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Multi-epoch obligations test failed: {:?}",
+                result.error
+            );
             assert!(result.epoch_stats.epochs_created >= 5);
             assert!(result.epoch_stats.epoch_rollover_count >= 4);
             assert!(result.obligation_stats.obligations_created >= 3);
@@ -856,7 +912,8 @@ mod tests {
             assert!(result.obligation_stats.cross_epoch_obligations >= 3);
             assert_eq!(result.obligation_stats.false_positive_leaks_detected, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
@@ -865,22 +922,33 @@ mod tests {
             let mut harness = EpochObligationTestHarness::new("concurrent_rollover_operations");
             let result = harness.test_concurrent_rollover_operations().await;
 
-            assert!(result.success, "Concurrent rollover operations test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Concurrent rollover operations test failed: {:?}",
+                result.error
+            );
             assert!(result.epoch_stats.concurrent_operations_during_rollover >= 5);
             assert!(result.obligation_stats.obligations_created >= 5);
             assert!(result.obligation_stats.obligations_resolved >= 5);
             assert_eq!(result.obligation_stats.false_positive_leaks_detected, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn test_epoch_comprehensive_integration() {
         crate::lab::runtime::test_with_lab(|cx| async move {
             let mut harness = EpochObligationTestHarness::new("comprehensive_epoch_obligation");
-            let result = harness.test_comprehensive_epoch_obligation_integration().await;
+            let result = harness
+                .test_comprehensive_epoch_obligation_integration()
+                .await;
 
-            assert!(result.success, "Comprehensive epoch-obligation integration test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Comprehensive epoch-obligation integration test failed: {:?}",
+                result.error
+            );
             let epoch_stats = result.epoch_stats;
             let obligation_stats = result.obligation_stats;
 
@@ -892,6 +960,7 @@ mod tests {
             assert!(obligation_stats.no_leak_proof_verifications > 0);
             assert_eq!(obligation_stats.false_positive_leaks_detected, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

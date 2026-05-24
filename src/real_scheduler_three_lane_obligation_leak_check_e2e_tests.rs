@@ -5,19 +5,19 @@
 //! across multiple scheduler lanes and workers without mocks.
 
 use crate::cx::Cx;
-use crate::runtime::scheduler::three_lane::{ThreeLaneScheduler, SchedulerConfig, FairnessPolicy};
-use crate::runtime::task::TaskId;
-use crate::runtime::{RegionId, ObligationId, RuntimeState};
 use crate::obligation::leak_check::{ObligationVar, VarState};
-use crate::obligation::{ObligationTracker, ObligationLease, ObligationPermit};
+use crate::obligation::{ObligationLease, ObligationPermit, ObligationTracker};
 use crate::record::{ObligationKind, ObligationRecord};
-use crate::types::{Outcome, Budget, Priority};
+use crate::runtime::scheduler::three_lane::{FairnessPolicy, SchedulerConfig, ThreeLaneScheduler};
+use crate::runtime::task::TaskId;
+use crate::runtime::{ObligationId, RegionId, RuntimeState};
 use crate::time::{Duration, Instant};
+use crate::types::{Budget, Outcome, Priority};
 use crate::util::det_rng::DetRng;
+use futures_lite::future;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicBool, Ordering};
-use futures_lite::future;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Configuration for scheduler + obligation integration testing.
 #[derive(Debug, Clone)]
@@ -56,9 +56,9 @@ impl Default for SchedulerObligationConfig {
             abort_rate: 0.3,
             fairness_policy: FairnessPolicy::Balanced,
             priority_distribution: PriorityDistribution {
-                high_priority_pct: 0.2,  // 20% cancel lane
+                high_priority_pct: 0.2,   // 20% cancel lane
                 medium_priority_pct: 0.3, // 30% timed lane
-                low_priority_pct: 0.5,   // 50% ready lane
+                low_priority_pct: 0.5,    // 50% ready lane
             },
         }
     }
@@ -173,10 +173,16 @@ impl ObligationTestTask {
         obligation_tracker: &Arc<ObligationTracker>,
         stats: &Arc<ObligationStats>,
     ) -> Outcome<(), String> {
-        cx.trace("task_started", &format!(
-            "task_id={:?} priority={:?} obligations={} should_abort={}",
-            self.task_id, self.priority, self.obligations.capacity(), self.should_abort
-        ));
+        cx.trace(
+            "task_started",
+            &format!(
+                "task_id={:?} priority={:?} obligations={} should_abort={}",
+                self.task_id,
+                self.priority,
+                self.obligations.capacity(),
+                self.should_abort
+            ),
+        );
 
         // Create obligations
         for i in 0..self.obligations.capacity() {
@@ -192,16 +198,19 @@ impl ObligationTestTask {
                 Ok(()) => {
                     self.obligations.push(obligation_id);
                     stats.created.fetch_add(1, Ordering::Relaxed);
-                    cx.trace("obligation_created", &format!(
-                        "task_id={:?} obligation_id={:?} index={}",
-                        self.task_id, obligation_id, i
-                    ));
+                    cx.trace(
+                        "obligation_created",
+                        &format!(
+                            "task_id={:?} obligation_id={:?} index={}",
+                            self.task_id, obligation_id, i
+                        ),
+                    );
                 }
                 Err(e) => {
-                    cx.trace("obligation_creation_failed", &format!(
-                        "task_id={:?} error={:?}",
-                        self.task_id, e
-                    ));
+                    cx.trace(
+                        "obligation_creation_failed",
+                        &format!("task_id={:?} error={:?}", self.task_id, e),
+                    );
                     stats.leaks_detected.fetch_add(1, Ordering::Relaxed);
                     return Outcome::Err(format!("Failed to create obligation: {:?}", e));
                 }
@@ -241,16 +250,22 @@ impl ObligationTestTask {
             match obligation_tracker.commit_obligation(obligation_id).await {
                 Ok(()) => {
                     stats.committed.fetch_add(1, Ordering::Relaxed);
-                    cx.trace("obligation_committed", &format!(
-                        "task_id={:?} obligation_id={:?}",
-                        self.task_id, obligation_id
-                    ));
+                    cx.trace(
+                        "obligation_committed",
+                        &format!(
+                            "task_id={:?} obligation_id={:?}",
+                            self.task_id, obligation_id
+                        ),
+                    );
                 }
                 Err(e) => {
-                    cx.trace("obligation_commit_failed", &format!(
-                        "task_id={:?} obligation_id={:?} error={:?}",
-                        self.task_id, obligation_id, e
-                    ));
+                    cx.trace(
+                        "obligation_commit_failed",
+                        &format!(
+                            "task_id={:?} obligation_id={:?} error={:?}",
+                            self.task_id, obligation_id, e
+                        ),
+                    );
                     stats.leaks_detected.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -271,16 +286,22 @@ impl ObligationTestTask {
             match obligation_tracker.abort_obligation(obligation_id).await {
                 Ok(()) => {
                     stats.aborted.fetch_add(1, Ordering::Relaxed);
-                    cx.trace("obligation_aborted", &format!(
-                        "task_id={:?} obligation_id={:?}",
-                        self.task_id, obligation_id
-                    ));
+                    cx.trace(
+                        "obligation_aborted",
+                        &format!(
+                            "task_id={:?} obligation_id={:?}",
+                            self.task_id, obligation_id
+                        ),
+                    );
                 }
                 Err(e) => {
-                    cx.trace("obligation_abort_failed", &format!(
-                        "task_id={:?} obligation_id={:?} error={:?}",
-                        self.task_id, obligation_id, e
-                    ));
+                    cx.trace(
+                        "obligation_abort_failed",
+                        &format!(
+                            "task_id={:?} obligation_id={:?} error={:?}",
+                            self.task_id, obligation_id, e
+                        ),
+                    );
                     stats.leaks_detected.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -371,12 +392,11 @@ impl SchedulerObligationTestHarness {
             let stats = Arc::clone(&self.stats);
             let scheduler = Arc::clone(&self.scheduler);
 
-            let handle = scheduler.spawn_with_priority(
-                task.priority,
-                async move {
+            let handle = scheduler
+                .spawn_with_priority(task.priority, async move {
                     task.execute(&cx_task, &obligation_tracker, &stats).await
-                },
-            ).await?;
+                })
+                .await?;
 
             task_handles.push((task.task_id, handle));
         }
@@ -396,7 +416,10 @@ impl SchedulerObligationTestHarness {
                     cx.trace("task_finished_cancelled", &format!("task_id={:?}", task_id));
                 }
                 Outcome::Err(e) => {
-                    cx.trace("task_finished_error", &format!("task_id={:?} error={:?}", task_id, e));
+                    cx.trace(
+                        "task_finished_error",
+                        &format!("task_id={:?} error={:?}", task_id, e),
+                    );
                     self.stats.leaks_detected.fetch_add(1, Ordering::Relaxed);
                 }
                 Outcome::Panicked => {
@@ -413,10 +436,13 @@ impl SchedulerObligationTestHarness {
         self.verify_obligation_consistency(cx).await?;
 
         let final_stats = self.stats.snapshot();
-        cx.trace("test_completed", &format!(
-            "completed={} aborted={} stats={:?}",
-            completed_count, aborted_count, final_stats
-        ));
+        cx.trace(
+            "test_completed",
+            &format!(
+                "completed={} aborted={} stats={:?}",
+                completed_count, aborted_count, final_stats
+            ),
+        );
 
         Ok(final_stats)
     }
@@ -427,11 +453,11 @@ impl SchedulerObligationTestHarness {
         let dist = &self.config.priority_distribution;
 
         if rand_val < dist.high_priority_pct {
-            Priority::High  // Cancel lane
+            Priority::High // Cancel lane
         } else if rand_val < dist.high_priority_pct + dist.medium_priority_pct {
-            Priority::Medium  // Timed lane
+            Priority::Medium // Timed lane
         } else {
-            Priority::Low  // Ready lane
+            Priority::Low // Ready lane
         }
     }
 
@@ -446,43 +472,67 @@ impl SchedulerObligationTestHarness {
             // Check cancel lane fairness
             if worker_stats.max_cancel_streak > self.scheduler.config().cancel_streak_limit * 2 {
                 violations += 1;
-                cx.trace("fairness_violation_cancel", &format!(
-                    "worker={:?} max_cancel_streak={} limit={}",
-                    worker_id, worker_stats.max_cancel_streak, self.scheduler.config().cancel_streak_limit
-                ));
+                cx.trace(
+                    "fairness_violation_cancel",
+                    &format!(
+                        "worker={:?} max_cancel_streak={} limit={}",
+                        worker_id,
+                        worker_stats.max_cancel_streak,
+                        self.scheduler.config().cancel_streak_limit
+                    ),
+                );
             }
 
             // Check timed lane fairness
             if worker_stats.max_timed_streak > self.scheduler.config().timed_fairness_limit {
                 violations += 1;
-                cx.trace("fairness_violation_timed", &format!(
-                    "worker={:?} max_timed_streak={} limit={}",
-                    worker_id, worker_stats.max_timed_streak, self.scheduler.config().timed_fairness_limit
-                ));
+                cx.trace(
+                    "fairness_violation_timed",
+                    &format!(
+                        "worker={:?} max_timed_streak={} limit={}",
+                        worker_id,
+                        worker_stats.max_timed_streak,
+                        self.scheduler.config().timed_fairness_limit
+                    ),
+                );
             }
 
             // Check work stealing fairness
             if worker_stats.max_steal_streak > self.scheduler.config().steal_fairness_limit {
                 violations += 1;
-                cx.trace("fairness_violation_steal", &format!(
-                    "worker={:?} max_steal_streak={} limit={}",
-                    worker_id, worker_stats.max_steal_streak, self.scheduler.config().steal_fairness_limit
-                ));
+                cx.trace(
+                    "fairness_violation_steal",
+                    &format!(
+                        "worker={:?} max_steal_streak={} limit={}",
+                        worker_id,
+                        worker_stats.max_steal_streak,
+                        self.scheduler.config().steal_fairness_limit
+                    ),
+                );
             }
         }
 
-        self.stats.fairness_violations.store(violations, Ordering::Release);
+        self.stats
+            .fairness_violations
+            .store(violations, Ordering::Release);
 
-        cx.trace("scheduler_fairness_verified", &format!(
-            "violations={} workers={}",
-            violations, scheduler_stats.worker_stats.len()
-        ));
+        cx.trace(
+            "scheduler_fairness_verified",
+            &format!(
+                "violations={} workers={}",
+                violations,
+                scheduler_stats.worker_stats.len()
+            ),
+        );
 
         Ok(())
     }
 
     /// Verify obligation tracking consistency and detect leaks.
-    async fn verify_obligation_consistency(&self, cx: &Cx) -> Result<(), Box<dyn std::error::Error>> {
+    async fn verify_obligation_consistency(
+        &self,
+        cx: &Cx,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let tracker_stats = self.obligation_tracker.get_tracking_stats().await?;
 
         // Check for obligation leaks
@@ -490,28 +540,39 @@ impl SchedulerObligationTestHarness {
         let pending_cleanup = tracker_stats.pending_cleanup_count;
 
         if active_obligations > 0 {
-            cx.trace("obligation_leak_detected", &format!(
-                "active_obligations={} pending_cleanup={}",
-                active_obligations, pending_cleanup
-            ));
-            self.stats.leaks_detected.fetch_add(active_obligations, Ordering::Relaxed);
+            cx.trace(
+                "obligation_leak_detected",
+                &format!(
+                    "active_obligations={} pending_cleanup={}",
+                    active_obligations, pending_cleanup
+                ),
+            );
+            self.stats
+                .leaks_detected
+                .fetch_add(active_obligations, Ordering::Relaxed);
         }
 
         // Verify obligation state transitions are valid
         for (obligation_id, state_history) in tracker_stats.state_transitions.iter() {
             if !self.is_valid_state_transition_sequence(state_history) {
-                cx.trace("invalid_obligation_state_transition", &format!(
-                    "obligation_id={:?} states={:?}",
-                    obligation_id, state_history
-                ));
+                cx.trace(
+                    "invalid_obligation_state_transition",
+                    &format!(
+                        "obligation_id={:?} states={:?}",
+                        obligation_id, state_history
+                    ),
+                );
                 self.stats.leaks_detected.fetch_add(1, Ordering::Relaxed);
             }
         }
 
-        cx.trace("obligation_consistency_verified", &format!(
-            "active={} pending_cleanup={} total_tracked={}",
-            active_obligations, pending_cleanup, tracker_stats.total_tracked
-        ));
+        cx.trace(
+            "obligation_consistency_verified",
+            &format!(
+                "active={} pending_cleanup={} total_tracked={}",
+                active_obligations, pending_cleanup, tracker_stats.total_tracked
+            ),
+        );
 
         Ok(())
     }
@@ -558,7 +619,7 @@ impl SchedulerObligationTestHarness {
 #[cfg(test)]
 mod scheduler_obligation_integration_tests {
     use super::*;
-    use crate::test_utils::{init_test_logging, TestRuntime};
+    use crate::test_utils::{TestRuntime, init_test_logging};
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -639,9 +700,9 @@ mod scheduler_obligation_integration_tests {
             abort_rate: 0.4,
             fairness_policy: FairnessPolicy::MeetDeadlines,
             priority_distribution: PriorityDistribution {
-                high_priority_pct: 0.4,  // High cancel lane pressure
+                high_priority_pct: 0.4,    // High cancel lane pressure
                 medium_priority_pct: 0.35, // High timed lane pressure
-                low_priority_pct: 0.25,  // Moderate ready lane pressure
+                low_priority_pct: 0.25,    // Moderate ready lane pressure
             },
         };
 
@@ -726,16 +787,24 @@ mod scheduler_obligation_integration_tests {
             assert!(
                 total_tasks >= config.task_count as u32 * 95 / 100,
                 "At least 95% of tasks should be processed: {}/{}",
-                total_tasks, config.task_count
+                total_tasks,
+                config.task_count
             );
 
-            cx.trace("test_scheduler_fairness_under_obligation_tracking_load_complete", &format!(
-                "fairness_policy={:?} fairness_violations={} total_tasks={} consistency={}",
-                config.fairness_policy, stats.fairness_violations, total_tasks, stats.is_consistent()
-            ));
+            cx.trace(
+                "test_scheduler_fairness_under_obligation_tracking_load_complete",
+                &format!(
+                    "fairness_policy={:?} fairness_violations={} total_tasks={} consistency={}",
+                    config.fairness_policy,
+                    stats.fairness_violations,
+                    total_tasks,
+                    stats.is_consistent()
+                ),
+            );
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         crate::test_complete!("test_scheduler_fairness_under_obligation_tracking_load");
     }
@@ -752,7 +821,7 @@ mod scheduler_obligation_integration_tests {
             abort_rate: 0.6, // High abort rate to stress leak detection
             fairness_policy: FairnessPolicy::Balanced,
             priority_distribution: PriorityDistribution {
-                high_priority_pct: 0.5,  // Many high-priority cancellations
+                high_priority_pct: 0.5, // Many high-priority cancellations
                 medium_priority_pct: 0.25,
                 low_priority_pct: 0.25,
             },
@@ -777,7 +846,8 @@ mod scheduler_obligation_integration_tests {
             assert!(
                 (actual_abort_rate - expected_abort_rate).abs() < 0.20,
                 "Abort rate should be close to configured rate: actual={:.2}, expected={:.2}",
-                actual_abort_rate, expected_abort_rate
+                actual_abort_rate,
+                expected_abort_rate
             );
 
             // Leak detection should be effective
@@ -788,14 +858,21 @@ mod scheduler_obligation_integration_tests {
                 leak_rate
             );
 
-            cx.trace("test_obligation_leak_detection_during_rapid_task_churn_complete", &format!(
-                "abort_rate={:.3} resolution_rate={:.3} leak_rate={:.3} created={} resolved={}",
-                actual_abort_rate, resolution_rate, leak_rate,
-                stats.created, stats.committed + stats.aborted
-            ));
+            cx.trace(
+                "test_obligation_leak_detection_during_rapid_task_churn_complete",
+                &format!(
+                    "abort_rate={:.3} resolution_rate={:.3} leak_rate={:.3} created={} resolved={}",
+                    actual_abort_rate,
+                    resolution_rate,
+                    leak_rate,
+                    stats.created,
+                    stats.committed + stats.aborted
+                ),
+            );
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         crate::test_complete!("test_obligation_leak_detection_during_rapid_task_churn");
     }

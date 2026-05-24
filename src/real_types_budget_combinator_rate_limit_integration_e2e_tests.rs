@@ -18,31 +18,29 @@
 //! 4. **Cross-Boundary Accounting**: Rate accounting works across context boundaries
 
 use crate::{
-    combinator::{
-        rate_limit::{
-            RateLimit, RateLimitConfig, RateLimitError, RateLimitState,
-            TokenBucket, TokenBucketConfig, PerBudgetRateLimit,
-        },
+    Result,
+    combinator::rate_limit::{
+        PerBudgetRateLimit, RateLimit, RateLimitConfig, RateLimitError, RateLimitState,
+        TokenBucket, TokenBucketConfig,
     },
-    cx::{Cx, CxConfig, CxHandle, CxScope, CxBudget},
+    cx::{Cx, CxBudget, CxConfig, CxHandle, CxScope},
+    runtime::{LabRuntime, LabRuntimeBuilder, RuntimeBuilder},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
     types::{
         budget::{
-            Budget, BudgetConfig, BudgetId, BudgetKind, BudgetReplenishment,
-            BudgetState, BudgetTracker, TimeBudget,
+            Budget, BudgetConfig, BudgetId, BudgetKind, BudgetReplenishment, BudgetState,
+            BudgetTracker, TimeBudget,
         },
         cancel::CancelToken,
         outcome::Outcome,
         region::RegionId,
         task::TaskId,
     },
-    runtime::{RuntimeBuilder, LabRuntime, LabRuntimeBuilder},
     util::{rng::DetRng, time::TimeSource},
-    Result,
 };
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -180,12 +178,7 @@ impl PerBudgetRateLimitTracker {
         }
     }
 
-    fn register_rate_limit_state(
-        &self,
-        budget_id: BudgetId,
-        cx_id: u64,
-        state: RateLimitState,
-    ) {
+    fn register_rate_limit_state(&self, budget_id: BudgetId, cx_id: u64, state: RateLimitState) {
         let mut states = self.rate_limit_states.write();
         states.insert((budget_id, cx_id), state);
     }
@@ -200,19 +193,24 @@ impl PerBudgetRateLimitTracker {
     ) -> Result<()> {
         // Verify replenishment is valid
         if new_available < previous_available {
-            self.replenishment_violations.fetch_add(1, Ordering::Release);
+            self.replenishment_violations
+                .fetch_add(1, Ordering::Release);
             return Err(format!(
                 "Invalid replenishment: new ({}) < previous ({})",
                 new_available, previous_available
-            ).into());
+            )
+            .into());
         }
 
         if replenished_amount != (new_available - previous_available) {
-            self.replenishment_violations.fetch_add(1, Ordering::Release);
+            self.replenishment_violations
+                .fetch_add(1, Ordering::Release);
             return Err(format!(
                 "Replenishment amount mismatch: expected {}, got {}",
-                new_available - previous_available, replenished_amount
-            ).into());
+                new_available - previous_available,
+                replenished_amount
+            )
+            .into());
         }
 
         // Record replenishment event
@@ -240,10 +238,7 @@ impl PerBudgetRateLimitTracker {
         Ok(())
     }
 
-    fn process_cx_boundary_operation(
-        &self,
-        operation: CxBoundaryOperation,
-    ) -> Result<()> {
+    fn process_cx_boundary_operation(&self, operation: CxBoundaryOperation) -> Result<()> {
         // Record boundary operation
         {
             let mut operations = self.boundary_operations.write();
@@ -289,12 +284,8 @@ impl PerBudgetRateLimitTracker {
             if let Some(source_state) = states.get(&(*budget_id, operation.source_cx_id)) {
                 // Detach creates independent rate limit state
                 let detached_state = match operation.budget_inheritance.isolation_mode {
-                    BudgetIsolationMode::Independent => {
-                        source_state.create_independent_copy()
-                    }
-                    BudgetIsolationMode::Isolated => {
-                        RateLimitState::new_isolated()
-                    }
+                    BudgetIsolationMode::Independent => source_state.create_independent_copy(),
+                    BudgetIsolationMode::Isolated => RateLimitState::new_isolated(),
                     BudgetIsolationMode::Shared => {
                         source_state.clone() // Shared state
                     }
@@ -317,22 +308,13 @@ impl PerBudgetRateLimitTracker {
         self.handle_cx_detach(operation)
     }
 
-    fn consume_tokens(
-        &self,
-        budget_id: BudgetId,
-        cx_id: u64,
-        tokens: u64,
-    ) -> Result<bool> {
+    fn consume_tokens(&self, budget_id: BudgetId, cx_id: u64, tokens: u64) -> Result<bool> {
         let mut states = self.rate_limit_states.write();
 
         if let Some(state) = states.get_mut(&(budget_id, cx_id)) {
             let consumed = state.try_consume_tokens(tokens);
-            self.token_consumption_tracking.record_consumption(
-                budget_id,
-                cx_id,
-                tokens,
-                consumed,
-            );
+            self.token_consumption_tracking
+                .record_consumption(budget_id, cx_id, tokens, consumed);
             Ok(consumed)
         } else {
             Ok(false)
@@ -356,11 +338,11 @@ impl PerBudgetRateLimitTracker {
             let curr = &window[1];
 
             if curr.budget_id == prev.budget_id && curr.cx_context_id == prev.cx_context_id {
-                let time_delta = curr.replenishment_time.duration_since(prev.replenishment_time);
-                let expected_replenishment = self.calculate_expected_replenishment(
-                    prev.budget_id,
-                    time_delta,
-                );
+                let time_delta = curr
+                    .replenishment_time
+                    .duration_since(prev.replenishment_time);
+                let expected_replenishment =
+                    self.calculate_expected_replenishment(prev.budget_id, time_delta);
 
                 if curr.replenished_amount != expected_replenishment {
                     result.time_based_accuracy = false;
@@ -464,9 +446,7 @@ struct ReplenishmentVerificationResult {
 
 impl ReplenishmentVerificationResult {
     fn is_successful(&self) -> bool {
-        self.violation_count == 0
-            && self.time_based_accuracy
-            && self.total_replenishments > 0
+        self.violation_count == 0 && self.time_based_accuracy && self.total_replenishments > 0
     }
 }
 
@@ -512,7 +492,8 @@ impl BudgetRateLimitIntegrationCoordinator {
             // Initialize budget and rate limit for this CX
             for &budget_id in &scenario.budgets {
                 let rate_limit_state = RateLimitState::new(100, 10); // 100 tokens, 10 replenish rate
-                self.tracker.register_rate_limit_state(budget_id, initial_cx_id, rate_limit_state);
+                self.tracker
+                    .register_rate_limit_state(budget_id, initial_cx_id, rate_limit_state);
             }
 
             // Execute CX boundary operations
@@ -531,10 +512,12 @@ impl BudgetRateLimitIntegrationCoordinator {
 
                         // Simulate operations on cloned CX
                         for &budget_id in &scenario.budgets {
-                            let consumed = self.tracker.consume_tokens(budget_id, cloned_cx_id, 5)?;
+                            let consumed =
+                                self.tracker.consume_tokens(budget_id, cloned_cx_id, 5)?;
                             if !consumed {
                                 // Trigger replenishment
-                                self.simulate_time_based_replenishment(budget_id, cloned_cx_id).await?;
+                                self.simulate_time_based_replenishment(budget_id, cloned_cx_id)
+                                    .await?;
                             }
                         }
                     }
@@ -551,9 +534,11 @@ impl BudgetRateLimitIntegrationCoordinator {
 
                         // Simulate independent operations on detached CX
                         for &budget_id in &scenario.budgets {
-                            let consumed = self.tracker.consume_tokens(budget_id, detached_cx_id, 3)?;
+                            let consumed =
+                                self.tracker.consume_tokens(budget_id, detached_cx_id, 3)?;
                             if !consumed {
-                                self.simulate_time_based_replenishment(budget_id, detached_cx_id).await?;
+                                self.simulate_time_based_replenishment(budget_id, detached_cx_id)
+                                    .await?;
                             }
                         }
                     }
@@ -566,7 +551,8 @@ impl BudgetRateLimitIntegrationCoordinator {
             // Simulate time-based replenishment for all active contexts
             cx.sleep(Duration::from_millis(100)).await;
             for &budget_id in &scenario.budgets {
-                self.simulate_time_based_replenishment(budget_id, initial_cx_id).await?;
+                self.simulate_time_based_replenishment(budget_id, initial_cx_id)
+                    .await?;
             }
         }
 
@@ -604,9 +590,9 @@ impl BudgetRateLimitIntegrationCoordinator {
         if !replenishment_result.is_successful() {
             return Err(format!(
                 "Replenishment verification failed: {} violations, accuracy: {}",
-                replenishment_result.violation_count,
-                replenishment_result.time_based_accuracy
-            ).into());
+                replenishment_result.violation_count, replenishment_result.time_based_accuracy
+            )
+            .into());
         }
 
         // Verify tracking statistics
@@ -623,11 +609,17 @@ impl BudgetRateLimitIntegrationCoordinator {
             return Err(format!("Budget replenishment violations detected: {}", violations).into());
         }
 
-        let (successful, failed) = self.tracker.token_consumption_tracking.get_consumption_stats();
+        let (successful, failed) = self
+            .tracker
+            .token_consumption_tracking
+            .get_consumption_stats();
 
         println!(
             "Budget/rate limit integration verified: {} replenishments, {} boundary ops, {}/{} token consumptions",
-            events, operations, successful, successful + failed
+            events,
+            operations,
+            successful,
+            successful + failed
         );
 
         Ok(())
@@ -685,10 +677,7 @@ impl BudgetRateLimitTestHarness {
         Self { coordinator }
     }
 
-    async fn run_comprehensive_budget_rate_limit_integration(
-        &self,
-        cx: &Cx,
-    ) -> Result<()> {
+    async fn run_comprehensive_budget_rate_limit_integration(&self, cx: &Cx) -> Result<()> {
         // Get registered budget IDs
         let budget_ids: Vec<BudgetId> = self.coordinator.budget_configs.keys().copied().collect();
 
@@ -696,41 +685,38 @@ impl BudgetRateLimitTestHarness {
         let scenarios = vec![
             BudgetRateLimitScenario::new(
                 budget_ids.clone(),
-                vec![
-                    CxBoundaryOperation::new(
-                        CxBoundaryType::Clone,
-                        0, 0, // Will be set during simulation
-                        BudgetInheritance::new(
-                            budget_ids.clone(),
-                            HashMap::new(),
-                            BudgetIsolationMode::Shared,
-                        ),
+                vec![CxBoundaryOperation::new(
+                    CxBoundaryType::Clone,
+                    0,
+                    0, // Will be set during simulation
+                    BudgetInheritance::new(
+                        budget_ids.clone(),
+                        HashMap::new(),
+                        BudgetIsolationMode::Shared,
                     ),
-                ],
+                )],
                 Duration::from_millis(50),
             ),
             BudgetRateLimitScenario::new(
                 budget_ids.clone(),
-                vec![
-                    CxBoundaryOperation::new(
-                        CxBoundaryType::Detach,
-                        0, 0,
-                        BudgetInheritance::new(
-                            budget_ids.clone(),
-                            HashMap::new(),
-                            BudgetIsolationMode::Independent,
-                        ),
+                vec![CxBoundaryOperation::new(
+                    CxBoundaryType::Detach,
+                    0,
+                    0,
+                    BudgetInheritance::new(
+                        budget_ids.clone(),
+                        HashMap::new(),
+                        BudgetIsolationMode::Independent,
                     ),
-                ],
+                )],
                 Duration::from_millis(100),
             ),
         ];
 
         // Run integration simulation
-        self.coordinator.simulate_budget_rate_limit_across_cx_boundaries(
-            cx,
-            scenarios,
-        ).await?;
+        self.coordinator
+            .simulate_budget_rate_limit_across_cx_boundaries(cx, scenarios)
+            .await?;
 
         // Verify integration properties
         self.coordinator.verify_integration_properties()?;
@@ -863,21 +849,31 @@ mod tests {
         let harness = BudgetRateLimitTestHarness::new();
 
         // Get test budget
-        let budget_ids: Vec<BudgetId> = harness.coordinator.budget_configs.keys().copied().collect();
+        let budget_ids: Vec<BudgetId> =
+            harness.coordinator.budget_configs.keys().copied().collect();
         let budget_id = budget_ids[0];
 
         let cx_id = harness.coordinator.get_next_cx_id();
 
         // Register rate limit state
         let rate_limit_state = RateLimitState::new(100, 10);
-        harness.coordinator.tracker.register_rate_limit_state(budget_id, cx_id, rate_limit_state);
+        harness
+            .coordinator
+            .tracker
+            .register_rate_limit_state(budget_id, cx_id, rate_limit_state);
 
         // Test basic token consumption
-        let consumed = harness.coordinator.tracker.consume_tokens(budget_id, cx_id, 20)?;
+        let consumed = harness
+            .coordinator
+            .tracker
+            .consume_tokens(budget_id, cx_id, 20)?;
         assert!(consumed, "Should be able to consume tokens initially");
 
         // Test time-based replenishment
-        harness.coordinator.simulate_time_based_replenishment(budget_id, cx_id).await?;
+        harness
+            .coordinator
+            .simulate_time_based_replenishment(budget_id, cx_id)
+            .await?;
 
         // Verify replenishment was recorded
         let (events, _, violations) = harness.coordinator.tracker.get_tracking_stats();
@@ -894,7 +890,8 @@ mod tests {
 
         let harness = BudgetRateLimitTestHarness::new();
 
-        let budget_ids: Vec<BudgetId> = harness.coordinator.budget_configs.keys().copied().collect();
+        let budget_ids: Vec<BudgetId> =
+            harness.coordinator.budget_configs.keys().copied().collect();
         let budget_id = budget_ids[0];
 
         let source_cx_id = harness.coordinator.get_next_cx_id();
@@ -902,25 +899,36 @@ mod tests {
 
         // Set up source CX with rate limit
         let rate_limit_state = RateLimitState::new(100, 10);
-        harness.coordinator.tracker.register_rate_limit_state(budget_id, source_cx_id, rate_limit_state);
+        harness.coordinator.tracker.register_rate_limit_state(
+            budget_id,
+            source_cx_id,
+            rate_limit_state,
+        );
 
         // Simulate CX clone operation
         let clone_operation = CxBoundaryOperation::new(
             CxBoundaryType::Clone,
             source_cx_id,
             clone_cx_id,
-            BudgetInheritance::new(
-                vec![budget_id],
-                HashMap::new(),
-                BudgetIsolationMode::Shared,
-            ),
+            BudgetInheritance::new(vec![budget_id], HashMap::new(), BudgetIsolationMode::Shared),
         );
 
-        harness.coordinator.tracker.process_cx_boundary_operation(clone_operation)?;
+        harness
+            .coordinator
+            .tracker
+            .process_cx_boundary_operation(clone_operation)?;
 
         // Verify clone inherits rate limit state
-        let consumed_source = harness.coordinator.tracker.consume_tokens(budget_id, source_cx_id, 10)?;
-        let consumed_clone = harness.coordinator.tracker.consume_tokens(budget_id, clone_cx_id, 10)?;
+        let consumed_source =
+            harness
+                .coordinator
+                .tracker
+                .consume_tokens(budget_id, source_cx_id, 10)?;
+        let consumed_clone =
+            harness
+                .coordinator
+                .tracker
+                .consume_tokens(budget_id, clone_cx_id, 10)?;
 
         assert!(consumed_source, "Source CX should consume tokens");
         assert!(consumed_clone, "Cloned CX should inherit rate limit state");
@@ -935,7 +943,8 @@ mod tests {
 
         let harness = BudgetRateLimitTestHarness::new();
 
-        let budget_ids: Vec<BudgetId> = harness.coordinator.budget_configs.keys().copied().collect();
+        let budget_ids: Vec<BudgetId> =
+            harness.coordinator.budget_configs.keys().copied().collect();
         let budget_id = budget_ids[0];
 
         let source_cx_id = harness.coordinator.get_next_cx_id();
@@ -943,10 +952,17 @@ mod tests {
 
         // Set up source CX with limited tokens
         let rate_limit_state = RateLimitState::new(100, 10);
-        harness.coordinator.tracker.register_rate_limit_state(budget_id, source_cx_id, rate_limit_state);
+        harness.coordinator.tracker.register_rate_limit_state(
+            budget_id,
+            source_cx_id,
+            rate_limit_state,
+        );
 
         // Consume most tokens from source
-        let _ = harness.coordinator.tracker.consume_tokens(budget_id, source_cx_id, 95)?;
+        let _ = harness
+            .coordinator
+            .tracker
+            .consume_tokens(budget_id, source_cx_id, 95)?;
 
         // Simulate CX detach operation with independent isolation
         let detach_operation = CxBoundaryOperation::new(
@@ -960,14 +976,28 @@ mod tests {
             ),
         );
 
-        harness.coordinator.tracker.process_cx_boundary_operation(detach_operation)?;
+        harness
+            .coordinator
+            .tracker
+            .process_cx_boundary_operation(detach_operation)?;
 
         // Verify detached CX has independent rate limit state
-        let consumed_detached = harness.coordinator.tracker.consume_tokens(budget_id, detached_cx_id, 30)?;
-        assert!(consumed_detached, "Detached CX should have independent token budget");
+        let consumed_detached =
+            harness
+                .coordinator
+                .tracker
+                .consume_tokens(budget_id, detached_cx_id, 30)?;
+        assert!(
+            consumed_detached,
+            "Detached CX should have independent token budget"
+        );
 
         // Original CX should still be limited
-        let consumed_source = harness.coordinator.tracker.consume_tokens(budget_id, source_cx_id, 10)?;
+        let consumed_source =
+            harness
+                .coordinator
+                .tracker
+                .consume_tokens(budget_id, source_cx_id, 10)?;
         assert!(!consumed_source, "Source CX should remain token-limited");
 
         Ok(())
@@ -980,7 +1010,8 @@ mod tests {
 
         let harness = BudgetRateLimitTestHarness::new();
 
-        let budget_ids: Vec<BudgetId> = harness.coordinator.budget_configs.keys().copied().collect();
+        let budget_ids: Vec<BudgetId> =
+            harness.coordinator.budget_configs.keys().copied().collect();
         let budget_id = budget_ids[0];
 
         let cx_id = harness.coordinator.get_next_cx_id();
@@ -1000,20 +1031,29 @@ mod tests {
             let replenish = 10;
             let new_total = previous + replenish;
 
-            harness.coordinator.tracker.process_budget_replenishment(
-                budget_id,
-                cx_id,
-                previous,
-                replenish,
-                new_total,
-            )?;
+            harness
+                .coordinator
+                .tracker
+                .process_budget_replenishment(budget_id, cx_id, previous, replenish, new_total)?;
         }
 
         // Verify replenishment accuracy
-        let verification_result = harness.coordinator.tracker.verify_replenishment_correctness()?;
-        assert!(verification_result.is_successful(), "Time-based replenishment should be accurate");
-        assert_eq!(verification_result.violation_count, 0, "No replenishment violations");
-        assert!(verification_result.time_based_accuracy, "Replenishment timing should be accurate");
+        let verification_result = harness
+            .coordinator
+            .tracker
+            .verify_replenishment_correctness()?;
+        assert!(
+            verification_result.is_successful(),
+            "Time-based replenishment should be accurate"
+        );
+        assert_eq!(
+            verification_result.violation_count, 0,
+            "No replenishment violations"
+        );
+        assert!(
+            verification_result.time_based_accuracy,
+            "Replenishment timing should be accurate"
+        );
 
         Ok(())
     }
@@ -1026,7 +1066,9 @@ mod tests {
         let harness = BudgetRateLimitTestHarness::new();
 
         // Run comprehensive integration test
-        harness.run_comprehensive_budget_rate_limit_integration(&cx).await?;
+        harness
+            .run_comprehensive_budget_rate_limit_integration(&cx)
+            .await?;
 
         // Verify comprehensive integration properties
         harness.coordinator.verify_integration_properties()?;
@@ -1037,13 +1079,22 @@ mod tests {
         assert!(operations > 0, "Should record CX boundary operations");
         assert_eq!(violations, 0, "No violations should occur");
 
-        let (successful_consumptions, failed_consumptions) =
-            harness.coordinator.tracker.token_consumption_tracking.get_consumption_stats();
-        assert!(successful_consumptions > 0, "Should have successful token consumptions");
+        let (successful_consumptions, failed_consumptions) = harness
+            .coordinator
+            .tracker
+            .token_consumption_tracking
+            .get_consumption_stats();
+        assert!(
+            successful_consumptions > 0,
+            "Should have successful token consumptions"
+        );
 
         println!(
             "Comprehensive budget/rate limit integration test completed: {} events, {} operations, {}/{} consumptions",
-            events, operations, successful_consumptions, successful_consumptions + failed_consumptions
+            events,
+            operations,
+            successful_consumptions,
+            successful_consumptions + failed_consumptions
         );
 
         Ok(())

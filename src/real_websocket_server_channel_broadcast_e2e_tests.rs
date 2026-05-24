@@ -32,8 +32,8 @@ mod tests {
     use crate::time::{Duration, Instant};
     use std::collections::HashMap;
     use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
     /// WebSocket server with integrated broadcast channel for multi-client messaging
@@ -231,7 +231,10 @@ mod tests {
         /// Slow client - introduces artificial delays
         Slow { delay_ms: u64 },
         /// Intermittent client - occasionally pauses message consumption
-        Intermittent { pause_probability: f64, pause_duration_ms: u64 },
+        Intermittent {
+            pause_probability: f64,
+            pause_duration_ms: u64,
+        },
         /// Backpressured client - allows queue to fill up
         Backpressured { max_queue_size: usize },
         /// Disconnecting client - disconnects after N messages
@@ -309,7 +312,11 @@ mod tests {
         }
 
         /// Accept new WebSocket client connection
-        async fn accept_client(&self, client_id: ClientId, websocket: WebSocketHandle) -> Result<(), String> {
+        async fn accept_client(
+            &self,
+            client_id: ClientId,
+            websocket: WebSocketHandle,
+        ) -> Result<(), String> {
             let (message_tx, message_rx) = mpsc::channel(self.config.max_pending_per_client);
 
             let connection = ClientConnection {
@@ -323,7 +330,9 @@ mod tests {
 
             let mut clients = self.clients.lock().await;
             clients.insert(client_id, connection);
-            self.stats.connected_clients.store(clients.len(), Ordering::Relaxed);
+            self.stats
+                .connected_clients
+                .store(clients.len(), Ordering::Relaxed);
 
             Ok(())
         }
@@ -341,11 +350,17 @@ mod tests {
                 match self.send_to_client(connection, message.clone()).await {
                     SendResult::Success => {
                         successful_sends += 1;
-                        connection.connection_stats.messages_sent.fetch_add(1, Ordering::Relaxed);
+                        connection
+                            .connection_stats
+                            .messages_sent
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                     SendResult::Backpressure => {
                         backpressured_clients.push(*client_id);
-                        connection.backpressure_state.dropped_messages.fetch_add(1, Ordering::Relaxed);
+                        connection
+                            .backpressure_state
+                            .dropped_messages
+                            .fetch_add(1, Ordering::Relaxed);
                         self.handle_client_backpressure(connection, &message).await;
                     }
                     SendResult::Error(e) => {
@@ -357,7 +372,9 @@ mod tests {
 
             let latency = start_time.elapsed();
             self.stats.total_broadcasts.fetch_add(1, Ordering::Relaxed);
-            self.stats.avg_latency_ms.store(latency.as_millis() as u64, Ordering::Relaxed);
+            self.stats
+                .avg_latency_ms
+                .store(latency.as_millis() as u64, Ordering::Relaxed);
 
             BroadcastResult {
                 successful_sends,
@@ -368,18 +385,33 @@ mod tests {
         }
 
         /// Send message to individual client with backpressure detection
-        async fn send_to_client(&self, connection: &ClientConnection, message: BroadcastMessage) -> SendResult {
+        async fn send_to_client(
+            &self,
+            connection: &ClientConnection,
+            message: BroadcastMessage,
+        ) -> SendResult {
             // Check current queue size for backpressure detection
-            let pending = connection.backpressure_state.pending_messages.load(Ordering::Relaxed);
+            let pending = connection
+                .backpressure_state
+                .pending_messages
+                .load(Ordering::Relaxed);
             if pending >= self.config.max_pending_per_client {
                 // Client is backpressured - decide whether to drop or queue
                 return self.handle_backpressured_send(connection, message).await;
             }
 
             // Attempt to send with timeout
-            match tokio::time::timeout(self.config.send_timeout, connection.message_queue.send(message)).await {
+            match tokio::time::timeout(
+                self.config.send_timeout,
+                connection.message_queue.send(message),
+            )
+            .await
+            {
                 Ok(Ok(())) => {
-                    connection.backpressure_state.pending_messages.fetch_add(1, Ordering::Relaxed);
+                    connection
+                        .backpressure_state
+                        .pending_messages
+                        .fetch_add(1, Ordering::Relaxed);
                     SendResult::Success
                 }
                 Ok(Err(_)) => SendResult::Error("Channel closed".to_string()),
@@ -388,12 +420,28 @@ mod tests {
         }
 
         /// Handle backpressured send based on message priority and configuration
-        async fn handle_backpressured_send(&self, connection: &ClientConnection, message: BroadcastMessage) -> SendResult {
+        async fn handle_backpressured_send(
+            &self,
+            connection: &ClientConnection,
+            message: BroadcastMessage,
+        ) -> SendResult {
             // Mark client as backpressured if not already
-            if !connection.backpressure_state.is_backpressured.load(Ordering::Relaxed) {
-                connection.backpressure_state.is_backpressured.store(true, Ordering::Relaxed);
-                self.stats.backpressured_clients.fetch_add(1, Ordering::Relaxed);
-                connection.connection_stats.backpressure_events.fetch_add(1, Ordering::Relaxed);
+            if !connection
+                .backpressure_state
+                .is_backpressured
+                .load(Ordering::Relaxed)
+            {
+                connection
+                    .backpressure_state
+                    .is_backpressured
+                    .store(true, Ordering::Relaxed);
+                self.stats
+                    .backpressured_clients
+                    .fetch_add(1, Ordering::Relaxed);
+                connection
+                    .connection_stats
+                    .backpressure_events
+                    .fetch_add(1, Ordering::Relaxed);
             }
 
             // Apply priority-based dropping policy
@@ -410,8 +458,10 @@ mod tests {
                     // Queue other messages with timeout
                     match tokio::time::timeout(
                         self.config.send_timeout / 2,
-                        connection.message_queue.send(message)
-                    ).await {
+                        connection.message_queue.send(message),
+                    )
+                    .await
+                    {
                         Ok(Ok(())) => SendResult::Success,
                         _ => SendResult::Backpressure,
                     }
@@ -420,7 +470,11 @@ mod tests {
         }
 
         /// Force send critical message even under backpressure
-        async fn force_send_to_client(&self, connection: &ClientConnection, message: BroadcastMessage) -> SendResult {
+        async fn force_send_to_client(
+            &self,
+            connection: &ClientConnection,
+            message: BroadcastMessage,
+        ) -> SendResult {
             // For critical messages, we might need to expand queue temporarily
             // or use a separate critical message channel
             match connection.message_queue.try_send(message) {
@@ -430,7 +484,11 @@ mod tests {
         }
 
         /// Handle client backpressure state management
-        async fn handle_client_backpressure(&self, connection: &ClientConnection, _message: &BroadcastMessage) {
+        async fn handle_client_backpressure(
+            &self,
+            connection: &ClientConnection,
+            _message: &BroadcastMessage,
+        ) {
             // Update backpressure timing and statistics
             let now = Instant::now();
             // Store backpressure start time if not already set
@@ -441,10 +499,18 @@ mod tests {
         /// Get current server statistics
         fn get_stats(&self) -> ServerStats {
             ServerStats {
-                connected_clients: AtomicUsize::new(self.stats.connected_clients.load(Ordering::Relaxed)),
-                total_broadcasts: AtomicU64::new(self.stats.total_broadcasts.load(Ordering::Relaxed)),
-                backpressured_clients: AtomicUsize::new(self.stats.backpressured_clients.load(Ordering::Relaxed)),
-                total_dropped_messages: AtomicU64::new(self.stats.total_dropped_messages.load(Ordering::Relaxed)),
+                connected_clients: AtomicUsize::new(
+                    self.stats.connected_clients.load(Ordering::Relaxed),
+                ),
+                total_broadcasts: AtomicU64::new(
+                    self.stats.total_broadcasts.load(Ordering::Relaxed),
+                ),
+                backpressured_clients: AtomicUsize::new(
+                    self.stats.backpressured_clients.load(Ordering::Relaxed),
+                ),
+                total_dropped_messages: AtomicU64::new(
+                    self.stats.total_dropped_messages.load(Ordering::Relaxed),
+                ),
                 avg_latency_ms: AtomicU64::new(self.stats.avg_latency_ms.load(Ordering::Relaxed)),
             }
         }
@@ -518,12 +584,19 @@ mod tests {
                 }
                 ClientBehavior::Slow { delay_ms } => {
                     tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
-                    self.client_stats.delays_experienced.fetch_add(1, Ordering::Relaxed);
+                    self.client_stats
+                        .delays_experienced
+                        .fetch_add(1, Ordering::Relaxed);
                 }
-                ClientBehavior::Intermittent { pause_probability, pause_duration_ms } => {
+                ClientBehavior::Intermittent {
+                    pause_probability,
+                    pause_duration_ms,
+                } => {
                     if rand::random::<f64>() < *pause_probability {
                         tokio::time::sleep(Duration::from_millis(*pause_duration_ms)).await;
-                        self.client_stats.delays_experienced.fetch_add(1, Ordering::Relaxed);
+                        self.client_stats
+                            .delays_experienced
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 ClientBehavior::Backpressured { max_queue_size } => {
@@ -544,11 +617,12 @@ mod tests {
             self.received_messages.push(message);
             let processing_time = start_time.elapsed();
 
-            self.client_stats.messages_received.fetch_add(1, Ordering::Relaxed);
-            self.client_stats.total_processing_time_ms.fetch_add(
-                processing_time.as_millis() as u64,
-                Ordering::Relaxed
-            );
+            self.client_stats
+                .messages_received
+                .fetch_add(1, Ordering::Relaxed);
+            self.client_stats
+                .total_processing_time_ms
+                .fetch_add(processing_time.as_millis() as u64, Ordering::Relaxed);
 
             ProcessResult::Success(processing_time)
         }
@@ -596,7 +670,10 @@ mod tests {
             let websocket_handle = self.create_mock_websocket(client_id).await;
 
             // Register client with server
-            self.server.accept_client(client_id, websocket_handle).await.unwrap();
+            self.server
+                .accept_client(client_id, websocket_handle)
+                .await
+                .unwrap();
 
             self.clients.push(test_client);
             client_id
@@ -659,22 +736,31 @@ mod tests {
 
         /// Update test statistics based on broadcast result
         fn update_test_stats(&mut self, result: &BroadcastResult) {
-            self.test_stats.total_delivered.fetch_add(result.successful_sends as u64, Ordering::Relaxed);
-            self.test_stats.total_backpressured.fetch_add(result.backpressured_clients.len() as u64, Ordering::Relaxed);
+            self.test_stats
+                .total_delivered
+                .fetch_add(result.successful_sends as u64, Ordering::Relaxed);
+            self.test_stats
+                .total_backpressured
+                .fetch_add(result.backpressured_clients.len() as u64, Ordering::Relaxed);
 
             if !result.backpressured_clients.is_empty() {
-                self.test_stats.backpressured_client_count.store(result.backpressured_clients.len(), Ordering::Relaxed);
+                self.test_stats
+                    .backpressured_client_count
+                    .store(result.backpressured_clients.len(), Ordering::Relaxed);
             }
         }
 
         /// Collect results from all test clients
         fn collect_client_results(&self) -> Vec<ClientTestResult> {
-            self.clients.iter().map(|client| ClientTestResult {
-                client_id: client.client_id,
-                messages_received: client.received_messages.len(),
-                processing_stats: client.get_stats().clone(),
-                behavior_type: format!("{:?}", client.behavior),
-            }).collect()
+            self.clients
+                .iter()
+                .map(|client| ClientTestResult {
+                    client_id: client.client_id,
+                    messages_received: client.received_messages.len(),
+                    processing_stats: client.get_stats().clone(),
+                    behavior_type: format!("{:?}", client.behavior),
+                })
+                .collect()
         }
 
         /// Verify that backpressure isolation works correctly
@@ -756,24 +842,26 @@ mod tests {
 
             match (is_debug, is_ci, is_slow_storage) {
                 (true, true, true) => {
-                    println!("Environment: Debug + CI + Slow Storage - using 10x timeout multiplier");
-                    10.0  // Debug builds in CI with slow storage
+                    println!(
+                        "Environment: Debug + CI + Slow Storage - using 10x timeout multiplier"
+                    );
+                    10.0 // Debug builds in CI with slow storage
                 }
                 (true, true, false) => {
                     println!("Environment: Debug + CI - using 5x timeout multiplier");
-                    5.0   // Debug builds in CI
+                    5.0 // Debug builds in CI
                 }
                 (true, false, _) => {
                     println!("Environment: Debug local - using 3x timeout multiplier");
-                    3.0   // Debug builds locally
+                    3.0 // Debug builds locally
                 }
                 (false, true, _) => {
                     println!("Environment: Release CI - using 2x timeout multiplier");
-                    2.0   // Release builds in CI
+                    2.0 // Release builds in CI
                 }
                 (false, false, _) => {
                     println!("Environment: Release local - using 1x timeout multiplier");
-                    1.0   // Release builds locally (baseline)
+                    1.0 // Release builds locally (baseline)
                 }
             }
         }
@@ -793,7 +881,7 @@ mod tests {
         let server_config = ServerConfig {
             max_pending_per_client: 50,
             max_total_memory_bytes: 1024 * 1024,
-            send_timeout: adaptive_timeout_ms(100),  // Base: 100ms, adaptive based on environment
+            send_timeout: adaptive_timeout_ms(100), // Base: 100ms, adaptive based on environment
             drop_low_priority: false,
         };
 
@@ -802,7 +890,7 @@ mod tests {
             num_messages: 20,
             message_size: 256,
             broadcast_rate: 10.0,
-            max_test_duration: adaptive_timeout_secs(10),  // Base: 10s, adaptive based on environment
+            max_test_duration: adaptive_timeout_secs(10), // Base: 10s, adaptive based on environment
         };
 
         println!(
@@ -811,7 +899,9 @@ mod tests {
             test_config.max_test_duration.as_secs()
         );
 
-        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config).await.unwrap();
+        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config)
+            .await
+            .unwrap();
 
         // Add mix of fast clients
         for _ in 0..5 {
@@ -821,19 +911,27 @@ mod tests {
         let result = harness.run_broadcast_test().await;
 
         assert!(result.success, "Basic broadcast test should succeed");
-        assert_eq!(result.client_results.len(), 5, "Should have 5 client results");
+        assert_eq!(
+            result.client_results.len(),
+            5,
+            "Should have 5 client results"
+        );
 
         // All fast clients should receive all messages
         for client_result in &result.client_results {
             assert!(
                 client_result.messages_received >= 15,
                 "Fast client {} should receive most messages, got {}",
-                client_result.client_id, client_result.messages_received
+                client_result.client_id,
+                client_result.messages_received
             );
         }
 
-        println!("✅ Basic broadcast: {} clients received messages in {:?}",
-                result.client_results.len(), result.total_time);
+        println!(
+            "✅ Basic broadcast: {} clients received messages in {:?}",
+            result.client_results.len(),
+            result.total_time
+        );
     }
 
     #[tokio::test]
@@ -853,28 +951,40 @@ mod tests {
             max_test_duration: Duration::from_secs(15),
         };
 
-        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config).await.unwrap();
+        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config)
+            .await
+            .unwrap();
 
         // Add 2 fast clients and 2 slow clients
         harness.add_client(ClientBehavior::Fast).await;
         harness.add_client(ClientBehavior::Fast).await;
-        harness.add_client(ClientBehavior::Slow { delay_ms: 100 }).await;
-        harness.add_client(ClientBehavior::Backpressured { max_queue_size: 5 }).await;
+        harness
+            .add_client(ClientBehavior::Slow { delay_ms: 100 })
+            .await;
+        harness
+            .add_client(ClientBehavior::Backpressured { max_queue_size: 5 })
+            .await;
 
         let result = harness.run_broadcast_test().await;
 
         assert!(result.success, "Backpressure isolation test should succeed");
-        assert!(result.verification_results.backpressure_isolated,
-                "Backpressure should be isolated per client");
+        assert!(
+            result.verification_results.backpressure_isolated,
+            "Backpressure should be isolated per client"
+        );
 
-        println!("✅ Backpressure isolation: Fast clients got {} messages, slow clients got {}, ratio: {:.2}",
-                result.verification_results.fast_client_messages,
-                result.verification_results.slow_client_messages,
-                result.verification_results.isolation_ratio);
+        println!(
+            "✅ Backpressure isolation: Fast clients got {} messages, slow clients got {}, ratio: {:.2}",
+            result.verification_results.fast_client_messages,
+            result.verification_results.slow_client_messages,
+            result.verification_results.isolation_ratio
+        );
 
         // Verify isolation ratio
-        assert!(result.verification_results.isolation_ratio > 1.5,
-               "Fast clients should receive significantly more messages than slow ones");
+        assert!(
+            result.verification_results.isolation_ratio > 1.5,
+            "Fast clients should receive significantly more messages than slow ones"
+        );
     }
 
     #[tokio::test]
@@ -894,12 +1004,18 @@ mod tests {
             max_test_duration: Duration::from_secs(10),
         };
 
-        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config).await.unwrap();
+        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config)
+            .await
+            .unwrap();
 
         // Add clients including one that disconnects
         harness.add_client(ClientBehavior::Fast).await;
         harness.add_client(ClientBehavior::Fast).await;
-        harness.add_client(ClientBehavior::Disconnecting { disconnect_after: 10 }).await;
+        harness
+            .add_client(ClientBehavior::Disconnecting {
+                disconnect_after: 10,
+            })
+            .await;
         harness.add_client(ClientBehavior::Fast).await;
 
         let result = harness.run_broadcast_test().await;
@@ -907,20 +1023,26 @@ mod tests {
         assert!(result.success, "Disconnect test should succeed");
 
         // Verify that remaining clients continued receiving messages
-        let remaining_clients: Vec<_> = result.client_results.iter()
+        let remaining_clients: Vec<_> = result
+            .client_results
+            .iter()
             .filter(|r| r.behavior_type.contains("Fast"))
             .collect();
 
         assert_eq!(remaining_clients.len(), 3, "Should have 3 fast clients");
 
         for client in remaining_clients {
-            assert!(client.messages_received >= 20,
-                   "Remaining client {} should receive most messages after disconnect",
-                   client.client_id);
+            assert!(
+                client.messages_received >= 20,
+                "Remaining client {} should receive most messages after disconnect",
+                client.client_id
+            );
         }
 
-        println!("✅ Client disconnect: {} clients continued after disconnect",
-                remaining_clients.len());
+        println!(
+            "✅ Client disconnect: {} clients continued after disconnect",
+            remaining_clients.len()
+        );
     }
 
     #[tokio::test]
@@ -940,13 +1062,19 @@ mod tests {
             max_test_duration: Duration::from_secs(20),
         };
 
-        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config).await.unwrap();
+        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config)
+            .await
+            .unwrap();
 
         // Add clients with different processing speeds
         harness.add_client(ClientBehavior::Fast).await;
         harness.add_client(ClientBehavior::Fast).await;
-        harness.add_client(ClientBehavior::Slow { delay_ms: 200 }).await;
-        harness.add_client(ClientBehavior::Slow { delay_ms: 300 }).await;
+        harness
+            .add_client(ClientBehavior::Slow { delay_ms: 200 })
+            .await;
+        harness
+            .add_client(ClientBehavior::Slow { delay_ms: 300 })
+            .await;
         harness.add_client(ClientBehavior::Fast).await;
 
         let result = harness.run_broadcast_test().await;
@@ -955,12 +1083,16 @@ mod tests {
 
         // Verify memory management - slow clients should experience backpressure
         let server_stats = result.server_stats;
-        assert!(server_stats.backpressured_clients.load(Ordering::Relaxed) > 0,
-               "Some clients should experience backpressure with large messages");
+        assert!(
+            server_stats.backpressured_clients.load(Ordering::Relaxed) > 0,
+            "Some clients should experience backpressure with large messages"
+        );
 
-        println!("✅ Large message broadcast: {} backpressured clients, {} total drops",
-                server_stats.backpressured_clients.load(Ordering::Relaxed),
-                server_stats.total_dropped_messages.load(Ordering::Relaxed));
+        println!(
+            "✅ Large message broadcast: {} backpressured clients, {} total drops",
+            server_stats.backpressured_clients.load(Ordering::Relaxed),
+            server_stats.total_dropped_messages.load(Ordering::Relaxed)
+        );
     }
 
     #[tokio::test]
@@ -980,7 +1112,9 @@ mod tests {
             max_test_duration: Duration::from_secs(15),
         };
 
-        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config).await.unwrap();
+        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config)
+            .await
+            .unwrap();
 
         // Add initial clients
         for _ in 0..3 {
@@ -990,13 +1124,21 @@ mod tests {
         // Start broadcast test
         let result = harness.run_broadcast_test().await;
 
-        assert!(result.success, "Concurrent subscription test should succeed");
+        assert!(
+            result.success,
+            "Concurrent subscription test should succeed"
+        );
 
         // Verify that the system handles dynamic client changes
-        assert!(result.client_results.len() >= 3, "Should handle initial clients");
+        assert!(
+            result.client_results.len() >= 3,
+            "Should handle initial clients"
+        );
 
-        println!("✅ Concurrent subscription: {} clients handled dynamic changes",
-                result.client_results.len());
+        println!(
+            "✅ Concurrent subscription: {} clients handled dynamic changes",
+            result.client_results.len()
+        );
     }
 
     #[tokio::test]
@@ -1016,11 +1158,17 @@ mod tests {
             max_test_duration: Duration::from_secs(10),
         };
 
-        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config).await.unwrap();
+        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config)
+            .await
+            .unwrap();
 
         // Add slow clients that will trigger backpressure
-        harness.add_client(ClientBehavior::Slow { delay_ms: 200 }).await;
-        harness.add_client(ClientBehavior::Backpressured { max_queue_size: 3 }).await;
+        harness
+            .add_client(ClientBehavior::Slow { delay_ms: 200 })
+            .await;
+        harness
+            .add_client(ClientBehavior::Backpressured { max_queue_size: 3 })
+            .await;
         harness.add_client(ClientBehavior::Fast).await;
 
         // Test with different message priorities
@@ -1049,16 +1197,22 @@ mod tests {
         let server_stats = harness.server.get_stats();
 
         // Critical messages should always be delivered
-        assert!(server_stats.total_broadcasts.load(Ordering::Relaxed) == 20,
-               "All broadcast attempts should be recorded");
+        assert!(
+            server_stats.total_broadcasts.load(Ordering::Relaxed) == 20,
+            "All broadcast attempts should be recorded"
+        );
 
         // Some low priority messages should be dropped due to backpressure
-        assert!(server_stats.total_dropped_messages.load(Ordering::Relaxed) > 0,
-               "Some messages should be dropped due to backpressure");
+        assert!(
+            server_stats.total_dropped_messages.load(Ordering::Relaxed) > 0,
+            "Some messages should be dropped due to backpressure"
+        );
 
-        println!("✅ Priority handling: {} broadcasts, {} drops due to backpressure",
-                server_stats.total_broadcasts.load(Ordering::Relaxed),
-                server_stats.total_dropped_messages.load(Ordering::Relaxed));
+        println!(
+            "✅ Priority handling: {} broadcasts, {} drops due to backpressure",
+            server_stats.total_broadcasts.load(Ordering::Relaxed),
+            server_stats.total_dropped_messages.load(Ordering::Relaxed)
+        );
     }
 
     #[tokio::test]
@@ -1078,13 +1232,23 @@ mod tests {
             max_test_duration: Duration::from_secs(12),
         };
 
-        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config).await.unwrap();
+        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config)
+            .await
+            .unwrap();
 
         // Add clients including some that will disconnect
         harness.add_client(ClientBehavior::Fast).await;
-        harness.add_client(ClientBehavior::Disconnecting { disconnect_after: 5 }).await;
+        harness
+            .add_client(ClientBehavior::Disconnecting {
+                disconnect_after: 5,
+            })
+            .await;
         harness.add_client(ClientBehavior::Fast).await;
-        harness.add_client(ClientBehavior::Disconnecting { disconnect_after: 8 }).await;
+        harness
+            .add_client(ClientBehavior::Disconnecting {
+                disconnect_after: 8,
+            })
+            .await;
 
         let result = harness.run_broadcast_test().await;
 
@@ -1092,11 +1256,15 @@ mod tests {
 
         // Server should continue functioning despite client disconnects
         let server_stats = result.server_stats;
-        assert!(server_stats.total_broadcasts.load(Ordering::Relaxed) >= 10,
-               "Server should continue broadcasting despite disconnects");
+        assert!(
+            server_stats.total_broadcasts.load(Ordering::Relaxed) >= 10,
+            "Server should continue broadcasting despite disconnects"
+        );
 
-        println!("✅ Error recovery: Server maintained {} broadcasts despite disconnects",
-                server_stats.total_broadcasts.load(Ordering::Relaxed));
+        println!(
+            "✅ Error recovery: Server maintained {} broadcasts despite disconnects",
+            server_stats.total_broadcasts.load(Ordering::Relaxed)
+        );
     }
 
     #[tokio::test]
@@ -1116,17 +1284,26 @@ mod tests {
             max_test_duration: Duration::from_secs(15),
         };
 
-        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config).await.unwrap();
+        let mut harness = WebSocketBroadcastHarness::new(server_config, test_config)
+            .await
+            .unwrap();
 
         // Add clients that will all disconnect at different times
         for i in 0..8 {
-            harness.add_client(ClientBehavior::Disconnecting { disconnect_after: 3 + i }).await;
+            harness
+                .add_client(ClientBehavior::Disconnecting {
+                    disconnect_after: 3 + i,
+                })
+                .await;
         }
 
         // Initial client count should be 8
         let initial_stats = harness.server.get_stats();
-        assert_eq!(initial_stats.connected_clients.load(Ordering::Relaxed), 8,
-                  "Should start with 8 connected clients");
+        assert_eq!(
+            initial_stats.connected_clients.load(Ordering::Relaxed),
+            8,
+            "Should start with 8 connected clients"
+        );
 
         let result = harness.run_broadcast_test().await;
 
@@ -1140,7 +1317,9 @@ mod tests {
         // - Memory usage returns to baseline
         // - No resource leaks occur
 
-        println!("✅ Resource cleanup: Handled {} client disconnects successfully",
-                test_config.num_clients);
+        println!(
+            "✅ Resource cleanup: Handled {} client disconnects successfully",
+            test_config.num_clients
+        );
     }
 }

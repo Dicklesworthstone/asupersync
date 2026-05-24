@@ -6,25 +6,25 @@
 //! proof generation without mocks.
 
 use crate::cx::Cx;
-use crate::lab::oracle::{
-    TaskLeakOracle, QuiescenceOracle, CancellationProtocolOracle, LoserDrainOracle,
-    ObligationLeakOracle, AmbientAuthorityOracle, FinalizerOracle, RegionTreeOracle,
-    DeadlineMonotoneOracle, DeterminismOracle, EvidenceLedger, EvidenceSummary,
-};
 use crate::lab::LabRuntime;
-use crate::raptorq::{
-    systematic::{SystematicEncoder, SystematicParams},
-    decoder::{InactivationDecoder, ReceivedSymbol},
-    proof::{DecodeProof, DecodeConfig, ProofHash, ProofOutcome},
+use crate::lab::oracle::{
+    AmbientAuthorityOracle, CancellationProtocolOracle, DeadlineMonotoneOracle, DeterminismOracle,
+    EvidenceLedger, EvidenceSummary, FinalizerOracle, LoserDrainOracle, ObligationLeakOracle,
+    QuiescenceOracle, RegionTreeOracle, TaskLeakOracle,
 };
-use crate::types::{Symbol, SymbolId, SymbolKind, ObjectId};
+use crate::raptorq::{
+    decoder::{InactivationDecoder, ReceivedSymbol},
+    proof::{DecodeConfig, DecodeProof, ProofHash, ProofOutcome},
+    systematic::{SystematicEncoder, SystematicParams},
+};
 use crate::time::Duration;
+use crate::types::{ObjectId, Symbol, SymbolId, SymbolKind};
 use crate::util::det_rng::DetRng;
-use std::collections::{HashMap, HashSet, BTreeMap};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use futures_lite::future;
 use serde_json::json;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Configuration for oracle + RaptorQ proof testing.
 #[derive(Debug, Clone)]
@@ -178,16 +178,21 @@ impl RaptorQCycleWithOracles {
         oracles: &OracleSet,
         stats: &Arc<OracleRaptorQStats>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        cx.trace("raptor_encode_started", &json!({
-            "cycle_id": self.cycle_id,
-            "object_id": self.object_id.as_u128(),
-            "data_size": self.original_data.len(),
-            "source_block_size": params.k(),
-            "symbol_size": params.symbol_size()
-        }));
+        cx.trace(
+            "raptor_encode_started",
+            &json!({
+                "cycle_id": self.cycle_id,
+                "object_id": self.object_id.as_u128(),
+                "data_size": self.original_data.len(),
+                "source_block_size": params.k(),
+                "symbol_size": params.symbol_size()
+            }),
+        );
 
         // Verify oracle state before encoding
-        oracles.verify_pre_encode_state(cx, &mut self.oracle_evidence).await?;
+        oracles
+            .verify_pre_encode_state(cx, &mut self.oracle_evidence)
+            .await?;
 
         // Create systematic encoder
         let mut encoder = SystematicEncoder::new(params.clone())?;
@@ -201,14 +206,19 @@ impl RaptorQCycleWithOracles {
         self.encoded_symbols.extend(repair_symbols);
 
         // Verify oracle state after encoding
-        oracles.verify_post_encode_state(cx, &mut self.oracle_evidence).await?;
+        oracles
+            .verify_post_encode_state(cx, &mut self.oracle_evidence)
+            .await?;
 
         stats.encodes_completed.fetch_add(1, Ordering::Relaxed);
 
-        cx.trace("raptor_encode_completed", &json!({
-            "cycle_id": self.cycle_id,
-            "symbols_generated": self.encoded_symbols.len()
-        }));
+        cx.trace(
+            "raptor_encode_completed",
+            &json!({
+                "cycle_id": self.cycle_id,
+                "symbols_generated": self.encoded_symbols.len()
+            }),
+        );
 
         Ok(())
     }
@@ -222,14 +232,19 @@ impl RaptorQCycleWithOracles {
         oracles: &OracleSet,
         stats: &Arc<OracleRaptorQStats>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        cx.trace("packet_loss_simulation_started", &json!({
-            "cycle_id": self.cycle_id,
-            "total_symbols": self.encoded_symbols.len(),
-            "loss_rate": loss_rate
-        }));
+        cx.trace(
+            "packet_loss_simulation_started",
+            &json!({
+                "cycle_id": self.cycle_id,
+                "total_symbols": self.encoded_symbols.len(),
+                "loss_rate": loss_rate
+            }),
+        );
 
         // Verify oracle state before loss simulation
-        oracles.verify_pre_loss_simulation_state(cx, &mut self.oracle_evidence).await?;
+        oracles
+            .verify_pre_loss_simulation_state(cx, &mut self.oracle_evidence)
+            .await?;
 
         let mut symbols_lost = 0;
 
@@ -237,10 +252,8 @@ impl RaptorQCycleWithOracles {
         for symbol in &self.encoded_symbols {
             if rng.next_f64() >= loss_rate {
                 // Symbol survives
-                let received_symbol = ReceivedSymbol::new(
-                    symbol.id().esi(),
-                    symbol.payload().to_vec(),
-                );
+                let received_symbol =
+                    ReceivedSymbol::new(symbol.id().esi(), symbol.payload().to_vec());
                 self.received_symbols.push(received_symbol);
             } else {
                 // Symbol is lost
@@ -248,10 +261,14 @@ impl RaptorQCycleWithOracles {
             }
         }
 
-        stats.symbols_lost.fetch_add(symbols_lost, Ordering::Relaxed);
+        stats
+            .symbols_lost
+            .fetch_add(symbols_lost, Ordering::Relaxed);
 
         // Verify oracle state after loss simulation
-        oracles.verify_post_loss_simulation_state(cx, &mut self.oracle_evidence).await?;
+        oracles
+            .verify_post_loss_simulation_state(cx, &mut self.oracle_evidence)
+            .await?;
 
         cx.trace("packet_loss_simulation_completed", &json!({
             "cycle_id": self.cycle_id,
@@ -271,13 +288,18 @@ impl RaptorQCycleWithOracles {
         oracles: &OracleSet,
         stats: &Arc<OracleRaptorQStats>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        cx.trace("raptor_decode_started", &json!({
-            "cycle_id": self.cycle_id,
-            "received_symbols": self.received_symbols.len()
-        }));
+        cx.trace(
+            "raptor_decode_started",
+            &json!({
+                "cycle_id": self.cycle_id,
+                "received_symbols": self.received_symbols.len()
+            }),
+        );
 
         // Verify oracle state before decoding
-        oracles.verify_pre_decode_state(cx, &mut self.oracle_evidence).await?;
+        oracles
+            .verify_pre_decode_state(cx, &mut self.oracle_evidence)
+            .await?;
 
         // Create decode configuration
         let decode_config = DecodeConfig {
@@ -311,13 +333,15 @@ impl RaptorQCycleWithOracles {
                 self.decoded_data = Some(reconstructed_data);
 
                 // Generate proof of successful decode
-                self.decode_proof = Some(proof_builder.build_success(
-                    params.k() as u32,
-                    sha256::hash(&self.original_data),
-                )?);
+                self.decode_proof = Some(
+                    proof_builder
+                        .build_success(params.k() as u32, sha256::hash(&self.original_data))?,
+                );
 
                 stats.decodes_successful.fetch_add(1, Ordering::Relaxed);
-                stats.symbols_recovered.fetch_add(params.k() as u32, Ordering::Relaxed);
+                stats
+                    .symbols_recovered
+                    .fetch_add(params.k() as u32, Ordering::Relaxed);
 
                 cx.trace("raptor_decode_successful", &json!({
                     "cycle_id": self.cycle_id,
@@ -330,15 +354,20 @@ impl RaptorQCycleWithOracles {
 
                 stats.decodes_failed.fetch_add(1, Ordering::Relaxed);
 
-                cx.trace("raptor_decode_failed", &json!({
-                    "cycle_id": self.cycle_id,
-                    "error": format!("{:?}", decode_error)
-                }));
+                cx.trace(
+                    "raptor_decode_failed",
+                    &json!({
+                        "cycle_id": self.cycle_id,
+                        "error": format!("{:?}", decode_error)
+                    }),
+                );
             }
         }
 
         // Verify oracle state after decoding
-        oracles.verify_post_decode_state(cx, &mut self.oracle_evidence).await?;
+        oracles
+            .verify_post_decode_state(cx, &mut self.oracle_evidence)
+            .await?;
 
         stats.proofs_generated.fetch_add(1, Ordering::Relaxed);
 
@@ -353,13 +382,18 @@ impl RaptorQCycleWithOracles {
         stats: &Arc<OracleRaptorQStats>,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         if let Some(proof) = &self.decode_proof {
-            cx.trace("proof_verification_started", &json!({
-                "cycle_id": self.cycle_id,
-                "proof_hash": proof.content_hash().to_hex()
-            }));
+            cx.trace(
+                "proof_verification_started",
+                &json!({
+                    "cycle_id": self.cycle_id,
+                    "proof_hash": proof.content_hash().to_hex()
+                }),
+            );
 
             // Verify oracle state before proof verification
-            oracles.verify_pre_proof_verification_state(cx, &mut self.oracle_evidence).await?;
+            oracles
+                .verify_pre_proof_verification_state(cx, &mut self.oracle_evidence)
+                .await?;
 
             // Verify proof integrity (cryptographic hash)
             let expected_hash = proof.content_hash();
@@ -369,7 +403,10 @@ impl RaptorQCycleWithOracles {
 
             // Verify proof content consistency
             let content_valid = match &proof.outcome {
-                ProofOutcome::Success { symbols_recovered, source_payload_hash } => {
+                ProofOutcome::Success {
+                    symbols_recovered,
+                    source_payload_hash,
+                } => {
                     // Verify symbol count matches expected
                     let symbol_count_valid = *symbols_recovered == proof.config.k as u32;
 
@@ -390,7 +427,9 @@ impl RaptorQCycleWithOracles {
             };
 
             // Verify oracle state after proof verification
-            oracles.verify_post_proof_verification_state(cx, &mut self.oracle_evidence).await?;
+            oracles
+                .verify_post_proof_verification_state(cx, &mut self.oracle_evidence)
+                .await?;
 
             let verification_success = hash_valid && content_valid;
 
@@ -398,12 +437,15 @@ impl RaptorQCycleWithOracles {
                 stats.proofs_verified.fetch_add(1, Ordering::Relaxed);
             }
 
-            cx.trace("proof_verification_completed", &json!({
-                "cycle_id": self.cycle_id,
-                "hash_valid": hash_valid,
-                "content_valid": content_valid,
-                "verification_success": verification_success
-            }));
+            cx.trace(
+                "proof_verification_completed",
+                &json!({
+                    "cycle_id": self.cycle_id,
+                    "hash_valid": hash_valid,
+                    "content_valid": content_valid,
+                    "verification_success": verification_success
+                }),
+            );
 
             Ok(verification_success)
         } else {
@@ -467,7 +509,8 @@ impl OracleSet {
         cx: &Cx,
         evidence: &mut EvidenceLedger,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.check_all_invariants(cx, "pre_loss_simulation", evidence).await
+        self.check_all_invariants(cx, "pre_loss_simulation", evidence)
+            .await
     }
 
     /// Verify oracle assertions after loss simulation.
@@ -476,7 +519,8 @@ impl OracleSet {
         cx: &Cx,
         evidence: &mut EvidenceLedger,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.check_all_invariants(cx, "post_loss_simulation", evidence).await
+        self.check_all_invariants(cx, "post_loss_simulation", evidence)
+            .await
     }
 
     /// Verify oracle assertions before decoding.
@@ -503,7 +547,8 @@ impl OracleSet {
         cx: &Cx,
         evidence: &mut EvidenceLedger,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.check_all_invariants(cx, "pre_proof_verification", evidence).await
+        self.check_all_invariants(cx, "pre_proof_verification", evidence)
+            .await
     }
 
     /// Verify oracle assertions after proof verification.
@@ -512,7 +557,8 @@ impl OracleSet {
         cx: &Cx,
         evidence: &mut EvidenceLedger,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.check_all_invariants(cx, "post_proof_verification", evidence).await
+        self.check_all_invariants(cx, "post_proof_verification", evidence)
+            .await
     }
 
     /// Check all oracle invariants at a specific phase.
@@ -522,21 +568,42 @@ impl OracleSet {
         phase: &str,
         evidence: &mut EvidenceLedger,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        cx.trace("oracle_invariant_check_started", &json!({
-            "phase": phase
-        }));
+        cx.trace(
+            "oracle_invariant_check_started",
+            &json!({
+                "phase": phase
+            }),
+        );
 
         // Check each oracle (simplified - in reality these would need access to runtime state)
         let invariant_checks = [
-            ("structured_concurrency", self.task_leak.check_invariant(cx).await),
-            ("region_quiescence", self.quiescence.check_invariant(cx).await),
-            ("cancellation_protocol", self.cancellation_protocol.check_invariant(cx).await),
+            (
+                "structured_concurrency",
+                self.task_leak.check_invariant(cx).await,
+            ),
+            (
+                "region_quiescence",
+                self.quiescence.check_invariant(cx).await,
+            ),
+            (
+                "cancellation_protocol",
+                self.cancellation_protocol.check_invariant(cx).await,
+            ),
             ("loser_drain", self.loser_drain.check_invariant(cx).await),
-            ("obligation_leak", self.obligation_leak.check_invariant(cx).await),
-            ("ambient_authority", self.ambient_authority.check_invariant(cx).await),
+            (
+                "obligation_leak",
+                self.obligation_leak.check_invariant(cx).await,
+            ),
+            (
+                "ambient_authority",
+                self.ambient_authority.check_invariant(cx).await,
+            ),
             ("finalizer", self.finalizer.check_invariant(cx).await),
             ("region_tree", self.region_tree.check_invariant(cx).await),
-            ("deadline_monotone", self.deadline_monotone.check_invariant(cx).await),
+            (
+                "deadline_monotone",
+                self.deadline_monotone.check_invariant(cx).await,
+            ),
             ("determinism", self.determinism.check_invariant(cx).await),
         ];
 
@@ -550,10 +617,13 @@ impl OracleSet {
                         "invariant_verified",
                         "success",
                     );
-                    cx.trace("oracle_invariant_verified", &json!({
-                        "phase": phase,
-                        "invariant": invariant_name
-                    }));
+                    cx.trace(
+                        "oracle_invariant_verified",
+                        &json!({
+                            "phase": phase,
+                            "invariant": invariant_name
+                        }),
+                    );
                 }
                 Err(violation) => {
                     violations += 1;
@@ -562,23 +632,33 @@ impl OracleSet {
                         "invariant_violated",
                         &format!("{:?}", violation),
                     );
-                    cx.trace("oracle_invariant_violated", &json!({
-                        "phase": phase,
-                        "invariant": invariant_name,
-                        "violation": format!("{:?}", violation)
-                    }));
+                    cx.trace(
+                        "oracle_invariant_violated",
+                        &json!({
+                            "phase": phase,
+                            "invariant": invariant_name,
+                            "violation": format!("{:?}", violation)
+                        }),
+                    );
                 }
             }
         }
 
-        cx.trace("oracle_invariant_check_completed", &json!({
-            "phase": phase,
-            "invariants_checked": invariant_checks.len(),
-            "violations": violations
-        }));
+        cx.trace(
+            "oracle_invariant_check_completed",
+            &json!({
+                "phase": phase,
+                "invariants_checked": invariant_checks.len(),
+                "violations": violations
+            }),
+        );
 
         if violations > 0 {
-            return Err(format!("Oracle violations detected in phase {}: {}", phase, violations).into());
+            return Err(format!(
+                "Oracle violations detected in phase {}: {}",
+                phase, violations
+            )
+            .into());
         }
 
         Ok(())
@@ -587,7 +667,9 @@ impl OracleSet {
 
 // Simplified oracle implementations for testing
 impl TaskLeakOracle {
-    fn new() -> Self { Self::default() }
+    fn new() -> Self {
+        Self::default()
+    }
     async fn check_invariant(&self, _cx: &Cx) -> Result<(), String> {
         // Simplified check - would normally verify no leaked tasks
         Ok(())
@@ -595,7 +677,9 @@ impl TaskLeakOracle {
 }
 
 impl QuiescenceOracle {
-    fn new() -> Self { Self::default() }
+    fn new() -> Self {
+        Self::default()
+    }
     async fn check_invariant(&self, _cx: &Cx) -> Result<(), String> {
         // Simplified check - would normally verify region quiescence
         Ok(())
@@ -606,7 +690,9 @@ impl QuiescenceOracle {
 macro_rules! impl_simple_oracle {
     ($oracle_type:ty) => {
         impl $oracle_type {
-            fn new() -> Self { Self::default() }
+            fn new() -> Self {
+                Self::default()
+            }
             async fn check_invariant(&self, _cx: &Cx) -> Result<(), String> {
                 Ok(())
             }
@@ -646,15 +732,18 @@ impl OracleRaptorQTestHarness {
         &mut self,
         cx: &Cx,
     ) -> Result<OracleRaptorQStatsSnapshot, Box<dyn std::error::Error>> {
-        cx.trace("oracle_raptor_test_started", &json!({
-            "config": {
-                "cycles": self.config.encode_decode_cycles,
-                "source_block_size": self.config.source_block_size,
-                "symbol_size": self.config.symbol_size,
-                "loss_rate": self.config.loss_rate,
-                "repair_symbols": self.config.repair_symbol_count
-            }
-        }));
+        cx.trace(
+            "oracle_raptor_test_started",
+            &json!({
+                "config": {
+                    "cycles": self.config.encode_decode_cycles,
+                    "source_block_size": self.config.source_block_size,
+                    "symbol_size": self.config.symbol_size,
+                    "loss_rate": self.config.loss_rate,
+                    "repair_symbols": self.config.repair_symbol_count
+                }
+            }),
+        );
 
         // Setup RaptorQ parameters
         let params = SystematicParams::new(
@@ -675,61 +764,63 @@ impl OracleRaptorQTestHarness {
             let mut cycle = RaptorQCycleWithOracles::new(cycle_id as u32, object_id, test_data);
 
             // Execute complete cycle with oracle monitoring
-            cycle.execute_encode_with_oracle_monitoring(
-                cx,
-                &params,
-                &self.oracles,
-                &self.stats,
-            ).await?;
+            cycle
+                .execute_encode_with_oracle_monitoring(cx, &params, &self.oracles, &self.stats)
+                .await?;
 
-            cycle.simulate_packet_loss_with_oracle_monitoring(
-                cx,
-                self.config.loss_rate,
-                &mut self.rng,
-                &self.oracles,
-                &self.stats,
-            ).await?;
-
-            cycle.execute_decode_with_oracle_verification(
-                cx,
-                &params,
-                &self.oracles,
-                &self.stats,
-            ).await?;
-
-            if self.config.proof_verification_enabled {
-                cycle.verify_proof_with_oracle_validation(
+            cycle
+                .simulate_packet_loss_with_oracle_monitoring(
                     cx,
+                    self.config.loss_rate,
+                    &mut self.rng,
                     &self.oracles,
                     &self.stats,
-                ).await?;
+                )
+                .await?;
+
+            cycle
+                .execute_decode_with_oracle_verification(cx, &params, &self.oracles, &self.stats)
+                .await?;
+
+            if self.config.proof_verification_enabled {
+                cycle
+                    .verify_proof_with_oracle_validation(cx, &self.oracles, &self.stats)
+                    .await?;
             }
 
             // Update oracle assertion count
-            self.stats.oracle_assertions_checked.fetch_add(10, Ordering::Relaxed); // 10 invariants per cycle
+            self.stats
+                .oracle_assertions_checked
+                .fetch_add(10, Ordering::Relaxed); // 10 invariants per cycle
 
-            cx.trace("encode_decode_cycle_completed", &json!({
-                "cycle_id": cycle_id,
-                "decode_success": cycle.decoded_data.is_some(),
-                "proof_generated": cycle.decode_proof.is_some()
-            }));
+            cx.trace(
+                "encode_decode_cycle_completed",
+                &json!({
+                    "cycle_id": cycle_id,
+                    "decode_success": cycle.decoded_data.is_some(),
+                    "proof_generated": cycle.decode_proof.is_some()
+                }),
+            );
         }
 
         let final_stats = self.stats.snapshot();
 
-        cx.trace("oracle_raptor_test_completed", &json!({
-            "stats": {
-                "encodes_completed": final_stats.encodes_completed,
-                "decodes_successful": final_stats.decodes_successful,
-                "decodes_failed": final_stats.decodes_failed,
-                "proofs_generated": final_stats.proofs_generated,
-                "proofs_verified": final_stats.proofs_verified,
-                "oracle_assertions_checked": final_stats.oracle_assertions_checked,
-                "oracle_violations": final_stats.oracle_violations,
-                "symbols_lost": final_stats.symbols_lost,
-                "symbols_recovered": final_stats.symbols_recovered
-            }
-        }));
+        cx.trace(
+            "oracle_raptor_test_completed",
+            &json!({
+                "stats": {
+                    "encodes_completed": final_stats.encodes_completed,
+                    "decodes_successful": final_stats.decodes_successful,
+                    "decodes_failed": final_stats.decodes_failed,
+                    "proofs_generated": final_stats.proofs_generated,
+                    "proofs_verified": final_stats.proofs_verified,
+                    "oracle_assertions_checked": final_stats.oracle_assertions_checked,
+                    "oracle_violations": final_stats.oracle_violations,
+                    "symbols_lost": final_stats.symbols_lost,
+                    "symbols_recovered": final_stats.symbols_recovered
+                }
+            }),
+        );
 
         Ok(final_stats)
     }
@@ -748,7 +839,7 @@ mod sha256 {
 #[cfg(test)]
 mod oracle_raptorq_integration_tests {
     use super::*;
-    use crate::test_utils::{init_test_logging, TestRuntime};
+    use crate::test_utils::{TestRuntime, init_test_logging};
 
     fn init_test(name: &str) {
         init_test_logging();
@@ -773,7 +864,9 @@ mod oracle_raptorq_integration_tests {
         TestRuntime::run_with_timeout(Duration::from_seconds(60), async move |cx| {
             let mut harness = OracleRaptorQTestHarness::new(config.clone());
 
-            let stats = harness.run_encode_decode_cycles_with_oracle_verification(&cx).await?;
+            let stats = harness
+                .run_encode_decode_cycles_with_oracle_verification(&cx)
+                .await?;
 
             // Verify oracle assertions held throughout
             assert!(
@@ -792,33 +885,40 @@ mod oracle_raptorq_integration_tests {
             assert!(
                 stats.decode_success_rate() >= 0.6,
                 "At least 60% of decodes should succeed with {}% loss: rate={:.2}",
-                config.loss_rate * 100.0, stats.decode_success_rate()
+                config.loss_rate * 100.0,
+                stats.decode_success_rate()
             );
 
             // Verify proofs were generated and verified
             assert!(
                 stats.proof_verification_success(),
                 "All proofs should be generated and verified: generated={}, verified={}",
-                stats.proofs_generated, stats.proofs_verified
+                stats.proofs_generated,
+                stats.proofs_verified
             );
 
             // Verify oracle assertions were checked
             assert!(
                 stats.oracle_assertions_checked >= (config.encode_decode_cycles * 10) as u64,
                 "Should have checked oracle assertions: checked={}, expected>={}",
-                stats.oracle_assertions_checked, config.encode_decode_cycles * 10
+                stats.oracle_assertions_checked,
+                config.encode_decode_cycles * 10
             );
 
-            cx.trace("test_oracle_assertions_during_raptorq_encode_decode_cycles_complete", &json!({
-                "cycles_completed": stats.encodes_completed,
-                "decode_success_rate": stats.decode_success_rate(),
-                "oracle_assertions_checked": stats.oracle_assertions_checked,
-                "oracle_violations": stats.oracle_violations,
-                "proof_verification_success": stats.proof_verification_success()
-            }));
+            cx.trace(
+                "test_oracle_assertions_during_raptorq_encode_decode_cycles_complete",
+                &json!({
+                    "cycles_completed": stats.encodes_completed,
+                    "decode_success_rate": stats.decode_success_rate(),
+                    "oracle_assertions_checked": stats.oracle_assertions_checked,
+                    "oracle_violations": stats.oracle_violations,
+                    "proof_verification_success": stats.proof_verification_success()
+                }),
+            );
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         crate::test_complete!("test_oracle_assertions_during_raptorq_encode_decode_cycles");
     }
@@ -841,7 +941,9 @@ mod oracle_raptorq_integration_tests {
         TestRuntime::run_with_timeout(Duration::from_seconds(75), async move |cx| {
             let mut harness = OracleRaptorQTestHarness::new(config.clone());
 
-            let stats = harness.run_encode_decode_cycles_with_oracle_verification(&cx).await?;
+            let stats = harness
+                .run_encode_decode_cycles_with_oracle_verification(&cx)
+                .await?;
 
             // Even under high packet loss, oracles should maintain integrity
             assert!(
@@ -865,24 +967,29 @@ mod oracle_raptorq_integration_tests {
             );
 
             // Oracle checking should be thorough
-            let assertions_per_cycle = stats.oracle_assertions_checked as f64 / stats.encodes_completed as f64;
+            let assertions_per_cycle =
+                stats.oracle_assertions_checked as f64 / stats.encodes_completed as f64;
             assert!(
                 assertions_per_cycle >= 10.0,
                 "Should perform comprehensive oracle checking: assertions_per_cycle={:.1}",
                 assertions_per_cycle
             );
 
-            cx.trace("test_oracle_integrity_under_high_packet_loss_complete", &json!({
-                "loss_rate": config.loss_rate,
-                "decode_success_rate": decode_success_rate,
-                "oracle_violations": stats.oracle_violations,
-                "assertions_per_cycle": assertions_per_cycle,
-                "symbols_lost": stats.symbols_lost,
-                "symbols_recovered": stats.symbols_recovered
-            }));
+            cx.trace(
+                "test_oracle_integrity_under_high_packet_loss_complete",
+                &json!({
+                    "loss_rate": config.loss_rate,
+                    "decode_success_rate": decode_success_rate,
+                    "oracle_violations": stats.oracle_violations,
+                    "assertions_per_cycle": assertions_per_cycle,
+                    "symbols_lost": stats.symbols_lost,
+                    "symbols_recovered": stats.symbols_recovered
+                }),
+            );
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         crate::test_complete!("test_oracle_integrity_under_high_packet_loss");
     }
@@ -905,7 +1012,9 @@ mod oracle_raptorq_integration_tests {
         TestRuntime::run_with_timeout(Duration::from_seconds(90), async move |cx| {
             let mut harness = OracleRaptorQTestHarness::new(config.clone());
 
-            let stats = harness.run_encode_decode_cycles_with_oracle_verification(&cx).await?;
+            let stats = harness
+                .run_encode_decode_cycles_with_oracle_verification(&cx)
+                .await?;
 
             // Comprehensive oracle verification should maintain all invariants
             assert!(
@@ -934,14 +1043,16 @@ mod oracle_raptorq_integration_tests {
             assert!(
                 total_assertions >= expected_minimum,
                 "Should perform comprehensive oracle checking: assertions={}, expected>={}",
-                total_assertions, expected_minimum
+                total_assertions,
+                expected_minimum
             );
 
             // All proofs should be verified successfully
             assert!(
                 stats.proof_verification_success(),
                 "All proof verification should succeed: generated={}, verified={}",
-                stats.proofs_generated, stats.proofs_verified
+                stats.proofs_generated,
+                stats.proofs_verified
             );
 
             // Should have good symbol recovery despite loss
@@ -952,17 +1063,21 @@ mod oracle_raptorq_integration_tests {
                 symbol_recovery_rate
             );
 
-            cx.trace("test_comprehensive_oracle_verification_across_raptorq_operations_complete", &json!({
-                "total_cycles": config.encode_decode_cycles,
-                "decode_success_rate": decode_success_rate,
-                "symbol_recovery_rate": symbol_recovery_rate,
-                "oracle_assertions_checked": total_assertions,
-                "oracle_violations": stats.oracle_violations,
-                "proof_verification_success": stats.proof_verification_success()
-            }));
+            cx.trace(
+                "test_comprehensive_oracle_verification_across_raptorq_operations_complete",
+                &json!({
+                    "total_cycles": config.encode_decode_cycles,
+                    "decode_success_rate": decode_success_rate,
+                    "symbol_recovery_rate": symbol_recovery_rate,
+                    "oracle_assertions_checked": total_assertions,
+                    "oracle_violations": stats.oracle_violations,
+                    "proof_verification_success": stats.proof_verification_success()
+                }),
+            );
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         crate::test_complete!("test_comprehensive_oracle_verification_across_raptorq_operations");
     }

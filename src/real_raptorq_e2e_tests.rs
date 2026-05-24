@@ -490,7 +490,8 @@ mod raptorq_e2e_tests {
             let codec = RealRaptorQCodec::new(RaptorQE2EConfig::default())?;
 
             // Test basic encode→decode cycle
-            let test_data = b"Hello, RaptorQ! This is a test message for encode/decode verification.";
+            let test_data =
+                b"Hello, RaptorQ! This is a test message for encode/decode verification.";
             let object_id = ObjectId::new();
 
             let receive_outcome = codec
@@ -543,7 +544,8 @@ mod raptorq_e2e_tests {
                 logger.export_json()
             );
             Ok::<(), Box<dyn std::error::Error>>(())
-        }).await
+        })
+        .await
         .map_err(|_| "RaptorQ basic encode/decode test timed out after 120 seconds".into())
     }
 

@@ -387,7 +387,10 @@ mod fs_e2e_tests {
                         &dir_path,
                         Some(entry_count),
                         true,
-                        Some(&format!("Directory enumeration hit limit of {} entries", MAX_DIRECTORY_ENTRIES))
+                        Some(&format!(
+                            "Directory enumeration hit limit of {} entries",
+                            MAX_DIRECTORY_ENTRIES
+                        )),
                     );
                     break;
                 }

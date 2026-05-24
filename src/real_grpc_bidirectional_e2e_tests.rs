@@ -14,8 +14,8 @@ mod real_grpc_bidirectional_e2e {
         ServerStreamingMethod,
     };
     use crate::net::tcp::TcpListener;
-    use crate::runtime::{Runtime, spawn};
     use crate::runtime::builder::JoinHandle;
+    use crate::runtime::{Runtime, spawn};
     use crate::time::{Duration, Instant, sleep, timeout};
     use bytes::Bytes;
     use serde_json::{Value, json};
@@ -52,7 +52,10 @@ mod real_grpc_bidirectional_e2e {
                 task.abort();
             }
             if !self.tasks.is_empty() {
-                eprintln!("TaskCollection: Aborted {} background tasks", self.tasks.len());
+                eprintln!(
+                    "TaskCollection: Aborted {} background tasks",
+                    self.tasks.len()
+                );
             }
         }
     }

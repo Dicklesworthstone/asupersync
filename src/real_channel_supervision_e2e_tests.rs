@@ -10,29 +10,42 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::actor::{Actor, ActorContext, ActorHandle, ActorError};
-    use crate::channel::{broadcast, mpsc, watch};
+    use crate::actor::{Actor, ActorContext, ActorError, ActorHandle};
     use crate::channel::broadcast::{Receiver as BroadcastReceiver, Sender as BroadcastSender};
     use crate::channel::mpsc::{Receiver as MpscReceiver, Sender as MpscSender};
+    use crate::channel::{broadcast, mpsc, watch};
     use crate::cx::Cx;
     use crate::runtime::region;
     use crate::supervision::{
-        SupervisionStrategy, SupervisorTree, ChildSpec, RestartConfig, BackoffStrategy
+        BackoffStrategy, ChildSpec, RestartConfig, SupervisionStrategy, SupervisorTree,
     };
-    use crate::types::{Budget, Outcome, TaskId, RegionId, Time};
+    use crate::types::{Budget, Outcome, RegionId, TaskId, Time};
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
 
     // Test message types for different communication patterns
     #[derive(Debug, Clone, PartialEq)]
     enum SupervisorMessage {
-        StartChild { name: String, spec: ChildSpec },
-        StopChild { name: String },
-        RestartChild { name: String, reason: String },
-        BroadcastError { error: String, affected_children: Vec<String> },
-        StatusRequest { reply_to: MpscSender<SupervisorStatus> },
+        StartChild {
+            name: String,
+            spec: ChildSpec,
+        },
+        StopChild {
+            name: String,
+        },
+        RestartChild {
+            name: String,
+            reason: String,
+        },
+        BroadcastError {
+            error: String,
+            affected_children: Vec<String>,
+        },
+        StatusRequest {
+            reply_to: MpscSender<SupervisorStatus>,
+        },
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -105,14 +118,19 @@ mod tests {
         fn create_supervisor_message(&self, msg_type: &str) -> SupervisorMessage {
             match msg_type {
                 "start_child" => SupervisorMessage::StartChild {
-                    name: format!("child_{}", self.child_counter.fetch_add(1, Ordering::Relaxed)),
+                    name: format!(
+                        "child_{}",
+                        self.child_counter.fetch_add(1, Ordering::Relaxed)
+                    ),
                     spec: self.create_child_spec("worker", SupervisionStrategy::Restart),
                 },
                 "broadcast_error" => SupervisorMessage::BroadcastError {
                     error: "Broadcast channel closed unexpectedly".to_string(),
                     affected_children: vec!["worker_1".to_string(), "worker_2".to_string()],
                 },
-                _ => SupervisorMessage::StopChild { name: "default".to_string() },
+                _ => SupervisorMessage::StopChild {
+                    name: "default".to_string(),
+                },
             }
         }
 
@@ -126,9 +144,15 @@ mod tests {
                     error_type: ErrorType::BroadcastReceiveError,
                 },
                 "process_broadcast" => WorkerMessage::ProcessBroadcast {
-                    data: format!("broadcast_data_{}", self.message_counter.fetch_add(1, Ordering::Relaxed)),
+                    data: format!(
+                        "broadcast_data_{}",
+                        self.message_counter.fetch_add(1, Ordering::Relaxed)
+                    ),
                 },
-                _ => WorkerMessage::DoWork { task_id: 0, payload: "default".to_string() },
+                _ => WorkerMessage::DoWork {
+                    task_id: 0,
+                    payload: "default".to_string(),
+                },
             }
         }
     }
@@ -151,10 +175,7 @@ mod tests {
     }
 
     impl TestSupervisor {
-        fn new(
-            broadcast_sender: Option<BroadcastSender<String>>,
-            logger: TestLogger
-        ) -> Self {
+        fn new(broadcast_sender: Option<BroadcastSender<String>>, logger: TestLogger) -> Self {
             Self {
                 children: HashMap::new(),
                 broadcast_sender,
@@ -169,7 +190,7 @@ mod tests {
             &mut self,
             cx: &Cx,
             error: String,
-            affected_children: Vec<String>
+            affected_children: Vec<String>,
         ) -> Result<(), ActorError> {
             self.logger.supervision_event("broadcast_error", &error);
             self.broadcast_errors.fetch_add(1, Ordering::Relaxed);
@@ -188,7 +209,8 @@ mod tests {
                 if let Some(sender) = &self.broadcast_sender {
                     // Attempt to send shutdown signal before closing
                     let _ = sender.reserve(cx).await;
-                    self.logger.supervision_event("broadcast_channel_closing", "shutdown_signal_sent");
+                    self.logger
+                        .supervision_event("broadcast_channel_closing", "shutdown_signal_sent");
                 }
             }
 
@@ -199,9 +221,10 @@ mod tests {
             &mut self,
             cx: &Cx,
             child_name: &str,
-            reason: &str
+            reason: &str,
         ) -> Result<(), ActorError> {
-            self.logger.supervision_event("restart_child_start", child_name);
+            self.logger
+                .supervision_event("restart_child_start", child_name);
 
             if let Some(child_handle) = self.children.remove(child_name) {
                 // Stop the existing child
@@ -210,14 +233,12 @@ mod tests {
                 // Wait for it to finish
                 let _ = child_handle.actor_handle.join(cx).await;
 
-                self.logger.supervision_event("old_child_stopped", child_name);
+                self.logger
+                    .supervision_event("old_child_stopped", child_name);
             }
 
             // Create new worker instance
-            let new_worker = TestWorker::new(
-                self.broadcast_sender.clone(),
-                self.logger.clone()
-            );
+            let new_worker = TestWorker::new(self.broadcast_sender.clone(), self.logger.clone());
 
             // Spawn new actor (simplified - real implementation would use proper region management)
             let task_id = TaskId::from_raw(self.restart_count.load(Ordering::Relaxed) + 1000);
@@ -233,7 +254,8 @@ mod tests {
             };
 
             self.children.insert(child_name.to_string(), new_handle);
-            self.logger.supervision_event("restart_child_complete", child_name);
+            self.logger
+                .supervision_event("restart_child_complete", child_name);
 
             Ok(())
         }
@@ -262,10 +284,8 @@ mod tests {
                 SupervisorMessage::StartChild { name, spec } => {
                     self.logger.supervision_event("start_child", &name);
 
-                    let new_worker = TestWorker::new(
-                        self.broadcast_sender.clone(),
-                        self.logger.clone()
-                    );
+                    let new_worker =
+                        TestWorker::new(self.broadcast_sender.clone(), self.logger.clone());
 
                     let task_id = TaskId::from_raw(self.children.len() as u64 + 1);
                     let actor_handle = self.create_mock_worker_handle(task_id);
@@ -296,8 +316,12 @@ mod tests {
                     self.restart_child(cx, &name, &reason).await?;
                 }
 
-                SupervisorMessage::BroadcastError { error, affected_children } => {
-                    self.handle_broadcast_error(cx, error, affected_children).await?;
+                SupervisorMessage::BroadcastError {
+                    error,
+                    affected_children,
+                } => {
+                    self.handle_broadcast_error(cx, error, affected_children)
+                        .await?;
                 }
 
                 SupervisorMessage::StatusRequest { reply_to } => {
@@ -343,12 +367,14 @@ mod tests {
                         Ok(())
                     }
                     Err(broadcast::RecvError::Closed) => {
-                        self.logger.worker_event("broadcast_channel_closed", "forcing_error");
+                        self.logger
+                            .worker_event("broadcast_channel_closed", "forcing_error");
                         *self.last_error.lock() = Some("Broadcast channel closed".to_string());
                         Err(ActorError::MailboxClosed)
                     }
                     Err(broadcast::RecvError::Lagged(n)) => {
-                        self.logger.worker_event("broadcast_lagged", &format!("missed_{}", n));
+                        self.logger
+                            .worker_event("broadcast_lagged", &format!("missed_{}", n));
                         *self.last_error.lock() = Some(format!("Lagged by {} messages", n));
                         // Continue processing despite lag
                         Ok(())
@@ -363,22 +389,26 @@ mod tests {
             match error_type {
                 ErrorType::BroadcastReceiveError => {
                     *self.last_error.lock() = Some("Broadcast receive failed".to_string());
-                    self.logger.worker_event("simulated_error", "broadcast_receive_error");
+                    self.logger
+                        .worker_event("simulated_error", "broadcast_receive_error");
                     Err(ActorError::ProcessingFailed)
                 }
                 ErrorType::MailboxOverflow => {
                     *self.last_error.lock() = Some("Mailbox overflow".to_string());
-                    self.logger.worker_event("simulated_error", "mailbox_overflow");
+                    self.logger
+                        .worker_event("simulated_error", "mailbox_overflow");
                     Err(ActorError::MailboxFull)
                 }
                 ErrorType::ResourceExhausted => {
                     *self.last_error.lock() = Some("Resource exhausted".to_string());
-                    self.logger.worker_event("simulated_error", "resource_exhausted");
+                    self.logger
+                        .worker_event("simulated_error", "resource_exhausted");
                     Err(ActorError::ResourceExhausted)
                 }
                 ErrorType::ProcessingError => {
                     *self.last_error.lock() = Some("Processing failed".to_string());
-                    self.logger.worker_event("simulated_error", "processing_error");
+                    self.logger
+                        .worker_event("simulated_error", "processing_error");
                     Err(ActorError::ProcessingFailed)
                 }
             }
@@ -401,7 +431,8 @@ mod tests {
             match msg {
                 WorkerMessage::DoWork { task_id, payload } => {
                     self.tasks_processed.fetch_add(1, Ordering::Relaxed);
-                    self.logger.worker_event("task_processed", &format!("{}:{}", task_id, payload));
+                    self.logger
+                        .worker_event("task_processed", &format!("{}:{}", task_id, payload));
 
                     // Also check for any pending broadcast messages
                     let _ = self.handle_broadcast_message(cx).await;
@@ -415,9 +446,7 @@ mod tests {
                     Ok(())
                 }
 
-                WorkerMessage::SimulateError { error_type } => {
-                    self.simulate_error(error_type)
-                }
+                WorkerMessage::SimulateError { error_type } => self.simulate_error(error_type),
 
                 WorkerMessage::GetStatus { reply_to } => {
                     let status = self.get_status();
@@ -445,8 +474,14 @@ mod tests {
 
         fn log_event(&self, category: &str, event: &str, details: &str) {
             let timestamp = crate::time::wall_now();
-            let entry = format!("{{\"test\":\"{}\",\"category\":\"{}\",\"event\":\"{}\",\"details\":\"{}\",\"ts\":{}}}",
-                self.test_name, category, event, details, timestamp.as_nanos());
+            let entry = format!(
+                "{{\"test\":\"{}\",\"category\":\"{}\",\"event\":\"{}\",\"details\":\"{}\",\"ts\":{}}}",
+                self.test_name,
+                category,
+                event,
+                details,
+                timestamp.as_nanos()
+            );
             self.events.lock().push(entry);
             eprintln!("{}", entry);
         }
@@ -511,24 +546,36 @@ mod tests {
             })
         }
 
-        async fn start_worker(&mut self, cx: &Cx, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        async fn start_worker(
+            &mut self,
+            cx: &Cx,
+            name: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
             self.logger.integration_event("start_worker", name);
 
-            let spec = self.factory.create_child_spec(name, SupervisionStrategy::Restart);
+            let spec = self
+                .factory
+                .create_child_spec(name, SupervisionStrategy::Restart);
             let start_msg = SupervisorMessage::StartChild {
                 name: name.to_string(),
                 spec,
             };
 
-            self.command_sender.send(start_msg).await
+            self.command_sender
+                .send(start_msg)
+                .await
                 .map_err(|_| "Failed to send start command")?;
 
             self.logger.integration_event("start_worker_sent", name);
             Ok(())
         }
 
-        async fn simulate_broadcast_error(&mut self, cx: &Cx) -> Result<(), Box<dyn std::error::Error>> {
-            self.logger.integration_event("simulate_broadcast_error", "started");
+        async fn simulate_broadcast_error(
+            &mut self,
+            cx: &Cx,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.logger
+                .integration_event("simulate_broadcast_error", "started");
 
             // Send error message to supervisor
             let error_msg = SupervisorMessage::BroadcastError {
@@ -536,19 +583,27 @@ mod tests {
                 affected_children: vec!["worker_1".to_string(), "worker_2".to_string()],
             };
 
-            self.command_sender.send(error_msg).await
+            self.command_sender
+                .send(error_msg)
+                .await
                 .map_err(|_| "Failed to send broadcast error")?;
 
-            self.logger.integration_event("broadcast_error_sent", "supervisor_notified");
+            self.logger
+                .integration_event("broadcast_error_sent", "supervisor_notified");
 
             // Close the broadcast channel to trigger actual errors
             drop(self.broadcast_sender.clone()); // Close one sender reference
 
-            self.logger.channel_event("broadcast_channel_closed", "error_propagation");
+            self.logger
+                .channel_event("broadcast_channel_closed", "error_propagation");
             Ok(())
         }
 
-        async fn send_broadcast_message(&mut self, cx: &Cx, data: &str) -> Result<(), Box<dyn std::error::Error>> {
+        async fn send_broadcast_message(
+            &mut self,
+            cx: &Cx,
+            data: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
             self.logger.integration_event("send_broadcast", data);
 
             match self.broadcast_sender.reserve(cx).await {
@@ -558,30 +613,37 @@ mod tests {
                     Ok(())
                 }
                 Err(_) => {
-                    self.logger.channel_event("broadcast_send_failed", "channel_closed");
+                    self.logger
+                        .channel_event("broadcast_send_failed", "channel_closed");
                     Err("Broadcast channel closed".into())
                 }
             }
         }
 
-        async fn get_supervisor_status(&mut self, cx: &Cx) -> Result<SupervisorStatus, Box<dyn std::error::Error>> {
+        async fn get_supervisor_status(
+            &mut self,
+            cx: &Cx,
+        ) -> Result<SupervisorStatus, Box<dyn std::error::Error>> {
             let (reply_sender, mut reply_receiver) = mpsc::channel(1);
 
             let status_msg = SupervisorMessage::StatusRequest {
                 reply_to: reply_sender,
             };
 
-            self.command_sender.send(status_msg).await
+            self.command_sender
+                .send(status_msg)
+                .await
                 .map_err(|_| "Failed to send status request")?;
 
             match reply_receiver.recv(cx).await {
                 Ok(status) => {
-                    self.logger.integration_event("status_received", &format!("children_{}", status.active_children));
+                    self.logger.integration_event(
+                        "status_received",
+                        &format!("children_{}", status.active_children),
+                    );
                     Ok(status)
                 }
-                Err(_) => {
-                    Err("Failed to receive status".into())
-                }
+                Err(_) => Err("Failed to receive status".into()),
             }
         }
 
@@ -608,7 +670,7 @@ mod tests {
                 crate::time::sleep(cx, backoff).await;
                 backoff = std::cmp::min(
                     Duration::from_millis((backoff.as_millis() as f64 * 1.5) as u64),
-                    max_backoff
+                    max_backoff,
                 );
             }
 
@@ -622,18 +684,26 @@ mod tests {
             ).into())
         }
 
-        async fn trigger_worker_restart(&mut self, cx: &Cx, worker_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-            self.logger.integration_event("trigger_restart", worker_name);
+        async fn trigger_worker_restart(
+            &mut self,
+            cx: &Cx,
+            worker_name: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.logger
+                .integration_event("trigger_restart", worker_name);
 
             let restart_msg = SupervisorMessage::RestartChild {
                 name: worker_name.to_string(),
                 reason: "Manual restart for testing".to_string(),
             };
 
-            self.command_sender.send(restart_msg).await
+            self.command_sender
+                .send(restart_msg)
+                .await
                 .map_err(|_| "Failed to send restart command")?;
 
-            self.logger.integration_event("restart_triggered", worker_name);
+            self.logger
+                .integration_event("restart_triggered", worker_name);
             Ok(())
         }
 
@@ -701,8 +771,12 @@ mod tests {
             harness.start_worker(&cx, "worker_3").await?;
 
             // Send some broadcast messages
-            harness.send_broadcast_message(&cx, "initial_broadcast_1").await?;
-            harness.send_broadcast_message(&cx, "initial_broadcast_2").await?;
+            harness
+                .send_broadcast_message(&cx, "initial_broadcast_1")
+                .await?;
+            harness
+                .send_broadcast_message(&cx, "initial_broadcast_2")
+                .await?;
 
             // Get initial supervisor status
             let initial_status = harness.get_supervisor_status(&cx).await?;
@@ -713,29 +787,50 @@ mod tests {
             harness.simulate_broadcast_error(&cx).await?;
 
             // Wait for supervision to handle the broadcast error
-            let post_error_status = harness.wait_for_supervision_action(
-                &cx,
-                |status| status.broadcast_errors > 0 && status.restart_count > 0,
-                Duration::from_secs(5)
-            ).await
-            .expect("Supervision should handle broadcast error within timeout");
+            let post_error_status = harness
+                .wait_for_supervision_action(
+                    &cx,
+                    |status| status.broadcast_errors > 0 && status.restart_count > 0,
+                    Duration::from_secs(5),
+                )
+                .await
+                .expect("Supervision should handle broadcast error within timeout");
 
             // Verify the expected conditions were met
-            assert!(post_error_status.broadcast_errors > 0,
-                "Should track broadcast errors: {}", post_error_status.broadcast_errors);
-            assert!(post_error_status.restart_count > 0,
-                "Should have triggered restarts: {}", post_error_status.restart_count);
+            assert!(
+                post_error_status.broadcast_errors > 0,
+                "Should track broadcast errors: {}",
+                post_error_status.broadcast_errors
+            );
+            assert!(
+                post_error_status.restart_count > 0,
+                "Should have triggered restarts: {}",
+                post_error_status.restart_count
+            );
 
             // Analyze event sequence
             let analysis = harness.analyze_event_sequence();
-            assert!(analysis.supervision_events > 0, "Should have supervision events");
+            assert!(
+                analysis.supervision_events > 0,
+                "Should have supervision events"
+            );
             assert!(analysis.channel_events > 0, "Should have channel events");
-            assert!(analysis.restart_sequence_detected, "Should detect restart sequence");
-            assert!(analysis.broadcast_error_propagation, "Should detect broadcast error propagation");
-            assert!(analysis.channel_close_handling, "Should detect channel close handling");
+            assert!(
+                analysis.restart_sequence_detected,
+                "Should detect restart sequence"
+            );
+            assert!(
+                analysis.broadcast_error_propagation,
+                "Should detect broadcast error propagation"
+            );
+            assert!(
+                analysis.channel_close_handling,
+                "Should detect channel close handling"
+            );
 
             Ok(())
-        }).expect("Channel supervision integration test should complete successfully");
+        })
+        .expect("Channel supervision integration test should complete successfully");
     }
 
     #[test]
@@ -761,20 +856,29 @@ mod tests {
             let post_restart_status = harness.get_supervisor_status(&cx).await?;
 
             // Verify forced restart occurred
-            assert!(post_restart_status.restart_count >= 2,
-                "Should have restarted affected workers");
-            assert!(post_restart_status.broadcast_errors > 0,
-                "Should track broadcast errors");
-            assert_eq!(post_restart_status.active_children, 2,
-                "Should maintain active worker count after restart");
+            assert!(
+                post_restart_status.restart_count >= 2,
+                "Should have restarted affected workers"
+            );
+            assert!(
+                post_restart_status.broadcast_errors > 0,
+                "Should track broadcast errors"
+            );
+            assert_eq!(
+                post_restart_status.active_children, 2,
+                "Should maintain active worker count after restart"
+            );
 
             // Verify event sequence shows forced restart
             let analysis = harness.analyze_event_sequence();
-            assert!(analysis.restart_sequence_detected,
-                "Should show forced restart sequence");
+            assert!(
+                analysis.restart_sequence_detected,
+                "Should show forced restart sequence"
+            );
 
             Ok(())
-        }).expect("Forced restart test should complete successfully");
+        })
+        .expect("Forced restart test should complete successfully");
     }
 
     #[test]
@@ -789,15 +893,21 @@ mod tests {
 
             // Send multiple messages to test mailbox behavior
             for i in 0..5 {
-                harness.send_broadcast_message(&cx, &format!("msg_{}", i)).await?;
+                harness
+                    .send_broadcast_message(&cx, &format!("msg_{}", i))
+                    .await?;
             }
 
             // Trigger restart and verify mailbox is properly reset
-            harness.trigger_worker_restart(&cx, "mailbox_worker").await?;
+            harness
+                .trigger_worker_restart(&cx, "mailbox_worker")
+                .await?;
 
             // Send more messages after restart
             for i in 5..10 {
-                harness.send_broadcast_message(&cx, &format!("post_restart_msg_{}", i)).await?;
+                harness
+                    .send_broadcast_message(&cx, &format!("post_restart_msg_{}", i))
+                    .await?;
             }
 
             // Verify supervision handled mailbox integration
@@ -806,10 +916,14 @@ mod tests {
 
             let analysis = harness.analyze_event_sequence();
             assert!(analysis.restart_sequence_detected, "Should detect restart");
-            assert!(analysis.channel_events >= 10, "Should have processed messages");
+            assert!(
+                analysis.channel_events >= 10,
+                "Should have processed messages"
+            );
 
             Ok(())
-        }).expect("Mailbox integration test should complete successfully");
+        })
+        .expect("Mailbox integration test should complete successfully");
     }
 
     #[test]
@@ -822,7 +936,9 @@ mod tests {
             // Start multiple workers
             let worker_count = 4;
             for i in 0..worker_count {
-                harness.start_worker(&cx, &format!("concurrent_worker_{}", i)).await?;
+                harness
+                    .start_worker(&cx, &format!("concurrent_worker_{}", i))
+                    .await?;
             }
 
             // Spawn multiple concurrent tasks that interact with channels and supervision
@@ -835,7 +951,8 @@ mod tests {
                 for i in 0..10 {
                     if let Ok(permit) = broadcast_sender_clone.reserve(&cx).await {
                         permit.send(format!("concurrent_broadcast_{}", i));
-                        logger_clone.channel_event("concurrent_broadcast_sent", &format!("msg_{}", i));
+                        logger_clone
+                            .channel_event("concurrent_broadcast_sent", &format!("msg_{}", i));
                     }
                     crate::time::sleep(&cx, Duration::from_millis(5)).await;
                 }
@@ -868,18 +985,29 @@ mod tests {
 
             // Verify final state
             let final_status = harness.get_supervisor_status(&cx).await?;
-            assert_eq!(final_status.active_children, worker_count,
-                "Should maintain correct worker count");
-            assert!(final_status.restart_count >= 3,
-                "Should have performed concurrent restarts");
+            assert_eq!(
+                final_status.active_children, worker_count,
+                "Should maintain correct worker count"
+            );
+            assert!(
+                final_status.restart_count >= 3,
+                "Should have performed concurrent restarts"
+            );
 
             let analysis = harness.analyze_event_sequence();
             assert!(analysis.total_events > 20, "Should have high activity");
-            assert!(analysis.supervision_events >= 3, "Should have supervision activity");
-            assert!(analysis.channel_events >= 10, "Should have channel activity");
+            assert!(
+                analysis.supervision_events >= 3,
+                "Should have supervision activity"
+            );
+            assert!(
+                analysis.channel_events >= 10,
+                "Should have channel activity"
+            );
 
             Ok(())
-        }).expect("Concurrent supervision test should complete successfully");
+        })
+        .expect("Concurrent supervision test should complete successfully");
     }
 
     #[test]
@@ -906,19 +1034,34 @@ mod tests {
             crate::time::sleep(&cx, Duration::from_millis(10)).await;
 
             // 3. Verify secondary worker is notified through channels
-            harness.send_broadcast_message(&cx, "restart_notification").await?;
+            harness
+                .send_broadcast_message(&cx, "restart_notification")
+                .await?;
 
             // 4. Check that supervision decisions were properly propagated
             let status = harness.get_supervisor_status(&cx).await?;
-            assert!(status.restart_count > 0, "Should have restarted primary worker");
-            assert!(status.broadcast_errors > 0, "Should track communication failure");
+            assert!(
+                status.restart_count > 0,
+                "Should have restarted primary worker"
+            );
+            assert!(
+                status.broadcast_errors > 0,
+                "Should track communication failure"
+            );
 
             // Analyze decision propagation
             let analysis = harness.analyze_event_sequence();
-            assert!(analysis.broadcast_error_propagation, "Should propagate broadcast errors");
-            assert!(analysis.restart_sequence_detected, "Should execute restart sequence");
+            assert!(
+                analysis.broadcast_error_propagation,
+                "Should propagate broadcast errors"
+            );
+            assert!(
+                analysis.restart_sequence_detected,
+                "Should execute restart sequence"
+            );
 
             Ok(())
-        }).expect("Decision propagation test should complete successfully");
+        })
+        .expect("Decision propagation test should complete successfully");
     }
 }

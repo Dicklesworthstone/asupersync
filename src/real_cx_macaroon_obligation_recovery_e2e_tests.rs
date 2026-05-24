@@ -68,7 +68,12 @@ struct CapabilityCheckpoint {
 
 /// Real checkpoint storage interface for E2E testing
 trait CheckpointStorage: Send + Sync + std::fmt::Debug {
-    fn store_checkpoint(&self, id: u64, timestamp_ns: u64, context: &VerificationContext) -> Result<(), String>;
+    fn store_checkpoint(
+        &self,
+        id: u64,
+        timestamp_ns: u64,
+        context: &VerificationContext,
+    ) -> Result<(), String>;
     fn restore_checkpoint(&self, id: u64) -> Result<Option<VerificationContext>, String>;
     fn list_checkpoints(&self) -> Result<Vec<u64>, String>;
 }
@@ -88,8 +93,15 @@ impl InMemoryCheckpointStorage {
 }
 
 impl CheckpointStorage for InMemoryCheckpointStorage {
-    fn store_checkpoint(&self, id: u64, timestamp_ns: u64, context: &VerificationContext) -> Result<(), String> {
-        let mut guard = self.checkpoints.lock()
+    fn store_checkpoint(
+        &self,
+        id: u64,
+        timestamp_ns: u64,
+        context: &VerificationContext,
+    ) -> Result<(), String> {
+        let mut guard = self
+            .checkpoints
+            .lock()
             .map_err(|poison_err| {
                 eprintln!("Checkpoint storage mutex poisoned during store, recovering...");
                 poison_err.into_inner()
@@ -101,7 +113,9 @@ impl CheckpointStorage for InMemoryCheckpointStorage {
     }
 
     fn restore_checkpoint(&self, id: u64) -> Result<Option<VerificationContext>, String> {
-        let guard = self.checkpoints.lock()
+        let guard = self
+            .checkpoints
+            .lock()
             .map_err(|poison_err| {
                 eprintln!("Checkpoint storage mutex poisoned during restore, recovering...");
                 poison_err.into_inner()
@@ -112,7 +126,9 @@ impl CheckpointStorage for InMemoryCheckpointStorage {
     }
 
     fn list_checkpoints(&self) -> Result<Vec<u64>, String> {
-        let guard = self.checkpoints.lock()
+        let guard = self
+            .checkpoints
+            .lock()
             .map_err(|poison_err| {
                 eprintln!("Checkpoint storage mutex poisoned during list, recovering...");
                 poison_err.into_inner()
@@ -133,9 +149,17 @@ impl RealCapabilityStore {
     }
 
     /// Store a capability using the real registry system
-    fn store_capability(&self, cx: &Cx, identifier: &str, token: MacaroonToken, root_key: AuthKey) -> Result<(), String> {
+    fn store_capability(
+        &self,
+        cx: &Cx,
+        identifier: &str,
+        token: MacaroonToken,
+        root_key: AuthKey,
+    ) -> Result<(), String> {
         // Use real registry to store capability with proper lease management
-        let lease_result = cx.registry().reserve_name(identifier)
+        let lease_result = cx
+            .registry()
+            .reserve_name(identifier)
             .map_err(|e| format!("Failed to reserve capability name: {:?}", e))?;
 
         // Store the token and key in cx registry context (this would normally be persistent)
@@ -143,7 +167,8 @@ impl RealCapabilityStore {
             .map_err(|e| format!("Failed to store capability token: {:?}", e))?;
 
         // Commit the lease to make the capability available
-        lease_result.commit()
+        lease_result
+            .commit()
             .map_err(|e| format!("Failed to commit capability lease: {:?}", e))?;
 
         Ok(())
@@ -156,10 +181,16 @@ impl RealCapabilityStore {
     }
 
     /// Verify a capability token with current context using real verification
-    fn verify_capability(&self, cx: &Cx, identifier: &str, context: &VerificationContext) -> Result<bool, String> {
+    fn verify_capability(
+        &self,
+        cx: &Cx,
+        identifier: &str,
+        context: &VerificationContext,
+    ) -> Result<bool, String> {
         match self.get_capability(cx, identifier)? {
             Some(token) => {
-                let root_key = cx.get_capability_root_key(identifier)
+                let root_key = cx
+                    .get_capability_root_key(identifier)
                     .map_err(|e| format!("Failed to get root key: {:?}", e))?;
                 Ok(token.verify(context, &root_key, &[]).is_ok())
             }
@@ -168,12 +199,21 @@ impl RealCapabilityStore {
     }
 
     /// Create a real recovery checkpoint using checkpoint storage
-    fn create_checkpoint(&self, id: u64, timestamp_ns: u64, context: VerificationContext) -> Result<(), String> {
-        self.checkpoint_storage.store_checkpoint(id, timestamp_ns, &context)
+    fn create_checkpoint(
+        &self,
+        id: u64,
+        timestamp_ns: u64,
+        context: VerificationContext,
+    ) -> Result<(), String> {
+        self.checkpoint_storage
+            .store_checkpoint(id, timestamp_ns, &context)
     }
 
     /// Restore from a real checkpoint
-    fn restore_from_checkpoint(&self, checkpoint_id: u64) -> Result<Option<VerificationContext>, String> {
+    fn restore_from_checkpoint(
+        &self,
+        checkpoint_id: u64,
+    ) -> Result<Option<VerificationContext>, String> {
         self.checkpoint_storage.restore_checkpoint(checkpoint_id)
     }
 
@@ -183,7 +223,8 @@ impl RealCapabilityStore {
         if let Some(mut token) = self.get_capability(cx, identifier)? {
             // Add an invalid caveat to simulate corruption
             let corrupted = token.add_caveat(CaveatPredicate::MaxUses(0));
-            let root_key = cx.get_capability_root_key(identifier)
+            let root_key = cx
+                .get_capability_root_key(identifier)
                 .map_err(|e| format!("Failed to get root key for corruption test: {:?}", e))?;
             self.store_capability(cx, identifier, corrupted, root_key)?;
         }
@@ -218,14 +259,18 @@ impl RecoveryScenario {
             store: RealCapabilityStore::new(recovery_config.clone()),
             ledger: CrdtObligationLedger::new(),
             governor: RecoveryGovernor::new(config),
-            current_time_ns: 1_000_000_000,  // Start at 1 second
+            current_time_ns: 1_000_000_000, // Start at 1 second
             test_region_id: RegionId::from_raw(42),
             test_task_id: TaskId::from_raw(123),
         }
     }
 
     /// Create a time-bounded capability token
-    fn create_time_bounded_capability(&self, identifier: &str, deadline_ns: u64) -> (MacaroonToken, AuthKey) {
+    fn create_time_bounded_capability(
+        &self,
+        identifier: &str,
+        deadline_ns: u64,
+    ) -> (MacaroonToken, AuthKey) {
         let root_key = AuthKey::from_seed(identifier.len() as u64);
         let token = MacaroonToken::mint(&root_key, identifier, "cx/recovery_test")
             .add_caveat(CaveatPredicate::TimeBefore(deadline_ns));
@@ -241,7 +286,11 @@ impl RecoveryScenario {
     }
 
     /// Create a usage-limited capability token
-    fn create_usage_limited_capability(&self, identifier: &str, max_uses: u32) -> (MacaroonToken, AuthKey) {
+    fn create_usage_limited_capability(
+        &self,
+        identifier: &str,
+        max_uses: u32,
+    ) -> (MacaroonToken, AuthKey) {
         let root_key = AuthKey::from_seed(identifier.len() as u64 + 2000);
         let token = MacaroonToken::mint(&root_key, identifier, "cx/recovery_test")
             .add_caveat(CaveatPredicate::MaxUses(max_uses));
@@ -249,7 +298,12 @@ impl RecoveryScenario {
     }
 
     /// Create compound attenuated capability token
-    fn create_compound_capability(&self, identifier: &str, deadline_ns: u64, max_uses: u32) -> (MacaroonToken, AuthKey) {
+    fn create_compound_capability(
+        &self,
+        identifier: &str,
+        deadline_ns: u64,
+        max_uses: u32,
+    ) -> (MacaroonToken, AuthKey) {
         let root_key = AuthKey::from_seed(identifier.len() as u64 + 3000);
         let token = MacaroonToken::mint(&root_key, identifier, "cx/recovery_test")
             .add_caveat(CaveatPredicate::TimeBefore(deadline_ns))
@@ -277,7 +331,8 @@ impl RecoveryScenario {
         let context = self.build_verification_context();
 
         // 1. Create checkpoint before "failure"
-        self.store.create_checkpoint(checkpoint_id, self.current_time_ns, context.clone());
+        self.store
+            .create_checkpoint(checkpoint_id, self.current_time_ns, context.clone());
 
         // 2. Simulate failure: corrupt some state
         // (In real system this would be process restart, network partition, etc.)
@@ -323,8 +378,11 @@ mod tests {
 
         // Create capability that expires 10 seconds from now
         let future_deadline = scenario.current_time_ns + 10_000_000_000;
-        let (token, root_key) = scenario.create_time_bounded_capability("time_test", future_deadline);
-        scenario.store.store_capability("time_test", token, root_key);
+        let (token, root_key) =
+            scenario.create_time_bounded_capability("time_test", future_deadline);
+        scenario
+            .store
+            .store_capability("time_test", token, root_key);
 
         // Capability should work before recovery
         let (before, after) = scenario.test_capability_recovery("time_test");
@@ -337,17 +395,23 @@ mod tests {
         let mut scenario = RecoveryScenario::new();
 
         // Create capability that expires very soon
-        let near_deadline = scenario.current_time_ns + 1_000_000;  // 1ms
-        let (token, root_key) = scenario.create_time_bounded_capability("expiry_test", near_deadline);
-        scenario.store.store_capability("expiry_test", token, root_key);
+        let near_deadline = scenario.current_time_ns + 1_000_000; // 1ms
+        let (token, root_key) =
+            scenario.create_time_bounded_capability("expiry_test", near_deadline);
+        scenario
+            .store
+            .store_capability("expiry_test", token, root_key);
 
         // Advance time past deadline
-        scenario.advance_time(2_000_000);  // 2ms
+        scenario.advance_time(2_000_000); // 2ms
 
         // Capability should be expired after time advancement
         let (before, after) = scenario.test_capability_recovery("expiry_test");
         assert!(!before, "Capability should be expired before recovery");
-        assert!(!after, "Expired capability should remain expired after recovery");
+        assert!(
+            !after,
+            "Expired capability should remain expired after recovery"
+        );
     }
 
     #[test]
@@ -355,10 +419,15 @@ mod tests {
         let mut scenario = RecoveryScenario::new();
 
         let (token, root_key) = scenario.create_region_scoped_capability("region_test");
-        scenario.store.store_capability("region_test", token, root_key);
+        scenario
+            .store
+            .store_capability("region_test", token, root_key);
 
         let (before, after) = scenario.test_capability_recovery("region_test");
-        assert!(before, "Region-scoped capability should work before recovery");
+        assert!(
+            before,
+            "Region-scoped capability should work before recovery"
+        );
         assert!(after, "Region-scoped capability should survive recovery");
     }
 
@@ -367,10 +436,15 @@ mod tests {
         let mut scenario = RecoveryScenario::new();
 
         let (token, root_key) = scenario.create_usage_limited_capability("usage_test", 5);
-        scenario.store.store_capability("usage_test", token, root_key);
+        scenario
+            .store
+            .store_capability("usage_test", token, root_key);
 
         let (before, after) = scenario.test_capability_recovery("usage_test");
-        assert!(before, "Usage-limited capability should work before recovery");
+        assert!(
+            before,
+            "Usage-limited capability should work before recovery"
+        );
         assert!(after, "Usage-limited capability should survive recovery");
     }
 
@@ -379,12 +453,18 @@ mod tests {
         let mut scenario = RecoveryScenario::new();
 
         let future_deadline = scenario.current_time_ns + 10_000_000_000;
-        let (token, root_key) = scenario.create_compound_capability("compound_test", future_deadline, 3);
-        scenario.store.store_capability("compound_test", token, root_key);
+        let (token, root_key) =
+            scenario.create_compound_capability("compound_test", future_deadline, 3);
+        scenario
+            .store
+            .store_capability("compound_test", token, root_key);
 
         let (before, after) = scenario.test_capability_recovery("compound_test");
         assert!(before, "Compound capability should work before recovery");
-        assert!(after, "Compound attenuated capability should survive recovery");
+        assert!(
+            after,
+            "Compound attenuated capability should survive recovery"
+        );
     }
 
     #[test]
@@ -394,29 +474,49 @@ mod tests {
         // Create several different capability types
         let future_deadline = scenario.current_time_ns + 10_000_000_000;
         let capabilities = [
-            ("time_cap", scenario.create_time_bounded_capability("time_cap", future_deadline)),
-            ("region_cap", scenario.create_region_scoped_capability("region_cap")),
-            ("usage_cap", scenario.create_usage_limited_capability("usage_cap", 10)),
+            (
+                "time_cap",
+                scenario.create_time_bounded_capability("time_cap", future_deadline),
+            ),
+            (
+                "region_cap",
+                scenario.create_region_scoped_capability("region_cap"),
+            ),
+            (
+                "usage_cap",
+                scenario.create_usage_limited_capability("usage_cap", 10),
+            ),
         ];
 
         // Store all capabilities
         for (id, (token, root_key)) in &capabilities {
-            scenario.store.store_capability(id, token.clone(), *root_key);
+            scenario
+                .store
+                .store_capability(id, token.clone(), *root_key);
         }
 
         // Verify all work before recovery
         for (id, _) in &capabilities {
-            assert!(scenario.verify_capability_integrity(id),
-                   "Capability {} should work before recovery", id);
+            assert!(
+                scenario.verify_capability_integrity(id),
+                "Capability {} should work before recovery",
+                id
+            );
         }
 
         // Perform recovery cycle
-        assert!(scenario.simulate_recovery_cycle(100), "Recovery should succeed");
+        assert!(
+            scenario.simulate_recovery_cycle(100),
+            "Recovery should succeed"
+        );
 
         // Verify all still work after recovery
         for (id, _) in &capabilities {
-            assert!(scenario.verify_capability_integrity(id),
-                   "Capability {} should work after recovery", id);
+            assert!(
+                scenario.verify_capability_integrity(id),
+                "Capability {} should work after recovery",
+                id
+            );
         }
     }
 
@@ -426,8 +526,11 @@ mod tests {
 
         // Create capability
         let future_deadline = scenario.current_time_ns + 10_000_000_000;
-        let (token, root_key) = scenario.create_time_bounded_capability("load_test", future_deadline);
-        scenario.store.store_capability("load_test", token, root_key);
+        let (token, root_key) =
+            scenario.create_time_bounded_capability("load_test", future_deadline);
+        scenario
+            .store
+            .store_capability("load_test", token, root_key);
 
         // Create many pending obligations to stress recovery
         for i in 0..50 {
@@ -438,7 +541,10 @@ mod tests {
         // Recovery should handle load gracefully
         let (before, after) = scenario.test_capability_recovery("load_test");
         assert!(before, "Capability should work under load before recovery");
-        assert!(after, "Capability should survive recovery under obligation load");
+        assert!(
+            after,
+            "Capability should survive recovery under obligation load"
+        );
     }
 
     #[test]
@@ -448,36 +554,54 @@ mod tests {
         // Create parent capability
         let root_key = AuthKey::from_seed(12345);
         let parent_token = MacaroonToken::mint(&root_key, "parent_cap", "cx/recovery_test");
-        scenario.store.store_capability("parent_cap", parent_token.clone(), root_key);
+        scenario
+            .store
+            .store_capability("parent_cap", parent_token.clone(), root_key);
 
         // Create attenuated child capability
         let child_token = parent_token.add_caveat(CaveatPredicate::MaxUses(5));
-        scenario.store.store_capability("child_cap", child_token.clone(), root_key);
+        scenario
+            .store
+            .store_capability("child_cap", child_token.clone(), root_key);
 
         // Verify parent is more permissive than child before recovery
         let parent_context = scenario.build_verification_context();
-        let parent_valid_before = scenario.store.verify_capability("parent_cap", &parent_context);
-        let child_valid_before = scenario.store.verify_capability("child_cap", &parent_context);
+        let parent_valid_before = scenario
+            .store
+            .verify_capability("parent_cap", &parent_context);
+        let child_valid_before = scenario
+            .store
+            .verify_capability("child_cap", &parent_context);
 
         // Perform recovery
         scenario.simulate_recovery_cycle(200);
 
         // Verify attenuation relationship preserved after recovery
-        let parent_valid_after = scenario.store.verify_capability("parent_cap", &parent_context);
-        let child_valid_after = scenario.store.verify_capability("child_cap", &parent_context);
+        let parent_valid_after = scenario
+            .store
+            .verify_capability("parent_cap", &parent_context);
+        let child_valid_after = scenario
+            .store
+            .verify_capability("child_cap", &parent_context);
 
-        assert_eq!(parent_valid_before, parent_valid_after,
-                  "Parent capability validity should be preserved");
-        assert_eq!(child_valid_before, child_valid_after,
-                  "Child capability validity should be preserved");
+        assert_eq!(
+            parent_valid_before, parent_valid_after,
+            "Parent capability validity should be preserved"
+        );
+        assert_eq!(
+            child_valid_before, child_valid_after,
+            "Child capability validity should be preserved"
+        );
 
         // Verify child is still properly attenuated (more restrictive than parent)
         assert!(parent_valid_after, "Parent should remain valid");
         assert!(child_valid_after, "Child should remain valid");
 
         // Child token should be a direct attenuation of parent
-        assert!(child_token.is_direct_attenuation_of(&parent_token, &CaveatPredicate::MaxUses(5)),
-               "Child should remain direct attenuation of parent after recovery");
+        assert!(
+            child_token.is_direct_attenuation_of(&parent_token, &CaveatPredicate::MaxUses(5)),
+            "Child should remain direct attenuation of parent after recovery"
+        );
     }
 
     #[test]
@@ -485,26 +609,42 @@ mod tests {
         let mut scenario = RecoveryScenario::new();
 
         let future_deadline = scenario.current_time_ns + 10_000_000_000;
-        let (token, root_key) = scenario.create_compound_capability("consistency_test", future_deadline, 7);
-        scenario.store.store_capability("consistency_test", token, root_key);
+        let (token, root_key) =
+            scenario.create_compound_capability("consistency_test", future_deadline, 7);
+        scenario
+            .store
+            .store_capability("consistency_test", token, root_key);
 
         // Create multiple checkpoints
         for i in 1..=5 {
-            scenario.advance_time(1_000_000_000);  // Advance 1 second
+            scenario.advance_time(1_000_000_000); // Advance 1 second
             let context = scenario.build_verification_context();
-            scenario.store.create_checkpoint(i, scenario.current_time_ns, context);
+            scenario
+                .store
+                .create_checkpoint(i, scenario.current_time_ns, context);
         }
 
         // Verify capability works before any restore
-        assert!(scenario.verify_capability_integrity("consistency_test"),
-               "Capability should work before restoration");
+        assert!(
+            scenario.verify_capability_integrity("consistency_test"),
+            "Capability should work before restoration"
+        );
 
         // Restore from various checkpoints and verify consistency
         for checkpoint_id in 1..=5 {
-            assert!(scenario.store.restore_from_checkpoint(checkpoint_id).is_some(),
-                   "Should be able to restore from checkpoint {}", checkpoint_id);
-            assert!(scenario.verify_capability_integrity("consistency_test"),
-                   "Capability should work after restoring from checkpoint {}", checkpoint_id);
+            assert!(
+                scenario
+                    .store
+                    .restore_from_checkpoint(checkpoint_id)
+                    .is_some(),
+                "Should be able to restore from checkpoint {}",
+                checkpoint_id
+            );
+            assert!(
+                scenario.verify_capability_integrity("consistency_test"),
+                "Capability should work after restoring from checkpoint {}",
+                checkpoint_id
+            );
         }
     }
 
@@ -513,30 +653,43 @@ mod tests {
         let mut scenario = RecoveryScenario::new();
 
         let future_deadline = scenario.current_time_ns + 10_000_000_000;
-        let (token, root_key) = scenario.create_time_bounded_capability("robust_test", future_deadline);
-        scenario.store.store_capability("robust_test", token, root_key);
+        let (token, root_key) =
+            scenario.create_time_bounded_capability("robust_test", future_deadline);
+        scenario
+            .store
+            .store_capability("robust_test", token, root_key);
 
         // Create checkpoint before corruption
         let context = scenario.build_verification_context();
-        scenario.store.create_checkpoint(999, scenario.current_time_ns, context);
+        scenario
+            .store
+            .create_checkpoint(999, scenario.current_time_ns, context);
 
         // Verify works before corruption
-        assert!(scenario.verify_capability_integrity("robust_test"),
-               "Capability should work before corruption");
+        assert!(
+            scenario.verify_capability_integrity("robust_test"),
+            "Capability should work before corruption"
+        );
 
         // Simulate corruption
         scenario.store.corrupt_capability("robust_test");
 
         // Should fail verification while corrupted
-        assert!(!scenario.verify_capability_integrity("robust_test"),
-               "Corrupted capability should fail verification");
+        assert!(
+            !scenario.verify_capability_integrity("robust_test"),
+            "Corrupted capability should fail verification"
+        );
 
         // Restore from clean checkpoint
-        assert!(scenario.store.restore_from_checkpoint(999).is_some(),
-               "Should be able to restore from clean checkpoint");
+        assert!(
+            scenario.store.restore_from_checkpoint(999).is_some(),
+            "Should be able to restore from clean checkpoint"
+        );
 
         // Should work again after restoration
-        assert!(scenario.verify_capability_integrity("robust_test"),
-               "Capability should work after restoration from clean checkpoint");
+        assert!(
+            scenario.verify_capability_integrity("robust_test"),
+            "Capability should work after restoration from clean checkpoint"
+        );
     }
 }

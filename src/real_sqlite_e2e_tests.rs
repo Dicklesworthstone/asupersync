@@ -902,10 +902,7 @@ mod sqlite_e2e_tests {
         env::set_var("NODE_ENV", "production");
         env::set_var("REAL_SERVICE_TESTS", "true");
         let result = validate_sqlite_e2e_environment();
-        assert!(
-            result.is_err(),
-            "Should reject production environment"
-        );
+        assert!(result.is_err(), "Should reject production environment");
         assert!(
             result.unwrap_err().contains("production"),
             "Error message should mention production"
@@ -937,10 +934,7 @@ mod sqlite_e2e_tests {
         env::set_var("NODE_ENV", "test");
         env::set_var("REAL_SERVICE_TESTS", "true");
         let result = validate_sqlite_e2e_environment();
-        assert!(
-            result.is_ok(),
-            "Should accept valid test environment"
-        );
+        assert!(result.is_ok(), "Should accept valid test environment");
 
         // Restore original environment values
         match original_node_env {

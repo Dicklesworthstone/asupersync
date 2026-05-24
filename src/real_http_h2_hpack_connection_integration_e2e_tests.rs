@@ -40,15 +40,15 @@ mod tests {
         dead_code
     )]
 
-    use crate::http::h2::{
-        connection::{Connection, CLIENT_PREFACE},
-        error::{ErrorCode, H2Error},
-        frame::{Frame, FrameType, HeadersFrame, SettingsFrame, Setting},
-        hpack::{self, Header, DEFAULT_MAX_TABLE_SIZE},
-        settings::Settings,
-    };
     use crate::bytes::{Bytes, BytesMut};
     use crate::cx::Cx;
+    use crate::http::h2::{
+        connection::{CLIENT_PREFACE, Connection},
+        error::{ErrorCode, H2Error},
+        frame::{Frame, FrameType, HeadersFrame, Setting, SettingsFrame},
+        hpack::{self, DEFAULT_MAX_TABLE_SIZE, Header},
+        settings::Settings,
+    };
     use crate::runtime::task_id::TaskId;
     use std::collections::{HashMap, VecDeque};
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -123,7 +123,8 @@ mod tests {
                     let elapsed = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
-                        .as_secs() - start_time;
+                        .as_secs()
+                        - start_time;
                     Instant::now() + std::time::Duration::from_secs(elapsed)
                 }),
                 connection_counter: AtomicU32::new(0),
@@ -140,7 +141,10 @@ mod tests {
         }
 
         /// Create a connection pair with custom HPACK table sizes for testing
-        fn create_connection_pair_with_table_size(&self, table_size: usize) -> (Connection, Connection) {
+        fn create_connection_pair_with_table_size(
+            &self,
+            table_size: usize,
+        ) -> (Connection, Connection) {
             let mut client_settings = Settings::default();
             client_settings.set_header_table_size(table_size);
 
@@ -158,24 +162,32 @@ mod tests {
         /// Generate large headers to fill dynamic table and trigger eviction
         fn generate_large_headers(&self, count: usize, size_per_header: usize) -> Vec<Header> {
             (0..count)
-                .map(|i| Header::new(
-                    format!("x-large-header-{:03}", i),
-                    "x".repeat(size_per_header)
-                ))
+                .map(|i| {
+                    Header::new(
+                        format!("x-large-header-{:03}", i),
+                        "x".repeat(size_per_header),
+                    )
+                })
                 .collect()
         }
 
         /// Create concurrent header frames for multiple streams
-        fn create_concurrent_header_frames(&self, stream_count: u32, headers_per_stream: usize) -> Vec<(u32, Vec<Header>)> {
-            (1..=stream_count * 2)  // Use odd stream IDs
+        fn create_concurrent_header_frames(
+            &self,
+            stream_count: u32,
+            headers_per_stream: usize,
+        ) -> Vec<(u32, Vec<Header>)> {
+            (1..=stream_count * 2) // Use odd stream IDs
                 .step_by(2)
                 .take(stream_count as usize)
                 .map(|stream_id| {
                     let headers = (0..headers_per_stream)
-                        .map(|i| Header::new(
-                            format!("x-stream-{}-header-{}", stream_id, i),
-                            format!("value-{}-{}", stream_id, i)
-                        ))
+                        .map(|i| {
+                            Header::new(
+                                format!("x-stream-{}-header-{}", stream_id, i),
+                                format!("value-{}-{}", stream_id, i),
+                            )
+                        })
                         .collect();
                     (stream_id, headers)
                 })
@@ -183,7 +195,11 @@ mod tests {
         }
 
         /// Verify HPACK encoder/decoder table synchronization
-        fn verify_table_synchronization(&self, encoder: &hpack::Encoder, decoder: &hpack::Decoder) -> bool {
+        fn verify_table_synchronization(
+            &self,
+            encoder: &hpack::Encoder,
+            decoder: &hpack::Decoder,
+        ) -> bool {
             // Check that both tables have the same effective size
             // This is an approximation since we don't have direct access to internal state
             // In a real implementation, we'd add accessor methods to the HPACK types
@@ -238,7 +254,10 @@ mod tests {
         }
 
         /// Test basic HPACK table synchronization between connection endpoints
-        async fn test_basic_hpack_table_synchronization(&mut self, cx: &Cx) -> HpackConnectionTestResult {
+        async fn test_basic_hpack_table_synchronization(
+            &mut self,
+            cx: &Cx,
+        ) -> HpackConnectionTestResult {
             let mut result = HpackConnectionTestResult {
                 success: false,
                 phase: HpackConnectionTestPhase::Initial,
@@ -251,7 +270,8 @@ mod tests {
             result.phase = HpackConnectionTestPhase::ConnectionSetup;
 
             // Create connection pair with standard table size
-            let (client_conn, server_conn) = self.create_connection_pair_with_table_size(DEFAULT_MAX_TABLE_SIZE);
+            let (client_conn, server_conn) =
+                self.create_connection_pair_with_table_size(DEFAULT_MAX_TABLE_SIZE);
             result.connection_stats.connections_created = 2;
 
             result.phase = HpackConnectionTestPhase::HpackTableSetup;
@@ -284,7 +304,8 @@ mod tests {
             match decoder.decode(&mut source) {
                 Ok(decoded_headers) => {
                     if decoded_headers == test_headers {
-                        result.tables_synchronized = self.verify_table_synchronization(&encoder, &decoder);
+                        result.tables_synchronized =
+                            self.verify_table_synchronization(&encoder, &decoder);
                         result.hpack_stats.synchronization_checks += 1;
 
                         if result.tables_synchronized {
@@ -292,7 +313,8 @@ mod tests {
                             result.phase = HpackConnectionTestPhase::Complete;
                         } else {
                             result.hpack_stats.sync_failures += 1;
-                            result.error = Some("HPACK encoder/decoder tables out of sync".to_string());
+                            result.error =
+                                Some("HPACK encoder/decoder tables out of sync".to_string());
                         }
                     } else {
                         result.error = Some("Header encoding/decoding mismatch".to_string());
@@ -307,7 +329,10 @@ mod tests {
         }
 
         /// Test concurrent header frames with eviction scenarios
-        async fn test_concurrent_header_frames_with_eviction(&mut self, cx: &Cx) -> HpackConnectionTestResult {
+        async fn test_concurrent_header_frames_with_eviction(
+            &mut self,
+            cx: &Cx,
+        ) -> HpackConnectionTestResult {
             let mut result = HpackConnectionTestResult {
                 success: false,
                 phase: HpackConnectionTestPhase::Initial,
@@ -321,7 +346,8 @@ mod tests {
 
             // Create connections with small table size to force eviction
             let small_table_size = 512;
-            let (client_conn, server_conn) = self.create_connection_pair_with_table_size(small_table_size);
+            let (client_conn, server_conn) =
+                self.create_connection_pair_with_table_size(small_table_size);
             result.connection_stats.connections_created = 2;
 
             result.phase = HpackConnectionTestPhase::ConcurrentHeadersSending;
@@ -337,12 +363,15 @@ mod tests {
             result.phase = HpackConnectionTestPhase::EvictionTriggering;
 
             // Execute concurrent header processing
-            match self.execute_concurrent_header_processing_with_eviction(
-                cx,
-                client_conn,
-                server_conn,
-                concurrent_frames,
-            ).await {
+            match self
+                .execute_concurrent_header_processing_with_eviction(
+                    cx,
+                    client_conn,
+                    server_conn,
+                    concurrent_frames,
+                )
+                .await
+            {
                 Ok(processing_success) => {
                     if processing_success {
                         result.phase = HpackConnectionTestPhase::SynchronizationVerification;
@@ -352,14 +381,16 @@ mod tests {
                         // Verify tables remain synchronized after eviction
                         let encoder = hpack::Encoder::new();
                         let decoder = hpack::Decoder::new();
-                        result.tables_synchronized = self.verify_table_synchronization(&encoder, &decoder);
+                        result.tables_synchronized =
+                            self.verify_table_synchronization(&encoder, &decoder);
 
                         if result.tables_synchronized {
                             result.success = true;
                             result.phase = HpackConnectionTestPhase::Complete;
                         } else {
                             result.hpack_stats.sync_failures += 1;
-                            result.error = Some("Table synchronization lost during eviction".to_string());
+                            result.error =
+                                Some("Table synchronization lost during eviction".to_string());
                         }
                     } else {
                         result.error = Some("Concurrent header processing failed".to_string());
@@ -374,7 +405,10 @@ mod tests {
         }
 
         /// Test table size updates during concurrent header processing
-        async fn test_table_size_updates_during_concurrent_processing(&mut self, cx: &Cx) -> HpackConnectionTestResult {
+        async fn test_table_size_updates_during_concurrent_processing(
+            &mut self,
+            cx: &Cx,
+        ) -> HpackConnectionTestResult {
             let mut result = HpackConnectionTestResult {
                 success: false,
                 phase: HpackConnectionTestPhase::Initial,
@@ -388,7 +422,8 @@ mod tests {
 
             // Start with larger table size
             let initial_table_size = 2048;
-            let (mut client_conn, mut server_conn) = self.create_connection_pair_with_table_size(initial_table_size);
+            let (mut client_conn, mut server_conn) =
+                self.create_connection_pair_with_table_size(initial_table_size);
             result.connection_stats.connections_created = 2;
 
             result.phase = HpackConnectionTestPhase::TableSizeUpdating;
@@ -432,7 +467,10 @@ mod tests {
         }
 
         /// Test comprehensive HPACK-connection integration across multiple scenarios
-        async fn test_comprehensive_hpack_connection_integration(&mut self, cx: &Cx) -> HpackConnectionTestResult {
+        async fn test_comprehensive_hpack_connection_integration(
+            &mut self,
+            cx: &Cx,
+        ) -> HpackConnectionTestResult {
             let mut result = HpackConnectionTestResult {
                 success: false,
                 phase: HpackConnectionTestPhase::Initial,
@@ -445,34 +483,39 @@ mod tests {
             // Run all sub-tests and combine results
             let sync_result = self.test_basic_hpack_table_synchronization(cx).await;
             let eviction_result = self.test_concurrent_header_frames_with_eviction(cx).await;
-            let size_update_result = self.test_table_size_updates_during_concurrent_processing(cx).await;
+            let size_update_result = self
+                .test_table_size_updates_during_concurrent_processing(cx)
+                .await;
 
             // Aggregate statistics
-            result.hpack_stats.synchronization_checks = sync_result.hpack_stats.synchronization_checks +
-                eviction_result.hpack_stats.synchronization_checks +
-                size_update_result.hpack_stats.synchronization_checks;
+            result.hpack_stats.synchronization_checks =
+                sync_result.hpack_stats.synchronization_checks
+                    + eviction_result.hpack_stats.synchronization_checks
+                    + size_update_result.hpack_stats.synchronization_checks;
 
-            result.hpack_stats.headers_processed = sync_result.hpack_stats.headers_processed +
-                eviction_result.hpack_stats.headers_processed +
-                size_update_result.hpack_stats.headers_processed;
+            result.hpack_stats.headers_processed = sync_result.hpack_stats.headers_processed
+                + eviction_result.hpack_stats.headers_processed
+                + size_update_result.hpack_stats.headers_processed;
 
-            result.connection_stats.connections_created = sync_result.connection_stats.connections_created +
-                eviction_result.connection_stats.connections_created +
-                size_update_result.connection_stats.connections_created;
+            result.connection_stats.connections_created =
+                sync_result.connection_stats.connections_created
+                    + eviction_result.connection_stats.connections_created
+                    + size_update_result.connection_stats.connections_created;
 
             // Check overall success
-            result.success = sync_result.success && eviction_result.success && size_update_result.success;
-            result.tables_synchronized = sync_result.tables_synchronized &&
-                eviction_result.tables_synchronized &&
-                size_update_result.tables_synchronized;
+            result.success =
+                sync_result.success && eviction_result.success && size_update_result.success;
+            result.tables_synchronized = sync_result.tables_synchronized
+                && eviction_result.tables_synchronized
+                && size_update_result.tables_synchronized;
 
             if result.success {
                 result.phase = HpackConnectionTestPhase::Complete;
             } else {
                 result.error = Some("One or more integration tests failed".to_string());
-                result.hpack_stats.sync_failures = sync_result.hpack_stats.sync_failures +
-                    eviction_result.hpack_stats.sync_failures +
-                    size_update_result.hpack_stats.sync_failures;
+                result.hpack_stats.sync_failures = sync_result.hpack_stats.sync_failures
+                    + eviction_result.hpack_stats.sync_failures
+                    + size_update_result.hpack_stats.sync_failures;
             }
 
             result
@@ -485,52 +528,77 @@ mod tests {
             let mut harness = HpackConnectionTestHarness::new("basic_hpack_sync");
             let result = harness.test_basic_hpack_table_synchronization(&cx).await;
 
-            assert!(result.success, "Basic HPACK table synchronization failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Basic HPACK table synchronization failed: {:?}",
+                result.error
+            );
             assert!(result.tables_synchronized);
             assert_eq!(result.phase, HpackConnectionTestPhase::Complete);
             assert!(result.hpack_stats.synchronization_checks > 0);
             assert_eq!(result.hpack_stats.sync_failures, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn test_hpack_concurrent_headers_eviction() {
         crate::lab::runtime::test_with_lab(|cx| async move {
             let mut harness = HpackConnectionTestHarness::new("concurrent_eviction");
-            let result = harness.test_concurrent_header_frames_with_eviction(&cx).await;
+            let result = harness
+                .test_concurrent_header_frames_with_eviction(&cx)
+                .await;
 
-            assert!(result.success, "Concurrent header eviction test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Concurrent header eviction test failed: {:?}",
+                result.error
+            );
             assert!(result.tables_synchronized);
             assert!(result.connection_stats.concurrent_streams > 0);
             assert!(result.hpack_stats.headers_processed > 0);
             assert_eq!(result.hpack_stats.sync_failures, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn test_hpack_table_size_updates_concurrent() {
         crate::lab::runtime::test_with_lab(|cx| async move {
             let mut harness = HpackConnectionTestHarness::new("table_size_updates");
-            let result = harness.test_table_size_updates_during_concurrent_processing(&cx).await;
+            let result = harness
+                .test_table_size_updates_during_concurrent_processing(&cx)
+                .await;
 
-            assert!(result.success, "Table size update test failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Table size update test failed: {:?}",
+                result.error
+            );
             assert!(result.tables_synchronized);
             assert!(result.hpack_stats.table_size_updates > 0);
             assert!(result.hpack_stats.synchronization_checks > 0);
             assert_eq!(result.hpack_stats.sync_failures, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]
     fn test_hpack_comprehensive_connection_integration() {
         crate::lab::runtime::test_with_lab(|cx| async move {
             let mut harness = HpackConnectionTestHarness::new("comprehensive_hpack_connection");
-            let result = harness.test_comprehensive_hpack_connection_integration(&cx).await;
+            let result = harness
+                .test_comprehensive_hpack_connection_integration(&cx)
+                .await;
 
-            assert!(result.success, "Comprehensive HPACK-connection integration failed: {:?}", result.error);
+            assert!(
+                result.success,
+                "Comprehensive HPACK-connection integration failed: {:?}",
+                result.error
+            );
             assert!(result.tables_synchronized);
             let hpack_stats = result.hpack_stats;
             let connection_stats = result.connection_stats;
@@ -540,6 +608,7 @@ mod tests {
             assert!(connection_stats.connections_created > 0);
             assert_eq!(hpack_stats.sync_failures, 0);
             Ok::<(), crate::error::Error>(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

@@ -19,18 +19,18 @@ mod tests {
     /// Chaos injection configuration for lab testing
     #[derive(Debug, Clone)]
     struct ChaosConfig {
-        scheduling_delays: bool,        // Inject random scheduling delays
-        resource_pressure: bool,        // Simulate resource exhaustion
-        timing_perturbations: bool,     // Perturb timing-sensitive operations
-        memory_pressure: bool,          // Simulate memory allocation failures
-        network_partitions: bool,       // Inject network connectivity issues
-        cpu_starvation: bool,           // Simulate CPU resource contention
+        scheduling_delays: bool,    // Inject random scheduling delays
+        resource_pressure: bool,    // Simulate resource exhaustion
+        timing_perturbations: bool, // Perturb timing-sensitive operations
+        memory_pressure: bool,      // Simulate memory allocation failures
+        network_partitions: bool,   // Inject network connectivity issues
+        cpu_starvation: bool,       // Simulate CPU resource contention
 
         // Chaos parameters
-        delay_range_ms: (u64, u64),     // Min/max delay range
-        failure_probability: f64,       // Probability of chaos injection
-        chaos_duration_ms: u64,         // How long chaos lasts
-        recovery_time_ms: u64,          // Time for system recovery
+        delay_range_ms: (u64, u64), // Min/max delay range
+        failure_probability: f64,   // Probability of chaos injection
+        chaos_duration_ms: u64,     // How long chaos lasts
+        recovery_time_ms: u64,      // Time for system recovery
     }
 
     impl Default for ChaosConfig {
@@ -39,14 +39,14 @@ mod tests {
                 scheduling_delays: true,
                 resource_pressure: true,
                 timing_perturbations: true,
-                memory_pressure: false,     // Potentially destructive
-                network_partitions: false,  // Not applicable to single-node
+                memory_pressure: false,    // Potentially destructive
+                network_partitions: false, // Not applicable to single-node
                 cpu_starvation: true,
 
-                delay_range_ms: (1, 50),    // 1-50ms delays
-                failure_probability: 0.1,   // 10% chaos injection rate
-                chaos_duration_ms: 100,     // 100ms chaos duration
-                recovery_time_ms: 200,      // 200ms recovery time
+                delay_range_ms: (1, 50),  // 1-50ms delays
+                failure_probability: 0.1, // 10% chaos injection rate
+                chaos_duration_ms: 100,   // 100ms chaos duration
+                recovery_time_ms: 200,    // 200ms recovery time
             }
         }
     }
@@ -213,7 +213,11 @@ mod tests {
             self.active.store(false, Ordering::Relaxed);
         }
 
-        fn inject_chaos(&self, runtime_state: &RuntimeState, operation: &str) -> Option<ChaosEvent> {
+        fn inject_chaos(
+            &self,
+            runtime_state: &RuntimeState,
+            operation: &str,
+        ) -> Option<ChaosEvent> {
             if !self.active.load(Ordering::Relaxed) {
                 return None;
             }
@@ -256,10 +260,17 @@ mod tests {
             }
         }
 
-        fn create_chaos_event(&self, event_type: ChaosEventType, runtime_state: &RuntimeState) -> ChaosEvent {
-            let duration = self.config.delay_range_ms.0 +
-                (runtime_state.global_stats.chaos_events_injected.load(Ordering::Relaxed) as u64 %
-                 (self.config.delay_range_ms.1 - self.config.delay_range_ms.0));
+        fn create_chaos_event(
+            &self,
+            event_type: ChaosEventType,
+            runtime_state: &RuntimeState,
+        ) -> ChaosEvent {
+            let duration = self.config.delay_range_ms.0
+                + (runtime_state
+                    .global_stats
+                    .chaos_events_injected
+                    .load(Ordering::Relaxed) as u64
+                    % (self.config.delay_range_ms.1 - self.config.delay_range_ms.0));
 
             ChaosEvent {
                 event_type,
@@ -282,21 +293,27 @@ mod tests {
                     // Simulate resource pressure (allocate temporary memory)
                     let _temp_allocation: Vec<u8> = vec![0; (event.duration_ms * 1024) as usize];
                     std::thread::sleep(Duration::from_millis(event.duration_ms / 10));
-                    self.stats.resource_pressures.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .resource_pressures
+                        .fetch_add(1, Ordering::Relaxed);
                 }
                 ChaosEventType::CpuStarvation => {
                     // Simulate CPU starvation (busy loop)
                     let end_time = Instant::now() + Duration::from_millis(event.duration_ms);
                     while Instant::now() < end_time {
                         // Busy loop to consume CPU
-                        for _ in 0..1000 { std::hint::black_box(1 + 1); }
+                        for _ in 0..1000 {
+                            std::hint::black_box(1 + 1);
+                        }
                     }
                     self.stats.cpu_starvations.fetch_add(1, Ordering::Relaxed);
                 }
                 ChaosEventType::TimingPerturbation => {
                     // Simulate timing perturbation
                     std::thread::sleep(Duration::from_millis(event.duration_ms / 2));
-                    self.stats.timing_perturbations.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .timing_perturbations
+                        .fetch_add(1, Ordering::Relaxed);
                 }
                 ChaosEventType::MemoryPressure => {
                     // Memory pressure (disabled by default for safety)
@@ -356,7 +373,10 @@ mod tests {
             };
 
             state.regions.insert(region_id, region);
-            state.global_stats.regions_created.fetch_add(1, Ordering::Relaxed);
+            state
+                .global_stats
+                .regions_created
+                .fetch_add(1, Ordering::Relaxed);
 
             // Update parent's child list
             if let Some(parent_id) = parent {
@@ -384,12 +404,16 @@ mod tests {
             let mut state = self.state.lock().unwrap();
 
             // Verify region exists and is active
-            let region = state.regions.get(&region_id)
+            let region = state
+                .regions
+                .get(&region_id)
                 .ok_or_else(|| format!("Region {} not found", region_id))?;
 
             if region.state != RegionStateEnum::Active {
-                return Err(format!("Cannot spawn task in region {} with state {:?}",
-                                   region_id, region.state));
+                return Err(format!(
+                    "Cannot spawn task in region {} with state {:?}",
+                    region_id, region.state
+                ));
             }
 
             let task = TaskState {
@@ -402,7 +426,10 @@ mod tests {
             };
 
             state.tasks.insert(task_id, task);
-            state.global_stats.tasks_spawned.fetch_add(1, Ordering::Relaxed);
+            state
+                .global_stats
+                .tasks_spawned
+                .fetch_add(1, Ordering::Relaxed);
 
             // Add task to region's owned tasks
             if let Some(region) = state.regions.get_mut(&region_id) {
@@ -428,12 +455,16 @@ mod tests {
             let mut state = self.state.lock().unwrap();
 
             // Verify task exists and is running
-            let task = state.tasks.get(&task_id)
+            let task = state
+                .tasks
+                .get(&task_id)
                 .ok_or_else(|| format!("Task {} not found", task_id))?;
 
             if task.state != TaskStateEnum::Running {
-                return Err(format!("Cannot create obligation for task {} in state {:?}",
-                                   task_id, task.state));
+                return Err(format!(
+                    "Cannot create obligation for task {} in state {:?}",
+                    task_id, task.state
+                ));
             }
 
             let obligation = ObligationState {
@@ -445,7 +476,10 @@ mod tests {
             };
 
             state.obligations.insert(obligation_id, obligation);
-            state.global_stats.obligations_created.fetch_add(1, Ordering::Relaxed);
+            state
+                .global_stats
+                .obligations_created
+                .fetch_add(1, Ordering::Relaxed);
 
             // Add obligation to task and region
             if let Some(task) = state.tasks.get_mut(&task_id) {
@@ -472,12 +506,16 @@ mod tests {
 
             let mut state = self.state.lock().unwrap();
 
-            let region = state.regions.get_mut(&region_id)
+            let region = state
+                .regions
+                .get_mut(&region_id)
                 .ok_or_else(|| format!("Region {} not found", region_id))?;
 
             if region.state != RegionStateEnum::Active {
-                return Err(format!("Region {} already closing/closed: {:?}",
-                                   region_id, region.state));
+                return Err(format!(
+                    "Region {} already closing/closed: {:?}",
+                    region_id, region.state
+                ));
             }
 
             region.state = RegionStateEnum::CloseRequested;
@@ -499,7 +537,9 @@ mod tests {
 
             let mut state = self.state.lock().unwrap();
 
-            let region = state.regions.get_mut(&region_id)
+            let region = state
+                .regions
+                .get_mut(&region_id)
                 .ok_or_else(|| format!("Region {} not found", region_id))?;
 
             region.state = RegionStateEnum::Draining;
@@ -524,13 +564,16 @@ mod tests {
         fn complete_region_drain(&self, region_id: RegionId) -> Result<(), String> {
             // Inject chaos during drain completion
             let state = self.state.lock().unwrap();
-            self.chaos_engine.inject_chaos(&state, "complete_region_drain");
+            self.chaos_engine
+                .inject_chaos(&state, "complete_region_drain");
             drop(state);
 
             // Simulate task completion and obligation resolution
             let mut state = self.state.lock().unwrap();
 
-            let region = state.regions.get(&region_id)
+            let region = state
+                .regions
+                .get(&region_id)
                 .ok_or_else(|| format!("Region {} not found", region_id))?;
 
             // Complete all tasks in region
@@ -545,14 +588,20 @@ mod tests {
                                 if obligation.state == ObligationStateEnum::Pending {
                                     obligation.state = ObligationStateEnum::Aborted;
                                     obligation.resolved_at = Some(Instant::now());
-                                    state.global_stats.obligations_resolved.fetch_add(1, Ordering::Relaxed);
+                                    state
+                                        .global_stats
+                                        .obligations_resolved
+                                        .fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                         }
 
                         task.state = TaskStateEnum::Completed;
                         task.completed_at = Some(Instant::now());
-                        state.global_stats.tasks_completed.fetch_add(1, Ordering::Relaxed);
+                        state
+                            .global_stats
+                            .tasks_completed
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -583,14 +632,18 @@ mod tests {
         fn finalize_region_close(&self, region_id: RegionId) -> Result<(), String> {
             // Final chaos injection before close completion
             let state = self.state.lock().unwrap();
-            self.chaos_engine.inject_chaos(&state, "finalize_region_close");
+            self.chaos_engine
+                .inject_chaos(&state, "finalize_region_close");
             drop(state);
 
             let mut state = self.state.lock().unwrap();
 
             if let Some(region) = state.regions.get_mut(&region_id) {
                 region.state = RegionStateEnum::Closed;
-                state.global_stats.regions_closed.fetch_add(1, Ordering::Relaxed);
+                state
+                    .global_stats
+                    .regions_closed
+                    .fetch_add(1, Ordering::Relaxed);
             }
 
             drop(state);
@@ -647,19 +700,37 @@ mod tests {
             let validation_result = self.invariant_validator.validate(&state, operation);
             drop(state);
 
-            self.chaos_engine.stats.invariant_checks.fetch_add(1, Ordering::Relaxed);
+            self.chaos_engine
+                .stats
+                .invariant_checks
+                .fetch_add(1, Ordering::Relaxed);
 
             if let Err(ref _error) = validation_result {
-                self.chaos_engine.stats.invariant_violations.fetch_add(1, Ordering::Relaxed);
+                self.chaos_engine
+                    .stats
+                    .invariant_violations
+                    .fetch_add(1, Ordering::Relaxed);
             }
 
             validation_result
         }
 
         fn get_chaos_stats(&self) -> (usize, usize, usize) {
-            let events = self.chaos_engine.stats.events_injected.load(Ordering::Relaxed);
-            let checks = self.chaos_engine.stats.invariant_checks.load(Ordering::Relaxed);
-            let violations = self.chaos_engine.stats.invariant_violations.load(Ordering::Relaxed);
+            let events = self
+                .chaos_engine
+                .stats
+                .events_injected
+                .load(Ordering::Relaxed);
+            let checks = self
+                .chaos_engine
+                .stats
+                .invariant_checks
+                .load(Ordering::Relaxed);
+            let violations = self
+                .chaos_engine
+                .stats
+                .invariant_violations
+                .load(Ordering::Relaxed);
             (events, checks, violations)
         }
     }
@@ -689,7 +760,11 @@ mod tests {
             Ok(())
         }
 
-        fn validate_structured_concurrency(&self, state: &RuntimeState, operation: &str) -> Result<(), String> {
+        fn validate_structured_concurrency(
+            &self,
+            state: &RuntimeState,
+            operation: &str,
+        ) -> Result<(), String> {
             // Every task must be owned by exactly one region
             for (task_id, task) in &state.tasks {
                 if !state.regions.contains_key(&task.owning_region) {
@@ -712,7 +787,11 @@ mod tests {
             Ok(())
         }
 
-        fn validate_region_close_quiescence(&self, state: &RuntimeState, operation: &str) -> Result<(), String> {
+        fn validate_region_close_quiescence(
+            &self,
+            state: &RuntimeState,
+            operation: &str,
+        ) -> Result<(), String> {
             // CRITICAL INVARIANT: Region close = quiescence
             // If a region is closed, it must be truly quiescent
             for (region_id, region) in &state.regions {
@@ -768,7 +847,11 @@ mod tests {
             Ok(())
         }
 
-        fn validate_no_obligation_leaks(&self, state: &RuntimeState, operation: &str) -> Result<(), String> {
+        fn validate_no_obligation_leaks(
+            &self,
+            state: &RuntimeState,
+            operation: &str,
+        ) -> Result<(), String> {
             // No obligations should be orphaned
             for (obligation_id, obligation) in &state.obligations {
                 if !state.tasks.contains_key(&obligation.owning_task) {
@@ -780,7 +863,9 @@ mod tests {
 
                 // If task is completed, obligation should be resolved
                 let task = &state.tasks[&obligation.owning_task];
-                if task.state == TaskStateEnum::Completed && obligation.state == ObligationStateEnum::Pending {
+                if task.state == TaskStateEnum::Completed
+                    && obligation.state == ObligationStateEnum::Pending
+                {
                     return Err(format!(
                         "Invariant violation in {}: Completed task {} has pending obligation {}",
                         operation, obligation.owning_task, obligation_id
@@ -791,7 +876,11 @@ mod tests {
             Ok(())
         }
 
-        fn validate_task_ownership(&self, state: &RuntimeState, operation: &str) -> Result<(), String> {
+        fn validate_task_ownership(
+            &self,
+            state: &RuntimeState,
+            operation: &str,
+        ) -> Result<(), String> {
             // Verify region task ownership is consistent
             for (region_id, region) in &state.regions {
                 for &task_id in &region.owned_tasks {
@@ -894,7 +983,8 @@ mod tests {
             }
 
             let execution_time = start_time.elapsed();
-            let (chaos_events, invariant_checks, invariant_violations) = self.runtime.get_chaos_stats();
+            let (chaos_events, invariant_checks, invariant_violations) =
+                self.runtime.get_chaos_stats();
 
             Ok(ScenarioResult {
                 scenario_name: scenario.name.clone(),
@@ -912,7 +1002,8 @@ mod tests {
         fn generate_basic_scenarios(&mut self) {
             self.add_scenario(TestScenario {
                 name: "Basic Region Lifecycle".to_string(),
-                description: "Create region, spawn task, create obligation, close region".to_string(),
+                description: "Create region, spawn task, create obligation, close region"
+                    .to_string(),
                 steps: vec![
                     ScenarioStep::EnableChaos,
                     ScenarioStep::CreateRegion { parent: None },
@@ -928,15 +1019,16 @@ mod tests {
 
             self.add_scenario(TestScenario {
                 name: "Nested Region Hierarchy".to_string(),
-                description: "Create nested regions with tasks and verify quiescence propagation".to_string(),
+                description: "Create nested regions with tasks and verify quiescence propagation"
+                    .to_string(),
                 steps: vec![
                     ScenarioStep::EnableChaos,
-                    ScenarioStep::CreateRegion { parent: None },         // region 1
-                    ScenarioStep::CreateRegion { parent: Some(1) },     // region 2
-                    ScenarioStep::SpawnTask { region_id: 2 },           // task 1
-                    ScenarioStep::CreateObligation { task_id: 1 },      // obligation 1
-                    ScenarioStep::CloseRegion { region_id: 2 },         // close child first
-                    ScenarioStep::CloseRegion { region_id: 1 },         // then parent
+                    ScenarioStep::CreateRegion { parent: None }, // region 1
+                    ScenarioStep::CreateRegion { parent: Some(1) }, // region 2
+                    ScenarioStep::SpawnTask { region_id: 2 },    // task 1
+                    ScenarioStep::CreateObligation { task_id: 1 }, // obligation 1
+                    ScenarioStep::CloseRegion { region_id: 2 },  // close child first
+                    ScenarioStep::CloseRegion { region_id: 1 },  // then parent
                     ScenarioStep::ValidateInvariants,
                     ScenarioStep::DisableChaos,
                 ],
@@ -991,20 +1083,27 @@ mod tests {
         harness.generate_basic_scenarios();
 
         let scenario = &harness.test_scenarios[0]; // Basic Region Lifecycle
-        let result = harness.execute_scenario(scenario)
+        let result = harness
+            .execute_scenario(scenario)
             .expect("Failed to execute basic region lifecycle scenario");
 
-        assert!(result.success,
+        assert!(
+            result.success,
             "Scenario failed with {} invariant violations",
-            result.invariant_violations);
+            result.invariant_violations
+        );
         assert_eq!(result.regions_created, 1);
         assert_eq!(result.tasks_spawned, 1);
         assert_eq!(result.obligations_created, 1);
-        assert!(result.chaos_events_injected > 0,
-            "Expected chaos events to be injected");
+        assert!(
+            result.chaos_events_injected > 0,
+            "Expected chaos events to be injected"
+        );
 
-        println!("✓ Basic region lifecycle preserved invariants under chaos: {} events, {} checks",
-                 result.chaos_events_injected, result.invariant_checks);
+        println!(
+            "✓ Basic region lifecycle preserved invariants under chaos: {} events, {} checks",
+            result.chaos_events_injected, result.invariant_checks
+        );
     }
 
     #[test]
@@ -1021,17 +1120,22 @@ mod tests {
         harness.generate_basic_scenarios();
 
         let scenario = &harness.test_scenarios[1]; // Nested Region Hierarchy
-        let result = harness.execute_scenario(scenario)
+        let result = harness
+            .execute_scenario(scenario)
             .expect("Failed to execute nested region scenario");
 
-        assert!(result.success,
+        assert!(
+            result.success,
             "Nested region scenario failed with {} invariant violations",
-            result.invariant_violations);
+            result.invariant_violations
+        );
         assert_eq!(result.regions_created, 2);
         assert!(result.chaos_events_injected > 0);
 
-        println!("✓ Nested region quiescence preserved under chaos: {} regions, {} events",
-                 result.regions_created, result.chaos_events_injected);
+        println!(
+            "✓ Nested region quiescence preserved under chaos: {} regions, {} events",
+            result.regions_created, result.chaos_events_injected
+        );
     }
 
     #[test]
@@ -1042,7 +1146,7 @@ mod tests {
             timing_perturbations: true,
             cpu_starvation: true,
             failure_probability: 0.3, // Very high chaos rate
-            delay_range_ms: (1, 100),  // Longer delays
+            delay_range_ms: (1, 100), // Longer delays
             ..ChaosConfig::default()
         };
 
@@ -1050,20 +1154,27 @@ mod tests {
         harness.generate_basic_scenarios();
 
         let scenario = &harness.test_scenarios[2]; // High Concurrency Chaos
-        let result = harness.execute_scenario(scenario)
+        let result = harness
+            .execute_scenario(scenario)
             .expect("Failed to execute high concurrency scenario");
 
-        assert!(result.success,
+        assert!(
+            result.success,
             "High concurrency scenario failed with {} invariant violations",
-            result.invariant_violations);
+            result.invariant_violations
+        );
         assert_eq!(result.regions_created, 3);
         assert_eq!(result.tasks_spawned, 3);
         assert_eq!(result.obligations_created, 3);
-        assert!(result.chaos_events_injected >= 10,
-            "Expected significant chaos injection");
+        assert!(
+            result.chaos_events_injected >= 10,
+            "Expected significant chaos injection"
+        );
 
-        println!("✓ High concurrency resilience verified: {} regions, {} tasks, {} chaos events",
-                 result.regions_created, result.tasks_spawned, result.chaos_events_injected);
+        println!(
+            "✓ High concurrency resilience verified: {} regions, {} tasks, {} chaos events",
+            result.regions_created, result.tasks_spawned, result.chaos_events_injected
+        );
     }
 
     #[test]
@@ -1083,7 +1194,10 @@ mod tests {
 
         // Inject chaos multiple times
         for i in 0..10 {
-            let event = harness.runtime.chaos_engine.inject_chaos(&dummy_state, &format!("test_op_{}", i));
+            let event = harness
+                .runtime
+                .chaos_engine
+                .inject_chaos(&dummy_state, &format!("test_op_{}", i));
             if let Some(event) = event {
                 assert!(event.duration_ms > 0);
                 assert!(event.duration_ms <= 100); // Within expected range
@@ -1095,7 +1209,10 @@ mod tests {
         let (events, _, _) = harness.runtime.get_chaos_stats();
         assert!(events > 0, "Expected some chaos events to be injected");
 
-        println!("✓ Chaos engine isolation verified: {} events injected", events);
+        println!(
+            "✓ Chaos engine isolation verified: {} events injected",
+            events
+        );
     }
 
     #[test]
@@ -1109,34 +1226,52 @@ mod tests {
         harness.runtime.chaos_engine.start_chaos();
 
         // Create region with tasks and obligations
-        let region_id = harness.runtime.create_region(None)
+        let region_id = harness
+            .runtime
+            .create_region(None)
             .expect("Failed to create region");
-        let task1_id = harness.runtime.spawn_task(region_id)
+        let task1_id = harness
+            .runtime
+            .spawn_task(region_id)
             .expect("Failed to spawn task 1");
-        let task2_id = harness.runtime.spawn_task(region_id)
+        let task2_id = harness
+            .runtime
+            .spawn_task(region_id)
             .expect("Failed to spawn task 2");
-        let _obligation1 = harness.runtime.create_obligation(task1_id)
+        let _obligation1 = harness
+            .runtime
+            .create_obligation(task1_id)
             .expect("Failed to create obligation 1");
-        let _obligation2 = harness.runtime.create_obligation(task2_id)
+        let _obligation2 = harness
+            .runtime
+            .create_obligation(task2_id)
             .expect("Failed to create obligation 2");
 
         // Close region - should trigger drain and quiescence
-        harness.runtime.close_region(region_id)
+        harness
+            .runtime
+            .close_region(region_id)
             .expect("Failed to close region");
 
         // Final validation of region close = quiescence invariant
-        harness.runtime.validate_invariants("final_validation")
+        harness
+            .runtime
+            .validate_invariants("final_validation")
             .expect("Region close=quiescence invariant violated under chaos");
 
         harness.runtime.chaos_engine.stop_chaos();
 
         let (events, checks, violations) = harness.runtime.get_chaos_stats();
-        assert_eq!(violations, 0,
+        assert_eq!(
+            violations, 0,
             "Invariant violations detected: {} violations out of {} checks",
-            violations, checks);
+            violations, checks
+        );
 
-        println!("✓ Region close=quiescence invariant preserved: {} chaos events, {} checks, {} violations",
-                 events, checks, violations);
+        println!(
+            "✓ Region close=quiescence invariant preserved: {} chaos events, {} checks, {} violations",
+            events, checks, violations
+        );
     }
 
     #[test]
@@ -1152,21 +1287,47 @@ mod tests {
         harness.runtime.chaos_engine.start_chaos();
 
         // Create multiple regions with tasks and obligations
-        let region1 = harness.runtime.create_region(None).expect("Failed to create region 1");
-        let region2 = harness.runtime.create_region(None).expect("Failed to create region 2");
+        let region1 = harness
+            .runtime
+            .create_region(None)
+            .expect("Failed to create region 1");
+        let region2 = harness
+            .runtime
+            .create_region(None)
+            .expect("Failed to create region 2");
 
-        let task1 = harness.runtime.spawn_task(region1).expect("Failed to spawn task 1");
-        let task2 = harness.runtime.spawn_task(region2).expect("Failed to spawn task 2");
+        let task1 = harness
+            .runtime
+            .spawn_task(region1)
+            .expect("Failed to spawn task 1");
+        let task2 = harness
+            .runtime
+            .spawn_task(region2)
+            .expect("Failed to spawn task 2");
 
-        let _obligation1 = harness.runtime.create_obligation(task1).expect("Failed to create obligation 1");
-        let _obligation2 = harness.runtime.create_obligation(task2).expect("Failed to create obligation 2");
+        let _obligation1 = harness
+            .runtime
+            .create_obligation(task1)
+            .expect("Failed to create obligation 1");
+        let _obligation2 = harness
+            .runtime
+            .create_obligation(task2)
+            .expect("Failed to create obligation 2");
 
         // Close regions in specific order to test cleanup
-        harness.runtime.close_region(region1).expect("Failed to close region 1");
-        harness.runtime.close_region(region2).expect("Failed to close region 2");
+        harness
+            .runtime
+            .close_region(region1)
+            .expect("Failed to close region 1");
+        harness
+            .runtime
+            .close_region(region2)
+            .expect("Failed to close region 2");
 
         // Validate no obligation leaks
-        harness.runtime.validate_invariants("obligation_leak_check")
+        harness
+            .runtime
+            .validate_invariants("obligation_leak_check")
             .expect("Obligation leak detected under chaos");
 
         harness.runtime.chaos_engine.stop_chaos();
@@ -1174,8 +1335,10 @@ mod tests {
         let (events, checks, violations) = harness.runtime.get_chaos_stats();
         assert_eq!(violations, 0, "Obligation leaks detected under chaos");
 
-        println!("✓ Obligation leak prevention verified under chaos: {} events, {} checks",
-                 events, checks);
+        println!(
+            "✓ Obligation leak prevention verified under chaos: {} events, {} checks",
+            events, checks
+        );
     }
 
     #[test]
@@ -1185,7 +1348,7 @@ mod tests {
             resource_pressure: true,
             timing_perturbations: true,
             cpu_starvation: true,
-            failure_probability: 0.8, // Extreme chaos
+            failure_probability: 0.8,  // Extreme chaos
             delay_range_ms: (10, 200), // High delays
             ..ChaosConfig::default()
         };
@@ -1194,30 +1357,67 @@ mod tests {
         harness.runtime.chaos_engine.start_chaos();
 
         // Create complex nested structure
-        let root_region = harness.runtime.create_region(None).expect("Failed to create root region");
-        let child1 = harness.runtime.create_region(Some(root_region)).expect("Failed to create child 1");
-        let child2 = harness.runtime.create_region(Some(root_region)).expect("Failed to create child 2");
-        let grandchild = harness.runtime.create_region(Some(child1)).expect("Failed to create grandchild");
+        let root_region = harness
+            .runtime
+            .create_region(None)
+            .expect("Failed to create root region");
+        let child1 = harness
+            .runtime
+            .create_region(Some(root_region))
+            .expect("Failed to create child 1");
+        let child2 = harness
+            .runtime
+            .create_region(Some(root_region))
+            .expect("Failed to create child 2");
+        let grandchild = harness
+            .runtime
+            .create_region(Some(child1))
+            .expect("Failed to create grandchild");
 
         // Spawn tasks in each region
-        let _task1 = harness.runtime.spawn_task(child1).expect("Failed to spawn task 1");
-        let _task2 = harness.runtime.spawn_task(child2).expect("Failed to spawn task 2");
-        let _task3 = harness.runtime.spawn_task(grandchild).expect("Failed to spawn task 3");
+        let _task1 = harness
+            .runtime
+            .spawn_task(child1)
+            .expect("Failed to spawn task 1");
+        let _task2 = harness
+            .runtime
+            .spawn_task(child2)
+            .expect("Failed to spawn task 2");
+        let _task3 = harness
+            .runtime
+            .spawn_task(grandchild)
+            .expect("Failed to spawn task 3");
 
         // Close from leaves up to root
-        harness.runtime.close_region(grandchild).expect("Failed to close grandchild");
-        harness.runtime.close_region(child1).expect("Failed to close child 1");
-        harness.runtime.close_region(child2).expect("Failed to close child 2");
-        harness.runtime.close_region(root_region).expect("Failed to close root region");
+        harness
+            .runtime
+            .close_region(grandchild)
+            .expect("Failed to close grandchild");
+        harness
+            .runtime
+            .close_region(child1)
+            .expect("Failed to close child 1");
+        harness
+            .runtime
+            .close_region(child2)
+            .expect("Failed to close child 2");
+        harness
+            .runtime
+            .close_region(root_region)
+            .expect("Failed to close root region");
 
         harness.runtime.chaos_engine.stop_chaos();
 
         let (events, checks, violations) = harness.runtime.get_chaos_stats();
-        assert_eq!(violations, 0,
+        assert_eq!(
+            violations, 0,
             "Structured concurrency violated under extreme chaos: {} violations",
-            violations);
+            violations
+        );
 
-        println!("✓ Structured concurrency preserved under extreme chaos: {} events, {} checks",
-                 events, checks);
+        println!(
+            "✓ Structured concurrency preserved under extreme chaos: {} events, {} checks",
+            events, checks
+        );
     }
 }

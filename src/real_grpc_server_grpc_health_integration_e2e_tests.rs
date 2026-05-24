@@ -18,43 +18,39 @@
 //! 4. **Reflection Integration**: Health status affects service reflection correctly
 
 use crate::{
+    Result,
     cx::Cx,
     grpc::{
         health::{
-            HealthCheck, HealthCheckRequest, HealthCheckResponse, HealthCheckService,
-            HealthStatus, ServiceHealthMap, StatusChangeEvent,
+            HealthCheck, HealthCheckRequest, HealthCheckResponse, HealthCheckService, HealthStatus,
+            ServiceHealthMap, StatusChangeEvent,
         },
         reflection::{
-            ReflectionService, ReflectionStream, ServerReflectionRequest,
-            ServerReflectionResponse, ServiceInfo,
+            ReflectionService, ReflectionStream, ServerReflectionRequest, ServerReflectionResponse,
+            ServiceInfo,
         },
         server::{
-            GrpcServer, GrpcServerBuilder, ServiceRegistry, ConnectionManager,
-            StreamHandle, ServerConfig,
+            ConnectionManager, GrpcServer, GrpcServerBuilder, ServerConfig, ServiceRegistry,
+            StreamHandle,
         },
         service::{GrpcService, ServiceDescriptor},
         status::{Code, Status},
         streaming::{BidirectionalStream, StreamingRequest, StreamingResponse},
     },
     net::{
-        tcp::{TcpListener, TcpStream},
         SocketAddr,
+        tcp::{TcpListener, TcpStream},
     },
-    runtime::{RuntimeBuilder, LabRuntime, LabRuntimeBuilder},
+    runtime::{LabRuntime, LabRuntimeBuilder, RuntimeBuilder},
     sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
     types::{
-        budget::Budget,
-        cancel::CancelToken,
-        outcome::Outcome,
-        region::RegionId,
-        task::TaskId,
+        budget::Budget, cancel::CancelToken, outcome::Outcome, region::RegionId, task::TaskId,
     },
     util::{rng::DetRng, time::TimeSource},
-    Result,
 };
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -187,12 +183,8 @@ impl HealthStatusPropagationCoordinator {
         new_status: HealthStatus,
     ) -> Result<u64> {
         let change_id = self.status_change_sequence.fetch_add(1, Ordering::Release);
-        let status_change = TestHealthStatusChange::new(
-            service_name.clone(),
-            old_status,
-            new_status,
-            change_id,
-        );
+        let status_change =
+            TestHealthStatusChange::new(service_name.clone(), old_status, new_status, change_id);
 
         let propagation_start = Instant::now();
         let streams = self.active_streams.read();
@@ -209,7 +201,8 @@ impl HealthStatusPropagationCoordinator {
         }
 
         let propagation_time = propagation_start.elapsed();
-        self.propagation_metrics.record_propagation_time(propagation_time);
+        self.propagation_metrics
+            .record_propagation_time(propagation_time);
 
         // Verify bounded time constraint
         if propagation_time > self.bounded_time_limit {
@@ -253,7 +246,10 @@ impl HealthStatusPropagationCoordinator {
 
     fn get_active_stream_count(&self) -> usize {
         let streams = self.active_streams.read();
-        streams.values().filter(|tracker| tracker.is_active()).count()
+        streams
+            .values()
+            .filter(|tracker| tracker.is_active())
+            .count()
     }
 
     fn get_propagation_stats(&self) -> PropagationStats {
@@ -398,16 +394,16 @@ impl GrpcServerHealthTestHarness {
             // Wait for propagation and verify
             cx.sleep(Duration::from_millis(50)).await;
 
-            let all_received = self.coordinator.verify_all_streams_received_update(
-                change_id,
-                &scenario.service_name,
-            )?;
+            let all_received = self
+                .coordinator
+                .verify_all_streams_received_update(change_id, &scenario.service_name)?;
 
             if !all_received {
                 return Err(format!(
                     "Not all streams received health status change for service: {}",
                     scenario.service_name
-                ).into());
+                )
+                .into());
             }
         }
 
@@ -428,14 +424,13 @@ impl GrpcServerHealthTestHarness {
             return Err(format!(
                 "Bounded time violations detected: {}",
                 stats.bounded_time_violations
-            ).into());
+            )
+            .into());
         }
 
         // Verify propagation occurred
         if stats.total_propagations == 0 {
-            return Err(format!(
-                "No health status propagations recorded"
-            ).into());
+            return Err(format!("No health status propagations recorded").into());
         }
 
         // Verify reasonable propagation times
@@ -443,14 +438,13 @@ impl GrpcServerHealthTestHarness {
             return Err(format!(
                 "Average propagation time too high: {:?}",
                 stats.average_propagation_time
-            ).into());
+            )
+            .into());
         }
 
         println!(
             "gRPC server/health integration verified: {} propagations, avg time: {:?}, max time: {:?}",
-            stats.total_propagations,
-            stats.average_propagation_time,
-            stats.max_propagation_time
+            stats.total_propagations, stats.average_propagation_time, stats.max_propagation_time
         );
 
         Ok(())
@@ -497,7 +491,10 @@ impl MockHealthService {
 
     fn check_health(&self, service_name: &str) -> HealthStatus {
         let registry = self.health_registry.read();
-        registry.get(service_name).copied().unwrap_or(HealthStatus::Unknown)
+        registry
+            .get(service_name)
+            .copied()
+            .unwrap_or(HealthStatus::Unknown)
     }
 }
 
@@ -575,10 +572,9 @@ mod tests {
         )?;
 
         // Verify propagation
-        let all_received = harness.coordinator.verify_all_streams_received_update(
-            change_id,
-            "service.TestService",
-        )?;
+        let all_received = harness
+            .coordinator
+            .verify_all_streams_received_update(change_id, "service.TestService")?;
 
         assert!(all_received, "Stream should receive health status change");
 
@@ -627,12 +623,14 @@ mod tests {
         );
 
         // Verify all streams received update
-        let all_received = harness.coordinator.verify_all_streams_received_update(
-            change_id,
-            "service.FastService",
-        )?;
+        let all_received = harness
+            .coordinator
+            .verify_all_streams_received_update(change_id, "service.FastService")?;
 
-        assert!(all_received, "All streams should receive update within bounded time");
+        assert!(
+            all_received,
+            "All streams should receive update within bounded time"
+        );
 
         // Clean up
         for (i, tracker) in trackers.iter().enumerate() {
@@ -651,7 +649,11 @@ mod tests {
         let harness = GrpcServerHealthTestHarness::new(Duration::from_millis(200));
 
         // Create reflection streams with different service subscriptions
-        let services = vec!["service.UserService", "service.OrderService", "service.PaymentService"];
+        let services = vec![
+            "service.UserService",
+            "service.OrderService",
+            "service.PaymentService",
+        ];
         let mut trackers = Vec::new();
 
         for (i, service) in services.iter().enumerate() {
@@ -679,9 +681,20 @@ mod tests {
             let updates = tracker.get_received_updates();
 
             // Should have exactly one update for its subscribed service
-            assert_eq!(updates.len(), 1, "Stream {} should have exactly one update", i);
-            assert_eq!(updates[0].change_id, *change_id, "Update change_id should match");
-            assert_eq!(&updates[0].service_name, *service, "Service name should match subscription");
+            assert_eq!(
+                updates.len(),
+                1,
+                "Stream {} should have exactly one update",
+                i
+            );
+            assert_eq!(
+                updates[0].change_id, *change_id,
+                "Update change_id should match"
+            );
+            assert_eq!(
+                &updates[0].service_name, *service,
+                "Service name should match subscription"
+            );
         }
 
         // Clean up
@@ -729,11 +742,13 @@ mod tests {
         ];
 
         // Run comprehensive integration test
-        harness.simulate_grpc_server_with_health_integration(
-            &cx,
-            6, // 6 reflection streams
-            status_change_scenarios,
-        ).await?;
+        harness
+            .simulate_grpc_server_with_health_integration(
+                &cx,
+                6, // 6 reflection streams
+                status_change_scenarios,
+            )
+            .await?;
 
         // Verify integration properties
         harness.verify_integration_properties()?;
@@ -743,8 +758,14 @@ mod tests {
         assert_eq!(active_streams, 0, "All streams should be cleaned up");
 
         let stats = harness.coordinator.get_propagation_stats();
-        assert!(stats.total_propagations >= 4, "Should have processed all status changes");
-        assert_eq!(stats.bounded_time_violations, 0, "No bounded time violations should occur");
+        assert!(
+            stats.total_propagations >= 4,
+            "Should have processed all status changes"
+        );
+        assert_eq!(
+            stats.bounded_time_violations, 0,
+            "No bounded time violations should occur"
+        );
 
         println!(
             "Comprehensive gRPC server/health integration test completed: {} propagations processed",
