@@ -936,7 +936,7 @@ mod tests {
         let snapshot = runtime.take_snapshot();
 
         // Verify task-region relationships
-        for (_task_id, task_state) in &snapshot.task_states {
+        for (task_id, task_state) in &snapshot.task_states {
             if !snapshot.region_tree.contains_key(&task_state.region_id) {
                 return TestResult::Fail {
                     reason: format!("Task {} references non-existent region {}", task_id, task_state.region_id),
