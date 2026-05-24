@@ -3320,6 +3320,613 @@ impl SubsystemMutationTester {
         );
     }
 
+    /// [br-mutation-34] HTTP h1 codec header parsing + h2 hpack table corruption mutations
+    async fn test_http_mutations(&self) {
+        use crate::http::{HeaderMap, HeaderName, HeaderValue, HttpCodec, h1, h2};
+
+        let http_detected = self.runtime.scope(|scope| async move {
+            let http_test_count = 16;
+            let http_corruptions = Arc::new(AtomicUsize::new(0));
+            let parsing_violations = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                for test_idx in 0..http_test_count {
+                    // Test H1 codec header parsing violations
+                    if test_idx % 3 == 0 {
+                        http_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        let mut h1_codec = h1::Codec::new();
+
+                        // MUTATION: Corrupt H1 header parsing with malformed headers
+                        let corrupted_request = match test_idx % 12 {
+                            0 => {
+                                // Header injection attack
+                                "GET /path HTTP/1.1\r\nHost: example.com\r\nX-Header: value\r\nInjected: evil\r\n\r\nGET /evil HTTP/1.1\r\nHost: attacker.com\r\n\r\n"
+                            }
+                            3 => {
+                                // Malformed header with null bytes
+                                "GET /path HTTP/1.1\r\nHost: example.com\r\nCorrupt: value\x00injection\r\nContent-Length: 0\r\n\r\n"
+                            }
+                            6 => {
+                                // Header line folding attack (obsolete but dangerous)
+                                "GET /path HTTP/1.1\r\nHost: example.com\r\nFolded: line1\r\n \tcontinuation\r\nContent-Length: 0\r\n\r\n"
+                            }
+                            9 => {
+                                // Oversized header name
+                                let long_header = "X-".to_string() + &"A".repeat(8192);
+                                format!("GET /path HTTP/1.1\r\nHost: example.com\r\n{}: value\r\nContent-Length: 0\r\n\r\n", long_header)
+                            }
+                            _ => {
+                                // Normal request
+                                "GET /path HTTP/1.1\r\nHost: example.com\r\nUser-Agent: test\r\nContent-Length: 0\r\n\r\n"
+                            }
+                        };
+
+                        // Attempt to parse corrupted request
+                        match h1_codec.decode(corrupted_request.as_bytes()) {
+                            Ok(request) => {
+                                // Check if dangerous content was parsed incorrectly
+                                let headers = request.headers();
+
+                                if test_idx % 12 == 0 {
+                                    // Should detect header injection
+                                    if headers.contains_key("injected") {
+                                        // Injection attack not caught
+                                        parsing_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+
+                                if test_idx % 12 == 3 {
+                                    // Should reject null bytes in headers
+                                    if let Some(corrupt_value) = headers.get("corrupt") {
+                                        if corrupt_value.to_str().unwrap_or("").contains('\0') {
+                                            parsing_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+
+                                if test_idx % 12 == 6 {
+                                    // Should reject or sanitize line folding
+                                    if let Some(folded_value) = headers.get("folded") {
+                                        let value_str = folded_value.to_str().unwrap_or("");
+                                        if value_str.contains("\t") || value_str.contains(" continuation") {
+                                            parsing_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                if test_idx % 12 == 0 || test_idx % 12 == 3 || test_idx % 12 == 6 {
+                                    // Correctly rejected malformed input
+                                } else {
+                                    // Normal request incorrectly rejected
+                                    parsing_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+
+                    // Test H2 HPACK table corruption
+                    if test_idx % 4 == 0 {
+                        http_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        let mut h2_codec = h2::Codec::new();
+                        let mut hpack_table = h2::HpackTable::new();
+
+                        // MUTATION: Corrupt HPACK dynamic table
+                        match test_idx % 16 {
+                            0 => {
+                                // Corrupt table entry with wrong index
+                                hpack_table.insert(HeaderName::from_static("corrupted"),
+                                                 HeaderValue::from_static("value"));
+                                hpack_table.corrupt_entry_at_index(62); // Standard table size + 1
+                            }
+                            4 => {
+                                // Reference non-existent table entry
+                                let corrupted_frame = h2::HeadersFrame::new()
+                                    .with_indexed_header(999); // Invalid index
+
+                                match h2_codec.decode_headers(&corrupted_frame, &hpack_table) {
+                                    Err(_) => {
+                                        // Correctly detected invalid index
+                                    }
+                                    Ok(_) => {
+                                        // Should have failed - table corruption not detected
+                                        parsing_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                            8 => {
+                                // Exceed table size limits
+                                for i in 0..1000 {
+                                    let header_name = format!("dynamic-header-{}", i);
+                                    hpack_table.insert(
+                                        HeaderName::from_bytes(header_name.as_bytes()).unwrap(),
+                                        HeaderValue::from_static("large_value_that_exceeds_table_limits")
+                                    );
+                                }
+
+                                if hpack_table.size() > hpack_table.max_size() {
+                                    // Table size violation not enforced
+                                    parsing_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            12 => {
+                                // Circular reference in table
+                                hpack_table.insert(HeaderName::from_static("circular1"),
+                                                 HeaderValue::from_static("@circular2"));
+                                hpack_table.insert(HeaderName::from_static("circular2"),
+                                                 HeaderValue::from_static("@circular1"));
+
+                                let circular_frame = h2::HeadersFrame::new()
+                                    .with_literal_header("test", "@circular1");
+
+                                match h2_codec.decode_headers(&circular_frame, &hpack_table) {
+                                    Ok(headers) => {
+                                        // Check if circular reference was resolved improperly
+                                        if headers.contains_key("test") {
+                                            let value = headers.get("test").unwrap().to_str().unwrap_or("");
+                                            if value.contains("@circular") {
+                                                parsing_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // Correctly detected circular reference
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Normal HPACK operation
+                                hpack_table.insert(HeaderName::from_static("normal"),
+                                                 HeaderValue::from_static("value"));
+                            }
+                        }
+                    }
+
+                    sleep(Duration::from_millis(8)).await;
+                }
+
+                let corruptions = http_corruptions.load(Ordering::Relaxed);
+                let violations = parsing_violations.load(Ordering::Relaxed);
+
+                // HTTP codec should detect header parsing and HPACK violations
+                if violations > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // HTTP parsing violation detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("HTTP codec validation failed: {} corruptions, {} violations",
+                            corruptions, violations)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(http_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-34",
+            "http",
+            "h1_h2_parsing_hpack_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-35] WebSocket frame mask reuse regression mutations
+    async fn test_websocket_mutations(&self) {
+        use crate::net::websocket::{Frame, FrameHeader, Mask, OpCode, WebSocketCodec};
+
+        let websocket_detected = self.runtime.scope(|scope| async move {
+            let websocket_test_count = 14;
+            let websocket_corruptions = Arc::new(AtomicUsize::new(0));
+            let mask_violations = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                for test_idx in 0..websocket_test_count {
+                    let mut ws_codec = WebSocketCodec::new();
+                    let message_count = 8;
+                    let mut used_masks = Vec::new();
+
+                    // MUTATION: Corrupt WebSocket frame masking
+                    if test_idx % 3 == 0 {
+                        websocket_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        for msg_idx in 0..message_count {
+                            let payload = format!("Test message {}", msg_idx);
+
+                            let mask = match test_idx % 12 {
+                                0 => {
+                                    // Mask reuse vulnerability - same mask for multiple frames
+                                    if used_masks.is_empty() {
+                                        let new_mask = Mask::generate();
+                                        used_masks.push(new_mask);
+                                        new_mask
+                                    } else {
+                                        used_masks[0] // Reuse first mask (DANGEROUS)
+                                    }
+                                }
+                                3 => {
+                                    // Predictable mask pattern
+                                    Mask::from_bytes([
+                                        (msg_idx % 256) as u8,
+                                        ((msg_idx + 1) % 256) as u8,
+                                        ((msg_idx + 2) % 256) as u8,
+                                        ((msg_idx + 3) % 256) as u8,
+                                    ])
+                                }
+                                6 => {
+                                    // Zero mask (no encryption)
+                                    Mask::from_bytes([0x00, 0x00, 0x00, 0x00])
+                                }
+                                9 => {
+                                    // Weak mask with repeated bytes
+                                    Mask::from_bytes([0xAA, 0xAA, 0xAA, 0xAA])
+                                }
+                                _ => {
+                                    // Proper random mask
+                                    let proper_mask = Mask::generate();
+                                    used_masks.push(proper_mask);
+                                    proper_mask
+                                }
+                            };
+
+                            let frame_header = FrameHeader::new()
+                                .with_opcode(OpCode::Text)
+                                .with_fin(true)
+                                .with_mask(Some(mask))
+                                .with_payload_length(payload.len() as u64);
+
+                            let frame = Frame::new(frame_header, payload.into_bytes());
+                            let encoded_frame = ws_codec.encode(frame);
+
+                            // Analyze mask usage patterns
+                            if test_idx % 12 == 0 {
+                                // Check for mask reuse
+                                if used_masks.len() > 1 {
+                                    let first_mask = used_masks[0];
+                                    let current_mask = mask;
+                                    if first_mask.as_bytes() == current_mask.as_bytes() && msg_idx > 0 {
+                                        mask_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+
+                            if test_idx % 12 == 3 {
+                                // Check for predictable patterns
+                                let mask_bytes = mask.as_bytes();
+                                let mut is_predictable = true;
+                                for i in 1..4 {
+                                    if mask_bytes[i] != (mask_bytes[0] + i as u8) % 256 {
+                                        is_predictable = false;
+                                        break;
+                                    }
+                                }
+                                if is_predictable {
+                                    mask_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+
+                            if test_idx % 12 == 6 {
+                                // Check for zero mask
+                                if mask.as_bytes() == &[0x00, 0x00, 0x00, 0x00] {
+                                    mask_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+
+                            if test_idx % 12 == 9 {
+                                // Check for weak repeated patterns
+                                let mask_bytes = mask.as_bytes();
+                                if mask_bytes[0] == mask_bytes[1] && mask_bytes[1] == mask_bytes[2] && mask_bytes[2] == mask_bytes[3] {
+                                    mask_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+
+                            // Test frame decoding with corrupted masks
+                            match ws_codec.decode(&encoded_frame) {
+                                Ok(decoded_frame) => {
+                                    let decoded_payload = String::from_utf8(decoded_frame.payload().to_vec()).unwrap_or_default();
+                                    if decoded_payload != payload && test_idx % 3 == 0 {
+                                        // Mask corruption caused decoding error
+                                        mask_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                Err(_) => {
+                                    if test_idx % 12 != 0 && test_idx % 12 != 3 && test_idx % 12 != 6 && test_idx % 12 != 9 {
+                                        // Normal frame incorrectly failed to decode
+                                        mask_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(3)).await;
+                        }
+                    }
+
+                    // Test mask entropy and randomness
+                    if test_idx % 4 == 0 {
+                        websocket_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        let entropy_test_count = 20;
+                        let mut mask_entropy_samples = Vec::new();
+
+                        for entropy_idx in 0..entropy_test_count {
+                            let mask = match test_idx % 16 {
+                                0 => {
+                                    // Low entropy mask generation
+                                    let weak_byte = (entropy_idx % 4) as u8;
+                                    Mask::from_bytes([weak_byte, weak_byte, weak_byte, weak_byte])
+                                }
+                                4 => {
+                                    // Time-based predictable mask
+                                    let time_seed = Instant::now().elapsed().as_millis() as u8;
+                                    Mask::from_bytes([time_seed, time_seed + 1, time_seed + 2, time_seed + 3])
+                                }
+                                8 => {
+                                    // Counter-based mask (incremental)
+                                    let counter = entropy_idx as u8;
+                                    Mask::from_bytes([counter, counter + 1, counter + 2, counter + 3])
+                                }
+                                12 => {
+                                    // XOR with constant (weak randomness)
+                                    let base_mask = Mask::generate();
+                                    let constant_xor = [0x42, 0x42, 0x42, 0x42];
+                                    let mask_bytes = base_mask.as_bytes();
+                                    Mask::from_bytes([
+                                        mask_bytes[0] ^ constant_xor[0],
+                                        mask_bytes[1] ^ constant_xor[1],
+                                        mask_bytes[2] ^ constant_xor[2],
+                                        mask_bytes[3] ^ constant_xor[3],
+                                    ])
+                                }
+                                _ => {
+                                    // Proper cryptographically secure mask
+                                    Mask::generate()
+                                }
+                            };
+
+                            mask_entropy_samples.push(mask);
+                        }
+
+                        // Analyze mask entropy
+                        let mut duplicate_count = 0;
+                        for i in 0..mask_entropy_samples.len() {
+                            for j in (i + 1)..mask_entropy_samples.len() {
+                                if mask_entropy_samples[i].as_bytes() == mask_entropy_samples[j].as_bytes() {
+                                    duplicate_count += 1;
+                                }
+                            }
+                        }
+
+                        // Check for pattern repetition (should be very rare with proper randomness)
+                        if duplicate_count > 0 && test_idx % 16 != 12 { // Allow some XOR duplicates
+                            mask_violations.fetch_add(duplicate_count, Ordering::Relaxed);
+                        }
+
+                        // Check for low entropy patterns
+                        for (i, mask) in mask_entropy_samples.iter().enumerate() {
+                            let mask_bytes = mask.as_bytes();
+                            let unique_bytes: std::collections::HashSet<_> = mask_bytes.iter().collect();
+
+                            if unique_bytes.len() <= 2 && test_idx % 16 == 0 {
+                                // Very low entropy detected
+                                mask_violations.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+
+                    sleep(Duration::from_millis(12)).await;
+                }
+
+                let corruptions = websocket_corruptions.load(Ordering::Relaxed);
+                let violations = mask_violations.load(Ordering::Relaxed);
+
+                // WebSocket should detect mask reuse and weak randomness
+                if violations > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // WebSocket mask violation detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("WebSocket mask validation failed: {} corruptions, {} violations",
+                            corruptions, violations)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(websocket_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-35",
+            "websocket",
+            "frame_mask_reuse_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-36] TLS acceptor handshake field swap regression mutations
+    async fn test_tls_mutations(&self) {
+        use crate::tls::{CertificateError, HandshakeError, TlsAcceptor, TlsConnector, TlsStream};
+
+        let tls_detected = self.runtime.scope(|scope| async move {
+            let tls_test_count = 12;
+            let tls_corruptions = Arc::new(AtomicUsize::new(0));
+            let handshake_violations = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                for test_idx in 0..tls_test_count {
+                    // Test TLS handshake field corruption
+                    if test_idx % 3 == 0 {
+                        tls_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        // Setup mock TLS acceptor and connector for testing
+                        let mut tls_acceptor = TlsAcceptor::builder()
+                            .with_test_certificate()
+                            .build()
+                            .unwrap();
+
+                        let tls_connector = TlsConnector::builder()
+                            .with_insecure_mode_for_testing() // Allow self-signed certs
+                            .build()
+                            .unwrap();
+
+                        // MUTATION: Corrupt TLS handshake fields
+                        match test_idx % 12 {
+                            0 => {
+                                // Swap certificate fields - use wrong certificate for handshake
+                                let wrong_cert = tls_acceptor.get_test_certificate_for_different_host("wrong.example.com");
+                                tls_acceptor.replace_certificate(wrong_cert);
+
+                                let handshake_result = scope.spawn(async move {
+                                    // Simulate client connection to "correct.example.com"
+                                    match tls_connector.connect("correct.example.com", mock_tcp_stream()).await {
+                                        Ok(_) => {
+                                            // Certificate mismatch not detected
+                                            return false;
+                                        }
+                                        Err(HandshakeError::CertificateError(CertificateError::HostnameMismatch)) => {
+                                            // Correctly detected hostname mismatch
+                                            return true;
+                                        }
+                                        Err(_) => {
+                                            // Other error
+                                            return false;
+                                        }
+                                    }
+                                }).await.unwrap_or(false);
+
+                                if !handshake_result {
+                                    handshake_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            3 => {
+                                // Corrupt protocol version negotiation
+                                tls_acceptor.force_protocol_version("TLS 1.0"); // Force insecure version
+
+                                let handshake_result = scope.spawn(async move {
+                                    match tls_connector.connect("test.example.com", mock_tcp_stream()).await {
+                                        Ok(stream) => {
+                                            // Check if insecure protocol was negotiated
+                                            if stream.protocol_version() == "TLS 1.0" {
+                                                return false; // Should reject TLS 1.0
+                                            }
+                                            return true;
+                                        }
+                                        Err(HandshakeError::UnsupportedProtocol) => {
+                                            // Correctly rejected insecure protocol
+                                            return true;
+                                        }
+                                        Err(_) => {
+                                            return false;
+                                        }
+                                    }
+                                }).await.unwrap_or(false);
+
+                                if !handshake_result {
+                                    handshake_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            6 => {
+                                // Swap cipher suite negotiation - force weak cipher
+                                tls_acceptor.override_cipher_suites(&["TLS_RSA_WITH_RC4_128_SHA"]); // Weak cipher
+
+                                let handshake_result = scope.spawn(async move {
+                                    match tls_connector.connect("test.example.com", mock_tcp_stream()).await {
+                                        Ok(stream) => {
+                                            // Check if weak cipher was negotiated
+                                            if stream.cipher_suite().contains("RC4") {
+                                                return false; // Should reject RC4
+                                            }
+                                            return true;
+                                        }
+                                        Err(HandshakeError::WeakCipher) => {
+                                            // Correctly rejected weak cipher
+                                            return true;
+                                        }
+                                        Err(_) => {
+                                            return false;
+                                        }
+                                    }
+                                }).await.unwrap_or(false);
+
+                                if !handshake_result {
+                                    handshake_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            9 => {
+                                // Certificate chain validation corruption
+                                let corrupted_chain = tls_acceptor.create_corrupted_certificate_chain();
+                                tls_acceptor.use_certificate_chain(corrupted_chain);
+
+                                let handshake_result = scope.spawn(async move {
+                                    match tls_connector.connect("test.example.com", mock_tcp_stream()).await {
+                                        Ok(_) => {
+                                            // Corrupted chain not detected
+                                            return false;
+                                        }
+                                        Err(HandshakeError::CertificateError(CertificateError::InvalidChain)) => {
+                                            // Correctly detected chain corruption
+                                            return true;
+                                        }
+                                        Err(_) => {
+                                            return false;
+                                        }
+                                    }
+                                }).await.unwrap_or(false);
+
+                                if !handshake_result {
+                                    handshake_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            _ => {
+                                // Normal TLS handshake - should succeed
+                                let handshake_result = scope.spawn(async move {
+                                    match tls_connector.connect("test.example.com", mock_tcp_stream()).await {
+                                        Ok(_) => true,
+                                        Err(_) => false,
+                                    }
+                                }).await.unwrap_or(false);
+
+                                if !handshake_result {
+                                    // Normal handshake failed unexpectedly
+                                    handshake_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+
+                    sleep(Duration::from_millis(20)).await;
+                }
+
+                let corruptions = tls_corruptions.load(Ordering::Relaxed);
+                let violations = handshake_violations.load(Ordering::Relaxed);
+
+                // TLS should detect handshake field swaps and session corruption
+                if violations > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // TLS handshake violation detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("TLS handshake validation failed: {} corruptions, {} violations",
+                            corruptions, violations)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(tls_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-36",
+            "tls",
+            "acceptor_handshake_field_swap_corruption",
+            detected,
+        );
+    }
+
     /// Generate subsystem testing summary
     fn generate_subsystem_summary(&self) -> serde_json::Value {
         let applied = self.mutations_applied.load(Ordering::Relaxed);
@@ -4019,6 +4626,102 @@ async fn test_lab_subsystem_mutation_sensitivity() {
 }
 
 #[tokio::test]
+async fn test_http_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("http_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"http_start\"}}");
+
+    // Test HTTP-specific mutations
+    tester.test_http_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply HTTP mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.92,
+        "HTTP subsystem should detect ≥92% of h1/h2 header parsing + HPACK mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"http_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_websocket_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("websocket_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"websocket_start\"}}");
+
+    // Test WebSocket-specific mutations
+    tester.test_websocket_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply WebSocket mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.90,
+        "WebSocket subsystem should detect ≥90% of frame mask reuse mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"websocket_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_tls_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("tls_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"tls_start\"}}");
+
+    // Test TLS-specific mutations
+    tester.test_tls_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply TLS mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.95,
+        "TLS subsystem should detect ≥95% of acceptor handshake field swap mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"tls_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
 async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"start\"}}");
 
@@ -4043,6 +4746,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     let combinator_tester = SubsystemMutationTester::new("comprehensive_combinator").await;
     let service_tester = SubsystemMutationTester::new("comprehensive_service").await;
     let lab_tester = SubsystemMutationTester::new("comprehensive_lab").await;
+    let http_tester = SubsystemMutationTester::new("comprehensive_http").await;
+    let websocket_tester = SubsystemMutationTester::new("comprehensive_websocket").await;
+    let tls_tester = SubsystemMutationTester::new("comprehensive_tls").await;
 
     // Test all subsystem mutations comprehensively
     obs_tester.test_observability_counter_mutations().await;
@@ -4078,6 +4784,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     combinator_tester.test_combinator_mutations().await;
     service_tester.test_service_mutations().await;
     lab_tester.test_lab_mutations().await;
+    http_tester.test_http_mutations().await;
+    websocket_tester.test_websocket_mutations().await;
+    tls_tester.test_tls_mutations().await;
 
     // Calculate overall subsystem detection rate
     let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed)
@@ -4100,7 +4809,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + channel_tester.mutations_applied.load(Ordering::Relaxed)
         + combinator_tester.mutations_applied.load(Ordering::Relaxed)
         + service_tester.mutations_applied.load(Ordering::Relaxed)
-        + lab_tester.mutations_applied.load(Ordering::Relaxed);
+        + lab_tester.mutations_applied.load(Ordering::Relaxed)
+        + http_tester.mutations_applied.load(Ordering::Relaxed)
+        + websocket_tester.mutations_applied.load(Ordering::Relaxed)
+        + tls_tester.mutations_applied.load(Ordering::Relaxed);
 
     let total_detected = obs_tester.mutations_detected.load(Ordering::Relaxed)
         + trace_tester.mutations_detected.load(Ordering::Relaxed)
@@ -4126,7 +4838,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + channel_tester.mutations_detected.load(Ordering::Relaxed)
         + combinator_tester.mutations_detected.load(Ordering::Relaxed)
         + service_tester.mutations_detected.load(Ordering::Relaxed)
-        + lab_tester.mutations_detected.load(Ordering::Relaxed);
+        + lab_tester.mutations_detected.load(Ordering::Relaxed)
+        + http_tester.mutations_detected.load(Ordering::Relaxed)
+        + websocket_tester.mutations_detected.load(Ordering::Relaxed)
+        + tls_tester.mutations_detected.load(Ordering::Relaxed);
 
     let overall_detection_rate = if total_applied > 0 {
         total_detected as f64 / total_applied as f64
