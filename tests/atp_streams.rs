@@ -191,6 +191,27 @@ fn test_stream_manager_drains_quic_stream_frames_into_packet_bytes() {
 }
 
 #[test]
+fn test_empty_non_fin_stream_send_does_not_emit_quic_frame() {
+    let cx = test_cx();
+    let mut manager = StreamManager::new(false);
+    let stream_id = manager
+        .open_stream(&cx, true, StreamPriority::Data)
+        .unwrap();
+
+    manager
+        .queue_stream_data(&cx, stream_id, Bytes::new(), false)
+        .unwrap();
+
+    let frames = match manager.drain_quic_stream_frames(2, 16) {
+        Outcome::Ok(frames) => frames,
+        other => panic!("empty non-FIN drain should not fail, got {other:?}"),
+    };
+
+    assert!(frames.is_empty());
+    assert!(manager.next_scheduled_stream().is_none());
+}
+
+#[test]
 fn test_stream_out_of_order_reassembly() {
     let cx = test_cx();
     let mut stream = AtpStream::new(StreamId::new(4), true, StreamPriority::Data, false);
