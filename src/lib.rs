@@ -415,6 +415,8 @@ pub mod real_lab_oracle_raptorq_proof_encode_decode_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_lab_replay_trace_recorder_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_messaging_jetstream_obligation_dialectica_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_dns_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_dns_resolver_happy_eyeballs_e2e_tests;
