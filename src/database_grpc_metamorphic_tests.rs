@@ -629,7 +629,7 @@ fn test_mr_postgres_scram_transcript() {
 
         // MR: Same credentials should produce same authentication result
         prop_assert_eq!(
-            result1, result2,
+            result1.clone(), result2,
             "SCRAM authentication should be deterministic for same credentials"
         );
 
@@ -662,10 +662,12 @@ fn test_mr_mysql_prepared_statement_caching() {
             }
         }
 
-        // MR: Cached and non-cached statements should be functionally equivalent
+        // MR: Cached and non-cached statements should be functionally equivalent.
+        // `.clone()` the borrowed String fields so prop_assert_eq! can take
+        // owned values without moving out of the shared `&(stmt1, stmt2)` ref.
         for (stmt1, stmt2) in &stmt_pairs {
             prop_assert_eq!(
-                stmt1.query, stmt2.query,
+                stmt1.query.clone(), stmt2.query.clone(),
                 "Cached and non-cached statements should have same query"
             );
 
@@ -940,9 +942,11 @@ fn test_mr_grpc_status_code_mapping() {
                 "Same error condition should map to same gRPC status code: {:?}", condition
             );
 
-            // Messages can differ, but codes should be consistent
-            prop_assert_eq!(status1.message, message1, "Status message should match input");
-            prop_assert_eq!(status2.message, message2, "Status message should match input");
+            // Messages can differ, but codes should be consistent. `.clone()`
+            // the .message field so status1/status2 remain wholly intact for
+            // the followup is_retryable() borrow.
+            prop_assert_eq!(status1.message.clone(), message1.clone(), "Status message should match input");
+            prop_assert_eq!(status2.message.clone(), message2.clone(), "Status message should match input");
 
             // Retryability should be consistent for same status code
             prop_assert_eq!(

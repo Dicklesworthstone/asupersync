@@ -111,8 +111,12 @@ mod tests {
     }
 
     /// Generate state snapshots for Lyapunov testing.
+    ///
+    /// `StateSnapshot` has more fields than `proptest` can pack into a single
+    /// tuple-strategy (max arity 12), so split the generators across two
+    /// nested tuples and merge in the closure.
     fn state_snapshot() -> impl Strategy<Value = StateSnapshot> {
-        (
+        let head = (
             time(),
             0u32..100u32,
             0u32..50u32,
@@ -120,6 +124,8 @@ mod tests {
             0u32..10u32,
             0.0f64..10.0f64,
             0u32..20u32,
+        );
+        let tail = (
             0u32..20u32,
             0u32..20u32,
             0u32..20u32,
@@ -127,9 +133,29 @@ mod tests {
             0u32..20u32,
             0u32..20u32,
             0u32..100u32,
-        )
-            .prop_map(
-                |(
+        );
+        (head, tail).prop_map(
+            |(
+                (
+                    time,
+                    live_tasks,
+                    pending_obligations,
+                    obligation_age_sum_ns,
+                    draining_regions,
+                    deadline_pressure,
+                    pending_send_permits,
+                ),
+                (
+                    pending_acks,
+                    pending_leases,
+                    pending_io_ops,
+                    cancel_requested_tasks,
+                    cancelling_tasks,
+                    finalizing_tasks,
+                    ready_queue_depth,
+                ),
+            )| {
+                StateSnapshot {
                     time,
                     live_tasks,
                     pending_obligations,
@@ -144,25 +170,9 @@ mod tests {
                     cancelling_tasks,
                     finalizing_tasks,
                     ready_queue_depth,
-                )| {
-                    StateSnapshot {
-                        time,
-                        live_tasks,
-                        pending_obligations,
-                        obligation_age_sum_ns,
-                        draining_regions,
-                        deadline_pressure,
-                        pending_send_permits,
-                        pending_acks,
-                        pending_leases,
-                        pending_io_ops,
-                        cancel_requested_tasks,
-                        cancelling_tasks,
-                        finalizing_tasks,
-                        ready_queue_depth,
-                    }
-                },
-            )
+                }
+            },
+        )
     }
 
     /// Generate Race structures for DPOR testing.
@@ -294,6 +304,18 @@ mod tests {
                         5u8.hash(&mut hasher);
                         k.hash(&mut hasher);
                         v.hash(&mut hasher);
+                    }
+                    CaveatPredicate::ResourceScope(pattern) => {
+                        6u8.hash(&mut hasher);
+                        pattern.hash(&mut hasher);
+                    }
+                    CaveatPredicate::RateLimit {
+                        max_count,
+                        window_secs,
+                    } => {
+                        7u8.hash(&mut hasher);
+                        max_count.hash(&mut hasher);
+                        window_secs.hash(&mut hasher);
                     }
                 }
             }
@@ -533,7 +555,13 @@ mod tests {
                 scope.add_obligation();
             }
             for i in 0..num_children {
-                scope.add_child_region(RegionId::from(region.as_u64() + 1 + i as u64));
+                // `RegionId` has no `From<u64>` impl — derive the child id from
+                // the parent's u64 representation, split back into index/gen.
+                let raw = region.as_u64().wrapping_add(1 + i as u64);
+                scope.add_child_region(RegionId::new_for_test(
+                    raw as u32,
+                    (raw >> 32) as u32,
+                ));
             }
 
             // Check quiescence condition before any resolution
@@ -617,13 +645,13 @@ mod tests {
             weights_deadline in 0.0f64..10.0f64,
         ) {
             let weights = PotentialWeights {
-                task_weight: weights_task,
-                obligation_weight: weights_obligation,
-                region_weight: weights_region,
-                deadline_weight: weights_deadline,
+                w_tasks: weights_task,
+                w_obligation_age: weights_obligation,
+                w_draining_regions: weights_region,
+                w_deadline_pressure: weights_deadline,
             };
 
-            let governor = LyapunovGovernor::new(weights);
+            let mut governor = LyapunovGovernor::new(weights);
             let potential = governor.compute_potential(&snapshot);
 
             prop_assert!(potential >= 0.0,
@@ -644,7 +672,7 @@ mod tests {
             base_snapshot in state_snapshot(),
         ) {
             let weights = PotentialWeights::default();
-            let governor = LyapunovGovernor::new(weights);
+            let mut governor = LyapunovGovernor::new(weights);
 
             // Create a quiescent snapshot (zero everything relevant)
             let quiescent_snapshot = StateSnapshot {
@@ -696,9 +724,11 @@ mod tests {
             race_a in race(),
             race_b in race(),
         ) {
-            // Create mock resources for independence testing
-            let resource_a = Resource::Channel { id: race_a.earlier as u64, kind: "mpsc".to_string() };
-            let resource_b = Resource::Channel { id: race_b.later as u64, kind: "mpsc".to_string() };
+            // Create mock resources for independence testing.
+            // The current `Resource` enum has no `Channel { id, kind }` variant;
+            // use `Timer(u64)` as a stand-in id-keyed resource.
+            let resource_a = Resource::Timer(race_a.earlier as u64);
+            let resource_b = Resource::Timer(race_b.later as u64);
 
             // Mock independence check (simplified)
             let independent_ab = mock_independent(&resource_a, &resource_b);
@@ -711,13 +741,16 @@ mod tests {
     }
 
     /// Mock independence function for testing symmetry.
+    ///
+    /// The current `Resource` enum is id-keyed (`Timer(u64)`, `IoToken(u64)`,
+    /// etc.) rather than carrying a struct payload — use those variants here.
     fn mock_independent(res_a: &Resource, res_b: &Resource) -> bool {
         match (res_a, res_b) {
-            (Resource::Channel { id: id_a, .. }, Resource::Channel { id: id_b, .. }) => {
-                id_a != id_b // Different channels are independent
+            (Resource::Timer(id_a), Resource::Timer(id_b)) => {
+                id_a != id_b // Different timers are independent
             }
-            (Resource::Memory { addr: addr_a, .. }, Resource::Memory { addr: addr_b, .. }) => {
-                addr_a != addr_b // Different memory locations are independent
+            (Resource::IoToken(tok_a), Resource::IoToken(tok_b)) => {
+                tok_a != tok_b // Different I/O tokens are independent
             }
             _ => false, // Different resource types are dependent for simplicity
         }

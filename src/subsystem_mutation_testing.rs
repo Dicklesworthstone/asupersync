@@ -5461,7 +5461,7 @@ impl SubsystemMutationTester {
 
     /// [br-mutation-43] Runtime state region close eager-vs-lazy regression mutations
     async fn test_runtime_state_mutations(&self) {
-        use crate::runtime::{state, Region, RegionState, TaskState, RegionCloseMode, StateError};
+        use crate::runtime::{Region, RegionCloseMode, RegionState, StateError, TaskState, state};
 
         let runtime_state_detected = self
             .runtime
@@ -5808,7 +5808,7 @@ impl SubsystemMutationTester {
 
     /// [br-mutation-44] Cx registry commit_permit identity regression mutations
     async fn test_cx_registry_mutations(&self) {
-        use crate::cx::{registry, CapabilityId, PermitId, RegistryError, CommitPermit};
+        use crate::cx::{CapabilityId, CommitPermit, PermitId, RegistryError, registry};
 
         let cx_registry_detected = self
             .runtime
@@ -5830,17 +5830,29 @@ impl SubsystemMutationTester {
                                 match test_idx % 16 {
                                     0 => {
                                         // Create permit for one capability
-                                        let capability_a = cx_registry.register_capability("test_cap_a").await;
-                                        let permit_a = cx_registry.acquire_permit(&capability_a).await.unwrap();
+                                        let capability_a =
+                                            cx_registry.register_capability("test_cap_a").await;
+                                        let permit_a = cx_registry
+                                            .acquire_permit(&capability_a)
+                                            .await
+                                            .unwrap();
 
                                         // Create permit for different capability
-                                        let capability_b = cx_registry.register_capability("test_cap_b").await;
-                                        let permit_b = cx_registry.acquire_permit(&capability_b).await.unwrap();
+                                        let capability_b =
+                                            cx_registry.register_capability("test_cap_b").await;
+                                        let permit_b = cx_registry
+                                            .acquire_permit(&capability_b)
+                                            .await
+                                            .unwrap();
 
                                         // MUTATION: Try to commit permit A as if it were for capability B
-                                        let commit_permit_corrupted = CommitPermit::new(&permit_a.id(), &capability_b);
+                                        let commit_permit_corrupted =
+                                            CommitPermit::new(&permit_a.id(), &capability_b);
 
-                                        match cx_registry.commit_permit(commit_permit_corrupted).await {
+                                        match cx_registry
+                                            .commit_permit(commit_permit_corrupted)
+                                            .await
+                                        {
                                             Err(RegistryError::PermitIdentityMismatch) => {
                                                 // Correctly detected permit identity mismatch
                                             }
@@ -5855,15 +5867,20 @@ impl SubsystemMutationTester {
                                     }
                                     1 => {
                                         // Test double commit corruption
-                                        let capability = cx_registry.register_capability("double_commit_test").await;
-                                        let permit = cx_registry.acquire_permit(&capability).await.unwrap();
+                                        let capability = cx_registry
+                                            .register_capability("double_commit_test")
+                                            .await;
+                                        let permit =
+                                            cx_registry.acquire_permit(&capability).await.unwrap();
 
                                         // First commit (should succeed)
-                                        let commit_permit1 = CommitPermit::new(&permit.id(), &capability);
+                                        let commit_permit1 =
+                                            CommitPermit::new(&permit.id(), &capability);
                                         cx_registry.commit_permit(commit_permit1).await.ok();
 
                                         // MUTATION: Second commit of same permit
-                                        let commit_permit2 = CommitPermit::new(&permit.id(), &capability);
+                                        let commit_permit2 =
+                                            CommitPermit::new(&permit.id(), &capability);
                                         match cx_registry.commit_permit(commit_permit2).await {
                                             Err(RegistryError::PermitAlreadyCommitted) => {
                                                 // Correctly prevented double commit
@@ -5879,9 +5896,13 @@ impl SubsystemMutationTester {
                                     }
                                     2 => {
                                         // Test permit expiry bypass corruption
-                                        let capability = cx_registry.register_capability("expiry_test").await;
+                                        let capability =
+                                            cx_registry.register_capability("expiry_test").await;
                                         let permit = cx_registry
-                                            .acquire_permit_with_expiry(&capability, Duration::from_millis(100))
+                                            .acquire_permit_with_expiry(
+                                                &capability,
+                                                Duration::from_millis(100),
+                                            )
                                             .await
                                             .unwrap();
 
@@ -5889,7 +5910,8 @@ impl SubsystemMutationTester {
                                         sleep(Duration::from_millis(200)).await;
 
                                         // MUTATION: Try to commit expired permit
-                                        let commit_permit = CommitPermit::new(&permit.id(), &capability);
+                                        let commit_permit =
+                                            CommitPermit::new(&permit.id(), &capability);
                                         match cx_registry.commit_permit(commit_permit).await {
                                             Err(RegistryError::PermitExpired) => {
                                                 // Correctly detected expired permit
@@ -5905,14 +5927,18 @@ impl SubsystemMutationTester {
                                     }
                                     3 => {
                                         // Test capability revocation bypass corruption
-                                        let capability = cx_registry.register_capability("revocation_test").await;
-                                        let permit = cx_registry.acquire_permit(&capability).await.unwrap();
+                                        let capability = cx_registry
+                                            .register_capability("revocation_test")
+                                            .await;
+                                        let permit =
+                                            cx_registry.acquire_permit(&capability).await.unwrap();
 
                                         // Revoke capability
                                         cx_registry.revoke_capability(&capability).await.ok();
 
                                         // MUTATION: Try to commit permit for revoked capability
-                                        let commit_permit = CommitPermit::new(&permit.id(), &capability);
+                                        let commit_permit =
+                                            CommitPermit::new(&permit.id(), &capability);
                                         match cx_registry.commit_permit(commit_permit).await {
                                             Err(RegistryError::CapabilityRevoked) => {
                                                 // Correctly detected revoked capability
@@ -5928,14 +5954,18 @@ impl SubsystemMutationTester {
                                     }
                                     4 => {
                                         // Test forged permit ID corruption
-                                        let capability = cx_registry.register_capability("forge_test").await;
-                                        let real_permit = cx_registry.acquire_permit(&capability).await.unwrap();
+                                        let capability =
+                                            cx_registry.register_capability("forge_test").await;
+                                        let real_permit =
+                                            cx_registry.acquire_permit(&capability).await.unwrap();
 
                                         // MUTATION: Create commit permit with forged ID
                                         let forged_permit_id = PermitId::new(); // Different ID
-                                        let commit_permit_forged = CommitPermit::new(&forged_permit_id, &capability);
+                                        let commit_permit_forged =
+                                            CommitPermit::new(&forged_permit_id, &capability);
 
-                                        match cx_registry.commit_permit(commit_permit_forged).await {
+                                        match cx_registry.commit_permit(commit_permit_forged).await
+                                        {
                                             Err(RegistryError::PermitNotFound) => {
                                                 // Correctly detected forged permit ID
                                             }
@@ -5953,11 +5983,15 @@ impl SubsystemMutationTester {
                                         let registry1 = registry::CxRegistry::new();
                                         let registry2 = registry::CxRegistry::new();
 
-                                        let capability1 = registry1.register_capability("cross_registry_test").await;
-                                        let permit1 = registry1.acquire_permit(&capability1).await.unwrap();
+                                        let capability1 = registry1
+                                            .register_capability("cross_registry_test")
+                                            .await;
+                                        let permit1 =
+                                            registry1.acquire_permit(&capability1).await.unwrap();
 
                                         // MUTATION: Try to use permit from registry1 in registry2
-                                        let commit_permit = CommitPermit::new(&permit1.id(), &capability1);
+                                        let commit_permit =
+                                            CommitPermit::new(&permit1.id(), &capability1);
                                         match registry2.commit_permit(commit_permit).await {
                                             Err(RegistryError::PermitRegistryMismatch) => {
                                                 // Correctly detected cross-registry permit reuse
@@ -5973,19 +6007,25 @@ impl SubsystemMutationTester {
                                     }
                                     8 => {
                                         // Test concurrent permit commit corruption
-                                        let capability = cx_registry.register_capability("concurrent_test").await;
-                                        let permit = cx_registry.acquire_permit(&capability).await.unwrap();
+                                        let capability = cx_registry
+                                            .register_capability("concurrent_test")
+                                            .await;
+                                        let permit =
+                                            cx_registry.acquire_permit(&capability).await.unwrap();
 
                                         // MUTATION: Attempt concurrent commits of same permit
-                                        let commit_permit1 = CommitPermit::new(&permit.id(), &capability);
-                                        let commit_permit2 = CommitPermit::new(&permit.id(), &capability);
+                                        let commit_permit1 =
+                                            CommitPermit::new(&permit.id(), &capability);
+                                        let commit_permit2 =
+                                            CommitPermit::new(&permit.id(), &capability);
 
                                         let commit1 = cx_registry.commit_permit(commit_permit1);
                                         let commit2 = cx_registry.commit_permit(commit_permit2);
 
                                         match futures::join!(commit1, commit2) {
-                                            (Ok(_), Err(RegistryError::PermitAlreadyCommitted)) |
-                                            (Err(RegistryError::PermitAlreadyCommitted), Ok(_)) => {
+                                            (Ok(_), Err(RegistryError::PermitAlreadyCommitted))
+                                            | (Err(RegistryError::PermitAlreadyCommitted), Ok(_)) =>
+                                            {
                                                 // Correctly handled concurrent commit
                                             }
                                             (Ok(_), Ok(_)) => {
@@ -5999,17 +6039,30 @@ impl SubsystemMutationTester {
                                     }
                                     12 => {
                                         // Test capability hierarchy bypass corruption
-                                        let parent_capability = cx_registry.register_capability("parent_cap").await;
+                                        let parent_capability =
+                                            cx_registry.register_capability("parent_cap").await;
                                         let child_capability = cx_registry
-                                            .register_child_capability("child_cap", &parent_capability)
+                                            .register_child_capability(
+                                                "child_cap",
+                                                &parent_capability,
+                                            )
                                             .await
                                             .unwrap();
 
-                                        let child_permit = cx_registry.acquire_permit(&child_capability).await.unwrap();
+                                        let child_permit = cx_registry
+                                            .acquire_permit(&child_capability)
+                                            .await
+                                            .unwrap();
 
                                         // MUTATION: Try to commit child permit as parent capability
-                                        let commit_permit_corrupted = CommitPermit::new(&child_permit.id(), &parent_capability);
-                                        match cx_registry.commit_permit(commit_permit_corrupted).await {
+                                        let commit_permit_corrupted = CommitPermit::new(
+                                            &child_permit.id(),
+                                            &parent_capability,
+                                        );
+                                        match cx_registry
+                                            .commit_permit(commit_permit_corrupted)
+                                            .await
+                                        {
                                             Err(RegistryError::CapabilityHierarchyViolation) => {
                                                 // Correctly detected capability hierarchy violation
                                             }
@@ -6024,9 +6077,12 @@ impl SubsystemMutationTester {
                                     }
                                     _ => {
                                         // Normal permit lifecycle test
-                                        let capability = cx_registry.register_capability("normal_test").await;
-                                        let permit = cx_registry.acquire_permit(&capability).await.unwrap();
-                                        let commit_permit = CommitPermit::new(&permit.id(), &capability);
+                                        let capability =
+                                            cx_registry.register_capability("normal_test").await;
+                                        let permit =
+                                            cx_registry.acquire_permit(&capability).await.unwrap();
+                                        let commit_permit =
+                                            CommitPermit::new(&permit.id(), &capability);
                                         cx_registry.commit_permit(commit_permit).await.ok();
                                     }
                                 }
@@ -6042,9 +6098,13 @@ impl SubsystemMutationTester {
                         if violations > 0 && corruptions > 0 {
                             Outcome::Ok(true) // Permit identity corruption detected
                         } else if corruptions > 0 {
-                            Outcome::Err(Error::new(ErrorKind::Other,
-                                format!("Cx registry validation failed: {} corruptions, {} violations",
-                                    corruptions, violations)))
+                            Outcome::Err(Error::new(
+                                ErrorKind::Other,
+                                format!(
+                                    "Cx registry validation failed: {} corruptions, {} violations",
+                                    corruptions, violations
+                                ),
+                            ))
                         } else {
                             Outcome::Ok(false) // No corruptions
                         }
@@ -6066,7 +6126,7 @@ impl SubsystemMutationTester {
 
     /// [br-mutation-45] Net DNS TTL caching expiry regression mutations
     async fn test_net_dns_mutations(&self) {
-        use crate::net::dns::{DnsCache, DnsRecord, RecordType, CacheError, DnsTtl};
+        use crate::net::dns::{CacheError, DnsCache, DnsRecord, DnsTtl, RecordType};
 
         let net_dns_detected = self
             .runtime
@@ -6088,8 +6148,12 @@ impl SubsystemMutationTester {
                                 match test_idx % 20 {
                                     0 => {
                                         // Test TTL expiry bypass corruption
-                                        let record = DnsRecord::new("example.com", RecordType::A, "192.168.1.1")
-                                            .with_ttl(DnsTtl::from_seconds(1)); // Very short TTL
+                                        let record = DnsRecord::new(
+                                            "example.com",
+                                            RecordType::A,
+                                            "192.168.1.1",
+                                        )
+                                        .with_ttl(DnsTtl::from_seconds(1)); // Very short TTL
 
                                         dns_cache.insert(record.clone()).await;
 
@@ -6097,7 +6161,10 @@ impl SubsystemMutationTester {
                                         sleep(Duration::from_millis(1500)).await;
 
                                         // MUTATION: Return expired record instead of cache miss
-                                        match dns_cache.get_ignore_ttl("example.com", RecordType::A).await {
+                                        match dns_cache
+                                            .get_ignore_ttl("example.com", RecordType::A)
+                                            .await
+                                        {
                                             Some(cached_record) => {
                                                 // Should not return expired record
                                                 ttl_violations.fetch_add(1, Ordering::Relaxed);
@@ -6109,16 +6176,27 @@ impl SubsystemMutationTester {
                                     }
                                     1 => {
                                         // Test TTL refresh corruption
-                                        let original_record = DnsRecord::new("refresh.com", RecordType::A, "10.0.0.1")
-                                            .with_ttl(DnsTtl::from_seconds(60));
+                                        let original_record = DnsRecord::new(
+                                            "refresh.com",
+                                            RecordType::A,
+                                            "10.0.0.1",
+                                        )
+                                        .with_ttl(DnsTtl::from_seconds(60));
 
                                         dns_cache.insert(original_record.clone()).await;
 
                                         // MUTATION: Update TTL without proper authority validation
-                                        let updated_record = DnsRecord::new("refresh.com", RecordType::A, "10.0.0.1")
-                                            .with_ttl(DnsTtl::from_seconds(3600)); // Extended TTL
+                                        let updated_record = DnsRecord::new(
+                                            "refresh.com",
+                                            RecordType::A,
+                                            "10.0.0.1",
+                                        )
+                                        .with_ttl(DnsTtl::from_seconds(3600)); // Extended TTL
 
-                                        match dns_cache.update_ttl_without_validation(&updated_record).await {
+                                        match dns_cache
+                                            .update_ttl_without_validation(&updated_record)
+                                            .await
+                                        {
                                             Err(CacheError::TtlUpdateRequiresValidation) => {
                                                 // Correctly required validation for TTL update
                                             }
@@ -6133,16 +6211,24 @@ impl SubsystemMutationTester {
                                     }
                                     2 => {
                                         // Test negative caching TTL corruption
-                                        let nxdomain_record = DnsRecord::new_nxdomain("nonexistent.com")
-                                            .with_ttl(DnsTtl::from_seconds(300)); // 5 minutes negative cache
+                                        let nxdomain_record =
+                                            DnsRecord::new_nxdomain("nonexistent.com")
+                                                .with_ttl(DnsTtl::from_seconds(300)); // 5 minutes negative cache
 
                                         dns_cache.insert_negative(nxdomain_record).await;
 
                                         // MUTATION: Positive record overwrites negative cache before TTL expires
-                                        let positive_record = DnsRecord::new("nonexistent.com", RecordType::A, "1.2.3.4")
-                                            .with_ttl(DnsTtl::from_seconds(60));
+                                        let positive_record = DnsRecord::new(
+                                            "nonexistent.com",
+                                            RecordType::A,
+                                            "1.2.3.4",
+                                        )
+                                        .with_ttl(DnsTtl::from_seconds(60));
 
-                                        match dns_cache.insert_ignoring_negative_cache(positive_record).await {
+                                        match dns_cache
+                                            .insert_ignoring_negative_cache(positive_record)
+                                            .await
+                                        {
                                             Err(CacheError::NegativeCacheStillValid) => {
                                                 // Correctly honored negative cache TTL
                                             }
@@ -6157,16 +6243,27 @@ impl SubsystemMutationTester {
                                     }
                                     3 => {
                                         // Test cache poisoning via TTL manipulation
-                                        let legitimate_record = DnsRecord::new("bank.com", RecordType::A, "203.0.113.1")
-                                            .with_ttl(DnsTtl::from_seconds(300));
+                                        let legitimate_record = DnsRecord::new(
+                                            "bank.com",
+                                            RecordType::A,
+                                            "203.0.113.1",
+                                        )
+                                        .with_ttl(DnsTtl::from_seconds(300));
 
                                         dns_cache.insert(legitimate_record).await;
 
                                         // MUTATION: Malicious record with very long TTL
-                                        let malicious_record = DnsRecord::new("bank.com", RecordType::A, "192.0.2.666") // Malicious IP
-                                            .with_ttl(DnsTtl::from_seconds(86400)); // 24 hours
+                                        let malicious_record = DnsRecord::new(
+                                            "bank.com",
+                                            RecordType::A,
+                                            "192.0.2.666",
+                                        ) // Malicious IP
+                                        .with_ttl(DnsTtl::from_seconds(86400)); // 24 hours
 
-                                        match dns_cache.insert_without_authority_check(malicious_record).await {
+                                        match dns_cache
+                                            .insert_without_authority_check(malicious_record)
+                                            .await
+                                        {
                                             Err(CacheError::AuthorityValidationRequired) => {
                                                 // Correctly required authority validation
                                             }
@@ -6181,10 +6278,17 @@ impl SubsystemMutationTester {
                                     }
                                     4 => {
                                         // Test TTL zero handling corruption
-                                        let zero_ttl_record = DnsRecord::new("immediate.com", RecordType::A, "198.51.100.1")
-                                            .with_ttl(DnsTtl::from_seconds(0)); // Should not be cached
+                                        let zero_ttl_record = DnsRecord::new(
+                                            "immediate.com",
+                                            RecordType::A,
+                                            "198.51.100.1",
+                                        )
+                                        .with_ttl(DnsTtl::from_seconds(0)); // Should not be cached
 
-                                        match dns_cache.insert_zero_ttl_record(zero_ttl_record).await {
+                                        match dns_cache
+                                            .insert_zero_ttl_record(zero_ttl_record)
+                                            .await
+                                        {
                                             Err(CacheError::ZeroTtlNotCacheable) => {
                                                 // Correctly rejected zero TTL caching
                                             }
@@ -6199,18 +6303,26 @@ impl SubsystemMutationTester {
                                     }
                                     6 => {
                                         // Test TTL drift corruption (system clock changes)
-                                        let record = DnsRecord::new("timetest.com", RecordType::A, "203.0.113.2")
-                                            .with_ttl(DnsTtl::from_seconds(120));
+                                        let record = DnsRecord::new(
+                                            "timetest.com",
+                                            RecordType::A,
+                                            "203.0.113.2",
+                                        )
+                                        .with_ttl(DnsTtl::from_seconds(120));
 
                                         dns_cache.insert(record).await;
 
                                         // MUTATION: Simulate system clock going backwards
-                                        dns_cache.simulate_clock_drift(Duration::from_secs(-60)).await;
+                                        dns_cache
+                                            .simulate_clock_drift(Duration::from_secs(-60))
+                                            .await;
 
                                         match dns_cache.get("timetest.com", RecordType::A).await {
                                             Some(cached_record) => {
                                                 // Check if TTL was correctly adjusted for clock drift
-                                                if cached_record.remaining_ttl() > Duration::from_secs(120) {
+                                                if cached_record.remaining_ttl()
+                                                    > Duration::from_secs(120)
+                                                {
                                                     // TTL should have been adjusted for clock drift
                                                     ttl_violations.fetch_add(1, Ordering::Relaxed);
                                                 }
@@ -6224,12 +6336,18 @@ impl SubsystemMutationTester {
                                         // Test cache eviction TTL bypass corruption
                                         dns_cache.set_max_size(2).await; // Very small cache
 
-                                        let record1 = DnsRecord::new("first.com", RecordType::A, "192.0.2.1")
-                                            .with_ttl(DnsTtl::from_seconds(3600));
-                                        let record2 = DnsRecord::new("second.com", RecordType::A, "192.0.2.2")
-                                            .with_ttl(DnsTtl::from_seconds(1)); // Short TTL
-                                        let record3 = DnsRecord::new("third.com", RecordType::A, "192.0.2.3")
-                                            .with_ttl(DnsTtl::from_seconds(3600));
+                                        let record1 =
+                                            DnsRecord::new("first.com", RecordType::A, "192.0.2.1")
+                                                .with_ttl(DnsTtl::from_seconds(3600));
+                                        let record2 = DnsRecord::new(
+                                            "second.com",
+                                            RecordType::A,
+                                            "192.0.2.2",
+                                        )
+                                        .with_ttl(DnsTtl::from_seconds(1)); // Short TTL
+                                        let record3 =
+                                            DnsRecord::new("third.com", RecordType::A, "192.0.2.3")
+                                                .with_ttl(DnsTtl::from_seconds(3600));
 
                                         dns_cache.insert(record1).await;
                                         dns_cache.insert(record2).await;
@@ -6240,15 +6358,20 @@ impl SubsystemMutationTester {
                                         // MUTATION: Insert record3, should evict expired record2 not valid record1
                                         dns_cache.insert(record3).await;
 
-                                        if dns_cache.get("first.com", RecordType::A).await.is_none() {
+                                        if dns_cache.get("first.com", RecordType::A).await.is_none()
+                                        {
                                             // Should have evicted expired record2, not valid record1
                                             ttl_violations.fetch_add(1, Ordering::Relaxed);
                                         }
                                     }
                                     10 => {
                                         // Test concurrent TTL expiry corruption
-                                        let record = DnsRecord::new("concurrent.com", RecordType::A, "203.0.113.3")
-                                            .with_ttl(DnsTtl::from_seconds(1));
+                                        let record = DnsRecord::new(
+                                            "concurrent.com",
+                                            RecordType::A,
+                                            "203.0.113.3",
+                                        )
+                                        .with_ttl(DnsTtl::from_seconds(1));
 
                                         dns_cache.insert(record).await;
 
@@ -6273,8 +6396,12 @@ impl SubsystemMutationTester {
                                     }
                                     12 => {
                                         // Test minimum TTL enforcement corruption
-                                        let short_ttl_record = DnsRecord::new("shortttl.com", RecordType::A, "198.51.100.2")
-                                            .with_ttl(DnsTtl::from_seconds(5)); // Very short
+                                        let short_ttl_record = DnsRecord::new(
+                                            "shortttl.com",
+                                            RecordType::A,
+                                            "198.51.100.2",
+                                        )
+                                        .with_ttl(DnsTtl::from_seconds(5)); // Very short
 
                                         dns_cache.set_minimum_ttl(Duration::from_secs(60)).await;
 
@@ -6295,15 +6422,23 @@ impl SubsystemMutationTester {
                                     }
                                     16 => {
                                         // Test maximum TTL clamping corruption
-                                        let long_ttl_record = DnsRecord::new("longttl.com", RecordType::A, "203.0.113.4")
-                                            .with_ttl(DnsTtl::from_seconds(86400)); // 24 hours
+                                        let long_ttl_record = DnsRecord::new(
+                                            "longttl.com",
+                                            RecordType::A,
+                                            "203.0.113.4",
+                                        )
+                                        .with_ttl(DnsTtl::from_seconds(86400)); // 24 hours
 
                                         dns_cache.set_maximum_ttl(Duration::from_secs(300)).await; // 5 minutes max
 
                                         dns_cache.insert(long_ttl_record).await;
 
-                                        if let Some(cached_record) = dns_cache.get("longttl.com", RecordType::A).await {
-                                            if cached_record.remaining_ttl() > Duration::from_secs(300) {
+                                        if let Some(cached_record) =
+                                            dns_cache.get("longttl.com", RecordType::A).await
+                                        {
+                                            if cached_record.remaining_ttl()
+                                                > Duration::from_secs(300)
+                                            {
                                                 // TTL should have been clamped to maximum
                                                 ttl_violations.fetch_add(1, Ordering::Relaxed);
                                             }
@@ -6311,8 +6446,12 @@ impl SubsystemMutationTester {
                                     }
                                     _ => {
                                         // Normal DNS caching test
-                                        let normal_record = DnsRecord::new("normal.com", RecordType::A, "192.0.2.100")
-                                            .with_ttl(DnsTtl::from_seconds(300));
+                                        let normal_record = DnsRecord::new(
+                                            "normal.com",
+                                            RecordType::A,
+                                            "192.0.2.100",
+                                        )
+                                        .with_ttl(DnsTtl::from_seconds(300));
                                         dns_cache.insert(normal_record).await;
                                         dns_cache.get("normal.com", RecordType::A).await;
                                     }
@@ -6329,9 +6468,13 @@ impl SubsystemMutationTester {
                         if violations > 0 && corruptions > 0 {
                             Outcome::Ok(true) // TTL caching corruption detected
                         } else if corruptions > 0 {
-                            Outcome::Err(Error::new(ErrorKind::Other,
-                                format!("DNS TTL validation failed: {} corruptions, {} violations",
-                                    corruptions, violations)))
+                            Outcome::Err(Error::new(
+                                ErrorKind::Other,
+                                format!(
+                                    "DNS TTL validation failed: {} corruptions, {} violations",
+                                    corruptions, violations
+                                ),
+                            ))
                         } else {
                             Outcome::Ok(false) // No corruptions
                         }
@@ -6353,7 +6496,7 @@ impl SubsystemMutationTester {
 
     /// [br-mutation-46] RaptorQ GF256 XOR table corruption regression mutations
     async fn test_raptorq_gf256_mutations(&self) {
-        use crate::raptorq::gf256::{Gf256, XorTable, MultiplicationTable, FieldElement};
+        use crate::raptorq::gf256::{FieldElement, Gf256, MultiplicationTable, XorTable};
 
         let raptorq_gf256_detected = self
             .runtime
@@ -6378,7 +6521,8 @@ impl SubsystemMutationTester {
                                         let zero = FieldElement::zero();
 
                                         // MUTATION: Corrupt XOR with zero (should be identity)
-                                        let corrupted_result = xor_table.xor_corrupted_identity(a, zero);
+                                        let corrupted_result =
+                                            xor_table.xor_corrupted_identity(a, zero);
                                         let expected_result = a; // XOR with 0 should be identity
 
                                         if corrupted_result != expected_result {
@@ -6386,8 +6530,11 @@ impl SubsystemMutationTester {
                                             let mult_table = MultiplicationTable::new();
 
                                             // Verify via multiplication: a * 1 = a
-                                            let mult_result = mult_table.multiply(a, FieldElement::one());
-                                            if mult_result == expected_result && corrupted_result != expected_result {
+                                            let mult_result =
+                                                mult_table.multiply(a, FieldElement::one());
+                                            if mult_result == expected_result
+                                                && corrupted_result != expected_result
+                                            {
                                                 // XOR corruption caught by multiplication verification
                                             } else {
                                                 // Should have caught XOR identity corruption
@@ -6429,7 +6576,8 @@ impl SubsystemMutationTester {
                                         let c = FieldElement::from_u8(51);
 
                                         // MUTATION: Break distributivity a ⊕ (b ⊕ c) != (a ⊕ b) ⊕ c
-                                        let left_result = xor_table.xor(a, xor_table.xor_corrupted_associativity(b, c));
+                                        let left_result = xor_table
+                                            .xor(a, xor_table.xor_corrupted_associativity(b, c));
                                         let right_result = xor_table.xor(xor_table.xor(a, b), c);
 
                                         if left_result != right_result {
@@ -6437,16 +6585,14 @@ impl SubsystemMutationTester {
                                             let mult_table = MultiplicationTable::new();
 
                                             // Check if multiplication maintains expected relationships
-                                            let mult_check = mult_table.multiply(
-                                                mult_table.multiply(a, b),
-                                                c
-                                            );
-                                            let expected_mult = mult_table.multiply(
-                                                a,
-                                                mult_table.multiply(b, c)
-                                            );
+                                            let mult_check =
+                                                mult_table.multiply(mult_table.multiply(a, b), c);
+                                            let expected_mult =
+                                                mult_table.multiply(a, mult_table.multiply(b, c));
 
-                                            if mult_check == expected_mult && left_result != right_result {
+                                            if mult_check == expected_mult
+                                                && left_result != right_result
+                                            {
                                                 // XOR associativity corruption detected
                                             } else {
                                                 // Should have detected associativity corruption
@@ -6461,7 +6607,8 @@ impl SubsystemMutationTester {
                                         let b = FieldElement::from_u8(255);
 
                                         // MUTATION: Use corrupted index calculation for XOR lookup
-                                        let corrupted_xor = xor_table.xor_with_corrupted_index(a, b);
+                                        let corrupted_xor =
+                                            xor_table.xor_with_corrupted_index(a, b);
                                         let expected_xor = a.to_u8() ^ b.to_u8(); // Correct XOR
 
                                         if corrupted_xor.to_u8() != expected_xor {
@@ -6469,8 +6616,12 @@ impl SubsystemMutationTester {
                                             let mult_table = MultiplicationTable::new();
 
                                             // Verify field relationships are maintained
-                                            let mult_verify = mult_table.multiply(a, FieldElement::one());
-                                            if mult_verify == a && corrupted_xor != FieldElement::from_u8(expected_xor) {
+                                            let mult_verify =
+                                                mult_table.multiply(a, FieldElement::one());
+                                            if mult_verify == a
+                                                && corrupted_xor
+                                                    != FieldElement::from_u8(expected_xor)
+                                            {
                                                 // Index corruption caught by field relationship check
                                             } else {
                                                 // Should have caught index corruption
@@ -6484,7 +6635,8 @@ impl SubsystemMutationTester {
                                         let a = FieldElement::from_u8(73);
 
                                         // MUTATION: Break self-inverse property (a ⊕ a should be 0)
-                                        let corrupted_self_xor = xor_table.xor_corrupted_self_inverse(a, a);
+                                        let corrupted_self_xor =
+                                            xor_table.xor_corrupted_self_inverse(a, a);
                                         let expected_zero = FieldElement::zero();
 
                                         if corrupted_self_xor != expected_zero {
@@ -6493,7 +6645,9 @@ impl SubsystemMutationTester {
                                             let a_inverse = mult_table.multiplicative_inverse(a);
                                             let mult_result = mult_table.multiply(a, a_inverse);
 
-                                            if mult_result == FieldElement::one() && corrupted_self_xor != expected_zero {
+                                            if mult_result == FieldElement::one()
+                                                && corrupted_self_xor != expected_zero
+                                            {
                                                 // Self-inverse corruption detected via multiplicative check
                                             } else {
                                                 // Should have detected self-inverse violation
@@ -6508,7 +6662,8 @@ impl SubsystemMutationTester {
                                         let b = FieldElement::from_u8(255);
 
                                         // MUTATION: Corrupt overflow handling in XOR operation
-                                        let corrupted_overflow = xor_table.xor_with_overflow_corruption(a, b);
+                                        let corrupted_overflow =
+                                            xor_table.xor_with_overflow_corruption(a, b);
                                         let expected_result = FieldElement::zero(); // 255 ^ 255 = 0
 
                                         if corrupted_overflow != expected_result {
@@ -6516,11 +6671,12 @@ impl SubsystemMutationTester {
                                             let mult_table = MultiplicationTable::new();
                                             let mult_check = mult_table.multiply(
                                                 FieldElement::from_u8(255),
-                                                FieldElement::one()
+                                                FieldElement::one(),
                                             );
 
-                                            if mult_check == FieldElement::from_u8(255) &&
-                                               corrupted_overflow != expected_result {
+                                            if mult_check == FieldElement::from_u8(255)
+                                                && corrupted_overflow != expected_result
+                                            {
                                                 // Overflow corruption detected
                                             } else {
                                                 // Should have detected overflow handling corruption
@@ -6534,22 +6690,38 @@ impl SubsystemMutationTester {
 
                                         // Test known XOR relationships
                                         let test_cases = [
-                                            (FieldElement::from_u8(0x53), FieldElement::from_u8(0xCA), FieldElement::from_u8(0x99)),
-                                            (FieldElement::from_u8(0xA5), FieldElement::from_u8(0x5A), FieldElement::from_u8(0xFF)),
-                                            (FieldElement::from_u8(0x0F), FieldElement::from_u8(0xF0), FieldElement::from_u8(0xFF)),
+                                            (
+                                                FieldElement::from_u8(0x53),
+                                                FieldElement::from_u8(0xCA),
+                                                FieldElement::from_u8(0x99),
+                                            ),
+                                            (
+                                                FieldElement::from_u8(0xA5),
+                                                FieldElement::from_u8(0x5A),
+                                                FieldElement::from_u8(0xFF),
+                                            ),
+                                            (
+                                                FieldElement::from_u8(0x0F),
+                                                FieldElement::from_u8(0xF0),
+                                                FieldElement::from_u8(0xFF),
+                                            ),
                                         ];
 
                                         for (a, b, expected_xor) in test_cases {
                                             // MUTATION: Return wrong constant for specific inputs
-                                            let corrupted_result = xor_table.xor_with_constant_corruption(a, b);
+                                            let corrupted_result =
+                                                xor_table.xor_with_constant_corruption(a, b);
 
                                             if corrupted_result != expected_xor {
                                                 // Cross-verify with multiplication properties
                                                 let mult_table = MultiplicationTable::new();
 
                                                 // Check if field structure is maintained
-                                                let field_check = mult_table.multiply(a, FieldElement::one());
-                                                if field_check == a && corrupted_result != expected_xor {
+                                                let field_check =
+                                                    mult_table.multiply(a, FieldElement::one());
+                                                if field_check == a
+                                                    && corrupted_result != expected_xor
+                                                {
                                                     // Constant corruption detected
                                                     break;
                                                 } else {
@@ -6567,7 +6739,8 @@ impl SubsystemMutationTester {
                                         let b = FieldElement::from_u8(0b01001100);
 
                                         // MUTATION: Corrupt specific bit positions in XOR result
-                                        let corrupted_bitwise = xor_table.xor_with_bit_corruption(a, b);
+                                        let corrupted_bitwise =
+                                            xor_table.xor_with_bit_corruption(a, b);
                                         let expected_bits = 0b11111111; // Correct XOR result
 
                                         if corrupted_bitwise.to_u8() != expected_bits {
@@ -6575,18 +6748,21 @@ impl SubsystemMutationTester {
                                             let mult_table = MultiplicationTable::new();
 
                                             // Multiplication should preserve bit relationships in field
-                                            let mult_a = mult_table.multiply(a, FieldElement::from_u8(2));
-                                            let mult_b = mult_table.multiply(b, FieldElement::from_u8(2));
+                                            let mult_a =
+                                                mult_table.multiply(a, FieldElement::from_u8(2));
+                                            let mult_b =
+                                                mult_table.multiply(b, FieldElement::from_u8(2));
                                             let mult_xor = xor_table.xor(mult_a, mult_b);
 
                                             // Check if bit relationships are consistent
                                             let expected_mult_xor = mult_table.multiply(
                                                 FieldElement::from_u8(expected_bits),
-                                                FieldElement::from_u8(2)
+                                                FieldElement::from_u8(2),
                                             );
 
-                                            if mult_xor == expected_mult_xor &&
-                                               corrupted_bitwise.to_u8() != expected_bits {
+                                            if mult_xor == expected_mult_xor
+                                                && corrupted_bitwise.to_u8() != expected_bits
+                                            {
                                                 // Bit-level corruption detected
                                             } else {
                                                 // Should have detected bit corruption
@@ -6614,9 +6790,13 @@ impl SubsystemMutationTester {
                         if violations > 0 && corruptions > 0 {
                             Outcome::Ok(true) // XOR table corruption detected via multiplication
                         } else if corruptions > 0 {
-                            Outcome::Err(Error::new(ErrorKind::Other,
-                                format!("GF256 XOR validation failed: {} corruptions, {} violations",
-                                    corruptions, violations)))
+                            Outcome::Err(Error::new(
+                                ErrorKind::Other,
+                                format!(
+                                    "GF256 XOR validation failed: {} corruptions, {} violations",
+                                    corruptions, violations
+                                ),
+                            ))
                         } else {
                             Outcome::Ok(false) // No corruptions
                         }
@@ -6638,7 +6818,9 @@ impl SubsystemMutationTester {
 
     /// [br-mutation-47] RaptorQ proof Merkle aggregation associativity regression mutations
     async fn test_raptorq_proof_mutations(&self) {
-        use crate::raptorq::proof::{MerkleProof, MerkleTree, ProofNode, HashFunction, Aggregation};
+        use crate::raptorq::proof::{
+            Aggregation, HashFunction, MerkleProof, MerkleTree, ProofNode,
+        };
 
         let raptorq_proof_detected = self
             .runtime
@@ -6959,7 +7141,9 @@ impl SubsystemMutationTester {
 
     /// [br-mutation-48] Obligation saga compensation symmetry regression mutations
     async fn test_obligation_saga_mutations(&self) {
-        use crate::obligation::saga::{Saga, SagaStep, Compensation, CompensationSymmetry, SagaExecutor};
+        use crate::obligation::saga::{
+            Compensation, CompensationSymmetry, Saga, SagaExecutor, SagaStep,
+        };
 
         let obligation_saga_detected = self
             .runtime
@@ -7260,7 +7444,10 @@ impl SubsystemMutationTester {
             })
             .await;
 
-        let detected = matches!(obligation_saga_detected, Outcome::Ok(true) | Outcome::Err(_));
+        let detected = matches!(
+            obligation_saga_detected,
+            Outcome::Ok(true) | Outcome::Err(_)
+        );
         self.log_subsystem_mutation(
             "br-mutation-48",
             "obligation",
@@ -7271,7 +7458,7 @@ impl SubsystemMutationTester {
 
     /// [br-mutation-49] Trace divergence causality DAG edge regression mutations
     async fn test_trace_divergence_mutations(&self) {
-        use crate::trace::divergence::{CausalityDag, DagEdge, CausalOrder, DivergenceDetector};
+        use crate::trace::divergence::{CausalOrder, CausalityDag, DagEdge, DivergenceDetector};
 
         let trace_divergence_detected = self
             .runtime
@@ -7613,7 +7800,10 @@ impl SubsystemMutationTester {
             })
             .await;
 
-        let detected = matches!(trace_divergence_detected, Outcome::Ok(true) | Outcome::Err(_));
+        let detected = matches!(
+            trace_divergence_detected,
+            Outcome::Ok(true) | Outcome::Err(_)
+        );
         self.log_subsystem_mutation(
             "br-mutation-49",
             "trace",
@@ -7624,7 +7814,7 @@ impl SubsystemMutationTester {
 
     /// [br-mutation-50] Evidence chain replay determinism regression mutations
     async fn test_evidence_mutations(&self) {
-        use crate::evidence::{EvidenceChain, EvidenceReplay, ReplayDeterminism, ChainValidator};
+        use crate::evidence::{ChainValidator, EvidenceChain, EvidenceReplay, ReplayDeterminism};
 
         let evidence_detected = self
             .runtime
@@ -7649,27 +7839,35 @@ impl SubsystemMutationTester {
                                         let validator = ChainValidator::new();
 
                                         // Add evidence entries
-                                        evidence_chain.add_evidence("step_1", "action_a", "result_1");
-                                        evidence_chain.add_evidence("step_2", "action_b", "result_2");
-                                        evidence_chain.add_evidence("step_3", "action_c", "result_3");
+                                        evidence_chain
+                                            .add_evidence("step_1", "action_a", "result_1");
+                                        evidence_chain
+                                            .add_evidence("step_2", "action_b", "result_2");
+                                        evidence_chain
+                                            .add_evidence("step_3", "action_c", "result_3");
 
                                         // First replay (baseline)
-                                        let replay1 = replay_engine.replay_chain(&evidence_chain).await;
+                                        let replay1 =
+                                            replay_engine.replay_chain(&evidence_chain).await;
 
                                         // MUTATION: Inject non-determinism into replay
                                         evidence_chain.inject_replay_non_determinism(true);
 
                                         // Second replay (should match first but won't due to corruption)
-                                        let replay2 = replay_engine.replay_chain(&evidence_chain).await;
+                                        let replay2 =
+                                            replay_engine.replay_chain(&evidence_chain).await;
 
                                         // Verify determinism
-                                        match validator.verify_replay_determinism(&replay1, &replay2) {
+                                        match validator
+                                            .verify_replay_determinism(&replay1, &replay2)
+                                        {
                                             Err(ReplayDeterminism::NonDeterministic) => {
                                                 // Correctly detected non-deterministic replay
                                             }
                                             Ok(_) => {
                                                 // Should have detected non-determinism
-                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                                determinism_violations
+                                                    .fetch_add(1, Ordering::Relaxed);
                                             }
                                             Err(_) => {
                                                 // Other error
@@ -7678,7 +7876,8 @@ impl SubsystemMutationTester {
                                     }
                                     2 => {
                                         // Test evidence ordering corruption in replay
-                                        let mut evidence_chain = EvidenceChain::new("ordering_test");
+                                        let mut evidence_chain =
+                                            EvidenceChain::new("ordering_test");
                                         let replay_engine = EvidenceReplay::new();
                                         let validator = ChainValidator::new();
 
@@ -7687,25 +7886,31 @@ impl SubsystemMutationTester {
                                             evidence_chain.add_evidence(
                                                 &format!("step_{}", i),
                                                 &format!("action_{}", i),
-                                                &format!("result_{}", i)
+                                                &format!("result_{}", i),
                                             );
                                         }
 
-                                        let baseline_replay = replay_engine.replay_chain(&evidence_chain).await;
+                                        let baseline_replay =
+                                            replay_engine.replay_chain(&evidence_chain).await;
 
                                         // MUTATION: Corrupt evidence ordering during replay
                                         evidence_chain.corrupt_replay_ordering(true);
 
-                                        let corrupted_replay = replay_engine.replay_chain(&evidence_chain).await;
+                                        let corrupted_replay =
+                                            replay_engine.replay_chain(&evidence_chain).await;
 
                                         // Check ordering determinism
-                                        match validator.verify_ordering_determinism(&baseline_replay, &corrupted_replay) {
+                                        match validator.verify_ordering_determinism(
+                                            &baseline_replay,
+                                            &corrupted_replay,
+                                        ) {
                                             Err(ReplayDeterminism::OrderingViolation) => {
                                                 // Correctly detected ordering non-determinism
                                             }
                                             Ok(_) => {
                                                 // Should have detected ordering violation
-                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                                determinism_violations
+                                                    .fetch_add(1, Ordering::Relaxed);
                                             }
                                             Err(_) => {
                                                 // Other error
@@ -7714,30 +7919,45 @@ impl SubsystemMutationTester {
                                     }
                                     4 => {
                                         // Test evidence timestamp corruption in replay
-                                        let mut evidence_chain = EvidenceChain::new("timestamp_test");
+                                        let mut evidence_chain =
+                                            EvidenceChain::new("timestamp_test");
                                         let replay_engine = EvidenceReplay::new();
                                         let validator = ChainValidator::new();
 
                                         // Add evidence with specific timestamps
-                                        evidence_chain.add_evidence_with_timestamp("step_1", "action_1", "result_1", 1000);
-                                        evidence_chain.add_evidence_with_timestamp("step_2", "action_2", "result_2", 2000);
-                                        evidence_chain.add_evidence_with_timestamp("step_3", "action_3", "result_3", 3000);
+                                        evidence_chain.add_evidence_with_timestamp(
+                                            "step_1", "action_1", "result_1", 1000,
+                                        );
+                                        evidence_chain.add_evidence_with_timestamp(
+                                            "step_2", "action_2", "result_2", 2000,
+                                        );
+                                        evidence_chain.add_evidence_with_timestamp(
+                                            "step_3", "action_3", "result_3", 3000,
+                                        );
 
-                                        let baseline_replay = replay_engine.replay_chain_with_timing(&evidence_chain).await;
+                                        let baseline_replay = replay_engine
+                                            .replay_chain_with_timing(&evidence_chain)
+                                            .await;
 
                                         // MUTATION: Corrupt timestamps during replay
                                         evidence_chain.corrupt_replay_timestamps(true);
 
-                                        let corrupted_replay = replay_engine.replay_chain_with_timing(&evidence_chain).await;
+                                        let corrupted_replay = replay_engine
+                                            .replay_chain_with_timing(&evidence_chain)
+                                            .await;
 
                                         // Verify timestamp determinism
-                                        match validator.verify_timestamp_determinism(&baseline_replay, &corrupted_replay) {
+                                        match validator.verify_timestamp_determinism(
+                                            &baseline_replay,
+                                            &corrupted_replay,
+                                        ) {
                                             Err(ReplayDeterminism::TimestampDrift) => {
                                                 // Correctly detected timestamp non-determinism
                                             }
                                             Ok(_) => {
                                                 // Should have detected timestamp drift
-                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                                determinism_violations
+                                                    .fetch_add(1, Ordering::Relaxed);
                                             }
                                             Err(_) => {
                                                 // Other error
@@ -7751,25 +7971,45 @@ impl SubsystemMutationTester {
                                         let validator = ChainValidator::new();
 
                                         // Add evidence that modifies state
-                                        evidence_chain.add_stateful_evidence("init", "initialize", "state_0");
-                                        evidence_chain.add_stateful_evidence("modify_a", "update_field", "state_1");
-                                        evidence_chain.add_stateful_evidence("modify_b", "update_field", "state_2");
+                                        evidence_chain.add_stateful_evidence(
+                                            "init",
+                                            "initialize",
+                                            "state_0",
+                                        );
+                                        evidence_chain.add_stateful_evidence(
+                                            "modify_a",
+                                            "update_field",
+                                            "state_1",
+                                        );
+                                        evidence_chain.add_stateful_evidence(
+                                            "modify_b",
+                                            "update_field",
+                                            "state_2",
+                                        );
 
-                                        let baseline_replay = replay_engine.replay_with_state_tracking(&evidence_chain).await;
+                                        let baseline_replay = replay_engine
+                                            .replay_with_state_tracking(&evidence_chain)
+                                            .await;
 
                                         // MUTATION: Corrupt state evolution during replay
                                         evidence_chain.corrupt_state_evolution(true);
 
-                                        let corrupted_replay = replay_engine.replay_with_state_tracking(&evidence_chain).await;
+                                        let corrupted_replay = replay_engine
+                                            .replay_with_state_tracking(&evidence_chain)
+                                            .await;
 
                                         // Verify state determinism
-                                        match validator.verify_state_determinism(&baseline_replay, &corrupted_replay) {
+                                        match validator.verify_state_determinism(
+                                            &baseline_replay,
+                                            &corrupted_replay,
+                                        ) {
                                             Err(ReplayDeterminism::StateInconsistency) => {
                                                 // Correctly detected state non-determinism
                                             }
                                             Ok(_) => {
                                                 // Should have detected state inconsistency
-                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                                determinism_violations
+                                                    .fetch_add(1, Ordering::Relaxed);
                                             }
                                             Err(_) => {
                                                 // Other error
@@ -7778,7 +8018,8 @@ impl SubsystemMutationTester {
                                     }
                                     8 => {
                                         // Test evidence checksum corruption during replay
-                                        let mut evidence_chain = EvidenceChain::new("checksum_test");
+                                        let mut evidence_chain =
+                                            EvidenceChain::new("checksum_test");
                                         let replay_engine = EvidenceReplay::new();
                                         let validator = ChainValidator::new();
 
@@ -7789,25 +8030,33 @@ impl SubsystemMutationTester {
                                             evidence_chain.add_evidence_with_checksum(
                                                 &format!("step_{}", i),
                                                 &data,
-                                                checksum
+                                                checksum,
                                             );
                                         }
 
-                                        let baseline_replay = replay_engine.replay_with_checksum_verification(&evidence_chain).await;
+                                        let baseline_replay = replay_engine
+                                            .replay_with_checksum_verification(&evidence_chain)
+                                            .await;
 
                                         // MUTATION: Corrupt checksums during replay
                                         evidence_chain.corrupt_replay_checksums(true);
 
-                                        let corrupted_replay = replay_engine.replay_with_checksum_verification(&evidence_chain).await;
+                                        let corrupted_replay = replay_engine
+                                            .replay_with_checksum_verification(&evidence_chain)
+                                            .await;
 
                                         // Verify checksum determinism
-                                        match validator.verify_checksum_determinism(&baseline_replay, &corrupted_replay) {
+                                        match validator.verify_checksum_determinism(
+                                            &baseline_replay,
+                                            &corrupted_replay,
+                                        ) {
                                             Err(ReplayDeterminism::ChecksumMismatch) => {
                                                 // Correctly detected checksum non-determinism
                                             }
                                             Ok(_) => {
                                                 // Should have detected checksum mismatch
-                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                                determinism_violations
+                                                    .fetch_add(1, Ordering::Relaxed);
                                             }
                                             Err(_) => {
                                                 // Other error
@@ -7816,32 +8065,56 @@ impl SubsystemMutationTester {
                                     }
                                     10 => {
                                         // Test evidence chain branching corruption during replay
-                                        let mut evidence_chain = EvidenceChain::new("branching_test");
+                                        let mut evidence_chain =
+                                            EvidenceChain::new("branching_test");
                                         let replay_engine = EvidenceReplay::new();
                                         let validator = ChainValidator::new();
 
                                         // Create evidence chain with branching
                                         evidence_chain.add_evidence("base", "init", "base_state");
-                                        let branch_point = evidence_chain.add_branch_point("branch");
-                                        evidence_chain.add_evidence_to_branch(branch_point, "branch_a", "action_a", "result_a");
-                                        evidence_chain.add_evidence_to_branch(branch_point, "branch_b", "action_b", "result_b");
-                                        evidence_chain.merge_branches(branch_point, "merge", "combined_result");
+                                        let branch_point =
+                                            evidence_chain.add_branch_point("branch");
+                                        evidence_chain.add_evidence_to_branch(
+                                            branch_point,
+                                            "branch_a",
+                                            "action_a",
+                                            "result_a",
+                                        );
+                                        evidence_chain.add_evidence_to_branch(
+                                            branch_point,
+                                            "branch_b",
+                                            "action_b",
+                                            "result_b",
+                                        );
+                                        evidence_chain.merge_branches(
+                                            branch_point,
+                                            "merge",
+                                            "combined_result",
+                                        );
 
-                                        let baseline_replay = replay_engine.replay_branched_chain(&evidence_chain).await;
+                                        let baseline_replay = replay_engine
+                                            .replay_branched_chain(&evidence_chain)
+                                            .await;
 
                                         // MUTATION: Corrupt branch replay determinism
                                         evidence_chain.corrupt_branch_replay(true);
 
-                                        let corrupted_replay = replay_engine.replay_branched_chain(&evidence_chain).await;
+                                        let corrupted_replay = replay_engine
+                                            .replay_branched_chain(&evidence_chain)
+                                            .await;
 
                                         // Verify branch determinism
-                                        match validator.verify_branch_determinism(&baseline_replay, &corrupted_replay) {
+                                        match validator.verify_branch_determinism(
+                                            &baseline_replay,
+                                            &corrupted_replay,
+                                        ) {
                                             Err(ReplayDeterminism::BranchingInconsistency) => {
                                                 // Correctly detected branch non-determinism
                                             }
                                             Ok(_) => {
                                                 // Should have detected branching inconsistency
-                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                                determinism_violations
+                                                    .fetch_add(1, Ordering::Relaxed);
                                             }
                                             Err(_) => {
                                                 // Other error
@@ -7850,7 +8123,8 @@ impl SubsystemMutationTester {
                                     }
                                     12 => {
                                         // Test evidence chain compression corruption during replay
-                                        let mut evidence_chain = EvidenceChain::new("compression_test");
+                                        let mut evidence_chain =
+                                            EvidenceChain::new("compression_test");
                                         let replay_engine = EvidenceReplay::new();
                                         let validator = ChainValidator::new();
 
@@ -7859,28 +8133,36 @@ impl SubsystemMutationTester {
                                             evidence_chain.add_evidence(
                                                 &format!("step_{}", i),
                                                 "increment_counter",
-                                                &format!("counter={}", i + 1)
+                                                &format!("counter={}", i + 1),
                                             );
                                         }
 
                                         // Enable compression
                                         evidence_chain.enable_compression(true);
 
-                                        let baseline_compressed = replay_engine.replay_compressed_chain(&evidence_chain).await;
+                                        let baseline_compressed = replay_engine
+                                            .replay_compressed_chain(&evidence_chain)
+                                            .await;
 
                                         // MUTATION: Corrupt compression algorithm determinism
                                         evidence_chain.corrupt_compression_determinism(true);
 
-                                        let corrupted_compressed = replay_engine.replay_compressed_chain(&evidence_chain).await;
+                                        let corrupted_compressed = replay_engine
+                                            .replay_compressed_chain(&evidence_chain)
+                                            .await;
 
                                         // Verify compression determinism
-                                        match validator.verify_compression_determinism(&baseline_compressed, &corrupted_compressed) {
+                                        match validator.verify_compression_determinism(
+                                            &baseline_compressed,
+                                            &corrupted_compressed,
+                                        ) {
                                             Err(ReplayDeterminism::CompressionInconsistency) => {
                                                 // Correctly detected compression non-determinism
                                             }
                                             Ok(_) => {
                                                 // Should have detected compression inconsistency
-                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                                determinism_violations
+                                                    .fetch_add(1, Ordering::Relaxed);
                                             }
                                             Err(_) => {
                                                 // Other error
@@ -7889,7 +8171,8 @@ impl SubsystemMutationTester {
                                     }
                                     14 => {
                                         // Test evidence chain parallel replay corruption
-                                        let mut evidence_chain = EvidenceChain::new("parallel_test");
+                                        let mut evidence_chain =
+                                            EvidenceChain::new("parallel_test");
                                         let replay_engine = EvidenceReplay::new();
                                         let validator = ChainValidator::new();
 
@@ -7898,25 +8181,33 @@ impl SubsystemMutationTester {
                                             evidence_chain.add_parallel_evidence(
                                                 &format!("parallel_{}", i),
                                                 &format!("independent_action_{}", i),
-                                                &format!("result_{}", i)
+                                                &format!("result_{}", i),
                                             );
                                         }
 
-                                        let baseline_parallel = replay_engine.replay_parallel_chain(&evidence_chain, 4).await;
+                                        let baseline_parallel = replay_engine
+                                            .replay_parallel_chain(&evidence_chain, 4)
+                                            .await;
 
                                         // MUTATION: Corrupt parallel replay determinism
                                         evidence_chain.corrupt_parallel_replay(true);
 
-                                        let corrupted_parallel = replay_engine.replay_parallel_chain(&evidence_chain, 4).await;
+                                        let corrupted_parallel = replay_engine
+                                            .replay_parallel_chain(&evidence_chain, 4)
+                                            .await;
 
                                         // Verify parallel determinism
-                                        match validator.verify_parallel_determinism(&baseline_parallel, &corrupted_parallel) {
+                                        match validator.verify_parallel_determinism(
+                                            &baseline_parallel,
+                                            &corrupted_parallel,
+                                        ) {
                                             Err(ReplayDeterminism::ParallelInconsistency) => {
                                                 // Correctly detected parallel non-determinism
                                             }
                                             Ok(_) => {
                                                 // Should have detected parallel inconsistency
-                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                                determinism_violations
+                                                    .fetch_add(1, Ordering::Relaxed);
                                             }
                                             Err(_) => {
                                                 // Other error
@@ -7928,7 +8219,11 @@ impl SubsystemMutationTester {
                                         let mut evidence_chain = EvidenceChain::new("normal_test");
                                         let replay_engine = EvidenceReplay::new();
 
-                                        evidence_chain.add_evidence("normal", "normal_action", "normal_result");
+                                        evidence_chain.add_evidence(
+                                            "normal",
+                                            "normal_action",
+                                            "normal_result",
+                                        );
                                         replay_engine.replay_chain(&evidence_chain).await;
                                     }
                                 }
@@ -7944,9 +8239,13 @@ impl SubsystemMutationTester {
                         if violations > 0 && corruptions > 0 {
                             Outcome::Ok(true) // Evidence replay determinism corruption detected
                         } else if corruptions > 0 {
-                            Outcome::Err(Error::new(ErrorKind::Other,
-                                format!("Evidence chain replay failed: {} corruptions, {} violations",
-                                    corruptions, violations)))
+                            Outcome::Err(Error::new(
+                                ErrorKind::Other,
+                                format!(
+                                    "Evidence chain replay failed: {} corruptions, {} violations",
+                                    corruptions, violations
+                                ),
+                            ))
                         } else {
                             Outcome::Ok(false) // No corruptions
                         }
@@ -7968,7 +8267,9 @@ impl SubsystemMutationTester {
 
     /// [br-mutation-51] Signal graceful shutdown ordering regression mutations
     async fn test_signal_graceful_mutations(&self) {
-        use crate::signal::graceful::{GracefulShutdown, ShutdownOrdering, ShutdownCoordinator, ComponentLifecycle};
+        use crate::signal::graceful::{
+            ComponentLifecycle, GracefulShutdown, ShutdownCoordinator, ShutdownOrdering,
+        };
 
         let signal_graceful_detected = self
             .runtime
@@ -8367,7 +8668,10 @@ impl SubsystemMutationTester {
             })
             .await;
 
-        let detected = matches!(signal_graceful_detected, Outcome::Ok(true) | Outcome::Err(_));
+        let detected = matches!(
+            signal_graceful_detected,
+            Outcome::Ok(true) | Outcome::Err(_)
+        );
         self.log_subsystem_mutation(
             "br-mutation-51",
             "signal",
@@ -9690,10 +9994,13 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     let net_dns_tester = SubsystemMutationTester::new("comprehensive_net_dns").await;
     let raptorq_gf256_tester = SubsystemMutationTester::new("comprehensive_raptorq_gf256").await;
     let raptorq_proof_tester = SubsystemMutationTester::new("comprehensive_raptorq_proof").await;
-    let obligation_saga_tester = SubsystemMutationTester::new("comprehensive_obligation_saga").await;
-    let trace_divergence_tester = SubsystemMutationTester::new("comprehensive_trace_divergence").await;
+    let obligation_saga_tester =
+        SubsystemMutationTester::new("comprehensive_obligation_saga").await;
+    let trace_divergence_tester =
+        SubsystemMutationTester::new("comprehensive_trace_divergence").await;
     let evidence_tester = SubsystemMutationTester::new("comprehensive_evidence").await;
-    let signal_graceful_tester = SubsystemMutationTester::new("comprehensive_signal_graceful").await;
+    let signal_graceful_tester =
+        SubsystemMutationTester::new("comprehensive_signal_graceful").await;
 
     // Test all subsystem mutations comprehensively
     obs_tester.test_observability_counter_mutations().await;
@@ -9757,13 +10064,19 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
 
     raptorq_proof_tester.test_raptorq_proof_mutations().await;
 
-    obligation_saga_tester.test_obligation_saga_mutations().await;
+    obligation_saga_tester
+        .test_obligation_saga_mutations()
+        .await;
 
-    trace_divergence_tester.test_trace_divergence_mutations().await;
+    trace_divergence_tester
+        .test_trace_divergence_mutations()
+        .await;
 
     evidence_tester.test_evidence_mutations().await;
 
-    signal_graceful_tester.test_signal_graceful_mutations().await;
+    signal_graceful_tester
+        .test_signal_graceful_mutations()
+        .await;
 
     // Calculate overall subsystem detection rate
     let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed)
@@ -9805,12 +10118,8 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + runtime_state_tester
             .mutations_applied
             .load(Ordering::Relaxed)
-        + cx_registry_tester
-            .mutations_applied
-            .load(Ordering::Relaxed)
-        + net_dns_tester
-            .mutations_applied
-            .load(Ordering::Relaxed)
+        + cx_registry_tester.mutations_applied.load(Ordering::Relaxed)
+        + net_dns_tester.mutations_applied.load(Ordering::Relaxed)
         + raptorq_gf256_tester
             .mutations_applied
             .load(Ordering::Relaxed)
@@ -9823,9 +10132,7 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + trace_divergence_tester
             .mutations_applied
             .load(Ordering::Relaxed)
-        + evidence_tester
-            .mutations_applied
-            .load(Ordering::Relaxed)
+        + evidence_tester.mutations_applied.load(Ordering::Relaxed)
         + signal_graceful_tester
             .mutations_applied
             .load(Ordering::Relaxed);
@@ -9876,9 +10183,7 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + cx_registry_tester
             .mutations_detected
             .load(Ordering::Relaxed)
-        + net_dns_tester
-            .mutations_detected
-            .load(Ordering::Relaxed)
+        + net_dns_tester.mutations_detected.load(Ordering::Relaxed)
         + raptorq_gf256_tester
             .mutations_detected
             .load(Ordering::Relaxed)
@@ -9891,9 +10196,7 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + trace_divergence_tester
             .mutations_detected
             .load(Ordering::Relaxed)
-        + evidence_tester
-            .mutations_detected
-            .load(Ordering::Relaxed)
+        + evidence_tester.mutations_detected.load(Ordering::Relaxed)
         + signal_graceful_tester
             .mutations_detected
             .load(Ordering::Relaxed);

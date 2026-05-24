@@ -524,9 +524,8 @@ mod fs_config_tests {
             // Second canonicalization of the result should be identical (idempotent)
             let canonical2 = mock_vfs.canonicalize(&canonical1).unwrap();
 
-            prop_assert_eq!(canonical1, canonical2,
-                "Path canonicalization not idempotent: {:?} -> {:?} -> {:?}",
-                path, canonical1, canonical2);
+            prop_assert_eq!(canonical1.clone(), canonical2.clone(),
+                "Path canonicalization not idempotent");
 
             // Canonical path should be absolute
             prop_assert!(canonical1.is_absolute(),
@@ -569,16 +568,16 @@ mod fs_config_tests {
             let read_data_vector = mock_read_vector.readv();
 
             // Scalar equivalence: concatenated data should match
-            prop_assert_eq!(data, read_data_vector,
-                "Vectored I/O doesn't preserve data integrity: {} bytes vs {} bytes",
-                data.len(), read_data_vector.len());
+            prop_assert_eq!(data.clone(), read_data_vector,
+                "Vectored I/O doesn't preserve data integrity");
 
             // Vector consistency: total written should equal total read
             let total_written: usize = mock_vector.writev(&data).iter()
                 .map(|chunk| chunk.len())
                 .sum();
-            prop_assert_eq!(data.len(), total_written,
-                "Vector write length mismatch: {} vs {}", data.len(), total_written);
+            let data_len = data.len();
+            prop_assert_eq!(data_len, total_written,
+                "Vector write length mismatch: {} vs {}", data_len, total_written);
         });
 
         crate::test_complete!("mr_uring_vector_consistency");
@@ -606,9 +605,8 @@ mod fs_config_tests {
             let direct_data = direct_reader.read_all().unwrap();
 
             // Buffered and direct reads should produce identical data
-            prop_assert_eq!(buffered_data, direct_data,
-                "Buffered read differs from direct read: {} vs {} bytes",
-                buffered_data.len(), direct_data.len());
+            prop_assert_eq!(buffered_data.clone(), direct_data,
+                "Buffered read differs from direct read");
 
             // Buffered writing
             let mut buf_writer = MockBufWriter::new(buffer_size);
@@ -621,9 +619,9 @@ mod fs_config_tests {
             let direct_write_data = direct_writer.written_data().unwrap();
 
             // Buffered and direct writes should produce identical output
-            prop_assert_eq!(buffered_write_data, direct_write_data,
+            prop_assert_eq!(buffered_write_data.clone(), direct_write_data,
                 "Buffered write differs from direct write");
-            prop_assert_eq!(data, buffered_write_data,
+            prop_assert_eq!(data.clone(), buffered_write_data,
                 "Buffered write doesn't preserve data integrity");
         });
 
@@ -658,7 +656,7 @@ mod fs_config_tests {
             let entries3 = mock_vfs.list_directory(temp_dir.path()).unwrap();
 
             // Directory enumeration should be deterministic
-            prop_assert_eq!(entries1, entries2,
+            prop_assert_eq!(entries1.clone(), entries2.clone(),
                 "Directory enumeration not deterministic between calls");
             prop_assert_eq!(entries2, entries3,
                 "Directory enumeration not deterministic on third call");
@@ -706,22 +704,34 @@ mod fs_config_tests {
             config.to_env();
             let config_from_env = MockRuntimeConfig::from_env();
 
+            // Pin scalar fields by value before the prop_assert_eq! moves them;
+            // String field is cloned because String isn't Copy.
+            let config_worker_threads = config.worker_threads;
+            let config_task_queue_depth = config.task_queue_depth;
+            let config_thread_stack_size = config.thread_stack_size;
+            let config_thread_name_prefix = config.thread_name_prefix.clone();
+            let config_steal_batch_size = config.steal_batch_size;
+
             // Core fields should round-trip correctly
-            prop_assert_eq!(config.worker_threads, config_from_env.worker_threads,
-                "worker_threads round-trip failed: {} vs {}",
-                config.worker_threads, config_from_env.worker_threads);
-            prop_assert_eq!(config.task_queue_depth, config_from_env.task_queue_depth,
+            prop_assert_eq!(config_worker_threads, config_from_env.worker_threads,
+                "worker_threads round-trip failed");
+            prop_assert_eq!(config_task_queue_depth, config_from_env.task_queue_depth,
                 "task_queue_depth round-trip failed");
-            prop_assert_eq!(config.thread_stack_size, config_from_env.thread_stack_size,
+            prop_assert_eq!(config_thread_stack_size, config_from_env.thread_stack_size,
                 "thread_stack_size round-trip failed");
-            prop_assert_eq!(config.thread_name_prefix, config_from_env.thread_name_prefix,
+            prop_assert_eq!(config_thread_name_prefix, config_from_env.thread_name_prefix,
                 "thread_name_prefix round-trip failed");
-            prop_assert_eq!(config.steal_batch_size, config_from_env.steal_batch_size,
+            prop_assert_eq!(config_steal_batch_size, config_from_env.steal_batch_size,
                 "steal_batch_size round-trip failed");
 
-            // Test with modified environment
-            let original_threads = config.worker_threads;
-            env::set_var(ENV_WORKER_THREADS, (original_threads * 2).to_string());
+            // Test with modified environment. SAFETY: see fs_config tests'
+            // module-level safety reasoning on env mutation — these tests are
+            // sequential and own the affected variables.
+            let original_threads = config_worker_threads;
+            #[allow(unsafe_code)]
+            unsafe {
+                env::set_var(ENV_WORKER_THREADS, (original_threads * 2).to_string());
+            }
 
             let modified_config = MockRuntimeConfig::from_env();
             prop_assert_eq!(modified_config.worker_threads, original_threads * 2,
@@ -752,7 +762,7 @@ mod fs_config_tests {
             let parsed3 = MockRuntimeConfig::from_toml(&toml_str).unwrap();
 
             // All parses should be identical (idempotent)
-            prop_assert_eq!(parsed1, parsed2,
+            prop_assert_eq!(parsed1.clone(), parsed2.clone(),
                 "Config parsing not idempotent between first and second parse");
             prop_assert_eq!(parsed2, parsed3,
                 "Config parsing not idempotent on third parse");
@@ -762,7 +772,7 @@ mod fs_config_tests {
             let parsed4 = MockRuntimeConfig::from_toml(&toml_str2).unwrap();
 
             // Should still be identical (serialize → parse idempotency)
-            prop_assert_eq!(parsed1, parsed4,
+            prop_assert_eq!(parsed1, parsed4.clone(),
                 "Serialize-parse cycle not idempotent");
 
             // Original config should equal final parsed config (full round-trip)
@@ -807,8 +817,7 @@ mod fs_config_tests {
             let canonical2 = mock_vfs.canonicalize(&path2).unwrap();
 
             prop_assert_eq!(canonical1, canonical2,
-                "Equivalent paths don't canonicalize to same result: {:?} vs {:?}",
-                path1, path2);
+                "Equivalent paths don't canonicalize to same result");
 
             // Test with parent directory references
             let mut path3 = path1.clone();

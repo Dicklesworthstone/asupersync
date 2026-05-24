@@ -913,35 +913,41 @@ mod tests {
             child_id: u64,
             timestamp: u64,
         ) -> Result<bool, &'static str> {
+            if !self.children.contains_key(&child_id) {
+                return Err("Child not found");
+            }
+
+            // Mark child as failed in a scoped mutable borrow so we can call
+            // self.should_restart_child afterwards without aliasing.
             if let Some(child) = self.children.get_mut(&child_id) {
                 child.state = MockChildState::Failed;
+            }
+
+            self.lifecycle_events.push(MockLifecycleEvent {
+                event_id: self.lifecycle_events.len() as u64,
+                timestamp,
+                event_type: MockLifecycleEventType::ChildFailed,
+                child_id: Some(child_id),
+            });
+
+            // Check restart policy
+            let should_restart = self.should_restart_child(child_id, timestamp);
+            if should_restart {
+                if let Some(child) = self.children.get_mut(&child_id) {
+                    child.state = MockChildState::Restarting;
+                    child.restart_count += 1;
+                    child.last_restart_time = Some(timestamp);
+                }
 
                 self.lifecycle_events.push(MockLifecycleEvent {
                     event_id: self.lifecycle_events.len() as u64,
                     timestamp,
-                    event_type: MockLifecycleEventType::ChildFailed,
+                    event_type: MockLifecycleEventType::ChildRestarted,
                     child_id: Some(child_id),
                 });
-
-                // Check restart policy
-                let should_restart = self.should_restart_child(child_id, timestamp);
-                if should_restart {
-                    child.state = MockChildState::Restarting;
-                    child.restart_count += 1;
-                    child.last_restart_time = Some(timestamp);
-
-                    self.lifecycle_events.push(MockLifecycleEvent {
-                        event_id: self.lifecycle_events.len() as u64,
-                        timestamp,
-                        event_type: MockLifecycleEventType::ChildRestarted,
-                        child_id: Some(child_id),
-                    });
-                }
-
-                Ok(should_restart)
-            } else {
-                Err("Child not found")
             }
+
+            Ok(should_restart)
         }
 
         fn should_restart_child(&self, child_id: u64, current_time: u64) -> bool {
@@ -1082,7 +1088,7 @@ mod tests {
 
             // Initiate shutdown
             server.initiate_shutdown();
-            prop_assert_eq!(server.state, MockServerState::Draining);
+            prop_assert_eq!(server.state.clone(), MockServerState::Draining);
 
             // Simulate time progression and request completion
             let mut total_time = 0u64;
@@ -1363,7 +1369,7 @@ mod tests {
             // Session type duality should be preserved under protocol transformations
             // If A has protocol P, then dual(A) should have protocol dual(P)
 
-            let session_a = MockSession::new(1, MockProtocolState::SendState {
+            let mut session_a = MockSession::new(1, MockProtocolState::SendState {
                 next_send: b"test".to_vec(),
             });
 
@@ -1478,7 +1484,7 @@ mod tests {
                 (1u64..1000, proptest::collection::vec(0u8..255, 1..100)), // (entry_id, data)
                 5..20
             ),
-            duplicate_attempts in proptest::collection::vec(0usize, 3..10),
+            duplicate_attempts in proptest::collection::vec(0usize..1000, 3..10),
             backend_types in proptest::collection::vec(0u8..3, 2..4)
         )| {
             // MR-EvidenceSinkConsumeOnceInvariants:
@@ -1922,13 +1928,13 @@ mod tests {
             ),
             restart_policy in (1u32..5, 1000u64..3000, 0u8..3), // (max_restarts, time_window, strategy)
             lifecycle_events in proptest::collection::vec(
-                (0usize, 0u8..4, 1000u64..5000), // (child_index, event_type, timestamp)
+                (0usize..1000, 0u8..4, 1000u64..5000), // (child_index, event_type, timestamp)
                 5..20
             ),
             name_registrations in proptest::collection::vec(
                 (
                     proptest::string::string_regex("[a-z]{3,8}").unwrap(),
-                    0usize, // child_index
+                    0usize..1000, // child_index
                     2000u64..4000 // timestamp
                 ),
                 2..6
@@ -2104,7 +2110,7 @@ mod tests {
             ),
             quiescence_trigger_time in 3000u64..5000,
             post_quiescence_events in proptest::collection::vec(
-                (0usize, 0u8..3), // (child_index, event_type)
+                (0usize..1000, 0u8..3), // (child_index, event_type)
                 2..6
             )
         )| {

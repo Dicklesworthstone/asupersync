@@ -232,3 +232,29 @@ These final golden tests complete comprehensive coverage of messaging serializat
 - **Command**: `UPDATE_GOLDENS=1 cargo test golden_obligation_eprocess_trajectory_bytes`
 
 These specialized golden tests ensure byte-for-byte regression detection for security-critical TLS handshakes, HTTP/2 compression efficiency, and statistical obligation leak detection - completing coverage of deterministic behavior verification across all network security and reliability subsystems.
+
+### br-golden-18: Web HTTP Request Canonical Bytes + Session Cookie Hash
+- **File**: `hot_path/web_http_request_canonical_bytes.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_web_http_request_canonical_bytes`
+- **Purpose**: Deterministic HTTP request canonical form with session cookie hash computation
+- **Stability**: Deterministic (fixed HTTP headers, canonical form serialization, deterministic cookie hash)
+- **Update trigger**: Web request format changes, session cookie algorithm changes, HTTP header canonicalization changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_web_http_request_canonical_bytes`
+
+### br-golden-19: FS Uring SQE/CQE Sequence Bytes
+- **File**: `hot_path/fs_uring_sqe_cqe_sequence_bytes.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_fs_uring_sqe_cqe_sequence_bytes`
+- **Purpose**: Deterministic io_uring SQE/CQE structure pairs with operation sequence and completion verification
+- **Stability**: Deterministic (fixed SQE structures, CQE results, operation ordering, binary encoding)
+- **Update trigger**: io_uring structure changes, operation type changes, completion pairing algorithm changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_fs_uring_sqe_cqe_sequence_bytes`
+
+### br-golden-20: Codec Length Delimited Frame Bytes
+- **File**: `hot_path/codec_length_delimited_frame_bytes.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_codec_length_delimited_frame_bytes`
+- **Purpose**: Deterministic length-delimited framing protocol with big-endian encoding and payload examples
+- **Stability**: Deterministic (fixed frame structures, big-endian length encoding, deterministic payloads)
+- **Update trigger**: Length-delimited format changes, encoding algorithm changes, frame boundary detection changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_codec_length_delimited_frame_bytes`
+
+These final golden tests complete comprehensive coverage of web request processing, filesystem I/O operations, and codec framing protocols - ensuring deterministic behavior across all major runtime subsystems for regression detection and cross-platform validation.

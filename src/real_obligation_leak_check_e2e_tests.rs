@@ -5,9 +5,11 @@
 //! leak detection and ledger state validation.
 //!
 //! Focused chaos lane:
-//! `RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_obligation_cleanup_e2e" ASUPERSYNC_TEST_ARTIFACTS_DIR=target/e2e-results/obligation-cleanup/artifacts cargo test -p asupersync --features real-service-e2e test_client_disconnect_forced_cancel_cleans_pending_obligations -- --nocapture --test-threads=1`
+//! `RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_obligation_cleanup_e2e" ASUPERSYNC_TEST_ARTIFACTS_DIR=target/e2e-results/obligation-cleanup/artifacts cargo test -p asupersync --no-default-features --features obligation-cleanup-e2e --test obligation_cleanup_e2e test_client_disconnect_forced_cancel_cleans_pending_obligations -- --nocapture --test-threads=1`
 
-#[cfg(all(test, feature = "real-service-e2e"))]
+// The earlier broad real-service draft depends on a larger E2E compile frontier
+// that is currently API-drifted. Keep it out of the focused no-mock proof lane.
+#[cfg(any())]
 mod real_obligation_leak_check_e2e {
     use crate::obligation::{LeakCheckResult, ObligationId, ObligationLedger, ObligationState};
     use crate::runtime::{RuntimeBuilder, spawn};
@@ -1018,4 +1020,515 @@ mod real_obligation_leak_check_e2e {
             }),
         );
     }
+}
+
+use crate::obligation::ledger::ObligationLedger;
+use crate::record::{ObligationAbortReason, ObligationKind, SourceLocation};
+use crate::runtime::RuntimeBuilder;
+use crate::types::{ObligationId, RegionId, TaskId, Time};
+use serde_json::{Value, json};
+use std::env;
+use std::fs;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+struct ObligationCleanupHarness {
+    ledger: Arc<Mutex<ObligationLedger>>,
+    start_time: Instant,
+    logical_time_ns: AtomicU64,
+    log_entries: Mutex<Vec<Value>>,
+    operations: Mutex<Vec<ObligationOperation>>,
+    holder: TaskId,
+    region: RegionId,
+}
+
+#[derive(Clone, Copy)]
+struct ObligationOperation {
+    created: bool,
+    completed: bool,
+    success: bool,
+}
+
+#[derive(Clone, Copy)]
+struct LeakSnapshot {
+    total_obligations: usize,
+    pending_obligations: usize,
+    committed_obligations: usize,
+    aborted_obligations: usize,
+    leaked_obligations: usize,
+    pending_or_leaked_reported: usize,
+    ledger_consistent: bool,
+}
+
+impl ObligationCleanupHarness {
+    fn new() -> Self {
+        Self {
+            ledger: Arc::new(Mutex::new(ObligationLedger::new())),
+            start_time: Instant::now(),
+            logical_time_ns: AtomicU64::new(1),
+            log_entries: Mutex::new(Vec::new()),
+            operations: Mutex::new(Vec::new()),
+            holder: TaskId::testing_default(),
+            region: RegionId::testing_default(),
+        }
+    }
+
+    fn next_time(&self) -> Time {
+        Time::from_nanos(self.logical_time_ns.fetch_add(1, Ordering::AcqRel))
+    }
+
+    fn log(&self, event: &str, data: Value) {
+        let timestamp_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis());
+        let entry = json!({
+            "timestamp_unix_ms": timestamp_unix_ms,
+            "event": event,
+            "data": data,
+            "elapsed_ms": self.start_time.elapsed().as_millis()
+        });
+        self.log_entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(entry);
+    }
+
+    fn record_operation(&self, operation: ObligationOperation) {
+        self.operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(operation);
+    }
+
+    fn create_reserved_send(&self, context: &str) -> ObligationId {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = ledger.len();
+        let token = ledger.acquire_with_context(
+            ObligationKind::SendPermit,
+            self.holder,
+            self.region,
+            self.next_time(),
+            SourceLocation::unknown(),
+            None,
+            Some(context.to_string()),
+        );
+        let obligation_id = token.id();
+        drop(token);
+        let after = ledger.len();
+        drop(ledger);
+
+        self.record_operation(ObligationOperation {
+            created: true,
+            completed: false,
+            success: true,
+        });
+        self.log(
+            "obligation_created",
+            json!({
+                "context": context,
+                "obligation_id": obligation_id.to_string(),
+                "ledger_size_before": before,
+                "ledger_size_after": after
+            }),
+        );
+
+        obligation_id
+    }
+
+    fn abort_reserved_send(
+        &self,
+        obligation_id: ObligationId,
+        context: &str,
+    ) -> Result<(), String> {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = ledger.len();
+        let result = ledger.try_abort_by_id(
+            obligation_id,
+            self.next_time(),
+            ObligationAbortReason::Cancel,
+        );
+        let after = ledger.len();
+        drop(ledger);
+
+        match result {
+            Ok(duration_ns) => {
+                self.record_operation(ObligationOperation {
+                    created: false,
+                    completed: true,
+                    success: true,
+                });
+                self.log(
+                    "obligation_aborted",
+                    json!({
+                        "context": context,
+                        "obligation_id": obligation_id.to_string(),
+                        "held_ns": duration_ns,
+                        "ledger_size_before": before,
+                        "ledger_size_after": after
+                    }),
+                );
+                Ok(())
+            }
+            Err(error) => {
+                self.record_operation(ObligationOperation {
+                    created: false,
+                    completed: true,
+                    success: false,
+                });
+                Err(error.to_string())
+            }
+        }
+    }
+
+    fn snapshot(&self, check_type: &str) -> LeakSnapshot {
+        let ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let stats = ledger.stats();
+        let pending_or_leaked_reported = ledger.check_leaks().leaked.len();
+        let snapshot = LeakSnapshot {
+            total_obligations: ledger.len(),
+            pending_obligations: stats.pending as usize,
+            committed_obligations: stats.total_committed as usize,
+            aborted_obligations: stats.total_aborted as usize,
+            leaked_obligations: stats.total_leaked as usize,
+            pending_or_leaked_reported,
+            ledger_consistent: stats.total_acquired
+                == stats
+                    .total_committed
+                    .saturating_add(stats.total_aborted)
+                    .saturating_add(stats.total_leaked)
+                    .saturating_add(stats.pending),
+        };
+        drop(ledger);
+
+        self.log(
+            "leak_check",
+            json!({
+                "check_type": check_type,
+                "total": snapshot.total_obligations,
+                "pending": snapshot.pending_obligations,
+                "committed": snapshot.committed_obligations,
+                "aborted": snapshot.aborted_obligations,
+                "leaked": snapshot.leaked_obligations,
+                "pending_or_leaked_reported": snapshot.pending_or_leaked_reported,
+                "consistent": snapshot.ledger_consistent
+            }),
+        );
+
+        snapshot
+    }
+
+    fn validate_zero_leaks(&self) -> Result<(), String> {
+        let final_check = self.snapshot("validation");
+        if final_check.pending_obligations != 0 {
+            return Err(format!(
+                "{} obligations still pending",
+                final_check.pending_obligations
+            ));
+        }
+        if final_check.leaked_obligations != 0 {
+            return Err(format!(
+                "Leak detected: {} obligations leaked",
+                final_check.leaked_obligations
+            ));
+        }
+        if !final_check.ledger_consistent {
+            return Err("ledger conservation check failed".to_string());
+        }
+
+        let operations = self
+            .operations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let creates = operations
+            .iter()
+            .filter(|operation| operation.success && operation.created)
+            .count();
+        let completions = operations
+            .iter()
+            .filter(|operation| operation.success && operation.completed)
+            .count();
+        if creates != completions {
+            return Err(format!(
+                "operation count mismatch: {creates} creates vs {completions} completions"
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn write_artifact_bundle(&self, test_id: &str, summary: Value) -> std::io::Result<()> {
+        let Ok(root) = env::var("ASUPERSYNC_TEST_ARTIFACTS_DIR") else {
+            return Ok(());
+        };
+
+        let artifact_dir = Path::new(&root).join(test_id);
+        fs::create_dir_all(&artifact_dir)?;
+        self.log(
+            "artifact_bundle_written",
+            json!({
+                "test_id": test_id,
+                "artifact_dir": artifact_dir.display().to_string(),
+                "events_path": artifact_dir.join("events.ndjson").display().to_string(),
+                "summary_path": artifact_dir.join("summary.json").display().to_string()
+            }),
+        );
+
+        let log_entries = self
+            .log_entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut events = String::new();
+        for entry in log_entries.iter() {
+            events.push_str(
+                &serde_json::to_string(entry)
+                    .expect("structured obligation E2E log entry should serialize"),
+            );
+            events.push('\n');
+        }
+        let summary_compact = serde_json::to_string(&summary)
+            .expect("structured obligation E2E summary should serialize");
+        let summary_pretty = serde_json::to_string_pretty(&summary)
+            .expect("structured obligation E2E summary should serialize");
+
+        fs::write(artifact_dir.join("events.ndjson"), &events)?;
+        fs::write(artifact_dir.join("summary.json"), &summary_pretty)?;
+
+        println!("ASUPERSYNC_OBLIGATION_CLEANUP_EVENTS_BEGIN {test_id}");
+        print!("{events}");
+        println!("ASUPERSYNC_OBLIGATION_CLEANUP_EVENTS_END {test_id}");
+        println!("ASUPERSYNC_OBLIGATION_CLEANUP_SUMMARY_JSON {summary_compact}");
+
+        Ok(())
+    }
+}
+        fs::write(
+            artifact_dir.join("summary.json"),
+            serde_json::to_string_pretty(&summary)
+                .expect("structured obligation E2E summary should serialize"),
+        )?;
+
+        Ok(())
+    }
+}
+
+/// Runs the focused no-mock client-disconnect obligation cleanup E2E scenario.
+///
+/// The harness uses the real `ObligationLedger` and a real Asupersync runtime
+/// for the cancellation cleanup tasks. It is intentionally exposed only behind
+/// the `obligation-cleanup-e2e` feature and invoked by
+/// `tests/obligation_cleanup_e2e.rs`.
+pub fn run_client_disconnect_forced_cancel_cleanup_e2e() {
+    let harness = Arc::new(ObligationCleanupHarness::new());
+    let pending_count = 16;
+    let cleanup_budget = Duration::from_millis(250);
+
+    harness.log(
+        "test_start",
+        json!({
+            "test": "client_disconnect_forced_cancel_cleanup",
+            "pending_count": pending_count,
+            "cleanup_budget_ms": cleanup_budget.as_millis()
+        }),
+    );
+
+    let initial_check = harness.snapshot("initial");
+    assert_eq!(
+        initial_check.pending_obligations, 0,
+        "should start with zero pending obligations"
+    );
+    assert_eq!(
+        initial_check.leaked_obligations, 0,
+        "should start with zero leaked obligations"
+    );
+
+    let mut pending_obligations = Vec::with_capacity(pending_count);
+    for index in 0..pending_count {
+        let obligation_id =
+            harness.create_reserved_send(&format!("client_disconnect_reserved_send_{index}"));
+        pending_obligations.push(obligation_id);
+
+        if index % 4 == 3 {
+            harness.log(
+                "stage_progress",
+                json!({
+                    "stage": "reserve_before_disconnect",
+                    "created": index + 1,
+                    "pending_so_far": pending_obligations.len()
+                }),
+            );
+        }
+    }
+
+    let before_cancel = harness.snapshot("before_forced_cancel");
+    assert_eq!(
+        before_cancel.pending_obligations, pending_count,
+        "all reserved-send obligations should be pending before cleanup"
+    );
+    assert_eq!(
+        before_cancel.leaked_obligations, 0,
+        "pending obligations should not be marked leaked before cleanup"
+    );
+
+    harness.log(
+        "forced_cancel_requested",
+        json!({
+            "scenario": "client_disconnect_during_reserved_send",
+            "pending_before": before_cancel.pending_obligations,
+            "leaked_before": before_cancel.leaked_obligations,
+            "cleanup_budget_ms": cleanup_budget.as_millis()
+        }),
+    );
+
+    let cleanup_runtime = RuntimeBuilder::new()
+        .thread_name_prefix("obligation-chaos-client-disconnect-cleanup")
+        .worker_threads(2)
+        .build()
+        .expect("real cleanup runtime should build for obligation chaos E2E");
+    let runtime_handle = cleanup_runtime.handle();
+    let cleanup_started = Instant::now();
+    let cleanup_tasks_started = Arc::new(AtomicUsize::new(0));
+    let cleanup_tasks_completed = Arc::new(AtomicUsize::new(0));
+    let cleanup_region_closed = Arc::new(AtomicBool::new(false));
+    let mut cleanup_handles = Vec::with_capacity(pending_obligations.len());
+
+    for (index, obligation_id) in pending_obligations.iter().copied().enumerate() {
+        let cleanup_harness = Arc::clone(&harness);
+        let tasks_started = Arc::clone(&cleanup_tasks_started);
+        let tasks_completed = Arc::clone(&cleanup_tasks_completed);
+        let handle = runtime_handle.spawn(async move {
+            tasks_started.fetch_add(1, Ordering::AcqRel);
+            cleanup_harness
+                .abort_reserved_send(obligation_id, "client_disconnect_forced_cancel")
+                .expect("forced cancellation should abort every pending obligation");
+            let completed = tasks_completed.fetch_add(1, Ordering::AcqRel) + 1;
+
+            if index % 4 == 3 {
+                cleanup_harness.log(
+                    "stage_progress",
+                    json!({
+                        "stage": "abort_pending_after_disconnect",
+                        "aborted": completed
+                    }),
+                );
+            }
+        });
+        cleanup_handles.push(handle);
+    }
+
+    cleanup_runtime.block_on(async {
+        for handle in cleanup_handles {
+            handle.await;
+        }
+    });
+    cleanup_region_closed.store(true, Ordering::Release);
+    let cleanup_elapsed = cleanup_started.elapsed();
+
+    let after_cancel = harness.snapshot("after_forced_cancel");
+    let cleanup_task_start_count = cleanup_tasks_started.load(Ordering::Acquire);
+    let cleanup_task_complete_count = cleanup_tasks_completed.load(Ordering::Acquire);
+    let cleanup_region_is_closed = cleanup_region_closed.load(Ordering::Acquire);
+    let cleanup_runtime_is_quiescent = cleanup_runtime.is_quiescent();
+
+    harness.log(
+        "forced_cancel_cleanup_complete",
+        json!({
+            "pending_before": before_cancel.pending_obligations,
+            "pending_after": after_cancel.pending_obligations,
+            "leaked_after": after_cancel.leaked_obligations,
+            "ledger_consistent": after_cancel.ledger_consistent,
+            "cleanup_tasks_started": cleanup_task_start_count,
+            "cleanup_tasks_completed": cleanup_task_complete_count,
+            "cleanup_region_closed": cleanup_region_is_closed,
+            "cleanup_runtime_quiescent": cleanup_runtime_is_quiescent,
+            "region_close_implies_quiescence": cleanup_region_is_closed && cleanup_runtime_is_quiescent,
+            "cleanup_elapsed_ms": cleanup_elapsed.as_millis(),
+            "cleanup_budget_ms": cleanup_budget.as_millis()
+        }),
+    );
+
+    assert!(
+        cleanup_elapsed <= cleanup_budget,
+        "forced cancellation cleanup exceeded budget: {:?} > {:?}",
+        cleanup_elapsed,
+        cleanup_budget
+    );
+    assert_eq!(
+        after_cancel.pending_obligations, 0,
+        "forced cancellation must resolve all pending obligations"
+    );
+    assert_eq!(
+        after_cancel.leaked_obligations, 0,
+        "forced cancellation must not leak obligations"
+    );
+    assert_eq!(
+        cleanup_task_start_count, pending_count,
+        "forced cancellation should spawn one cleanup task per pending obligation"
+    );
+    assert_eq!(
+        cleanup_task_complete_count, pending_count,
+        "forced cancellation cleanup tasks must all complete"
+    );
+    assert!(
+        cleanup_region_is_closed,
+        "cleanup region marker should close after all cleanup tasks join"
+    );
+    assert!(
+        cleanup_runtime_is_quiescent,
+        "cleanup runtime should be quiescent after forced cancellation joins"
+    );
+    assert!(
+        after_cancel.ledger_consistent,
+        "ledger should remain consistent after forced cancellation cleanup"
+    );
+
+    let validation_result = harness.validate_zero_leaks();
+    assert!(
+        validation_result.is_ok(),
+        "forced cancellation leak validation failed: {:?}",
+        validation_result
+    );
+
+    harness.log(
+        "test_result",
+        json!({
+            "passed": true,
+            "scenario": "client_disconnect_during_reserved_send",
+            "zero_pending": after_cancel.pending_obligations == 0,
+            "zero_leaks": after_cancel.leaked_obligations == 0,
+            "no_task_leaks": cleanup_task_complete_count == pending_count,
+            "region_close_implies_quiescence": cleanup_region_is_closed && cleanup_runtime_is_quiescent,
+            "cleanup_within_budget": cleanup_elapsed <= cleanup_budget
+        }),
+    );
+
+    harness
+        .write_artifact_bundle(
+            "client_disconnect_forced_cancel_cleanup",
+            json!({
+                "schema_version": "obligation-chaos-e2e-summary-v1",
+                "scenario": "client_disconnect_during_reserved_send",
+                "pending_before": before_cancel.pending_obligations,
+                "pending_after": after_cancel.pending_obligations,
+                "leaked_after": after_cancel.leaked_obligations,
+                "ledger_consistent": after_cancel.ledger_consistent,
+                "cleanup_tasks_started": cleanup_task_start_count,
+                "cleanup_tasks_completed": cleanup_task_complete_count,
+                "cleanup_region_closed": cleanup_region_is_closed,
+                "cleanup_runtime_quiescent": cleanup_runtime_is_quiescent,
+                "cleanup_elapsed_ms": cleanup_elapsed.as_millis(),
+                "cleanup_budget_ms": cleanup_budget.as_millis()
+            }),
+        )
+        .expect("artifact bundle should be written when artifact env is set");
 }

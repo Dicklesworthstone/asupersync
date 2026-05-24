@@ -763,7 +763,7 @@ mod tests {
     fn mr_actor_message_permutation_invariance() {
         proptest!(|(
             messages in proptest::collection::vec(
-                (1u64..1000, 1u8, proptest::collection::vec(0u8..255, 1..20)),
+                (1u64..1000, 1u8..4, proptest::collection::vec(0u8..255, 1..20)),
                 3..15
             ),
             capacity in 20usize..50,
@@ -958,7 +958,7 @@ mod tests {
                 operation_log.push(format!("{}:{}", op_type, id));
                 current_time += 10;
 
-                match op_type.as_str() {
+                match *op_type {
                     "call" => {
                         let call = MockCall {
                             id: *id,
@@ -983,8 +983,8 @@ mod tests {
             }
 
             // Verify ordering invariants
-            let call_count = operations.iter().filter(|(op, _, _)| op == "call").count();
-            let cast_count = operations.iter().filter(|(op, _, _)| op == "cast").count();
+            let call_count = operations.iter().filter(|(op, _, _)| *op == "call").count();
+            let cast_count = operations.iter().filter(|(op, _, _)| *op == "cast").count();
 
             prop_assert_eq!(
                 genserver.pending_calls.len(), call_count,
@@ -1182,13 +1182,13 @@ mod tests {
 
             // All orderings should produce identical final sorted notifications
             prop_assert_eq!(
-                notifications_original, notifications_reversed,
+                notifications_original.clone(), notifications_reversed.clone(),
                 "Original and reversed failure ordering should produce identical notifications. Original len: {}, Reversed len: {}",
                 notifications_original.len(), notifications_reversed.len()
             );
 
             prop_assert_eq!(
-                notifications_original, notifications_shuffled,
+                notifications_original.clone(), notifications_shuffled.clone(),
                 "Original and shuffled failure ordering should produce identical notifications. Original len: {}, Shuffled len: {}",
                 notifications_original.len(), notifications_shuffled.len()
             );
@@ -1402,7 +1402,7 @@ mod tests {
 
             // Create links with different policy combinations
             let mut established_links = Vec::new();
-            for (i, (&(task_a, task_b), &(policy_a_idx, policy_b_idx), &timestamp)) in
+            for (i, ((&(task_a, task_b), &(policy_a_idx, policy_b_idx)), &timestamp)) in
                 link_pairs.iter().zip(policy_combinations.iter()).zip(timestamps.iter()).enumerate() {
 
                 if i >= link_pairs.len() { break; }
@@ -1514,7 +1514,7 @@ mod tests {
                 (10u64..30, 40u64..60), 2..8
             ),
             failure_scenarios in proptest::collection::vec(
-                (0usize, 7000u64..8000), 1..5
+                (0usize..1000, 7000u64..8000), 1..5
             )
         )| {
             // MR-LinkExitSignalBidirectionality:
@@ -1673,7 +1673,7 @@ mod tests {
                 // Start the process
                 process.start();
                 prop_assert_eq!(
-                    process.state, MockProcessState::Running,
+                    process.state.clone(), MockProcessState::Running,
                     "Process should be in Running state after start: pid={}",
                     process.pid
                 );
@@ -1758,7 +1758,7 @@ mod tests {
                         // State progression should be consistent
                         if first_process.state == MockProcessState::Finished {
                             prop_assert_eq!(
-                                other_process.state, MockProcessState::Finished,
+                                other_process.state.clone(), MockProcessState::Finished,
                                 "Identical commands should reach same final state: cmd='{}' args={:?}",
                                 command, args
                             );
@@ -1781,7 +1781,7 @@ mod tests {
                 3..12
             ),
             state_transitions in proptest::collection::vec(
-                (0usize, 0u8..4, 100u64..500), 5..15
+                (0usize..1000, 0u8..4, 100u64..500), 5..15
             )
         )| {
             // MR-ProcessLifecycleInvariance:

@@ -18,6 +18,8 @@ RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LOG_FILE="${OUTPUT_DIR}/obligation_cleanup_e2e_${TIMESTAMP}.log"
 ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
+SCENARIO_ID="client_disconnect_forced_cancel_cleanup"
+TEST_ARTIFACT_SCENARIO_DIR="${ASUPERSYNC_TEST_ARTIFACTS_DIR:-${ARTIFACT_DIR}/test-artifacts}/${SCENARIO_ID}"
 TEST_FILTER="${1:-test_client_disconnect_forced_cancel_cleans_pending_obligations}"
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch-target-obligation-cleanup-e2e-${USER:-unknown}-${TIMESTAMP}-$$}"
@@ -34,6 +36,7 @@ export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
 export TEST_SEED="${TEST_SEED:-0x90057B5}"
 export OBLIGATION_E2E_TESTS="${OBLIGATION_E2E_TESTS:-true}"
 export ASUPERSYNC_TEST_ARTIFACTS_DIR="${ASUPERSYNC_TEST_ARTIFACTS_DIR:-${ARTIFACT_DIR}/test-artifacts}"
+TEST_ARTIFACT_SCENARIO_DIR="${ASUPERSYNC_TEST_ARTIFACTS_DIR}/${SCENARIO_ID}"
 
 if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
     echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
@@ -81,7 +84,7 @@ echo ""
 
 TEST_RESULT=0
 pushd "$PROJECT_ROOT" >/dev/null
-if run_timeout_cargo 900 test -p asupersync --message-format=short --features real-service-e2e "${TEST_FILTER}" -- --nocapture --test-threads=1 2>&1 | tee "$LOG_FILE"; then
+if run_timeout_cargo 900 test -p asupersync --no-default-features --features obligation-cleanup-e2e --test obligation_cleanup_e2e --message-format=short "${TEST_FILTER}" -- --nocapture --test-threads=1 2>&1 | tee "$LOG_FILE"; then
     TEST_RESULT=0
 else
     TEST_RESULT=$?
@@ -92,13 +95,28 @@ if ! reject_rch_local_fallback_log "$LOG_FILE"; then
     TEST_RESULT=86
 fi
 
+materialize_test_artifacts_from_log() {
+    mkdir -p "$TEST_ARTIFACT_SCENARIO_DIR"
+
+    awk '
+        /^ASUPERSYNC_OBLIGATION_CLEANUP_EVENTS_BEGIN / { capture = 1; next }
+        /^ASUPERSYNC_OBLIGATION_CLEANUP_EVENTS_END / { capture = 0; next }
+        capture { print }
+    ' "$LOG_FILE" > "${TEST_ARTIFACT_SCENARIO_DIR}/events.ndjson"
+
+    sed -n 's/^ASUPERSYNC_OBLIGATION_CLEANUP_SUMMARY_JSON //p' "$LOG_FILE" \
+        | tail -1 > "${TEST_ARTIFACT_SCENARIO_DIR}/summary.json"
+}
+
+materialize_test_artifacts_from_log
+
 PATTERN_FAILURES=0
 check_pattern() {
     local pattern="$1"
     local label="$2"
-    if grep -q "$pattern" "$LOG_FILE" 2>/dev/null; then
+    if grep -Eq "$pattern" "$LOG_FILE" 2>/dev/null; then
         echo "  ERROR: ${label}"
-        grep -n "$pattern" "$LOG_FILE" | head -5 > "${ARTIFACT_DIR}/${label// /_}.txt" 2>/dev/null || true
+        grep -En "$pattern" "$LOG_FILE" | head -5 > "${ARTIFACT_DIR}/${label// /_}.txt" 2>/dev/null || true
         ((PATTERN_FAILURES++)) || true
     fi
 }
@@ -107,10 +125,17 @@ check_pattern "panicked at" "panic detected"
 check_pattern "assertion failed" "assertion failure"
 check_pattern "test result: FAILED" "cargo reported failures"
 check_pattern "Task leak detected" "task leak detected"
-check_pattern "obligation.*leak" "obligation leak"
+check_pattern 'Leak detected: [1-9][0-9]* obligations leaked|obligation leak detected|"zero_leaks":[[:space:]]*false|"leaked_after":[[:space:]]*[1-9]' "obligation leak"
 
-PASSED=$(grep -c "^test .* ok$" "$LOG_FILE" 2>/dev/null || echo "0")
-FAILED=$(grep -c "^test .* FAILED$" "$LOG_FILE" 2>/dev/null || echo "0")
+if [ "$TEST_RESULT" -eq 0 ]; then
+    if [ ! -s "${TEST_ARTIFACT_SCENARIO_DIR}/events.ndjson" ] || [ ! -s "${TEST_ARTIFACT_SCENARIO_DIR}/summary.json" ]; then
+        echo "  ERROR: test artifact materialization failed"
+        ((PATTERN_FAILURES++)) || true
+    fi
+fi
+
+PASSED=$(grep -c "^test .* ok$" "$LOG_FILE" 2>/dev/null || true)
+FAILED=$(grep -c "^test .* FAILED$" "$LOG_FILE" 2>/dev/null || true)
 RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SUITE_STATUS="failed"
 if [ "$TEST_RESULT" -eq 0 ] && [ "$PATTERN_FAILURES" -eq 0 ]; then

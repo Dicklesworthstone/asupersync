@@ -344,7 +344,10 @@ pub mod real_integration_scenarios_e2e_tests;
 pub mod real_net_dns_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
+#[cfg(any(
+    all(test, feature = "real-service-e2e"),
+    feature = "obligation-cleanup-e2e"
+))]
 pub mod real_obligation_leak_check_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_quic_native_e2e_tests;

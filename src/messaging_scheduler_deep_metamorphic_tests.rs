@@ -890,7 +890,7 @@ mod tests {
                         prop_assert_eq!(received_msg.offset, *sent_offset,
                             "Message order violation in partition {}: expected offset {}, got {}",
                             partition, sent_offset, received_msg.offset);
-                        prop_assert_eq!(received_msg.value, *sent_data,
+                        prop_assert_eq!(received_msg.value.clone(), sent_data.clone(),
                             "Message content mismatch in partition {}", partition);
                     }
                 }
@@ -957,7 +957,7 @@ mod tests {
                 assignment1.sort();
                 assignment2.sort();
 
-                prop_assert_eq!(assignment1, assignment2,
+                prop_assert_eq!(assignment1.clone(), assignment2.clone(),
                     "Rebalance idempotency failed for consumer {}: {:?} vs {:?}",
                     i, assignment1, assignment2);
             }
@@ -1186,11 +1186,11 @@ mod tests {
                 "Request should be published");
 
             let request_msg = &client.published_messages[initial_published];
-            prop_assert_eq!(request_msg.subject, request_subject,
+            prop_assert_eq!(request_msg.subject.clone(), request_subject.clone(),
                 "Request subject mismatch");
-            prop_assert_eq!(request_msg.data, request_data,
+            prop_assert_eq!(request_msg.data.clone(), request_data.clone(),
                 "Request data mismatch");
-            prop_assert_eq!(request_msg.reply_to, Some(reply_subject.clone()),
+            prop_assert_eq!(request_msg.reply_to.clone(), Some(reply_subject.clone()),
                 "Request should have reply_to field");
 
             // Send reply
@@ -1201,9 +1201,9 @@ mod tests {
                 "Reply should be published");
 
             let reply_msg = &client.published_messages[initial_published + 1];
-            prop_assert_eq!(reply_msg.subject, reply_subject,
+            prop_assert_eq!(reply_msg.subject.clone(), reply_subject.clone(),
                 "Reply subject should match reply_to from request");
-            prop_assert_eq!(reply_msg.data, reply_data,
+            prop_assert_eq!(reply_msg.data.clone(), reply_data.clone(),
                 "Reply data mismatch");
             prop_assert!(reply_msg.reply_to.is_none(),
                 "Reply should not have reply_to field");
@@ -1253,7 +1253,7 @@ mod tests {
                 // Decoding should recover original value
                 match MockRedisValue::decode_resp3(&encoded) {
                     Ok((decoded_value, consumed_bytes)) => {
-                        prop_assert_eq!(decoded_value, original_value,
+                        prop_assert_eq!(decoded_value.clone(), original_value.clone(),
                             "RESP3 round-trip failed: {:?} -> {:?}", original_value, decoded_value);
 
                         // All bytes should be consumed for a complete value
@@ -1356,9 +1356,9 @@ mod tests {
                 let route2 = cluster.route_key(key);
                 let route3 = cluster.route_key(key);
 
-                prop_assert_eq!(route1, route2,
+                prop_assert_eq!(route1.clone(), route2.clone(),
                     "Routing not consistent for key '{}': {:?} vs {:?}", key, route1, route2);
-                prop_assert_eq!(route2, route3,
+                prop_assert_eq!(route2.clone(), route3.clone(),
                     "Routing not consistent for key '{}': {:?} vs {:?}", key, route2, route3);
 
                 // Slot-route correspondence: routing should match slot assignment
@@ -1367,7 +1367,7 @@ mod tests {
 
                 if let Some(expected_node_id) = expected_node {
                     let expected_address = cluster.nodes.get(expected_node_id);
-                    prop_assert_eq!(route1, expected_address.cloned(),
+                    prop_assert_eq!(route1.clone(), expected_address.cloned(),
                         "Route mismatch for key '{}' (slot {}): expected {:?}, got {:?}",
                         key, slot, expected_address, route1);
                 }

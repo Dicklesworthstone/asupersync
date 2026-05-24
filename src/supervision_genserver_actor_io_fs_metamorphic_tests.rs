@@ -352,7 +352,7 @@ mod tests {
             self.entries
                 .keys()
                 .filter(|path| {
-                    path.starts_with(&dir_path) && path != &dir_path[..dir_path.len() - 1]
+                    path.starts_with(&dir_path) && path.as_str() != &dir_path[..dir_path.len() - 1]
                 })
                 .filter(|path| {
                     let relative = &path[dir_path.len()..];
@@ -744,7 +744,7 @@ mod tests {
             }
 
             prop_assert_eq!(
-                received1, received2,
+                received1.clone(), received2.clone(),
                 "Both mailboxes should receive messages in identical FIFO order"
             );
 
@@ -761,7 +761,7 @@ mod tests {
             let remaining1: Vec<u64> = mailbox1.messages.iter().map(|m| m.sequence).collect();
             let remaining2: Vec<u64> = mailbox2.messages.iter().map(|m| m.sequence).collect();
 
-            prop_assert_eq!(remaining1, remaining2, "Remaining messages should maintain same order");
+            prop_assert_eq!(remaining1.clone(), remaining2.clone(), "Remaining messages should maintain same order");
 
             for window in remaining1.windows(2) {
                 prop_assert!(
@@ -902,7 +902,7 @@ mod tests {
             let recovered_data = reader.read_all();
 
             prop_assert_eq!(
-                recovered_data, original_data,
+                recovered_data.clone(), original_data.clone(),
                 "Round-trip through BufWriter -> BufReader should preserve data integrity. Buffer size: {}",
                 buffer_size
             );
@@ -962,7 +962,7 @@ mod tests {
             let copied_data = destination.into_inner();
 
             prop_assert_eq!(
-                copied_data, original_data,
+                copied_data.clone(), original_data.clone(),
                 "Copy operation should preserve data content exactly"
             );
 
@@ -1041,7 +1041,7 @@ mod tests {
             }
 
             prop_assert_eq!(
-                merged_data, original_data,
+                merged_data.clone(), original_data.clone(),
                 "Merge operation should restore original data exactly. Split points: {:?}",
                 actual_splits
             );
@@ -1084,13 +1084,13 @@ mod tests {
             }
 
             prop_assert_eq!(
-                sync_result, async_result,
+                sync_result.clone(), async_result.clone(),
                 "Synchronous and asynchronous IO should produce identical results. Chunk size: {}",
                 read_chunk_size
             );
 
             prop_assert_eq!(
-                sync_result, original_data,
+                sync_result.clone(), original_data.clone(),
                 "Both sync and async should preserve original data integrity"
             );
 
@@ -1244,7 +1244,7 @@ mod tests {
                 sorted_expected.sort();
 
                 prop_assert_eq!(
-                    sorted_listed, sorted_expected,
+                    sorted_listed.clone(), sorted_expected.clone(),
                     "Directory listing should match created files for directory '{}': listed={:?}, expected={:?}",
                     dir_name, sorted_listed, sorted_expected
                 );
@@ -1328,7 +1328,7 @@ mod tests {
                         path, entry1.size, entry2.size
                     );
                     prop_assert_eq!(
-                        entry1.content, entry2.content,
+                        entry1.content.clone(), entry2.content.clone(),
                         "File contents should be identical: {}", path
                     );
                     prop_assert_eq!(

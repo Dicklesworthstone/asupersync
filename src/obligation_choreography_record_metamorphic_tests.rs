@@ -461,9 +461,12 @@ mod tests {
             let hash = u64::from_le_bytes(data.try_into().ok()?);
             // For testing, reconstruct a canonical form based on the hash
             // In reality, this would be proper deserialization
+            // `RegionId` has no `From<u64>`; construct via the test-only
+            // (index, generation) constructor with the hash modulo bound
+            // as the index (the test only needs determinism, not range).
             Some(MockRegionHierarchy {
-                root_id: RegionId::from(hash % 1000),
-                child_ids: vec![RegionId::from((hash / 1000) % 100)],
+                root_id: RegionId::new_for_test((hash % 1000) as u32, 0),
+                child_ids: vec![RegionId::new_for_test(((hash / 1000) % 100) as u32, 0)],
                 state: RegionState::Open,
                 pending_tasks: (hash % 10) as u32,
             })
@@ -553,12 +556,11 @@ mod tests {
             let result_a = prover_a.verify(&events);
             let result_b = prover_b.verify(&events);
 
-            prop_assert_eq!(result_a, result_b,
-                "Proof verification should be deterministic: {:?} ≠ {:?}",
-                result_a, result_b);
+            prop_assert_eq!(result_a.clone(), result_b.clone(),
+                "Proof verification should be deterministic");
 
             // Verification traces should also be identical
-            prop_assert_eq!(prover_a.trace(), prover_b.trace(),
+            prop_assert_eq!(prover_a.trace().clone(), prover_b.trace().clone(),
                 "Proof traces should be deterministic");
         }
     }
@@ -629,9 +631,8 @@ mod tests {
             let result_a = engine_a.recover(&conflict_state);
             let result_b = engine_b.recover(&conflict_state);
 
-            prop_assert_eq!(result_a, result_b,
-                "Recovery should be deterministic for same conflict state: {:?} ≠ {:?}",
-                result_a, result_b);
+            prop_assert_eq!(result_a.clone(), result_b.clone(),
+                "Recovery should be deterministic for same conflict state");
         }
     }
 
@@ -702,9 +703,8 @@ mod tests {
                 original_semantic_hash, execution_result.semantic_preservation_hash);
 
             // Protocol identity preservation
-            prop_assert_eq!(protocol.name, execution_result.protocol_name,
-                "Protocol name should be preserved: {} ≠ {}",
-                protocol.name, execution_result.protocol_name);
+            prop_assert_eq!(protocol.name.clone(), execution_result.protocol_name.clone(),
+                "Protocol name should be preserved");
 
             // Structural consistency
             prop_assert_eq!(protocol.participants.len(), generated_code.participant_count,
@@ -767,17 +767,20 @@ mod tests {
             let result_a = replayer_a.replay(&events);
             let result_b = replayer_b.replay(&events);
 
+            // Pin scalar projections before the prop_assert_eq! moves result_a/b.
+            let total_events_a = result_a.total_events;
+            let determinism_fp_a = result_a.determinism_fingerprint;
+            let events_len = events.len();
             prop_assert_eq!(result_a, result_b,
-                "Event log replay should be deterministic: {:?} ≠ {:?}",
-                result_a, result_b);
+                "Event log replay should be deterministic");
 
             // Event count should match input
-            prop_assert_eq!(result_a.total_events, events.len(),
+            prop_assert_eq!(total_events_a, events_len,
                 "Replayer should process all events: {} ≠ {}",
-                result_a.total_events, events.len());
+                total_events_a, events_len);
 
             // Determinism fingerprint should be consistent
-            prop_assert!(result_a.determinism_fingerprint != 0,
+            prop_assert!(determinism_fp_a != 0,
                 "Determinism fingerprint should be non-zero for non-empty logs");
         }
     }

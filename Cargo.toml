@@ -58,6 +58,8 @@ wasm-browser-minimal = ["wasm-runtime"]
 test-internals = ["dep:tracing", "dep:tracing-subscriber", "dep:visibility"]
 # Opt-in compile surface for ignored, environment-gated real-service E2E tests.
 real-service-e2e = []
+# Focused no-mock obligation cleanup E2E harness for asupersync-9u057b.5.
+obligation-cleanup-e2e = []
 # OpenTelemetry metrics provider only. The normal dependency graph for this
 # feature stays Tokio-free; OTLP protobuf helpers remain fuzz/test-only.
 metrics = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
@@ -487,7 +489,7 @@ strip = false
 [lints.rust]
 # Default to deny for unsafe code - specific modules that require it can use #[allow(unsafe_code)]
 # The epoll reactor requires unsafe for the polling crate's FFI operations
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(fuzzing)', 'cfg(feature, values("quic", "http3", "wasm-browser-preview", "simd-intrinsics", "messaging-fabric"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(fuzzing)', 'cfg(feature, values("quic", "http3", "wasm-browser-preview", "simd-intrinsics", "messaging-fabric", "obligation-cleanup-e2e"))'] }
 unsafe_code = "deny"
 missing_docs = "warn"
 unused = { level = "warn", priority = -1 }

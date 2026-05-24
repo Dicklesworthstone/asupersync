@@ -1120,7 +1120,7 @@ mod tests {
                     });
 
             prop_assert_eq!(
-                original_total_consumed, permuted_total_consumed,
+                original_total_consumed.clone(), permuted_total_consumed.clone(),
                 "Total budget consumption should be invariant to scheduling order: {:?} vs {:?}",
                 original_total_consumed, permuted_total_consumed
             );
@@ -1139,7 +1139,7 @@ mod tests {
                 5..20
             ),
             churn_operations in proptest::collection::vec(
-                (0usize, 0u8),  // (remove_index, new_priority)
+                (0usize..1000, 0u8..10),  // (remove_index, new_priority)
                 3..10
             )
         )| {
@@ -1534,12 +1534,12 @@ mod tests {
 
             // State should remain stable after multiple cancel attempts
             prop_assert_eq!(
-                handle.state, initial_state,
+                handle.state.clone(), initial_state,
                 "State should be stable after multiple cancel_after_completion calls"
             );
 
             prop_assert_eq!(
-                handle.completion_result, initial_result,
+                handle.completion_result.clone(), initial_result,
                 "Completion result should be stable after multiple cancel_after_completion calls"
             );
 
@@ -1571,7 +1571,7 @@ mod tests {
 
                 // State should remain consistent
                 prop_assert_eq!(
-                    handle.state, state_before,
+                    handle.state.clone(), state_before,
                     "State should be stable after post-completion operation type {}",
                     op_type % 3
                 );
@@ -1668,7 +1668,7 @@ mod tests {
                 let handle2 = &handles_pattern2[i];
 
                 prop_assert_eq!(
-                    handle1.state, handle2.state,
+                    handle1.state.clone(), handle2.state.clone(),
                     "Final state should be identical for task {}: {:?} vs {:?}",
                     task_id, handle1.state, handle2.state
                 );
@@ -1677,26 +1677,26 @@ mod tests {
                 if *completion_offset >= *lease_duration {
                     // Should have expired
                     prop_assert_eq!(
-                        handle1.state, MockRemoteState::LeaseExpired,
+                        handle1.state.clone(), MockRemoteState::LeaseExpired,
                         "Task {} should have expired: lease={}, completion={}",
                         task_id, lease_duration, completion_offset
                     );
 
                     prop_assert_eq!(
-                        handle2.state, MockRemoteState::LeaseExpired,
+                        handle2.state.clone(), MockRemoteState::LeaseExpired,
                         "Task {} should have expired in pattern 2: lease={}, completion={}",
                         task_id, lease_duration, completion_offset
                     );
                 } else {
                     // Should have completed successfully
                     prop_assert_eq!(
-                        handle1.state, MockRemoteState::Completed,
+                        handle1.state.clone(), MockRemoteState::Completed,
                         "Task {} should have completed: lease={}, completion={}",
                         task_id, lease_duration, completion_offset
                     );
 
                     prop_assert_eq!(
-                        handle2.state, MockRemoteState::Completed,
+                        handle2.state.clone(), MockRemoteState::Completed,
                         "Task {} should have completed in pattern 2: lease={}, completion={}",
                         task_id, lease_duration, completion_offset
                     );
@@ -1710,7 +1710,7 @@ mod tests {
                 let result2 = handle2_copy.join();
 
                 prop_assert_eq!(
-                    result1, result2,
+                    result1.clone(), result2.clone(),
                     "join() results should be identical for task {}: {:?} vs {:?}",
                     task_id, result1, result2
                 );
