@@ -25,7 +25,7 @@
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Runtime state machine conformance test infrastructure
@@ -396,7 +396,7 @@ mod tests {
             initial_regions in 1u32..5,
         )| {
             // RTM-1.1: Region can only close when quiescent
-            for (seq_idx, operations) in operation_sequences.iter().enumerate() {
+            'operation_sequence: for (seq_idx, operations) in operation_sequences.iter().enumerate() {
                 let mut runtime = RuntimeStateMachine::new();
 
                 // Create initial regions
@@ -469,7 +469,7 @@ mod tests {
                                                 "Region can only close when quiescent",
                                                 result
                                             );
-                                            return;
+                                            continue 'operation_sequence;
                                         }
 
                                         // RTM-1.1: If region was quiescent, it should close
@@ -634,7 +634,9 @@ mod tests {
             ),
         )| {
             // RTM-2.1: Task state transitions are well-defined
-            for (seq_idx, operations) in task_operation_sequences.iter().enumerate() {
+            'task_operation_sequence: for (seq_idx, operations) in
+                task_operation_sequences.iter().enumerate()
+            {
                 let mut runtime = RuntimeStateMachine::new();
                 let region_id = runtime.create_region(None);
 
@@ -656,7 +658,7 @@ mod tests {
                                             "Task spawning should succeed in active region",
                                             result
                                         );
-                                        return;
+                                        continue 'task_operation_sequence;
                                     }
                                 }
                             }
