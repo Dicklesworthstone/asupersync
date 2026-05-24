@@ -13,7 +13,7 @@ mod quic_native_e2e_tests {
     use crate::net::quic_native::{
         OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointConfig, ReceivedPacket,
     };
-    use crate::net::{UdpSocket, UdpSocketConfig};
+    use crate::net::UdpSocket;
     use crate::runtime::RuntimeBuilder;
     use crate::time::{sleep, Duration, Instant};
     use crate::types::{Budget, Outcome};
@@ -204,16 +204,7 @@ mod quic_native_e2e_tests {
             Self::validate_test_environment()?;
 
             // Create UDP socket with ephemeral port
-            let socket_config = UdpSocketConfig {
-                bind_address: config.bind_addr,
-                reuse_address: true,
-                broadcast: false,
-                multicast_loop: None,
-                multicast_ttl: None,
-                ttl: None,
-            };
-
-            let socket = UdpSocket::bind(cx, &socket_config).await
+            let socket = UdpSocket::bind(config.bind_addr).await
                 .map_err(|e| format!("Failed to bind UDP socket: {:?}", e))?;
 
             let local_addr = socket.local_addr()
@@ -358,20 +349,13 @@ mod quic_native_e2e_tests {
         };
 
         // Give server time to start
-        sleep(&cx, Duration::from_millis(50)).await?;
+        let _ = sleep(&cx, Duration::from_millis(50)).await;
 
         // Create client endpoint
         let client_config = QuicUdpEndpointConfig::default();
-        let client_socket = UdpSocket::bind(&cx, &UdpSocketConfig {
-            bind_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-            reuse_address: true,
-            broadcast: false,
-            multicast_loop: None,
-            multicast_ttl: None,
-            ttl: None,
-        }).await?;
+        let client_socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
 
-        let mut client_endpoint = QuicUdpEndpoint::bind(&cx, client_socket, client_config)?;
+        let mut client_endpoint = QuicUdpEndpoint::bind(&cx, client_socket, client_config).await?;
 
         // Send test packet
         let test_message = b"TEST_QUIC_MESSAGE";
@@ -431,7 +415,7 @@ mod quic_native_e2e_tests {
             async move { server.start(cx).await }
         };
 
-        sleep(&cx, Duration::from_millis(50)).await?;
+        let _ = sleep(&cx, Duration::from_millis(50)).await;
 
         // Create multiple clients
         const NUM_CLIENTS: usize = 3;
@@ -447,7 +431,7 @@ mod quic_native_e2e_tests {
                 ttl: None,
             }).await?;
 
-            let client_endpoint = QuicUdpEndpoint::bind(&cx, client_socket, QuicUdpEndpointConfig::default())?;
+            let client_endpoint = QuicUdpEndpoint::bind(&cx, client_socket, QuicUdpEndpointConfig::default()).await?;
             client_endpoints.push(client_endpoint);
 
             // Send packet from each client

@@ -324,9 +324,9 @@ mod sqlite_e2e_tests {
 
                     let operation = SqliteE2ELogger::extract_operation(sql);
                     match operation.as_str() {
-                        "INSERT" => self.stats.rows_inserted.fetch_add(rows_affected as u64, Ordering::Relaxed),
-                        "UPDATE" => self.stats.rows_updated.fetch_add(rows_affected as u64, Ordering::Relaxed),
-                        "DELETE" => self.stats.rows_deleted.fetch_add(rows_affected as u64, Ordering::Relaxed),
+                        "INSERT" => { self.stats.rows_inserted.fetch_add(rows_affected as u64, Ordering::Relaxed); }
+                        "UPDATE" => { self.stats.rows_updated.fetch_add(rows_affected as u64, Ordering::Relaxed); }
+                        "DELETE" => { self.stats.rows_deleted.fetch_add(rows_affected as u64, Ordering::Relaxed); }
                         _ => {}
                     }
 
