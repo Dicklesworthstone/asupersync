@@ -29,6 +29,7 @@ the listed files, and run or extend the listed proof lane.
 | ATP object graph | `ATP-C`, `asupersync-bg83ig` | `src/atp/object.rs` | inline unit tests, rch all-target check |
 | ATP manifest, Merkle roots, transforms, and graph commits | `ATP-C`, `asupersync-1iuqyc`, `asupersync-w5j10z` | `src/atp/manifest.rs` | inline unit tests, graph-commit validation tests, `scripts/run_atp_manifest_e2e.sh` |
 | ATP verification boundary | `ATP-D4`, `asupersync-fw1eg1` | `src/atp/verifier.rs` plus object/manifest validators | verifier tests, finalizer/cancellation tests, future crash/finalizer lab scripts |
+| ATP proof bundle and FrankenSuite evidence projection | `ATP-C5`, `ATP-M6`, `asupersync-w5j10z`, `asupersync-fv459o` | `src/atp/proof/`, `franken_evidence/`, `franken_decision/` | proof-bundle unit tests, FrankenEvidence ledger validation, rch lib check |
 | ATP path candidate model | `ATP-F`, `asupersync-6cokae` | `src/atp/path.rs`, `src/net/atp/path/mod.rs` | inline unit tests, future NAT/path lab scripts |
 | ATP binary frames, codec, varints | `ATP-B`, `asupersync-1ar9mg` | `src/net/atp/protocol/frames.rs`, `src/net/atp/protocol/codec.rs`, `src/net/atp/protocol/varint.rs` | codec round-trip, partial-frame, canonical-varint, size-limit, malformed-input tests |
 | ATP transcript, outcomes, and session negotiation | `ATP-B`, `asupersync-wvjjnz` | `src/net/atp/protocol/transcript.rs`, `src/net/atp/protocol/outcome.rs`, `src/net/atp/protocol/session.rs` | `tests/atp_session_negotiation.rs`, `scripts/run_atp_session_negotiation_e2e.sh` |
@@ -66,6 +67,9 @@ boundary.
   ATP; if an adapter is ever needed, keep it outside the runtime guarantee.
 - Keep replay evidence redaction-safe. Peer ids, path ids, transcript hashes,
   and verification summaries can be logged; payload bytes and secrets cannot.
+- Keep ATP proof bundles and FrankenSuite evidence separate. ATP proof bundles
+  own transfer-specific artifacts; `AtpFrankenProofExport` owns the generic
+  `DecisionAuditEntry`, `EvidenceLedger`, and audit attachment refs.
 - Treat capability grants as obligations. A grant, lease, sparse writer
   reservation, or relay permission must have an explicit commit, abort, expiry,
   or rejection path.

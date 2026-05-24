@@ -10,8 +10,9 @@ pub mod replay;
 pub mod serde_types;
 
 pub use bundle::{
-    AtpProofBundle, AtpProofBundleBuilder, AtpProofBundleError, AtpProofBundleMetadata,
-    ChunkBitmap, PeerIdentityInfo, ProofStrength, RaptorQDecodeMetadata, RepairGroupMetadata,
-    TransferJournal, TransferPathSummary,
+    ATP_PROOF_DECISION_CONTRACT, ATP_PROOF_FRANKEN_COMPONENT, AtpAuditArtifactRef,
+    AtpFrankenProofExport, AtpProofBundle, AtpProofBundleBuilder, AtpProofBundleError,
+    AtpProofBundleMetadata, AtpProofValidationStatus, ChunkBitmap, PeerIdentityInfo, ProofStrength,
+    RaptorQDecodeMetadata, RepairGroupMetadata, TransferJournal, TransferPathSummary,
 };
 pub use replay::{AtpReplayPointer, ReplayableEvent, ReplayableEventKind};

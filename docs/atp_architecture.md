@@ -89,6 +89,7 @@ happens on `main`.
 | Object graph | `ATP-C`, `asupersync-bg83ig` | `src/atp/object.rs` | inline unit tests and manifest E2E | ATP moves verified object graphs; files and streams are front ends, not the primitive. |
 | Manifest, Merkle, transform policy, graph commit | `ATP-C`, `asupersync-1iuqyc`, `asupersync-w5j10z` | `src/atp/manifest.rs` | `scripts/run_atp_manifest_e2e.sh` | Verification truth must be explicit about chunking, compression, encryption, repair, and proof semantics. |
 | Verifier boundary | `ATP-D4`, `asupersync-fw1eg1` | `src/atp/verifier.rs` | verifier unit tests and future crash/finalizer lab scripts | The verifier is the gate that prevents corrupt chunks, lying relays, or bad repairs from becoming visible data. |
+| Proof bundle and FrankenSuite projection | `ATP-C5`, `ATP-M6`, `asupersync-w5j10z`, `asupersync-fv459o` | `src/atp/proof/`, `franken_evidence/`, `franken_decision/` | proof-bundle unit tests, FrankenEvidence validation, rch lib check | ATP keeps transfer-specific proof artifacts while exporting generic decision/evidence rows for project-wide audit. |
 | Path candidate model | `ATP-F`, `asupersync-6cokae` | `src/atp/path.rs`, `src/net/atp/path/mod.rs` | path model tests and future NAT/path lab scripts | Connectivity is a graph of typed candidate edges, not direct-or-relay branching. |
 | Platform capability facade and doctor output | `ATP-D1`, `asupersync-1tgbxe` | `src/atp/platform/mod.rs`, `src/atp/doctor/mod.rs`, `src/bin/asupersync.rs` | platform doctor tests and host capability probes | Disk, socket, service-manager, IPv6, and filesystem policy must be measured and explainable. |
 | ATP binary protocol frames and codec | `ATP-B`, `asupersync-1ar9mg` | `src/net/atp/protocol/frames.rs`, `src/net/atp/protocol/codec.rs`, `src/net/atp/protocol/varint.rs` | codec round-trip, partial-frame, size-limit, and malformed-input tests | ATP application framing stays separate from QUIC packet mechanics and remains replayable in memory. |
@@ -183,6 +184,17 @@ relays, mailbox consumers, proof bundles, and finalizers as those surfaces land:
 Sparse writers, cache readers, relays, mailbox consumers, and SDK import paths
 must use the committed validation surface now and the dedicated verifier stages
 before exposing committed ATP data once those stages are part of `main`.
+
+`src/atp/proof/` keeps the ATP-specific proof material: manifest roots, object
+roots, chunk bitmap state, verification stages, repair metadata, peer identity,
+path summary, journal digest, final commit record, replay pointers, and
+extensions. The FrankenSuite-generic projection is
+`AtpProofBundle::to_franken_proof_export()`: it derives stable `TraceId` and
+`DecisionId` values from the canonical proof-bundle hash, emits a
+`DecisionAuditEntry`, converts that entry to an `EvidenceLedger`, and returns
+`AtpAuditArtifactRef` values that project-wide audit records can attach. A
+bundle that fails ATP validation still emits evidence, but the proof-bundle gate
+chooses `quarantine_proof_bundle` instead of `accept_proof_bundle`.
 
 ### Path Graph
 

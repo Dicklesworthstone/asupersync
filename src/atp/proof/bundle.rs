@@ -13,6 +13,9 @@ use crate::atp::proof::serde_types::{
 };
 use crate::atp::verifier::VerificationEvidence;
 use crate::security::AuthKey;
+use franken_decision::DecisionAuditEntry;
+use franken_evidence::EvidenceLedger;
+use franken_kernel::{DecisionId, TraceId};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -436,6 +439,63 @@ pub struct TransferJournal {
     pub finalized_at_micros: Option<u64>,
 }
 
+/// FrankenSuite component name for ATP proof-bundle evidence exports.
+pub const ATP_PROOF_FRANKEN_COMPONENT: &str = "atp.proof_bundle";
+
+/// Decision-contract name used when gating ATP proof bundles.
+pub const ATP_PROOF_DECISION_CONTRACT: &str = "atp.proof_bundle_gate";
+
+const ATP_PROOF_ACCEPT_ACTION: &str = "accept_proof_bundle";
+const ATP_PROOF_QUARANTINE_ACTION: &str = "quarantine_proof_bundle";
+
+/// Validation result attached to the FrankenSuite projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtpProofValidationStatus {
+    /// The bundle passed ATP validation and can be accepted by the gate.
+    Accepted,
+    /// The bundle failed validation and must remain quarantined with evidence.
+    Quarantined {
+        /// Stable, human-readable validation failure reason.
+        reason: String,
+    },
+}
+
+impl AtpProofValidationStatus {
+    /// Returns true when the proof bundle passed ATP validation.
+    #[must_use]
+    pub const fn is_accepted(&self) -> bool {
+        matches!(self, Self::Accepted)
+    }
+}
+
+/// Project-audit attachment reference emitted from an ATP proof bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpAuditArtifactRef {
+    /// Stable key within the ATP proof-bundle export.
+    pub key: String,
+    /// ATP-specific artifact kind, for example `atp.proof_bundle`.
+    pub artifact_kind: String,
+    /// Schema identifier for the artifact payload.
+    pub schema: String,
+    /// Optional content digest for tamper-evidence.
+    pub digest: Option<String>,
+    /// Optional replay range when this artifact points into a replay stream.
+    pub replay_range: Option<(u64, u64)>,
+}
+
+/// FrankenSuite-compatible export derived from an ATP proof bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AtpFrankenProofExport {
+    /// Decision-contract audit entry for the proof-bundle gate.
+    pub decision_audit: DecisionAuditEntry,
+    /// Canonical FrankenEvidence ledger entry derived from `decision_audit`.
+    pub evidence_ledger: EvidenceLedger,
+    /// ATP-specific artifacts that project-wide audit records can attach.
+    pub audit_artifacts: Vec<AtpAuditArtifactRef>,
+    /// ATP validation outcome used by the proof-bundle gate.
+    pub validation_status: AtpProofValidationStatus,
+}
+
 /// Builder for constructing ATP proof bundles incrementally.
 #[derive(Debug, Clone)]
 pub struct AtpProofBundleBuilder {
@@ -729,6 +789,16 @@ fn system_time_micros_since_unix_epoch(
     duration_micros_to_u64(duration, field)
 }
 
+fn stable_franken_random_bits(domain: &[u8], bundle_hash: &[u8]) -> u128 {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(bundle_hash);
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    u128::from_be_bytes(bytes)
+}
+
 impl AtpProofBundle {
     /// Serialize the proof bundle to JSON bytes.
     pub fn to_json_bytes(&self) -> Result<Vec<u8>, AtpProofBundleError> {
@@ -820,6 +890,171 @@ impl AtpProofBundle {
         hasher.update(self.peer_identity.auth_method.as_bytes());
 
         hasher.finalize().to_vec()
+    }
+
+    /// Stable FrankenSuite trace identifier derived from the canonical bundle hash.
+    #[must_use]
+    pub fn stable_trace_id(&self) -> TraceId {
+        TraceId::from_parts(
+            self.created_at_micros / 1_000,
+            stable_franken_random_bits(b"atp.proof.trace", &self.compute_canonical_bundle_hash()),
+        )
+    }
+
+    /// Stable FrankenSuite decision identifier for the proof-bundle gate.
+    #[must_use]
+    pub fn stable_decision_id(&self) -> DecisionId {
+        DecisionId::from_parts(
+            self.created_at_micros / 1_000,
+            stable_franken_random_bits(
+                b"atp.proof.decision",
+                &self.compute_canonical_bundle_hash(),
+            ),
+        )
+    }
+
+    /// Export this ATP proof bundle into FrankenSuite evidence and audit surfaces.
+    ///
+    /// The export is fail-closed: invalid ATP bundles still produce audit evidence,
+    /// but the chosen decision action is quarantine instead of acceptance.
+    #[must_use]
+    pub fn to_franken_proof_export(&self) -> AtpFrankenProofExport {
+        let validation_result = self.validate();
+        let validation_status = match &validation_result {
+            Ok(()) => AtpProofValidationStatus::Accepted,
+            Err(err) => AtpProofValidationStatus::Quarantined {
+                reason: err.to_string(),
+            },
+        };
+
+        let (action, posterior, expected_loss_by_action, expected_loss, calibration, fallback) =
+            if validation_status.is_accepted() {
+                let mut expected_loss_by_action = BTreeMap::new();
+                expected_loss_by_action.insert(ATP_PROOF_ACCEPT_ACTION.to_string(), 0.01);
+                expected_loss_by_action.insert(ATP_PROOF_QUARANTINE_ACTION.to_string(), 0.25);
+                (
+                    ATP_PROOF_ACCEPT_ACTION.to_string(),
+                    vec![0.99, 0.01],
+                    expected_loss_by_action,
+                    0.01,
+                    1.0,
+                    false,
+                )
+            } else {
+                let mut expected_loss_by_action = BTreeMap::new();
+                expected_loss_by_action.insert(ATP_PROOF_ACCEPT_ACTION.to_string(), 1.0);
+                expected_loss_by_action.insert(ATP_PROOF_QUARANTINE_ACTION.to_string(), 0.05);
+                (
+                    ATP_PROOF_QUARANTINE_ACTION.to_string(),
+                    vec![0.02, 0.98],
+                    expected_loss_by_action,
+                    0.05,
+                    0.99,
+                    true,
+                )
+            };
+
+        let decision_audit = DecisionAuditEntry {
+            decision_id: self.stable_decision_id(),
+            trace_id: self.stable_trace_id(),
+            contract_name: ATP_PROOF_DECISION_CONTRACT.to_string(),
+            action_chosen: action,
+            expected_loss,
+            calibration_score: calibration,
+            fallback_active: fallback,
+            posterior_snapshot: posterior,
+            expected_loss_by_action,
+            ts_unix_ms: self.created_at_micros / 1_000,
+        };
+
+        let evidence_ledger = decision_audit.to_evidence_ledger();
+        let canonical_hash = self.compute_canonical_bundle_hash();
+        let audit_artifacts = self.audit_artifact_refs(&canonical_hash);
+
+        AtpFrankenProofExport {
+            decision_audit,
+            evidence_ledger,
+            audit_artifacts,
+            validation_status,
+        }
+    }
+
+    /// Convenience projection for callers that only need the canonical ledger row.
+    #[must_use]
+    pub fn to_evidence_ledger(&self) -> EvidenceLedger {
+        self.to_franken_proof_export().evidence_ledger
+    }
+
+    fn audit_artifact_refs(&self, canonical_hash: &[u8]) -> Vec<AtpAuditArtifactRef> {
+        let mut artifacts = vec![
+            AtpAuditArtifactRef {
+                key: "proof_bundle".to_string(),
+                artifact_kind: ATP_PROOF_FRANKEN_COMPONENT.to_string(),
+                schema: "atp-proof-bundle-v1".to_string(),
+                digest: Some(format!("sha256:{}", hex::encode(canonical_hash))),
+                replay_range: None,
+            },
+            AtpAuditArtifactRef {
+                key: "manifest_root".to_string(),
+                artifact_kind: "atp.manifest_root".to_string(),
+                schema: "atp-merkle-root-v1".to_string(),
+                digest: Some(format!("sha256:{}", hex::encode(self.manifest_root.hash()))),
+                replay_range: None,
+            },
+            AtpAuditArtifactRef {
+                key: "transfer_journal".to_string(),
+                artifact_kind: "atp.transfer_journal".to_string(),
+                schema: "atp-transfer-journal-v1".to_string(),
+                digest: Some(format!("sha256:{}", self.journal.digest)),
+                replay_range: None,
+            },
+            AtpAuditArtifactRef {
+                key: "path_summary".to_string(),
+                artifact_kind: "atp.path_summary".to_string(),
+                schema: "atp-transfer-path-summary-v1".to_string(),
+                digest: None,
+                replay_range: None,
+            },
+            AtpAuditArtifactRef {
+                key: "peer_identity".to_string(),
+                artifact_kind: "atp.peer_identity".to_string(),
+                schema: "atp-peer-identity-v1".to_string(),
+                digest: None,
+                replay_range: None,
+            },
+        ];
+
+        if self.commit_record.is_some() {
+            artifacts.push(AtpAuditArtifactRef {
+                key: "final_commit_record".to_string(),
+                artifact_kind: "atp.graph_commit".to_string(),
+                schema: "atp-graph-commit-v1".to_string(),
+                digest: None,
+                replay_range: None,
+            });
+        }
+
+        for group in &self.repair_groups {
+            artifacts.push(AtpAuditArtifactRef {
+                key: format!("repair_group:{}", group.group_id),
+                artifact_kind: "atp.repair_group".to_string(),
+                schema: "atp-repair-group-v1".to_string(),
+                digest: None,
+                replay_range: None,
+            });
+        }
+
+        for (key, pointer) in &self.replay_pointers {
+            artifacts.push(AtpAuditArtifactRef {
+                key: format!("replay:{key}"),
+                artifact_kind: "atp.replay_pointer".to_string(),
+                schema: "atp-replay-pointer-v1".to_string(),
+                digest: Some(format!("sha256:{}", pointer.stream_checksum)),
+                replay_range: Some((pointer.start_position, pointer.end_position)),
+            });
+        }
+
+        artifacts
     }
 
     /// Verify cryptographic signatures in the proof bundle.
@@ -1234,6 +1469,139 @@ mod tests {
         bitmap.mark_received(10); // Out of bounds
         assert_eq!(bitmap.received_count, 0);
         assert!(!bitmap.is_received(10));
+    }
+
+    fn franken_export_test_bundle(include_manifest_evidence: bool) -> AtpProofBundle {
+        use crate::atp::object::Object;
+        use crate::atp::proof::replay::AtpReplayPointer;
+
+        let manifest_root = crate::atp::manifest::MerkleRoot::new([1; 32]);
+        let object_id = Object::file(b"test".to_vec()).id;
+        let mut chunk_bitmap = ChunkBitmap::new(1);
+        chunk_bitmap.mark_received(0);
+
+        let peer_identity = PeerIdentityInfo {
+            source_peer_id: "source".to_string(),
+            destination_peer_id: "dest".to_string(),
+            auth_method: "ed25519".to_string(),
+            key_fingerprints: vec!["key1".to_string()],
+            authenticated_at_micros: 12345,
+            mutual_auth: true,
+        };
+
+        let path_summary = TransferPathSummary {
+            primary_protocol: "quic".to_string(),
+            fallback_protocols: vec!["tcp".to_string()],
+            rtt_millis: Some(50.0),
+            bandwidth_bps: Some(1_000_000),
+            relay_used: false,
+            relay_nodes: vec![],
+            path_setup_duration_millis: 100,
+            path_switches: 0,
+        };
+
+        let journal = TransferJournal {
+            digest: SerializableContentId::from(&crate::atp::object::ContentId::from_bytes(
+                b"journal",
+            )),
+            format_version: 1,
+            entry_count: 10,
+            size_bytes: 1024,
+            is_complete: true,
+            created_at_micros: 12345,
+            finalized_at_micros: Some(12400),
+        };
+
+        let replay_pointer = AtpReplayPointer::new(
+            "transfer-replay",
+            10,
+            42,
+            SerializableContentId::from(&crate::atp::object::ContentId::from_bytes(b"replay")),
+        );
+
+        let mut builder = AtpProofBundleBuilder::new("test-transfer")
+            .manifest_root(manifest_root)
+            .object_roots(vec![object_id])
+            .chunk_bitmap(chunk_bitmap)
+            .peer_identity(peer_identity)
+            .path_summary(path_summary)
+            .journal(journal)
+            .add_replay_pointer("failure-trace", replay_pointer)
+            .add_verification_evidence(VerificationEvidence {
+                stage: VerificationStage::ChunkHash,
+                summary: "chunk verified".to_string(),
+                digest: Some(crate::atp::object::ContentId::from_bytes(b"chunk")),
+            });
+
+        if include_manifest_evidence {
+            builder = builder.add_verification_evidence(VerificationEvidence {
+                stage: VerificationStage::Manifest,
+                summary: "manifest verified".to_string(),
+                digest: Some(crate::atp::object::ContentId::from_bytes(b"manifest")),
+            });
+        }
+
+        builder
+            .build()
+            .expect("franken export test bundle should build")
+    }
+
+    #[test]
+    fn franken_export_accepts_valid_bundle_with_stable_ids() {
+        let bundle = franken_export_test_bundle(true);
+        let export = bundle.to_franken_proof_export();
+
+        assert_eq!(export.validation_status, AtpProofValidationStatus::Accepted);
+        assert_eq!(export.decision_audit.action_chosen, ATP_PROOF_ACCEPT_ACTION);
+        assert_eq!(
+            export.decision_audit.contract_name,
+            ATP_PROOF_DECISION_CONTRACT
+        );
+        assert_eq!(
+            export.decision_audit.decision_id.as_u128(),
+            bundle.stable_decision_id().as_u128()
+        );
+        assert_eq!(
+            export.decision_audit.trace_id.as_u128(),
+            bundle.stable_trace_id().as_u128()
+        );
+        assert!(export.evidence_ledger.is_valid());
+        assert_eq!(export.evidence_ledger.action, ATP_PROOF_ACCEPT_ACTION);
+        assert_eq!(
+            bundle.to_evidence_ledger().action,
+            export.evidence_ledger.action
+        );
+
+        assert!(export.audit_artifacts.iter().any(|artifact| {
+            artifact.key == "proof_bundle"
+                && artifact
+                    .digest
+                    .as_deref()
+                    .is_some_and(|digest| digest.starts_with("sha256:"))
+        }));
+        assert!(export.audit_artifacts.iter().any(|artifact| {
+            artifact.key == "replay:failure-trace" && artifact.replay_range == Some((10, 42))
+        }));
+    }
+
+    #[test]
+    fn franken_export_quarantines_invalid_bundle_with_evidence() {
+        let bundle = franken_export_test_bundle(false);
+        let export = bundle.to_franken_proof_export();
+
+        match &export.validation_status {
+            AtpProofValidationStatus::Quarantined { reason } => {
+                assert!(reason.contains("missing manifest evidence"));
+            }
+            AtpProofValidationStatus::Accepted => panic!("invalid bundle must be quarantined"),
+        }
+        assert_eq!(
+            export.decision_audit.action_chosen,
+            ATP_PROOF_QUARANTINE_ACTION
+        );
+        assert!(export.decision_audit.fallback_active);
+        assert!(export.evidence_ledger.is_valid());
+        assert_eq!(export.evidence_ledger.action, ATP_PROOF_QUARANTINE_ACTION);
     }
 
     #[test]
