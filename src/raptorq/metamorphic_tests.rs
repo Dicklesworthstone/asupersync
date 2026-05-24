@@ -2827,7 +2827,7 @@ fn mr_bytes_slice_consistency() {
 ///   - State inconsistency in freeze operation
 #[test]
 fn mr_bytes_mut_freeze_invariance() {
-    use crate::bytes::{Bytes, BytesMut};
+    use crate::bytes::BytesMut;
 
     proptest!(|(data: Vec<u8>)| {
         if !data.is_empty() {
