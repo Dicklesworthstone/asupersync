@@ -82,6 +82,13 @@ fn string_set(value: &JsonValue, key: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn object_string_set(value: &JsonValue, key: &str, nested_key: &str) -> BTreeSet<String> {
+    array(value, key)
+        .iter()
+        .map(|entry| string(entry, nested_key).to_string())
+        .collect()
+}
+
 fn artifact() -> JsonValue {
     read_repo_json(ARTIFACT_PATH)
 }
@@ -120,6 +127,10 @@ fn artifact_declares_truthful_schema_sources_and_required_logs() {
         artifact.get("bead_id").and_then(JsonValue::as_str),
         Some("asupersync-j1dwk6")
     );
+    assert!(
+        string_set(&artifact, "successor_bead_ids").contains("asupersync-9u057b.7"),
+        "artifact must link the swarm-grade performance budget bead"
+    );
     assert_eq!(
         artifact.get("capability_id").and_then(JsonValue::as_str),
         Some("massive_swarm_capacity_envelope")
@@ -146,6 +157,8 @@ fn artifact_declares_truthful_schema_sources_and_required_logs() {
         "host_cpu_count",
         "host_memory_gib",
         "profile",
+        "profile_kind",
+        "workload_shape",
         "seed",
         "task_count",
         "region_count",
@@ -159,6 +172,8 @@ fn artifact_declares_truthful_schema_sources_and_required_logs() {
         "max_rss_bytes",
         "trace_bytes",
         "cancellation_drain_us",
+        "budget_rule",
+        "metric_source",
         "fallback_reason",
         "no_win_reason",
         "unsupported_reason",
@@ -182,6 +197,34 @@ fn artifact_declares_truthful_schema_sources_and_required_logs() {
             .unwrap_or("missing large_host_truthfulness")
             .contains("never emit verdict=pass"),
         "metric policy must prevent synthetic large-host proof"
+    );
+    let harness = object(&artifact, "performance_budget_harness");
+    assert_eq!(
+        harness.get("owner_bead_id").and_then(JsonValue::as_str),
+        Some("asupersync-9u057b.7")
+    );
+    assert!(
+        string(harness, "machine_readable_report").ends_with("run_report.json"),
+        "harness must name its machine-readable report"
+    );
+    assert!(
+        string(harness, "human_readable_summary").ends_with("summary.txt"),
+        "harness must name its human-readable summary"
+    );
+    assert!(
+        string(harness, "rch_contract_proof_command").contains("rch exec --"),
+        "harness proof command must be rch-backed"
+    );
+    assert_eq!(
+        object_string_set(harness, "budget_profiles", "profile_kind"),
+        [
+            "deterministic_micro",
+            "realistic_multi_component",
+            "large_host_envelope"
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<BTreeSet<_>>()
     );
 
     log_contract_event(
@@ -252,6 +295,24 @@ fn profile_matrix_covers_fast_standard_and_large_host_without_collapsing_scope()
     let fast = row_for_profile(&artifact, "fast");
     let standard = row_for_profile(&artifact, "standard");
     let large = row_for_profile(&artifact, "large-host");
+    assert_eq!(string(fast, "profile_kind"), "deterministic_micro");
+    assert_eq!(
+        string(standard, "profile_kind"),
+        "realistic_multi_component"
+    );
+    assert_eq!(string(large, "profile_kind"), "large_host_envelope");
+    assert!(
+        string(fast, "budget_rule").contains("reduced_scale_contract_budget"),
+        "fast profile must document its micro budget rule"
+    );
+    assert!(
+        string(standard, "budget_rule").contains("artifact_chain_budgets"),
+        "standard profile must document its multi-component budget rule"
+    );
+    assert!(
+        string(large, "budget_rule").contains("64_cpu_256_gib"),
+        "large-host profile must document its host-gated budget rule"
+    );
     assert!(
         u64_value(fast, "task_count") < u64_value(standard, "task_count")
             && u64_value(standard, "task_count") < u64_value(large, "task_count"),
@@ -371,6 +432,7 @@ fn runner_emits_all_required_logs_and_truthful_large_host_skip() {
 
     let report_path = output_root.join("run_contract/run_report.json");
     let log_path = output_root.join("run_contract/run.log");
+    let summary_path = output_root.join("run_contract/summary.txt");
     let report = serde_json::from_str::<JsonValue>(
         &std::fs::read_to_string(&report_path)
             .unwrap_or_else(|err| panic!("read {}: {err}", report_path.display())),
@@ -391,6 +453,21 @@ fn runner_emits_all_required_logs_and_truthful_large_host_skip() {
     let log_body = std::fs::read_to_string(&log_path)
         .unwrap_or_else(|err| panic!("read {}: {err}", log_path.display()));
     assert_eq!(log_body.lines().count(), 3, "run.log row count");
+    let summary_body = std::fs::read_to_string(&summary_path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", summary_path.display()));
+    assert!(
+        summary_body.contains("Massive Swarm Capacity Envelope Summary"),
+        "runner must emit a human-readable summary"
+    );
+    assert_eq!(
+        optional_string(&report, "human_summary_path"),
+        "target/massive-swarm-capacity-envelope-contract/run_contract/summary.txt"
+    );
+    assert_eq!(
+        array(&report, "human_summary").len(),
+        3,
+        "report must carry one human summary row per profile"
+    );
 
     for row in rows {
         let profile = string(row, "profile");
@@ -409,6 +486,26 @@ fn runner_emits_all_required_logs_and_truthful_large_host_skip() {
         assert_eq!(
             optional_string(row, "artifact_path"),
             "target/massive-swarm-capacity-envelope-contract/run_contract/run_report.json"
+        );
+        assert!(
+            !optional_string(row, "profile_kind").is_empty(),
+            "{profile}: profile kind"
+        );
+        assert!(
+            !optional_string(row, "workload_shape").is_empty(),
+            "{profile}: workload shape"
+        );
+        assert!(
+            !optional_string(row, "budget_rule").is_empty(),
+            "{profile}: budget rule"
+        );
+        assert!(
+            !optional_string(row, "metric_source").is_empty(),
+            "{profile}: metric source"
+        );
+        assert!(
+            summary_body.contains(&format!("{profile}:")),
+            "summary should contain row for {profile}"
         );
     }
 

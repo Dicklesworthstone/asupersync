@@ -1,6 +1,9 @@
 {
   "schema_version": "massive-swarm-capacity-envelope-evidence-v1",
   "bead_id": "asupersync-j1dwk6",
+  "successor_bead_ids": [
+    "asupersync-9u057b.7"
+  ],
   "capability_id": "massive_swarm_capacity_envelope",
   "created_date": "2026-05-05",
   "runner_script": "scripts/run_massive_swarm_capacity_envelope.sh",
@@ -12,12 +15,55 @@
     "trace_fields": "trace_bytes is the retained trace budget for the workload profile.",
     "large_host_truthfulness": "The runner must never emit verdict=pass for profile=large-host unless the executing host has at least 64 CPUs and at least 256 binary GiB of memory."
   },
+  "performance_budget_harness": {
+    "owner_bead_id": "asupersync-9u057b.7",
+    "purpose": "Swarm-scale performance budget harness for high-core agent operators, with deterministic reduced-scale proof and realistic multi-component artifact-chain coverage.",
+    "machine_readable_report": "target/massive-swarm-capacity-envelope/run_<run-id>/run_report.json",
+    "human_readable_summary": "target/massive-swarm-capacity-envelope/run_<run-id>/summary.txt",
+    "rch_contract_proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_massive_swarm_capacity cargo test -p asupersync --test massive_swarm_capacity_envelope_contract --features test-internals -- --nocapture",
+    "comparison_rules": [
+      {
+        "rule_id": "latency_percentiles_monotonic",
+        "description": "Every profile must keep p50_us <= p95_us <= p99_us <= p999_us."
+      },
+      {
+        "rule_id": "rss_dominates_trace_budget",
+        "description": "Every profile must keep max_rss_bytes greater than retained trace_bytes."
+      },
+      {
+        "rule_id": "large_host_truthful_skip",
+        "description": "The large-host profile must skip with host_shape_unsupported on machines below 64 CPUs or 256 binary GiB."
+      }
+    ],
+    "budget_profiles": [
+      {
+        "profile": "fast",
+        "profile_kind": "deterministic_micro",
+        "workload_shape": "scheduler_channel_trace_micro",
+        "acceptance_role": "cheap deterministic micro workload for CI and bisection"
+      },
+      {
+        "profile": "standard",
+        "profile_kind": "realistic_multi_component",
+        "workload_shape": "scheduler_channel_trace_raptorq_coordination_artifact_chain",
+        "acceptance_role": "operator-scale multi-component workload chain without requiring a 64c/256GiB worker"
+      },
+      {
+        "profile": "large-host",
+        "profile_kind": "large_host_envelope",
+        "workload_shape": "scheduler_channel_trace_raptorq_coordination_64c_256g",
+        "acceptance_role": "truthfully gated 64 CPU / 256 binary GiB capacity envelope"
+      }
+    ]
+  },
   "required_log_fields": [
     "bead_id",
     "scenario_id",
     "host_cpu_count",
     "host_memory_gib",
     "profile",
+    "profile_kind",
+    "workload_shape",
     "seed",
     "task_count",
     "region_count",
@@ -31,6 +77,8 @@
     "max_rss_bytes",
     "trace_bytes",
     "cancellation_drain_us",
+    "budget_rule",
+    "metric_source",
     "fallback_reason",
     "no_win_reason",
     "unsupported_reason",
@@ -102,6 +150,9 @@
       "scenario_id": "AA-MASSIVE-SWARM-CAPACITY-FAST-REDUCED-CI",
       "description": "Reduced-scale CI smoke profile that keeps the logging, profile selection, and invariant contract cheap enough for focused validation.",
       "seed": 401001,
+      "profile_kind": "deterministic_micro",
+      "workload_shape": "scheduler_channel_trace_micro",
+      "budget_rule": "pass_when_percentiles_rss_trace_and_drain_match_reduced_scale_contract_budget",
       "task_count": 4096,
       "region_count": 256,
       "obligation_count": 4096,
@@ -128,6 +179,9 @@
       "scenario_id": "AA-MASSIVE-SWARM-CAPACITY-STANDARD-ARTIFACT-CHAIN",
       "description": "Operator-standard profile that exercises the existing capacity, adaptive-batch, trace-storage, and latency-budget artifacts without requiring a 64c/256GiB worker.",
       "seed": 401002,
+      "profile_kind": "realistic_multi_component",
+      "workload_shape": "scheduler_channel_trace_raptorq_coordination_artifact_chain",
+      "budget_rule": "pass_when_artifact_chain_budgets_hold_or_conservative_fallback_is_logged",
       "task_count": 32768,
       "region_count": 2048,
       "obligation_count": 32768,
@@ -157,6 +211,9 @@
       "scenario_id": "AA-MASSIVE-SWARM-CAPACITY-LARGE-HOST-64C-256G",
       "description": "Platform-scoped 64 CPU / 256 binary GiB profile backed by the capacity planner's 64c/256g artifact chain and guarded by live host-shape checks.",
       "seed": 401064,
+      "profile_kind": "large_host_envelope",
+      "workload_shape": "scheduler_channel_trace_raptorq_coordination_64c_256g",
+      "budget_rule": "pass_only_on_64_cpu_256_gib_hosts_otherwise_skip_with_host_shape_unsupported",
       "task_count": 196608,
       "region_count": 8192,
       "obligation_count": 196608,

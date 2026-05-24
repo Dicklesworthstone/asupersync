@@ -117,9 +117,11 @@ report_dir = output_root / f"run_{run_id}"
 report_dir.mkdir(parents=True, exist_ok=True)
 run_log_path = report_dir / "run.log"
 run_report_path = report_dir / "run_report.json"
+summary_path = report_dir / "summary.txt"
 
 rows = []
 log_lines = []
+summary_lines = []
 first_failure = ""
 
 for profile in selected_profiles:
@@ -144,6 +146,8 @@ for profile in selected_profiles:
         "host_cpu_count": host_cpu_count,
         "host_memory_gib": round(host_memory_gib, 2),
         "profile": profile["profile"],
+        "profile_kind": profile["profile_kind"],
+        "workload_shape": profile["workload_shape"],
         "seed": profile["seed"],
         "task_count": profile["task_count"],
         "region_count": profile["region_count"],
@@ -157,6 +161,7 @@ for profile in selected_profiles:
         "max_rss_bytes": profile["max_rss_bytes"],
         "trace_bytes": profile["trace_bytes"],
         "cancellation_drain_us": profile["cancellation_drain_us"],
+        "budget_rule": profile["budget_rule"],
         "fallback_reason": profile.get("fallback_reason", ""),
         "no_win_reason": profile.get("no_win_reason", ""),
         "unsupported_reason": unsupported_reason,
@@ -181,6 +186,14 @@ for profile in selected_profiles:
     rows.append(row)
     log_line = " ".join(f"{field}={log_value(row[field])}" for field in required_fields)
     log_lines.append(log_line)
+    summary_lines.append(
+        f"{profile['profile']}: {verdict} "
+        f"kind={profile['profile_kind']} "
+        f"tasks={profile['task_count']} workers={profile['worker_count']} "
+        f"p95_us<={profile['p95_us']} p999_us<={profile['p999_us']} "
+        f"rss_bytes<={profile['max_rss_bytes']} "
+        f"metric_source={profile['metric_source']}"
+    )
     print(log_line)
 
 validation_passed = first_failure == "" and all(
@@ -190,6 +203,14 @@ validation_passed = first_failure == "" and all(
 )
 
 run_log_path.write_text("\n".join(log_lines) + "\n")
+summary_header = [
+    "Massive Swarm Capacity Envelope Summary",
+    f"run_id: {run_id}",
+    f"profile: {profile_arg}",
+    f"host: cpu={host_cpu_count} memory_gib={host_memory_gib:.2f}",
+    "",
+]
+summary_path.write_text("\n".join(summary_header + summary_lines) + "\n")
 
 report = {
     "schema_version": "massive-swarm-capacity-envelope-run-report-v1",
@@ -201,6 +222,8 @@ report = {
     "artifact_path": repo_relative(artifact_path),
     "run_report_path": repo_relative(run_report_path),
     "run_log_path": repo_relative(run_log_path),
+    "human_summary_path": repo_relative(summary_path),
+    "human_summary": summary_lines,
     "host_fingerprint": {
         "cpu_count": host_cpu_count,
         "memory_bytes": host_memory_bytes,
