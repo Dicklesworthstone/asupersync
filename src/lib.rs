@@ -464,6 +464,8 @@ pub mod real_raptorq_systematic_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_runtime_obligation_trace_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_runtime_region_table_runtime_obligation_table_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_scheduler_priority_promotion_starvation_cancel_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_scheduler_three_lane_obligation_leak_check_e2e_tests;
