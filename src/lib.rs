@@ -354,6 +354,10 @@ pub mod real_grpc_bidirectional_e2e_tests;
 pub mod real_http_h2_concurrent_load_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_distributed_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_codec_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_bytes_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod raptorq_rfc6330_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
