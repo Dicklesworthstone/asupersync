@@ -26,11 +26,12 @@ fn array<'a>(value: &'a JsonValue, key: &str) -> &'a Vec<JsonValue> {
         .unwrap_or_else(|| panic!("{key} must be an array"))
 }
 
-fn object<'a>(value: &'a JsonValue, key: &str) -> &'a serde_json::Map<String, JsonValue> {
-    value
+fn object<'a>(value: &'a JsonValue, key: &str) -> &'a JsonValue {
+    let v = value
         .get(key)
-        .and_then(JsonValue::as_object)
-        .unwrap_or_else(|| panic!("{key} must be an object"))
+        .unwrap_or_else(|| panic!("{key} must be present"));
+    assert!(v.is_object(), "{key} must be an object");
+    v
 }
 
 fn string<'a>(value: &'a JsonValue, key: &str) -> &'a str {
