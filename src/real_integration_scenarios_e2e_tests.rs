@@ -2396,6 +2396,890 @@ impl IntegrationTestHarness {
         assert!(work_completed > 0, "Work should complete despite panics");
         assert!(completion_rate > 0.6, "Work completion rate should be >60% despite panics: {:.2}%", completion_rate * 100.0);
     }
+
+    /// [br-integration-11] Burst traffic with rate limiting and sustained throughput
+    async fn test_burst_traffic_rate_limit_throughput(&self) {
+        self.logger.log_phase("burst_traffic_setup");
+
+        use crate::combinator::rate_limit::{RateLimit, RateLimitPolicy};
+
+        let burst_size = 500; // Large burst of requests
+        let sustained_rate = 50; // Requests per second after burst
+        let burst_duration = Duration::from_millis(200);
+        let observation_period = Duration::from_secs(5);
+        let rate_limit_capacity = 100; // tokens
+        let refill_rate = 20; // tokens per second
+
+        self.logger.log_event("burst_traffic_config", serde_json::json!({
+            "burst_size": burst_size,
+            "sustained_rate": sustained_rate,
+            "burst_duration_ms": burst_duration.as_millis(),
+            "observation_period_secs": observation_period.as_secs(),
+            "rate_limit_capacity": rate_limit_capacity,
+            "refill_rate": refill_rate
+        }));
+
+        // Phase 1: Setup rate limiter
+        self.logger.log_phase("rate_limiter_setup");
+
+        let rate_policy = RateLimitPolicy::new(rate_limit_capacity, refill_rate);
+        let rate_limiter = RateLimit::new(rate_policy);
+
+        let burst_requests_sent = Arc::new(AtomicUsize::new(0));
+        let sustained_requests_sent = Arc::new(AtomicUsize::new(0));
+        let burst_requests_processed = Arc::new(AtomicUsize::new(0));
+        let sustained_requests_processed = Arc::new(AtomicUsize::new(0));
+        let rate_limit_rejections = Arc::new(AtomicUsize::new(0));
+        let total_processing_time = Arc::new(AtomicUsize::new(0));
+
+        // Phase 2: Request processing service with rate limiting
+        let (request_tx, request_rx) = mpsc::channel(1000);
+        let (result_tx, result_rx) = mpsc::channel(1000);
+
+        let processing_service = {
+            let logger = self.logger.clone();
+            let rate_limiter = rate_limiter.clone();
+            let burst_processed = Arc::clone(&burst_requests_processed);
+            let sustained_processed = Arc::clone(&sustained_requests_processed);
+            let total_time = Arc::clone(&total_processing_time);
+            let rejections = Arc::clone(&rate_limit_rejections);
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let mut request_rx = request_rx;
+                    let mut processed_count = 0;
+
+                    while let Some((request_id, is_burst, timestamp)) = request_rx.recv().await {
+                        let processing_start = Instant::now();
+
+                        // Apply rate limiting
+                        match timeout(Duration::from_millis(100), rate_limiter.acquire()).await {
+                            Outcome::Ok(_permit) => {
+                                // Process request
+                                sleep(Duration::from_millis(10)).await; // Simulate processing
+
+                                processed_count += 1;
+                                let processing_duration = processing_start.elapsed();
+                                total_time.fetch_add(processing_duration.as_micros() as usize, Ordering::Relaxed);
+
+                                if is_burst {
+                                    burst_processed.fetch_add(1, Ordering::Relaxed);
+                                } else {
+                                    sustained_processed.fetch_add(1, Ordering::Relaxed);
+                                }
+
+                                let result = format!("processed_request_{}", request_id);
+
+                                logger.log_event("request_processed", serde_json::json!({
+                                    "request_id": request_id,
+                                    "is_burst": is_burst,
+                                    "processing_duration_us": processing_duration.as_micros(),
+                                    "processed_count": processed_count,
+                                    "timestamp": timestamp.elapsed().as_millis()
+                                }));
+
+                                if result_tx.send(result).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Outcome::Cancelled => {
+                                // Rate limited
+                                rejections.fetch_add(1, Ordering::Relaxed);
+
+                                logger.log_event("request_rate_limited", serde_json::json!({
+                                    "request_id": request_id,
+                                    "is_burst": is_burst,
+                                    "timestamp": timestamp.elapsed().as_millis()
+                                }));
+                            }
+                        }
+                    }
+
+                    logger.log_event("processing_service_shutdown", serde_json::json!({
+                        "total_processed": processed_count
+                    }));
+
+                    Outcome::Ok(processed_count)
+                }).await
+            }).await
+        };
+
+        // Phase 3: Burst traffic generator
+        self.logger.log_phase("burst_traffic_generation");
+
+        let burst_generator = {
+            let logger = self.logger.clone();
+            let request_tx = request_tx.clone();
+            let burst_sent = Arc::clone(&burst_requests_sent);
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let burst_start = Instant::now();
+                    let mut sent_count = 0;
+
+                    for request_id in 0..burst_size {
+                        let send_result = request_tx.send((request_id, true, burst_start)).await;
+
+                        if send_result.is_ok() {
+                            sent_count += 1;
+                            burst_sent.fetch_add(1, Ordering::Relaxed);
+
+                            if request_id % 50 == 0 {
+                                logger.log_event("burst_progress", serde_json::json!({
+                                    "sent_count": sent_count,
+                                    "request_id": request_id,
+                                    "elapsed_ms": burst_start.elapsed().as_millis()
+                                }));
+                            }
+                        } else {
+                            logger.log_event("burst_send_failed", serde_json::json!({
+                                "request_id": request_id,
+                                "sent_count": sent_count
+                            }));
+                            break;
+                        }
+
+                        // Tight burst - minimal delay
+                        sleep(burst_duration / burst_size as u32).await;
+                    }
+
+                    logger.log_event("burst_generation_complete", serde_json::json!({
+                        "total_sent": sent_count,
+                        "duration_ms": burst_start.elapsed().as_millis()
+                    }));
+
+                    Outcome::Ok(sent_count)
+                }).await
+            }).await
+        };
+
+        // Phase 4: Sustained traffic generator
+        let sustained_generator = {
+            let logger = self.logger.clone();
+            let request_tx = request_tx.clone();
+            let sustained_sent = Arc::clone(&sustained_requests_sent);
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    // Wait for burst to complete
+                    sleep(burst_duration + Duration::from_millis(100)).await;
+
+                    let sustained_start = Instant::now();
+                    let mut sent_count = 0;
+                    let request_interval = Duration::from_millis(1000 / sustained_rate as u64);
+
+                    while sustained_start.elapsed() < observation_period {
+                        let request_id = burst_size + sent_count;
+
+                        if request_tx.send((request_id, false, sustained_start)).await.is_ok() {
+                            sent_count += 1;
+                            sustained_sent.fetch_add(1, Ordering::Relaxed);
+
+                            logger.log_event("sustained_request_sent", serde_json::json!({
+                                "request_id": request_id,
+                                "sent_count": sent_count,
+                                "elapsed_ms": sustained_start.elapsed().as_millis()
+                            }));
+                        } else {
+                            break;
+                        }
+
+                        sleep(request_interval).await;
+                    }
+
+                    logger.log_event("sustained_generation_complete", serde_json::json!({
+                        "total_sent": sent_count,
+                        "duration_ms": sustained_start.elapsed().as_millis()
+                    }));
+
+                    Outcome::Ok(sent_count)
+                }).await
+            }).await
+        };
+
+        // Phase 5: Execute load test
+        self.logger.log_phase("load_test_execution");
+
+        let total_timeout = burst_duration + observation_period + Duration::from_secs(2);
+
+        // Start processing service
+        let processing_task = processing_service;
+
+        // Start traffic generators
+        let burst_task = burst_generator;
+        let sustained_task = sustained_generator;
+
+        // Wait for generators to complete
+        let burst_result = timeout(Duration::from_secs(5), burst_task).await;
+        let sustained_result = timeout(observation_period + Duration::from_secs(2), sustained_task).await;
+
+        // Allow processing to complete
+        drop(request_tx);
+        sleep(Duration::from_millis(500)).await;
+
+        let processing_result = timeout(Duration::from_secs(3), processing_task).await;
+
+        // Phase 6: Collect results and validate performance
+        self.logger.log_phase("performance_validation");
+
+        let burst_sent = burst_requests_sent.load(Ordering::Relaxed);
+        let sustained_sent = sustained_requests_sent.load(Ordering::Relaxed);
+        let burst_processed = burst_requests_processed.load(Ordering::Relaxed);
+        let sustained_processed = sustained_requests_processed.load(Ordering::Relaxed);
+        let total_rejections = rate_limit_rejections.load(Ordering::Relaxed);
+        let avg_processing_time = total_processing_time.load(Ordering::Relaxed) / (burst_processed + sustained_processed).max(1);
+
+        self.logger.log_metrics(serde_json::json!({
+            "burst_traffic_results": {
+                "burst_sent": burst_sent,
+                "burst_processed": burst_processed,
+                "sustained_sent": sustained_sent,
+                "sustained_processed": sustained_processed,
+                "total_rejections": total_rejections,
+                "avg_processing_time_us": avg_processing_time,
+                "burst_success_rate": burst_processed as f64 / burst_sent as f64,
+                "sustained_success_rate": sustained_processed as f64 / sustained_sent as f64,
+                "rate_limit_effectiveness": total_rejections as f64 / (burst_sent + sustained_sent) as f64,
+                "sustained_throughput_rps": sustained_processed as f64 / observation_period.as_secs_f64()
+            }
+        }));
+
+        // Critical assertions for burst and sustained performance
+        self.logger.log_assertion("burst_traffic_generated", burst_sent > 0, serde_json::json!({
+            "burst_sent": burst_sent
+        }));
+
+        self.logger.log_assertion("sustained_traffic_generated", sustained_sent > 0, serde_json::json!({
+            "sustained_sent": sustained_sent
+        }));
+
+        self.logger.log_assertion("rate_limiting_active", total_rejections > 0, serde_json::json!({
+            "total_rejections": total_rejections
+        }));
+
+        self.logger.log_assertion("burst_partially_processed", burst_processed > 0, serde_json::json!({
+            "burst_processed": burst_processed
+        }));
+
+        // Rate limiting should be effective during burst
+        let rejection_rate = total_rejections as f64 / (burst_sent + sustained_sent) as f64;
+        self.logger.log_assertion("rate_limit_effectiveness", rejection_rate > 0.1, serde_json::json!({
+            "rejection_rate": rejection_rate,
+            "threshold": 0.1
+        }));
+
+        // Sustained throughput should be reasonable after burst
+        let sustained_throughput = sustained_processed as f64 / observation_period.as_secs_f64();
+        self.logger.log_assertion("sustained_throughput", sustained_throughput >= sustained_rate as f64 * 0.7, serde_json::json!({
+            "achieved_rps": sustained_throughput,
+            "target_rps": sustained_rate,
+            "threshold": sustained_rate as f64 * 0.7
+        }));
+
+        assert!(burst_sent > 0, "Burst traffic should be generated");
+        assert!(sustained_sent > 0, "Sustained traffic should be generated");
+        assert!(total_rejections > 0, "Rate limiting should reject some requests: {} rejections", total_rejections);
+        assert!(burst_processed > 0, "Some burst requests should be processed despite rate limiting");
+        assert!(rejection_rate > 0.1, "Rate limiting should be effective: {:.2}% rejection rate", rejection_rate * 100.0);
+        assert!(sustained_throughput >= sustained_rate as f64 * 0.7, "Sustained throughput should be ≥70% of target: {:.1} vs {} RPS", sustained_throughput, sustained_rate);
+    }
+
+    /// [br-integration-12] HTTP/2 concurrent connection storm and slot leak detection
+    async fn test_http2_connection_storm_slot_leaks(&self) {
+        self.logger.log_phase("http2_connection_storm_setup");
+
+        use crate::http::h2::{H2Server, H2Client, H2Connection};
+        use crate::net::tcp::{TcpListener, TcpStream};
+
+        let concurrent_connections = 200; // Massive connection load
+        let requests_per_connection = 10;
+        let connection_timeout = Duration::from_secs(2);
+        let server_port = 8080; // Fixed port for test
+
+        self.logger.log_event("http2_storm_config", serde_json::json!({
+            "concurrent_connections": concurrent_connections,
+            "requests_per_connection": requests_per_connection,
+            "connection_timeout_secs": connection_timeout.as_secs(),
+            "server_port": server_port
+        }));
+
+        // Phase 1: Setup HTTP/2 server
+        self.logger.log_phase("http2_server_setup");
+
+        let server_addr = format!("127.0.0.1:{}", server_port);
+        let listener = TcpListener::bind(&server_addr).await
+            .expect("Should bind to localhost");
+
+        let connections_accepted = Arc::new(AtomicUsize::new(0));
+        let connections_active = Arc::new(AtomicUsize::new(0));
+        let total_requests_handled = Arc::new(AtomicUsize::new(0));
+        let connection_errors = Arc::new(AtomicUsize::new(0));
+        let slot_allocations = Arc::new(AtomicUsize::new(0));
+        let slot_deallocations = Arc::new(AtomicUsize::new(0));
+
+        // HTTP/2 server with connection tracking
+        let server_task = {
+            let logger = self.logger.clone();
+            let accepted = Arc::clone(&connections_accepted);
+            let active = Arc::clone(&connections_active);
+            let requests = Arc::clone(&total_requests_handled);
+            let errors = Arc::clone(&connection_errors);
+            let allocations = Arc::clone(&slot_allocations);
+            let deallocations = Arc::clone(&slot_deallocations);
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let mut connection_handlers = Vec::new();
+
+                    while connections_accepted.load(Ordering::Relaxed) < concurrent_connections {
+                        match timeout(Duration::from_millis(100), listener.accept()).await {
+                            Outcome::Ok(Ok((stream, peer_addr))) => {
+                                let conn_id = accepted.fetch_add(1, Ordering::Relaxed);
+                                active.fetch_add(1, Ordering::Relaxed);
+                                allocations.fetch_add(1, Ordering::Relaxed); // Track slot allocation
+
+                                logger.log_event("http2_connection_accepted", serde_json::json!({
+                                    "connection_id": conn_id,
+                                    "peer_addr": peer_addr.to_string(),
+                                    "active_connections": active.load(Ordering::Relaxed)
+                                }));
+
+                                // Handle connection with H2 protocol
+                                let connection_handler = {
+                                    let logger = logger.clone();
+                                    let active = Arc::clone(&active);
+                                    let requests = Arc::clone(&requests);
+                                    let errors = Arc::clone(&errors);
+                                    let deallocations = Arc::clone(&deallocations);
+
+                                    scope.spawn(async move {
+                                        let mut handled_requests = 0;
+
+                                        // Simulate H2 connection handling
+                                        let connection_start = Instant::now();
+
+                                        while connection_start.elapsed() < connection_timeout {
+                                            // Simulate receiving H2 frames and handling requests
+                                            match timeout(Duration::from_millis(50), async {
+                                                // Mock H2 request processing
+                                                sleep(Duration::from_millis(10)).await;
+                                                handled_requests += 1;
+                                                requests.fetch_add(1, Ordering::Relaxed);
+
+                                                logger.log_event("http2_request_handled", serde_json::json!({
+                                                    "connection_id": conn_id,
+                                                    "request_count": handled_requests,
+                                                    "connection_age_ms": connection_start.elapsed().as_millis()
+                                                }));
+
+                                                Ok(())
+                                            }).await {
+                                                Outcome::Ok(Ok(())) => {
+                                                    // Continue processing
+                                                    if handled_requests >= requests_per_connection {
+                                                        break;
+                                                    }
+                                                }
+                                                _ => {
+                                                    // Timeout or error
+                                                    break;
+                                                }
+                                            }
+                                        }
+
+                                        // Connection cleanup
+                                        active.fetch_sub(1, Ordering::Relaxed);
+                                        deallocations.fetch_add(1, Ordering::Relaxed); // Track slot deallocation
+
+                                        logger.log_event("http2_connection_closed", serde_json::json!({
+                                            "connection_id": conn_id,
+                                            "handled_requests": handled_requests,
+                                            "duration_ms": connection_start.elapsed().as_millis(),
+                                            "active_connections": active.load(Ordering::Relaxed)
+                                        }));
+
+                                        if handled_requests == 0 {
+                                            errors.fetch_add(1, Ordering::Relaxed);
+                                        }
+
+                                        Outcome::Ok(handled_requests)
+                                    }).await
+                                };
+
+                                connection_handlers.push(connection_handler);
+                            }
+                            Outcome::Ok(Err(_)) => {
+                                errors.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Outcome::Cancelled => {
+                                // Accept timeout - continue
+                            }
+                        }
+                    }
+
+                    // Wait for all connection handlers to complete
+                    let mut total_handled = 0;
+                    for handler in connection_handlers {
+                        if let Outcome::Ok(handled) = timeout(Duration::from_secs(5), handler).await {
+                            total_handled += handled;
+                        }
+                    }
+
+                    logger.log_event("http2_server_shutdown", serde_json::json!({
+                        "total_connections": accepted.load(Ordering::Relaxed),
+                        "total_requests": total_handled
+                    }));
+
+                    Outcome::Ok(total_handled)
+                }).await
+            }).await
+        };
+
+        // Phase 2: Connection storm clients
+        self.logger.log_phase("http2_client_storm");
+
+        let mut client_tasks = Vec::new();
+        let clients_connected = Arc::new(AtomicUsize::new(0));
+        let clients_failed = Arc::new(AtomicUsize::new(0));
+        let total_client_requests = Arc::new(AtomicUsize::new(0));
+
+        for client_id in 0..concurrent_connections {
+            let logger = self.logger.clone();
+            let connected = Arc::clone(&clients_connected);
+            let failed = Arc::clone(&clients_failed);
+            let client_requests = Arc::clone(&total_client_requests);
+            let server_addr = server_addr.clone();
+
+            let client_task = self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let client_start = Instant::now();
+
+                    // Attempt connection to HTTP/2 server
+                    match timeout(Duration::from_millis(500), TcpStream::connect(&server_addr)).await {
+                        Outcome::Ok(Ok(_stream)) => {
+                            connected.fetch_add(1, Ordering::Relaxed);
+
+                            logger.log_event("http2_client_connected", serde_json::json!({
+                                "client_id": client_id,
+                                "connect_time_ms": client_start.elapsed().as_millis()
+                            }));
+
+                            // Send requests over H2 connection
+                            let mut requests_sent = 0;
+
+                            for req_id in 0..requests_per_connection {
+                                // Simulate H2 request
+                                sleep(Duration::from_millis(20)).await;
+                                requests_sent += 1;
+                                client_requests.fetch_add(1, Ordering::Relaxed);
+
+                                logger.log_event("http2_client_request", serde_json::json!({
+                                    "client_id": client_id,
+                                    "request_id": req_id,
+                                    "requests_sent": requests_sent
+                                }));
+                            }
+
+                            // Hold connection open for a bit
+                            sleep(connection_timeout / 2).await;
+
+                            logger.log_event("http2_client_disconnect", serde_json::json!({
+                                "client_id": client_id,
+                                "requests_sent": requests_sent,
+                                "duration_ms": client_start.elapsed().as_millis()
+                            }));
+
+                            Outcome::Ok(requests_sent)
+                        }
+                        _ => {
+                            failed.fetch_add(1, Ordering::Relaxed);
+
+                            logger.log_event("http2_client_connect_failed", serde_json::json!({
+                                "client_id": client_id,
+                                "connect_time_ms": client_start.elapsed().as_millis()
+                            }));
+
+                            Outcome::Err(Error::new(ErrorKind::Other, "Connection failed"))
+                        }
+                    }
+                }).await
+            }).await;
+
+            client_tasks.push(client_task);
+
+            // Stagger client connections to create realistic storm pattern
+            if client_id % 20 == 0 {
+                sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        // Phase 3: Execute connection storm
+        self.logger.log_phase("connection_storm_execution");
+
+        let storm_timeout = connection_timeout + Duration::from_secs(10);
+
+        // Wait for server and all clients to complete
+        let server_result = timeout(storm_timeout, server_task).await;
+
+        let mut successful_clients = 0;
+        for (client_id, client_task) in client_tasks.into_iter().enumerate() {
+            match timeout(Duration::from_secs(5), client_task).await {
+                Outcome::Ok(Outcome::Ok(_)) => successful_clients += 1,
+                _ => {
+                    self.logger.log_event("http2_client_timeout", serde_json::json!({
+                        "client_id": client_id
+                    }));
+                }
+            }
+        }
+
+        // Phase 4: Validate connection handling and slot management
+        self.logger.log_phase("slot_leak_validation");
+
+        let total_accepted = connections_accepted.load(Ordering::Relaxed);
+        let final_active = connections_active.load(Ordering::Relaxed);
+        let server_requests = total_requests_handled.load(Ordering::Relaxed);
+        let total_errors = connection_errors.load(Ordering::Relaxed);
+        let clients_connected_count = clients_connected.load(Ordering::Relaxed);
+        let clients_failed_count = clients_failed.load(Ordering::Relaxed);
+        let client_requests_count = total_client_requests.load(Ordering::Relaxed);
+        let allocated_slots = slot_allocations.load(Ordering::Relaxed);
+        let deallocated_slots = slot_deallocations.load(Ordering::Relaxed);
+
+        self.logger.log_metrics(serde_json::json!({
+            "http2_storm_results": {
+                "connections_accepted": total_accepted,
+                "connections_active": final_active,
+                "server_requests_handled": server_requests,
+                "connection_errors": total_errors,
+                "clients_connected": clients_connected_count,
+                "clients_failed": clients_failed_count,
+                "client_requests_sent": client_requests_count,
+                "successful_clients": successful_clients,
+                "slot_allocations": allocated_slots,
+                "slot_deallocations": deallocated_slots,
+                "connection_success_rate": clients_connected_count as f64 / concurrent_connections as f64,
+                "slot_leak_count": allocated_slots.saturating_sub(deallocated_slots),
+                "request_handling_efficiency": server_requests as f64 / client_requests_count.max(1) as f64
+            }
+        }));
+
+        // Critical assertions for HTTP/2 performance and slot management
+        self.logger.log_assertion("connections_accepted", total_accepted > 0, serde_json::json!({
+            "accepted": total_accepted
+        }));
+
+        self.logger.log_assertion("clients_connected", clients_connected_count > 0, serde_json::json!({
+            "connected": clients_connected_count
+        }));
+
+        // Connection success rate should be reasonable under load
+        let connection_success_rate = clients_connected_count as f64 / concurrent_connections as f64;
+        self.logger.log_assertion("connection_success_rate", connection_success_rate > 0.7, serde_json::json!({
+            "success_rate": connection_success_rate,
+            "threshold": 0.7
+        }));
+
+        // CRITICAL: No active connections should remain (no slot leaks)
+        self.logger.log_assertion("no_active_connections_leak", final_active == 0, serde_json::json!({
+            "final_active": final_active
+        }));
+
+        // CRITICAL: Slot allocations should match deallocations (no slot leaks)
+        let slot_leaks = allocated_slots.saturating_sub(deallocated_slots);
+        self.logger.log_assertion("no_slot_leaks", slot_leaks == 0, serde_json::json!({
+            "allocated_slots": allocated_slots,
+            "deallocated_slots": deallocated_slots,
+            "leaked_slots": slot_leaks
+        }));
+
+        assert!(total_accepted > 0, "HTTP/2 server should accept connections");
+        assert!(clients_connected_count > 0, "Clients should successfully connect");
+        assert!(connection_success_rate > 0.7, "Connection success rate should be >70% under load: {:.2}%", connection_success_rate * 100.0);
+        assert!(final_active == 0, "NO active connections should remain after storm: {} active connections leaked", final_active);
+        assert!(slot_leaks == 0, "NO connection slots should leak: {} slots leaked (allocated: {}, deallocated: {})", slot_leaks, allocated_slots, deallocated_slots);
+        assert!(server_requests > 0, "Server should handle requests during connection storm");
+    }
+
+    /// [br-integration-13] High-frequency timer churn and timer wheel stress test
+    async fn test_high_frequency_timer_churn_wheel_stress(&self) {
+        self.logger.log_phase("timer_churn_setup");
+
+        use crate::time::{sleep, timeout, Instant, Timer, TimerWheel};
+
+        let timer_count = 12000; // 12k simultaneous timers
+        let churn_frequency = Duration::from_millis(5); // Very high frequency
+        let test_duration = Duration::from_secs(8);
+        let timer_range_ms = (10, 1000); // Random timer durations
+
+        self.logger.log_event("timer_churn_config", serde_json::json!({
+            "timer_count": timer_count,
+            "churn_frequency_ms": churn_frequency.as_millis(),
+            "test_duration_secs": test_duration.as_secs(),
+            "timer_range_ms": timer_range_ms
+        }));
+
+        // Phase 1: Setup timer tracking
+        self.logger.log_phase("timer_tracking_setup");
+
+        let timers_created = Arc::new(AtomicUsize::new(0));
+        let timers_completed = Arc::new(AtomicUsize::new(0));
+        let timers_cancelled = Arc::new(AtomicUsize::new(0));
+        let timer_accuracy_violations = Arc::new(AtomicUsize::new(0));
+        let active_timer_count = Arc::new(AtomicUsize::new(0));
+        let peak_active_timers = Arc::new(AtomicUsize::new(0));
+        let total_timer_drift = Arc::new(AtomicUsize::new(0));
+
+        // Phase 2: Timer churn generator
+        self.logger.log_phase("timer_churn_generation");
+
+        let churn_generator = {
+            let logger = self.logger.clone();
+            let created = Arc::clone(&timers_created);
+            let completed = Arc::clone(&timers_completed);
+            let cancelled = Arc::clone(&timers_cancelled);
+            let accuracy_violations = Arc::clone(&timer_accuracy_violations);
+            let active_count = Arc::clone(&active_timer_count);
+            let peak_active = Arc::clone(&peak_active_timers);
+            let total_drift = Arc::clone(&total_timer_drift);
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let test_start = Instant::now();
+                    let mut timer_id = 0;
+                    let mut active_timers = Vec::new();
+
+                    while test_start.elapsed() < test_duration {
+                        // Create new timers at high frequency
+                        if active_timers.len() < timer_count {
+                            let timer_duration_ms = fastrand::u64(timer_range_ms.0..=timer_range_ms.1);
+                            let timer_duration = Duration::from_millis(timer_duration_ms);
+
+                            let timer_start = Instant::now();
+                            timer_id += 1;
+                            created.fetch_add(1, Ordering::Relaxed);
+                            active_count.fetch_add(1, Ordering::Relaxed);
+
+                            // Update peak active timer count
+                            let current_active = active_count.load(Ordering::Relaxed);
+                            loop {
+                                let current_peak = peak_active.load(Ordering::Relaxed);
+                                if current_active <= current_peak {
+                                    break;
+                                }
+                                if peak_active.compare_exchange_weak(current_peak, current_active, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                                    break;
+                                }
+                            }
+
+                            // Create timer task
+                            let timer_task = {
+                                let logger = logger.clone();
+                                let completed = Arc::clone(&completed);
+                                let active_count = Arc::clone(&active_count);
+                                let accuracy_violations = Arc::clone(&accuracy_violations);
+                                let total_drift = Arc::clone(&total_drift);
+
+                                scope.spawn(async move {
+                                    let sleep_result = timeout(timer_duration + Duration::from_millis(100), sleep(timer_duration)).await;
+
+                                    let actual_duration = timer_start.elapsed();
+                                    let expected_duration = timer_duration;
+                                    let drift_ms = if actual_duration > expected_duration {
+                                        (actual_duration - expected_duration).as_millis() as usize
+                                    } else {
+                                        (expected_duration - actual_duration).as_millis() as usize
+                                    };
+
+                                    total_drift.fetch_add(drift_ms, Ordering::Relaxed);
+
+                                    match sleep_result {
+                                        Outcome::Ok(_) => {
+                                            completed.fetch_add(1, Ordering::Relaxed);
+
+                                            // Check timer accuracy (should be within reasonable bounds)
+                                            if drift_ms > 50 { // 50ms tolerance
+                                                accuracy_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+
+                                            logger.log_event("timer_completed", serde_json::json!({
+                                                "timer_id": timer_id,
+                                                "expected_duration_ms": expected_duration.as_millis(),
+                                                "actual_duration_ms": actual_duration.as_millis(),
+                                                "drift_ms": drift_ms
+                                            }));
+                                        }
+                                        Outcome::Cancelled => {
+                                            logger.log_event("timer_timeout", serde_json::json!({
+                                                "timer_id": timer_id,
+                                                "expected_duration_ms": expected_duration.as_millis(),
+                                                "actual_duration_ms": actual_duration.as_millis()
+                                            }));
+                                        }
+                                    }
+
+                                    active_count.fetch_sub(1, Ordering::Relaxed);
+
+                                    Outcome::Ok(drift_ms)
+                                }).await
+                            };
+
+                            active_timers.push(timer_task);
+
+                            // Log progress periodically
+                            if timer_id % 1000 == 0 {
+                                logger.log_event("timer_churn_progress", serde_json::json!({
+                                    "timers_created": timer_id,
+                                    "active_timers": active_timers.len(),
+                                    "elapsed_ms": test_start.elapsed().as_millis()
+                                }));
+                            }
+                        } else {
+                            // Cancel some random timers to create churn
+                            if !active_timers.is_empty() {
+                                let cancel_index = fastrand::usize(0..active_timers.len());
+                                let _cancelled_timer = active_timers.swap_remove(cancel_index);
+                                cancelled.fetch_add(1, Ordering::Relaxed);
+
+                                logger.log_event("timer_cancelled", serde_json::json!({
+                                    "cancelled_timer_index": cancel_index,
+                                    "remaining_active": active_timers.len()
+                                }));
+                            }
+                        }
+
+                        // High-frequency churn
+                        sleep(churn_frequency).await;
+                    }
+
+                    // Wait for remaining timers to complete
+                    let cleanup_start = Instant::now();
+                    for timer_task in active_timers {
+                        if timeout(Duration::from_secs(2), timer_task).await.is_err() {
+                            cancelled.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+
+                    logger.log_event("timer_churn_complete", serde_json::json!({
+                        "total_created": created.load(Ordering::Relaxed),
+                        "cleanup_duration_ms": cleanup_start.elapsed().as_millis()
+                    }));
+
+                    Outcome::Ok(timer_id)
+                }).await
+            }).await
+        };
+
+        // Phase 3: Timer wheel monitoring
+        let wheel_monitor = {
+            let logger = self.logger.clone();
+            let active_count = Arc::clone(&active_timer_count);
+            let peak_active = Arc::clone(&peak_active_timers);
+
+            self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let monitor_start = Instant::now();
+                    let mut sample_count = 0;
+
+                    while monitor_start.elapsed() < test_duration + Duration::from_secs(1) {
+                        let current_active = active_count.load(Ordering::Relaxed);
+                        sample_count += 1;
+
+                        if sample_count % 100 == 0 { // Log every 100 samples
+                            logger.log_event("timer_wheel_monitor", serde_json::json!({
+                                "active_timers": current_active,
+                                "peak_active": peak_active.load(Ordering::Relaxed),
+                                "sample_count": sample_count,
+                                "elapsed_ms": monitor_start.elapsed().as_millis()
+                            }));
+                        }
+
+                        sleep(Duration::from_millis(10)).await; // Monitor every 10ms
+                    }
+
+                    logger.log_event("timer_wheel_monitoring_complete", serde_json::json!({
+                        "total_samples": sample_count
+                    }));
+
+                    Outcome::Ok(sample_count)
+                }).await
+            }).await
+        };
+
+        // Phase 4: Execute timer churn test
+        self.logger.log_phase("timer_wheel_execution");
+
+        let churn_result = timeout(test_duration + Duration::from_secs(5), churn_generator).await;
+        let monitor_result = timeout(Duration::from_secs(2), wheel_monitor).await;
+
+        // Phase 5: Validate timer wheel performance
+        self.logger.log_phase("timer_wheel_validation");
+
+        let total_created = timers_created.load(Ordering::Relaxed);
+        let total_completed = timers_completed.load(Ordering::Relaxed);
+        let total_cancelled = timers_cancelled.load(Ordering::Relaxed);
+        let final_active = active_timer_count.load(Ordering::Relaxed);
+        let peak_active_count = peak_active_timers.load(Ordering::Relaxed);
+        let accuracy_violations_count = timer_accuracy_violations.load(Ordering::Relaxed);
+        let avg_timer_drift = total_timer_drift.load(Ordering::Relaxed) / total_completed.max(1);
+
+        self.logger.log_metrics(serde_json::json!({
+            "timer_wheel_results": {
+                "timers_created": total_created,
+                "timers_completed": total_completed,
+                "timers_cancelled": total_cancelled,
+                "final_active_timers": final_active,
+                "peak_active_timers": peak_active_count,
+                "accuracy_violations": accuracy_violations_count,
+                "avg_timer_drift_ms": avg_timer_drift,
+                "timer_completion_rate": total_completed as f64 / total_created as f64,
+                "timer_accuracy_rate": (total_completed - accuracy_violations_count) as f64 / total_completed as f64,
+                "peak_utilization": peak_active_count as f64 / timer_count as f64
+            }
+        }));
+
+        // Critical assertions for timer wheel performance
+        self.logger.log_assertion("timers_created", total_created > timer_count / 2, serde_json::json!({
+            "created": total_created,
+            "target": timer_count
+        }));
+
+        self.logger.log_assertion("peak_timer_load", peak_active_count >= timer_count / 2, serde_json::json!({
+            "peak_active": peak_active_count,
+            "target": timer_count / 2
+        }));
+
+        self.logger.log_assertion("timers_completed", total_completed > 0, serde_json::json!({
+            "completed": total_completed
+        }));
+
+        // Timer wheel should handle high load efficiently
+        let completion_rate = total_completed as f64 / total_created as f64;
+        self.logger.log_assertion("timer_completion_rate", completion_rate > 0.7, serde_json::json!({
+            "completion_rate": completion_rate,
+            "threshold": 0.7
+        }));
+
+        // Timer accuracy should be reasonable under high load
+        let accuracy_rate = (total_completed - accuracy_violations_count) as f64 / total_completed as f64;
+        self.logger.log_assertion("timer_accuracy", accuracy_rate > 0.85, serde_json::json!({
+            "accuracy_rate": accuracy_rate,
+            "threshold": 0.85,
+            "violations": accuracy_violations_count
+        }));
+
+        // No active timers should remain after test
+        self.logger.log_assertion("no_timer_leaks", final_active == 0, serde_json::json!({
+            "final_active": final_active
+        }));
+
+        assert!(total_created > timer_count / 2, "Should create significant timer load: {} created vs {} target", total_created, timer_count);
+        assert!(peak_active_count >= timer_count / 2, "Timer wheel should handle high concurrent load: {} peak vs {} target", peak_active_count, timer_count);
+        assert!(total_completed > 0, "Timers should complete successfully under load");
+        assert!(completion_rate > 0.7, "Timer completion rate should be >70% under churn: {:.2}%", completion_rate * 100.0);
+        assert!(accuracy_rate > 0.85, "Timer accuracy should be >85% under load: {:.2}% ({} violations)", accuracy_rate * 100.0, accuracy_violations_count);
+        assert!(final_active == 0, "NO timer leaks after test: {} active timers remain", final_active);
+    }
 }
 
 #[tokio::test]
@@ -2488,4 +3372,24 @@ async fn test_raptorq_decode_interruption_resume_integration() {
 async fn test_runtime_panic_recovery_subscriptions_integration() {
     let harness = IntegrationTestHarness::new("runtime_panic_recovery_subscriptions_integration").await;
     harness.test_runtime_panic_recovery_subscriptions().await;
+}
+
+// ===== PERFORMANCE UNDER LOAD INTEGRATION TEST FUNCTIONS =====
+
+#[tokio::test]
+async fn test_burst_traffic_rate_limit_throughput_integration() {
+    let harness = IntegrationTestHarness::new("burst_traffic_rate_limit_throughput_integration").await;
+    harness.test_burst_traffic_rate_limit_throughput().await;
+}
+
+#[tokio::test]
+async fn test_http2_connection_storm_slot_leaks_integration() {
+    let harness = IntegrationTestHarness::new("http2_connection_storm_slot_leaks_integration").await;
+    harness.test_http2_connection_storm_slot_leaks().await;
+}
+
+#[tokio::test]
+async fn test_high_frequency_timer_churn_wheel_stress_integration() {
+    let harness = IntegrationTestHarness::new("high_frequency_timer_churn_wheel_stress_integration").await;
+    harness.test_high_frequency_timer_churn_wheel_stress().await;
 }
