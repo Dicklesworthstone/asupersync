@@ -386,7 +386,7 @@ mod sqlite_e2e_tests {
     async fn test_real_sqlite_basic_crud_operations() -> Result<(), Box<dyn std::error::Error>> {
         validate_sqlite_e2e_environment()?;
 
-        let runtime = RuntimeBuilder::new().build().await?;
+        let runtime = RuntimeBuilder::new().build()?;
         let cx_builder = CxBuilder::new(&runtime);
         let cx = cx_builder.build();
 
@@ -466,7 +466,7 @@ mod sqlite_e2e_tests {
     async fn test_real_sqlite_transaction_isolation() -> Result<(), Box<dyn std::error::Error>> {
         validate_sqlite_e2e_environment()?;
 
-        let runtime = RuntimeBuilder::new().build().await?;
+        let runtime = RuntimeBuilder::new().build()?;
         let cx_builder = CxBuilder::new(&runtime);
         let cx = cx_builder.build();
 
@@ -541,7 +541,7 @@ mod sqlite_e2e_tests {
     async fn test_real_sqlite_foreign_key_constraints() -> Result<(), Box<dyn std::error::Error>> {
         validate_sqlite_e2e_environment()?;
 
-        let runtime = RuntimeBuilder::new().build().await?;
+        let runtime = RuntimeBuilder::new().build()?;
         let cx_builder = CxBuilder::new(&runtime);
         let cx = cx_builder.build();
 
@@ -609,7 +609,7 @@ mod sqlite_e2e_tests {
     async fn test_real_sqlite_concurrent_access() -> Result<(), Box<dyn std::error::Error>> {
         validate_sqlite_e2e_environment()?;
 
-        let runtime = RuntimeBuilder::new().build().await?;
+        let runtime = RuntimeBuilder::new().build()?;
         let cx_builder = CxBuilder::new(&runtime);
         let cx = cx_builder.build();
 

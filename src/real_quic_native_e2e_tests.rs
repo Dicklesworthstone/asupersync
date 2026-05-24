@@ -341,7 +341,7 @@ mod quic_native_e2e_tests {
     async fn test_real_quic_server_basic_packet_exchange() -> Result<(), Box<dyn std::error::Error>> {
         validate_quic_e2e_environment()?;
 
-        let runtime = RuntimeBuilder::new().build().await?;
+        let runtime = RuntimeBuilder::new().build()?;
         let cx_builder = CxBuilder::new(&runtime);
         let cx = cx_builder.build();
 
@@ -412,7 +412,7 @@ mod quic_native_e2e_tests {
     async fn test_real_quic_server_multiple_connections() -> Result<(), Box<dyn std::error::Error>> {
         validate_quic_e2e_environment()?;
 
-        let runtime = RuntimeBuilder::new().build().await?;
+        let runtime = RuntimeBuilder::new().build()?;
         let cx_builder = CxBuilder::new(&runtime);
         let cx = cx_builder.build();
 
@@ -491,7 +491,7 @@ mod quic_native_e2e_tests {
     async fn test_real_quic_server_graceful_shutdown() -> Result<(), Box<dyn std::error::Error>> {
         validate_quic_e2e_environment()?;
 
-        let runtime = RuntimeBuilder::new().build().await?;
+        let runtime = RuntimeBuilder::new().build()?;
         let cx_builder = CxBuilder::new(&runtime);
         let cx = cx_builder.build();
 
