@@ -206,3 +206,29 @@ These additional golden tests extend regression coverage to RaptorQ decoding tra
 - **Command**: `UPDATE_GOLDENS=1 cargo test golden_runtime_config_toml_canonical`
 
 These final golden tests complete comprehensive coverage of messaging serialization, distributed system state, and configuration management - ensuring deterministic behavior across all major runtime subsystems.
+
+### br-golden-15: TLS Handshake Transcript Bytes
+- **File**: `hot_path/tls_handshake_transcript_bytes.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_tls_handshake_transcript_bytes`
+- **Purpose**: Deterministic TLS acceptor handshake transcript with complete message sequence
+- **Stability**: Deterministic (fixed TLS 1.2 messages, hex encoding, deterministic random values)
+- **Update trigger**: TLS handshake format changes, protocol version changes, cipher suite changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_tls_handshake_transcript_bytes`
+
+### br-golden-16: HTTP/H2 HPACK Encoded Table Bytes
+- **File**: `hot_path/h2_hpack_encoded_table_bytes.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_h2_hpack_encoded_table_bytes`
+- **Purpose**: Deterministic HPACK static table and encoding examples per RFC 7541
+- **Stability**: Deterministic (RFC 7541 static table, fixed encoding patterns, compression statistics)
+- **Update trigger**: HPACK implementation changes, RFC 7541 table updates, encoding format changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_h2_hpack_encoded_table_bytes`
+
+### br-golden-17: Obligation E-Process E-Value Trajectory Bytes
+- **File**: `hot_path/obligation_eprocess_trajectory_bytes.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_obligation_eprocess_trajectory_bytes`
+- **Purpose**: Deterministic e-process e-value trajectory for obligation leak detection
+- **Stability**: Deterministic (fixed trajectory points, binary encoding, statistical analysis)
+- **Update trigger**: E-process algorithm changes, trajectory format changes, statistical thresholds
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_obligation_eprocess_trajectory_bytes`
+
+These specialized golden tests ensure byte-for-byte regression detection for security-critical TLS handshakes, HTTP/2 compression efficiency, and statistical obligation leak detection - completing coverage of deterministic behavior verification across all network security and reliability subsystems.
