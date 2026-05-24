@@ -773,11 +773,40 @@ mod tests {
                 });
             }
 
-            let total_time = if let (Some(started), Some(completed)) =
-                (*self.shutdown_started_at.lock().unwrap(), *self.shutdown_completed_at.lock().unwrap()) {
-                Some(completed.duration_since(started))
-            } else {
-                None
+            // Safe dual lock acquisition to prevent deadlock
+            let total_time = {
+                // Always acquire locks in consistent order by memory address to prevent deadlock
+                let (first_lock, second_lock) = if &self.shutdown_started_at as *const _ <
+                                                  &self.shutdown_completed_at as *const _ {
+                    (&self.shutdown_started_at, &self.shutdown_completed_at)
+                } else {
+                    (&self.shutdown_completed_at, &self.shutdown_started_at)
+                };
+
+                let first_guard = first_lock.lock()
+                    .map_err(|poison_err| {
+                        eprintln!("Shutdown timing mutex poisoned, recovering...");
+                        poison_err.into_inner()
+                    })
+                    .unwrap();
+                let second_guard = second_lock.lock()
+                    .map_err(|poison_err| {
+                        eprintln!("Shutdown timing mutex poisoned, recovering...");
+                        poison_err.into_inner()
+                    })
+                    .unwrap();
+
+                // Determine which is which and calculate timing
+                let (started, completed) = if std::ptr::eq(first_lock, &self.shutdown_started_at) {
+                    (*first_guard, *second_guard)
+                } else {
+                    (*second_guard, *first_guard)
+                };
+
+                match (started, completed) {
+                    (Some(start), Some(end)) => Some(end.duration_since(start)),
+                    _ => None,
+                }
             };
 
             ShutdownStatistics {

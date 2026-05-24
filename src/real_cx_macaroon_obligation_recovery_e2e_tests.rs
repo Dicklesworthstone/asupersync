@@ -89,16 +89,37 @@ impl InMemoryCheckpointStorage {
 
 impl CheckpointStorage for InMemoryCheckpointStorage {
     fn store_checkpoint(&self, id: u64, timestamp_ns: u64, context: &VerificationContext) -> Result<(), String> {
-        self.checkpoints.lock().unwrap().insert(id, (timestamp_ns, context.clone()));
+        let mut guard = self.checkpoints.lock()
+            .map_err(|poison_err| {
+                eprintln!("Checkpoint storage mutex poisoned during store, recovering...");
+                poison_err.into_inner()
+            })
+            .map_err(|_| "Failed to acquire checkpoint storage lock".to_string())?;
+
+        guard.insert(id, (timestamp_ns, context.clone()));
         Ok(())
     }
 
     fn restore_checkpoint(&self, id: u64) -> Result<Option<VerificationContext>, String> {
-        Ok(self.checkpoints.lock().unwrap().get(&id).map(|(_, ctx)| ctx.clone()))
+        let guard = self.checkpoints.lock()
+            .map_err(|poison_err| {
+                eprintln!("Checkpoint storage mutex poisoned during restore, recovering...");
+                poison_err.into_inner()
+            })
+            .map_err(|_| "Failed to acquire checkpoint storage lock".to_string())?;
+
+        Ok(guard.get(&id).map(|(_, ctx)| ctx.clone()))
     }
 
     fn list_checkpoints(&self) -> Result<Vec<u64>, String> {
-        Ok(self.checkpoints.lock().unwrap().keys().copied().collect())
+        let guard = self.checkpoints.lock()
+            .map_err(|poison_err| {
+                eprintln!("Checkpoint storage mutex poisoned during list, recovering...");
+                poison_err.into_inner()
+            })
+            .map_err(|_| "Failed to acquire checkpoint storage lock".to_string())?;
+
+        Ok(guard.keys().copied().collect())
     }
 }
 

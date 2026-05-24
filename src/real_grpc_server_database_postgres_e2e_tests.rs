@@ -324,10 +324,23 @@ impl UserService {
             "SELECT user_id, username, email FROM users WHERE user_id = $1"
         };
 
-        // Execute database query with cancellation support
+        // Execute database query with cancellation support - avoid holding lock across async
         let result = {
-            let mut pool = self.db_pool.lock().unwrap();
-            pool.execute_query(cx, sql).await
+            // Acquire connection without holding pool lock across async operation
+            let connection = {
+                let pool = self.db_pool.lock()
+                    .map_err(|_| Status::internal("Database pool mutex poisoned"))?;
+                pool.get_connection()
+                    .map_err(|e| Status::internal(format!("Failed to get connection: {}", e)))?
+            }; // Pool lock released immediately
+
+            // Execute async query without blocking other pool users
+            let query_result = connection.execute_query(cx, sql).await;
+
+            // Return connection to pool (if the pool supports it)
+            // Note: In a real implementation, you'd return the connection here
+
+            query_result
         };
 
         self.increment_stat(|s| s.queries_executed += 1);
