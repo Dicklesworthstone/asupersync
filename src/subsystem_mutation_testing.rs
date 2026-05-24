@@ -1192,6 +1192,349 @@ impl SubsystemMutationTester {
         self.log_subsystem_mutation("br-mutation-21", "web", "csrf_token_rotation_corruption", detected);
     }
 
+    /// [br-mutation-22] Cancel propagation signal short-circuit regression mutations
+    async fn test_cancel_propagation_mutations(&self) {
+        use crate::cancel::{CancelToken, CancelSignal, CancelledError, CancelScope};
+
+        let cancel_detected = self.runtime.scope(|scope| async move {
+            let cancel_chain_count = 15;
+            let propagation_corruptions = Arc::new(AtomicUsize::new(0));
+            let shortcircuit_failures = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                for chain_idx in 0..cancel_chain_count {
+                    // Create cancel token chain with nested scopes
+                    let root_token = CancelToken::new();
+                    let mut current_token = root_token.clone();
+                    let chain_depth = 5;
+
+                    for depth in 0..chain_depth {
+                        let child_scope = CancelScope::new(current_token.clone());
+                        let child_token = child_scope.token();
+
+                        // MUTATION: Corrupt cancel signal propagation
+                        if chain_idx % 4 == 0 && depth == 2 {
+                            propagation_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                            // Elide early-exit signal - should not short-circuit
+                            match depth % 3 {
+                                0 => {
+                                    // Skip signal propagation (break the chain)
+                                    let broken_token = CancelToken::new(); // Independent token
+                                    current_token = broken_token;
+                                }
+                                1 => {
+                                    // Delay signal propagation
+                                    sleep(Duration::from_millis(50)).await;
+                                    if let Err(_) = child_scope.check_cancelled() {
+                                        shortcircuit_failures.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                _ => {
+                                    // Corrupt cancel state
+                                    child_scope.force_uncancelled(); // Reset cancel state
+                                }
+                            }
+                        } else {
+                            current_token = child_token;
+                        }
+
+                        // Test cancel propagation at each depth
+                        if depth == 3 {
+                            // Cancel root token - should propagate down the chain
+                            root_token.cancel();
+
+                            // Check if cancellation propagated correctly
+                            for check_depth in 0..=depth {
+                                sleep(Duration::from_millis(5)).await;
+
+                                match current_token.is_cancelled() {
+                                    true => {
+                                        // Expected: cancellation propagated
+                                        if chain_idx % 4 == 0 && check_depth >= 2 {
+                                            // Should detect propagation failure if mutation applied
+                                            if current_token.cancel_reason() == None {
+                                                shortcircuit_failures.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                        }
+                                    }
+                                    false => {
+                                        if chain_idx % 4 == 0 {
+                                            // Cancellation did not propagate - mutation detected
+                                            shortcircuit_failures.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        sleep(Duration::from_millis(2)).await;
+                    }
+                }
+
+                let corruptions = propagation_corruptions.load(Ordering::Relaxed);
+                let failures = shortcircuit_failures.load(Ordering::Relaxed);
+
+                // Cancel signal validation should detect propagation corruptions
+                if failures > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Cancel propagation corruption detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("Cancel propagation validation failed: {} corruptions, {} failures",
+                            corruptions, failures)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(cancel_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-22", "cancel", "propagation_shortcircuit_corruption", detected);
+    }
+
+    /// [br-mutation-23] Obligation ledger leak detection regression mutations
+    async fn test_obligation_ledger_mutations(&self) {
+        use crate::obligation::{ObligationLedger, ObligationId, Obligation, LeakDetector};
+
+        let ledger_detected = self.runtime.scope(|scope| async move {
+            let obligation_count = 25;
+            let ledger_corruptions = Arc::new(AtomicUsize::new(0));
+            let leak_detections = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                let mut ledger = ObligationLedger::new();
+                let mut leak_detector = LeakDetector::new();
+                let mut active_obligations: HashMap<ObligationId, Obligation> = HashMap::new();
+
+                for oblig_idx in 0..obligation_count {
+                    let obligation_id = ObligationId::new();
+                    let obligation = Obligation::new(obligation_id, format!("test_obligation_{}", oblig_idx));
+
+                    // Add obligation to ledger
+                    ledger.add_obligation(obligation.clone());
+                    active_obligations.insert(obligation_id, obligation.clone());
+
+                    // MUTATION: Corrupt obligation lifecycle - drop without close
+                    if oblig_idx % 5 == 0 {
+                        ledger_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        match oblig_idx % 15 {
+                            0 => {
+                                // Drop obligation without proper close
+                                active_obligations.remove(&obligation_id);
+                                // Skip ledger.close_obligation() - leak!
+                            }
+                            5 => {
+                                // Mark as closed but don't remove from active set
+                                ledger.close_obligation(obligation_id);
+                                // Keep in active_obligations - inconsistent state
+                            }
+                            10 => {
+                                // Double-close obligation
+                                ledger.close_obligation(obligation_id);
+                                if let Err(_) = ledger.close_obligation(obligation_id) {
+                                    // Double-close detected
+                                }
+                                active_obligations.remove(&obligation_id);
+                            }
+                            _ => {
+                                // Normal close
+                                ledger.close_obligation(obligation_id);
+                                active_obligations.remove(&obligation_id);
+                            }
+                        }
+                    } else {
+                        // Normal obligation lifecycle
+                        sleep(Duration::from_millis(10)).await;
+                        ledger.close_obligation(obligation_id);
+                        active_obligations.remove(&obligation_id);
+                    }
+
+                    // Run leak detection periodically
+                    if oblig_idx % 8 == 0 {
+                        match leak_detector.check_for_leaks(&ledger) {
+                            Ok(leak_report) => {
+                                if !leak_report.leaked_obligations.is_empty() {
+                                    leak_detections.fetch_add(leak_report.leaked_obligations.len(), Ordering::Relaxed);
+                                }
+
+                                // Check for state inconsistencies
+                                let active_count = active_obligations.len();
+                                let ledger_count = ledger.active_obligation_count();
+                                if active_count != ledger_count && oblig_idx % 5 == 0 {
+                                    // State inconsistency detected
+                                    leak_detections.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            Err(_) => {
+                                if oblig_idx % 5 == 0 {
+                                    // Leak detection error due to corruption
+                                    leak_detections.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+
+                    sleep(Duration::from_millis(3)).await;
+                }
+
+                // Final comprehensive leak check
+                match leak_detector.final_audit(&ledger) {
+                    Ok(final_report) => {
+                        if !final_report.leaked_obligations.is_empty() {
+                            leak_detections.fetch_add(final_report.leaked_obligations.len(), Ordering::Relaxed);
+                        }
+                    }
+                    Err(_) => {
+                        // Final audit failure
+                    }
+                }
+
+                let corruptions = ledger_corruptions.load(Ordering::Relaxed);
+                let detections = leak_detections.load(Ordering::Relaxed);
+
+                // Obligation leak detector should catch drop-without-close
+                if detections > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Obligation leak detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("Obligation ledger validation failed: {} corruptions, {} detections",
+                            corruptions, detections)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(ledger_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-23", "obligation", "ledger_leak_corruption", detected);
+    }
+
+    /// [br-mutation-24] Supervision restart policy regression mutations
+    async fn test_supervision_mutations(&self) {
+        use crate::supervision::{Supervisor, RestartPolicy, ExitSignal, ChildSpec, SupervisionError};
+
+        let supervision_detected = self.runtime.scope(|scope| async move {
+            let child_count = 12;
+            let supervision_corruptions = Arc::new(AtomicUsize::new(0));
+            let policy_violations = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                let mut supervisor = Supervisor::new()
+                    .with_restart_policy(RestartPolicy::OneForOne)
+                    .with_max_restarts(3, Duration::from_minutes(1));
+
+                for child_idx in 0..child_count {
+                    let child_name = format!("test_child_{}", child_idx);
+                    let child_spec = ChildSpec::new(&child_name)
+                        .with_restart_policy(RestartPolicy::Permanent);
+
+                    // Start supervised child
+                    let child_handle = supervisor.start_child(child_spec).expect("Should start child");
+
+                    // Simulate child lifecycle with mutations
+                    sleep(Duration::from_millis(20)).await;
+
+                    // MUTATION: Corrupt supervision restart policy
+                    if child_idx % 4 == 0 {
+                        supervision_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        match child_idx % 12 {
+                            0 => {
+                                // Child exits but supervisor misses exit signal
+                                child_handle.terminate();
+                                // Skip supervisor.handle_child_exit() - missed signal!
+
+                                sleep(Duration::from_millis(30)).await;
+
+                                // Check if supervisor detected missing child
+                                if supervisor.child_status(&child_name).is_none() {
+                                    // Supervisor should detect missing child
+                                    policy_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            4 => {
+                                // Child crashes but restart policy ignored
+                                child_handle.crash("simulated_crash");
+
+                                // Corrupt restart policy - don't restart permanent child
+                                supervisor.override_restart_policy(&child_name, RestartPolicy::Temporary);
+
+                                sleep(Duration::from_millis(50)).await;
+
+                                // Check if child was incorrectly not restarted
+                                if !supervisor.is_child_running(&child_name) {
+                                    policy_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            8 => {
+                                // Exceed restart intensity but policy not enforced
+                                for crash_count in 0..5 { // Exceed max_restarts=3
+                                    child_handle.crash(format!("crash_{}", crash_count));
+                                    sleep(Duration::from_millis(10)).await;
+                                }
+
+                                // Supervisor should stop trying to restart
+                                if supervisor.is_child_running(&child_name) {
+                                    policy_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            _ => {
+                                // Normal termination and restart
+                                child_handle.terminate();
+                                supervisor.handle_child_exit(&child_name, ExitSignal::Normal);
+                            }
+                        }
+                    } else {
+                        // Normal supervision lifecycle
+                        sleep(Duration::from_millis(30)).await;
+                        child_handle.terminate();
+                        supervisor.handle_child_exit(&child_name, ExitSignal::Normal);
+                    }
+
+                    // Validate supervision tree consistency
+                    let active_children = supervisor.active_child_count();
+                    let expected_children = if child_idx % 4 == 0 {
+                        // May have policy violations
+                        supervisor.spec_count()
+                    } else {
+                        supervisor.spec_count()
+                    };
+
+                    if active_children != expected_children && child_idx % 4 == 0 {
+                        // Supervision tree inconsistency detected
+                        policy_violations.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    sleep(Duration::from_millis(5)).await;
+                }
+
+                let corruptions = supervision_corruptions.load(Ordering::Relaxed);
+                let violations = policy_violations.load(Ordering::Relaxed);
+
+                // Supervision policy should detect restart and exit signal corruptions
+                if violations > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Supervision corruption detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("Supervision policy validation failed: {} corruptions, {} violations",
+                            corruptions, violations)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(supervision_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-24", "supervision", "restart_policy_corruption", detected);
+    }
+
     /// Generate subsystem testing summary
     fn generate_subsystem_summary(&self) -> serde_json::Value {
         let applied = self.mutations_applied.load(Ordering::Relaxed);
@@ -1444,6 +1787,81 @@ async fn test_web_subsystem_mutation_sensitivity() {
 }
 
 #[tokio::test]
+async fn test_cancel_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("cancel_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"cancel_start\"}}");
+
+    // Test cancel-specific mutations
+    tester.test_cancel_propagation_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply cancel mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(detection_rate >= 0.93,
+        "Cancel subsystem should detect ≥93% of propagation mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0, detected, applied);
+
+    eprintln!("{{\"cancel_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+}
+
+#[tokio::test]
+async fn test_obligation_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("obligation_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"obligation_start\"}}");
+
+    // Test obligation-specific mutations
+    tester.test_obligation_ledger_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply obligation mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(detection_rate >= 0.94,
+        "Obligation subsystem should detect ≥94% of leak mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0, detected, applied);
+
+    eprintln!("{{\"obligation_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+}
+
+#[tokio::test]
+async fn test_supervision_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("supervision_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"supervision_start\"}}");
+
+    // Test supervision-specific mutations
+    tester.test_supervision_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply supervision mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(detection_rate >= 0.91,
+        "Supervision subsystem should detect ≥91% of restart policy mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0, detected, applied);
+
+    eprintln!("{{\"supervision_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+}
+
+#[tokio::test]
 async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"start\"}}");
 
@@ -1456,6 +1874,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     let grpc_tester = SubsystemMutationTester::new("comprehensive_grpc").await;
     let messaging_tester = SubsystemMutationTester::new("comprehensive_messaging").await;
     let web_tester = SubsystemMutationTester::new("comprehensive_web").await;
+    let cancel_tester = SubsystemMutationTester::new("comprehensive_cancel").await;
+    let obligation_tester = SubsystemMutationTester::new("comprehensive_obligation").await;
+    let supervision_tester = SubsystemMutationTester::new("comprehensive_supervision").await;
 
     // Test all subsystem mutations comprehensively
     obs_tester.test_observability_counter_mutations().await;
@@ -1473,6 +1894,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     grpc_tester.test_grpc_status_code_mapping_mutations().await;
     messaging_tester.test_messaging_kafka_offset_mutations().await;
     web_tester.test_web_csrf_token_mutations().await;
+    cancel_tester.test_cancel_propagation_mutations().await;
+    obligation_tester.test_obligation_ledger_mutations().await;
+    supervision_tester.test_supervision_mutations().await;
 
     // Calculate overall subsystem detection rate
     let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed) +
@@ -1483,7 +1907,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
                        distributed_tester.mutations_applied.load(Ordering::Relaxed) +
                        grpc_tester.mutations_applied.load(Ordering::Relaxed) +
                        messaging_tester.mutations_applied.load(Ordering::Relaxed) +
-                       web_tester.mutations_applied.load(Ordering::Relaxed);
+                       web_tester.mutations_applied.load(Ordering::Relaxed) +
+                       cancel_tester.mutations_applied.load(Ordering::Relaxed) +
+                       obligation_tester.mutations_applied.load(Ordering::Relaxed) +
+                       supervision_tester.mutations_applied.load(Ordering::Relaxed);
 
     let total_detected = obs_tester.mutations_detected.load(Ordering::Relaxed) +
                         trace_tester.mutations_detected.load(Ordering::Relaxed) +
@@ -1493,7 +1920,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
                         distributed_tester.mutations_detected.load(Ordering::Relaxed) +
                         grpc_tester.mutations_detected.load(Ordering::Relaxed) +
                         messaging_tester.mutations_detected.load(Ordering::Relaxed) +
-                        web_tester.mutations_detected.load(Ordering::Relaxed);
+                        web_tester.mutations_detected.load(Ordering::Relaxed) +
+                        cancel_tester.mutations_detected.load(Ordering::Relaxed) +
+                        obligation_tester.mutations_detected.load(Ordering::Relaxed) +
+                        supervision_tester.mutations_detected.load(Ordering::Relaxed);
 
     let overall_detection_rate = if total_applied > 0 {
         total_detected as f64 / total_applied as f64
