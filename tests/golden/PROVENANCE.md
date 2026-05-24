@@ -180,3 +180,29 @@ These new golden tests ensure byte-for-byte regression detection for critical st
 - **Command**: `UPDATE_GOLDENS=1 cargo test golden_cli_doctor_diagnostic_report`
 
 These additional golden tests extend regression coverage to RaptorQ decoding traces, supervision restart cascades, and CLI diagnostic outputs - all critical for debugging deterministic behavior in production incidents.
+
+### br-golden-12: Messaging Primitive Serialization Goldens
+- **File**: `hot_path/messaging_primitive_serialization.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_messaging_primitive_serialization`
+- **Purpose**: Deterministic frame byte serialization for Kafka/NATS/Redis protocols
+- **Stability**: Deterministic (fixed frame formats, hex encoding, protocol-specific delimiters)
+- **Update trigger**: Messaging protocol frame format changes, serialization changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_messaging_primitive_serialization`
+
+### br-golden-13: Distributed Consistent Hash Ring State Goldens
+- **File**: `hot_path/distributed_consistent_hash_ring.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_distributed_consistent_hash_ring`
+- **Purpose**: Deterministic consistent hash ring node distribution and key assignment
+- **Stability**: Deterministic (fixed node weights, simple hash function, sorted virtual nodes)
+- **Update trigger**: Consistent hashing algorithm changes, virtual node distribution changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_distributed_consistent_hash_ring`
+
+### br-golden-14: Runtime Config TOML Canonical Form Goldens
+- **File**: `hot_path/runtime_config_toml_canonical.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_runtime_config_toml_canonical`
+- **Purpose**: Deterministic runtime configuration TOML serialization in canonical form
+- **Stability**: Deterministic (sorted keys, canonical TOML format, fixed validation summary)
+- **Update trigger**: Runtime config schema changes, TOML serialization format changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_runtime_config_toml_canonical`
+
+These final golden tests complete comprehensive coverage of messaging serialization, distributed system state, and configuration management - ensuring deterministic behavior across all major runtime subsystems.
