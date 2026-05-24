@@ -332,6 +332,10 @@ pub mod real_timer_e2e_tests;
 pub mod real_channel_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_cancel_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_cx_registry_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod raptorq_rfc6330_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
