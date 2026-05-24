@@ -480,6 +480,8 @@ pub mod real_timer_wheel_region_drain_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_tls_acceptor_http_h1_server_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_tls_acceptor_http_h2_connection_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_types_budget_combinator_rate_limit_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_transport_security_authenticated_routing_e2e_tests;
