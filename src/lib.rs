@@ -367,6 +367,8 @@ pub mod real_fs_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_fs_uring_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_fs_uring_io_buf_writer_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_fs_uring_raptorq_encoder_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_fs_vfs_obligation_recovery_e2e_tests;
