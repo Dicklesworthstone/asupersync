@@ -343,9 +343,9 @@ pub mod real_channel_watch_obligation_ledger_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cli_doctor_trace_divergence_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_cli_progress_observability_metrics_integration_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cli_output_trace_streaming_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_cli_progress_observability_metrics_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_codec_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
@@ -494,11 +494,11 @@ pub mod real_plan_scheduler_certificate_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_quic_native_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_raptorq_decision_contract_lab_oracle_loser_drain_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_decoder_stream_backpressure_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_decoder_trace_integrity_integration_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_raptorq_decision_contract_lab_oracle_loser_drain_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
@@ -517,6 +517,8 @@ pub mod real_runtime_blocking_pool_cancel_symbol_e2e_tests;
 pub mod real_runtime_obligation_trace_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_runtime_region_table_runtime_obligation_table_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_runtime_scheduler_priority_trace_event_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_scheduler_priority_promotion_starvation_cancel_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
