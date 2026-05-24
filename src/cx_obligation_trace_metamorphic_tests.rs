@@ -37,7 +37,7 @@
 #[cfg(test)]
 mod tests {
     use crate::cx::macaroon::{Caveat, CaveatPredicate, MacaroonToken};
-    use crate::obligation::leak_check::{ObligationVar, VarState};
+    use crate::obligation::{ObligationVar, VarState};
     use crate::obligation::lyapunov::{LyapunovGovernor, PotentialWeights, StateSnapshot};
     use crate::record::ObligationKind;
     use crate::security::key::AuthKey;
@@ -52,13 +52,18 @@ mod tests {
     // ────────────────────────────────────────────────────────────────────
 
     /// Generate TaskId values for testing.
+    ///
+    /// `TaskId` doesn't impl `From<u64>` — its public test constructor takes
+    /// `(index: u32, generation: u32)`. Split the proptest-supplied u64 into
+    /// two u32 halves to cover the full 64-bit input space deterministically.
     fn task_id() -> impl Strategy<Value = TaskId> {
-        any::<u64>().prop_map(TaskId::from)
+        any::<u64>().prop_map(|v| TaskId::new_for_test(v as u32, (v >> 32) as u32))
     }
 
-    /// Generate RegionId values for testing.
+    /// Generate RegionId values for testing. See `task_id` for the rationale
+    /// behind the u64 → (u32, u32) split.
     fn region_id() -> impl Strategy<Value = RegionId> {
-        any::<u64>().prop_map(RegionId::from)
+        any::<u64>().prop_map(|v| RegionId::new_for_test(v as u32, (v >> 32) as u32))
     }
 
     /// Generate Time values for testing.
@@ -82,12 +87,24 @@ mod tests {
         prop::collection::vec(caveat_predicate(), 0..10)
     }
 
+    /// Generate ObligationKind values. `ObligationKind` doesn't impl
+    /// `proptest::Arbitrary`, so we hand-roll a strategy over its 5 variants.
+    fn obligation_kind() -> impl Strategy<Value = ObligationKind> {
+        prop_oneof![
+            Just(ObligationKind::SendPermit),
+            Just(ObligationKind::Ack),
+            Just(ObligationKind::Lease),
+            Just(ObligationKind::IoOp),
+            Just(ObligationKind::SemaphorePermit),
+        ]
+    }
+
     /// Generate VarState values for leak_check testing.
     fn var_state() -> impl Strategy<Value = VarState> {
         prop_oneof![
             Just(VarState::Empty),
-            any::<ObligationKind>().prop_map(VarState::Held),
-            any::<ObligationKind>().prop_map(VarState::MayHold),
+            obligation_kind().prop_map(VarState::Held),
+            obligation_kind().prop_map(VarState::MayHold),
             Just(VarState::MayHoldAmbiguous),
             Just(VarState::Resolved),
         ]

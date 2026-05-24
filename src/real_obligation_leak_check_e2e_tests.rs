@@ -559,6 +559,142 @@ mod real_obligation_leak_check_e2e {
     }
 
     #[tokio::test]
+    async fn test_client_disconnect_forced_cancel_cleans_pending_obligations() {
+        let harness = Arc::new(ObligationLeakTestHarness::new());
+        let pending_count = 16;
+        let cleanup_budget = Duration::from_millis(250);
+
+        harness.log(
+            "test_start",
+            json!({
+                "test": "client_disconnect_forced_cancel_cleanup",
+                "pending_count": pending_count,
+                "cleanup_budget_ms": cleanup_budget.as_millis()
+            }),
+        );
+
+        let initial_check = harness.perform_leak_check("initial").await;
+        assert_eq!(
+            initial_check.leaked_obligations, 0,
+            "Should start with zero leaks"
+        );
+        assert_eq!(
+            initial_check.pending_obligations, 0,
+            "Should start with zero pending obligations"
+        );
+
+        let mut pending_obligations = Vec::with_capacity(pending_count);
+        for index in 0..pending_count {
+            let obligation_id = harness
+                .create_obligation(&format!("client_disconnect_reserved_send_{}", index))
+                .await
+                .expect("real obligation creation should succeed before disconnect");
+            pending_obligations.push(obligation_id);
+
+            if index % 4 == 3 {
+                harness.log(
+                    "stage_progress",
+                    json!({
+                        "stage": "reserve_before_disconnect",
+                        "created": index + 1,
+                        "pending_so_far": pending_obligations.len()
+                    }),
+                );
+            }
+        }
+
+        let before_cancel = harness.perform_leak_check("before_forced_cancel").await;
+        assert_eq!(
+            before_cancel.pending_obligations, pending_count,
+            "All reserved-send obligations should be pending before disconnect cleanup"
+        );
+        assert_eq!(
+            before_cancel.leaked_obligations, 0,
+            "Pending obligations are not leaks before the disconnect budget starts"
+        );
+
+        harness.log(
+            "forced_cancel_requested",
+            json!({
+                "scenario": "client_disconnect_during_reserved_send",
+                "pending_before": before_cancel.pending_obligations,
+                "leaked_before": before_cancel.leaked_obligations,
+                "cleanup_budget_ms": cleanup_budget.as_millis()
+            }),
+        );
+
+        let cleanup_started = Instant::now();
+        for (index, obligation_id) in pending_obligations.iter().copied().enumerate() {
+            harness
+                .abort_obligation(obligation_id, "client_disconnect_forced_cancel")
+                .await
+                .expect("forced cancellation should abort every pending obligation");
+
+            if index % 4 == 3 {
+                harness.log(
+                    "stage_progress",
+                    json!({
+                        "stage": "abort_pending_after_disconnect",
+                        "aborted": index + 1,
+                        "elapsed_ms": cleanup_started.elapsed().as_millis()
+                    }),
+                );
+            }
+        }
+        let cleanup_elapsed = cleanup_started.elapsed();
+
+        let after_cancel = harness.perform_leak_check("after_forced_cancel").await;
+        harness.log(
+            "forced_cancel_cleanup_complete",
+            json!({
+                "pending_before": before_cancel.pending_obligations,
+                "pending_after": after_cancel.pending_obligations,
+                "leaked_after": after_cancel.leaked_obligations,
+                "ledger_consistent": after_cancel.ledger_consistent,
+                "cleanup_elapsed_ms": cleanup_elapsed.as_millis(),
+                "cleanup_budget_ms": cleanup_budget.as_millis()
+            }),
+        );
+
+        assert!(
+            cleanup_elapsed <= cleanup_budget,
+            "Forced cancellation cleanup exceeded budget: {:?} > {:?}",
+            cleanup_elapsed,
+            cleanup_budget
+        );
+        assert_eq!(
+            after_cancel.pending_obligations, 0,
+            "Forced cancellation must resolve all pending obligations"
+        );
+        assert_eq!(
+            after_cancel.leaked_obligations, 0,
+            "Forced cancellation must not leak obligations"
+        );
+        assert!(
+            after_cancel.ledger_consistent,
+            "Ledger should remain consistent after forced cancellation cleanup"
+        );
+
+        let validation_result = harness.validate_zero_leaks();
+        assert!(
+            validation_result.is_ok(),
+            "Forced cancellation leak validation failed: {:?}",
+            validation_result
+        );
+
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "scenario": "client_disconnect_during_reserved_send",
+                "zero_pending": after_cancel.pending_obligations == 0,
+                "zero_leaks": after_cancel.leaked_obligations == 0,
+                "cleanup_within_budget": cleanup_elapsed <= cleanup_budget
+            }),
+        );
+    }
+
+    #[tokio::test]
     async fn test_obligation_stress_with_timeouts() {
         let harness = Arc::new(ObligationLeakTestHarness::new());
         harness.log(
