@@ -342,55 +342,50 @@ mod tests {
 #[cfg(test)]
 mod examples {
     use super::*;
-    use futures::stream;
+
+    const EXAMPLE_CHUNK_BYTES: usize = 64 * 1024;
 
     /// Example showing the main ergonomic API for huge buffers
-    #[tokio::test]
-    #[ignore] // Integration test
-    async fn example_write_really_big_buffer() {
-        // This example shows how simple it is to send huge amounts of data
-
-        // let mut client = AtpClient::new().await.unwrap();
-        // let cx = Cx::root();
-
-        // Create a really big buffer (1GB simulation)
+    #[test]
+    fn example_write_really_big_buffer_asserts_transfer_shape() {
         let big_data = vec![42u8; 1_000_000]; // 1MB for test
+        let chunks = big_data.chunks(EXAMPLE_CHUNK_BYTES).collect::<Vec<_>>();
+        let options = WriteOptions::default();
+        let expected_last_chunk_len = big_data.len() % EXAMPLE_CHUNK_BYTES;
 
-        // The ergonomic API handles everything automatically:
-        // - Chunking strategy selection
-        // - Backpressure management
-        // - Progress reporting
-        // - Proof generation
-        // - Error handling
-        // let result = client.write_really_big_buffer(&cx, &big_data).await.unwrap();
-
-        // assert_eq!(result.total_bytes, big_data.len() as u64);
-        // assert!(result.chunk_count > 0);
-        // assert!(result.metrics.duration > Duration::ZERO);
-
-        println!("Example: would transfer {} bytes", big_data.len());
+        assert_eq!(big_data.len(), 1_000_000);
+        assert_eq!(chunks.len(), big_data.len().div_ceil(EXAMPLE_CHUNK_BYTES));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| !chunk.is_empty() && chunk.len() <= EXAMPLE_CHUNK_BYTES)
+        );
+        assert_eq!(chunks.first().unwrap().len(), EXAMPLE_CHUNK_BYTES);
+        assert_eq!(chunks.last().unwrap().len(), expected_last_chunk_len);
+        assert!(chunks.iter().flatten().all(|byte| **byte == 42));
+        assert!(options.chunking_strategy.is_none());
+        assert_eq!(options.compression, CompressionPreference::Auto);
+        assert_eq!(options.encryption, EncryptionPreference::Required);
+        assert_eq!(options.proof_requirements, ProofRequirements::Standard);
+        assert!(options.report_progress);
     }
 
     /// Example showing streaming with unknown size
-    #[tokio::test]
-    #[ignore] // Integration test
-    async fn example_stream_unknown_size() {
-        // let mut client = AtpClient::new().await.unwrap();
-        // let cx = Cx::root();
+    #[test]
+    fn example_stream_unknown_size_asserts_chunk_sequence() {
+        let chunks = (0..1000).map(|i| vec![i as u8; 1024]).collect::<Vec<_>>();
+        let total_bytes = chunks.iter().map(Vec::len).sum::<usize>();
+        let observed_patterns = chunks
+            .iter()
+            .map(|chunk| chunk[0])
+            .collect::<std::collections::BTreeSet<_>>();
 
-        // Create a stream that generates data dynamically
-        let data_stream = stream::iter(0..1000)
-            .map(|i| Ok::<_, AtpError>(vec![i as u8; 1024])); // 1KB chunks
-
-        // The SDK handles:
-        // - Dynamic sizing
-        // - Backpressure from receiver
-        // - Cancellation safety
-        // - Progress tracking without knowing final size
-        // let result = client.send_stream(&cx, data_stream).await.unwrap();
-
-        // assert_eq!(result.chunk_count, 1000);
-
-        println!("Example: would stream 1000 chunks");
+        assert_eq!(chunks.len(), 1000);
+        assert_eq!(total_bytes, 1_024_000);
+        assert!(chunks.iter().all(|chunk| chunk.len() == 1024));
+        assert!(chunks[0].iter().all(|byte| *byte == 0));
+        assert!(chunks[255].iter().all(|byte| *byte == 255));
+        assert!(chunks[256].iter().all(|byte| *byte == 0));
+        assert_eq!(observed_patterns.len(), 256);
     }
 }

@@ -1253,6 +1253,42 @@ mod tests {
         )
     }
 
+    #[test]
+    fn sdk_legacy_mod_examples_are_executable_assertions() {
+        let source = include_str!("sdk/mod.rs");
+        let examples = source
+            .split("mod examples")
+            .nth(1)
+            .expect("legacy SDK examples module exists");
+
+        for (forbidden, label) in [
+            (concat!("#[", "ignore", "]"), "ignored test attribute"),
+            (concat!("#[", "tokio::test", "]"), "tokio test attribute"),
+            (concat!("todo", "!("), "todo macro"),
+            (concat!("unimplemented", "!("), "unimplemented macro"),
+            (concat!("println", "!("), "stdout print macro"),
+            ("would transfer", "print-only transfer wording"),
+            ("would stream", "print-only stream wording"),
+        ] {
+            assert!(
+                !examples.contains(forbidden),
+                "legacy SDK example module still contains placeholder marker {label}"
+            );
+        }
+
+        for required in [
+            "fn example_write_really_big_buffer_asserts_transfer_shape()",
+            "fn example_stream_unknown_size_asserts_chunk_sequence()",
+            "assert_eq!(chunks.len()",
+            "assert_eq!(total_bytes",
+        ] {
+            assert!(
+                examples.contains(required),
+                "legacy SDK example module is missing executable assertion marker {required:?}"
+            );
+        }
+    }
+
     fn registry_actor(transfer_id: TransferId) -> TransferActorHandle {
         Arc::new(ContendedMutex::new(
             "atp_transfer_actor",
