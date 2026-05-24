@@ -377,6 +377,8 @@ pub mod real_kafka_consumer_group_rebalance_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_lab_chaos_runtime_state_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_lab_oracle_quiescence_runtime_state_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_lab_oracle_raptorq_proof_encode_decode_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_dns_e2e_tests;
