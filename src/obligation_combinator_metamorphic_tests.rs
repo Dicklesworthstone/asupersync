@@ -622,73 +622,53 @@ fn mr_hedge_convergence() {
 ///   - Frame inference bugs in proof generation
 #[test]
 fn mr_separation_logic_frame_rule() {
-    use crate::obligation::separation_logic::HeapState;
-    use std::collections::BTreeMap;
+    use crate::obligation::separation_logic::FrameCondition;
+    use crate::types::{ObligationId, RegionId, TaskId};
 
     proptest!(|(
-        heap_size in 1usize..=20usize,
-        modified_region_size in 1usize..=10usize,
-        frame_region_size in 1usize..=10usize,
+        obligation_count in 2usize..=20usize,
+        target_index in 0usize..20usize,
+        holder_seed in 0u64..1000u64,
+        region_seed in 0u64..1000u64,
     )| {
-        if modified_region_size + frame_region_size <= heap_size {
-            // Create initial heap state
-            let mut initial_heap = BTreeMap::new();
-            for i in 0..heap_size {
-                initial_heap.insert(i, format!("value_{}", i));
-            }
+        if target_index < obligation_count {
+            let target = ObligationId::for_test(target_index as u64);
+            let holder = TaskId::for_test(holder_seed);
+            let region = RegionId::for_test(region_seed);
+            let frame = FrameCondition::single_obligation(target, holder, region);
 
-            let heap_state = HeapState::from_map(initial_heap.clone());
-
-            // Define regions: modified and frame (disjoint)
-            let modified_region: Vec<usize> = (0..modified_region_size).collect();
-            let frame_region: Vec<usize> = (heap_size - frame_region_size..heap_size).collect();
-
-            // Verify regions are disjoint
-            let regions_disjoint = modified_region.iter()
-                .all(|&addr| !frame_region.contains(&addr));
             prop_assert!(
-                regions_disjoint,
-                "Frame rule precondition: modified and frame regions must be disjoint"
+                !frame.is_framed(target),
+                "Frame rule violation: target obligation must be in the operation footprint"
+            );
+            prop_assert!(
+                !frame.task_is_framed(holder),
+                "Frame rule violation: holder pending count must be in the operation footprint"
+            );
+            prop_assert!(
+                !frame.region_is_framed(region),
+                "Frame rule violation: region pending count must be in the operation footprint"
             );
 
-            if regions_disjoint {
-                // Simulate heap modification that only touches modified region
-                let mut modified_heap = initial_heap.clone();
-                for &addr in &modified_region {
-                    modified_heap.insert(addr, format!("modified_value_{}", addr));
-                }
-
-                let modified_state = HeapState::from_map(modified_heap);
-
-                // Frame rule check: frame region should be unchanged
-                for &addr in &frame_region {
-                    let original_value = initial_heap.get(&addr);
-                    let modified_value = modified_state.get(addr);
-
-                    prop_assert_eq!(
-                        original_value, modified_value,
-                        "Frame rule violation: frame region address {} was modified", addr
-                    );
-                }
-
-                // Verify that modified region actually changed
-                let mut something_changed = false;
-                for &addr in &modified_region {
-                    let original_value = initial_heap.get(&addr);
-                    let modified_value = modified_state.get(addr);
-                    if original_value != modified_value {
-                        something_changed = true;
-                        break;
-                    }
-                }
-
-                if !modified_region.is_empty() {
-                    prop_assert!(
-                        something_changed,
-                        "Frame rule test validity: modified region should actually be modified"
-                    );
-                }
+            for i in 0..obligation_count {
+                let obligation = ObligationId::for_test(i as u64);
+                prop_assert_eq!(
+                    frame.is_framed(obligation),
+                    i != target_index,
+                    "Frame rule violation: only the target obligation should be unframed"
+                );
             }
+
+            let other_holder = TaskId::for_test(holder_seed.saturating_add(1_000_000));
+            let other_region = RegionId::for_test(region_seed.saturating_add(1_000_000));
+            prop_assert!(
+                frame.task_is_framed(other_holder),
+                "Frame rule violation: unrelated task pending count should remain framed"
+            );
+            prop_assert!(
+                frame.region_is_framed(other_region),
+                "Frame rule violation: unrelated region pending count should remain framed"
+            );
         }
     });
 }
