@@ -345,6 +345,8 @@ pub mod real_cli_doctor_trace_divergence_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cli_progress_observability_metrics_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_cli_output_trace_streaming_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_codec_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_codec_length_delimited_framed_read_integration_e2e_tests;
