@@ -200,6 +200,7 @@ impl ChunkEntry {
 }
 
 /// Transfer state bitmap tracking chunk states
+#[derive(Debug)]
 pub struct ChunkBitmap {
     /// Map from chunk offset to chunk entry
     chunks: HashMap<u64, ChunkEntry>,
