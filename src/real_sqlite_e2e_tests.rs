@@ -889,6 +889,69 @@ mod sqlite_e2e_tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn test_environment_validation_errors() {
+        use std::env;
+
+        // Save original environment values
+        let original_node_env = env::var("NODE_ENV").ok();
+        let original_real_service_tests = env::var("REAL_SERVICE_TESTS").ok();
+
+        // Test production environment rejection
+        env::set_var("NODE_ENV", "production");
+        env::set_var("REAL_SERVICE_TESTS", "true");
+        let result = validate_sqlite_e2e_environment();
+        assert!(
+            result.is_err(),
+            "Should reject production environment"
+        );
+        assert!(
+            result.unwrap_err().contains("production"),
+            "Error message should mention production"
+        );
+
+        // Test missing REAL_SERVICE_TESTS
+        env::set_var("NODE_ENV", "test");
+        env::remove_var("REAL_SERVICE_TESTS");
+        let result = validate_sqlite_e2e_environment();
+        assert!(
+            result.is_err(),
+            "Should reject when REAL_SERVICE_TESTS is unset"
+        );
+        assert!(
+            result.unwrap_err().contains("REAL_SERVICE_TESTS"),
+            "Error message should mention REAL_SERVICE_TESTS"
+        );
+
+        // Test REAL_SERVICE_TESTS=false
+        env::set_var("NODE_ENV", "test");
+        env::set_var("REAL_SERVICE_TESTS", "false");
+        let result = validate_sqlite_e2e_environment();
+        assert!(
+            result.is_err(),
+            "Should reject when REAL_SERVICE_TESTS=false"
+        );
+
+        // Test valid environment
+        env::set_var("NODE_ENV", "test");
+        env::set_var("REAL_SERVICE_TESTS", "true");
+        let result = validate_sqlite_e2e_environment();
+        assert!(
+            result.is_ok(),
+            "Should accept valid test environment"
+        );
+
+        // Restore original environment values
+        match original_node_env {
+            Some(value) => env::set_var("NODE_ENV", value),
+            None => env::remove_var("NODE_ENV"),
+        }
+        match original_real_service_tests {
+            Some(value) => env::set_var("REAL_SERVICE_TESTS", value),
+            None => env::remove_var("REAL_SERVICE_TESTS"),
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-internals"))]

@@ -947,4 +947,52 @@ mod tests {
             "Not all real server E2E tests passed"
         );
     }
+
+    #[test]
+    fn test_address_parsing_errors() {
+        use std::net::SocketAddr;
+
+        // Test various invalid address formats
+        let invalid_addresses = vec![
+            ("invalid.format", "malformed address"),
+            ("127.0.0.1:99999", "port overflow"),
+            ("127.0.0.1:abc", "non-numeric port"),
+            (":8080", "missing host"),
+            ("127.0.0.1:", "missing port"),
+            ("300.300.300.300:8080", "invalid IP octets"),
+            ("127.0.0.1:0:extra", "extra port component"),
+            ("", "empty string"),
+            ("just-text", "not an address"),
+            ("127.0.0.1:-1", "negative port"),
+        ];
+
+        for (invalid_addr, error_type) in invalid_addresses {
+            let result = invalid_addr.parse::<SocketAddr>();
+            assert!(
+                result.is_err(),
+                "Should fail to parse '{}': {} - got: {:?}",
+                invalid_addr,
+                error_type,
+                result
+            );
+        }
+
+        // Test valid addresses still work
+        let valid_addresses = vec![
+            "127.0.0.1:8080",
+            "0.0.0.0:0",
+            "192.168.1.1:3000",
+            "[::1]:8080", // IPv6
+        ];
+
+        for valid_addr in valid_addresses {
+            let result = valid_addr.parse::<SocketAddr>();
+            assert!(
+                result.is_ok(),
+                "Should successfully parse valid address '{}': {:?}",
+                valid_addr,
+                result
+            );
+        }
+    }
 }

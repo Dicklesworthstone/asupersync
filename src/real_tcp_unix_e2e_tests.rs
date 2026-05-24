@@ -821,6 +821,73 @@ mod tcp_unix_e2e_tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_network_operation_errors() {
+        use crate::time::Duration;
+        use std::net::SocketAddr;
+
+        // Test connection to non-existent port
+        let unreachable_addr = "127.0.0.1:1".parse::<SocketAddr>().unwrap();
+        let result = TcpStream::connect(unreachable_addr).await;
+        assert!(
+            result.is_err(),
+            "Should fail to connect to unused port 1"
+        );
+
+        // Test bind to invalid address (should fail)
+        let invalid_bind_addr = "999.999.999.999:8080".parse::<SocketAddr>();
+        assert!(
+            invalid_bind_addr.is_err(),
+            "Should fail to parse invalid IP address"
+        );
+
+        // Test bind to port 0 allocates different ports for multiple listeners
+        let listener1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr1 = listener1.local_addr().unwrap();
+
+        let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+
+        assert_ne!(
+            addr1.port(),
+            addr2.port(),
+            "OS should allocate different ports for each listener"
+        );
+
+        // Test that both listeners can accept connections
+        let connect_result1 = TcpStream::connect(addr1).await;
+        assert!(
+            connect_result1.is_ok(),
+            "Should successfully connect to first listener: {:?}",
+            connect_result1
+        );
+
+        let connect_result2 = TcpStream::connect(addr2).await;
+        assert!(
+            connect_result2.is_ok(),
+            "Should successfully connect to second listener: {:?}",
+            connect_result2
+        );
+
+        // Test connection timeout behavior (connect to a non-routable address)
+        let non_routable_addr = "10.255.255.1:1".parse::<SocketAddr>().unwrap();
+        let start = Instant::now();
+        let result = timeout(Duration::from_millis(100), async {
+            TcpStream::connect(non_routable_addr).await
+        }).await;
+
+        let elapsed = start.elapsed();
+        assert!(
+            result.is_err() || result.unwrap().is_err(),
+            "Connection to non-routable address should timeout or fail"
+        );
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "Connection should timeout within reasonable time, took: {:?}",
+            elapsed
+        );
+    }
 }
 
 #[cfg(any(test, feature = "test-internals"))]
