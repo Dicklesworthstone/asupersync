@@ -1,0 +1,26 @@
+{
+  "schema_version": "atp-raptorq-repair-proof-v1",
+  "case_id": "ATP-NR9-RQ-REPAIR-LOSS-V1",
+  "transfer_shape": "constraints+partial-source+repair-symbols",
+  "seed": 20260524,
+  "k": 8,
+  "symbol_size": 32,
+  "source_symbols_total": 8,
+  "source_symbols_lost": [
+    1,
+    2,
+    3,
+    4,
+    6
+  ],
+  "source_symbols_received": 3,
+  "repair_symbols_sent": 32,
+  "repair_esi_start": 8,
+  "repair_esi_end_exclusive": 40,
+  "pre_repair_failure": "recoverable_decode_failure",
+  "pre_repair_failure_recoverable": true,
+  "decode_status": "recovered",
+  "recovered_source_bytes": 256,
+  "recovered_source_digest": "fnv1a64:e37de1bdb54c973d",
+  "replay_ref": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_p9 cargo test -p asupersync --test atp_raptorq_repair_e2e"
+}
