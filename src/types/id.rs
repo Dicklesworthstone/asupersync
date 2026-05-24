@@ -376,6 +376,15 @@ impl ObligationId {
         Self(index)
     }
 
+    /// Returns a 64-bit integer representation of this `ObligationId`,
+    /// suitable for hashing, sorting, and trace identity. Parity with
+    /// `RegionId::as_u64` and `TaskId::as_u64`.
+    #[inline]
+    #[must_use]
+    pub fn as_u64(&self) -> u64 {
+        ((self.0.generation() as u64) << 32) | (self.0.index() as u64)
+    }
+
     /// Returns the underlying arena index (internal use).
     #[inline]
     #[must_use]

@@ -41,23 +41,50 @@ mod tests {
     // ────────────────────────────────────────────────────────────────────
 
     /// Generate TaskId values for testing.
+    ///
+    /// `TaskId` has no `From<u64>`; its public test constructor takes
+    /// `(index: u32, generation: u32)`. Split a proptest-supplied u64 in half.
     fn task_id() -> impl Strategy<Value = TaskId> {
-        any::<u64>().prop_map(TaskId::from)
+        any::<u64>().prop_map(|v| TaskId::new_for_test(v as u32, (v >> 32) as u32))
     }
 
     /// Generate RegionId values for testing.
     fn region_id() -> impl Strategy<Value = RegionId> {
-        any::<u64>().prop_map(RegionId::from)
+        any::<u64>().prop_map(|v| RegionId::new_for_test(v as u32, (v >> 32) as u32))
     }
 
     /// Generate ObligationId values for testing.
     fn obligation_id() -> impl Strategy<Value = ObligationId> {
-        any::<u64>().prop_map(ObligationId::from)
+        any::<u64>().prop_map(|v| ObligationId::new_for_test(v as u32, (v >> 32) as u32))
     }
 
     /// Generate Time values for testing.
     fn time() -> impl Strategy<Value = Time> {
         any::<u64>().prop_map(Time::from_nanos)
+    }
+
+    /// Generate `ObligationKind` values. Hand-rolled strategy because
+    /// `ObligationKind` doesn't impl `proptest::Arbitrary`.
+    fn obligation_kind() -> impl Strategy<Value = ObligationKind> {
+        prop_oneof![
+            Just(ObligationKind::SendPermit),
+            Just(ObligationKind::Ack),
+            Just(ObligationKind::Lease),
+            Just(ObligationKind::IoOp),
+            Just(ObligationKind::SemaphorePermit),
+        ]
+    }
+
+    /// Generate `RegionState` values. Hand-rolled strategy because
+    /// `RegionState` doesn't impl `proptest::Arbitrary`.
+    fn region_state() -> impl Strategy<Value = RegionState> {
+        prop_oneof![
+            Just(RegionState::Open),
+            Just(RegionState::Closing),
+            Just(RegionState::Draining),
+            Just(RegionState::Finalizing),
+            Just(RegionState::Closed),
+        ]
     }
 
     /// Generate MarkingEvent sequences for proof testing.
@@ -70,7 +97,7 @@ mod tests {
         (
             time(),
             obligation_id(),
-            any::<ObligationKind>(),
+            obligation_kind(),
             task_id(),
             region_id(),
         )
@@ -97,7 +124,7 @@ mod tests {
         (
             region_id(),
             prop::collection::vec(region_id(), 0..5),
-            any::<RegionState>(),
+            region_state(),
             0u32..10u32,
         )
             .prop_map(
