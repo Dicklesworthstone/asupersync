@@ -912,4 +912,24 @@ mod real_grpc_bidirectional_e2e {
             }),
         );
     }
+
+    impl Drop for GrpcBidirectionalTestHarness {
+        fn drop(&mut self) {
+            // Clear all shared state to prevent test pollution
+            if let Ok(mut log) = self.log_entries.lock() {
+                log.clear();
+            }
+            if let Ok(mut stats) = self.stream_stats.lock() {
+                stats.clear();
+            }
+            if let Ok(mut messages) = self.message_log.lock() {
+                messages.clear();
+            }
+            if let Ok(mut conn_stats) = self.connection_stats.lock() {
+                *conn_stats = ConnectionStats::default();
+            }
+
+            eprintln!("GrpcBidirectionalTestHarness cleanup completed");
+        }
+    }
 }

@@ -49,6 +49,8 @@ mod tests {
         stats: ServerStats,
         /// TLS acceptor instance
         tls_acceptor: TlsAcceptor,
+        /// Per-instance connection ID generator (replaces global static)
+        connection_id_generator: AtomicU64,
     }
 
     /// TLS server configuration with certificates and security settings
@@ -582,6 +584,7 @@ mod tests {
                 connections: Arc::new(RwLock::new(HashMap::new())),
                 stats: ServerStats::default(),
                 tls_acceptor,
+                connection_id_generator: AtomicU64::new(1),
             })
         }
 
@@ -818,10 +821,9 @@ mod tests {
             Ok(())
         }
 
-        /// Generate unique connection ID
+        /// Generate unique connection ID (per-instance, not global)
         fn generate_connection_id(&self) -> ConnectionId {
-            static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            self.connection_id_generator.fetch_add(1, Ordering::Relaxed)
         }
 
         /// Get server statistics

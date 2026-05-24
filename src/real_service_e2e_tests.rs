@@ -1226,6 +1226,20 @@ mod tests {
         result
     }
 
+    impl Drop for ServiceLayerTestHarness {
+        fn drop(&mut self) {
+            // Clear shared state to prevent test pollution
+            if let Ok(mut log) = self.request_log.lock() {
+                log.clear();
+            }
+
+            // Clear server tracking
+            self.servers.clear();
+
+            eprintln!("ServiceLayerTestHarness cleanup completed");
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // Test Execution and Reporting
     // ---------------------------------------------------------------------------
