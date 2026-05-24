@@ -138,7 +138,9 @@ fn rotate_csrf_token_returns_fresh_value_distinct_from_old() {
         let old_token = session
             .csrf_token()
             .expect("session middleware minted a CSRF token");
-        let new_token = session.rotate_csrf_token();
+        let new_token = session
+            .rotate_csrf_token()
+            .expect("rotate_csrf_token returns the freshly minted token");
         let stored_token = session
             .csrf_token()
             .expect("rotate_csrf_token stores the new token");
@@ -177,9 +179,15 @@ fn two_rotations_produce_distinct_tokens() {
         .secure(false)
         .csrf_protection(true);
     let mw = layer.wrap(SessionStatusHandler(move |session: &Session| {
-        let t1 = session.rotate_csrf_token();
-        let t2 = session.rotate_csrf_token();
-        let t3 = session.rotate_csrf_token();
+        let t1 = session
+            .rotate_csrf_token()
+            .expect("first rotation mints a token");
+        let t2 = session
+            .rotate_csrf_token()
+            .expect("second rotation mints a token");
+        let t3 = session
+            .rotate_csrf_token()
+            .expect("third rotation mints a token");
         *captured_clone.lock().unwrap() = Some((t1, t2, t3));
         StatusCode::OK
     }));
