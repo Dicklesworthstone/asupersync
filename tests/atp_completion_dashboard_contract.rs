@@ -61,6 +61,16 @@ fn contract_declares_required_workstreams_questions_and_nr_gates() {
         contract["verifier"].as_str(),
         Some("tests/atp_completion_dashboard_contract.rs")
     );
+    let proof_sources = contract["proof_sources"]
+        .as_array()
+        .expect("proof_sources array")
+        .iter()
+        .map(|row| row.as_str().expect("proof source string"))
+        .collect::<BTreeSet<_>>();
+    assert!(
+        proof_sources.contains("artifacts/atp_proof_reconciliation_v1.json"),
+        "ATP-NR14 proof reconciliation must be a dashboard proof source"
+    );
 
     let workstreams = contract["required_workstreams"]
         .as_array()
@@ -170,6 +180,27 @@ fn dashboard_json_answers_user_questions_and_lists_live_gates() {
         row["gate_id"].as_str() == Some("ATP-NR0")
             && row["bead_id"].as_str() == Some("asupersync-vk4kcf.1")
     }));
+    let nr14_gate = gates
+        .iter()
+        .find(|row| row["gate_id"].as_str() == Some("ATP-NR14"))
+        .expect("ATP-NR14 gate");
+    assert_eq!(nr14_gate["bead_id"].as_str(), Some("asupersync-vk4kcf.15"));
+    let nr14_required_artifacts = nr14_gate["required_artifacts"]
+        .as_array()
+        .expect("ATP-NR14 required_artifacts")
+        .iter()
+        .map(|row| row.as_str().expect("artifact path"))
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "artifacts/atp_proof_reconciliation_v1.json",
+        "docs/atp_proof_reconciliation/README.md",
+        "tests/atp_proof_reconciliation_contract.rs",
+    ] {
+        assert!(
+            nr14_required_artifacts.contains(required),
+            "ATP-NR14 dashboard gate must require {required}"
+        );
+    }
 
     let workstreams = dashboard["workstreams"].as_array().expect("workstreams");
     assert_eq!(

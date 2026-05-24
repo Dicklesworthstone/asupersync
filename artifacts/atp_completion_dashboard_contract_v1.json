@@ -10,7 +10,8 @@
     "artifacts/proof_status_snapshot_v1.json",
     "artifacts/proof_lane_manifest_v1.json",
     "artifacts/no_mock_policy_contract_v1.json",
-    "artifacts/atp_quic_dependency_audit_gate_contract_v1.json"
+    "artifacts/atp_quic_dependency_audit_gate_contract_v1.json",
+    "artifacts/atp_proof_reconciliation_v1.json"
   ],
   "stale_proof_policy": {
     "max_age_days": 7,
@@ -287,8 +288,12 @@
       "question_ids": [
         "all_done"
       ],
-      "required_artifacts": [],
-      "proof_command": "python3 scripts/atp_completion_dashboard.py --format=json"
+      "required_artifacts": [
+        "artifacts/atp_proof_reconciliation_v1.json",
+        "docs/atp_proof_reconciliation/README.md",
+        "tests/atp_proof_reconciliation_contract.rs"
+      ],
+      "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_p9 cargo test -p asupersync --test atp_proof_reconciliation_contract -- --nocapture"
     }
   ],
   "required_questions": [
