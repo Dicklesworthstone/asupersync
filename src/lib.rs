@@ -399,6 +399,8 @@ pub mod real_distributed_snapshot_raptorq_encoder_e2e_tests;
 pub mod real_lab_chaos_runtime_state_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_signal_graceful_shutdown_supervision_tree_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_e2e_hardening_consolidation;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
