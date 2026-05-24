@@ -775,6 +775,44 @@ impl From<io::Error> for RelaySocketIoError {
     }
 }
 
+/// Deterministic summary for one relay socket service turn.
+///
+/// A production daemon can emit these fields as structured logs. Tests can use
+/// them as replay-stable evidence that a turn made only the intended progress
+/// and that socket readiness misses did not mutate relay state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RelaySocketTurnSummary {
+    /// UDP relay datagrams read from the OS socket and accepted by relay state.
+    pub udp_datagrams_received: usize,
+    /// UDP relay datagrams written to admitted peer socket endpoints.
+    pub udp_datagrams_sent: usize,
+    /// TCP/TLS stream read calls that supplied at least one byte to relay state.
+    pub tcp_tls_chunks_read: usize,
+    /// Opaque ATP packets forwarded from decoded TCP/TLS stream records.
+    pub tcp_tls_packets_forwarded: usize,
+    /// TCP/TLS streams that reached EOF and were closed by the socket loop.
+    pub tcp_tls_streams_closed: usize,
+    /// TCP/TLS bytes accepted by concrete stream writers.
+    pub tcp_tls_bytes_written: usize,
+    /// Nonblocking socket operations that had no readiness in this turn.
+    pub socket_would_block: usize,
+    /// Egress attempts that found no queued packet or record for the peer.
+    pub empty_egress_attempts: usize,
+}
+
+impl RelaySocketTurnSummary {
+    /// Return true when the turn moved any relay traffic or closed a stream.
+    #[must_use]
+    pub const fn made_progress(self) -> bool {
+        self.udp_datagrams_received > 0
+            || self.udp_datagrams_sent > 0
+            || self.tcp_tls_chunks_read > 0
+            || self.tcp_tls_packets_forwarded > 0
+            || self.tcp_tls_streams_closed > 0
+            || self.tcp_tls_bytes_written > 0
+    }
+}
+
 /// Deterministic socket-facing relay loop state.
 ///
 /// This is the boundary a real UDP socket loop or TCP/TLS accept/read/write loop
@@ -1310,6 +1348,96 @@ impl RelaySocketLoop {
     ) -> Result<Option<usize>, RelaySocketIoError> {
         let stream_id = accepted.stream_id();
         self.send_tcp_tls_stream_once(service, stream_id, accepted.stream_mut())
+    }
+
+    /// Service one deterministic socket-loop turn over admitted UDP/TCP sockets.
+    ///
+    /// The turn performs at most one UDP read, at most one TCP read per accepted
+    /// stream, at most one UDP write per admitted UDP peer, and at most one TCP
+    /// write per accepted stream. Nonblocking readiness misses are counted in
+    /// the returned summary and are not reported as hard failures. Other relay
+    /// validation or OS errors fail the turn immediately without converting the
+    /// deterministic relay model into an implicit retry loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns malformed frame/auth/quota/lifecycle errors from the relay
+    /// service, caller buffer errors, closed TCP/TLS stream errors converted into
+    /// summary counters, TCP/TLS zero-progress writes, or non-`WouldBlock` OS
+    /// I/O errors.
+    pub fn service_socket_turn_once(
+        &mut self,
+        service: &mut RelayService,
+        now_micros: u64,
+        udp_socket: Option<&UdpSocket>,
+        udp_scratch: &mut [u8],
+        tcp_streams: &mut [RelayAcceptedTcpTlsStream],
+        tcp_scratch: &mut [u8],
+    ) -> Result<RelaySocketTurnSummary, RelaySocketIoError> {
+        let mut summary = RelaySocketTurnSummary::default();
+
+        if let Some(socket) = udp_socket {
+            match self.recv_udp_socket_once(service, now_micros, socket, udp_scratch) {
+                Ok(Some(_)) => summary.udp_datagrams_received += 1,
+                Ok(None) | Err(RelaySocketIoError::WouldBlock) => {
+                    summary.socket_would_block += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        for accepted in tcp_streams.iter_mut() {
+            let stream_id = accepted.stream_id();
+            if self.endpoints.peer_for_tcp_tls_stream(stream_id).is_err() {
+                continue;
+            }
+            match self.recv_accepted_tcp_tls_stream_once(service, now_micros, accepted, tcp_scratch)
+            {
+                Ok(Some(forwarded)) => {
+                    summary.tcp_tls_chunks_read += 1;
+                    summary.tcp_tls_packets_forwarded += forwarded.len();
+                }
+                Ok(None) | Err(RelaySocketIoError::WouldBlock) => {
+                    summary.socket_would_block += 1;
+                }
+                Err(RelaySocketIoError::TcpTlsStreamClosed { .. }) => {
+                    summary.tcp_tls_streams_closed += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        if let Some(socket) = udp_socket {
+            let udp_peers: BTreeSet<_> = self
+                .endpoints
+                .udp_endpoints
+                .values()
+                .map(|binding| binding.peer_id)
+                .collect();
+            for peer_id in udp_peers {
+                match self.send_udp_socket_once(service, socket, peer_id) {
+                    Ok(Some(_)) => summary.udp_datagrams_sent += 1,
+                    Ok(None) => summary.empty_egress_attempts += 1,
+                    Err(RelaySocketIoError::WouldBlock) => summary.socket_would_block += 1,
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+
+        for accepted in tcp_streams.iter_mut() {
+            let stream_id = accepted.stream_id();
+            if self.endpoints.peer_for_tcp_tls_stream(stream_id).is_err() {
+                continue;
+            }
+            match self.send_accepted_tcp_tls_stream_once(service, accepted) {
+                Ok(Some(written)) => summary.tcp_tls_bytes_written += written,
+                Ok(None) => summary.empty_egress_attempts += 1,
+                Err(RelaySocketIoError::WouldBlock) => summary.socket_would_block += 1,
+                Err(error) => return Err(error),
+            }
+        }
+
+        Ok(summary)
     }
 
     fn allocate_tcp_tls_stream_id(&mut self) -> Result<RelayTcpTlsStreamId, RelayError> {

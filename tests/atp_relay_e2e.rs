@@ -1629,6 +1629,263 @@ fn relay_socket_loop_round_trips_real_tcp_stream_with_detailed_logs() {
 }
 
 #[test]
+fn relay_socket_turn_services_udp_and_tcp_with_detailed_logs() {
+    let test = "relay_socket_turn_services_udp_and_tcp_with_detailed_logs";
+    let mut service = RelayService::new(
+        RelayServiceConfig::new("relay-socket-turn-e2e", 4)
+            .expect("config")
+            .with_log_peer_ids(true),
+    );
+
+    log_stage(
+        test,
+        "reserve",
+        "accept one relay reservation that can move opaque UDP and TCP/TLS traffic",
+    );
+    service
+        .reserve(
+            800,
+            reservation_id(805),
+            "socket-turn-path",
+            grant(10_000, RelayQuota::default()),
+            &|_: &RelayReservationGrant| true,
+        )
+        .expect("reserve relay socket turn");
+
+    log_stage(
+        test,
+        "udp-setup",
+        "bind real relay/source/destination UDP sockets and admit endpoints",
+    );
+    let relay_udp =
+        UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("relay udp binds");
+    relay_udp
+        .set_nonblocking(true)
+        .expect("relay udp nonblocking");
+    let relay_udp_addr = relay_udp.local_addr().expect("relay udp addr");
+    let source_udp =
+        UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("source udp binds");
+    let destination_udp =
+        UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("destination udp binds");
+    destination_udp
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("destination udp read timeout");
+
+    let mut socket_loop = RelaySocketLoop::new(
+        RelayEndpointDirectoryQuota {
+            max_udp_endpoints: 2,
+            max_tcp_tls_streams: 2,
+        },
+        RelayQuota::default().max_packet_bytes,
+        2048,
+    )
+    .expect("socket loop");
+    socket_loop
+        .admit_udp_endpoint(peer(1), source_udp.local_addr().expect("source udp addr"))
+        .expect("admit source udp endpoint");
+    socket_loop
+        .admit_udp_endpoint(
+            peer(2),
+            destination_udp.local_addr().expect("destination udp addr"),
+        )
+        .expect("admit destination udp endpoint");
+
+    log_stage(
+        test,
+        "tcp-setup",
+        "accept real source and destination TCP/TLS fallback streams through the relay loop",
+    );
+    let source_listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("source listener");
+    let mut source_client =
+        TcpStream::connect(source_listener.local_addr().expect("source listener addr"))
+            .expect("source client connects");
+    let mut source_accept = socket_loop
+        .accept_tcp_tls_stream_once(&source_listener, peer(1))
+        .expect("accept source stream")
+        .expect("source stream accepted");
+
+    let destination_listener =
+        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).expect("destination listener");
+    let mut destination_client = TcpStream::connect(
+        destination_listener
+            .local_addr()
+            .expect("destination listener addr"),
+    )
+    .expect("destination client connects");
+    destination_client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("destination tcp read timeout");
+    let mut destination_accept = socket_loop
+        .accept_tcp_tls_stream_once(&destination_listener, peer(2))
+        .expect("accept destination stream")
+        .expect("destination stream accepted");
+
+    source_accept
+        .stream()
+        .set_nonblocking(true)
+        .expect("source accepted stream nonblocking");
+    destination_accept
+        .stream()
+        .set_nonblocking(true)
+        .expect("destination accepted stream nonblocking");
+
+    log_stage(
+        test,
+        "send-inputs",
+        "submit one real UDP datagram and one real TCP/TLS relay record before one service turn",
+    );
+    let udp_frame = RelayWireFrame::new(
+        reservation_id(805),
+        nonce(0xfeed_f500),
+        peer(1),
+        packet_sent_at(RelayTransport::Udp, b"turn-udp-ciphertext", 1, 810),
+    );
+    let udp_datagram = udp_frame
+        .encode(RelayQuota::default().max_packet_bytes)
+        .expect("encode udp frame");
+    source_udp
+        .send_to(&udp_datagram, relay_udp_addr)
+        .expect("source udp sends relay datagram");
+
+    let tcp_frame = RelayWireFrame::new(
+        reservation_id(805),
+        nonce(0xfeed_f500),
+        peer(1),
+        packet_sent_at(RelayTransport::TcpTls443, b"turn-tcp-ciphertext", 2, 820),
+    );
+    let tcp_record = tcp_frame
+        .encode_tcp_tls_record(RelayQuota::default().max_packet_bytes)
+        .expect("encode tcp record");
+    source_client
+        .write_all(&tcp_record)
+        .expect("source client writes tcp record");
+
+    log_stage(
+        test,
+        "service-turn",
+        "one deterministic socket turn services UDP ingress, TCP ingress, UDP egress, and TCP egress",
+    );
+    let mut udp_scratch = vec![
+        0;
+        socket_loop
+            .udp_socket_recv_buffer_capacity()
+            .expect("udp scratch capacity")
+    ];
+    let mut tcp_scratch = vec![0; 2048];
+    let mut accepted_streams = vec![source_accept, destination_accept];
+    let mut summary = socket_loop
+        .service_socket_turn_once(
+            &mut service,
+            900,
+            Some(&relay_udp),
+            &mut udp_scratch,
+            &mut accepted_streams,
+            &mut tcp_scratch,
+        )
+        .expect("service socket turn");
+    for _ in 0..8 {
+        if summary.udp_datagrams_sent > 0
+            && summary.tcp_tls_bytes_written > 0
+            && socket_loop.tcp_tls_pending_write_count() == 0
+        {
+            break;
+        }
+        let next = socket_loop
+            .service_socket_turn_once(
+                &mut service,
+                901,
+                Some(&relay_udp),
+                &mut udp_scratch,
+                &mut accepted_streams,
+                &mut tcp_scratch,
+            )
+            .expect("follow-up service socket turn");
+        summary.udp_datagrams_received += next.udp_datagrams_received;
+        summary.udp_datagrams_sent += next.udp_datagrams_sent;
+        summary.tcp_tls_chunks_read += next.tcp_tls_chunks_read;
+        summary.tcp_tls_packets_forwarded += next.tcp_tls_packets_forwarded;
+        summary.tcp_tls_streams_closed += next.tcp_tls_streams_closed;
+        summary.tcp_tls_bytes_written += next.tcp_tls_bytes_written;
+        summary.socket_would_block += next.socket_would_block;
+        summary.empty_egress_attempts += next.empty_egress_attempts;
+    }
+    assert!(summary.made_progress());
+    assert_eq!(summary.udp_datagrams_received, 1);
+    assert_eq!(summary.udp_datagrams_sent, 1);
+    assert_eq!(summary.tcp_tls_chunks_read, 1);
+    assert_eq!(summary.tcp_tls_packets_forwarded, 1);
+    assert!(summary.tcp_tls_bytes_written > 0);
+    assert_eq!(socket_loop.tcp_tls_pending_write_count(), 0);
+
+    log_stage(
+        test,
+        "verify-udp-output",
+        "destination UDP socket receives the relayed opaque frame from the relay address",
+    );
+    let mut received_udp = vec![0; 2048];
+    let (received_udp_len, received_udp_from) = destination_udp
+        .recv_from(&mut received_udp)
+        .expect("destination udp receives relay datagram");
+    assert_eq!(received_udp_from, relay_udp_addr);
+    let decoded_udp = RelayWireFrame::decode(
+        &received_udp[..received_udp_len],
+        RelayQuota::default().max_packet_bytes,
+    )
+    .expect("decode relayed udp frame");
+    assert_eq!(decoded_udp.from_peer_id(), peer(1));
+    assert_eq!(decoded_udp.packet().transport(), RelayTransport::Udp);
+    assert_eq!(decoded_udp.packet().opaque_bytes(), b"turn-udp-ciphertext");
+
+    log_stage(
+        test,
+        "verify-tcp-output",
+        "destination TCP client receives the relayed length-prefixed fallback record",
+    );
+    let mut received_tcp = vec![0; 2048];
+    let mut received_tcp_len = 0usize;
+    while received_tcp_len < 4 {
+        let read = destination_client
+            .read(&mut received_tcp[received_tcp_len..])
+            .expect("destination reads tcp prefix");
+        assert!(read > 0, "destination closed before tcp record prefix");
+        received_tcp_len += read;
+    }
+    let frame_len =
+        u32::from_be_bytes(received_tcp[..4].try_into().expect("tcp prefix bytes")) as usize;
+    let tcp_record_len = frame_len + 4;
+    assert!(
+        tcp_record_len <= received_tcp.len(),
+        "relayed tcp record exceeds receive buffer"
+    );
+    while received_tcp_len < tcp_record_len {
+        let read = destination_client
+            .read(&mut received_tcp[received_tcp_len..tcp_record_len])
+            .expect("destination reads complete tcp record");
+        assert!(read > 0, "destination closed before complete tcp record");
+        received_tcp_len += read;
+    }
+    let decoded_tcp = RelayWireFrame::decode_complete_tcp_tls_record(
+        &received_tcp[..tcp_record_len],
+        RelayQuota::default().max_packet_bytes,
+    )
+    .expect("decode relayed tcp record");
+    assert_eq!(decoded_tcp.from_peer_id(), peer(1));
+    assert_eq!(decoded_tcp.packet().transport(), RelayTransport::TcpTls443);
+    assert_eq!(decoded_tcp.packet().opaque_bytes(), b"turn-tcp-ciphertext");
+
+    let proof = service
+        .proof_artifact(reservation_id(805))
+        .expect("proof after socket turn");
+    assert_eq!(proof.packets_forwarded, 2);
+    assert_eq!(
+        proof.opaque_bytes_forwarded,
+        (b"turn-udp-ciphertext".len() + b"turn-tcp-ciphertext".len()) as u64
+    );
+    assert!(proof.latency_summary.is_some());
+}
+
+#[test]
 fn relay_restart_sender_disconnect_and_mailbox_boundary_are_deterministic() {
     let test = "relay_restart_sender_disconnect_and_mailbox_boundary_are_deterministic";
     let mut service = RelayService::new(RelayServiceConfig::default());
