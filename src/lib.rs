@@ -435,6 +435,8 @@ pub mod real_net_websocket_frame_sync_notify_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_websocket_http_h1_upgrade_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_obligation_choreography_pipeline_obligation_session_types_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_e2e_tests;
 #[cfg(any(
     all(test, feature = "real-service-e2e"),
