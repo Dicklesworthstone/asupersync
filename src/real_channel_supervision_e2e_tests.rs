@@ -585,6 +585,43 @@ mod tests {
             }
         }
 
+        /// Poll until supervision action meets expected condition
+        async fn wait_for_supervision_action<F>(
+            &mut self,
+            cx: &Cx,
+            condition: F,
+            timeout: Duration,
+        ) -> Result<SupervisorStatus, Box<dyn std::error::Error>>
+        where
+            F: Fn(&SupervisorStatus) -> bool,
+        {
+            let start = std::time::Instant::now();
+            let mut backoff = Duration::from_millis(5);
+            let max_backoff = Duration::from_millis(50);
+
+            while start.elapsed() < timeout {
+                let status = self.get_supervisor_status(cx).await?;
+                if condition(&status) {
+                    return Ok(status);
+                }
+
+                crate::time::sleep(cx, backoff).await;
+                backoff = std::cmp::min(
+                    Duration::from_millis((backoff.as_millis() as f64 * 1.5) as u64),
+                    max_backoff
+                );
+            }
+
+            // Get final status for error message
+            let final_status = self.get_supervisor_status(cx).await?;
+            Err(format!(
+                "Supervision action condition not met within {:?}. Final status: restarts={}, errors={}",
+                timeout,
+                final_status.restart_count,
+                final_status.broadcast_errors
+            ).into())
+        }
+
         async fn trigger_worker_restart(&mut self, cx: &Cx, worker_name: &str) -> Result<(), Box<dyn std::error::Error>> {
             self.logger.integration_event("trigger_restart", worker_name);
 
@@ -675,13 +712,19 @@ mod tests {
             // Simulate broadcast error that triggers supervision decisions
             harness.simulate_broadcast_error(&cx).await?;
 
-            // Give time for supervision decisions to propagate
-            crate::time::sleep(&cx, Duration::from_millis(10)).await;
+            // Wait for supervision to handle the broadcast error
+            let post_error_status = harness.wait_for_supervision_action(
+                &cx,
+                |status| status.broadcast_errors > 0 && status.restart_count > 0,
+                Duration::from_secs(5)
+            ).await
+            .expect("Supervision should handle broadcast error within timeout");
 
-            // Verify that supervision handled the broadcast error
-            let post_error_status = harness.get_supervisor_status(&cx).await?;
-            assert!(post_error_status.broadcast_errors > 0);
-            assert!(post_error_status.restart_count > 0);
+            // Verify the expected conditions were met
+            assert!(post_error_status.broadcast_errors > 0,
+                "Should track broadcast errors: {}", post_error_status.broadcast_errors);
+            assert!(post_error_status.restart_count > 0,
+                "Should have triggered restarts: {}", post_error_status.restart_count);
 
             // Analyze event sequence
             let analysis = harness.analyze_event_sequence();

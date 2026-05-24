@@ -24,6 +24,64 @@ mod tcp_unix_e2e_tests {
     use std::sync::{Arc, Mutex};
     use tempfile::{TempDir, tempdir};
 
+    /// Configuration for polling server readiness
+    #[derive(Debug, Clone)]
+    pub struct PollingConfig {
+        pub max_attempts: u32,
+        pub initial_delay: Duration,
+        pub max_delay: Duration,
+        pub backoff_multiplier: f64,
+    }
+
+    impl Default for PollingConfig {
+        fn default() -> Self {
+            Self {
+                max_attempts: 50,
+                initial_delay: Duration::from_millis(10),
+                max_delay: Duration::from_millis(100),
+                backoff_multiplier: 1.5,
+            }
+        }
+    }
+
+    impl PollingConfig {
+        pub fn server_startup() -> Self {
+            Self {
+                max_attempts: 50,
+                initial_delay: Duration::from_millis(10),
+                max_delay: Duration::from_millis(100),
+                backoff_multiplier: 1.5,
+            }
+        }
+    }
+
+    /// Poll until server is ready to accept connections
+    async fn wait_for_server_ready(addr: SocketAddr, config: PollingConfig) -> Result<(), String> {
+        let mut attempts = 0;
+        let mut backoff = config.initial_delay;
+
+        while attempts < config.max_attempts {
+            match TcpStream::connect(addr).await {
+                Ok(_stream) => {
+                    // Connection successful, server is ready
+                    return Ok(());
+                }
+                Err(_) => {
+                    attempts += 1;
+                    let _ = sleep(&Cx::root(), backoff).await;
+                    backoff = Duration::from_millis(
+                        std::cmp::min(
+                            (backoff.as_millis() as f64 * config.backoff_multiplier) as u64,
+                            config.max_delay.as_millis() as u64
+                        )
+                    );
+                }
+            }
+        }
+
+        Err(format!("Server not ready after {} attempts at {}", config.max_attempts, addr))
+    }
+
     /// Real TCP server for E2E testing with actual socket binding
     pub struct RealTcpServer {
         listener: TcpListener,
@@ -583,8 +641,9 @@ mod tcp_unix_e2e_tests {
                 async move { server.start_echo_server(cx, logger).await }
             };
 
-            // Give server time to start
-            let _ = sleep(&cx, Duration::from_millis(50)).await;
+            // Wait for server to be ready for connections
+            wait_for_server_ready(server_addr, PollingConfig::server_startup()).await
+                .expect("Server should become ready for connections");
 
             // Connect as client and send test message
             let mut client_stream = TcpStream::connect(server_addr).await?;
