@@ -227,12 +227,22 @@ impl MockRegion {
             // Close leaf regions first (no children in remaining set)
             let leaf_idx = remaining
                 .iter()
-                .position(|r| {
+                .enumerate()
+                .filter(|(_, r)| {
                     !r.children
                         .iter()
                         .any(|child_id| remaining.iter().any(|rem| rem.id == *child_id))
                 })
-                .unwrap_or(0);
+                .min_by_key(|(_, r)| r.id)
+                .map(|(idx, _)| idx)
+                .unwrap_or_else(|| {
+                    remaining
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, r)| r.id)
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(0)
+                });
 
             let region = remaining.remove(leaf_idx);
             order.push(region.id);
@@ -486,7 +496,7 @@ fn test_mr_state_transition_determinism() {
 
         // MR: Same state + same event = same result (determinism)
         prop_assert_eq!(
-            result1, result2,
+            &result1, &result2,
             "State transition non-deterministic: state1→{:?}, state2→{:?}",
             result1, result2
         );
@@ -532,19 +542,15 @@ fn test_mr_region_close_ordering() {
 
         // Test ordering determinism with different permutations
         let mut shuffled = regions.clone();
-        use proptest::sample::{Rng, size_range};
-        let mut rng = proptest::test_runner::TestRng::deterministic_rng(proptest::RngAlgorithm::ChaCha);
-        for i in (1..shuffled.len()).rev() {
-            let j = rng.gen_range(0..=i);
-            shuffled.swap(i, j);
-        }
+        let rotation = shuffled.len() / 2;
+        shuffled.rotate_left(rotation);
 
         let order1 = MockRegion::close_ordered(&regions);
         let order2 = MockRegion::close_ordered(&shuffled);
 
         // MR: Close order should be deterministic regardless of input order
         prop_assert_eq!(
-            order1, order2,
+            &order1, &order2,
             "Region close order should be deterministic: original={:?}, shuffled={:?}",
             order1, order2
         );
@@ -631,7 +637,7 @@ fn test_mr_mpsc_message_ordering() {
 
         // MR: Send order should equal receive order in MPSC
         prop_assert_eq!(
-            send_order, receive_order,
+            &send_order, &receive_order,
             "MPSC ordering violated: send={:?}, receive={:?}",
             send_order, receive_order
         );
@@ -648,15 +654,20 @@ fn test_mr_mpsc_message_ordering() {
 #[test]
 fn test_mr_broadcast_lag_bound() {
     proptest!(|(
-        messages: Vec<MockMessage>,
+        messages_data: Vec<(u32, String, u64)>,
         initial_receivers: Vec<u32>,
         additional_receivers: Vec<u32>,
         lag_bound in 1u32..=100
     )| {
+        let messages: Vec<MockMessage> = messages_data
+            .into_iter()
+            .map(|(id, content, sequence)| MockMessage { id, content, sequence })
+            .collect();
+        let initial_receiver_count = initial_receivers.len();
         let mut broadcast_state = MockBroadcastState {
             messages,
             receivers: initial_receivers,
-            lag_counts: vec![0; initial_receivers.len()],
+            lag_counts: vec![0; initial_receiver_count],
         };
 
         // Add new receivers (should start with zero lag)
