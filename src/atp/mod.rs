@@ -11,10 +11,12 @@ pub mod autotune;
 pub mod diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
+pub mod governance;
 pub mod grant;
 pub mod identity;
 pub mod inbox;
 pub mod journal;
+pub mod lab;
 pub mod logging;
 pub mod manifest;
 pub mod object;
@@ -22,6 +24,7 @@ pub mod path;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod platform;
 pub mod policy;
+pub mod profiles;
 pub mod proof;
 pub mod quota;
 pub mod repair_receiver;
@@ -53,6 +56,10 @@ pub use diagnostics::{
     AtpRuntimeEvidenceEnvelope, AtpRuntimeEvidenceSignal, AtpRuntimeSignalClass,
     AtpRuntimeSignalSource,
 };
+pub use governance::{
+    AtpGovernanceDecision, AtpGovernanceViolation, AtpGovernanceViolationKind, AtpResourceBudget,
+    AtpResourceDemand, AtpResourceGovernor,
+};
 pub use grant::{GrantInfo, GrantManager, GrantQuery, GrantStats, PairingCode, PairingManager};
 pub use identity::{DurablePeerIdentity, IdentityError};
 pub use inbox::{
@@ -67,6 +74,7 @@ pub use manifest::{ChunkStrategy, ProofStrength};
 pub use policy::{
     Capability, CapabilityAction, PolicyDecision, PolicyEnforcer, ResourceScope, TemporalScope,
 };
+pub use profiles::{AtpPowerProfile, AtpResourceProfile};
 pub use quota::{
     QuotaAllocation, QuotaBucket, QuotaError, QuotaLedger, QuotaLimit, QuotaRow, QuotaUsage,
     RetentionClock, RetentionPolicy, RetentionRecord, RetentionRule,

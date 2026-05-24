@@ -1,11 +1,10 @@
 //! ATP path lab harness implementation for deterministic network testing.
 
-use crate::atp::lab::{AtpLabScenario, AtpLabRegime, AtpLabTransferSpec, AtpTransferLabPlan};
+use crate::atp::lab::{AtpLabRegime, AtpLabScenario, AtpLabTransferSpec, AtpTransferLabPlan};
 use crate::atp::path::{PathKind, PathTraceId};
-use crate::lab::network::{HostId, NetworkConfig, SimulatedNetwork};
+use crate::lab::network::{NetworkConfig, SimulatedNetwork};
 use crate::net::atp::path::NatProfile;
 use crate::types::Time;
-use std::collections::BTreeMap;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -100,8 +99,7 @@ impl AtpPathValidation {
     /// Check if the validation represents a successful transfer.
     #[must_use]
     pub fn transfer_succeeded(&self) -> bool {
-        self.selected_path_kind.is_some() &&
-        (self.has_direct_path() || self.relay_succeeded)
+        self.selected_path_kind.is_some() && (self.has_direct_path() || self.relay_succeeded)
     }
 }
 
@@ -150,10 +148,7 @@ pub enum AtpPathEventKind {
         latency_micros: u64,
     },
     /// Path candidate failed
-    PathFailed {
-        path_kind: PathKind,
-        reason: String,
-    },
+    PathFailed { path_kind: PathKind, reason: String },
     /// Path migration triggered
     MigrationTriggered {
         from_path: PathKind,
@@ -184,8 +179,11 @@ pub enum AtpPathLabError {
 /// ATP path lab harness for executing path-related scenarios.
 #[derive(Debug)]
 pub struct AtpPathLabHarness {
+    #[allow(dead_code)] // TODO: Use config for timeout/tracing settings
     config: AtpPathTestConfig,
     network: SimulatedNetwork,
+    /// Deterministic timestamp counter for trace events
+    timestamp_counter: u64,
 }
 
 impl AtpPathLabHarness {
@@ -193,7 +191,17 @@ impl AtpPathLabHarness {
     #[must_use]
     pub fn new(config: AtpPathTestConfig) -> Self {
         let network = SimulatedNetwork::new(config.network.clone());
-        Self { config, network }
+        Self {
+            config,
+            network,
+            timestamp_counter: 0,
+        }
+    }
+
+    /// Generate a deterministic timestamp for trace events.
+    fn next_timestamp(&mut self) -> Time {
+        self.timestamp_counter += 1;
+        Time::from_nanos(self.timestamp_counter)
     }
 
     /// Execute an ATP lab scenario and return path validation results.
@@ -208,9 +216,10 @@ impl AtpPathLabHarness {
 
         // Create a basic transfer spec for path testing
         let transfer = AtpLabTransferSpec::new(
-            "client", "server",
+            "client",
+            "server",
             1024 * 1024, // 1MB test transfer
-            1
+            1,
         );
 
         let plan = scenario.clone().compose(transfer);
@@ -239,21 +248,21 @@ impl AtpPathLabHarness {
         let mut scenario_matched_expected = true;
 
         // Set up simulated endpoints
-        let client_host = HostId::new("client");
-        let server_host = HostId::new("server");
-
-        self.network.add_host(client_host);
-        self.network.add_host(server_host);
+        let _client_host = self.network.add_host("client");
+        let _server_host = self.network.add_host("server");
 
         // Process each regime in the scenario
         for regime in &plan.scenario.regimes {
-            match self.process_regime(*regime, &mut trace_events, &mut path_validation).await {
+            match self
+                .process_regime(*regime, &mut trace_events, &mut path_validation)
+                .await
+            {
                 Ok(evaluated) => candidates_evaluated += evaluated,
                 Err(e) => {
                     scenario_matched_expected = false;
                     // Log error but continue with other regimes
                     trace_events.push(AtpPathTraceEvent {
-                        timestamp: Time::now(),
+                        timestamp: self.next_timestamp(),
                         trace_id: PathTraceId::new(trace_events.len() as u64),
                         event: AtpPathEventKind::PathFailed {
                             path_kind: PathKind::LanMulticast, // Default for error
@@ -288,56 +297,38 @@ impl AtpPathLabHarness {
         match regime {
             AtpLabRegime::EasyNat => {
                 validation.detected_nat_profile = NatProfile::LikelyEasyNat;
-                candidates_evaluated += self.test_path_kind(
-                    PathKind::LanMulticast,
-                    trace_id,
-                    trace_events,
-                    validation,
-                ).await?;
+                candidates_evaluated += self
+                    .test_path_kind(PathKind::LanMulticast, trace_id, trace_events, validation)
+                    .await?;
             }
             AtpLabRegime::Ipv6Direct => {
                 validation.detected_nat_profile = NatProfile::Ipv6Direct;
-                candidates_evaluated += self.test_path_kind(
-                    PathKind::PublicIpv6,
-                    trace_id,
-                    trace_events,
-                    validation,
-                ).await?;
+                candidates_evaluated += self
+                    .test_path_kind(PathKind::PublicIpv6, trace_id, trace_events, validation)
+                    .await?;
             }
             AtpLabRegime::HardNat | AtpLabRegime::SymmetricNat => {
                 validation.detected_nat_profile = NatProfile::HardSymmetricNat;
-                candidates_evaluated += self.test_path_kind(
-                    PathKind::NatPunchedUdp,
-                    trace_id,
-                    trace_events,
-                    validation,
-                ).await?;
+                candidates_evaluated += self
+                    .test_path_kind(PathKind::NatPunchedUdp, trace_id, trace_events, validation)
+                    .await?;
             }
             AtpLabRegime::UdpBlocked => {
                 validation.detected_nat_profile = NatProfile::UdpBlocked;
                 // UDP blocked forces relay usage
-                candidates_evaluated += self.test_path_kind(
-                    PathKind::AtpRelayUdp,
-                    trace_id,
-                    trace_events,
-                    validation,
-                ).await?;
+                candidates_evaluated += self
+                    .test_path_kind(PathKind::AtpRelayUdp, trace_id, trace_events, validation)
+                    .await?;
             }
             AtpLabRegime::RelayOnly => {
-                candidates_evaluated += self.test_path_kind(
-                    PathKind::AtpRelayUdp,
-                    trace_id,
-                    trace_events,
-                    validation,
-                ).await?;
+                candidates_evaluated += self
+                    .test_path_kind(PathKind::AtpRelayUdp, trace_id, trace_events, validation)
+                    .await?;
             }
             AtpLabRegime::TailscalePrivateRoute => {
-                candidates_evaluated += self.test_path_kind(
-                    PathKind::TailscaleIp,
-                    trace_id,
-                    trace_events,
-                    validation,
-                ).await?;
+                candidates_evaluated += self
+                    .test_path_kind(PathKind::TailscaleIp, trace_id, trace_events, validation)
+                    .await?;
             }
             AtpLabRegime::PathMigration => {
                 // Test migration from LAN to IPv6
@@ -347,7 +338,8 @@ impl AtpPathLabHarness {
                     trace_id,
                     trace_events,
                     validation,
-                ).await?;
+                )
+                .await?;
                 candidates_evaluated += 2;
             }
             // Other regimes are handled by different harnesses
@@ -365,7 +357,7 @@ impl AtpPathLabHarness {
         validation: &mut AtpPathValidation,
     ) -> Result<u32, AtpPathLabError> {
         trace_events.push(AtpPathTraceEvent {
-            timestamp: Time::now(),
+            timestamp: self.next_timestamp(),
             trace_id,
             event: AtpPathEventKind::DiscoveryStarted {
                 path_kind,
@@ -374,7 +366,7 @@ impl AtpPathLabHarness {
         });
 
         trace_events.push(AtpPathTraceEvent {
-            timestamp: Time::now(),
+            timestamp: self.next_timestamp(),
             trace_id,
             event: AtpPathEventKind::ConnectionAttempt {
                 path_kind,
@@ -408,7 +400,7 @@ impl AtpPathLabHarness {
 
         if success {
             trace_events.push(AtpPathTraceEvent {
-                timestamp: Time::now(),
+                timestamp: self.next_timestamp(),
                 trace_id,
                 event: AtpPathEventKind::PathSucceeded {
                     path_kind,
@@ -417,7 +409,7 @@ impl AtpPathLabHarness {
             });
         } else {
             trace_events.push(AtpPathTraceEvent {
-                timestamp: Time::now(),
+                timestamp: self.next_timestamp(),
                 trace_id,
                 event: AtpPathEventKind::PathFailed {
                     path_kind,
@@ -438,20 +430,19 @@ impl AtpPathLabHarness {
         validation: &mut AtpPathValidation,
     ) -> Result<(), AtpPathLabError> {
         // First establish the initial path
-        self.test_path_kind(from_path, trace_id, trace_events, validation).await?;
+        self.test_path_kind(from_path, trace_id, trace_events, validation)
+            .await?;
 
         // Simulate migration trigger
         trace_events.push(AtpPathTraceEvent {
-            timestamp: Time::now(),
+            timestamp: self.next_timestamp(),
             trace_id,
-            event: AtpPathEventKind::MigrationTriggered {
-                from_path,
-                to_path,
-            },
+            event: AtpPathEventKind::MigrationTriggered { from_path, to_path },
         });
 
         // Test the new path
-        self.test_path_kind(to_path, trace_id, trace_events, validation).await?;
+        self.test_path_kind(to_path, trace_id, trace_events, validation)
+            .await?;
 
         // Migration preserves transfer if both paths succeeded
         validation.migration_preserved_transfer = match (from_path, to_path) {
@@ -514,13 +505,16 @@ mod tests {
     async fn test_udp_blocked_forces_relay() {
         let mut harness = AtpPathLabHarness::new(AtpPathTestConfig::relay_only());
 
-        let scenario = AtpLabScenario::new("udp-blocked", 0xA7F0_0003)
-            .with_regime(AtpLabRegime::UdpBlocked);
+        let scenario =
+            AtpLabScenario::new("udp-blocked", 0xA7F0_0003).with_regime(AtpLabRegime::UdpBlocked);
 
         let result = harness.execute_scenario(&scenario).await.unwrap();
 
         assert!(result.path_validation.relay_succeeded);
         assert!(!result.path_validation.has_direct_path());
-        assert_eq!(result.path_validation.detected_nat_profile, NatProfile::UdpBlocked);
+        assert_eq!(
+            result.path_validation.detected_nat_profile,
+            NatProfile::UdpBlocked
+        );
     }
 }
