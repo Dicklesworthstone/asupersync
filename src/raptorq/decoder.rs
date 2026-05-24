@@ -4823,8 +4823,12 @@ mod tests {
         let symbol_size = 32;
         let seed = 42u64;
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
-        let (c1, k1) = decoder.repair_equation_rfc6330(17);
-        let (c2, k2) = decoder.repair_equation_rfc6330(17);
+        let (c1, k1) = decoder
+            .repair_equation_rfc6330(17)
+            .expect("repair ESI 17 should produce an RFC 6330 equation");
+        let (c2, k2) = decoder
+            .repair_equation_rfc6330(17)
+            .expect("repair ESI 17 should produce an RFC 6330 equation");
         let context = rfc_eq_context(
             "RQ-B2-DECODER-EQ-DET-001",
             seed,
@@ -4854,7 +4858,9 @@ mod tests {
             "index_bounds",
         );
         for esi in 0..32u32 {
-            let (cols, coefs) = decoder.repair_equation_rfc6330(esi);
+            let (cols, coefs) = decoder
+                .repair_equation_rfc6330(esi)
+                .unwrap_or_else(|| panic!("{context} missing equation for esi={esi}"));
             assert_eq!(
                 cols.len(),
                 coefs.len(),
@@ -4878,7 +4884,9 @@ mod tests {
         let w = params.w;
         let mut saw_pi = false;
         for esi in 0..128u32 {
-            let (cols, _) = decoder.repair_equation_rfc6330(esi);
+            let (cols, _) = decoder
+                .repair_equation_rfc6330(esi)
+                .unwrap_or_else(|| panic!("missing RFC 6330 equation for esi={esi}"));
             if cols.iter().any(|c| *c >= w) {
                 saw_pi = true;
                 break;
@@ -4908,7 +4916,7 @@ mod tests {
             let params = SystematicParams::for_source_block(k, symbol_size);
             for esi in 0..64u32 {
                 let decoder_eq = decoder.repair_equation_rfc6330(esi);
-                let shared_eq = params.rfc_repair_equation(esi);
+                let shared_eq = params.rfc_repair_equation(esi).ok();
                 let context = rfc_eq_context(
                     scenario_id,
                     seed,
@@ -4918,8 +4926,7 @@ mod tests {
                     "decoder_params_parity",
                 );
                 assert_eq!(
-                    decoder_eq,
-                    shared_eq.unwrap(),
+                    decoder_eq, shared_eq,
                     "{context} decoder/params equation mismatch for esi={esi}"
                 );
             }
@@ -4945,7 +4952,9 @@ mod tests {
         // Add RFC tuple-driven repair equations and synthesize repair bytes directly
         // from intermediate symbols to validate decoder-side equation reconstruction.
         for esi in (k as u32)..(l as u32) {
-            let (columns, coefficients) = decoder.repair_equation_rfc6330(esi);
+            let (columns, coefficients) = decoder
+                .repair_equation_rfc6330(esi)
+                .expect("repair ESI should produce an RFC 6330 equation");
             let repair_data = build_repair_from_intermediate(&encoder, &columns, symbol_size);
             received.push(ReceivedSymbol::repair(
                 esi,

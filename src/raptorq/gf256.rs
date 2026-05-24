@@ -3715,8 +3715,15 @@ mod tests {
             .collect()
     }
 
+    fn profile_pack_metadata_fixture(
+        profile_pack: Gf256ProfilePackId,
+    ) -> &'static Gf256ProfilePackMetadata {
+        profile_pack_metadata(profile_pack)
+            .expect("profile pack fixture should exist in deterministic catalog")
+    }
+
     fn x86_profile_pack_policy_fixture() -> DualKernelPolicy {
-        let metadata = profile_pack_metadata(Gf256ProfilePackId::X86Avx2BalancedV1);
+        let metadata = profile_pack_metadata_fixture(Gf256ProfilePackId::X86Avx2BalancedV1);
         DualKernelPolicy {
             profile_pack: metadata.profile_pack,
             architecture_class: metadata.architecture_class,
@@ -3740,7 +3747,7 @@ mod tests {
     }
 
     fn policy_fixture_from_selection(selection: ProfilePackSelection) -> DualKernelPolicy {
-        let metadata = profile_pack_metadata(selection.profile_pack);
+        let metadata = profile_pack_metadata_fixture(selection.profile_pack);
         DualKernelPolicy {
             profile_pack: metadata.profile_pack,
             architecture_class: selection.architecture_class,
@@ -3846,7 +3853,7 @@ mod tests {
     fn default_profile_metadata_for_kernel(
         kernel: Gf256Kernel,
     ) -> &'static Gf256ProfilePackMetadata {
-        profile_pack_metadata(default_profile_pack_for_arch(
+        profile_pack_metadata_fixture(default_profile_pack_for_arch(
             architecture_class_for_kernel(kernel),
         ))
     }
@@ -3858,7 +3865,8 @@ mod tests {
         kernel: Gf256Kernel,
     ) {
         let host_architecture = architecture_class_for_kernel(kernel);
-        let expected_profile = profile_pack_metadata(Gf256ProfilePackId::ScalarConservativeV1);
+        let expected_profile =
+            profile_pack_metadata_fixture(Gf256ProfilePackId::ScalarConservativeV1);
 
         assert_eq!(
             policy.profile_pack,
@@ -5697,7 +5705,7 @@ mod tests {
 
     #[test]
     fn disabled_windows_report_explicit_profile_reason() {
-        let metadata = profile_pack_metadata(Gf256ProfilePackId::ScalarConservativeV1);
+        let metadata = profile_pack_metadata_fixture(Gf256ProfilePackId::ScalarConservativeV1);
         let policy = DualKernelPolicy {
             profile_pack: metadata.profile_pack,
             architecture_class: metadata.architecture_class,
@@ -5967,7 +5975,7 @@ mod tests {
 
     #[test]
     fn dual_kernel_policy_snapshot_debug_clone_copy_eq() {
-        let metadata = profile_pack_metadata(Gf256ProfilePackId::X86Avx2BalancedV1);
+        let metadata = profile_pack_metadata_fixture(Gf256ProfilePackId::X86Avx2BalancedV1);
         let snap = DualKernelPolicySnapshot {
             profile_schema_version: metadata.schema_version,
             profile_pack: metadata.profile_pack,
@@ -6224,7 +6232,7 @@ mod tests {
 
         for profile_pack in expected_profiles {
             assert_eq!(
-                profile_pack_metadata(profile_pack).profile_pack,
+                profile_pack_metadata_fixture(profile_pack).profile_pack,
                 profile_pack,
                 "profile-pack lookup must resolve to its exact metadata entry"
             );
@@ -6237,7 +6245,7 @@ mod tests {
         let architecture_class = architecture_class_for_kernel(kernel);
         let selection = select_profile_pack(kernel, Some(ProfilePackRequest::ScalarConservativeV1));
         let mut policy = policy_fixture_from_selection(selection);
-        let catalog_profile = profile_pack_metadata(policy.profile_pack);
+        let catalog_profile = profile_pack_metadata_fixture(policy.profile_pack);
         policy.override_mask.set_profile_pack_env_requested();
 
         apply_effective_selection_contract(&mut policy);
@@ -6303,7 +6311,7 @@ mod tests {
             Some(ProfilePackRequest::X86Avx2BalancedV1),
         );
         let mut policy = policy_fixture_from_selection(selection);
-        let catalog_profile = profile_pack_metadata(policy.profile_pack);
+        let catalog_profile = profile_pack_metadata_fixture(policy.profile_pack);
         policy.override_mask.set_profile_pack_env_requested();
 
         apply_effective_selection_contract(&mut policy);
@@ -6359,7 +6367,7 @@ mod tests {
         let architecture_class = architecture_class_for_kernel(kernel);
         let selection = select_profile_pack(kernel, None);
         let mut policy = policy_fixture_from_selection(selection);
-        let catalog_profile = profile_pack_metadata(policy.profile_pack);
+        let catalog_profile = profile_pack_metadata_fixture(policy.profile_pack);
         policy.override_mask.set_profile_pack_env_requested();
         policy.fallback_reason = Some(Gf256ProfileFallbackReason::UnknownRequestedProfile);
 
@@ -6423,7 +6431,7 @@ mod tests {
     fn unknown_dual_policy_env_request_falls_back_without_scrubbing_canonical_metadata() {
         let selection = select_profile_pack(dispatch().kind, None);
         let mut policy = policy_fixture_from_selection(selection);
-        let catalog_profile = profile_pack_metadata(policy.profile_pack);
+        let catalog_profile = profile_pack_metadata_fixture(policy.profile_pack);
         policy.override_mask.set_dual_policy_env_requested();
         policy.mode_fallback_reason = Some(DualKernelModeFallbackReason::UnknownRequestedMode);
 
@@ -6467,7 +6475,7 @@ mod tests {
             || {
                 let kernel = dispatch().kind;
                 let policy = detect_dual_policy();
-                let expected_profile = profile_pack_metadata(policy.profile_pack);
+                let expected_profile = profile_pack_metadata_fixture(policy.profile_pack);
                 let snapshot = dual_kernel_policy_snapshot_for(&policy, kernel);
                 let manifest = gf256_profile_pack_manifest_snapshot_for(&policy, kernel);
 
@@ -6874,7 +6882,7 @@ mod tests {
             "not-a-number",
             || {
                 let policy = detect_dual_policy();
-                let catalog_profile = profile_pack_metadata(policy.profile_pack);
+                let catalog_profile = profile_pack_metadata_fixture(policy.profile_pack);
                 let metadata = effective_profile_pack_metadata(&policy);
 
                 assert!(policy.override_mask.addmul_min_total_env_override());
@@ -6902,7 +6910,7 @@ mod tests {
     fn malformed_numeric_lane_ratio_request_preserves_catalog_value_but_scrubs_provenance() {
         with_gf256_env("ASUPERSYNC_GF256_DUAL_MAX_LANE_RATIO", "eight", || {
             let policy = detect_dual_policy();
-            let catalog_profile = profile_pack_metadata(policy.profile_pack);
+            let catalog_profile = profile_pack_metadata_fixture(policy.profile_pack);
             let metadata = effective_profile_pack_metadata(&policy);
 
             assert!(policy.override_mask.max_lane_ratio_env_override());
@@ -7169,7 +7177,7 @@ mod tests {
             Some(ProfilePackRequest::X86Avx2BalancedV1),
         );
         let mut policy = policy_fixture_from_selection(selection);
-        let expected_profile = profile_pack_metadata(policy.profile_pack);
+        let expected_profile = profile_pack_metadata_fixture(policy.profile_pack);
         policy.override_mask.set_profile_pack_env_requested();
 
         apply_effective_selection_contract(&mut policy);
@@ -7228,7 +7236,7 @@ mod tests {
     fn unknown_profile_pack_snapshot_preserves_canonical_manifest_provenance() {
         let selection = select_profile_pack(Gf256Kernel::Scalar, None);
         let mut policy = policy_fixture_from_selection(selection);
-        let expected_profile = profile_pack_metadata(policy.profile_pack);
+        let expected_profile = profile_pack_metadata_fixture(policy.profile_pack);
         policy.override_mask.set_profile_pack_env_requested();
         policy.fallback_reason = Some(Gf256ProfileFallbackReason::UnknownRequestedProfile);
 
@@ -7389,7 +7397,7 @@ mod tests {
                 .iter()
                 .any(|metadata| metadata.profile_pack == policy.profile_pack)
         );
-        let catalog_profile = profile_pack_metadata(policy.profile_pack);
+        let catalog_profile = profile_pack_metadata_fixture(policy.profile_pack);
         assert_eq!(
             manifest.active_profile_metadata.architecture_class,
             catalog_profile.architecture_class

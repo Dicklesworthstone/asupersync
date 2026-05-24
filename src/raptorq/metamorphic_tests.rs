@@ -1867,7 +1867,7 @@ fn mr_zero_byte_boundary_round_trip() {
         } else {
             // Non-empty data should round-trip exactly
             let mut sender = RaptorQSenderBuilder::new()
-                .config(config)
+                .config(config.clone())
                 .transport(CollectorSink::new())
                 .build()
                 .expect(&format!("sender for {}", description));
@@ -2482,7 +2482,8 @@ fn mr_matrix_operation_rank_monotonicity() {
             let original_rank = count_nonzero_rows(&matrix);
 
             // Perform row XOR operation: R1 := R1 + R2
-            row_xor(&mut modified_matrix[0], &modified_matrix[1]);
+            let (first_row, remaining_rows) = modified_matrix.split_at_mut(1);
+            row_xor(&mut first_row[0], &remaining_rows[0]);
             let rank_after_xor = count_nonzero_rows(&modified_matrix);
 
             prop_assert!(
@@ -2504,7 +2505,8 @@ fn mr_matrix_operation_rank_monotonicity() {
 
             // Reset and test row swap: R1 <-> R2
             let mut swapped_matrix = matrix.clone();
-            row_swap(&mut swapped_matrix[0], &mut swapped_matrix[1]);
+            let (first_row, remaining_rows) = swapped_matrix.split_at_mut(1);
+            row_swap(&mut first_row[0], &mut remaining_rows[0]);
             let rank_after_swap = count_nonzero_rows(&swapped_matrix);
 
             prop_assert_eq!(
@@ -2762,7 +2764,7 @@ fn mr_bytes_split_composition() {
             recombined.extend_from_slice(&right);
 
             prop_assert_eq!(
-                recombined, data,
+                recombined.as_slice(), data.as_slice(),
                 "Bytes split composition failed: split_to({}) + remainder != original",
                 split_pos
             );
