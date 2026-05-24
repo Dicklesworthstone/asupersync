@@ -1,0 +1,45 @@
+{
+  "schema_version": "asupersync.atp.fixture_corpus.v1",
+  "fixture_id": "atp-direct-success-seed-90057b12",
+  "seed": 2416278290,
+  "shape": "direct_success_tree_v1",
+  "object_graph": [
+    {
+      "path": "payload/control.txt",
+      "kind": "small_file",
+      "logical_size": 64,
+      "content_hash": "b695a6ab26514c2ad8a93441d523753bf692dbd050b077015380623ee7456b52",
+      "generation": {
+        "strategy": "xorshift64",
+        "seed": 2416278290
+      }
+    },
+    {
+      "path": "payload/model-prefix.bin",
+      "kind": "media_model_prefix",
+      "logical_size": 4096,
+      "content_hash": "44f0726489e46b03963a2385a6bc7c73c16bde2c6a4866c036048012fb5fce7f",
+      "generation": {
+        "strategy": "xorshift64",
+        "seed": 2416278453
+      }
+    },
+    {
+      "path": "payload/logical-large.bin",
+      "kind": "generated_large_file",
+      "logical_size": 1048576,
+      "content_hash": "b4f3b8de702db52b45a491840ce7e1575ac6346eb640cb9675507e9a88ee974c",
+      "generation": {
+        "strategy": "xorshift64",
+        "seed": 2416255304
+      }
+    }
+  ],
+  "expected_manifest_root": "cd40067d2266dbd7430872d1d4a67a9d452f90b969b654596cb7a6e94661f547",
+  "platform_capability_assumptions": [
+    "deterministic_xorshift64",
+    "large_data_generated_on_demand",
+    "utf8_paths"
+  ],
+  "large_data_policy": "generate_on_demand_no_large_binary_blobs"
+}
