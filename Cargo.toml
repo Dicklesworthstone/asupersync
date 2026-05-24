@@ -56,6 +56,8 @@ wasm-browser-minimal = ["wasm-runtime"]
 # Enable internal test helpers for integration tests.
 # This exposes private APIs like Cx::new() and is NOT for production use.
 test-internals = ["dep:tracing", "dep:tracing-subscriber", "dep:visibility"]
+# Opt-in compile surface for ignored, environment-gated real-service E2E tests.
+real-service-e2e = []
 # OpenTelemetry metrics provider only. The normal dependency graph for this
 # feature stays Tokio-free; OTLP protobuf helpers remain fuzz/test-only.
 metrics = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
