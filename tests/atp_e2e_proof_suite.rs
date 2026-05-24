@@ -16,9 +16,9 @@ use asupersync::lab::oracle::evidence::{
 use asupersync::trace::{TraceBuffer, TraceEvent};
 use asupersync::types::Time;
 use atp::{
-    AtpCrashPoint, AtpForensics, AtpObligationTracker, ChunkRangeInfo, FaultConfig, FaultInjector,
-    FaultPoint, FaultType, JournalOffsets, ObjectInfo, ObligationType, ReproducibleTestCase,
-    VerifierDecision,
+    AtpCrashPoint, AtpForensics, AtpObligationTracker, BitmapChange, ChunkRangeInfo, CommitRecord,
+    FaultConfig, FaultInjector, FaultPoint, FaultType, JournalOffsets, ObjectInfo, ObligationType,
+    ReproducibleTestCase, VerifierDecision,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -96,6 +96,261 @@ fn test_atp_crash_matrix_basic() -> Result<(), Box<dyn std::error::Error>> {
             "configured crash point {crash_point:?} did not trigger {fault_point:?}: {observed_fault:?}"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_atp_crash_mid_transfer_resume_reuses_verified_prefix()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let fault_injector = FaultInjector::new();
+    let tracker = std::sync::Arc::new(AtpObligationTracker::new());
+    let chunks: [&[u8]; 3] = [
+        b"verified-prefix-chunk-0",
+        b"verified-prefix-chunk-1",
+        b"tail-chunk-after-crash",
+    ];
+    let chunk_lengths: Vec<u64> = chunks
+        .iter()
+        .map(|chunk| u64::try_from(chunk.len()).expect("test chunk length fits u64"))
+        .collect();
+    let chunk_offsets = [0, chunk_lengths[0], chunk_lengths[0] + chunk_lengths[1]];
+    let prefix_bytes = chunk_lengths[0] + chunk_lengths[1];
+    let transfer_bytes = prefix_bytes + chunk_lengths[2];
+    let chunk_hashes: Vec<String> = chunks.iter().map(|chunk| sha256_tag(chunk)).collect();
+    let manifest_material = chunk_hashes.join("|");
+    let manifest_root = sha256_tag(manifest_material.as_bytes());
+    let proof_bundle_hash = sha256_tag(format!("{manifest_root}:{manifest_material}").as_bytes());
+
+    let transfer_obligation = tracker.create_obligation(
+        ObligationType::Transfer("tx-crash-mid-transfer".to_string()),
+        "crash_mid_transfer".to_string(),
+        HashMap::from([("manifest_root".to_string(), manifest_root.clone())]),
+    );
+    let journal_obligation = tracker.create_obligation(
+        ObligationType::Journal("receiver-journal".to_string()),
+        "crash_mid_transfer".to_string(),
+        HashMap::from([("checkpoint".to_string(), prefix_bytes.to_string())]),
+    );
+    let verifier_obligation = tracker.create_obligation(
+        ObligationType::Verification("chunk-prefix".to_string()),
+        "crash_mid_transfer".to_string(),
+        HashMap::new(),
+    );
+
+    fault_injector.configure_fault(FaultConfig {
+        point: FaultPoint::ChunkWrite,
+        fault_type: FaultType::Crash,
+        probability: 1.0,
+        trigger_count: Some(1),
+    });
+
+    let mut crash_forensics = AtpForensics::new(temp_dir.path())?;
+    crash_forensics.start_capture(
+        "crash_mid_transfer",
+        "receiver crashed after writing an uncommitted tail chunk",
+        "receive_chunk",
+    );
+    crash_forensics.set_crash_point(AtpCrashPoint::PostChunkWrite.as_str());
+    crash_forensics.record_manifest_root(&manifest_root);
+    crash_forensics.record_journal_offsets(JournalOffsets {
+        last_written: transfer_bytes,
+        last_flushed: transfer_bytes,
+        last_committed: prefix_bytes,
+        recovery_checkpoint: prefix_bytes,
+    })?;
+    crash_forensics.set_object_info(ObjectInfo {
+        object_id: "object-crash-mid-transfer".to_string(),
+        object_kind: "file".to_string(),
+        size: transfer_bytes,
+        metadata: BTreeMap::from([(
+            "proof_bundle_hash".to_string(),
+            serde_json::json!(proof_bundle_hash.clone()),
+        )]),
+    });
+    crash_forensics.set_test_case(ReproducibleTestCase {
+        test_function: "test_atp_crash_mid_transfer_resume_reuses_verified_prefix".to_string(),
+        parameters: BTreeMap::from([
+            ("seed".to_string(), serde_json::json!(0xA7_50)),
+            (
+                "crash_point".to_string(),
+                serde_json::json!(AtpCrashPoint::PostChunkWrite.as_str()),
+            ),
+        ]),
+        random_seed: 0xA7_50,
+        lab_config: None,
+        reproduction_steps: Vec::new(),
+    });
+
+    for index in 0..2 {
+        crash_forensics.record_chunk_range(ChunkRangeInfo {
+            start_offset: chunk_offsets[index],
+            length: chunk_lengths[index],
+            chunk_hash: chunk_hashes[index].clone(),
+            state: "verified-prefix".to_string(),
+            verified: true,
+        });
+        crash_forensics.record_bitmap_change(BitmapChange {
+            chunk_index: u64::try_from(index).expect("test index fits u64"),
+            previous_state: "received".to_string(),
+            new_state: "verified".to_string(),
+            timestamp: u64::try_from(index).expect("test index fits u64"),
+        });
+        crash_forensics.record_verifier_decision(VerifierDecision {
+            stage: "ChunkHash".to_string(),
+            target: format!("object-crash-mid-transfer:{index}"),
+            decision: "accepted".to_string(),
+            reason: Some("digest matched before crash".to_string()),
+            timestamp: u64::try_from(index).expect("test index fits u64"),
+        });
+    }
+    crash_forensics.record_chunk_range(ChunkRangeInfo {
+        start_offset: chunk_offsets[2],
+        length: chunk_lengths[2],
+        chunk_hash: chunk_hashes[2].clone(),
+        state: "written-uncommitted".to_string(),
+        verified: false,
+    });
+    crash_forensics.record_bitmap_change(BitmapChange {
+        chunk_index: 2,
+        previous_state: "missing".to_string(),
+        new_state: "written".to_string(),
+        timestamp: 2,
+    });
+
+    let observed_fault = fault_injector.should_inject(&FaultPoint::ChunkWrite);
+    assert!(
+        matches!(observed_fault, Some(FaultType::Crash)),
+        "post-chunk-write crash was not exercised before recovery: {observed_fault:?}"
+    );
+
+    let crash_artifact_path = crash_forensics.finish_capture()?;
+    let crash_artifact = AtpForensics::load_artifact(&crash_artifact_path)?;
+    assert!(crash_artifact.final_commit_record.is_none());
+    assert_eq!(
+        crash_artifact.context.crash_point.as_deref(),
+        Some(AtpCrashPoint::PostChunkWrite.as_str())
+    );
+    assert_eq!(crash_artifact.journal_offsets.last_committed, prefix_bytes);
+    assert_eq!(
+        crash_artifact.journal_offsets.recovery_checkpoint,
+        prefix_bytes
+    );
+    assert!(
+        crash_artifact
+            .chunk_ranges
+            .iter()
+            .any(|range| !range.verified),
+        "crash artifact must retain the uncommitted tail chunk witness"
+    );
+
+    let verified_prefix_bytes: u64 = crash_artifact
+        .chunk_ranges
+        .iter()
+        .filter(|range| range.verified)
+        .map(|range| range.length)
+        .sum();
+    assert_eq!(verified_prefix_bytes, prefix_bytes);
+
+    let replay_command = AtpForensics::generate_replay_command(&crash_artifact);
+    assert!(replay_command.contains("test_atp_crash_mid_transfer_resume_reuses_verified_prefix"));
+    assert!(replay_command.contains("--seed 42832"));
+
+    fault_injector.clear_faults();
+    assert!(tracker.fulfill_obligation(&journal_obligation));
+    assert!(tracker.fulfill_obligation(&verifier_obligation));
+
+    let mut recovery_forensics = AtpForensics::new(temp_dir.path())?;
+    recovery_forensics.start_capture(
+        "crash_mid_transfer_resume",
+        "receiver resumed from verified prefix and committed after final verification",
+        "recover_transfer",
+    );
+    recovery_forensics.record_manifest_root(&manifest_root);
+    recovery_forensics.record_journal_offsets(JournalOffsets {
+        last_written: transfer_bytes,
+        last_flushed: transfer_bytes,
+        last_committed: transfer_bytes,
+        recovery_checkpoint: prefix_bytes,
+    })?;
+    for index in 0..3 {
+        recovery_forensics.record_chunk_range(ChunkRangeInfo {
+            start_offset: chunk_offsets[index],
+            length: chunk_lengths[index],
+            chunk_hash: chunk_hashes[index].clone(),
+            state: "verified-after-resume".to_string(),
+            verified: true,
+        });
+    }
+    recovery_forensics.record_final_commit(CommitRecord {
+        commit_id: "commit-crash-mid-transfer".to_string(),
+        objects: vec!["object-crash-mid-transfer".to_string()],
+        manifest_hash: manifest_root.clone(),
+        proof_bundle_hash: Some(proof_bundle_hash.clone()),
+        timestamp: 3,
+    });
+
+    let recovery_artifact_path = recovery_forensics.finish_capture()?;
+    let recovery_artifact = AtpForensics::load_artifact(&recovery_artifact_path)?;
+    let final_commit = recovery_artifact
+        .final_commit_record
+        .as_ref()
+        .expect("resume must record final commit only after verification");
+    assert_eq!(final_commit.manifest_hash, manifest_root);
+    assert_eq!(
+        final_commit.proof_bundle_hash.as_deref(),
+        Some(proof_bundle_hash.as_str())
+    );
+    assert_eq!(
+        recovery_artifact
+            .chunk_ranges
+            .iter()
+            .filter(|range| range.verified)
+            .count(),
+        3
+    );
+    assert_eq!(
+        recovery_artifact.journal_offsets.recovery_checkpoint,
+        verified_prefix_bytes
+    );
+    assert!(
+        verified_prefix_bytes > 0,
+        "resume must reuse a nonempty verified prefix"
+    );
+
+    let mut recovery_state = AtpTransferState::clean();
+    recovery_state.manifest_hash = final_commit.manifest_hash.clone();
+    recovery_state.expected_manifest_hash = final_commit.manifest_hash.clone();
+    recovery_state.metadata.insert(
+        "verified_prefix_bytes".to_string(),
+        verified_prefix_bytes.to_string(),
+    );
+    recovery_state.metadata.insert(
+        "proof_bundle_hash".to_string(),
+        proof_bundle_hash.to_string(),
+    );
+    let oracle_result =
+        AtpTransferOracle::new("crash_mid_transfer_resume").validate(&recovery_state);
+    assert!(
+        oracle_result.passed,
+        "recovered transfer must satisfy ATP final-exposure/quiescence/proof oracle"
+    );
+    let final_exposure = oracle_result
+        .evidence_ledger
+        .entries
+        .iter()
+        .find(|entry| entry.oracle_name == "final_exposure")
+        .expect("final exposure oracle recorded");
+    assert!(final_exposure.evidence.passed);
+
+    assert!(tracker.fulfill_obligation(&transfer_obligation));
+    let leaks = tracker.check_for_leaks(std::time::Duration::from_secs(1));
+    assert!(
+        leaks.is_empty(),
+        "recovery left obligation leaks: {leaks:?}"
+    );
+    tracker.validate_region_quiescence()?;
 
     Ok(())
 }
@@ -969,4 +1224,8 @@ fn transfer_violation(
         severity,
         evidence: BTreeMap::from([("source".to_string(), "test".to_string())]),
     }
+}
+
+fn sha256_tag(bytes: &[u8]) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
