@@ -415,6 +415,8 @@ pub mod real_http_h1_codec_http_body_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h2_concurrent_load_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_http_h2_frame_http_h2_stream_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h2_hpack_connection_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h2_server_grpc_protobuf_streaming_e2e_tests;
