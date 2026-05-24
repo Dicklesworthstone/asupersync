@@ -35,6 +35,7 @@ use crate::raptorq::systematic::{SystematicParams, SystematicEncoder, Systematic
 use crate::web::multipart::{Multipart, MultipartField, MultipartLimits};
 use std::collections::HashMap;
 use std::io;
+use std::time::Instant;
 
 // ────────────────────────────────────────────────────────────────────────────────
 // MockMultipartUpload — Simulate HTTP multipart file uploads
@@ -485,33 +486,107 @@ mod tests {
 
     #[test]
     fn test_single_chunk_upload_pipeline() {
+        // Test span instrumentation for observability
+        eprintln!("TEST_START: test_single_chunk_upload_pipeline - Single chunk upload with RaptorQ pipeline");
+        let test_start = Instant::now();
+
+        // Phase 1: Setup with observability
+        eprintln!("PHASE_1: Pipeline setup and test data creation");
+        let setup_start = Instant::now();
         let mut pipeline = FileUploadPipeline::new();
 
         // Create small file that fits in one chunk
         let test_data = create_test_file_data(4096, 0xAA);
+        eprintln!(
+            "SETUP_COMPLETE: Created test data - size: {} bytes, pattern: 0xAA, duration: {} ms",
+            test_data.len(),
+            setup_start.elapsed().as_millis()
+        );
         let upload = MockMultipartUpload::new(
             "file".to_string(),
             Some("test.bin".to_string()),
             test_data.clone(),
         );
 
-        // Process through pipeline
-        let processed = pipeline.process_upload(upload).expect("Processing should succeed");
+        // Phase 2: Pipeline processing with observability
+        eprintln!("PHASE_2: Upload processing through multipart -> codec -> RaptorQ pipeline");
+        let process_start = Instant::now();
+
+        // Process through pipeline with detailed error context
+        let processed = pipeline.process_upload(upload.clone()).map_err(|e| {
+            format!(
+                "Upload processing failed in test_single_chunk_upload_pipeline\n\
+                 Pipeline Error: {:?}\n\
+                 Upload Context: field_name={}, filename={:?}, data_size={} bytes\n\
+                 Expected: Single chunk (data <= 4096 bytes)\n\
+                 Pipeline State: files_processed={}, bytes_processed={}, symbols_generated={}",
+                e,
+                upload.field_name,
+                upload.filename,
+                upload.data.len(),
+                pipeline.get_stats().files_processed,
+                pipeline.get_stats().bytes_processed,
+                pipeline.get_stats().symbols_generated
+            )
+        }).expect("Upload processing with detailed error context");
 
         // Verify metadata
         assert_eq!(processed.metadata.field_name, "file");
         assert_eq!(processed.metadata.filename, Some("test.bin".to_string()));
         assert_eq!(processed.metadata.chunk_count, 1);
 
-        // Decode and verify
-        let recovered_data = pipeline.decode_upload(processed).expect("Decoding should succeed");
+        // Decode and verify with detailed error context
+        let recovered_data = pipeline.decode_upload(processed.clone()).map_err(|e| {
+            format!(
+                "Upload decoding failed in test_single_chunk_upload_pipeline\n\
+                 Decode Error: {:?}\n\
+                 Processed Upload Context: field_name={}, filename={:?}, chunk_count={}\n\
+                 Symbols Available: {} symbols, {} bytes total\n\
+                 Pipeline State: files_processed={}, symbols_generated={}",
+                e,
+                processed.metadata.field_name,
+                processed.metadata.filename,
+                processed.metadata.chunk_count,
+                processed.symbols.len(),
+                processed.symbols.iter().map(|s| s.len()).sum::<usize>(),
+                pipeline.get_stats().files_processed,
+                pipeline.get_stats().symbols_generated
+            )
+        }).expect("Upload decoding with detailed error context");
+
+        eprintln!(
+            "PROCESSING_COMPLETE: Pipeline processed upload in {} ms - {} chunks, {} symbols",
+            process_start.elapsed().as_millis(),
+            processed.metadata.chunk_count,
+            processed.symbols.len()
+        );
+
+        // Phase 3: Verification with observability
+        eprintln!("PHASE_3: Data integrity verification and statistics validation");
+        let verify_start = Instant::now();
+
         assert_eq!(recovered_data, test_data, "Recovered data should match original");
 
-        // Check stats
+        // Check stats with detailed logging
         let stats = pipeline.get_stats();
+        eprintln!(
+            "PIPELINE_STATS: files_processed={}, bytes_processed={}, symbols_generated={}",
+            stats.files_processed, stats.bytes_processed, stats.symbols_generated
+        );
+
         assert_eq!(stats.files_processed, 1);
         assert_eq!(stats.bytes_processed, 4096);
         assert!(stats.symbols_generated > 0);
+
+        eprintln!(
+            "VERIFICATION_COMPLETE: All assertions passed in {} ms",
+            verify_start.elapsed().as_millis()
+        );
+
+        eprintln!(
+            "TEST_COMPLETE: test_single_chunk_upload_pipeline passed - total duration: {} ms",
+            test_start.elapsed().as_millis()
+        );
     }
 
     #[test]

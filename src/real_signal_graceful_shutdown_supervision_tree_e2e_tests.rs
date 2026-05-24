@@ -202,17 +202,49 @@ mod tests {
         }
 
         fn add_child(&self, child_id: NodeId) {
-            let mut children = self.children.lock().unwrap();
+            let mut children = self.children.lock()
+                .map_err(|poison_err| {
+                    eprintln!(
+                        "MUTEX_POISON: add_child operation failed - children mutex poisoned by previous panic. \
+                         Node: {}, Child: {}, Recovering state...",
+                        self.node_id, child_id
+                    );
+                    let recovered_children = poison_err.into_inner();
+                    eprintln!("POISON_RECOVERY: Found {} existing children: {:?}",
+                             recovered_children.len(), recovered_children);
+                    poison_err.into_inner()
+                })
+                .unwrap_or_else(|recovered| recovered);
             children.push(child_id);
         }
 
         fn set_state(&self, new_state: NodeState) {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock()
+                .map_err(|poison_err| {
+                    eprintln!(
+                        "MUTEX_POISON: set_state operation failed - state mutex poisoned by previous panic. \
+                         Node: {}, New State: {:?}, Recovering...",
+                        self.node_id, new_state
+                    );
+                    let recovered_state = poison_err.into_inner();
+                    eprintln!("POISON_RECOVERY: Previous state was: {:?}", *recovered_state);
+                    poison_err.into_inner()
+                })
+                .unwrap_or_else(|recovered| recovered);
             *state = new_state;
         }
 
         fn get_state(&self) -> NodeState {
-            let state = self.state.lock().unwrap();
+            let state = self.state.lock()
+                .map_err(|poison_err| {
+                    eprintln!(
+                        "MUTEX_POISON: get_state operation failed - state mutex poisoned by previous panic. \
+                         Node: {}, Recovering state for read...",
+                        self.node_id
+                    );
+                    poison_err.into_inner()
+                })
+                .unwrap_or_else(|recovered| recovered);
             state.clone()
         }
 
