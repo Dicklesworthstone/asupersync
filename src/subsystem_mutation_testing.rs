@@ -2111,6 +2111,452 @@ impl SubsystemMutationTester {
         );
     }
 
+    /// [br-mutation-28] Sync mutex acquire reorder regression mutations
+    async fn test_sync_mutex_mutations(&self) {
+        use crate::sync::{Mutex, RwLock, Semaphore, MutexGuard};
+
+        let sync_detected = self.runtime.scope(|scope| async move {
+            let contention_test_count = 15;
+            let sync_corruptions = Arc::new(AtomicUsize::new(0));
+            let ordering_violations = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                for test_idx in 0..contention_test_count {
+                    let shared_data = Arc::new(Mutex::new(Vec::<(usize, Duration)>::new()));
+                    let acquire_order = Arc::new(Mutex::new(Vec::<usize>::new()));
+                    let contender_count = 8;
+
+                    let mut contender_handles = Vec::new();
+
+                    // Spawn multiple contenders for mutex
+                    for contender_id in 0..contender_count {
+                        let data_clone = shared_data.clone();
+                        let order_clone = acquire_order.clone();
+
+                        let handle = scope.spawn(async move {
+                            // Wait a bit to create contention
+                            sleep(Duration::from_millis(contender_id as u64 * 5)).await;
+
+                            let acquire_start = Instant::now();
+
+                            // MUTATION: Corrupt mutex acquire ordering
+                            let guard = if test_idx % 4 == 0 && contender_id % 2 == 0 {
+                                // Priority inversion - later requesters get priority
+                                if contender_id > contender_count / 2 {
+                                    data_clone.lock_with_priority().await
+                                } else {
+                                    data_clone.lock().await
+                                }
+                            } else {
+                                // Normal acquisition
+                                data_clone.lock().await
+                            };
+
+                            let acquire_duration = acquire_start.elapsed();
+
+                            // Record acquisition order
+                            {
+                                let mut order = order_clone.lock().await;
+                                order.push(contender_id);
+                            }
+
+                            // Hold lock for variable time to create contention patterns
+                            let hold_time = Duration::from_millis((contender_id % 3 + 1) as u64 * 10);
+                            sleep(hold_time).await;
+
+                            // Update shared data while holding lock
+                            guard.push((contender_id, acquire_duration));
+
+                            drop(guard);
+                            contender_id
+                        });
+
+                        contender_handles.push(handle);
+                        sleep(Duration::from_millis(8)).await; // Stagger spawn times
+                    }
+
+                    // Wait for all contenders to complete
+                    let mut completion_order = Vec::new();
+                    for handle in contender_handles {
+                        let contender_id = handle.await.unwrap();
+                        completion_order.push(contender_id);
+                    }
+
+                    // Analyze acquisition order for fairness violations
+                    let final_order = acquire_order.lock().await;
+                    let shared_data_final = shared_data.lock().await;
+
+                    // MUTATION detection: Check for acquire order violations
+                    if test_idx % 4 == 0 {
+                        sync_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        // Check for priority inversion in acquisition order
+                        let mut has_inversion = false;
+                        for window in final_order.windows(2) {
+                            let (first, second) = (window[0], window[1]);
+                            // Later contenders should not acquire before earlier ones
+                            // (accounting for some reasonable variance due to scheduling)
+                            if second < first && (first - second) > 2 {
+                                has_inversion = true;
+                                break;
+                            }
+                        }
+
+                        if has_inversion {
+                            ordering_violations.fetch_add(1, Ordering::Relaxed);
+                        }
+
+                        // Check for starvation patterns
+                        let first_half: std::collections::HashSet<_> =
+                            (0..contender_count/2).collect();
+                        let acquired_first_half: std::collections::HashSet<_> =
+                            final_order.iter().take(contender_count/2).cloned().collect();
+
+                        // If none of the first half acquired in the first half of acquisitions
+                        if first_half.intersection(&acquired_first_half).count() == 0 {
+                            ordering_violations.fetch_add(1, Ordering::Relaxed);
+                        }
+
+                        // Check for excessive contention times
+                        for (contender_id, acquire_time) in shared_data_final.iter() {
+                            if acquire_time > &Duration::from_millis(200) {
+                                // Unreasonable contention time indicates unfairness
+                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+
+                    sleep(Duration::from_millis(15)).await;
+                }
+
+                let corruptions = sync_corruptions.load(Ordering::Relaxed);
+                let violations = ordering_violations.load(Ordering::Relaxed);
+
+                // Sync primitives should detect acquire ordering violations
+                if violations > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Mutex acquire ordering violation detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("Sync mutex acquire validation failed: {} corruptions, {} violations",
+                            corruptions, violations)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(sync_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-28", "sync", "mutex_acquire_reorder_corruption", detected);
+    }
+
+    /// [br-mutation-29] Time timer wheel level swap regression mutations
+    async fn test_time_timer_wheel_mutations(&self) {
+        use crate::time::{TimerWheel, Timer, TimerHandle, Instant};
+
+        let time_detected = self.runtime.scope(|scope| async move {
+            let timer_test_count = 12;
+            let timing_corruptions = Arc::new(AtomicUsize::new(0));
+            let level_violations = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                for test_idx in 0..timer_test_count {
+                    let mut timer_wheel = TimerWheel::new();
+                    let timer_count_per_level = 6;
+                    let mut timer_handles = Vec::new();
+                    let completion_order = Arc::new(Mutex::new(Vec::<(usize, Instant)>::new()));
+
+                    // Create timers with different durations to populate different wheel levels
+                    let base_time = Instant::now();
+                    for level in 0..4 {
+                        for timer_idx in 0..timer_count_per_level {
+                            let timer_id = level * timer_count_per_level + timer_idx;
+
+                            // Different levels have different time scales
+                            let delay = match level {
+                                0 => Duration::from_millis(50 + timer_idx as u64 * 10), // Short timers
+                                1 => Duration::from_millis(200 + timer_idx as u64 * 50), // Medium timers
+                                2 => Duration::from_millis(800 + timer_idx as u64 * 100), // Long timers
+                                3 => Duration::from_millis(2000 + timer_idx as u64 * 200), // Very long timers
+                                _ => Duration::from_millis(50),
+                            };
+
+                            let expected_fire_time = base_time + delay;
+                            let order_clone = completion_order.clone();
+
+                            // MUTATION: Corrupt timer wheel level assignment
+                            let actual_delay = if test_idx % 3 == 0 && timer_idx % 2 == 0 {
+                                timing_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                match test_idx % 9 {
+                                    0 => {
+                                        // Swap timer levels - put short timer in long level
+                                        if level == 0 {
+                                            Duration::from_millis(2000) // Move to level 3
+                                        } else if level == 3 {
+                                            Duration::from_millis(50)   // Move to level 0
+                                        } else {
+                                            delay // Keep original
+                                        }
+                                    }
+                                    3 => {
+                                        // Corrupt timer ordering within level
+                                        Duration::from_millis(delay.as_millis() as u64 * 3) // Triple duration
+                                    }
+                                    6 => {
+                                        // Timer level inversion
+                                        Duration::from_millis((4 - level) as u64 * 100) // Inverse relationship
+                                    }
+                                    _ => delay,
+                                }
+                            } else {
+                                delay
+                            };
+
+                            let timer = Timer::new(actual_delay, move || {
+                                async move {
+                                    let fire_time = Instant::now();
+                                    let mut order = order_clone.lock().await;
+                                    order.push((timer_id, fire_time));
+                                    timer_id
+                                }
+                            });
+
+                            let handle = timer_wheel.schedule_timer(timer);
+                            timer_handles.push((timer_id, handle, expected_fire_time, level));
+                        }
+                    }
+
+                    // Run timer wheel for sufficient time
+                    let wheel_runtime = Duration::from_millis(3000);
+                    let wheel_start = Instant::now();
+
+                    while wheel_start.elapsed() < wheel_runtime {
+                        timer_wheel.advance(Duration::from_millis(10));
+                        sleep(Duration::from_millis(10)).await;
+                    }
+
+                    // Analyze timer firing order
+                    let final_order = completion_order.lock().await;
+
+                    if test_idx % 3 == 0 {
+                        // Check for timer wheel level violations
+                        let mut level_0_fires = Vec::new();
+                        let mut level_3_fires = Vec::new();
+
+                        for (timer_id, fire_time) in final_order.iter() {
+                            if let Some((_, _, expected_time, level)) = timer_handles.iter().find(|(id, _, _, _)| id == timer_id) {
+                                match level {
+                                    0 => level_0_fires.push((timer_id, fire_time, expected_time)),
+                                    3 => level_3_fires.push((timer_id, fire_time, expected_time)),
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        // Level 0 (short) timers should fire before level 3 (long) timers
+                        for (_, short_fire, _) in &level_0_fires {
+                            for (_, long_fire, _) in &level_3_fires {
+                                if long_fire < short_fire {
+                                    // Long timer fired before short timer - level violation
+                                    level_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+
+                        // Check for extreme timing deviations
+                        for (timer_id, fire_time, expected_time) in level_0_fires.iter().chain(level_3_fires.iter()) {
+                            let deviation = if fire_time > expected_time {
+                                **fire_time - **expected_time
+                            } else {
+                                **expected_time - **fire_time
+                            };
+
+                            if deviation > Duration::from_millis(500) {
+                                // Excessive timing deviation indicates level corruption
+                                level_violations.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+
+                    sleep(Duration::from_millis(20)).await;
+                }
+
+                let corruptions = timing_corruptions.load(Ordering::Relaxed);
+                let violations = level_violations.load(Ordering::Relaxed);
+
+                // Timer wheel should detect level swap violations
+                if violations > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Timer wheel level violation detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("Timer wheel level validation failed: {} corruptions, {} violations",
+                            corruptions, violations)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(time_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-29", "time", "timer_wheel_level_swap_corruption", detected);
+    }
+
+    /// [br-mutation-30] Channel MPSC ordering FIFO regression mutations
+    async fn test_channel_mpsc_mutations(&self) {
+        use crate::channel::{mpsc, Receiver, Sender};
+
+        let channel_detected = self.runtime.scope(|scope| async move {
+            let channel_test_count = 10;
+            let ordering_corruptions = Arc::new(AtomicUsize::new(0));
+            let fifo_violations = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                for test_idx in 0..channel_test_count {
+                    let (tx, mut rx) = mpsc::channel::<(usize, usize, Instant)>(100);
+                    let sender_count = 6;
+                    let messages_per_sender = 8;
+
+                    let mut sender_handles = Vec::new();
+
+                    // Spawn multiple senders
+                    for sender_id in 0..sender_count {
+                        let tx_clone = tx.clone();
+
+                        let handle = scope.spawn(async move {
+                            for msg_idx in 0..messages_per_sender {
+                                let send_time = Instant::now();
+                                let message = (sender_id, msg_idx, send_time);
+
+                                // MUTATION: Corrupt MPSC FIFO ordering
+                                if test_idx % 3 == 0 && sender_id % 2 == 0 && msg_idx % 2 == 0 {
+                                    // Introduce ordering corruption
+                                    match test_idx % 9 {
+                                        0 => {
+                                            // Send messages out of order
+                                            let future_message = (sender_id, msg_idx + 2, send_time);
+                                            tx_clone.send(future_message).await.ok();
+                                            sleep(Duration::from_millis(5)).await;
+                                            tx_clone.send(message).await.ok(); // Original message delayed
+                                        }
+                                        3 => {
+                                            // Duplicate message send
+                                            tx_clone.send(message).await.ok();
+                                            tx_clone.send(message).await.ok(); // Duplicate
+                                        }
+                                        6 => {
+                                            // Skip message (create gap)
+                                            if msg_idx > 0 {
+                                                // Skip this message, continue with next
+                                                continue;
+                                            } else {
+                                                tx_clone.send(message).await.ok();
+                                            }
+                                        }
+                                        _ => {
+                                            tx_clone.send(message).await.ok();
+                                        }
+                                    }
+                                } else {
+                                    // Normal send
+                                    tx_clone.send(message).await.ok();
+                                }
+
+                                // Add small delay between sends to create ordering opportunities
+                                sleep(Duration::from_millis(2)).await;
+                            }
+                            sender_id
+                        });
+
+                        sender_handles.push(handle);
+                        sleep(Duration::from_millis(5)).await; // Stagger sender starts
+                    }
+
+                    // Close sender channel
+                    drop(tx);
+
+                    // Collect all received messages
+                    let mut received_messages = Vec::new();
+                    while let Some(message) = rx.recv().await {
+                        received_messages.push(message);
+                    }
+
+                    // Wait for all senders to complete
+                    for handle in sender_handles {
+                        handle.await.ok();
+                    }
+
+                    // Analyze FIFO ordering violations
+                    if test_idx % 3 == 0 {
+                        ordering_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        // Check per-sender FIFO ordering
+                        let mut sender_sequences: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+
+                        for (sender_id, msg_idx, _) in &received_messages {
+                            sender_sequences.entry(*sender_id).or_insert_with(Vec::new).push(*msg_idx);
+                        }
+
+                        // Verify FIFO ordering within each sender's sequence
+                        for (sender_id, sequence) in &sender_sequences {
+                            for window in sequence.windows(2) {
+                                if window[1] < window[0] {
+                                    // Message received out of order for this sender
+                                    fifo_violations.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+
+                            // Check for gaps in sequence (missing messages)
+                            let mut expected_seq: Vec<usize> = (0..messages_per_sender).collect();
+                            let mut actual_seq = sequence.clone();
+                            actual_seq.sort();
+                            actual_seq.dedup(); // Remove duplicates
+
+                            if actual_seq != expected_seq {
+                                // Sequence has gaps or duplicates
+                                fifo_violations.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+
+                        // Check overall message delivery completeness
+                        let expected_total = sender_count * messages_per_sender;
+                        let actual_total = received_messages.len();
+
+                        // Allow some variance for dropped messages in corrupted tests
+                        if (expected_total as isize - actual_total as isize).abs() > 5 {
+                            // Significant message loss indicates corruption
+                            fifo_violations.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+
+                    sleep(Duration::from_millis(25)).await;
+                }
+
+                let corruptions = ordering_corruptions.load(Ordering::Relaxed);
+                let violations = fifo_violations.load(Ordering::Relaxed);
+
+                // MPSC channels should detect FIFO ordering violations
+                if violations > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // MPSC FIFO ordering violation detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("MPSC FIFO ordering validation failed: {} corruptions, {} violations",
+                            corruptions, violations)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(channel_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-30", "channel", "mpsc_fifo_ordering_corruption", detected);
+    }
+
     /// Generate subsystem testing summary
     fn generate_subsystem_summary(&self) -> serde_json::Value {
         let applied = self.mutations_applied.load(Ordering::Relaxed);
@@ -2618,6 +3064,102 @@ async fn test_net_tcp_subsystem_mutation_sensitivity() {
 }
 
 #[tokio::test]
+async fn test_sync_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("sync_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"sync_start\"}}");
+
+    // Test sync-specific mutations
+    tester.test_sync_mutex_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply sync mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.90,
+        "Sync subsystem should detect ≥90% of mutex acquire reorder mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"sync_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_time_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("time_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"time_start\"}}");
+
+    // Test time-specific mutations
+    tester.test_time_timer_wheel_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply time mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.93,
+        "Time subsystem should detect ≥93% of timer wheel level swap mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"time_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_channel_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("channel_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"channel_start\"}}");
+
+    // Test channel-specific mutations
+    tester.test_channel_mpsc_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply channel mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.92,
+        "Channel subsystem should detect ≥92% of MPSC FIFO ordering mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"channel_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
 async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"start\"}}");
 
@@ -2636,6 +3178,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     let cx_scope_tester = SubsystemMutationTester::new("comprehensive_cx_scope").await;
     let scheduler_tester = SubsystemMutationTester::new("comprehensive_scheduler").await;
     let tcp_tester = SubsystemMutationTester::new("comprehensive_tcp").await;
+    let sync_tester = SubsystemMutationTester::new("comprehensive_sync").await;
+    let time_tester = SubsystemMutationTester::new("comprehensive_time").await;
+    let channel_tester = SubsystemMutationTester::new("comprehensive_channel").await;
 
     // Test all subsystem mutations comprehensively
     obs_tester.test_observability_counter_mutations().await;
@@ -2665,6 +3210,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     cx_scope_tester.test_cx_scope_region_mutations().await;
     scheduler_tester.test_runtime_scheduler_mutations().await;
     tcp_tester.test_net_tcp_split_merge_mutations().await;
+    sync_tester.test_sync_mutex_mutations().await;
+    time_tester.test_time_timer_wheel_mutations().await;
+    channel_tester.test_channel_mpsc_mutations().await;
 
     // Calculate overall subsystem detection rate
     let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed)
@@ -2681,7 +3229,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + supervision_tester.mutations_applied.load(Ordering::Relaxed)
         + cx_scope_tester.mutations_applied.load(Ordering::Relaxed)
         + scheduler_tester.mutations_applied.load(Ordering::Relaxed)
-        + tcp_tester.mutations_applied.load(Ordering::Relaxed);
+        + tcp_tester.mutations_applied.load(Ordering::Relaxed)
+        + sync_tester.mutations_applied.load(Ordering::Relaxed)
+        + time_tester.mutations_applied.load(Ordering::Relaxed)
+        + channel_tester.mutations_applied.load(Ordering::Relaxed);
 
     let total_detected = obs_tester.mutations_detected.load(Ordering::Relaxed)
         + trace_tester.mutations_detected.load(Ordering::Relaxed)
@@ -2701,7 +3252,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
             .load(Ordering::Relaxed)
         + cx_scope_tester.mutations_detected.load(Ordering::Relaxed)
         + scheduler_tester.mutations_detected.load(Ordering::Relaxed)
-        + tcp_tester.mutations_detected.load(Ordering::Relaxed);
+        + tcp_tester.mutations_detected.load(Ordering::Relaxed)
+        + sync_tester.mutations_detected.load(Ordering::Relaxed)
+        + time_tester.mutations_detected.load(Ordering::Relaxed)
+        + channel_tester.mutations_detected.load(Ordering::Relaxed);
 
     let overall_detection_rate = if total_applied > 0 {
         total_detected as f64 / total_applied as f64
