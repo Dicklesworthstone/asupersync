@@ -122,10 +122,21 @@ fn validate_claim_lane_mapping(
         return Err(format!("{claim_id}: missing guarantee ids"));
     }
 
+    for lane_id in &lane_ids {
+        if !lanes.contains_key(lane_id) {
+            return Err(format!("{claim_id}: unknown lane {lane_id}"));
+        }
+    }
+    for guarantee_id in &guarantee_ids {
+        if !guarantees.contains_key(guarantee_id) {
+            return Err(format!("{claim_id}: unknown guarantee {guarantee_id}"));
+        }
+    }
+
     for guarantee_id in &guarantee_ids {
         let guarantee = guarantees
             .get(guarantee_id)
-            .ok_or_else(|| format!("{claim_id}: unknown guarantee {guarantee_id}"))?;
+            .expect("guarantee existence checked above");
         let mapped_lanes = string_set(guarantee, "lane_ids");
         if mapped_lanes.is_disjoint(&lane_ids) {
             return Err(format!(
@@ -135,9 +146,7 @@ fn validate_claim_lane_mapping(
     }
 
     for lane_id in &lane_ids {
-        let lane = lanes
-            .get(lane_id)
-            .ok_or_else(|| format!("{claim_id}: unknown lane {lane_id}"))?;
+        let lane = lanes.get(lane_id).expect("lane existence checked above");
         let lane_guarantees = string_set(lane, "guarantee_ids");
         if lane_guarantees.is_disjoint(&guarantee_ids) {
             return Err(format!(
