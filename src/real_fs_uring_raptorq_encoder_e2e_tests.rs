@@ -34,9 +34,50 @@ use crate::fs::File;
 use crate::io::{AsyncRead, AsyncSeek, SeekFrom};
 use crate::raptorq::systematic::{SystematicEncoder, SystematicParams};
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::io;
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Resource Management — File Drop Bombs
+// ────────────────────────────────────────────────────────────────────────────────
+
+/// RAII File Guard that ensures proper cleanup even on panic
+struct FileGuard {
+    file: File,
+    path: String,
+}
+
+impl FileGuard {
+    async fn open(cx: &Cx, path: &str) -> io::Result<Self> {
+        let file = File::open(cx, path).await?;
+        Ok(Self {
+            file,
+            path: path.to_string(),
+        })
+    }
+}
+
+impl Drop for FileGuard {
+    fn drop(&mut self) {
+        eprintln!("FileGuard: Ensuring file '{}' is properly closed", self.path);
+        // File::drop() will be called automatically
+    }
+}
+
+impl Deref for FileGuard {
+    type Target = File;
+    fn deref(&self) -> &Self::Target {
+        &self.file
+    }
+}
+
+impl DerefMut for FileGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.file
+    }
+}
 
 // ────────────────────────────────────────────────────────────────────────────────
 // File Reader with uring Integration
@@ -91,10 +132,10 @@ impl UringFileReader {
         }
     }
 
-    /// Read file in chunks with deterministic boundaries
+    /// Read file in chunks with deterministic boundaries (panic-safe with FileGuard)
     async fn read_file_chunked(&self, cx: &Cx) -> Result<Vec<FileChunk>, io::Error> {
         let start_time = Instant::now();
-        let mut file = File::open(cx, &self.file_path).await?;
+        let mut file_guard = FileGuard::open(cx, &self.file_path).await?;
 
         let mut chunks = Vec::new();
         let mut sequence_number = 0;
@@ -106,7 +147,7 @@ impl UringFileReader {
 
             // Read chunk with deterministic size
             let mut buffer = vec![0u8; self.chunk_size];
-            let bytes_read = file.read(cx, &mut buffer).await?;
+            let bytes_read = file_guard.read(cx, &mut buffer).await?;
 
             if bytes_read == 0 {
                 break; // EOF

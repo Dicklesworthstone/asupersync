@@ -15,15 +15,47 @@ mod real_grpc_bidirectional_e2e {
     };
     use crate::net::tcp::TcpListener;
     use crate::runtime::{Runtime, spawn};
+    use crate::runtime::builder::JoinHandle;
     use crate::time::{Duration, Instant, sleep, timeout};
     use bytes::Bytes;
     use serde_json::{Value, json};
     use std::collections::HashMap;
+    use std::future::Future;
     use std::net::SocketAddr;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     };
+
+    /// Collection for managing background tasks with automatic cleanup on Drop
+    struct TaskCollection {
+        tasks: Vec<JoinHandle<()>>,
+    }
+
+    impl TaskCollection {
+        fn new() -> Self {
+            Self { tasks: Vec::new() }
+        }
+
+        fn spawn<F>(&mut self, future: F)
+        where
+            F: Future<Output = ()> + Send + 'static,
+        {
+            let handle = spawn(future);
+            self.tasks.push(handle);
+        }
+    }
+
+    impl Drop for TaskCollection {
+        fn drop(&mut self) {
+            for task in self.tasks.drain(..) {
+                task.abort();
+            }
+            if !self.tasks.is_empty() {
+                eprintln!("TaskCollection: Aborted {} background tasks", self.tasks.len());
+            }
+        }
+    }
 
     /// gRPC test harness with bidirectional streaming monitoring
     struct GrpcBidirectionalTestHarness {
@@ -33,6 +65,7 @@ mod real_grpc_bidirectional_e2e {
         stream_stats: Arc<Mutex<Vec<StreamStats>>>,
         message_log: Arc<Mutex<Vec<GrpcMessageLog>>>,
         connection_stats: Arc<Mutex<ConnectionStats>>,
+        background_tasks: Mutex<TaskCollection>,
     }
 
     #[derive(Debug, Clone)]
@@ -86,6 +119,7 @@ mod real_grpc_bidirectional_e2e {
                 stream_stats: Arc::new(Mutex::new(Vec::new())),
                 message_log: Arc::new(Mutex::new(Vec::new())),
                 connection_stats: Arc::new(Mutex::new(ConnectionStats::default())),
+                background_tasks: Mutex::new(TaskCollection::new()),
             }
         }
 
@@ -155,8 +189,8 @@ mod real_grpc_bidirectional_e2e {
             let server_clone = Arc::clone(&server);
             let bind_addr = self.server_addr;
 
-            // Start server in background
-            spawn(async move {
+            // Start server in background with managed task collection
+            self.background_tasks.lock().unwrap().spawn(async move {
                 if let Err(e) = server_clone.serve(bind_addr).await {
                     eprintln!("Server error: {}", e);
                 }
