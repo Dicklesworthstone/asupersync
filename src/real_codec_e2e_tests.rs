@@ -15,7 +15,7 @@
 
 use crate::bytes::{Bytes, BytesMut};
 use crate::codec::{Decoder, Encoder, FramedRead, FramedWrite, LengthDelimitedCodec};
-use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, split};
+use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, split};
 use crate::stream::StreamExt;
 
 use std::io::{self, Cursor};
@@ -99,10 +99,16 @@ impl AsyncRead for MockAsyncIo<Cursor<Vec<u8>>> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         use std::io::Read;
-        Poll::Ready(self.inner.read(buf))
+        match self.inner.read(buf.unfilled()) {
+            Ok(n) => {
+                buf.advance(n);
+                Poll::Ready(Ok(()))
+            }
+            Err(err) => Poll::Ready(Err(err)),
+        }
     }
 }
 
@@ -121,7 +127,7 @@ impl AsyncWrite for MockAsyncIo<Cursor<Vec<u8>>> {
         Poll::Ready(self.inner.flush())
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
 }
@@ -140,7 +146,7 @@ impl AsyncWrite for MockAsyncIo<Vec<u8>> {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
 }
