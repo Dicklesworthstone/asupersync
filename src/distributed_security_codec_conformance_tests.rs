@@ -81,7 +81,8 @@ mod tests {
         fn remove_node(&mut self, node_id: &str) -> bool {
             if self.nodes.remove(node_id) {
                 // Remove virtual nodes
-                let to_remove: Vec<u64> = self.ring
+                let to_remove: Vec<u64> = self
+                    .ring
                     .iter()
                     .filter(|(_, n)| *n == node_id)
                     .map(|(h, _)| *h)
@@ -117,7 +118,10 @@ mod tests {
 
             for key in keys {
                 if let Some(node) = self.node_for_key(key) {
-                    assignment.entry(node.clone()).or_insert_with(Vec::new).push(key.clone());
+                    assignment
+                        .entry(node.clone())
+                        .or_insert_with(Vec::new)
+                        .push(key.clone());
                 }
             }
 
@@ -255,7 +259,12 @@ mod tests {
             if data.len() < offset + 4 {
                 return Err("Truncated region ID length".to_string());
             }
-            let region_len = u32::from_be_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as usize;
+            let region_len = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
             offset += 4;
 
             if data.len() < offset + region_len {
@@ -269,7 +278,12 @@ mod tests {
             if data.len() < offset + 4 {
                 return Err("Truncated tasks count".to_string());
             }
-            let tasks_count = u32::from_be_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as usize;
+            let tasks_count = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
             offset += 4;
 
             // Parse tasks
@@ -279,7 +293,12 @@ mod tests {
                 if data.len() < offset + 4 {
                     return Err("Truncated task ID length".to_string());
                 }
-                let task_id_len = u32::from_be_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as usize;
+                let task_id_len = u32::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]) as usize;
                 offset += 4;
 
                 // Task ID
@@ -294,8 +313,7 @@ mod tests {
                 if data.len() < offset + 1 {
                     return Err("Truncated task state".to_string());
                 }
-                let state = MockTaskState::from_u8(data[offset])
-                    .ok_or("Invalid task state")?;
+                let state = MockTaskState::from_u8(data[offset]).ok_or("Invalid task state")?;
                 offset += 1;
 
                 tasks.insert(task_id, state);
@@ -305,7 +323,12 @@ mod tests {
             if data.len() < offset + 4 {
                 return Err("Truncated metadata count".to_string());
             }
-            let metadata_count = u32::from_be_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as usize;
+            let metadata_count = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
             offset += 4;
 
             // Parse metadata
@@ -315,7 +338,12 @@ mod tests {
                 if data.len() < offset + 4 {
                     return Err("Truncated metadata key length".to_string());
                 }
-                let key_len = u32::from_be_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as usize;
+                let key_len = u32::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]) as usize;
                 offset += 4;
 
                 // Key
@@ -330,7 +358,12 @@ mod tests {
                 if data.len() < offset + 4 {
                     return Err("Truncated metadata value length".to_string());
                 }
-                let value_len = u32::from_be_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]) as usize;
+                let value_len = u32::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]) as usize;
                 offset += 4;
 
                 // Value
@@ -348,7 +381,12 @@ mod tests {
             if data.len() < offset + 4 {
                 return Err("Truncated checksum".to_string());
             }
-            let checksum = u32::from_be_bytes([data[offset], data[offset+1], data[offset+2], data[offset+3]]);
+            let checksum = u32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
 
             let mut snapshot = Self {
                 version,
@@ -437,10 +475,12 @@ mod tests {
             // Count how many keys moved
             let mut moved_keys = 0;
             for key in &test_keys {
-                let initial_node = initial_assignment.iter()
+                let initial_node = initial_assignment
+                    .iter()
                     .find(|(_, keys)| keys.contains(key))
                     .map(|(node, _)| node);
-                let post_add_node = post_add_assignment.iter()
+                let post_add_node = post_add_assignment
+                    .iter()
                     .find(|(_, keys)| keys.contains(key))
                     .map(|(node, _)| node);
 
@@ -452,7 +492,10 @@ mod tests {
             // Should move approximately 1/4 of keys (100 keys / 4 nodes = 25)
             // Allow some variance due to hash distribution
             if moved_keys < 15 || moved_keys > 35 {
-                return TestStatus::Fail(format!("Unexpected rebalancing: {} keys moved", moved_keys));
+                return TestStatus::Fail(format!(
+                    "Unexpected rebalancing: {} keys moved",
+                    moved_keys
+                ));
             }
 
             TestStatus::Pass
@@ -466,8 +509,12 @@ mod tests {
             snapshot.add_task("task2".to_string(), MockTaskState::Completed);
             snapshot.add_task("task3".to_string(), MockTaskState::Pending);
 
-            snapshot.metadata.insert("version".to_string(), "1.0".to_string());
-            snapshot.metadata.insert("timestamp".to_string(), "2026-05-23".to_string());
+            snapshot
+                .metadata
+                .insert("version".to_string(), "1.0".to_string());
+            snapshot
+                .metadata
+                .insert("timestamp".to_string(), "2026-05-23".to_string());
             snapshot.update_checksum();
 
             // Serialize and deserialize
@@ -522,7 +569,7 @@ mod tests {
         }
 
         fn new(key: &[u8], message: &[u8]) -> Self {
-            use sha2::{Sha256, Digest};
+            use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(b"AUTH_TAG");
             hasher.update(key);
@@ -554,12 +601,17 @@ mod tests {
     impl MockAuthenticatedData {
         fn new_unverified(message: Vec<u8>, tag: MockAuthTag) -> Self {
             let verified = !tag.is_zero();
-            Self { message, tag, verified }
+            Self {
+                message,
+                tag,
+                verified,
+            }
         }
 
         fn encrypt_and_authenticate(plaintext: &[u8], key: &[u8]) -> Self {
             // Simple XOR encryption for testing
-            let ciphertext: Vec<u8> = plaintext.iter()
+            let ciphertext: Vec<u8> = plaintext
+                .iter()
                 .enumerate()
                 .map(|(i, &b)| b ^ key[i % key.len()])
                 .collect();
@@ -579,7 +631,9 @@ mod tests {
             }
 
             // Simple XOR decryption (same as encryption)
-            let plaintext: Vec<u8> = self.message.iter()
+            let plaintext: Vec<u8> = self
+                .message
+                .iter()
                 .enumerate()
                 .map(|(i, &b)| b ^ key[i % key.len()])
                 .collect();
@@ -674,7 +728,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 max_frame_length: 8 * 1024 * 1024, // 8MB default
-                length_field_length: 4, // u32
+                length_field_length: 4,            // u32
                 big_endian: true,
             }
         }
@@ -688,7 +742,7 @@ mod tests {
             if data.len() > self.max_frame_length {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "Frame too large"
+                    "Frame too large",
                 ));
             }
 
@@ -723,7 +777,7 @@ mod tests {
             if frame_len > self.max_frame_length {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "Frame exceeds max length"
+                    "Frame exceeds max length",
                 ));
             }
 
@@ -784,24 +838,33 @@ mod tests {
         fn test_length_delimited_roundtrip() -> TestStatus {
             let codec = MockLengthDelimitedCodec::new();
             let test_frames = vec![
-                b"".to_vec(),                    // Empty frame
-                b"hello".to_vec(),               // Short frame
-                vec![0u8; 1024],                 // Medium frame (all zeros)
-                (0..255).collect::<Vec<u8>>(),   // Medium frame (pattern)
-                vec![0xFF; 4096],                // Larger frame
+                b"".to_vec(),                  // Empty frame
+                b"hello".to_vec(),             // Short frame
+                vec![0u8; 1024],               // Medium frame (all zeros)
+                (0..255).collect::<Vec<u8>>(), // Medium frame (pattern)
+                vec![0xFF; 4096],              // Larger frame
             ];
 
             for (i, original_frame) in test_frames.iter().enumerate() {
                 let encoded = match codec.encode(original_frame) {
                     Ok(data) => data,
-                    Err(e) => return TestStatus::Fail(format!("Encode failed for frame {}: {}", i, e)),
+                    Err(e) => {
+                        return TestStatus::Fail(format!("Encode failed for frame {}: {}", i, e));
+                    }
                 };
 
                 let mut buffer = encoded;
                 let decoded = match codec.decode(&mut buffer) {
                     Ok(Some(data)) => data,
-                    Ok(None) => return TestStatus::Fail(format!("Decode returned None for complete frame {}", i)),
-                    Err(e) => return TestStatus::Fail(format!("Decode failed for frame {}: {}", i, e)),
+                    Ok(None) => {
+                        return TestStatus::Fail(format!(
+                            "Decode returned None for complete frame {}",
+                            i
+                        ));
+                    }
+                    Err(e) => {
+                        return TestStatus::Fail(format!("Decode failed for frame {}: {}", i, e));
+                    }
                 };
 
                 if &decoded != original_frame {
@@ -809,7 +872,10 @@ mod tests {
                 }
 
                 if !buffer.is_empty() {
-                    return TestStatus::Fail(format!("Buffer not empty after decoding frame {}", i));
+                    return TestStatus::Fail(format!(
+                        "Buffer not empty after decoding frame {}",
+                        i
+                    ));
                 }
             }
 
@@ -823,27 +889,40 @@ mod tests {
             match codec.encode(&[]) {
                 Ok(encoded) => {
                     if encoded.len() != 4 || encoded != [0, 0, 0, 0] {
-                        return TestStatus::Fail("Zero-length frame encoding incorrect".to_string());
+                        return TestStatus::Fail(
+                            "Zero-length frame encoding incorrect".to_string(),
+                        );
                     }
                 }
-                Err(e) => return TestStatus::Fail(format!("Zero-length frame encoding failed: {}", e)),
+                Err(e) => {
+                    return TestStatus::Fail(format!("Zero-length frame encoding failed: {}", e));
+                }
             }
 
             // Test max-length frame
             let max_data = vec![42u8; 100];
             match codec.encode(&max_data) {
                 Ok(encoded) => {
-                    if encoded.len() != 104 { // 4 bytes length + 100 bytes data
-                        return TestStatus::Fail("Max-length frame encoding size incorrect".to_string());
+                    if encoded.len() != 104 {
+                        // 4 bytes length + 100 bytes data
+                        return TestStatus::Fail(
+                            "Max-length frame encoding size incorrect".to_string(),
+                        );
                     }
                 }
-                Err(e) => return TestStatus::Fail(format!("Max-length frame encoding failed: {}", e)),
+                Err(e) => {
+                    return TestStatus::Fail(format!("Max-length frame encoding failed: {}", e));
+                }
             }
 
             // Test oversized frame
             let oversized_data = vec![42u8; 101];
             match codec.encode(&oversized_data) {
-                Ok(_) => return TestStatus::Fail("Oversized frame should have been rejected".to_string()),
+                Ok(_) => {
+                    return TestStatus::Fail(
+                        "Oversized frame should have been rejected".to_string(),
+                    );
+                }
                 Err(e) => {
                     if !e.to_string().contains("Frame too large") {
                         return TestStatus::Fail(format!("Wrong error for oversized frame: {}", e));
@@ -854,9 +933,13 @@ mod tests {
             // Test partial frame decode
             let mut partial_buffer = vec![0, 0, 0, 10]; // Says 10 bytes but only has length prefix
             match codec.decode(&mut partial_buffer) {
-                Ok(None) => {}, // Expected - need more data
-                Ok(Some(_)) => return TestStatus::Fail("Partial frame should not decode".to_string()),
-                Err(e) => return TestStatus::Fail(format!("Unexpected error for partial frame: {}", e)),
+                Ok(None) => {} // Expected - need more data
+                Ok(Some(_)) => {
+                    return TestStatus::Fail("Partial frame should not decode".to_string());
+                }
+                Err(e) => {
+                    return TestStatus::Fail(format!("Unexpected error for partial frame: {}", e));
+                }
             }
 
             TestStatus::Pass
@@ -927,13 +1010,18 @@ mod tests {
                                 return TestStatus::Fail("Partial read frame mismatch".to_string());
                             }
                         } else {
-                            return TestStatus::Fail(format!("Frame decoded too early at byte {}", i));
+                            return TestStatus::Fail(format!(
+                                "Frame decoded too early at byte {}",
+                                i
+                            ));
                         }
                     }
                     Ok(None) => {
                         // Expected until we have complete frame
                         if i == output.len() - 1 {
-                            return TestStatus::Fail("Frame should have decoded on final byte".to_string());
+                            return TestStatus::Fail(
+                                "Frame should have decoded on final byte".to_string(),
+                            );
                         }
                     }
                     Err(e) => return TestStatus::Fail(format!("Read frame error: {}", e)),
@@ -968,7 +1056,6 @@ mod tests {
             level: RequirementLevel::Should,
             description: "Key rebalancing should minimize moved keys",
         },
-
         // Distributed - Snapshots
         ConformanceCase {
             id: "DIST-004",
@@ -988,7 +1075,6 @@ mod tests {
             level: RequirementLevel::Should,
             description: "Snapshots should preserve all task state accurately",
         },
-
         // Security - Authentication
         ConformanceCase {
             id: "SEC-001",
@@ -1014,7 +1100,6 @@ mod tests {
             level: RequirementLevel::Should,
             description: "Authentication should use constant-time verification",
         },
-
         // Codec - Length Delimited
         ConformanceCase {
             id: "CODEC-001",
@@ -1040,7 +1125,6 @@ mod tests {
             level: RequirementLevel::Must,
             description: "Codec must handle partial frame decoding",
         },
-
         // Codec - Framed Streams
         ConformanceCase {
             id: "CODEC-005",
@@ -1070,7 +1154,7 @@ mod tests {
     fn conformance_distributed_consistent_hash() {
         let result = MockDistributedProcessor::test_consistent_hash_rebalance();
         match result {
-            TestStatus::Pass => {},
+            TestStatus::Pass => {}
             TestStatus::Fail(msg) => panic!("DIST-001/DIST-002/DIST-003 FAIL: {}", msg),
             TestStatus::Skip(msg) => panic!("DIST-001/DIST-002/DIST-003 SKIP: {}", msg),
         }
@@ -1080,7 +1164,7 @@ mod tests {
     fn conformance_distributed_snapshot_roundtrip() {
         let result = MockDistributedProcessor::test_snapshot_restore_roundtrip();
         match result {
-            TestStatus::Pass => {},
+            TestStatus::Pass => {}
             TestStatus::Fail(msg) => panic!("DIST-004/DIST-006 FAIL: {}", msg),
             TestStatus::Skip(msg) => panic!("DIST-004/DIST-006 SKIP: {}", msg),
         }
@@ -1090,7 +1174,7 @@ mod tests {
     fn conformance_distributed_snapshot_corruption() {
         let result = MockDistributedProcessor::test_snapshot_corruption_detection();
         match result {
-            TestStatus::Pass => {},
+            TestStatus::Pass => {}
             TestStatus::Fail(msg) => panic!("DIST-005 FAIL: {}", msg),
             TestStatus::Skip(msg) => panic!("DIST-005 SKIP: {}", msg),
         }
@@ -1100,7 +1184,7 @@ mod tests {
     fn conformance_security_authenticated_encryption() {
         let result = MockSecurityProcessor::test_authenticated_encryption_symmetry();
         match result {
-            TestStatus::Pass => {},
+            TestStatus::Pass => {}
             TestStatus::Fail(msg) => panic!("SEC-001 FAIL: {}", msg),
             TestStatus::Skip(msg) => panic!("SEC-001 SKIP: {}", msg),
         }
@@ -1110,7 +1194,7 @@ mod tests {
     fn conformance_security_tampering_detection() {
         let result = MockSecurityProcessor::test_authentication_tag_tampering_detection();
         match result {
-            TestStatus::Pass => {},
+            TestStatus::Pass => {}
             TestStatus::Fail(msg) => panic!("SEC-002 FAIL: {}", msg),
             TestStatus::Skip(msg) => panic!("SEC-002 SKIP: {}", msg),
         }
@@ -1120,7 +1204,7 @@ mod tests {
     fn conformance_security_zero_tag_verification() {
         let result = MockSecurityProcessor::test_zero_tag_verification_status();
         match result {
-            TestStatus::Pass => {},
+            TestStatus::Pass => {}
             TestStatus::Fail(msg) => panic!("SEC-003 FAIL: {}", msg),
             TestStatus::Skip(msg) => panic!("SEC-003 SKIP: {}", msg),
         }
@@ -1130,7 +1214,7 @@ mod tests {
     fn conformance_codec_length_delimited_roundtrip() {
         let result = MockCodecProcessor::test_length_delimited_roundtrip();
         match result {
-            TestStatus::Pass => {},
+            TestStatus::Pass => {}
             TestStatus::Fail(msg) => panic!("CODEC-001 FAIL: {}", msg),
             TestStatus::Skip(msg) => panic!("CODEC-001 SKIP: {}", msg),
         }
@@ -1140,7 +1224,7 @@ mod tests {
     fn conformance_codec_boundary_cases() {
         let result = MockCodecProcessor::test_length_delimited_boundary_cases();
         match result {
-            TestStatus::Pass => {},
+            TestStatus::Pass => {}
             TestStatus::Fail(msg) => panic!("CODEC-002/CODEC-003/CODEC-004 FAIL: {}", msg),
             TestStatus::Skip(msg) => panic!("CODEC-002/CODEC-003/CODEC-004 SKIP: {}", msg),
         }
@@ -1150,7 +1234,7 @@ mod tests {
     fn conformance_codec_framed_stream_operations() {
         let result = MockCodecProcessor::test_framed_stream_operations();
         match result {
-            TestStatus::Pass => {},
+            TestStatus::Pass => {}
             TestStatus::Fail(msg) => panic!("CODEC-005/CODEC-007 FAIL: {}", msg),
             TestStatus::Skip(msg) => panic!("CODEC-005/CODEC-007 SKIP: {}", msg),
         }
@@ -1160,7 +1244,7 @@ mod tests {
     fn conformance_codec_framed_stream_partial_reads() {
         let result = MockCodecProcessor::test_framed_stream_partial_reads();
         match result {
-            TestStatus::Pass => {},
+            TestStatus::Pass => {}
             TestStatus::Fail(msg) => panic!("CODEC-006 FAIL: {}", msg),
             TestStatus::Skip(msg) => panic!("CODEC-006 SKIP: {}", msg),
         }
@@ -1180,13 +1264,15 @@ mod tests {
             match case.level {
                 RequirementLevel::Must => *must += 1,
                 RequirementLevel::Should => *should += 1,
-                RequirementLevel::May => {}, // Not tracked in compliance score
+                RequirementLevel::May => {} // Not tracked in compliance score
             }
         }
 
         for (section, (must_count, should_count)) in by_section {
-            println!("| {} | {}/{} | {}/{} | All | ✅ PASS |",
-                section, must_count, must_count, should_count, should_count);
+            println!(
+                "| {} | {}/{} | {}/{} | All | ✅ PASS |",
+                section, must_count, must_count, should_count, should_count
+            );
         }
 
         let total_must: usize = by_section.values().map(|(m, _)| m).sum();
@@ -1194,12 +1280,23 @@ mod tests {
         let total_tests = CONFORMANCE_CASES.len();
 
         println!("\n**Summary:**");
-        println!("- Total requirements: {} MUST + {} SHOULD", total_must, total_should);
+        println!(
+            "- Total requirements: {} MUST + {} SHOULD",
+            total_must, total_should
+        );
         println!("- Tests implemented: {}", total_tests);
         println!("- Conformance patterns: Round-Trip + Spec-Derived Test Matrix");
         println!("- Mock implementation: No runtime dependencies");
-        println!("- MUST clause coverage: {}/{} (100%)", total_must, total_must);
-        println!("- SHOULD clause coverage: {}/{} (100%)", total_should, total_should);
-        println!("\n✅ **CONFORMANCE ACHIEVED**: All critical distributed/security/codec invariants verified");
+        println!(
+            "- MUST clause coverage: {}/{} (100%)",
+            total_must, total_must
+        );
+        println!(
+            "- SHOULD clause coverage: {}/{} (100%)",
+            total_should, total_should
+        );
+        println!(
+            "\n✅ **CONFORMANCE ACHIEVED**: All critical distributed/security/codec invariants verified"
+        );
     }
 }
