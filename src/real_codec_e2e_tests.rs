@@ -669,37 +669,37 @@ impl CodecTestHarness {
     }
 }
 
-#[test]
+#[tokio::test]
 async fn test_length_delimited_roundtrip_e2e() {
     let harness = CodecTestHarness::new("length_delimited_roundtrip_e2e");
     harness.test_length_delimited_roundtrip().await;
 }
 
-#[test]
+#[tokio::test]
 async fn test_framed_readwrite_real_io_e2e() {
     let harness = CodecTestHarness::new("framed_readwrite_real_io_e2e");
     harness.test_framed_readwrite_real_io().await;
 }
 
-#[test]
+#[tokio::test]
 async fn test_codec_configurations_e2e() {
     let harness = CodecTestHarness::new("codec_configurations_e2e");
     harness.test_codec_configurations().await;
 }
 
-#[test]
+#[tokio::test]
 async fn test_codec_error_handling_e2e() {
     let harness = CodecTestHarness::new("codec_error_handling_e2e");
     harness.test_codec_error_handling().await;
 }
 
-#[test]
+#[tokio::test]
 async fn test_buffer_management_e2e() {
     let harness = CodecTestHarness::new("buffer_management_e2e");
     harness.test_buffer_management().await;
 }
 
-#[test]
+#[tokio::test]
 async fn test_codec_full_pipeline_e2e() {
     let harness = CodecTestHarness::new("codec_full_pipeline_e2e");
 

@@ -691,13 +691,13 @@ fn test_zero_copy_operations_e2e() {
     harness.test_zero_copy_operations();
 }
 
-#[test]
+#[tokio::test]
 async fn test_bytes_io_integration_e2e() {
     let harness = BytesTestHarness::new("bytes_io_integration_e2e");
     harness.test_bytes_io_integration().await;
 }
 
-#[test]
+#[tokio::test]
 async fn test_bytes_mut_growth_patterns_e2e() {
     let harness = BytesTestHarness::new("bytes_mut_growth_patterns_e2e");
     harness.test_bytes_mut_growth_patterns().await;
@@ -709,13 +709,13 @@ fn test_buf_trait_operations_e2e() {
     harness.test_buf_trait_operations();
 }
 
-#[test]
+#[tokio::test]
 async fn test_memory_efficiency_e2e() {
     let harness = BytesTestHarness::new("memory_efficiency_e2e");
     harness.test_memory_efficiency().await;
 }
 
-#[test]
+#[tokio::test]
 async fn test_bytes_full_pipeline_e2e() {
     let harness = BytesTestHarness::new("bytes_full_pipeline_e2e");
 
