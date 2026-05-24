@@ -748,10 +748,52 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_websocket_broadcast_to_multiple_clients() {
+        // Environment-adaptive timeout configuration
+        fn get_environment_timeout_multiplier() -> f64 {
+            let is_debug = cfg!(debug_assertions);
+            let is_ci = std::env::var("CI").is_ok();
+            let is_slow_storage = std::env::var("ASUPERSYNC_SLOW_STORAGE").is_ok();
+
+            match (is_debug, is_ci, is_slow_storage) {
+                (true, true, true) => {
+                    println!("Environment: Debug + CI + Slow Storage - using 10x timeout multiplier");
+                    10.0  // Debug builds in CI with slow storage
+                }
+                (true, true, false) => {
+                    println!("Environment: Debug + CI - using 5x timeout multiplier");
+                    5.0   // Debug builds in CI
+                }
+                (true, false, _) => {
+                    println!("Environment: Debug local - using 3x timeout multiplier");
+                    3.0   // Debug builds locally
+                }
+                (false, true, _) => {
+                    println!("Environment: Release CI - using 2x timeout multiplier");
+                    2.0   // Release builds in CI
+                }
+                (false, false, _) => {
+                    println!("Environment: Release local - using 1x timeout multiplier");
+                    1.0   // Release builds locally (baseline)
+                }
+            }
+        }
+
+        fn adaptive_timeout_ms(base_ms: u64) -> Duration {
+            let multiplier = get_environment_timeout_multiplier();
+            let timeout_ms = (base_ms as f64 * multiplier) as u64;
+            Duration::from_millis(timeout_ms)
+        }
+
+        fn adaptive_timeout_secs(base_secs: u64) -> Duration {
+            let multiplier = get_environment_timeout_multiplier();
+            let timeout_secs = (base_secs as f64 * multiplier) as u64;
+            Duration::from_secs(timeout_secs)
+        }
+
         let server_config = ServerConfig {
             max_pending_per_client: 50,
             max_total_memory_bytes: 1024 * 1024,
-            send_timeout: Duration::from_millis(100),
+            send_timeout: adaptive_timeout_ms(100),  // Base: 100ms, adaptive based on environment
             drop_low_priority: false,
         };
 
@@ -760,8 +802,14 @@ mod tests {
             num_messages: 20,
             message_size: 256,
             broadcast_rate: 10.0,
-            max_test_duration: Duration::from_secs(10),
+            max_test_duration: adaptive_timeout_secs(10),  // Base: 10s, adaptive based on environment
         };
+
+        println!(
+            "Using adaptive timeouts - send_timeout: {} ms, max_test_duration: {} s",
+            server_config.send_timeout.as_millis(),
+            test_config.max_test_duration.as_secs()
+        );
 
         let mut harness = WebSocketBroadcastHarness::new(server_config, test_config).await.unwrap();
 

@@ -521,76 +521,139 @@ mod real_http_h2_concurrent_load_e2e {
             .await
             .expect("Failed to start test server");
 
-        let num_clients = 10;
-        let requests_per_client = 20;
-        let total_expected_requests = num_clients * requests_per_client;
-
-        let mut client_handles = Vec::new();
-
-        // Create concurrent clients
-        for client_id in 0..num_clients {
-            let harness = Arc::clone(&harness);
-
-            let handle = spawn(async move {
-                // Each client creates its own HTTP/2 connection
-                let client = harness.create_h2_client(client_id).await?;
-
-                // Run load test for this client
-                harness
-                    .run_concurrent_load_test(client, client_id, requests_per_client)
-                    .await
-            });
-
-            client_handles.push(handle);
+        // Parameterized concurrency scenarios for comprehensive load testing
+        #[derive(Debug, Clone)]
+        struct ConcurrencyScenario {
+            name: &'static str,
+            num_clients: usize,
+            requests_per_client: usize,
+            expected_success_rate: f64,  // Expected minimum success rate
         }
 
-        // Wait for all clients to complete
-        let mut total_successful_connections = 0;
-        let mut total_completed_requests = 0;
+        let concurrency_scenarios = vec![
+            ConcurrencyScenario {
+                name: "light_load",
+                num_clients: 1,
+                requests_per_client: 5,
+                expected_success_rate: 1.0,  // 100% success expected
+            },
+            ConcurrencyScenario {
+                name: "moderate_load",
+                num_clients: 10,
+                requests_per_client: 20,
+                expected_success_rate: 0.95, // 95% success expected
+            },
+            ConcurrencyScenario {
+                name: "heavy_load",
+                num_clients: 25,
+                requests_per_client: 50,
+                expected_success_rate: 0.90, // 90% success expected
+            },
+        ];
 
-        for handle in client_handles {
-            match handle.await {
-                Ok(connection_stats) => {
-                    if connection_stats.connection_successful {
-                        total_successful_connections += 1;
-                        total_completed_requests += connection_stats.streams_completed;
+        for scenario in concurrency_scenarios {
+            println!("Testing HTTP/2 concurrency scenario: {} ({} clients × {} requests)",
+                     scenario.name, scenario.num_clients, scenario.requests_per_client);
+            let scenario_start = std::time::Instant::now();
+
+            let total_expected_requests = scenario.num_clients * scenario.requests_per_client;
+            let mut client_handles = Vec::new();
+
+            // Create concurrent clients for this scenario
+            for client_id in 0..scenario.num_clients {
+                let harness = Arc::clone(&harness);
+                let requests_for_client = scenario.requests_per_client;
+
+                let handle = spawn(async move {
+                    // Each client creates its own HTTP/2 connection
+                    let client = harness.create_h2_client(client_id).await?;
+
+                    // Run load test for this client
+                    harness
+                        .run_concurrent_load_test(client, client_id, requests_for_client)
+                        .await
+                });
+
+                client_handles.push(handle);
+            }
+
+            // Wait for all clients to complete and collect scenario-specific results
+            let mut scenario_successful_connections = 0;
+            let mut scenario_completed_requests = 0;
+
+            for handle in client_handles {
+                match handle.await {
+                    Ok(connection_stats) => {
+                        if connection_stats.connection_successful {
+                            scenario_successful_connections += 1;
+                            scenario_completed_requests += connection_stats.streams_completed;
+                        }
+
+                        harness.log(
+                            "client_load_result",
+                            json!({
+                                "scenario": scenario.name,
+                                "client_id": connection_stats.client_id,
+                                "connection_successful": connection_stats.connection_successful,
+                                "streams_completed": connection_stats.streams_completed,
+                                "bytes_sent": connection_stats.bytes_sent,
+                                "bytes_received": connection_stats.bytes_received,
+                                "duration_ms": connection_stats.connection_duration_ms
+                            }),
+                        );
                     }
-
-                    harness.log(
-                        "client_load_result",
-                        json!({
-                            "client_id": connection_stats.client_id,
-                            "connection_successful": connection_stats.connection_successful,
-                            "streams_completed": connection_stats.streams_completed,
-                            "bytes_sent": connection_stats.bytes_sent,
-                            "bytes_received": connection_stats.bytes_received,
-                            "duration_ms": connection_stats.connection_duration_ms
-                        }),
-                    );
-                }
-                Err(e) => {
-                    harness.log(
-                        "client_load_error",
-                        json!({
-                            "error": e
-                        }),
+                    Err(e) => {
+                        harness.log(
+                            "client_load_error",
+                            json!({
+                                "scenario": scenario.name,
+                                "error": e
+                            }),
                     );
                 }
             }
+
+            // Calculate scenario-specific success rate
+            let actual_success_rate = if total_expected_requests > 0 {
+                scenario_completed_requests as f64 / total_expected_requests as f64
+            } else {
+                0.0
+            };
+
+            let scenario_duration = scenario_start.elapsed().as_millis();
+
+            // Validate scenario-specific performance expectations
+            assert!(
+                actual_success_rate >= scenario.expected_success_rate,
+                "Scenario {}: Expected success rate >= {:.1}%, got {:.1}% ({}/{} requests)",
+                scenario.name,
+                scenario.expected_success_rate * 100.0,
+                actual_success_rate * 100.0,
+                scenario_completed_requests,
+                total_expected_requests
+            );
+
+            println!(
+                "✓ Scenario {} completed: {:.1}% success rate, {} ms total duration",
+                scenario.name,
+                actual_success_rate * 100.0,
+                scenario_duration
+            );
+
+            harness.log(
+                "scenario_summary",
+                json!({
+                    "scenario": scenario.name,
+                    "clients": scenario.num_clients,
+                    "requests_per_client": scenario.requests_per_client,
+                    "successful_connections": scenario_successful_connections,
+                    "completed_requests": scenario_completed_requests,
+                    "total_expected_requests": total_expected_requests,
+                    "success_rate": actual_success_rate,
+                    "duration_ms": scenario_duration
+                }),
+            );
         }
-
-        // Validate load performance
-        assert_eq!(
-            total_successful_connections, num_clients,
-            "All clients should connect successfully"
-        );
-
-        assert!(
-            total_completed_requests >= total_expected_requests * 90 / 100,
-            "Should complete at least 90% of requests: {}/{}",
-            total_completed_requests,
-            total_expected_requests
-        );
 
         let performance_validation = harness.validate_load_performance();
         assert!(

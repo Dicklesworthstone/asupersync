@@ -591,24 +591,108 @@ mod tests {
 
     #[test]
     fn test_multi_chunk_upload_pipeline() {
-        let mut pipeline = FileUploadPipeline::new();
+        // Parameterized buffer size scenarios for comprehensive coverage
+        #[derive(Debug, Clone)]
+        struct BufferScenario {
+            name: &'static str,
+            file_size: usize,
+            chunk_size: usize,
+            expected_chunks: usize,
+            pattern: u8,
+        }
 
-        // Create large file that spans multiple chunks
-        let test_data = create_test_file_data(32768, 0xBB); // 32KB
-        let upload = MockMultipartUpload::new(
-            "largefile".to_string(),
-            Some("big.bin".to_string()),
-            test_data.clone(),
-        ).with_chunk_size(8192); // 8KB chunks = 4 chunks
+        let buffer_scenarios = vec![
+            BufferScenario {
+                name: "small_multi_chunk",
+                file_size: 2048,      // 2KB file
+                chunk_size: 512,      // 512B chunks = 4 chunks
+                expected_chunks: 4,
+                pattern: 0xAA,
+            },
+            BufferScenario {
+                name: "medium_multi_chunk",
+                file_size: 32768,     // 32KB file (original)
+                chunk_size: 8192,     // 8KB chunks = 4 chunks
+                expected_chunks: 4,
+                pattern: 0xBB,
+            },
+            BufferScenario {
+                name: "large_multi_chunk",
+                file_size: 1024 * 1024,  // 1MB file
+                chunk_size: 64 * 1024,   // 64KB chunks = 16 chunks
+                expected_chunks: 16,
+                pattern: 0xCC,
+            },
+            BufferScenario {
+                name: "uneven_boundary_test",
+                file_size: 10000,     // 10KB file (uneven)
+                chunk_size: 3000,     // 3KB chunks = 4 chunks (with remainder)
+                expected_chunks: 4,
+                pattern: 0xDD,
+            },
+        ];
 
-        // Process through pipeline
-        let processed = pipeline.process_upload(upload).expect("Processing should succeed");
+        for scenario in buffer_scenarios {
+            println!("Testing multi-chunk scenario: {} ({} bytes, {} byte chunks)",
+                     scenario.name, scenario.file_size, scenario.chunk_size);
 
-        // Verify multiple chunks were created
-        assert_eq!(processed.original_chunks.len(), 4);
-        assert_eq!(processed.metadata.chunk_count, 4);
+            let mut pipeline = FileUploadPipeline::new();
 
-        // Verify chunk boundaries
+            // Create test file with scenario-specific parameters
+            let test_data = create_test_file_data(scenario.file_size, scenario.pattern);
+            let upload = MockMultipartUpload::new(
+                format!("{}file", scenario.name),
+                Some(format!("{}.bin", scenario.name)),
+                test_data.clone(),
+            ).with_chunk_size(scenario.chunk_size);
+
+            // Process through pipeline
+            let processed = pipeline.process_upload(upload)
+                .expect(&format!("Processing should succeed for scenario {}", scenario.name));
+
+            // Verify chunk count matches scenario expectations
+            assert_eq!(
+                processed.original_chunks.len(),
+                scenario.expected_chunks,
+                "Scenario {}: Expected {} chunks, got {} chunks",
+                scenario.name,
+                scenario.expected_chunks,
+                processed.original_chunks.len()
+            );
+            assert_eq!(
+                processed.metadata.chunk_count,
+                scenario.expected_chunks,
+                "Scenario {}: Metadata chunk count mismatch",
+                scenario.name
+            );
+
+            // Verify chunk boundaries and data integrity for each scenario
+            let mut reassembled = BytesMut::new();
+            for (i, chunk) in processed.original_chunks.iter().enumerate() {
+                reassembled.extend_from_slice(chunk);
+                println!("  Chunk {}: {} bytes", i + 1, chunk.len());
+            }
+
+            // Verify reassembled data matches original
+            assert_eq!(
+                reassembled.as_ref(),
+                test_data.as_ref(),
+                "Scenario {}: Reassembled data should match original",
+                scenario.name
+            );
+
+            // Decode and verify full pipeline
+            let recovered_data = pipeline.decode_upload(processed)
+                .expect(&format!("Decoding should succeed for scenario {}", scenario.name));
+            assert_eq!(
+                recovered_data,
+                test_data,
+                "Scenario {}: Recovered data should match original",
+                scenario.name
+            );
+
+            println!("✓ Scenario {} completed successfully", scenario.name);
+        }
         let mut reassembled = BytesMut::new();
         for chunk in &processed.original_chunks {
             reassembled.extend_from_slice(chunk);
