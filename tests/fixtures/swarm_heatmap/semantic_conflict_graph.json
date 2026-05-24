@@ -1,0 +1,92 @@
+{
+  "agent_mail": {
+    "agents": [
+      {
+        "last_active_ts": "2026-05-10T08:40:00Z",
+        "name": "BlueMesa"
+      },
+      {
+        "last_active_ts": "2026-05-10T07:00:00Z",
+        "name": "OldHarbor"
+      }
+    ],
+    "messages": [
+      {
+        "body_md": "Working on src/http/h1.rs with CARGO_TARGET_DIR=/tmp/rch_target_bluemesa_http.",
+        "created_ts": "2026-05-10T08:40:00Z",
+        "from": "BlueMesa",
+        "subject": "HTTP proof"
+      }
+    ],
+    "reservations": [
+      {
+        "agent_name": "BlueMesa",
+        "exclusive": true,
+        "expires_ts": "2026-05-10T09:40:00Z",
+        "id": 401,
+        "path_pattern": "src/http/**"
+      },
+      {
+        "agent_name": "OldHarbor",
+        "exclusive": true,
+        "expires_ts": "2026-05-10T07:40:00Z",
+        "id": 402,
+        "path_pattern": "src/runtime/**"
+      }
+    ],
+    "status": "fixture"
+  },
+  "beads": [
+    {
+      "assignee": "BlueMesa",
+      "id": "asupersync-http-proof",
+      "status": "in_progress",
+      "touched_paths": [
+        "src/http/**"
+      ]
+    }
+  ],
+  "candidate_surfaces": [
+    "src/http/h1.rs",
+    "src/sync",
+    "tests/http_h1.rs"
+  ],
+  "dirty_tree": {
+    "entries": [
+      {
+        "path": "src/http/h1.rs",
+        "status": " M"
+      },
+      {
+        "path": "tests/unowned_probe.rs",
+        "status": "??"
+      }
+    ],
+    "status": "ok"
+  },
+  "proof_lanes": [
+    {
+      "lane_id": "http-h1-proof",
+      "release_blocking": true,
+      "touched_paths": [
+        "src/http/h1.rs",
+        "tests/http_h1.rs"
+      ]
+    },
+    {
+      "lane_id": "sync-proof",
+      "release_blocking": false,
+      "touched_paths": [
+        "src/sync"
+      ]
+    }
+  ],
+  "validation_frontier_blockers": [
+    {
+      "lane_id": "all-targets",
+      "owner": "BlueMesa",
+      "path": "src/http/h1.rs",
+      "status": "blocked"
+    }
+  ]
+}

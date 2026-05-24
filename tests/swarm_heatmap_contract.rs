@@ -44,6 +44,27 @@ fn heatmap_json(fixture: &str) -> Value {
     serde_json::from_slice(&output.stdout).expect("heatmap output must be JSON")
 }
 
+fn graph_has_node(graph: &Value, kind: &str, id: &str) -> bool {
+    graph["nodes"]
+        .as_array()
+        .expect("graph nodes")
+        .iter()
+        .any(|node| node["kind"].as_str() == Some(kind) && node["id"].as_str() == Some(id))
+}
+
+fn graph_has_edge(graph: &Value, kind: &str, source: &str, target: &str, path: &str) -> bool {
+    graph["edges"]
+        .as_array()
+        .expect("graph edges")
+        .iter()
+        .any(|edge| {
+            edge["kind"].as_str() == Some(kind)
+                && edge["source"].as_str() == Some(source)
+                && edge["target"].as_str() == Some(target)
+                && edge["path"].as_str() == Some(path)
+        })
+}
+
 #[test]
 fn script_exists_and_help_is_non_mutating() {
     assert!(
@@ -293,6 +314,114 @@ fn no_active_agents_stays_empty_without_false_conflicts() {
     assert_eq!(
         heatmap["suggested_open_surfaces"][0].as_str(),
         Some("fuzz/fuzz_targets")
+    );
+}
+
+#[test]
+fn semantic_conflict_graph_links_reservations_dirty_paths_and_proof_lanes() {
+    let heatmap = heatmap_json("semantic_conflict_graph.json");
+    let graph = &heatmap["semantic_conflict_graph"];
+    let contact_targets = graph["summary"]["owner_contact_targets"]
+        .as_array()
+        .expect("contact targets");
+
+    assert_eq!(
+        graph["schema_version"].as_str(),
+        Some("semantic-conflict-graph-v1")
+    );
+    assert_eq!(
+        graph["summary"]["dominant_conflict_class"].as_str(),
+        Some("blocks_proof")
+    );
+    assert_eq!(
+        graph["summary"]["suggested_narrow_proof"].as_str(),
+        Some("sync-proof")
+    );
+    assert!(contact_targets.iter().any(|name| name == "BlueMesa"));
+    assert!(contact_targets.iter().any(|name| name == "OldHarbor"));
+
+    assert!(graph_has_node(graph, "reservation", "reservation:401"));
+    assert!(graph_has_node(graph, "dirty_path", "dirty:src/http/h1.rs"));
+    assert!(graph_has_node(
+        graph,
+        "validation_blocker",
+        "validation_blocker:src/http/h1.rs"
+    ));
+    assert!(graph_has_node(graph, "bead", "bead:asupersync-http-proof"));
+    assert!(graph_has_node(
+        graph,
+        "proof_lane",
+        "proof_lane:http-h1-proof"
+    ));
+    assert!(graph_has_node(graph, "proof_lane", "proof_lane:sync-proof"));
+
+    assert!(graph_has_edge(
+        graph,
+        "blocks_proof",
+        "reservation:401",
+        "proof_lane:http-h1-proof",
+        "src/http/**"
+    ));
+    assert!(graph_has_edge(
+        graph,
+        "blocks_proof",
+        "dirty:src/http/h1.rs",
+        "proof_lane:http-h1-proof",
+        "src/http/h1.rs"
+    ));
+    assert!(graph_has_edge(
+        graph,
+        "blocks_proof",
+        "validation_blocker:src/http/h1.rs",
+        "proof_lane:http-h1-proof",
+        "src/http/h1.rs"
+    ));
+    assert!(graph_has_edge(
+        graph,
+        "clean_surface",
+        "proof_lane:sync-proof",
+        "surface:src/sync",
+        "src/sync"
+    ));
+    assert!(graph_has_edge(
+        graph,
+        "stale_owner",
+        "reservation:402",
+        "agent:OldHarbor",
+        "src/runtime/**"
+    ));
+    assert!(graph_has_edge(
+        graph,
+        "unknown_owner",
+        "dirty:tests/unowned_probe.rs",
+        "agent:unknown",
+        "tests/unowned_probe.rs"
+    ));
+}
+
+#[test]
+fn semantic_conflict_graph_keeps_clean_surfaces_open_and_blocks_owned_production_paths() {
+    let heatmap = heatmap_json("semantic_conflict_graph.json");
+    let graph = &heatmap["semantic_conflict_graph"];
+    let open_surfaces = heatmap["suggested_open_surfaces"]
+        .as_array()
+        .expect("open surfaces");
+    let clean_surfaces = graph["summary"]["clean_surfaces"]
+        .as_array()
+        .expect("clean surfaces");
+
+    assert!(open_surfaces.iter().any(|path| path == "src/sync"));
+    assert!(clean_surfaces.iter().any(|path| path == "src/sync"));
+    assert!(
+        !open_surfaces
+            .iter()
+            .any(|path| path.as_str() == Some("src/http/h1.rs")),
+        "peer-reserved production paths must not remain open"
+    );
+    assert_eq!(
+        graph["summary"]["conflict_count"].as_u64(),
+        Some(6),
+        "fixture should expose reservation, dirty-path, stale-owner, unknown-owner, and proof blockers"
     );
 }
 
