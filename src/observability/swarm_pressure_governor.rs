@@ -1859,6 +1859,42 @@ impl SwarmPressureGovernor {
         receipts
     }
 
+    /// Abort all live workload leases bound to a cancelled region/admission attempt.
+    pub fn abort_region_workload_leases(
+        &self,
+        region_id: RegionId,
+        reason: impl AsRef<str>,
+    ) -> Vec<SwarmWorkloadLeaseReceipt> {
+        let now = Instant::now();
+        let reason = reason.as_ref().trim();
+        let reason = if reason.is_empty() {
+            "workload leases aborted by region cancellation"
+        } else {
+            reason
+        };
+        let (receipts, expired_receipts) = {
+            let mut receipts = Vec::new();
+            let mut leases = self.workload_leases.lock().unwrap();
+            let expired_receipts = self.expire_stale_workload_leases_locked(&mut leases, now);
+            for lease in leases.values_mut() {
+                if lease.region_id == region_id && lease.state.is_live() {
+                    lease.state = SwarmWorkloadLeaseState::Aborted;
+                    lease.terminal_at = Some(now);
+                    self.workload_leases_aborted.fetch_add(1, Ordering::Relaxed);
+                    receipts.push(Self::lease_receipt(
+                        lease,
+                        SwarmWorkloadLeaseTransition::Aborted,
+                        reason,
+                    ));
+                }
+            }
+            (receipts, expired_receipts)
+        };
+        self.clear_workload_pressure_feedback_for_receipts(&expired_receipts);
+        self.clear_workload_pressure_feedback_for_receipts(&receipts);
+        receipts
+    }
+
     /// Get a workload lease by id.
     pub fn get_workload_lease(&self, lease_id: SwarmWorkloadLeaseId) -> Option<SwarmWorkloadLease> {
         let leases = self.workload_leases.lock().unwrap();
@@ -4984,6 +5020,104 @@ mod tests {
                 .reason
                 .contains("workload lease released by region close")
         );
+    }
+
+    #[test]
+    fn test_abort_region_workload_leases_clears_cancelled_admission_obligations() {
+        let governor = create_test_swarm_governor();
+        let runtime = std::sync::Arc::new(
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .build()
+                .expect("Failed to create test runtime"),
+        );
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let region_id = RegionId::new_for_test(54, 5);
+        let first_request = SwarmWorkloadAdmissionRequest::new(
+            "cancelled-admission-a",
+            SwarmAdmissionOwner::new("OrangeElm").with_reservation_scope("asw/cancel/a"),
+        )
+        .with_proof_lane(SwarmProofLaneKind::CargoCheckLib);
+        let second_request = SwarmWorkloadAdmissionRequest::new(
+            "cancelled-admission-b",
+            SwarmAdmissionOwner::new("OrangeElm").with_reservation_scope("asw/cancel/b"),
+        )
+        .with_proof_lane(SwarmProofLaneKind::Test);
+
+        let first_decision = governor
+            .check_workload_admission(&cx, &first_request)
+            .expect("first cancelled admission workload should classify");
+        let second_decision = governor
+            .check_workload_admission(&cx, &second_request)
+            .expect("second cancelled admission workload should classify");
+        let first = governor
+            .acquire_workload_lease(region_id, &first_request, &first_decision)
+            .expect("first cancelled admission lease should acquire");
+        let second = governor
+            .acquire_workload_lease(region_id, &second_request, &second_decision)
+            .expect("second cancelled admission lease should acquire");
+        governor
+            .commit_workload_lease(first.lease_id)
+            .expect("committed lease should still abort on region cancellation");
+        governor
+            .record_workload_pressure_feedback(
+                SwarmWorkloadPressureFeedback::new(
+                    "cancelled-admission-a",
+                    SwarmAdmissionOwner::new("OrangeElm"),
+                    SwarmProofLaneKind::CargoCheckLib,
+                )
+                .with_pressures(0.10, 0.20, 0.30, 0.40, 0.50),
+            )
+            .expect("first feedback should record before cancellation");
+        governor
+            .record_workload_pressure_feedback(
+                SwarmWorkloadPressureFeedback::new(
+                    "cancelled-admission-b",
+                    SwarmAdmissionOwner::new("OrangeElm"),
+                    SwarmProofLaneKind::Test,
+                )
+                .with_pressures(0.50, 0.40, 0.30, 0.20, 0.10),
+            )
+            .expect("second feedback should record before cancellation");
+        assert_eq!(governor.metrics().live_workload_feedback_reports, 2);
+
+        let receipts =
+            governor.abort_region_workload_leases(region_id, "admission cancelled by operator");
+        let aborted_ids: Vec<_> = receipts.iter().map(|receipt| receipt.lease_id).collect();
+        assert_eq!(receipts.len(), 2);
+        assert!(aborted_ids.contains(&first.lease_id));
+        assert!(aborted_ids.contains(&second.lease_id));
+        for receipt in &receipts {
+            assert_eq!(receipt.state, SwarmWorkloadLeaseState::Aborted);
+            assert_eq!(receipt.transition, SwarmWorkloadLeaseTransition::Aborted);
+            assert_eq!(receipt.transition_reason, "admission cancelled by operator");
+            assert!(
+                receipt
+                    .replay_pointer
+                    .starts_with("swarm-workload-lease://lease/")
+            );
+            assert!(receipt.replay_pointer.ends_with("/transition/aborted"));
+            assert!(receipt.reason.contains("admission cancelled by operator"));
+        }
+        assert!(
+            governor
+                .abort_region_workload_leases(region_id, "")
+                .is_empty(),
+            "terminal cancelled leases must not emit duplicate abort receipts"
+        );
+
+        let metrics = governor.metrics();
+        assert_eq!(metrics.workload_leases_aborted, 2);
+        assert_eq!(metrics.active_workload_lease_count, 0);
+        assert_eq!(metrics.terminal_workload_lease_count, 2);
+        assert_eq!(
+            metrics.live_workload_feedback_reports, 0,
+            "region cancellation should clear cancelled workload feedback"
+        );
+        let audit = governor.workload_lease_audit_snapshot();
+        assert_eq!(audit.live_lease_count, 0);
+        assert_eq!(audit.aborted_lease_count, 2);
+        assert!(!audit.leak_detected, "{}", audit.reason);
     }
 
     #[test]
