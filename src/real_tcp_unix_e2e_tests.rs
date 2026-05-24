@@ -14,7 +14,7 @@ mod tcp_unix_e2e_tests {
     use crate::net::tcp::{TcpListener, TcpStream};
     use crate::net::unix::{UnixDatagram, UnixListener, UnixStream};
     use crate::runtime::RuntimeBuilder;
-    use crate::time::{sleep, Duration, Instant};
+    use crate::time::{Duration, Instant, sleep};
     use crate::types::Outcome;
     use serde_json;
     use std::collections::HashMap;
@@ -22,7 +22,7 @@ mod tcp_unix_e2e_tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     /// Real TCP server for E2E testing with actual socket binding
     pub struct RealTcpServer {
@@ -127,7 +127,10 @@ mod tcp_unix_e2e_tests {
             content: Option<&str>,
         ) {
             let mut details = HashMap::new();
-            details.insert("direction".to_string(), serde_json::Value::String(direction.to_string()));
+            details.insert(
+                "direction".to_string(),
+                serde_json::Value::String(direction.to_string()),
+            );
 
             let event = SocketLogEvent {
                 timestamp: self.start_time.elapsed().as_micros() as u64,
@@ -147,12 +150,7 @@ mod tcp_unix_e2e_tests {
             }
         }
 
-        pub fn log_error(
-            &self,
-            socket_type: &str,
-            connection_id: Option<&str>,
-            error: &str,
-        ) {
+        pub fn log_error(&self, socket_type: &str, connection_id: Option<&str>, error: &str) {
             let event = SocketLogEvent {
                 timestamp: self.start_time.elapsed().as_micros() as u64,
                 event_type: "error".to_string(),
@@ -214,14 +212,14 @@ mod tcp_unix_e2e_tests {
             if std::env::var("NODE_ENV").unwrap_or_default() == "production" {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    "Cannot run real TCP E2E tests in production environment"
+                    "Cannot run real TCP E2E tests in production environment",
                 ));
             }
 
             if std::env::var("REAL_SERVICE_TESTS").unwrap_or_default() != "true" {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    "Set REAL_SERVICE_TESTS=true to enable real service testing"
+                    "Set REAL_SERVICE_TESTS=true to enable real service testing",
                 ));
             }
 
@@ -237,7 +235,11 @@ mod tcp_unix_e2e_tests {
         }
 
         /// Start TCP echo server
-        pub async fn start_echo_server(&self, cx: &Cx, logger: &SocketE2ELogger) -> Result<(), Box<dyn std::error::Error>> {
+        pub async fn start_echo_server(
+            &self,
+            cx: &Cx,
+            logger: &SocketE2ELogger,
+        ) -> Result<(), Box<dyn std::error::Error>> {
             self.is_running.store(true, Ordering::SeqCst);
 
             let mut connection_counter = 0u64;
@@ -252,11 +254,15 @@ mod tcp_unix_e2e_tests {
                         connection_counter += 1;
                         let connection_id = format!("tcp-{}", connection_counter);
 
-                        self.stats.connections_accepted.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .connections_accepted
+                            .fetch_add(1, Ordering::Relaxed);
 
                         let mut details = HashMap::new();
-                        details.insert("connection_count".to_string(),
-                            serde_json::Value::Number(serde_json::Number::from(connection_counter)));
+                        details.insert(
+                            "connection_count".to_string(),
+                            serde_json::Value::Number(serde_json::Number::from(connection_counter)),
+                        );
 
                         logger.log_connection_event(
                             "connection_accepted",
@@ -264,7 +270,7 @@ mod tcp_unix_e2e_tests {
                             &connection_id,
                             Some(&self.local_addr.to_string()),
                             Some(&remote_addr.to_string()),
-                            details
+                            details,
                         );
 
                         // Handle connection in simple echo mode
@@ -283,14 +289,17 @@ mod tcp_unix_e2e_tests {
                                     &connection_id,
                                     "receive",
                                     n,
-                                    Some(&received_data)
+                                    Some(&received_data),
                                 );
 
                                 // Echo the data back
                                 let echo_response = format!("TCP_ECHO: {}", received_data);
                                 match stream.write_all(echo_response.as_bytes()).await {
                                     Ok(()) => {
-                                        stats.bytes_sent.fetch_add(echo_response.len() as u64, Ordering::Relaxed);
+                                        stats.bytes_sent.fetch_add(
+                                            echo_response.len() as u64,
+                                            Ordering::Relaxed,
+                                        );
                                         stats.messages_echoed.fetch_add(1, Ordering::Relaxed);
 
                                         logger_clone.log_data_transfer(
@@ -298,12 +307,16 @@ mod tcp_unix_e2e_tests {
                                             &connection_id,
                                             "send",
                                             echo_response.len(),
-                                            Some(&echo_response)
+                                            Some(&echo_response),
                                         );
                                     }
                                     Err(e) => {
                                         stats.connection_errors.fetch_add(1, Ordering::Relaxed);
-                                        logger_clone.log_error("tcp", Some(&connection_id), &e.to_string());
+                                        logger_clone.log_error(
+                                            "tcp",
+                                            Some(&connection_id),
+                                            &e.to_string(),
+                                        );
                                     }
                                 }
                             }
@@ -316,7 +329,9 @@ mod tcp_unix_e2e_tests {
                             }
                         }
 
-                        self.stats.connections_closed.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .connections_closed
+                            .fetch_add(1, Ordering::Relaxed);
 
                         logger.log_connection_event(
                             "connection_closed",
@@ -324,7 +339,7 @@ mod tcp_unix_e2e_tests {
                             &connection_id,
                             Some(&self.local_addr.to_string()),
                             Some(&remote_addr.to_string()),
-                            HashMap::new()
+                            HashMap::new(),
                         );
                     }
                     Err(e) => {
@@ -357,10 +372,12 @@ mod tcp_unix_e2e_tests {
             Self::validate_test_environment()?;
 
             // Create temporary directory for Unix socket
-            let temp_dir = tempdir().map_err(|e| std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to create temp directory: {}", e)
-            ))?;
+            let temp_dir = tempdir().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to create temp directory: {}", e),
+                )
+            })?;
 
             let socket_path = temp_dir.path().join("test_socket.sock");
             let listener = UnixListener::bind(&socket_path)?;
@@ -379,14 +396,14 @@ mod tcp_unix_e2e_tests {
             if std::env::var("NODE_ENV").unwrap_or_default() == "production" {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    "Cannot run real Unix socket E2E tests in production environment"
+                    "Cannot run real Unix socket E2E tests in production environment",
                 ));
             }
 
             if std::env::var("REAL_SERVICE_TESTS").unwrap_or_default() != "true" {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    "Set REAL_SERVICE_TESTS=true to enable real service testing"
+                    "Set REAL_SERVICE_TESTS=true to enable real service testing",
                 ));
             }
 
@@ -402,7 +419,11 @@ mod tcp_unix_e2e_tests {
         }
 
         /// Start Unix domain socket echo server
-        pub async fn start_echo_server(&self, cx: &Cx, logger: &SocketE2ELogger) -> Result<(), Box<dyn std::error::Error>> {
+        pub async fn start_echo_server(
+            &self,
+            cx: &Cx,
+            logger: &SocketE2ELogger,
+        ) -> Result<(), Box<dyn std::error::Error>> {
             self.is_running.store(true, Ordering::SeqCst);
 
             let mut connection_counter = 0u64;
@@ -417,11 +438,15 @@ mod tcp_unix_e2e_tests {
                         connection_counter += 1;
                         let connection_id = format!("unix-{}", connection_counter);
 
-                        self.stats.connections_accepted.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .connections_accepted
+                            .fetch_add(1, Ordering::Relaxed);
 
                         let mut details = HashMap::new();
-                        details.insert("connection_count".to_string(),
-                            serde_json::Value::Number(serde_json::Number::from(connection_counter)));
+                        details.insert(
+                            "connection_count".to_string(),
+                            serde_json::Value::Number(serde_json::Number::from(connection_counter)),
+                        );
 
                         logger.log_connection_event(
                             "connection_accepted",
@@ -429,7 +454,7 @@ mod tcp_unix_e2e_tests {
                             &connection_id,
                             Some(&self.socket_path.display().to_string()),
                             None,
-                            details
+                            details,
                         );
 
                         // Handle connection in simple echo mode
@@ -447,14 +472,17 @@ mod tcp_unix_e2e_tests {
                                     &connection_id,
                                     "receive",
                                     n,
-                                    Some(&received_data)
+                                    Some(&received_data),
                                 );
 
                                 // Echo the data back
                                 let echo_response = format!("UNIX_ECHO: {}", received_data);
                                 match stream.write_all(echo_response.as_bytes()).await {
                                     Ok(()) => {
-                                        stats.bytes_sent.fetch_add(echo_response.len() as u64, Ordering::Relaxed);
+                                        stats.bytes_sent.fetch_add(
+                                            echo_response.len() as u64,
+                                            Ordering::Relaxed,
+                                        );
                                         stats.messages_echoed.fetch_add(1, Ordering::Relaxed);
 
                                         logger.log_data_transfer(
@@ -462,12 +490,16 @@ mod tcp_unix_e2e_tests {
                                             &connection_id,
                                             "send",
                                             echo_response.len(),
-                                            Some(&echo_response)
+                                            Some(&echo_response),
                                         );
                                     }
                                     Err(e) => {
                                         stats.connection_errors.fetch_add(1, Ordering::Relaxed);
-                                        logger.log_error("unix", Some(&connection_id), &e.to_string());
+                                        logger.log_error(
+                                            "unix",
+                                            Some(&connection_id),
+                                            &e.to_string(),
+                                        );
                                     }
                                 }
                             }
@@ -480,7 +512,9 @@ mod tcp_unix_e2e_tests {
                             }
                         }
 
-                        self.stats.connections_closed.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .connections_closed
+                            .fetch_add(1, Ordering::Relaxed);
 
                         logger.log_connection_event(
                             "connection_closed",
@@ -488,7 +522,7 @@ mod tcp_unix_e2e_tests {
                             &connection_id,
                             Some(&self.socket_path.display().to_string()),
                             None,
-                            HashMap::new()
+                            HashMap::new(),
                         );
                     }
                     Err(e) => {
@@ -555,8 +589,13 @@ mod tcp_unix_e2e_tests {
         let mut client_stream = TcpStream::connect(server_addr).await?;
         let test_message = b"Hello TCP World!";
 
-        logger.log_data_transfer("tcp", "client", "send", test_message.len(),
-            Some(&String::from_utf8_lossy(test_message)));
+        logger.log_data_transfer(
+            "tcp",
+            "client",
+            "send",
+            test_message.len(),
+            Some(&String::from_utf8_lossy(test_message)),
+        );
 
         client_stream.write_all(test_message).await?;
 
@@ -567,18 +606,38 @@ mod tcp_unix_e2e_tests {
 
         logger.log_data_transfer("tcp", "client", "receive", n, Some(&response));
 
-        assert!(response.starts_with("TCP_ECHO:"), "Should receive TCP echo: {}", response);
-        assert!(response.contains("Hello TCP World!"), "Echo should contain original message: {}", response);
+        assert!(
+            response.starts_with("TCP_ECHO:"),
+            "Should receive TCP echo: {}",
+            response
+        );
+        assert!(
+            response.contains("Hello TCP World!"),
+            "Echo should contain original message: {}",
+            response
+        );
 
         // Stop server
         server.stop(&cx).await?;
 
         // Verify statistics
         let stats = server.stats();
-        assert!(stats.connections_accepted.load(Ordering::Relaxed) > 0, "Should accept connections");
-        assert!(stats.messages_echoed.load(Ordering::Relaxed) > 0, "Should echo messages");
-        assert!(stats.bytes_sent.load(Ordering::Relaxed) > 0, "Should send bytes");
-        assert!(stats.bytes_received.load(Ordering::Relaxed) > 0, "Should receive bytes");
+        assert!(
+            stats.connections_accepted.load(Ordering::Relaxed) > 0,
+            "Should accept connections"
+        );
+        assert!(
+            stats.messages_echoed.load(Ordering::Relaxed) > 0,
+            "Should echo messages"
+        );
+        assert!(
+            stats.bytes_sent.load(Ordering::Relaxed) > 0,
+            "Should send bytes"
+        );
+        assert!(
+            stats.bytes_received.load(Ordering::Relaxed) > 0,
+            "Should receive bytes"
+        );
 
         eprintln!("TCP E2E structured log:\n{}", logger.export_json());
         Ok(())
@@ -612,8 +671,13 @@ mod tcp_unix_e2e_tests {
         let mut client_stream = UnixStream::connect(&socket_path).await?;
         let test_message = b"Hello Unix World!";
 
-        logger.log_data_transfer("unix", "client", "send", test_message.len(),
-            Some(&String::from_utf8_lossy(test_message)));
+        logger.log_data_transfer(
+            "unix",
+            "client",
+            "send",
+            test_message.len(),
+            Some(&String::from_utf8_lossy(test_message)),
+        );
 
         client_stream.write_all(test_message).await?;
 
@@ -624,26 +688,50 @@ mod tcp_unix_e2e_tests {
 
         logger.log_data_transfer("unix", "client", "receive", n, Some(&response));
 
-        assert!(response.starts_with("UNIX_ECHO:"), "Should receive Unix echo: {}", response);
-        assert!(response.contains("Hello Unix World!"), "Echo should contain original message: {}", response);
+        assert!(
+            response.starts_with("UNIX_ECHO:"),
+            "Should receive Unix echo: {}",
+            response
+        );
+        assert!(
+            response.contains("Hello Unix World!"),
+            "Echo should contain original message: {}",
+            response
+        );
 
         // Stop server
         server.stop(&cx).await?;
 
         // Verify statistics
         let stats = server.stats();
-        assert!(stats.connections_accepted.load(Ordering::Relaxed) > 0, "Should accept connections");
-        assert!(stats.messages_echoed.load(Ordering::Relaxed) > 0, "Should echo messages");
-        assert!(stats.bytes_sent.load(Ordering::Relaxed) > 0, "Should send bytes");
-        assert!(stats.bytes_received.load(Ordering::Relaxed) > 0, "Should receive bytes");
+        assert!(
+            stats.connections_accepted.load(Ordering::Relaxed) > 0,
+            "Should accept connections"
+        );
+        assert!(
+            stats.messages_echoed.load(Ordering::Relaxed) > 0,
+            "Should echo messages"
+        );
+        assert!(
+            stats.bytes_sent.load(Ordering::Relaxed) > 0,
+            "Should send bytes"
+        );
+        assert!(
+            stats.bytes_received.load(Ordering::Relaxed) > 0,
+            "Should receive bytes"
+        );
 
-        eprintln!("Unix Domain Socket E2E structured log:\n{}", logger.export_json());
+        eprintln!(
+            "Unix Domain Socket E2E structured log:\n{}",
+            logger.export_json()
+        );
         Ok(())
     }
 
     #[tokio::test]
     #[ignore] // Requires REAL_SERVICE_TESTS=true
-    async fn test_real_tcp_multiple_concurrent_connections() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_real_tcp_multiple_concurrent_connections()
+    -> Result<(), Box<dyn std::error::Error>> {
         validate_socket_e2e_environment()?;
 
         let runtime = RuntimeBuilder::new().build()?;
@@ -672,8 +760,13 @@ mod tcp_unix_e2e_tests {
             let mut client_stream = TcpStream::connect(server_addr).await?;
             let test_message = format!("Client {} message", i);
 
-            logger.log_data_transfer("tcp", &format!("client-{}", i), "send", test_message.len(),
-                Some(&test_message));
+            logger.log_data_transfer(
+                "tcp",
+                &format!("client-{}", i),
+                "send",
+                test_message.len(),
+                Some(&test_message),
+            );
 
             client_stream.write_all(test_message.as_bytes()).await?;
 
@@ -682,10 +775,24 @@ mod tcp_unix_e2e_tests {
             let n = client_stream.read(&mut response_buffer).await?;
             let response = String::from_utf8_lossy(&response_buffer[..n]);
 
-            logger.log_data_transfer("tcp", &format!("client-{}", i), "receive", n, Some(&response));
+            logger.log_data_transfer(
+                "tcp",
+                &format!("client-{}", i),
+                "receive",
+                n,
+                Some(&response),
+            );
 
-            assert!(response.starts_with("TCP_ECHO:"), "Client {} should receive echo", i);
-            assert!(response.contains(&test_message), "Client {} echo should contain original", i);
+            assert!(
+                response.starts_with("TCP_ECHO:"),
+                "Client {} should receive echo",
+                i
+            );
+            assert!(
+                response.contains(&test_message),
+                "Client {} echo should contain original",
+                i
+            );
 
             client_results.push(response.to_string());
         }
@@ -693,13 +800,22 @@ mod tcp_unix_e2e_tests {
         server.stop(&cx).await?;
 
         // Verify all clients got responses
-        assert_eq!(client_results.len(), NUM_CLIENTS, "All clients should get responses");
+        assert_eq!(
+            client_results.len(),
+            NUM_CLIENTS,
+            "All clients should get responses"
+        );
 
         let stats = server.stats();
-        assert!(stats.connections_accepted.load(Ordering::Relaxed) >= NUM_CLIENTS as u64,
-            "Should accept all client connections");
+        assert!(
+            stats.connections_accepted.load(Ordering::Relaxed) >= NUM_CLIENTS as u64,
+            "Should accept all client connections"
+        );
 
-        eprintln!("Multiple TCP connections E2E structured log:\n{}", logger.export_json());
+        eprintln!(
+            "Multiple TCP connections E2E structured log:\n{}",
+            logger.export_json()
+        );
         Ok(())
     }
 }

@@ -9,26 +9,26 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 use crate::{
-    cx::Cx,
-    runtime::{RuntimeBuilder, Region},
-    cancel::{CancelToken, CancelRequest, CancelReason, cancel_scope, cancel_after},
-    combinator::{race, join, timeout},
-    error::{Outcome, AsupersyncError},
-    time::{Duration, sleep, Instant},
+    cancel::{CancelReason, CancelRequest, CancelToken, cancel_after, cancel_scope},
     channel::{mpsc, oneshot},
+    combinator::{join, race, timeout},
+    cx::Cx,
+    error::{AsupersyncError, Outcome},
+    runtime::{Region, RuntimeBuilder},
     sync::{Arc, Barrier},
-    types::{TaskId, RegionId},
+    time::{Duration, Instant, sleep},
+    types::{RegionId, TaskId},
 };
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 use std::{
-    sync::atomic::{AtomicU64, AtomicBool, Ordering},
     collections::{HashMap, VecDeque},
     sync::Mutex,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 #[cfg(all(test, feature = "real-service-e2e"))]
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Real cancel propagation manager that coordinates actual cancel signal testing
 /// Uses asupersync cancel primitives with real task hierarchies and scope trees
@@ -159,7 +159,8 @@ impl RealCancelManager {
                 &cancel_token,
                 &status_sender,
                 &mut hierarchy_nodes,
-            ).await
+            )
+            .await
         });
 
         // Wait for hierarchy to establish
@@ -168,7 +169,9 @@ impl RealCancelManager {
         // Send cancel signal
         let cancel_start = Instant::now();
         cancel_token.cancel(CancelReason::UserRequested);
-        self.stats.cancel_signals_sent.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .cancel_signals_sent
+            .fetch_add(1, Ordering::Relaxed);
 
         // Collect status updates from hierarchy
         let mut received_cancels = 0;
@@ -179,10 +182,14 @@ impl RealCancelManager {
                 TaskStatus::Created => total_nodes += 1,
                 TaskStatus::CancelReceived => {
                     received_cancels += 1;
-                    self.stats.cancel_signals_received.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .cancel_signals_received
+                        .fetch_add(1, Ordering::Relaxed);
                 }
                 TaskStatus::Completed => {
-                    self.stats.tasks_completed_before_cancel.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .tasks_completed_before_cancel
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -191,8 +198,12 @@ impl RealCancelManager {
         let end_time = Instant::now();
 
         let propagation_latency = end_time.duration_since(cancel_start).as_nanos() as u64;
-        self.stats.cancel_latency_total_ns.fetch_add(propagation_latency, Ordering::Relaxed);
-        self.stats.max_nesting_level.store(depth as u64, Ordering::Relaxed);
+        self.stats
+            .cancel_latency_total_ns
+            .fetch_add(propagation_latency, Ordering::Relaxed);
+        self.stats
+            .max_nesting_level
+            .store(depth as u64, Ordering::Relaxed);
 
         let success_rate = if total_nodes > 0 {
             received_cancels as f64 / total_nodes as f64
@@ -200,7 +211,12 @@ impl RealCancelManager {
             0.0
         };
 
-        self.logger.log_operation("linear_hierarchy", depth as u64, total_nodes, received_cancels);
+        self.logger.log_operation(
+            "linear_hierarchy",
+            depth as u64,
+            total_nodes,
+            received_cancels,
+        );
 
         Ok(CancelOperation {
             operation_type: CancelOperationType::LinearHierarchy,
@@ -276,14 +292,16 @@ impl RealCancelManager {
                     &child_cancel_token,
                     &child_status_sender,
                     &mut child_hierarchy,
-                ).await?;
+                )
+                .await?;
             }
 
             // Simulate some work at this level
             let work_result = timeout(
                 Duration::from_millis(200),
                 self.simulate_task_work(current_level),
-            ).await;
+            )
+            .await;
 
             match work_result {
                 Outcome::Ok(()) => {
@@ -300,7 +318,8 @@ impl RealCancelManager {
 
             let _ = cancel_monitor.await;
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test tree hierarchy cancel propagation (parent with multiple children)
@@ -325,7 +344,8 @@ impl RealCancelManager {
                 0,
                 &cancel_token,
                 &status_sender,
-            ).await
+            )
+            .await
         });
 
         // Wait for tree to establish
@@ -334,7 +354,9 @@ impl RealCancelManager {
         // Send cancel signal
         let cancel_start = Instant::now();
         cancel_token.cancel(CancelReason::UserRequested);
-        self.stats.cancel_signals_sent.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .cancel_signals_sent
+            .fetch_add(1, Ordering::Relaxed);
 
         // Collect status updates from tree hierarchy
         let mut received_cancels = 0;
@@ -347,20 +369,27 @@ impl RealCancelManager {
                     TaskStatus::Created => total_nodes += 1,
                     TaskStatus::CancelReceived => {
                         received_cancels += 1;
-                        self.stats.cancel_signals_received.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .cancel_signals_received
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                     TaskStatus::Completed => {
-                        self.stats.tasks_completed_before_cancel.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .tasks_completed_before_cancel
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
-        }).await;
+        })
+        .await;
 
         let _ = tree_handle.await;
         let end_time = Instant::now();
 
         let propagation_latency = end_time.duration_since(cancel_start).as_nanos() as u64;
-        self.stats.cancel_latency_total_ns.fetch_add(propagation_latency, Ordering::Relaxed);
+        self.stats
+            .cancel_latency_total_ns
+            .fetch_add(propagation_latency, Ordering::Relaxed);
 
         let success_rate = if total_nodes > 0 {
             received_cancels as f64 / total_nodes as f64
@@ -368,7 +397,12 @@ impl RealCancelManager {
             0.0
         };
 
-        self.logger.log_operation("tree_hierarchy", config.max_nesting_depth as u64, total_nodes, received_cancels);
+        self.logger.log_operation(
+            "tree_hierarchy",
+            config.max_nesting_depth as u64,
+            total_nodes,
+            received_cancels,
+        );
 
         Ok(CancelOperation {
             operation_type: CancelOperationType::TreeHierarchy,
@@ -426,7 +460,8 @@ impl RealCancelManager {
                         child_node_id,
                         &child_cancel_token,
                         &child_status_sender,
-                    ).await
+                    )
+                    .await
                 });
 
                 child_handles.push(child_handle);
@@ -436,7 +471,8 @@ impl RealCancelManager {
             let work_result = timeout(
                 Duration::from_millis(100),
                 self.simulate_task_work(current_level),
-            ).await;
+            )
+            .await;
 
             match work_result {
                 Outcome::Ok(()) => {
@@ -454,7 +490,8 @@ impl RealCancelManager {
 
             let _ = cancel_monitor.await;
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test deep nesting cancel propagation under stress
@@ -470,13 +507,8 @@ impl RealCancelManager {
 
         // Create deeply nested scope chain
         let nesting_handle = cx.spawn(async move {
-            self.create_deep_nested_scopes(
-                cx,
-                depth,
-                0,
-                &cancel_token,
-                &completion_sender,
-            ).await
+            self.create_deep_nested_scopes(cx, depth, 0, &cancel_token, &completion_sender)
+                .await
         });
 
         // Wait for deep nesting to establish
@@ -485,7 +517,9 @@ impl RealCancelManager {
         // Send cancel signal and measure propagation time
         let cancel_start = Instant::now();
         cancel_token.cancel(CancelReason::Timeout);
-        self.stats.cancel_signals_sent.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .cancel_signals_sent
+            .fetch_add(1, Ordering::Relaxed);
 
         // Wait for completion notifications
         let mut completed_levels = 0;
@@ -499,10 +533,15 @@ impl RealCancelManager {
         let _ = nesting_handle.await;
         let propagation_latency = cancel_start.elapsed().as_nanos() as u64;
 
-        self.stats.cancel_propagation_depth.store(depth as u64, Ordering::Relaxed);
-        self.stats.max_nesting_level.store(depth as u64, Ordering::Relaxed);
+        self.stats
+            .cancel_propagation_depth
+            .store(depth as u64, Ordering::Relaxed);
+        self.stats
+            .max_nesting_level
+            .store(depth as u64, Ordering::Relaxed);
 
-        self.logger.log_operation("deep_nesting", depth as u64, depth as u64, completed_levels);
+        self.logger
+            .log_operation("deep_nesting", depth as u64, depth as u64, completed_levels);
 
         Ok(CancelOperation {
             operation_type: CancelOperationType::DeepNesting,
@@ -538,7 +577,9 @@ impl RealCancelManager {
 
             let cancel_monitor = nested_cx.spawn(async move {
                 level_cancel_token.cancelled().await;
-                self.stats.cancel_signals_received.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .cancel_signals_received
+                    .fetch_add(1, Ordering::Relaxed);
                 let _ = level_completion_sender.send(level).await;
             });
 
@@ -550,21 +591,21 @@ impl RealCancelManager {
                     current_level + 1,
                     cancel_token,
                     completion_sender,
-                ).await?;
+                )
+                .await?;
             }
 
             // Simulate work that can be cancelled
-            let work_result = race!(
-                self.simulate_task_work(current_level),
-                async {
-                    cancel_token.cancelled().await;
-                    Err(AsupersyncError::from("cancelled"))
-                }
-            ).await;
+            let work_result = race!(self.simulate_task_work(current_level), async {
+                cancel_token.cancelled().await;
+                Err(AsupersyncError::from("cancelled"))
+            })
+            .await;
 
             let _ = cancel_monitor.await;
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test concurrent cancel operations on shared hierarchy
@@ -585,7 +626,8 @@ impl RealCancelManager {
                 5, // 5 levels deep
                 &cancel_token,
                 &result_sender,
-            ).await
+            )
+            .await
         });
 
         // Wait for hierarchy to establish
@@ -609,7 +651,9 @@ impl RealCancelManager {
         // Wait for all cancel operations to complete
         for handle in cancel_handles {
             let _ = handle.await;
-            self.stats.cancel_signals_sent.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .cancel_signals_sent
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         // Collect results from hierarchy
@@ -620,14 +664,18 @@ impl RealCancelManager {
             total_results += 1;
             if result {
                 cancelled_results += 1;
-                self.stats.cancel_signals_received.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .cancel_signals_received
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
 
         let _ = hierarchy_handle.await;
         let propagation_latency = cancel_start.elapsed().as_nanos() as u64;
 
-        self.stats.cancel_latency_total_ns.fetch_add(propagation_latency, Ordering::Relaxed);
+        self.stats
+            .cancel_latency_total_ns
+            .fetch_add(propagation_latency, Ordering::Relaxed);
 
         let success_rate = if total_results > 0 {
             cancelled_results as f64 / total_results as f64
@@ -635,7 +683,12 @@ impl RealCancelManager {
             0.0
         };
 
-        self.logger.log_operation("concurrent_cancel", concurrent_cancels as u64, total_results, cancelled_results);
+        self.logger.log_operation(
+            "concurrent_cancel",
+            concurrent_cancels as u64,
+            total_results,
+            cancelled_results,
+        );
 
         Ok(CancelOperation {
             operation_type: CancelOperationType::ConcurrentCancel,
@@ -668,13 +721,11 @@ impl RealCancelManager {
                     self.stats.tasks_spawned.fetch_add(1, Ordering::Relaxed);
 
                     // Wait for either work completion or cancellation
-                    let result = race!(
-                        self.simulate_task_work(task_id),
-                        async {
-                            token.cancelled().await;
-                            Err(AsupersyncError::from("cancelled"))
-                        }
-                    ).await;
+                    let result = race!(self.simulate_task_work(task_id), async {
+                        token.cancelled().await;
+                        Err(AsupersyncError::from("cancelled"))
+                    })
+                    .await;
 
                     let was_cancelled = result.is_err();
                     let _ = sender.send(was_cancelled).await;
@@ -716,12 +767,23 @@ impl RealCancelManager {
             max_nesting_level: self.stats.max_nesting_level.load(Ordering::Relaxed),
             average_propagation_latency_ns: {
                 let total_latency = self.stats.cancel_latency_total_ns.load(Ordering::Relaxed);
-                if total_signals > 0 { total_latency / total_signals } else { 0 }
+                if total_signals > 0 {
+                    total_latency / total_signals
+                } else {
+                    0
+                }
             },
-            tasks_completed_before_cancel: self.stats.tasks_completed_before_cancel.load(Ordering::Relaxed),
+            tasks_completed_before_cancel: self
+                .stats
+                .tasks_completed_before_cancel
+                .load(Ordering::Relaxed),
             orphaned_tasks: self.stats.orphaned_tasks.load(Ordering::Relaxed),
             propagation_success_rate: {
-                if total_signals > 0 { received_signals as f64 / total_signals as f64 } else { 0.0 }
+                if total_signals > 0 {
+                    received_signals as f64 / total_signals as f64
+                } else {
+                    0.0
+                }
             },
         }
     }
@@ -746,30 +808,42 @@ impl CancelE2ELogger {
     }
 
     fn log_phase(&self, phase: &str) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"phase_change\",\"phase\":\"{}\"}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 phase);
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"phase_change\",\"phase\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            phase
+        );
     }
 
-    fn log_operation(&self, operation_type: &str, depth: u64, total_nodes: u64, cancelled_nodes: u64) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"cancel_operation\",\"operation_type\":\"{}\",\"depth\":{},\"total_nodes\":{},\"cancelled_nodes\":{}}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 operation_type,
-                 depth,
-                 total_nodes,
-                 cancelled_nodes);
+    fn log_operation(
+        &self,
+        operation_type: &str,
+        depth: u64,
+        total_nodes: u64,
+        cancelled_nodes: u64,
+    ) {
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"cancel_operation\",\"operation_type\":\"{}\",\"depth\":{},\"total_nodes\":{},\"cancelled_nodes\":{}}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            operation_type,
+            depth,
+            total_nodes,
+            cancelled_nodes
+        );
     }
 
     fn log_stats_summary(&self, stats: &CancelE2EStatsSummary) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"stats_summary\",\"data\":{}}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 serde_json::to_string(stats).unwrap_or_else(|_| "{}".to_string()));
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"stats_summary\",\"data\":{}}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            serde_json::to_string(stats).unwrap_or_else(|_| "{}".to_string())
+        );
     }
 }
 
@@ -841,10 +915,15 @@ mod tests {
             let manager = RealCancelManager::new("linear-test");
             let cx = Cx::root();
 
-            let operation = manager.test_linear_hierarchy_cancel(&cx, 5).await
+            let operation = manager
+                .test_linear_hierarchy_cancel(&cx, 5)
+                .await
                 .expect("Linear hierarchy cancel should succeed");
 
-            assert_eq!(operation.operation_type, CancelOperationType::LinearHierarchy);
+            assert_eq!(
+                operation.operation_type,
+                CancelOperationType::LinearHierarchy
+            );
             assert_eq!(operation.scope_tree_depth, 5);
             assert!(operation.cancellation_success_rate >= 0.8);
             assert!(operation.cancel_propagation_latency_ns < 100_000_000); // < 100ms
@@ -876,7 +955,9 @@ mod tests {
                 ..CancelE2EConfig::default()
             };
 
-            let operation = manager.test_tree_hierarchy_cancel(&cx, &config).await
+            let operation = manager
+                .test_tree_hierarchy_cancel(&cx, &config)
+                .await
                 .expect("Tree hierarchy cancel should succeed");
 
             assert_eq!(operation.operation_type, CancelOperationType::TreeHierarchy);
@@ -903,7 +984,9 @@ mod tests {
             let manager = RealCancelManager::new("deep-test");
             let cx = Cx::root();
 
-            let operation = manager.test_deep_nesting_cancel(&cx, 10).await
+            let operation = manager
+                .test_deep_nesting_cancel(&cx, 10)
+                .await
                 .expect("Deep nesting cancel should succeed");
 
             assert_eq!(operation.operation_type, CancelOperationType::DeepNesting);
@@ -931,10 +1014,15 @@ mod tests {
             let manager = RealCancelManager::new("concurrent-test");
             let cx = Cx::root();
 
-            let operation = manager.test_concurrent_cancel_operations(&cx, 3).await
+            let operation = manager
+                .test_concurrent_cancel_operations(&cx, 3)
+                .await
                 .expect("Concurrent cancel operations should succeed");
 
-            assert_eq!(operation.operation_type, CancelOperationType::ConcurrentCancel);
+            assert_eq!(
+                operation.operation_type,
+                CancelOperationType::ConcurrentCancel
+            );
             assert!(operation.cancellation_success_rate >= 0.7);
 
             let stats = manager.get_stats_summary();
@@ -961,7 +1049,9 @@ mod tests {
             let mut all_operations = Vec::new();
 
             // 1. Linear hierarchy
-            let linear_op = manager.test_linear_hierarchy_cancel(&cx, 4).await
+            let linear_op = manager
+                .test_linear_hierarchy_cancel(&cx, 4)
+                .await
                 .expect("Linear hierarchy should succeed");
             all_operations.push(linear_op);
 
@@ -971,17 +1061,23 @@ mod tests {
                 tree_branching_factor: 2,
                 ..CancelE2EConfig::default()
             };
-            let tree_op = manager.test_tree_hierarchy_cancel(&cx, &config).await
+            let tree_op = manager
+                .test_tree_hierarchy_cancel(&cx, &config)
+                .await
                 .expect("Tree hierarchy should succeed");
             all_operations.push(tree_op);
 
             // 3. Deep nesting
-            let deep_op = manager.test_deep_nesting_cancel(&cx, 8).await
+            let deep_op = manager
+                .test_deep_nesting_cancel(&cx, 8)
+                .await
                 .expect("Deep nesting should succeed");
             all_operations.push(deep_op);
 
             // 4. Concurrent cancels
-            let concurrent_op = manager.test_concurrent_cancel_operations(&cx, 2).await
+            let concurrent_op = manager
+                .test_concurrent_cancel_operations(&cx, 2)
+                .await
                 .expect("Concurrent cancels should succeed");
             all_operations.push(concurrent_op);
 

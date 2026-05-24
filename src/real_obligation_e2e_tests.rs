@@ -9,30 +9,30 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 use crate::{
+    cancel::CancelToken,
+    combinator::{join, race, timeout},
     cx::Cx,
-    runtime::{RuntimeBuilder, Region},
+    error::{AsupersyncError, Outcome},
     obligation::{
-        ObligationLedger, ObligationId, ObligationState, ObligationType,
-        Permit, Ack, Lease, commit_permit, abort_permit, commit_ack, abort_ack,
-        commit_lease, abort_lease, track_obligation, release_obligation,
+        Ack, Lease, ObligationId, ObligationLedger, ObligationState, ObligationType, Permit,
+        abort_ack, abort_lease, abort_permit, commit_ack, commit_lease, commit_permit,
+        release_obligation, track_obligation,
     },
     record::{ObligationRecord, ObligationTracker},
-    combinator::{race, join, timeout},
-    error::{Outcome, AsupersyncError},
-    time::{Duration, sleep, Instant},
-    types::{TaskId, RegionId},
-    cancel::CancelToken,
+    runtime::{Region, RuntimeBuilder},
+    time::{Duration, Instant, sleep},
+    types::{RegionId, TaskId},
 };
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 use std::{
-    sync::atomic::{AtomicU64, AtomicBool, Ordering},
     collections::{HashMap, HashSet},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, Mutex},
 };
 
 #[cfg(all(test, feature = "real-service-e2e"))]
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Real obligation manager that coordinates actual obligation lifecycle operations
 /// Uses asupersync obligation primitives with real ledger state tracking
@@ -178,7 +178,8 @@ impl RealObligationManager {
 
         // Create permits
         for i in 0..permit_count {
-            let permit = track_obligation(cx, ObligationType::Permit, format!("permit-{}", i)).await?;
+            let permit =
+                track_obligation(cx, ObligationType::Permit, format!("permit-{}", i)).await?;
             permits.push((permit, i));
             self.stats.permits_created.fetch_add(1, Ordering::Relaxed);
             self.stats.total_obligations.fetch_add(1, Ordering::Relaxed);
@@ -198,7 +199,9 @@ impl RealObligationManager {
                 committed_count += 1;
             }
 
-            self.stats.active_obligations.fetch_sub(1, Ordering::Relaxed);
+            self.stats
+                .active_obligations
+                .fetch_sub(1, Ordering::Relaxed);
         }
 
         // Perform leak detection scan
@@ -259,7 +262,9 @@ impl RealObligationManager {
                 committed_count += 1;
             }
 
-            self.stats.active_obligations.fetch_sub(1, Ordering::Relaxed);
+            self.stats
+                .active_obligations
+                .fetch_sub(1, Ordering::Relaxed);
         }
 
         let leaks_detected = self.scan_for_leaks().await?;
@@ -299,7 +304,9 @@ impl RealObligationManager {
         // Create leases with varying durations
         for i in 0..lease_count {
             let duration = Duration::from_millis(100 + (i as u64 * 50));
-            let lease = track_obligation(cx, ObligationType::Lease(duration), format!("lease-{}", i)).await?;
+            let lease =
+                track_obligation(cx, ObligationType::Lease(duration), format!("lease-{}", i))
+                    .await?;
             leases.push((lease, i, duration));
             self.stats.leases_created.fetch_add(1, Ordering::Relaxed);
             self.stats.total_obligations.fetch_add(1, Ordering::Relaxed);
@@ -318,7 +325,8 @@ impl RealObligationManager {
                 let commit_result = timeout(
                     duration / 2, // Try to commit before timeout
                     commit_lease(lease),
-                ).await;
+                )
+                .await;
 
                 match commit_result {
                     Outcome::Ok(Ok(())) => {
@@ -333,7 +341,9 @@ impl RealObligationManager {
                 }
             }
 
-            self.stats.active_obligations.fetch_sub(1, Ordering::Relaxed);
+            self.stats
+                .active_obligations
+                .fetch_sub(1, Ordering::Relaxed);
         }
 
         let leaks_detected = self.scan_for_leaks().await?;
@@ -365,7 +375,8 @@ impl RealObligationManager {
     ) -> Result<ObligationOperation, AsupersyncError> {
         self.logger.log_phase("random_spawn_abort_start");
 
-        let sequence = self.generate_random_sequence(config.sequence_length, config.abort_probability);
+        let sequence =
+            self.generate_random_sequence(config.sequence_length, config.abort_probability);
         let mut active_obligations: HashMap<u64, Box<dyn std::any::Any + Send>> = HashMap::new();
         let mut total_created = 0;
         let mut total_committed = 0;
@@ -380,7 +391,8 @@ impl RealObligationManager {
                             cx,
                             ObligationType::Permit,
                             format!("random-permit-{}", id),
-                        ).await?;
+                        )
+                        .await?;
                         active_obligations.insert(id, Box::new(permit));
                         total_created += 1;
                         self.stats.spawn_operations.fetch_add(1, Ordering::Relaxed);
@@ -409,11 +421,9 @@ impl RealObligationManager {
 
                 ObligationSequenceOp::SpawnAck { id } => {
                     if !active_obligations.contains_key(&id) {
-                        let ack = track_obligation(
-                            cx,
-                            ObligationType::Ack,
-                            format!("random-ack-{}", id),
-                        ).await?;
+                        let ack =
+                            track_obligation(cx, ObligationType::Ack, format!("random-ack-{}", id))
+                                .await?;
                         active_obligations.insert(id, Box::new(ack));
                         total_created += 1;
                         self.stats.spawn_operations.fetch_add(1, Ordering::Relaxed);
@@ -443,7 +453,8 @@ impl RealObligationManager {
                             cx,
                             ObligationType::Lease(Duration::from_millis(duration_ms)),
                             format!("random-lease-{}", id),
-                        ).await?;
+                        )
+                        .await?;
                         active_obligations.insert(id, Box::new(lease));
                         total_created += 1;
                         self.stats.spawn_operations.fetch_add(1, Ordering::Relaxed);
@@ -546,7 +557,9 @@ impl RealObligationManager {
                         cx,
                         obligation_type.clone(),
                         format!("concurrent-{}-{}", worker_id, i),
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(obligation) => {
                             worker_stats.created += 1;
                             stats.total_obligations.fetch_add(1, Ordering::Relaxed);
@@ -635,11 +648,19 @@ impl RealObligationManager {
                     ObligationSequenceOp::SpawnPermit { id: id_counter }
                 }
                 1 => {
-                    let id = if id_counter > 0 { fastrand::u64(1..=id_counter) } else { 1 };
+                    let id = if id_counter > 0 {
+                        fastrand::u64(1..=id_counter)
+                    } else {
+                        1
+                    };
                     ObligationSequenceOp::CommitPermit { id }
                 }
                 2 => {
-                    let id = if id_counter > 0 { fastrand::u64(1..=id_counter) } else { 1 };
+                    let id = if id_counter > 0 {
+                        fastrand::u64(1..=id_counter)
+                    } else {
+                        1
+                    };
                     ObligationSequenceOp::AbortPermit { id }
                 }
                 3 => {
@@ -647,24 +668,43 @@ impl RealObligationManager {
                     ObligationSequenceOp::SpawnAck { id: id_counter }
                 }
                 4 => {
-                    let id = if id_counter > 0 { fastrand::u64(1..=id_counter) } else { 1 };
+                    let id = if id_counter > 0 {
+                        fastrand::u64(1..=id_counter)
+                    } else {
+                        1
+                    };
                     ObligationSequenceOp::CommitAck { id }
                 }
                 5 => {
-                    let id = if id_counter > 0 { fastrand::u64(1..=id_counter) } else { 1 };
+                    let id = if id_counter > 0 {
+                        fastrand::u64(1..=id_counter)
+                    } else {
+                        1
+                    };
                     ObligationSequenceOp::AbortAck { id }
                 }
                 6 => {
                     id_counter += 1;
                     let duration_ms = fastrand::u64(50..500);
-                    ObligationSequenceOp::SpawnLease { id: id_counter, duration_ms }
+                    ObligationSequenceOp::SpawnLease {
+                        id: id_counter,
+                        duration_ms,
+                    }
                 }
                 7 => {
-                    let id = if id_counter > 0 { fastrand::u64(1..=id_counter) } else { 1 };
+                    let id = if id_counter > 0 {
+                        fastrand::u64(1..=id_counter)
+                    } else {
+                        1
+                    };
                     ObligationSequenceOp::CommitLease { id }
                 }
                 _ => {
-                    let id = if id_counter > 0 { fastrand::u64(1..=id_counter) } else { 1 };
+                    let id = if id_counter > 0 {
+                        fastrand::u64(1..=id_counter)
+                    } else {
+                        1
+                    };
                     ObligationSequenceOp::AbortLease { id }
                 }
             };
@@ -687,7 +727,9 @@ impl RealObligationManager {
     async fn scan_for_leaks(&self) -> Result<u64, AsupersyncError> {
         let ledger = self.ledger.lock().unwrap();
         let leaks = ledger.scan_for_leaks();
-        self.stats.leaked_obligations.store(leaks, Ordering::Relaxed);
+        self.stats
+            .leaked_obligations
+            .store(leaks, Ordering::Relaxed);
         Ok(leaks)
     }
 
@@ -712,7 +754,11 @@ impl RealObligationManager {
             leak_rate: {
                 let total = self.stats.total_obligations.load(Ordering::Relaxed);
                 let leaks = self.stats.leaked_obligations.load(Ordering::Relaxed);
-                if total > 0 { leaks as f64 / total as f64 } else { 0.0 }
+                if total > 0 {
+                    leaks as f64 / total as f64
+                } else {
+                    0.0
+                }
             },
         }
     }
@@ -738,30 +784,36 @@ impl ObligationE2ELogger {
     }
 
     fn log_phase(&self, phase: &str) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"phase_change\",\"phase\":\"{}\"}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 phase);
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"phase_change\",\"phase\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            phase
+        );
     }
 
     fn log_operation(&self, operation_type: &str, created: u64, committed: u64, aborted: u64) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"obligation_operation\",\"operation_type\":\"{}\",\"created\":{},\"committed\":{},\"aborted\":{}}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 operation_type,
-                 created,
-                 committed,
-                 aborted);
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"obligation_operation\",\"operation_type\":\"{}\",\"created\":{},\"committed\":{},\"aborted\":{}}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            operation_type,
+            created,
+            committed,
+            aborted
+        );
     }
 
     fn log_stats_summary(&self, stats: &ObligationE2EStatsSummary) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"stats_summary\",\"data\":{}}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 serde_json::to_string(stats).unwrap_or_else(|_| "{}".to_string()));
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"stats_summary\",\"data\":{}}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            serde_json::to_string(stats).unwrap_or_else(|_| "{}".to_string())
+        );
     }
 }
 
@@ -837,10 +889,15 @@ mod tests {
             let manager = RealObligationManager::new("permit-test");
             let cx = Cx::root();
 
-            let operation = manager.test_permit_lifecycle(&cx, 20, 0.3).await
+            let operation = manager
+                .test_permit_lifecycle(&cx, 20, 0.3)
+                .await
                 .expect("Permit lifecycle should succeed");
 
-            assert_eq!(operation.operation_type, ObligationOperationType::PermitLifecycle);
+            assert_eq!(
+                operation.operation_type,
+                ObligationOperationType::PermitLifecycle
+            );
             assert_eq!(operation.obligations_created, 20);
             assert!(operation.success_rate >= 0.95);
             assert_eq!(operation.leaks_detected, 0); // No leaks expected
@@ -866,10 +923,15 @@ mod tests {
             let manager = RealObligationManager::new("ack-test");
             let cx = Cx::root();
 
-            let operation = manager.test_ack_lifecycle(&cx, 15, 0.4).await
+            let operation = manager
+                .test_ack_lifecycle(&cx, 15, 0.4)
+                .await
                 .expect("Ack lifecycle should succeed");
 
-            assert_eq!(operation.operation_type, ObligationOperationType::AckLifecycle);
+            assert_eq!(
+                operation.operation_type,
+                ObligationOperationType::AckLifecycle
+            );
             assert_eq!(operation.obligations_created, 15);
             assert!(operation.success_rate >= 0.95);
             assert_eq!(operation.leaks_detected, 0);
@@ -895,10 +957,15 @@ mod tests {
             let manager = RealObligationManager::new("lease-test");
             let cx = Cx::root();
 
-            let operation = manager.test_lease_lifecycle(&cx, 10, 0.5).await
+            let operation = manager
+                .test_lease_lifecycle(&cx, 10, 0.5)
+                .await
                 .expect("Lease lifecycle should succeed");
 
-            assert_eq!(operation.operation_type, ObligationOperationType::LeaseLifecycle);
+            assert_eq!(
+                operation.operation_type,
+                ObligationOperationType::LeaseLifecycle
+            );
             assert_eq!(operation.obligations_created, 10);
             assert!(operation.success_rate >= 0.8); // Allow timeouts
             assert_eq!(operation.leaks_detected, 0);
@@ -930,10 +997,15 @@ mod tests {
                 ..ObligationE2EConfig::default()
             };
 
-            let operation = manager.test_random_spawn_abort_sequence(&cx, &config).await
+            let operation = manager
+                .test_random_spawn_abort_sequence(&cx, &config)
+                .await
                 .expect("Random spawn/abort sequence should succeed");
 
-            assert_eq!(operation.operation_type, ObligationOperationType::RandomSpawnAbort);
+            assert_eq!(
+                operation.operation_type,
+                ObligationOperationType::RandomSpawnAbort
+            );
             assert!(operation.obligations_created > 0);
             assert!(operation.success_rate >= 0.7);
             // Some leaks may be expected due to random sequences
@@ -967,10 +1039,15 @@ mod tests {
                 ..ObligationE2EConfig::default()
             };
 
-            let operation = manager.test_concurrent_obligations(&cx, &config).await
+            let operation = manager
+                .test_concurrent_obligations(&cx, &config)
+                .await
                 .expect("Concurrent obligations should succeed");
 
-            assert_eq!(operation.operation_type, ObligationOperationType::ConcurrentObligations);
+            assert_eq!(
+                operation.operation_type,
+                ObligationOperationType::ConcurrentObligations
+            );
             assert!(operation.obligations_created >= 60); // Most operations should succeed
             assert!(operation.success_rate >= 0.8);
 
@@ -997,17 +1074,23 @@ mod tests {
             let mut all_operations = Vec::new();
 
             // 1. Permit lifecycle
-            let permit_op = manager.test_permit_lifecycle(&cx, 15, 0.2).await
+            let permit_op = manager
+                .test_permit_lifecycle(&cx, 15, 0.2)
+                .await
                 .expect("Permit lifecycle should succeed");
             all_operations.push(permit_op);
 
             // 2. Ack lifecycle
-            let ack_op = manager.test_ack_lifecycle(&cx, 12, 0.3).await
+            let ack_op = manager
+                .test_ack_lifecycle(&cx, 12, 0.3)
+                .await
                 .expect("Ack lifecycle should succeed");
             all_operations.push(ack_op);
 
             // 3. Lease lifecycle
-            let lease_op = manager.test_lease_lifecycle(&cx, 8, 0.4).await
+            let lease_op = manager
+                .test_lease_lifecycle(&cx, 8, 0.4)
+                .await
                 .expect("Lease lifecycle should succeed");
             all_operations.push(lease_op);
 
@@ -1019,20 +1102,19 @@ mod tests {
                 ..ObligationE2EConfig::default()
             };
 
-            let random_op = manager.test_random_spawn_abort_sequence(&cx, &config).await
+            let random_op = manager
+                .test_random_spawn_abort_sequence(&cx, &config)
+                .await
                 .expect("Random sequence should succeed");
             all_operations.push(random_op);
 
             // Validate comprehensive results
             assert_eq!(all_operations.len(), 4);
 
-            let total_obligations_created: u64 = all_operations.iter()
-                .map(|op| op.obligations_created)
-                .sum();
+            let total_obligations_created: u64 =
+                all_operations.iter().map(|op| op.obligations_created).sum();
 
-            let total_leaks: u64 = all_operations.iter()
-                .map(|op| op.leaks_detected)
-                .sum();
+            let total_leaks: u64 = all_operations.iter().map(|op| op.leaks_detected).sum();
 
             // Validate overall metrics
             assert!(total_obligations_created >= 50);

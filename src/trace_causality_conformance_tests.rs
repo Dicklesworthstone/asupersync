@@ -37,9 +37,9 @@
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, BTreeMap, VecDeque, HashSet, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 #[cfg(test)]
@@ -212,7 +212,7 @@ pub struct ExecutionSchedule {
 pub struct MockTraceAnalyzer {
     events: Vec<TraceEvent>,
     logical_clock_domains: HashMap<u64, u64>, // task_id -> current_clock
-    causality_graph: HashMap<u64, Vec<u64>>, // event_id -> dependent_events
+    causality_graph: HashMap<u64, Vec<u64>>,  // event_id -> dependent_events
     resource_state: HashMap<Resource, Vec<u64>>, // resource -> accessing_events
 }
 
@@ -232,13 +232,17 @@ impl MockTraceAnalyzer {
 
     pub fn add_event(&mut self, mut event: TraceEvent) -> Result<(), String> {
         // Assign logical time based on causality constraints
-        let current_clock = self.logical_clock_domains
+        let current_clock = self
+            .logical_clock_domains
             .get(&event.task_id)
             .cloned()
             .unwrap_or(0);
 
-        event.logical_time = LogicalTime { clock: current_clock + 1 };
-        self.logical_clock_domains.insert(event.task_id, current_clock + 1);
+        event.logical_time = LogicalTime {
+            clock: current_clock + 1,
+        };
+        self.logical_clock_domains
+            .insert(event.task_id, current_clock + 1);
 
         // Update resource state tracking
         for access in &event.resource_accesses {
@@ -304,7 +308,10 @@ impl MockTraceAnalyzer {
 
         for event in &self.events {
             match &event.event_type {
-                TraceEventType::ChannelReceive { channel_id, message_id } => {
+                TraceEventType::ChannelReceive {
+                    channel_id,
+                    message_id,
+                } => {
                     // Find corresponding send event
                     if let Some(send_event) = self.events.iter().find(|e| {
                         matches!(e.event_type, TraceEventType::ChannelSend { channel_id: cid, message_id: mid }
@@ -332,7 +339,10 @@ impl MockTraceAnalyzer {
         let mut dependencies = Vec::new();
 
         match &event.event_type {
-            TraceEventType::ChannelReceive { channel_id, message_id } => {
+            TraceEventType::ChannelReceive {
+                channel_id,
+                message_id,
+            } => {
                 // Depend on corresponding send event
                 if let Some(send_event) = self.events.iter().find(|e| {
                     matches!(e.event_type, TraceEventType::ChannelSend { channel_id: cid, message_id: mid }
@@ -344,7 +354,8 @@ impl MockTraceAnalyzer {
             TraceEventType::MutexAcquire { mutex_id } => {
                 // Depend on previous mutex release
                 for other in self.events.iter().rev() {
-                    if matches!(other.event_type, TraceEventType::MutexRelease { mutex_id: mid } if mid == *mutex_id) {
+                    if matches!(other.event_type, TraceEventType::MutexRelease { mutex_id: mid } if mid == *mutex_id)
+                    {
                         dependencies.push(other.id);
                         break;
                     }
@@ -397,7 +408,7 @@ impl MockTraceAnalyzer {
                     // Verify no intervening dependent event
                     let has_intervening = self.events[i + 1..j].iter().any(|intervening| {
                         self.check_dependency(event_a, intervening).is_some()
-                        && self.check_dependency(intervening, event_b).is_some()
+                            && self.check_dependency(intervening, event_b).is_some()
                     });
 
                     if !has_intervening {
@@ -414,7 +425,11 @@ impl MockTraceAnalyzer {
         races
     }
 
-    fn check_dependency(&self, event_a: &TraceEvent, event_b: &TraceEvent) -> Option<DependencyType> {
+    fn check_dependency(
+        &self,
+        event_a: &TraceEvent,
+        event_b: &TraceEvent,
+    ) -> Option<DependencyType> {
         // Check resource access conflicts
         for access_a in &event_a.resource_accesses {
             for access_b in &event_b.resource_accesses {
@@ -458,8 +473,7 @@ impl MockTraceAnalyzer {
         // Add events that have already been explored in alternative orderings
         for event in &self.events {
             match &event.event_type {
-                TraceEventType::MutexAcquire { .. } |
-                TraceEventType::ChannelSend { .. } => {
+                TraceEventType::MutexAcquire { .. } | TraceEventType::ChannelSend { .. } => {
                     sleep_set.insert(event.id);
                 }
                 _ => {}
@@ -469,7 +483,10 @@ impl MockTraceAnalyzer {
         sleep_set
     }
 
-    fn generate_alternative_schedules(&self, backtrack_points: &[BacktrackPoint]) -> Vec<ExecutionSchedule> {
+    fn generate_alternative_schedules(
+        &self,
+        backtrack_points: &[BacktrackPoint],
+    ) -> Vec<ExecutionSchedule> {
         let mut schedules = Vec::new();
 
         for (i, _backtrack) in backtrack_points.iter().enumerate() {
@@ -543,8 +560,12 @@ impl MockTraceAnalyzer {
 
         // Check for control dependencies
         match (&event_a.event_type, &event_b.event_type) {
-            (TraceEventType::TaskSpawn { child_task }, _) if *child_task == event_b.task_id => false,
-            (_, TraceEventType::TaskSpawn { child_task }) if *child_task == event_a.task_id => false,
+            (TraceEventType::TaskSpawn { child_task }, _) if *child_task == event_b.task_id => {
+                false
+            }
+            (_, TraceEventType::TaskSpawn { child_task }) if *child_task == event_a.task_id => {
+                false
+            }
             _ => true,
         }
     }
@@ -605,7 +626,6 @@ const TRACE_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::CausalityOrdering,
         description: "Concurrent events properly identified",
     },
-
     // DPOR Coverage Tests
     ConformanceCase {
         id: "TRACE-DPOR-01",
@@ -635,7 +655,6 @@ const TRACE_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::DporCoverage,
         description: "Partial order reduction preserves program semantics",
     },
-
     // Event Independence Tests
     ConformanceCase {
         id: "TRACE-INDEPENDENCE-01",
@@ -691,46 +710,58 @@ mod tests {
         let mut analyzer = MockTraceAnalyzer::new();
 
         // Task 1: Send to channel 1
-        analyzer.add_event(TraceEvent {
-            id: 1,
-            task_id: 1,
-            logical_time: LogicalTime { clock: 0 },
-            event_type: TraceEventType::ChannelSend { channel_id: 1, message_id: 1 },
-            resource_accesses: vec![ResourceAccess {
-                resource: Resource::Channel(1),
-                access_type: AccessType::Write,
-            }],
-            sequence_number: 1,
-            virtual_time: Duration::from_millis(10),
-        }).unwrap();
+        analyzer
+            .add_event(TraceEvent {
+                id: 1,
+                task_id: 1,
+                logical_time: LogicalTime { clock: 0 },
+                event_type: TraceEventType::ChannelSend {
+                    channel_id: 1,
+                    message_id: 1,
+                },
+                resource_accesses: vec![ResourceAccess {
+                    resource: Resource::Channel(1),
+                    access_type: AccessType::Write,
+                }],
+                sequence_number: 1,
+                virtual_time: Duration::from_millis(10),
+            })
+            .unwrap();
 
         // Task 2: Receive from channel 1
-        analyzer.add_event(TraceEvent {
-            id: 2,
-            task_id: 2,
-            logical_time: LogicalTime { clock: 0 },
-            event_type: TraceEventType::ChannelReceive { channel_id: 1, message_id: 1 },
-            resource_accesses: vec![ResourceAccess {
-                resource: Resource::Channel(1),
-                access_type: AccessType::Read,
-            }],
-            sequence_number: 2,
-            virtual_time: Duration::from_millis(20),
-        }).unwrap();
+        analyzer
+            .add_event(TraceEvent {
+                id: 2,
+                task_id: 2,
+                logical_time: LogicalTime { clock: 0 },
+                event_type: TraceEventType::ChannelReceive {
+                    channel_id: 1,
+                    message_id: 1,
+                },
+                resource_accesses: vec![ResourceAccess {
+                    resource: Resource::Channel(1),
+                    access_type: AccessType::Read,
+                }],
+                sequence_number: 2,
+                virtual_time: Duration::from_millis(20),
+            })
+            .unwrap();
 
         // Task 3: Acquire mutex 1
-        analyzer.add_event(TraceEvent {
-            id: 3,
-            task_id: 3,
-            logical_time: LogicalTime { clock: 0 },
-            event_type: TraceEventType::MutexAcquire { mutex_id: 1 },
-            resource_accesses: vec![ResourceAccess {
-                resource: Resource::Mutex(1),
-                access_type: AccessType::Write,
-            }],
-            sequence_number: 3,
-            virtual_time: Duration::from_millis(30),
-        }).unwrap();
+        analyzer
+            .add_event(TraceEvent {
+                id: 3,
+                task_id: 3,
+                logical_time: LogicalTime { clock: 0 },
+                event_type: TraceEventType::MutexAcquire { mutex_id: 1 },
+                resource_accesses: vec![ResourceAccess {
+                    resource: Resource::Mutex(1),
+                    access_type: AccessType::Write,
+                }],
+                sequence_number: 3,
+                virtual_time: Duration::from_millis(30),
+            })
+            .unwrap();
 
         analyzer
     }
@@ -804,9 +835,10 @@ mod tests {
         let dpor_analysis = analyzer.analyze_dpor();
 
         // Should detect race between channel send and receive
-        let has_channel_race = dpor_analysis.races.iter().any(|race| {
-            matches!(race.dependency_type, DependencyType::WriteRead)
-        });
+        let has_channel_race = dpor_analysis
+            .races
+            .iter()
+            .any(|race| matches!(race.dependency_type, DependencyType::WriteRead));
 
         if has_channel_race {
             TestResult::Pass
@@ -860,7 +892,8 @@ mod tests {
             // In a real implementation, we'd execute the alternative schedule
             // Here we just verify the final state structure is maintained
             if schedule.final_state.keys().collect::<HashSet<_>>()
-                != original_state.keys().collect::<HashSet<_>>() {
+                != original_state.keys().collect::<HashSet<_>>()
+            {
                 return TestResult::Fail {
                     reason: "Alternative schedule changes resource set".to_string(),
                 };
@@ -911,7 +944,10 @@ mod tests {
                 TestResult::Pass
             } else {
                 TestResult::Fail {
-                    reason: format!("Incorrect channel footprint: {} events", channel_events.len()),
+                    reason: format!(
+                        "Incorrect channel footprint: {} events",
+                        channel_events.len()
+                    ),
                 }
             }
         } else {
@@ -946,11 +982,14 @@ mod tests {
         }
 
         let total = pass_count + fail_count + skip_count;
-        println!("\nTrace Conformance Results: {}/{} passed, {} failed, {} skipped",
-                pass_count, total, fail_count, skip_count);
+        println!(
+            "\nTrace Conformance Results: {}/{} passed, {} failed, {} skipped",
+            pass_count, total, fail_count, skip_count
+        );
 
         // Require 100% MUST compliance
-        let must_cases: Vec<_> = TRACE_CONFORMANCE_CASES.iter()
+        let must_cases: Vec<_> = TRACE_CONFORMANCE_CASES
+            .iter()
             .filter(|c| c.level == RequirementLevel::Must)
             .collect();
 
@@ -961,7 +1000,11 @@ mod tests {
             }
         }
 
-        assert_eq!(must_failures, 0, "{} MUST requirements failed", must_failures);
+        assert_eq!(
+            must_failures, 0,
+            "{} MUST requirements failed",
+            must_failures
+        );
     }
 
     // Property-based testing

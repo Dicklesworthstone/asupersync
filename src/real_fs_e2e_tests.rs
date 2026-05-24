@@ -10,21 +10,21 @@
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod fs_e2e_tests {
     use crate::cx::{Cx, CxBuilder};
-    use crate::fs::{
-        File, OpenOptions, read, write, read_to_string, write_atomic, create_dir, create_dir_all,
-        read_dir, remove_dir, remove_dir_all, remove_file, copy, metadata, FileType,
-    };
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     use crate::fs::uring::IoUringFile;
+    use crate::fs::{
+        File, FileType, OpenOptions, copy, create_dir, create_dir_all, metadata, read, read_dir,
+        read_to_string, remove_dir, remove_dir_all, remove_file, write, write_atomic,
+    };
     use crate::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter, SeekFrom};
     use crate::runtime::RuntimeBuilder;
-    use crate::time::{sleep, Duration, Instant};
+    use crate::time::{Duration, Instant, sleep};
     use serde_json;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use tempfile::{tempdir, NamedTempFile, TempDir};
+    use tempfile::{NamedTempFile, TempDir, tempdir};
 
     /// Real filesystem manager for E2E testing
     pub struct RealFilesystemManager {
@@ -91,13 +91,21 @@ mod fs_e2e_tests {
         ) {
             let mut details = HashMap::new();
             if let Some(duration) = duration {
-                details.insert("duration_us".to_string(),
-                    serde_json::Value::Number(serde_json::Number::from(duration.as_micros() as u64)));
+                details.insert(
+                    "duration_us".to_string(),
+                    serde_json::Value::Number(
+                        serde_json::Number::from(duration.as_micros() as u64),
+                    ),
+                );
             }
 
             let event = FsLogEvent {
                 timestamp: self.start_time.elapsed().as_micros() as u64,
-                event_type: if success { "file_operation_success".to_string() } else { "file_operation_error".to_string() },
+                event_type: if success {
+                    "file_operation_success".to_string()
+                } else {
+                    "file_operation_error".to_string()
+                },
                 operation: operation.to_string(),
                 file_path: Some(file_path.display().to_string()),
                 file_size: None,
@@ -125,13 +133,19 @@ mod fs_e2e_tests {
         ) {
             let mut details = HashMap::new();
             if let Some(count) = entry_count {
-                details.insert("entry_count".to_string(),
-                    serde_json::Value::Number(serde_json::Number::from(count)));
+                details.insert(
+                    "entry_count".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(count)),
+                );
             }
 
             let event = FsLogEvent {
                 timestamp: self.start_time.elapsed().as_micros() as u64,
-                event_type: if success { "directory_operation_success".to_string() } else { "directory_operation_error".to_string() },
+                event_type: if success {
+                    "directory_operation_success".to_string()
+                } else {
+                    "directory_operation_error".to_string()
+                },
                 operation: operation.to_string(),
                 file_path: Some(dir_path.display().to_string()),
                 file_size: None,
@@ -151,10 +165,12 @@ mod fs_e2e_tests {
 
         pub fn log_concurrent_operation_start(&self, operation: &str, concurrent_count: usize) {
             let mut details = HashMap::new();
-            details.insert("concurrent_start_time".to_string(),
+            details.insert(
+                "concurrent_start_time".to_string(),
                 serde_json::Value::Number(serde_json::Number::from(
-                    self.start_time.elapsed().as_millis() as u64
-                )));
+                    self.start_time.elapsed().as_millis() as u64,
+                )),
+            );
 
             let event = FsLogEvent {
                 timestamp: self.start_time.elapsed().as_micros() as u64,
@@ -212,14 +228,14 @@ mod fs_e2e_tests {
             if std::env::var("NODE_ENV").unwrap_or_default() == "production" {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    "Cannot run real filesystem E2E tests in production environment"
+                    "Cannot run real filesystem E2E tests in production environment",
                 ));
             }
 
             if std::env::var("REAL_SERVICE_TESTS").unwrap_or_default() != "true" {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    "Set REAL_SERVICE_TESTS=true to enable real service testing"
+                    "Set REAL_SERVICE_TESTS=true to enable real service testing",
                 ));
             }
 
@@ -246,18 +262,36 @@ mod fs_e2e_tests {
             let start_time = Instant::now();
 
             // Create and write file
-            logger.log_file_operation("create", &file_path, None, None, Some("standard"), true, None);
+            logger.log_file_operation(
+                "create",
+                &file_path,
+                None,
+                None,
+                Some("standard"),
+                true,
+                None,
+            );
             let mut file = File::create(&file_path).await?;
             self.stats.files_created.fetch_add(1, Ordering::Relaxed);
 
-            logger.log_file_operation("write", &file_path, Some(content.len()), None, Some("standard"), true, None);
+            logger.log_file_operation(
+                "write",
+                &file_path,
+                Some(content.len()),
+                None,
+                Some("standard"),
+                true,
+                None,
+            );
             file.write_all(content).await?;
             file.sync_all().await?;
             drop(file);
 
             let write_duration = start_time.elapsed();
             self.stats.files_written.fetch_add(1, Ordering::Relaxed);
-            self.stats.bytes_written.fetch_add(content.len() as u64, Ordering::Relaxed);
+            self.stats
+                .bytes_written
+                .fetch_add(content.len() as u64, Ordering::Relaxed);
             self.stats.io_operations.fetch_add(1, Ordering::Relaxed);
 
             // Read file back
@@ -265,21 +299,47 @@ mod fs_e2e_tests {
             let read_content = read(&file_path).await?;
             let read_duration = read_start.elapsed();
 
-            logger.log_file_operation("read", &file_path, Some(read_content.len()), Some(read_duration), Some("standard"), true, None);
+            logger.log_file_operation(
+                "read",
+                &file_path,
+                Some(read_content.len()),
+                Some(read_duration),
+                Some("standard"),
+                true,
+                None,
+            );
             self.stats.files_read.fetch_add(1, Ordering::Relaxed);
-            self.stats.bytes_read.fetch_add(read_content.len() as u64, Ordering::Relaxed);
+            self.stats
+                .bytes_read
+                .fetch_add(read_content.len() as u64, Ordering::Relaxed);
             self.stats.io_operations.fetch_add(1, Ordering::Relaxed);
 
             // Verify content matches
             if read_content != content {
                 let error = "Content mismatch after read";
-                logger.log_file_operation("verify", &file_path, None, None, None, false, Some(error));
+                logger.log_file_operation(
+                    "verify",
+                    &file_path,
+                    None,
+                    None,
+                    None,
+                    false,
+                    Some(error),
+                );
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error));
             }
 
             // Delete file
             remove_file(&file_path).await?;
-            logger.log_file_operation("delete", &file_path, None, None, Some("standard"), true, None);
+            logger.log_file_operation(
+                "delete",
+                &file_path,
+                None,
+                None,
+                Some("standard"),
+                true,
+                None,
+            );
             self.stats.files_deleted.fetch_add(1, Ordering::Relaxed);
 
             Ok(read_content)
@@ -298,7 +358,9 @@ mod fs_e2e_tests {
             // Create directory
             create_dir(&dir_path).await?;
             logger.log_directory_operation("create_dir", &dir_path, None, true, None);
-            self.stats.directories_created.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .directories_created
+                .fetch_add(1, Ordering::Relaxed);
 
             // Create files in directory
             for filename in files_to_create {
@@ -306,7 +368,9 @@ mod fs_e2e_tests {
                 let content = format!("Content for {}", filename);
                 write(&file_path, content.as_bytes()).await?;
                 self.stats.files_created.fetch_add(1, Ordering::Relaxed);
-                self.stats.bytes_written.fetch_add(content.len() as u64, Ordering::Relaxed);
+                self.stats
+                    .bytes_written
+                    .fetch_add(content.len() as u64, Ordering::Relaxed);
             }
 
             // Enumerate directory entries
@@ -336,7 +400,9 @@ mod fs_e2e_tests {
             // Clean up directory
             remove_dir_all(&dir_path).await?;
             logger.log_directory_operation("remove_all", &dir_path, Some(entry_count), true, None);
-            self.stats.directories_deleted.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .directories_deleted
+                .fetch_add(1, Ordering::Relaxed);
 
             Ok(entry_names)
         }
@@ -349,7 +415,9 @@ mod fs_e2e_tests {
             logger: &FsE2ELogger,
         ) -> Result<Vec<String>, std::io::Error> {
             logger.log_concurrent_operation_start("concurrent_file_ops", num_operations);
-            self.stats.concurrent_operations.fetch_add(num_operations as u64, Ordering::Relaxed);
+            self.stats
+                .concurrent_operations
+                .fetch_add(num_operations as u64, Ordering::Relaxed);
 
             let mut results = Vec::new();
 
@@ -370,9 +438,25 @@ mod fs_e2e_tests {
 
                 if read_content == content {
                     results.push(filename);
-                    logger.log_file_operation("concurrent_success", &file_path, Some(content.len()), None, Some("standard"), true, None);
+                    logger.log_file_operation(
+                        "concurrent_success",
+                        &file_path,
+                        Some(content.len()),
+                        None,
+                        Some("standard"),
+                        true,
+                        None,
+                    );
                 } else {
-                    logger.log_file_operation("concurrent_failure", &file_path, None, None, None, false, Some("content mismatch"));
+                    logger.log_file_operation(
+                        "concurrent_failure",
+                        &file_path,
+                        None,
+                        None,
+                        None,
+                        false,
+                        Some("content mismatch"),
+                    );
                 }
 
                 self.stats.io_operations.fetch_add(2, Ordering::Relaxed); // write + read
@@ -412,21 +496,49 @@ mod fs_e2e_tests {
             drop(file);
             let write_duration = write_start.elapsed();
 
-            logger.log_file_operation("large_write", &file_path, Some(test_data.len()), Some(write_duration), Some("standard"), true, None);
-            self.stats.bytes_written.fetch_add(test_data.len() as u64, Ordering::Relaxed);
+            logger.log_file_operation(
+                "large_write",
+                &file_path,
+                Some(test_data.len()),
+                Some(write_duration),
+                Some("standard"),
+                true,
+                None,
+            );
+            self.stats
+                .bytes_written
+                .fetch_add(test_data.len() as u64, Ordering::Relaxed);
 
             // Read large file back
             let read_start = Instant::now();
             let read_data = read(&file_path).await?;
             let read_duration = read_start.elapsed();
 
-            logger.log_file_operation("large_read", &file_path, Some(read_data.len()), Some(read_duration), Some("standard"), true, None);
-            self.stats.bytes_read.fetch_add(read_data.len() as u64, Ordering::Relaxed);
+            logger.log_file_operation(
+                "large_read",
+                &file_path,
+                Some(read_data.len()),
+                Some(read_duration),
+                Some("standard"),
+                true,
+                None,
+            );
+            self.stats
+                .bytes_read
+                .fetch_add(read_data.len() as u64, Ordering::Relaxed);
 
             // Verify large file content
             if read_data != test_data {
                 let error = "Large file content verification failed";
-                logger.log_file_operation("large_verify", &file_path, None, None, None, false, Some(error));
+                logger.log_file_operation(
+                    "large_verify",
+                    &file_path,
+                    None,
+                    None,
+                    None,
+                    false,
+                    Some(error),
+                );
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error));
             }
 
@@ -454,7 +566,15 @@ mod fs_e2e_tests {
             drop(uring_file);
             let write_duration = write_start.elapsed();
 
-            logger.log_file_operation("uring_write", &file_path, Some(test_content.len()), Some(write_duration), Some("io_uring"), true, None);
+            logger.log_file_operation(
+                "uring_write",
+                &file_path,
+                Some(test_content.len()),
+                Some(write_duration),
+                Some("io_uring"),
+                true,
+                None,
+            );
 
             // Test io_uring read
             let read_start = Instant::now();
@@ -463,12 +583,28 @@ mod fs_e2e_tests {
             uring_file.read_to_end(&mut read_buffer).await?;
             let read_duration = read_start.elapsed();
 
-            logger.log_file_operation("uring_read", &file_path, Some(read_buffer.len()), Some(read_duration), Some("io_uring"), true, None);
+            logger.log_file_operation(
+                "uring_read",
+                &file_path,
+                Some(read_buffer.len()),
+                Some(read_duration),
+                Some("io_uring"),
+                true,
+                None,
+            );
 
             // Verify content
             if read_buffer != test_content {
                 let error = "io_uring content verification failed";
-                logger.log_file_operation("uring_verify", &file_path, None, None, Some("io_uring"), false, Some(error));
+                logger.log_file_operation(
+                    "uring_verify",
+                    &file_path,
+                    None,
+                    None,
+                    Some("io_uring"),
+                    false,
+                    Some(error),
+                );
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error));
             }
 
@@ -506,20 +642,52 @@ mod fs_e2e_tests {
 
         // Test basic file lifecycle
         let test_content = b"Hello, filesystem E2E testing! This is a test file with some content.";
-        let read_content = fs_manager.test_file_lifecycle(&cx, "test_file.txt", test_content, &logger).await?;
+        let read_content = fs_manager
+            .test_file_lifecycle(&cx, "test_file.txt", test_content, &logger)
+            .await?;
 
-        assert_eq!(&read_content, test_content, "Read content should match written content");
+        assert_eq!(
+            &read_content, test_content,
+            "Read content should match written content"
+        );
 
         // Verify statistics
         let stats = fs_manager.stats();
-        assert_eq!(stats.files_created.load(Ordering::Relaxed), 1, "Should create one file");
-        assert_eq!(stats.files_written.load(Ordering::Relaxed), 1, "Should write one file");
-        assert_eq!(stats.files_read.load(Ordering::Relaxed), 1, "Should read one file");
-        assert_eq!(stats.files_deleted.load(Ordering::Relaxed), 1, "Should delete one file");
-        assert_eq!(stats.bytes_written.load(Ordering::Relaxed), test_content.len() as u64, "Should track written bytes");
-        assert_eq!(stats.bytes_read.load(Ordering::Relaxed), test_content.len() as u64, "Should track read bytes");
+        assert_eq!(
+            stats.files_created.load(Ordering::Relaxed),
+            1,
+            "Should create one file"
+        );
+        assert_eq!(
+            stats.files_written.load(Ordering::Relaxed),
+            1,
+            "Should write one file"
+        );
+        assert_eq!(
+            stats.files_read.load(Ordering::Relaxed),
+            1,
+            "Should read one file"
+        );
+        assert_eq!(
+            stats.files_deleted.load(Ordering::Relaxed),
+            1,
+            "Should delete one file"
+        );
+        assert_eq!(
+            stats.bytes_written.load(Ordering::Relaxed),
+            test_content.len() as u64,
+            "Should track written bytes"
+        );
+        assert_eq!(
+            stats.bytes_read.load(Ordering::Relaxed),
+            test_content.len() as u64,
+            "Should track read bytes"
+        );
 
-        eprintln!("Filesystem File Lifecycle E2E structured log:\n{}", logger.export_json());
+        eprintln!(
+            "Filesystem File Lifecycle E2E structured log:\n{}",
+            logger.export_json()
+        );
         Ok(())
     }
 
@@ -537,22 +705,46 @@ mod fs_e2e_tests {
 
         // Test directory operations with multiple files
         let test_files = vec!["file1.txt", "file2.txt", "file3.txt"];
-        let entries = fs_manager.test_directory_operations(&cx, "test_directory", &test_files, &logger).await?;
+        let entries = fs_manager
+            .test_directory_operations(&cx, "test_directory", &test_files, &logger)
+            .await?;
 
         // Verify all expected files were found
         for expected_file in &test_files {
-            assert!(entries.contains(&expected_file.to_string()),
-                "Directory should contain {}", expected_file);
+            assert!(
+                entries.contains(&expected_file.to_string()),
+                "Directory should contain {}",
+                expected_file
+            );
         }
 
         // Verify statistics
         let stats = fs_manager.stats();
-        assert_eq!(stats.directories_created.load(Ordering::Relaxed), 1, "Should create one directory");
-        assert_eq!(stats.directories_read.load(Ordering::Relaxed), 1, "Should read one directory");
-        assert_eq!(stats.directories_deleted.load(Ordering::Relaxed), 1, "Should delete one directory");
-        assert_eq!(stats.files_created.load(Ordering::Relaxed), test_files.len() as u64, "Should create test files");
+        assert_eq!(
+            stats.directories_created.load(Ordering::Relaxed),
+            1,
+            "Should create one directory"
+        );
+        assert_eq!(
+            stats.directories_read.load(Ordering::Relaxed),
+            1,
+            "Should read one directory"
+        );
+        assert_eq!(
+            stats.directories_deleted.load(Ordering::Relaxed),
+            1,
+            "Should delete one directory"
+        );
+        assert_eq!(
+            stats.files_created.load(Ordering::Relaxed),
+            test_files.len() as u64,
+            "Should create test files"
+        );
 
-        eprintln!("Filesystem Directory Operations E2E structured log:\n{}", logger.export_json());
+        eprintln!(
+            "Filesystem Directory Operations E2E structured log:\n{}",
+            logger.export_json()
+        );
         Ok(())
     }
 
@@ -570,18 +762,32 @@ mod fs_e2e_tests {
 
         // Test concurrent file operations
         const NUM_CONCURRENT_OPS: usize = 5;
-        let results = fs_manager.test_concurrent_file_operations(&cx, NUM_CONCURRENT_OPS, &logger).await?;
+        let results = fs_manager
+            .test_concurrent_file_operations(&cx, NUM_CONCURRENT_OPS, &logger)
+            .await?;
 
-        assert_eq!(results.len(), NUM_CONCURRENT_OPS, "All concurrent operations should succeed");
+        assert_eq!(
+            results.len(),
+            NUM_CONCURRENT_OPS,
+            "All concurrent operations should succeed"
+        );
 
         // Verify statistics
         let stats = fs_manager.stats();
-        assert_eq!(stats.concurrent_operations.load(Ordering::Relaxed), NUM_CONCURRENT_OPS as u64,
-            "Should track concurrent operations");
-        assert!(stats.io_operations.load(Ordering::Relaxed) >= (NUM_CONCURRENT_OPS * 2) as u64,
-            "Should have multiple I/O operations");
+        assert_eq!(
+            stats.concurrent_operations.load(Ordering::Relaxed),
+            NUM_CONCURRENT_OPS as u64,
+            "Should track concurrent operations"
+        );
+        assert!(
+            stats.io_operations.load(Ordering::Relaxed) >= (NUM_CONCURRENT_OPS * 2) as u64,
+            "Should have multiple I/O operations"
+        );
 
-        eprintln!("Filesystem Concurrent Operations E2E structured log:\n{}", logger.export_json());
+        eprintln!(
+            "Filesystem Concurrent Operations E2E structured log:\n{}",
+            logger.export_json()
+        );
         Ok(())
     }
 
@@ -599,16 +805,25 @@ mod fs_e2e_tests {
 
         // Test large file operations (1MB file)
         const LARGE_FILE_SIZE: usize = 1024 * 1024; // 1MB
-        fs_manager.test_large_file_operations(&cx, LARGE_FILE_SIZE, &logger).await?;
+        fs_manager
+            .test_large_file_operations(&cx, LARGE_FILE_SIZE, &logger)
+            .await?;
 
         // Verify statistics
         let stats = fs_manager.stats();
-        assert!(stats.bytes_written.load(Ordering::Relaxed) >= LARGE_FILE_SIZE as u64,
-            "Should write large amount of data");
-        assert!(stats.bytes_read.load(Ordering::Relaxed) >= LARGE_FILE_SIZE as u64,
-            "Should read large amount of data");
+        assert!(
+            stats.bytes_written.load(Ordering::Relaxed) >= LARGE_FILE_SIZE as u64,
+            "Should write large amount of data"
+        );
+        assert!(
+            stats.bytes_read.load(Ordering::Relaxed) >= LARGE_FILE_SIZE as u64,
+            "Should read large amount of data"
+        );
 
-        eprintln!("Filesystem Large File E2E structured log:\n{}", logger.export_json());
+        eprintln!(
+            "Filesystem Large File E2E structured log:\n{}",
+            logger.export_json()
+        );
         Ok(())
     }
 
@@ -628,7 +843,10 @@ mod fs_e2e_tests {
         // Test io_uring operations
         fs_manager.test_io_uring_operations(&cx, &logger).await?;
 
-        eprintln!("Filesystem io_uring E2E structured log:\n{}", logger.export_json());
+        eprintln!(
+            "Filesystem io_uring E2E structured log:\n{}",
+            logger.export_json()
+        );
         Ok(())
     }
 }

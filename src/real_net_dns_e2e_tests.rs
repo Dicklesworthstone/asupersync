@@ -6,14 +6,17 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod real_net_dns_e2e {
-    use crate::net::dns::{DnsResolver, DnsCache, DnsRecord, DnsQuery, DnsResponse, RecordType};
-    use crate::runtime::{Runtime, spawn};
     use crate::cx::Cx;
-    use crate::time::{sleep, Duration, Instant, timeout};
-    use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}};
+    use crate::net::dns::{DnsCache, DnsQuery, DnsRecord, DnsResolver, DnsResponse, RecordType};
+    use crate::runtime::{Runtime, spawn};
+    use crate::time::{Duration, Instant, sleep, timeout};
+    use serde_json::{Value, json};
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-    use serde_json::{json, Value};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     /// DNS test harness with cache monitoring and timing validation
     struct DnsTestHarness {
@@ -51,7 +54,11 @@ mod real_net_dns_e2e {
 
     impl DnsTestHarness {
         async fn new() -> Self {
-            let resolver = Arc::new(DnsResolver::new().await.expect("Failed to create DNS resolver"));
+            let resolver = Arc::new(
+                DnsResolver::new()
+                    .await
+                    .expect("Failed to create DNS resolver"),
+            );
             let cache = Arc::new(DnsCache::new(Duration::from_secs(300), 1000)); // 5min TTL, 1000 entries max
 
             Self {
@@ -101,16 +108,23 @@ mod real_net_dns_e2e {
 
             self.cache_stats.lock().unwrap().push(snapshot.clone());
 
-            self.log("cache_stats", json!({
-                "size": snapshot.cache_size,
-                "hits": snapshot.hit_count,
-                "misses": snapshot.miss_count,
-                "efficiency": snapshot.cache_efficiency,
-                "expired": snapshot.expired_count
-            }));
+            self.log(
+                "cache_stats",
+                json!({
+                    "size": snapshot.cache_size,
+                    "hits": snapshot.hit_count,
+                    "misses": snapshot.miss_count,
+                    "efficiency": snapshot.cache_efficiency,
+                    "expired": snapshot.expired_count
+                }),
+            );
         }
 
-        async fn resolve_with_cache(&self, hostname: &str, record_type: RecordType) -> Result<Vec<DnsRecord>, String> {
+        async fn resolve_with_cache(
+            &self,
+            hostname: &str,
+            record_type: RecordType,
+        ) -> Result<Vec<DnsRecord>, String> {
             let query_start = Instant::now();
 
             // Check cache first
@@ -132,20 +146,26 @@ mod real_net_dns_e2e {
 
                 self.record_query(query_log);
 
-                self.log("dns_cache_hit", json!({
-                    "hostname": hostname,
-                    "record_type": format!("{:?}", record_type),
-                    "result_count": cached_result.len(),
-                    "response_time_ms": query_time.as_millis()
-                }));
+                self.log(
+                    "dns_cache_hit",
+                    json!({
+                        "hostname": hostname,
+                        "record_type": format!("{:?}", record_type),
+                        "result_count": cached_result.len(),
+                        "response_time_ms": query_time.as_millis()
+                    }),
+                );
 
                 return Ok(cached_result);
             }
 
             // Cache miss - perform actual DNS lookup
-            match timeout(Duration::from_secs(10),
-                self.resolver.resolve(hostname, record_type)
-            ).await {
+            match timeout(
+                Duration::from_secs(10),
+                self.resolver.resolve(hostname, record_type),
+            )
+            .await
+            {
                 Ok(Ok(records)) => {
                     let query_time = query_start.elapsed();
 
@@ -166,13 +186,16 @@ mod real_net_dns_e2e {
 
                     self.record_query(query_log);
 
-                    self.log("dns_cache_miss", json!({
-                        "hostname": hostname,
-                        "record_type": format!("{:?}", record_type),
-                        "result_count": records.len(),
-                        "response_time_ms": query_time.as_millis(),
-                        "cached": true
-                    }));
+                    self.log(
+                        "dns_cache_miss",
+                        json!({
+                            "hostname": hostname,
+                            "record_type": format!("{:?}", record_type),
+                            "result_count": records.len(),
+                            "response_time_ms": query_time.as_millis(),
+                            "cached": true
+                        }),
+                    );
 
                     Ok(records)
                 }
@@ -217,7 +240,12 @@ mod real_net_dns_e2e {
             }
         }
 
-        async fn test_cache_hit_performance(&self, hostname: &str, record_type: RecordType, iterations: usize) -> (Duration, Duration, f64) {
+        async fn test_cache_hit_performance(
+            &self,
+            hostname: &str,
+            record_type: RecordType,
+            iterations: usize,
+        ) -> (Duration, Duration, f64) {
             // First query (cache miss)
             let miss_start = Instant::now();
             let _ = self.resolve_with_cache(hostname, record_type).await;
@@ -275,7 +303,9 @@ mod real_net_dns_e2e {
             if total_queries > 10 && hit_ratio < 0.3 {
                 return Err(format!(
                     "Cache hit ratio too low: {:.2}% ({}/{} queries)",
-                    hit_ratio * 100.0, cache_hits, total_queries
+                    hit_ratio * 100.0,
+                    cache_hits,
+                    total_queries
                 ));
             }
 
@@ -301,18 +331,24 @@ mod real_net_dns_e2e {
         for (domain, record_type) in &test_domains {
             match harness.resolve_with_cache(domain, *record_type).await {
                 Ok(records) => {
-                    harness.log("initial_lookup", json!({
-                        "domain": domain,
-                        "record_type": format!("{:?}", record_type),
-                        "record_count": records.len()
-                    }));
+                    harness.log(
+                        "initial_lookup",
+                        json!({
+                            "domain": domain,
+                            "record_type": format!("{:?}", record_type),
+                            "record_count": records.len()
+                        }),
+                    );
                     assert!(!records.is_empty(), "Should get DNS records for {}", domain);
                 }
                 Err(e) => {
-                    harness.log("initial_lookup_failed", json!({
-                        "domain": domain,
-                        "error": e
-                    }));
+                    harness.log(
+                        "initial_lookup_failed",
+                        json!({
+                            "domain": domain,
+                            "error": e
+                        }),
+                    );
                     // Continue with other domains
                 }
             }
@@ -326,16 +362,22 @@ mod real_net_dns_e2e {
             if let Ok(_) = harness.resolve_with_cache(domain, *record_type).await {
                 let hit_time = hit_start.elapsed();
 
-                harness.log("cache_hit_lookup", json!({
-                    "domain": domain,
-                    "record_type": format!("{:?}", record_type),
-                    "hit_time_ms": hit_time.as_millis()
-                }));
+                harness.log(
+                    "cache_hit_lookup",
+                    json!({
+                        "domain": domain,
+                        "record_type": format!("{:?}", record_type),
+                        "hit_time_ms": hit_time.as_millis()
+                    }),
+                );
 
                 // Cache hits should be very fast
-                assert!(hit_time < Duration::from_millis(10),
+                assert!(
+                    hit_time < Duration::from_millis(10),
                     "Cache hit for {} should be under 10ms, got {}ms",
-                    domain, hit_time.as_millis());
+                    domain,
+                    hit_time.as_millis()
+                );
             }
         }
 
@@ -355,11 +397,14 @@ mod real_net_dns_e2e {
             if let Ok(_) = harness.resolve_with_cache(domain, *record_type).await {
                 let post_ttl_time = post_ttl_start.elapsed();
 
-                harness.log("post_ttl_lookup", json!({
-                    "domain": domain,
-                    "record_type": format!("{:?}", record_type),
-                    "response_time_ms": post_ttl_time.as_millis()
-                }));
+                harness.log(
+                    "post_ttl_lookup",
+                    json!({
+                        "domain": domain,
+                        "record_type": format!("{:?}", record_type),
+                        "response_time_ms": post_ttl_time.as_millis()
+                    }),
+                );
             }
         }
 
@@ -367,13 +412,20 @@ mod real_net_dns_e2e {
 
         // Validate cache behavior
         let validation_result = harness.validate_cache_behavior();
-        assert!(validation_result.is_ok(), "Cache behavior validation failed: {:?}", validation_result);
+        assert!(
+            validation_result.is_ok(),
+            "Cache behavior validation failed: {:?}",
+            validation_result
+        );
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "cache_cycles_validated": true,
-            "message": "DNS lookup → cache → TTL invalidation cycle validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "cache_cycles_validated": true,
+                "message": "DNS lookup → cache → TTL invalidation cycle validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
@@ -382,8 +434,14 @@ mod real_net_dns_e2e {
         harness.log("test_start", json!({"test": "concurrent_dns_lookups"}));
 
         let test_domains = vec![
-            "example.com", "google.com", "github.com", "stackoverflow.com",
-            "rust-lang.org", "docs.rs", "crates.io", "cloudflare.com"
+            "example.com",
+            "google.com",
+            "github.com",
+            "stackoverflow.com",
+            "rust-lang.org",
+            "docs.rs",
+            "crates.io",
+            "cloudflare.com",
         ];
 
         let concurrent_workers = 8;
@@ -407,18 +465,24 @@ mod real_net_dns_e2e {
                     match harness.resolve_with_cache(domain, RecordType::A).await {
                         Ok(records) => {
                             successful_lookups += 1;
-                            harness.log("concurrent_lookup_success", json!({
-                                "worker_id": worker_id,
-                                "domain": domain,
-                                "record_count": records.len()
-                            }));
+                            harness.log(
+                                "concurrent_lookup_success",
+                                json!({
+                                    "worker_id": worker_id,
+                                    "domain": domain,
+                                    "record_count": records.len()
+                                }),
+                            );
                         }
                         Err(e) => {
-                            harness.log("concurrent_lookup_error", json!({
-                                "worker_id": worker_id,
-                                "domain": domain,
-                                "error": e
-                            }));
+                            harness.log(
+                                "concurrent_lookup_error",
+                                json!({
+                                    "worker_id": worker_id,
+                                    "domain": domain,
+                                    "error": e
+                                }),
+                            );
                         }
                     }
 
@@ -437,28 +501,41 @@ mod real_net_dns_e2e {
         for handle in worker_handles {
             let (worker_id, successful) = handle.await;
             total_successful += successful;
-            harness.log("worker_completed", json!({
-                "worker_id": worker_id,
-                "successful_lookups": successful
-            }));
+            harness.log(
+                "worker_completed",
+                json!({
+                    "worker_id": worker_id,
+                    "successful_lookups": successful
+                }),
+            );
         }
 
         harness.snapshot_cache_stats();
 
         // Validate concurrent behavior
         let validation_result = harness.validate_cache_behavior();
-        assert!(validation_result.is_ok(), "Concurrent cache behavior validation failed: {:?}", validation_result);
+        assert!(
+            validation_result.is_ok(),
+            "Concurrent cache behavior validation failed: {:?}",
+            validation_result
+        );
 
         // Should have successful lookups
-        assert!(total_successful > 0, "Should have at least some successful lookups");
+        assert!(
+            total_successful > 0,
+            "Should have at least some successful lookups"
+        );
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "concurrent_workers": concurrent_workers,
-            "total_successful_lookups": total_successful,
-            "concurrent_behavior_validated": true,
-            "message": "Concurrent DNS lookups validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "concurrent_workers": concurrent_workers,
+                "total_successful_lookups": total_successful,
+                "concurrent_behavior_validated": true,
+                "message": "Concurrent DNS lookups validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
@@ -478,40 +555,61 @@ mod real_net_dns_e2e {
 
         harness.snapshot_cache_stats();
 
-        harness.log("cache_performance", json!({
-            "domain": test_domain,
-            "cache_miss_time_ms": miss_time.as_millis(),
-            "avg_cache_hit_time_ms": avg_hit_time.as_millis(),
-            "speedup_factor": speedup,
-            "hit_iterations": cache_hit_iterations
-        }));
+        harness.log(
+            "cache_performance",
+            json!({
+                "domain": test_domain,
+                "cache_miss_time_ms": miss_time.as_millis(),
+                "avg_cache_hit_time_ms": avg_hit_time.as_millis(),
+                "speedup_factor": speedup,
+                "hit_iterations": cache_hit_iterations
+            }),
+        );
 
         // Cache hits should be significantly faster
-        assert!(speedup > 5.0, "Cache hits should be at least 5x faster, got {}x speedup", speedup);
-        assert!(avg_hit_time < Duration::from_millis(5),
-            "Average cache hit time should be under 5ms, got {}ms", avg_hit_time.as_millis());
+        assert!(
+            speedup > 5.0,
+            "Cache hits should be at least 5x faster, got {}x speedup",
+            speedup
+        );
+        assert!(
+            avg_hit_time < Duration::from_millis(5),
+            "Average cache hit time should be under 5ms, got {}ms",
+            avg_hit_time.as_millis()
+        );
 
         // Test different record types for same domain
-        let record_types = vec![RecordType::A, RecordType::AAAA, RecordType::MX, RecordType::TXT];
+        let record_types = vec![
+            RecordType::A,
+            RecordType::AAAA,
+            RecordType::MX,
+            RecordType::TXT,
+        ];
 
         for record_type in record_types {
             let type_start = Instant::now();
             match harness.resolve_with_cache(test_domain, record_type).await {
                 Ok(records) => {
                     let type_time = type_start.elapsed();
-                    harness.log("record_type_test", json!({
-                        "domain": test_domain,
-                        "record_type": format!("{:?}", record_type),
-                        "response_time_ms": type_time.as_millis(),
-                        "record_count": records.len()
-                    }));
+                    harness.log(
+                        "record_type_test",
+                        json!({
+                            "domain": test_domain,
+                            "record_type": format!("{:?}", record_type),
+                            "response_time_ms": type_time.as_millis(),
+                            "record_count": records.len()
+                        }),
+                    );
                 }
                 Err(e) => {
-                    harness.log("record_type_error", json!({
-                        "domain": test_domain,
-                        "record_type": format!("{:?}", record_type),
-                        "error": e
-                    }));
+                    harness.log(
+                        "record_type_error",
+                        json!({
+                            "domain": test_domain,
+                            "record_type": format!("{:?}", record_type),
+                            "error": e
+                        }),
+                    );
                 }
             }
         }
@@ -520,50 +618,66 @@ mod real_net_dns_e2e {
 
         // Validate overall cache performance
         let validation_result = harness.validate_cache_behavior();
-        assert!(validation_result.is_ok(), "Cache performance validation failed: {:?}", validation_result);
+        assert!(
+            validation_result.is_ok(),
+            "Cache performance validation failed: {:?}",
+            validation_result
+        );
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "cache_speedup": speedup,
-            "performance_validated": true,
-            "message": "DNS cache performance validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "cache_speedup": speedup,
+                "performance_validated": true,
+                "message": "DNS cache performance validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
     async fn test_dns_resolver_with_invalid_domains() {
         let harness = Arc::new(DnsTestHarness::new().await);
-        harness.log("test_start", json!({"test": "dns_resolver_invalid_domains"}));
+        harness.log(
+            "test_start",
+            json!({"test": "dns_resolver_invalid_domains"}),
+        );
 
         let invalid_domains = vec![
             "this-domain-definitely-does-not-exist-12345.com",
             "invalid.local.test.nonexistent",
             "...", // Malformed domain
-            "", // Empty domain
+            "",    // Empty domain
         ];
 
-        let valid_domains = vec![
-            "google.com",
-            "github.com",
-        ];
+        let valid_domains = vec!["google.com", "github.com"];
 
         harness.snapshot_cache_stats();
 
         // Test invalid domains
         for invalid_domain in &invalid_domains {
-            match harness.resolve_with_cache(invalid_domain, RecordType::A).await {
+            match harness
+                .resolve_with_cache(invalid_domain, RecordType::A)
+                .await
+            {
                 Ok(records) => {
-                    harness.log("unexpected_success", json!({
-                        "domain": invalid_domain,
-                        "record_count": records.len()
-                    }));
+                    harness.log(
+                        "unexpected_success",
+                        json!({
+                            "domain": invalid_domain,
+                            "record_count": records.len()
+                        }),
+                    );
                     // Some invalid domains might return empty results rather than errors
                 }
                 Err(e) => {
-                    harness.log("expected_error", json!({
-                        "domain": invalid_domain,
-                        "error": e
-                    }));
+                    harness.log(
+                        "expected_error",
+                        json!({
+                            "domain": invalid_domain,
+                            "error": e
+                        }),
+                    );
                     // Expected behavior for invalid domains
                 }
             }
@@ -571,19 +685,32 @@ mod real_net_dns_e2e {
 
         // Test valid domains for comparison
         for valid_domain in &valid_domains {
-            match harness.resolve_with_cache(valid_domain, RecordType::A).await {
+            match harness
+                .resolve_with_cache(valid_domain, RecordType::A)
+                .await
+            {
                 Ok(records) => {
-                    harness.log("valid_domain_success", json!({
-                        "domain": valid_domain,
-                        "record_count": records.len()
-                    }));
-                    assert!(!records.is_empty(), "Valid domain {} should have records", valid_domain);
+                    harness.log(
+                        "valid_domain_success",
+                        json!({
+                            "domain": valid_domain,
+                            "record_count": records.len()
+                        }),
+                    );
+                    assert!(
+                        !records.is_empty(),
+                        "Valid domain {} should have records",
+                        valid_domain
+                    );
                 }
                 Err(e) => {
-                    harness.log("valid_domain_error", json!({
-                        "domain": valid_domain,
-                        "error": e
-                    }));
+                    harness.log(
+                        "valid_domain_error",
+                        json!({
+                            "domain": valid_domain,
+                            "error": e
+                        }),
+                    );
                 }
             }
         }
@@ -592,13 +719,20 @@ mod real_net_dns_e2e {
 
         // Validate that resolver handles errors gracefully
         let validation_result = harness.validate_cache_behavior();
-        assert!(validation_result.is_ok(), "Error handling validation failed: {:?}", validation_result);
+        assert!(
+            validation_result.is_ok(),
+            "Error handling validation failed: {:?}",
+            validation_result
+        );
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "invalid_domains_handled": true,
-            "valid_domains_resolved": true,
-            "message": "DNS resolver error handling validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "invalid_domains_handled": true,
+                "valid_domains_resolved": true,
+                "message": "DNS resolver error handling validated successfully"
+            }),
+        );
     }
 }

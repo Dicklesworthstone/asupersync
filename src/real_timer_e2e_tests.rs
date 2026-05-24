@@ -8,24 +8,27 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 use crate::{
-    cx::Cx,
-    runtime::{RuntimeBuilder, Region},
-    time::{Sleep, Deadline, Instant, Duration, sleep, timeout, interval},
-    combinator::{race, join},
-    error::{Outcome, AsupersyncError},
     channel::{mpsc, oneshot},
+    combinator::{join, race},
+    cx::Cx,
+    error::{AsupersyncError, Outcome},
+    runtime::{Region, RuntimeBuilder},
     stream::Stream,
+    time::{Deadline, Duration, Instant, Sleep, interval, sleep, timeout},
 };
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 use std::{
-    sync::{Arc, atomic::{AtomicU64, AtomicBool, Ordering}},
     collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::SystemTime,
 };
 
 #[cfg(all(test, feature = "real-service-e2e"))]
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Real timer manager that creates actual timer wheels and sleep futures
 /// Uses the asupersync time primitives with real deadline scheduling
@@ -139,18 +142,26 @@ impl RealTimerManager {
 
         // Update statistics
         self.stats.sleep_operations.fetch_add(1, Ordering::Relaxed);
-        self.stats.total_latency_ns.fetch_add(latency_ns, Ordering::Relaxed);
+        self.stats
+            .total_latency_ns
+            .fetch_add(latency_ns, Ordering::Relaxed);
 
         let current_max = self.stats.max_latency_ns.load(Ordering::Relaxed);
         if latency_ns > current_max {
-            self.stats.max_latency_ns.store(latency_ns, Ordering::Relaxed);
+            self.stats
+                .max_latency_ns
+                .store(latency_ns, Ordering::Relaxed);
         }
 
-        if accuracy_error.abs() > 1_000_000 { // > 1ms
-            self.stats.wakeup_accuracy_violations.fetch_add(1, Ordering::Relaxed);
+        if accuracy_error.abs() > 1_000_000 {
+            // > 1ms
+            self.stats
+                .wakeup_accuracy_violations
+                .fetch_add(1, Ordering::Relaxed);
         }
 
-        self.logger.log_operation("sleep", requested_ns, actual_ns, latency_ns);
+        self.logger
+            .log_operation("sleep", requested_ns, actual_ns, latency_ns);
 
         Ok(TimerOperation {
             operation_type: TimerOperationType::Sleep,
@@ -175,13 +186,11 @@ impl RealTimerManager {
         let requested_ns = timeout_duration.as_nanos() as u64;
 
         // Real timeout operation using asupersync timeout combinator
-        let result = timeout(
-            timeout_duration,
-            async {
-                sleep(work_duration).await;
-                "work_completed"
-            }
-        ).await;
+        let result = timeout(timeout_duration, async {
+            sleep(work_duration).await;
+            "work_completed"
+        })
+        .await;
 
         let end = Instant::now();
         let actual_ns = end.duration_since(start).as_nanos() as u64;
@@ -189,11 +198,15 @@ impl RealTimerManager {
         let accuracy_error = actual_ns as i64 - requested_ns as i64;
 
         // Update statistics
-        self.stats.timeout_operations.fetch_add(1, Ordering::Relaxed);
-        self.stats.total_latency_ns.fetch_add(latency_ns, Ordering::Relaxed);
+        self.stats
+            .timeout_operations
+            .fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .total_latency_ns
+            .fetch_add(latency_ns, Ordering::Relaxed);
 
         let deadline_hit = match result {
-            Outcome::Ok(_) => false, // Work completed before timeout
+            Outcome::Ok(_) => false,    // Work completed before timeout
             Outcome::Cancelled => true, // Timeout fired
             _ => false,
         };
@@ -204,7 +217,8 @@ impl RealTimerManager {
             self.stats.deadline_misses.fetch_add(1, Ordering::Relaxed);
         }
 
-        self.logger.log_operation("timeout", requested_ns, actual_ns, latency_ns);
+        self.logger
+            .log_operation("timeout", requested_ns, actual_ns, latency_ns);
 
         Ok(TimerOperation {
             operation_type: TimerOperationType::Timeout,
@@ -259,7 +273,10 @@ impl RealTimerManager {
         self.logger.log_operation(
             "interval",
             interval_duration.as_nanos() as u64 * tick_count as u64,
-            operations.last().map(|op| op.actual_duration_ns).unwrap_or(0),
+            operations
+                .last()
+                .map(|op| op.actual_duration_ns)
+                .unwrap_or(0),
             operations.iter().map(|op| op.latency_ns).sum(),
         );
 
@@ -297,7 +314,8 @@ impl RealTimerManager {
             self.stats.deadline_misses.fetch_add(1, Ordering::Relaxed);
         }
 
-        self.logger.log_operation("deadline", requested_ns, actual_ns, latency_ns);
+        self.logger
+            .log_operation("deadline", requested_ns, actual_ns, latency_ns);
 
         Ok(TimerOperation {
             operation_type: TimerOperationType::DeadlineCheck,
@@ -377,7 +395,11 @@ impl RealTimerManager {
         self.logger.log_operation(
             "concurrent_sleep",
             config.load_duration_ms * 1_000_000,
-            operations.iter().map(|op| op.actual_duration_ns).max().unwrap_or(0),
+            operations
+                .iter()
+                .map(|op| op.actual_duration_ns)
+                .max()
+                .unwrap_or(0),
             operations.iter().map(|op| op.latency_ns).sum(),
         );
 
@@ -401,13 +423,16 @@ impl RealTimerManager {
             },
             average_latency_ns: {
                 let total = self.stats.total_latency_ns.load(Ordering::Relaxed);
-                let ops = self.stats.sleep_operations.load(Ordering::Relaxed) +
-                         self.stats.timeout_operations.load(Ordering::Relaxed);
+                let ops = self.stats.sleep_operations.load(Ordering::Relaxed)
+                    + self.stats.timeout_operations.load(Ordering::Relaxed);
                 if ops > 0 { total / ops } else { 0 }
             },
             max_latency_ns: self.stats.max_latency_ns.load(Ordering::Relaxed),
             concurrent_operations: self.stats.concurrent_sleeps.load(Ordering::Relaxed),
-            accuracy_violations: self.stats.wakeup_accuracy_violations.load(Ordering::Relaxed),
+            accuracy_violations: self
+                .stats
+                .wakeup_accuracy_violations
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -422,30 +447,42 @@ impl TimerE2ELogger {
     }
 
     fn log_phase(&self, phase: &str) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"phase_change\",\"phase\":\"{}\"}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 phase);
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"phase_change\",\"phase\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            phase
+        );
     }
 
-    fn log_operation(&self, operation_type: &str, requested_ns: u64, actual_ns: u64, latency_ns: u64) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"timer_operation\",\"operation_type\":\"{}\",\"requested_ns\":{},\"actual_ns\":{},\"latency_ns\":{}}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 operation_type,
-                 requested_ns,
-                 actual_ns,
-                 latency_ns);
+    fn log_operation(
+        &self,
+        operation_type: &str,
+        requested_ns: u64,
+        actual_ns: u64,
+        latency_ns: u64,
+    ) {
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"timer_operation\",\"operation_type\":\"{}\",\"requested_ns\":{},\"actual_ns\":{},\"latency_ns\":{}}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            operation_type,
+            requested_ns,
+            actual_ns,
+            latency_ns
+        );
     }
 
     fn log_stats_summary(&self, stats: &TimerE2EStatsSummary) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"stats_summary\",\"data\":{}}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 serde_json::to_string(stats).unwrap_or_else(|_| "{}".to_string()));
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"stats_summary\",\"data\":{}}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            serde_json::to_string(stats).unwrap_or_else(|_| "{}".to_string())
+        );
     }
 }
 
@@ -524,12 +561,20 @@ mod tests {
 
             for duration in durations {
                 let cx = Cx::root();
-                let operation = manager.test_sleep_operation(&cx, duration).await
+                let operation = manager
+                    .test_sleep_operation(&cx, duration)
+                    .await
                     .expect("Sleep operation should succeed");
 
                 assert_eq!(operation.operation_type, TimerOperationType::Sleep);
-                assert!(operation.deadline_hit, "Sleep should meet timing requirements");
-                assert!(operation.latency_ns < 10_000_000, "Sleep latency should be < 10ms");
+                assert!(
+                    operation.deadline_hit,
+                    "Sleep should meet timing requirements"
+                );
+                assert!(
+                    operation.latency_ns < 10_000_000,
+                    "Sleep latency should be < 10ms"
+                );
             }
 
             let stats = manager.get_stats_summary();
@@ -552,24 +597,33 @@ mod tests {
             let cx = Cx::root();
 
             // Test timeout hit (work takes longer than timeout)
-            let timeout_hit = manager.test_timeout_operation(
-                &cx,
-                Duration::from_millis(50),  // 50ms timeout
-                Duration::from_millis(100), // 100ms work
-            ).await.expect("Timeout operation should succeed");
+            let timeout_hit = manager
+                .test_timeout_operation(
+                    &cx,
+                    Duration::from_millis(50),  // 50ms timeout
+                    Duration::from_millis(100), // 100ms work
+                )
+                .await
+                .expect("Timeout operation should succeed");
 
             assert_eq!(timeout_hit.operation_type, TimerOperationType::Timeout);
             assert!(timeout_hit.deadline_hit, "Timeout should fire");
 
             // Test timeout miss (work completes before timeout)
-            let timeout_miss = manager.test_timeout_operation(
-                &cx,
-                Duration::from_millis(100), // 100ms timeout
-                Duration::from_millis(50),  // 50ms work
-            ).await.expect("Timeout operation should succeed");
+            let timeout_miss = manager
+                .test_timeout_operation(
+                    &cx,
+                    Duration::from_millis(100), // 100ms timeout
+                    Duration::from_millis(50),  // 50ms work
+                )
+                .await
+                .expect("Timeout operation should succeed");
 
             assert_eq!(timeout_miss.operation_type, TimerOperationType::Timeout);
-            assert!(!timeout_miss.deadline_hit, "Work should complete before timeout");
+            assert!(
+                !timeout_miss.deadline_hit,
+                "Work should complete before timeout"
+            );
 
             let stats = manager.get_stats_summary();
             assert_eq!(stats.total_timeout_operations, 2);
@@ -591,11 +645,14 @@ mod tests {
             let cx = Cx::root();
 
             // Test interval with multiple ticks
-            let operations = manager.test_interval_operation(
-                &cx,
-                Duration::from_millis(25), // 25ms intervals
-                5, // 5 ticks
-            ).await.expect("Interval operation should succeed");
+            let operations = manager
+                .test_interval_operation(
+                    &cx,
+                    Duration::from_millis(25), // 25ms intervals
+                    5,                         // 5 ticks
+                )
+                .await
+                .expect("Interval operation should succeed");
 
             assert_eq!(operations.len(), 5);
 
@@ -608,7 +665,9 @@ mod tests {
                 assert!(
                     operation.accuracy_error.abs() <= tolerance as i64,
                     "Interval tick {} accuracy error {} exceeds tolerance {}",
-                    i, operation.accuracy_error, tolerance
+                    i,
+                    operation.accuracy_error,
+                    tolerance
                 );
             }
 
@@ -633,7 +692,9 @@ mod tests {
 
             // Test deadline that should be hit
             let deadline = Deadline::from_duration(Duration::from_millis(100));
-            let operation = manager.test_deadline_operation(&cx, deadline).await
+            let operation = manager
+                .test_deadline_operation(&cx, deadline)
+                .await
                 .expect("Deadline operation should succeed");
 
             assert_eq!(operation.operation_type, TimerOperationType::DeadlineCheck);
@@ -665,14 +726,22 @@ mod tests {
                 ..TimerE2EConfig::default()
             };
 
-            let operations = manager.test_concurrent_sleep_load(&cx, &config).await
+            let operations = manager
+                .test_concurrent_sleep_load(&cx, &config)
+                .await
                 .expect("Concurrent sleep load should succeed");
 
             assert_eq!(operations.len(), config.concurrency_level);
 
             for operation in &operations {
-                assert_eq!(operation.operation_type, TimerOperationType::ConcurrentSleep);
-                assert_eq!(operation.concurrent_operations, config.concurrency_level as u64);
+                assert_eq!(
+                    operation.operation_type,
+                    TimerOperationType::ConcurrentSleep
+                );
+                assert_eq!(
+                    operation.concurrent_operations,
+                    config.concurrency_level as u64
+                );
 
                 // Under load, we allow more tolerance
                 assert!(
@@ -736,11 +805,20 @@ mod tests {
             assert_eq!(completed_operations, operations_per_batch * batch_count);
 
             let stats = manager.get_stats_summary();
-            assert_eq!(stats.total_sleep_operations, (operations_per_batch * batch_count) as u64);
+            assert_eq!(
+                stats.total_sleep_operations,
+                (operations_per_batch * batch_count) as u64
+            );
 
             // Under stress, we allow higher latency but still require reasonable performance
-            assert!(stats.average_latency_ns < 20_000_000, "Average latency under stress should be < 20ms");
-            assert!(stats.accuracy_violations <= (completed_operations / 10) as u64, "< 10% accuracy violations allowed");
+            assert!(
+                stats.average_latency_ns < 20_000_000,
+                "Average latency under stress should be < 20ms"
+            );
+            assert!(
+                stats.accuracy_violations <= (completed_operations / 10) as u64,
+                "< 10% accuracy violations allowed"
+            );
 
             manager.logger.log_stats_summary(&stats);
         });
@@ -784,37 +862,38 @@ mod tests {
 
             // 1. Basic sleep operations
             for ms in [10, 25, 50] {
-                let operation = manager.test_sleep_operation(&cx, Duration::from_millis(ms)).await
+                let operation = manager
+                    .test_sleep_operation(&cx, Duration::from_millis(ms))
+                    .await
                     .expect("Sleep operation should succeed");
                 all_operations.push(operation);
             }
 
             // 2. Timeout operations (both hit and miss)
-            let timeout_hit = manager.test_timeout_operation(
-                &cx,
-                Duration::from_millis(30),
-                Duration::from_millis(60),
-            ).await.expect("Timeout hit should succeed");
+            let timeout_hit = manager
+                .test_timeout_operation(&cx, Duration::from_millis(30), Duration::from_millis(60))
+                .await
+                .expect("Timeout hit should succeed");
             all_operations.push(timeout_hit);
 
-            let timeout_miss = manager.test_timeout_operation(
-                &cx,
-                Duration::from_millis(60),
-                Duration::from_millis(30),
-            ).await.expect("Timeout miss should succeed");
+            let timeout_miss = manager
+                .test_timeout_operation(&cx, Duration::from_millis(60), Duration::from_millis(30))
+                .await
+                .expect("Timeout miss should succeed");
             all_operations.push(timeout_miss);
 
             // 3. Interval operations
-            let interval_ops = manager.test_interval_operation(
-                &cx,
-                Duration::from_millis(20),
-                3,
-            ).await.expect("Interval operation should succeed");
+            let interval_ops = manager
+                .test_interval_operation(&cx, Duration::from_millis(20), 3)
+                .await
+                .expect("Interval operation should succeed");
             all_operations.extend(interval_ops);
 
             // 4. Deadline check
             let deadline = Deadline::from_duration(Duration::from_millis(40));
-            let deadline_op = manager.test_deadline_operation(&cx, deadline).await
+            let deadline_op = manager
+                .test_deadline_operation(&cx, deadline)
+                .await
                 .expect("Deadline operation should succeed");
             all_operations.push(deadline_op);
 
@@ -824,7 +903,9 @@ mod tests {
                 load_duration_ms: 30,
                 ..TimerE2EConfig::default()
             };
-            let concurrent_ops = manager.test_concurrent_sleep_load(&cx, &config).await
+            let concurrent_ops = manager
+                .test_concurrent_sleep_load(&cx, &config)
+                .await
                 .expect("Concurrent load should succeed");
             all_operations.extend(concurrent_ops);
 
@@ -832,7 +913,8 @@ mod tests {
             assert!(!all_operations.is_empty());
 
             let total_operations = all_operations.len();
-            let successful_operations = all_operations.iter()
+            let successful_operations = all_operations
+                .iter()
                 .filter(|op| op.latency_ns < 100_000_000) // < 100ms
                 .count();
 

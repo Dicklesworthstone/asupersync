@@ -9,24 +9,24 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 use crate::{
+    channel::{broadcast, mpsc, oneshot, watch},
+    combinator::{join, race, timeout},
     cx::Cx,
-    runtime::{RuntimeBuilder, Region},
-    channel::{mpsc, broadcast, oneshot, watch},
-    combinator::{race, join, timeout},
-    error::{Outcome, AsupersyncError},
-    time::{Duration, sleep, Instant},
-    sync::{Barrier, Arc},
+    error::{AsupersyncError, Outcome},
+    runtime::{Region, RuntimeBuilder},
+    sync::{Arc, Barrier},
+    time::{Duration, Instant, sleep},
 };
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 use std::{
-    sync::atomic::{AtomicU64, AtomicBool, Ordering},
     collections::VecDeque,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     thread,
 };
 
 #[cfg(all(test, feature = "real-service-e2e"))]
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Real channel manager that coordinates actual channel operations
 /// Uses asupersync channel primitives with real concurrent producers/consumers
@@ -159,9 +159,13 @@ impl RealChannelManager {
 
                 match sender.send(message).await {
                     Ok(()) => {
-                        producer_stats.mpsc_messages_sent.fetch_add(1, Ordering::Relaxed);
+                        producer_stats
+                            .mpsc_messages_sent
+                            .fetch_add(1, Ordering::Relaxed);
                         let latency = send_start.elapsed().as_nanos() as u64;
-                        producer_stats.total_latency_ns.fetch_add(latency, Ordering::Relaxed);
+                        producer_stats
+                            .total_latency_ns
+                            .fetch_add(latency, Ordering::Relaxed);
                     }
                     Err(_) => {
                         eprintln!("Producer failed to send message {}", i);
@@ -184,7 +188,9 @@ impl RealChannelManager {
             while received_count < messages_to_send {
                 match receiver.recv().await {
                     Some(message) => {
-                        consumer_stats.mpsc_messages_received.fetch_add(1, Ordering::Relaxed);
+                        consumer_stats
+                            .mpsc_messages_received
+                            .fetch_add(1, Ordering::Relaxed);
                         received_count += 1;
 
                         // Validate message format
@@ -193,7 +199,10 @@ impl RealChannelManager {
                         }
                     }
                     None => {
-                        eprintln!("Channel closed unexpectedly after {} messages", received_count);
+                        eprintln!(
+                            "Channel closed unexpectedly after {} messages",
+                            received_count
+                        );
                         break;
                     }
                 }
@@ -266,7 +275,9 @@ impl RealChannelManager {
                 loop {
                     match receiver.recv().await {
                         Ok(message) => {
-                            stats.broadcast_messages_received.fetch_add(1, Ordering::Relaxed);
+                            stats
+                                .broadcast_messages_received
+                                .fetch_add(1, Ordering::Relaxed);
                             received_count += 1;
 
                             // Check if we've received all expected messages
@@ -275,8 +286,13 @@ impl RealChannelManager {
                             }
                         }
                         Err(broadcast::RecvError::Lagged(skip_count)) => {
-                            eprintln!("Receiver {} lagged, skipped {} messages", receiver_id, skip_count);
-                            stats.message_loss_events.fetch_add(skip_count, Ordering::Relaxed);
+                            eprintln!(
+                                "Receiver {} lagged, skipped {} messages",
+                                receiver_id, skip_count
+                            );
+                            stats
+                                .message_loss_events
+                                .fetch_add(skip_count, Ordering::Relaxed);
                         }
                         Err(broadcast::RecvError::Closed) => {
                             eprintln!("Broadcast channel closed for receiver {}", receiver_id);
@@ -299,7 +315,9 @@ impl RealChannelManager {
 
                 match sender.send(message) {
                     Ok(_) => {
-                        producer_stats.broadcast_messages_sent.fetch_add(1, Ordering::Relaxed);
+                        producer_stats
+                            .broadcast_messages_sent
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                     Err(_) => {
                         eprintln!("Failed to send broadcast message {}", i);
@@ -384,7 +402,9 @@ impl RealChannelManager {
                 // Ping task
                 let ping_handle = cx.spawn(async move {
                     let message = format!("ping-{}", i);
-                    ping_sender.send(message).map_err(|_| AsupersyncError::from("ping send failed"))?;
+                    ping_sender
+                        .send(message)
+                        .map_err(|_| AsupersyncError::from("ping send failed"))?;
 
                     // Wait for pong
                     match pong_receiver.await {
@@ -396,7 +416,7 @@ impl RealChannelManager {
                                 Err(AsupersyncError::from("invalid pong response"))
                             }
                         }
-                        Err(_) => Err(AsupersyncError::from("pong receive failed"))
+                        Err(_) => Err(AsupersyncError::from("pong receive failed")),
                     }
                 });
 
@@ -406,13 +426,15 @@ impl RealChannelManager {
                         Ok(message) => {
                             if message.starts_with("ping-") {
                                 let response = message.replace("ping-", "pong-");
-                                pong_sender.send(response).map_err(|_| AsupersyncError::from("pong send failed"))?;
+                                pong_sender
+                                    .send(response)
+                                    .map_err(|_| AsupersyncError::from("pong send failed"))?;
                                 Ok(())
                             } else {
                                 Err(AsupersyncError::from("invalid ping message"))
                             }
                         }
-                        Err(_) => Err(AsupersyncError::from("ping receive failed"))
+                        Err(_) => Err(AsupersyncError::from("ping receive failed")),
                     }
                 });
 
@@ -421,7 +443,7 @@ impl RealChannelManager {
 
                 match (ping_result, pong_result) {
                     (Outcome::Ok(Ok(())), Outcome::Ok(Ok(()))) => Ok(()),
-                    _ => Err(AsupersyncError::from("ping-pong failed"))
+                    _ => Err(AsupersyncError::from("ping-pong failed")),
                 }
             });
 
@@ -604,8 +626,12 @@ impl RealChannelManager {
 
                     match producer_sender.send(message).await {
                         Ok(()) => {
-                            producer_stats.mpsc_messages_sent.fetch_add(1, Ordering::Relaxed);
-                            producer_stats.producer_threads.store(producer_id as u64 + 1, Ordering::Relaxed);
+                            producer_stats
+                                .mpsc_messages_sent
+                                .fetch_add(1, Ordering::Relaxed);
+                            producer_stats
+                                .producer_threads
+                                .store(producer_id as u64 + 1, Ordering::Relaxed);
                         }
                         Err(_) => {
                             eprintln!("Producer {} failed to send message {}", producer_id, i);
@@ -633,7 +659,9 @@ impl RealChannelManager {
             let mut producer_counts = std::collections::HashMap::new();
 
             while let Some(message) = receiver.recv().await {
-                consumer_stats.mpsc_messages_received.fetch_add(1, Ordering::Relaxed);
+                consumer_stats
+                    .mpsc_messages_received
+                    .fetch_add(1, Ordering::Relaxed);
                 received_count += 1;
 
                 // Track messages from each producer
@@ -644,8 +672,11 @@ impl RealChannelManager {
                 }
             }
 
-            eprintln!("Consumer received {} messages from {} producers",
-                     received_count, producer_counts.len());
+            eprintln!(
+                "Consumer received {} messages from {} producers",
+                received_count,
+                producer_counts.len()
+            );
             received_count
         });
 
@@ -698,13 +729,16 @@ impl RealChannelManager {
             total_mpsc_sent: self.stats.mpsc_messages_sent.load(Ordering::Relaxed),
             total_mpsc_received: self.stats.mpsc_messages_received.load(Ordering::Relaxed),
             total_broadcast_sent: self.stats.broadcast_messages_sent.load(Ordering::Relaxed),
-            total_broadcast_received: self.stats.broadcast_messages_received.load(Ordering::Relaxed),
+            total_broadcast_received: self
+                .stats
+                .broadcast_messages_received
+                .load(Ordering::Relaxed),
             total_oneshot_operations: self.stats.oneshot_operations.load(Ordering::Relaxed),
             total_watch_updates: self.stats.watch_updates.load(Ordering::Relaxed),
             average_latency_ns: {
                 let total = self.stats.total_latency_ns.load(Ordering::Relaxed);
-                let ops = self.stats.mpsc_messages_sent.load(Ordering::Relaxed) +
-                         self.stats.broadcast_messages_sent.load(Ordering::Relaxed);
+                let ops = self.stats.mpsc_messages_sent.load(Ordering::Relaxed)
+                    + self.stats.broadcast_messages_sent.load(Ordering::Relaxed);
                 if ops > 0 { total / ops } else { 0 }
             },
             max_latency_ns: self.stats.max_latency_ns.load(Ordering::Relaxed),
@@ -725,30 +759,36 @@ impl ChannelE2ELogger {
     }
 
     fn log_phase(&self, phase: &str) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"phase_change\",\"phase\":\"{}\"}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 phase);
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"phase_change\",\"phase\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            phase
+        );
     }
 
     fn log_operation(&self, operation_type: &str, sent: u64, received: u64, latency_ns: u64) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"channel_operation\",\"operation_type\":\"{}\",\"sent\":{},\"received\":{},\"latency_ns\":{}}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 operation_type,
-                 sent,
-                 received,
-                 latency_ns);
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"channel_operation\",\"operation_type\":\"{}\",\"sent\":{},\"received\":{},\"latency_ns\":{}}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            operation_type,
+            sent,
+            received,
+            latency_ns
+        );
     }
 
     fn log_stats_summary(&self, stats: &ChannelE2EStatsSummary) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"stats_summary\",\"data\":{}}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 serde_json::to_string(stats).unwrap_or_else(|_| "{}".to_string()));
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"stats_summary\",\"data\":{}}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            serde_json::to_string(stats).unwrap_or_else(|_| "{}".to_string())
+        );
     }
 }
 
@@ -830,10 +870,15 @@ mod tests {
                 ..ChannelE2EConfig::default()
             };
 
-            let operation = manager.test_mpsc_producer_consumer(&cx, &config).await
+            let operation = manager
+                .test_mpsc_producer_consumer(&cx, &config)
+                .await
                 .expect("MPSC producer-consumer should succeed");
 
-            assert_eq!(operation.operation_type, ChannelOperationType::MpscProducerConsumer);
+            assert_eq!(
+                operation.operation_type,
+                ChannelOperationType::MpscProducerConsumer
+            );
             assert_eq!(operation.message_count, 100);
             assert!(operation.success_rate >= 0.95); // Allow 5% message loss
             assert!(operation.throughput_mps > 0.0);
@@ -866,10 +911,15 @@ mod tests {
                 ..ChannelE2EConfig::default()
             };
 
-            let operation = manager.test_broadcast_fanout(&cx, &config).await
+            let operation = manager
+                .test_broadcast_fanout(&cx, &config)
+                .await
                 .expect("Broadcast fanout should succeed");
 
-            assert_eq!(operation.operation_type, ChannelOperationType::BroadcastFanOut);
+            assert_eq!(
+                operation.operation_type,
+                ChannelOperationType::BroadcastFanOut
+            );
             assert!(operation.success_rate >= 0.8); // Allow 20% message loss due to lagging
             assert!(operation.throughput_mps > 0.0);
             assert_eq!(operation.concurrent_operations, 4); // 1 producer + 3 consumers
@@ -894,10 +944,15 @@ mod tests {
             let manager = RealChannelManager::new("oneshot-test");
             let cx = Cx::root();
 
-            let operation = manager.test_oneshot_pingpong(&cx, 10).await
+            let operation = manager
+                .test_oneshot_pingpong(&cx, 10)
+                .await
                 .expect("Oneshot ping-pong should succeed");
 
-            assert_eq!(operation.operation_type, ChannelOperationType::OneshotPingPong);
+            assert_eq!(
+                operation.operation_type,
+                ChannelOperationType::OneshotPingPong
+            );
             assert_eq!(operation.message_count, 10);
             assert!(operation.success_rate >= 0.9); // Allow 10% failure rate
             assert_eq!(operation.concurrent_operations, 20); // 10 pairs * 2 tasks each
@@ -921,10 +976,15 @@ mod tests {
             let manager = RealChannelManager::new("watch-test");
             let cx = Cx::root();
 
-            let operation = manager.test_watch_value_sync(&cx, 20, 3).await
+            let operation = manager
+                .test_watch_value_sync(&cx, 20, 3)
+                .await
                 .expect("Watch value sync should succeed");
 
-            assert_eq!(operation.operation_type, ChannelOperationType::WatchValueSync);
+            assert_eq!(
+                operation.operation_type,
+                ChannelOperationType::WatchValueSync
+            );
             assert!(operation.success_rate >= 0.8); // Allow some missed observations
             assert!(operation.throughput_mps > 0.0);
             assert_eq!(operation.concurrent_operations, 4); // 1 updater + 3 watchers
@@ -957,10 +1017,15 @@ mod tests {
                 ..ChannelE2EConfig::default()
             };
 
-            let operation = manager.test_multithreaded_mpsc_stress(&cx, &config).await
+            let operation = manager
+                .test_multithreaded_mpsc_stress(&cx, &config)
+                .await
                 .expect("Multi-threaded MPSC stress should succeed");
 
-            assert_eq!(operation.operation_type, ChannelOperationType::MultithreadedMpsc);
+            assert_eq!(
+                operation.operation_type,
+                ChannelOperationType::MultithreadedMpsc
+            );
             assert!(operation.success_rate >= 0.9); // Allow 10% message loss under stress
             assert!(operation.throughput_mps > 0.0);
             assert_eq!(operation.concurrent_operations, 4); // 3 producers + 1 consumer
@@ -998,22 +1063,30 @@ mod tests {
             let mut all_operations = Vec::new();
 
             // 1. MPSC producer-consumer
-            let mpsc_op = manager.test_mpsc_producer_consumer(&cx, &config).await
+            let mpsc_op = manager
+                .test_mpsc_producer_consumer(&cx, &config)
+                .await
                 .expect("MPSC operation should succeed");
             all_operations.push(mpsc_op);
 
             // 2. Broadcast fanout
-            let broadcast_op = manager.test_broadcast_fanout(&cx, &config).await
+            let broadcast_op = manager
+                .test_broadcast_fanout(&cx, &config)
+                .await
                 .expect("Broadcast operation should succeed");
             all_operations.push(broadcast_op);
 
             // 3. Oneshot ping-pong
-            let oneshot_op = manager.test_oneshot_pingpong(&cx, 5).await
+            let oneshot_op = manager
+                .test_oneshot_pingpong(&cx, 5)
+                .await
                 .expect("Oneshot operation should succeed");
             all_operations.push(oneshot_op);
 
             // 4. Watch value sync
-            let watch_op = manager.test_watch_value_sync(&cx, 10, 2).await
+            let watch_op = manager
+                .test_watch_value_sync(&cx, 10, 2)
+                .await
                 .expect("Watch operation should succeed");
             all_operations.push(watch_op);
 

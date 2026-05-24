@@ -153,7 +153,8 @@ impl MockMultipartParser {
                 }
 
                 // Find next boundary or end
-                let next_boundary_pos = self.find_boundary(data, &boundary_bytes, pos)
+                let next_boundary_pos = self
+                    .find_boundary(data, &boundary_bytes, pos)
                     .or_else(|| self.find_boundary(data, &end_boundary, pos));
 
                 match next_boundary_pos {
@@ -194,20 +195,25 @@ impl MockMultipartParser {
             // Write Content-Disposition header
             if let Some(filename) = &field.filename {
                 result.extend_from_slice(
-                    format!("Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
-                            field.name, filename).as_bytes()
+                    format!(
+                        "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+                        field.name, filename
+                    )
+                    .as_bytes(),
                 );
             } else {
                 result.extend_from_slice(
-                    format!("Content-Disposition: form-data; name=\"{}\"\r\n", field.name).as_bytes()
+                    format!(
+                        "Content-Disposition: form-data; name=\"{}\"\r\n",
+                        field.name
+                    )
+                    .as_bytes(),
                 );
             }
 
             // Write Content-Type if present
             if let Some(content_type) = &field.content_type {
-                result.extend_from_slice(
-                    format!("Content-Type: {}\r\n", content_type).as_bytes()
-                );
+                result.extend_from_slice(format!("Content-Type: {}\r\n", content_type).as_bytes());
             }
 
             // Write additional headers
@@ -232,14 +238,16 @@ impl MockMultipartParser {
     }
 
     fn find_boundary(&self, data: &[u8], boundary: &[u8], start: usize) -> Option<usize> {
-        data[start..].windows(boundary.len())
+        data[start..]
+            .windows(boundary.len())
             .position(|window| window == boundary)
             .map(|pos| start + pos)
     }
 
     fn parse_part(&self, data: &[u8]) -> Result<MultipartField, String> {
         // Find end of headers (empty line)
-        let header_end = data.windows(4)
+        let header_end = data
+            .windows(4)
             .position(|window| window == b"\r\n\r\n")
             .or_else(|| data.windows(2).position(|window| window == b"\n\n"))
             .ok_or("No header/body separator found")?;
@@ -320,7 +328,8 @@ impl WebSocketFrameProcessor {
 
     /// Apply XOR masking to payload data
     pub fn apply_mask(&self, payload: &[u8], mask_key: &[u8; 4]) -> Vec<u8> {
-        payload.iter()
+        payload
+            .iter()
             .enumerate()
             .map(|(i, &byte)| byte ^ mask_key[i % 4])
             .collect()
@@ -337,16 +346,26 @@ impl WebSocketFrameProcessor {
 
         // First byte: FIN(1) + RSV(3) + Opcode(4)
         let mut first_byte = 0u8;
-        if frame.fin { first_byte |= 0x80; }
-        if frame.rsv1 { first_byte |= 0x40; }
-        if frame.rsv2 { first_byte |= 0x20; }
-        if frame.rsv3 { first_byte |= 0x10; }
+        if frame.fin {
+            first_byte |= 0x80;
+        }
+        if frame.rsv1 {
+            first_byte |= 0x40;
+        }
+        if frame.rsv2 {
+            first_byte |= 0x20;
+        }
+        if frame.rsv3 {
+            first_byte |= 0x10;
+        }
         first_byte |= frame.opcode & 0x0F;
         result.push(first_byte);
 
         // Second byte: MASK(1) + Payload length(7)
         let mut second_byte = 0u8;
-        if frame.masked { second_byte |= 0x80; }
+        if frame.masked {
+            second_byte |= 0x80;
+        }
 
         let payload_len = frame.payload.len() as u64;
         if payload_len < 126 {
@@ -411,8 +430,14 @@ impl WebSocketFrameProcessor {
                     return Err("Incomplete extended payload length".to_string());
                 }
                 let len = u64::from_be_bytes([
-                    data[pos], data[pos + 1], data[pos + 2], data[pos + 3],
-                    data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7],
+                    data[pos],
+                    data[pos + 1],
+                    data[pos + 2],
+                    data[pos + 3],
+                    data[pos + 4],
+                    data[pos + 5],
+                    data[pos + 6],
+                    data[pos + 7],
                 ]);
                 pos += 8;
                 len
@@ -506,9 +531,7 @@ impl SseEvent {
 
 impl SseStream {
     pub fn new() -> Self {
-        Self {
-            events: Vec::new(),
-        }
+        Self { events: Vec::new() }
     }
 
     pub fn add_event(&mut self, event: SseEvent) {
@@ -642,7 +665,10 @@ impl MockSessionManager {
             last_accessed: now,
         };
 
-        self.sessions.lock().unwrap().insert(session_id.clone(), session_data);
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session_id.clone(), session_data);
         session_id
     }
 
@@ -775,7 +801,6 @@ const WEB_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::MultipartFormData,
         description: "Round-trip parse/serialize maintains data integrity",
     },
-
     // WebSocket Frame Tests (RFC 6455)
     ConformanceCase {
         id: "WEB-WEBSOCKET-01",
@@ -798,7 +823,6 @@ const WEB_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::WebSocketFraming,
         description: "Preserve payload integrity through mask/unmask cycle",
     },
-
     // Server-Sent Events Tests (WHATWG HTML)
     ConformanceCase {
         id: "WEB-SSE-01",
@@ -821,7 +845,6 @@ const WEB_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::ServerSentEvents,
         description: "Maintain proper event boundaries and chunking",
     },
-
     // Session Management Tests
     ConformanceCase {
         id: "WEB-SESSION-01",
@@ -844,7 +867,6 @@ const WEB_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::SessionManagement,
         description: "Session data survives serialization round-trips",
     },
-
     // CSRF Protection Tests
     ConformanceCase {
         id: "WEB-CSRF-01",
@@ -922,9 +944,10 @@ mod tests {
 
         match parser.parse(multipart_data.as_bytes()) {
             Ok(parsed) => {
-                if parsed.fields.len() == 2 &&
-                   parsed.fields[0].name == "field1" &&
-                   parsed.fields[1].name == "field2" {
+                if parsed.fields.len() == 2
+                    && parsed.fields[0].name == "field1"
+                    && parsed.fields[1].name == "field2"
+                {
                     TestResult::Pass
                 } else {
                     TestResult::Fail {
@@ -955,9 +978,10 @@ mod tests {
             Ok(parsed) => {
                 if parsed.fields.len() == 1 {
                     let field = &parsed.fields[0];
-                    if field.name == "file" &&
-                       field.filename == Some("test.txt".to_string()) &&
-                       field.content_type == Some("text/plain".to_string()) {
+                    if field.name == "file"
+                        && field.filename == Some("test.txt".to_string())
+                        && field.content_type == Some("text/plain".to_string())
+                    {
                         TestResult::Pass
                     } else {
                         TestResult::Fail {
@@ -1003,9 +1027,10 @@ mod tests {
         let serialized = parser.serialize(&original);
         match parser.parse(&serialized) {
             Ok(parsed) => {
-                if parsed.fields.len() == original.fields.len() &&
-                   parsed.fields[0].body == original.fields[0].body &&
-                   parsed.fields[1].body == original.fields[1].body {
+                if parsed.fields.len() == original.fields.len()
+                    && parsed.fields[0].body == original.fields[0].body
+                    && parsed.fields[1].body == original.fields[1].body
+                {
                     TestResult::Pass
                 } else {
                     TestResult::Fail {
@@ -1129,18 +1154,9 @@ mod tests {
     fn test_sse_formatting() -> TestResult {
         let mut stream = SseStream::new();
 
-        stream.add_event(
-            SseEvent::new()
-                .id("1")
-                .event_type("message")
-                .data("Hello")
-        );
+        stream.add_event(SseEvent::new().id("1").event_type("message").data("Hello"));
 
-        stream.add_event(
-            SseEvent::new()
-                .data("World")
-                .retry(1000)
-        );
+        stream.add_event(SseEvent::new().data("World").retry(1000));
 
         let serialized = stream.serialize();
         let expected = "id: 1\nevent: message\ndata: Hello\n\ndata: World\nretry: 1000\n\n";
@@ -1149,7 +1165,10 @@ mod tests {
             TestResult::Pass
         } else {
             TestResult::Fail {
-                reason: format!("SSE formatting incorrect:\nExpected: {:?}\nActual: {:?}", expected, serialized),
+                reason: format!(
+                    "SSE formatting incorrect:\nExpected: {:?}\nActual: {:?}",
+                    expected, serialized
+                ),
             }
         }
     }
@@ -1157,12 +1176,7 @@ mod tests {
     fn test_sse_multiline_data() -> TestResult {
         let mut stream = SseStream::new();
 
-        stream.add_event(
-            SseEvent::new()
-                .data("Line 1")
-                .data("Line 2")
-                .data("Line 3")
-        );
+        stream.add_event(SseEvent::new().data("Line 1").data("Line 2").data("Line 3"));
 
         let serialized = stream.serialize();
         let expected = "data: Line 1\ndata: Line 2\ndata: Line 3\n\n";
@@ -1181,11 +1195,12 @@ mod tests {
 
         match SseStream::parse(sse_data) {
             Ok(stream) => {
-                if stream.events.len() == 2 &&
-                   stream.events[0].data.len() == 1 &&
-                   stream.events[0].data[0] == "Event 1" &&
-                   stream.events[1].data[0] == "Event 2" &&
-                   stream.events[1].id == Some("123".to_string()) {
+                if stream.events.len() == 2
+                    && stream.events[0].data.len() == 1
+                    && stream.events[0].data[0] == "Event 1"
+                    && stream.events[1].data[0] == "Event 2"
+                    && stream.events[1].id == Some("123".to_string())
+                {
                     TestResult::Pass
                 } else {
                     TestResult::Fail {
@@ -1294,7 +1309,9 @@ mod tests {
 
         // Generate multiple tokens for the same session
         let session_id = "test_session_123";
-        let tokens: Vec<String> = (0..10).map(|_| manager.generate_token(session_id)).collect();
+        let tokens: Vec<String> = (0..10)
+            .map(|_| manager.generate_token(session_id))
+            .collect();
 
         // All tokens should be valid format and unique
         let mut unique_tokens = std::collections::HashSet::new();
@@ -1379,11 +1396,14 @@ mod tests {
         }
 
         let total = pass_count + fail_count + skip_count;
-        println!("\nWeb Conformance Results: {}/{} passed, {} failed, {} skipped",
-                pass_count, total, fail_count, skip_count);
+        println!(
+            "\nWeb Conformance Results: {}/{} passed, {} failed, {} skipped",
+            pass_count, total, fail_count, skip_count
+        );
 
         // Require 100% MUST compliance
-        let must_cases: Vec<_> = WEB_CONFORMANCE_CASES.iter()
+        let must_cases: Vec<_> = WEB_CONFORMANCE_CASES
+            .iter()
             .filter(|c| c.level == RequirementLevel::Must)
             .collect();
 
@@ -1394,7 +1414,11 @@ mod tests {
             }
         }
 
-        assert_eq!(must_failures, 0, "{} MUST requirements failed", must_failures);
+        assert_eq!(
+            must_failures, 0,
+            "{} MUST requirements failed",
+            must_failures
+        );
     }
 
     // Property-based testing

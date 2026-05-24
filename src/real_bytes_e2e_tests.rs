@@ -18,10 +18,10 @@ use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use std::io::{self, Cursor};
 use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH, Instant};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
 
 // Structured JSON-line logging for CI debugging
@@ -47,8 +47,10 @@ impl TestLogger {
             .unwrap()
             .as_millis();
 
-        eprintln!("{{\"timestamp\":{},\"test\":\"{}\",\"elapsed_ms\":{},\"event\":\"{}\",\"data\":{}}}",
-            timestamp, self.test_name, elapsed, event_type, data);
+        eprintln!(
+            "{{\"timestamp\":{},\"test\":\"{}\",\"elapsed_ms\":{},\"event\":\"{}\",\"data\":{}}}",
+            timestamp, self.test_name, elapsed, event_type, data
+        );
     }
 
     fn log_phase(&self, phase: &str) {
@@ -60,18 +62,24 @@ impl TestLogger {
     }
 
     fn log_assertion(&self, assertion: &str, passed: bool, details: serde_json::Value) {
-        self.log_event("assertion", serde_json::json!({
-            "assertion": assertion,
-            "passed": passed,
-            "details": details
-        }));
+        self.log_event(
+            "assertion",
+            serde_json::json!({
+                "assertion": assertion,
+                "passed": passed,
+                "details": details
+            }),
+        );
     }
 }
 
 impl Drop for TestLogger {
     fn drop(&mut self) {
         let elapsed = self.start_time.elapsed().as_millis();
-        self.log_event("test_end", serde_json::json!({"total_duration_ms": elapsed}));
+        self.log_event(
+            "test_end",
+            serde_json::json!({"total_duration_ms": elapsed}),
+        );
     }
 }
 
@@ -161,7 +169,10 @@ impl BytesTestHarness {
 
         logger.log_event("harness_init", serde_json::json!({}));
 
-        Self { logger, allocation_tracker }
+        Self {
+            logger,
+            allocation_tracker,
+        }
     }
 
     /// Test zero-copy cloning and slicing
@@ -169,12 +180,17 @@ impl BytesTestHarness {
         self.logger.log_phase("zero_copy_setup");
 
         // Create test data
-        let test_data = b"Hello, this is a test string for zero-copy validation with asupersync bytes!".to_vec();
+        let test_data =
+            b"Hello, this is a test string for zero-copy validation with asupersync bytes!"
+                .to_vec();
         let original_size = test_data.len();
 
-        self.logger.log_event("test_data_prepared", serde_json::json!({
-            "original_size": original_size
-        }));
+        self.logger.log_event(
+            "test_data_prepared",
+            serde_json::json!({
+                "original_size": original_size
+            }),
+        );
 
         // Phase 1: Create Bytes from data
         self.logger.log_phase("bytes_creation");
@@ -199,11 +215,15 @@ impl BytesTestHarness {
 
         let (allocs_for_cloning, bytes_for_cloning) = self.allocation_tracker.get_stats();
 
-        self.logger.log_assertion("zero_copy_cloning", allocs_for_cloning == 0, serde_json::json!({
-            "allocations_for_cloning": allocs_for_cloning,
-            "bytes_for_cloning": bytes_for_cloning,
-            "clone_count": 3
-        }));
+        self.logger.log_assertion(
+            "zero_copy_cloning",
+            allocs_for_cloning == 0,
+            serde_json::json!({
+                "allocations_for_cloning": allocs_for_cloning,
+                "bytes_for_cloning": bytes_for_cloning,
+                "clone_count": 3
+            }),
+        );
 
         // Cloning should be zero-allocation
         assert_eq!(allocs_for_cloning, 0, "Cloning should be zero-allocation");
@@ -226,12 +246,16 @@ impl BytesTestHarness {
 
         let (allocs_for_slicing, bytes_for_slicing) = self.allocation_tracker.get_stats();
 
-        self.logger.log_assertion("zero_copy_slicing", allocs_for_slicing == 0, serde_json::json!({
-            "allocations_for_slicing": allocs_for_slicing,
-            "bytes_for_slicing": bytes_for_slicing,
-            "slice_count": 3,
-            "slice_sizes": [slice1.len(), slice2.len(), slice3.len()]
-        }));
+        self.logger.log_assertion(
+            "zero_copy_slicing",
+            allocs_for_slicing == 0,
+            serde_json::json!({
+                "allocations_for_slicing": allocs_for_slicing,
+                "bytes_for_slicing": bytes_for_slicing,
+                "slice_count": 3,
+                "slice_sizes": [slice1.len(), slice2.len(), slice3.len()]
+            }),
+        );
 
         // Slicing should be zero-allocation
         assert_eq!(allocs_for_slicing, 0, "Slicing should be zero-allocation");
@@ -241,10 +265,14 @@ impl BytesTestHarness {
         assert_eq!(&slice2[..], &test_data[10..20]);
         assert_eq!(&slice3[..], &test_data[20..]);
 
-        self.logger.log_assertion("zero_copy_validation_complete", true, serde_json::json!({
-            "original_size": original_size,
-            "total_zero_copy_ops": 6
-        }));
+        self.logger.log_assertion(
+            "zero_copy_validation_complete",
+            true,
+            serde_json::json!({
+                "original_size": original_size,
+                "total_zero_copy_ops": 6
+            }),
+        );
     }
 
     /// Test Bytes/BytesMut integration with I/O operations
@@ -259,13 +287,17 @@ impl BytesTestHarness {
             ((0..256).collect::<Vec<u8>>(), "sequence_256"),
         ];
 
-        self.logger.log_event("io_patterns_prepared", serde_json::json!({
-            "pattern_count": test_patterns.len(),
-            "total_test_bytes": test_patterns.iter().map(|(data, _)| data.len()).sum::<usize>()
-        }));
+        self.logger.log_event(
+            "io_patterns_prepared",
+            serde_json::json!({
+                "pattern_count": test_patterns.len(),
+                "total_test_bytes": test_patterns.iter().map(|(data, _)| data.len()).sum::<usize>()
+            }),
+        );
 
         for (test_data, pattern_name) in test_patterns {
-            self.logger.log_phase(&format!("io_pattern_{}", pattern_name));
+            self.logger
+                .log_phase(&format!("io_pattern_{}", pattern_name));
 
             // Phase 1: Write Bytes through AsyncWrite
             self.logger.log_phase("async_write");
@@ -274,7 +306,9 @@ impl BytesTestHarness {
 
             {
                 let mut writer = MockAsyncIo::new(Vec::new());
-                writer.write_all(&bytes_to_write).await
+                writer
+                    .write_all(&bytes_to_write)
+                    .await
                     .expect("Bytes write should succeed");
                 writer.flush().await.expect("Write flush should succeed");
 
@@ -288,17 +322,26 @@ impl BytesTestHarness {
                 "write_preserved_size": write_buffer.len() == test_data.len()
             }));
 
-            assert_eq!(write_buffer.len(), test_data.len(),
-                "Write should preserve data size for {}", pattern_name);
-            assert_eq!(write_buffer, test_data,
-                "Write should preserve data content for {}", pattern_name);
+            assert_eq!(
+                write_buffer.len(),
+                test_data.len(),
+                "Write should preserve data size for {}",
+                pattern_name
+            );
+            assert_eq!(
+                write_buffer, test_data,
+                "Write should preserve data content for {}",
+                pattern_name
+            );
 
             // Phase 2: Read into BytesMut through AsyncRead
             self.logger.log_phase("async_read");
             let mut read_buffer = BytesMut::with_capacity(test_data.len() + 100);
             let mut reader = MockAsyncIo::new(Cursor::new(write_buffer));
 
-            let bytes_read = reader.read_buf(&mut read_buffer).await
+            let bytes_read = reader
+                .read_buf(&mut read_buffer)
+                .await
                 .expect("Bytes read should succeed");
 
             self.logger.log_metrics(serde_json::json!({
@@ -308,10 +351,18 @@ impl BytesTestHarness {
                 "buffer_capacity": read_buffer.capacity()
             }));
 
-            assert_eq!(bytes_read, test_data.len(),
-                "Should read all bytes for {}", pattern_name);
-            assert_eq!(&read_buffer[..], &test_data[..],
-                "Read data should match original for {}", pattern_name);
+            assert_eq!(
+                bytes_read,
+                test_data.len(),
+                "Should read all bytes for {}",
+                pattern_name
+            );
+            assert_eq!(
+                &read_buffer[..],
+                &test_data[..],
+                "Read data should match original for {}",
+                pattern_name
+            );
 
             // Phase 3: Convert BytesMut to Bytes (zero-copy where possible)
             self.logger.log_phase("bytes_mut_conversion");
@@ -320,20 +371,32 @@ impl BytesTestHarness {
             let final_bytes = read_buffer.freeze();
             let (allocs_for_freeze, bytes_for_freeze) = self.allocation_tracker.get_stats();
 
-            self.logger.log_assertion("freeze_zero_copy", allocs_for_freeze == 0, serde_json::json!({
-                "pattern": pattern_name,
-                "allocations_for_freeze": allocs_for_freeze,
-                "bytes_for_freeze": bytes_for_freeze,
-                "final_bytes_len": final_bytes.len()
-            }));
+            self.logger.log_assertion(
+                "freeze_zero_copy",
+                allocs_for_freeze == 0,
+                serde_json::json!({
+                    "pattern": pattern_name,
+                    "allocations_for_freeze": allocs_for_freeze,
+                    "bytes_for_freeze": bytes_for_freeze,
+                    "final_bytes_len": final_bytes.len()
+                }),
+            );
 
-            assert_eq!(&final_bytes[..], &test_data[..],
-                "Frozen bytes should match original for {}", pattern_name);
+            assert_eq!(
+                &final_bytes[..],
+                &test_data[..],
+                "Frozen bytes should match original for {}",
+                pattern_name
+            );
 
-            self.logger.log_assertion("io_pattern_complete", true, serde_json::json!({
-                "pattern": pattern_name,
-                "all_validations_passed": true
-            }));
+            self.logger.log_assertion(
+                "io_pattern_complete",
+                true,
+                serde_json::json!({
+                    "pattern": pattern_name,
+                    "all_validations_passed": true
+                }),
+            );
         }
     }
 
@@ -349,7 +412,8 @@ impl BytesTestHarness {
         ];
 
         for (pattern_name, append_sizes) in growth_tests {
-            self.logger.log_phase(&format!("growth_pattern_{}", pattern_name));
+            self.logger
+                .log_phase(&format!("growth_pattern_{}", pattern_name));
 
             self.allocation_tracker.reset();
             let mut bytes_mut = BytesMut::new();
@@ -369,15 +433,18 @@ impl BytesTestHarness {
                 let new_allocations = allocs_after - allocs_before;
                 allocations_per_append.push(new_allocations);
 
-                self.logger.log_event("append_step", serde_json::json!({
-                    "pattern": pattern_name,
-                    "step": i,
-                    "append_size": append_size,
-                    "new_allocations": new_allocations,
-                    "total_length": bytes_mut.len(),
-                    "capacity": bytes_mut.capacity(),
-                    "total_allocated": bytes_allocated
-                }));
+                self.logger.log_event(
+                    "append_step",
+                    serde_json::json!({
+                        "pattern": pattern_name,
+                        "step": i,
+                        "append_size": append_size,
+                        "new_allocations": new_allocations,
+                        "total_length": bytes_mut.len(),
+                        "capacity": bytes_mut.capacity(),
+                        "total_allocated": bytes_allocated
+                    }),
+                );
             }
 
             let (final_allocs, final_bytes_allocated) = self.allocation_tracker.get_stats();
@@ -399,16 +466,28 @@ impl BytesTestHarness {
                 expected_data.extend(vec![i as u8; append_size]);
             }
 
-            assert_eq!(bytes_mut.len(), total_appended,
-                "Length should match total appended for {}", pattern_name);
-            assert_eq!(&bytes_mut[..], &expected_data[..],
-                "Data should match expected pattern for {}", pattern_name);
+            assert_eq!(
+                bytes_mut.len(),
+                total_appended,
+                "Length should match total appended for {}",
+                pattern_name
+            );
+            assert_eq!(
+                &bytes_mut[..],
+                &expected_data[..],
+                "Data should match expected pattern for {}",
+                pattern_name
+            );
 
-            self.logger.log_assertion("growth_pattern_validated", true, serde_json::json!({
-                "pattern": pattern_name,
-                "data_integrity": true,
-                "allocation_efficiency": final_allocs <= append_sizes.len() * 2 // Reasonable upper bound
-            }));
+            self.logger.log_assertion(
+                "growth_pattern_validated",
+                true,
+                serde_json::json!({
+                    "pattern": pattern_name,
+                    "data_integrity": true,
+                    "allocation_efficiency": final_allocs <= append_sizes.len() * 2 // Reasonable upper bound
+                }),
+            );
         }
     }
 
@@ -438,8 +517,11 @@ impl BytesTestHarness {
             "remaining_capacity": bytes_mut.remaining_mut()
         }));
 
-        assert_eq!(bytes_mut.len(), expected_len,
-            "BufMut should have correct length");
+        assert_eq!(
+            bytes_mut.len(),
+            expected_len,
+            "BufMut should have correct length"
+        );
 
         // Phase 2: Convert to Bytes and test Buf operations
         self.logger.log_phase("buf_operations");
@@ -450,8 +532,16 @@ impl BytesTestHarness {
         // Get the values back
         assert_eq!(Buf::get_u8(&mut buf), 0x42, "Should read u8 correctly");
         assert_eq!(Buf::get_u16(&mut buf), 0x1234, "Should read u16 correctly");
-        assert_eq!(Buf::get_u32(&mut buf), 0x56789ABC, "Should read u32 correctly");
-        assert_eq!(Buf::get_u64(&mut buf), 0xDEADBEEFCAFEBABE, "Should read u64 correctly");
+        assert_eq!(
+            Buf::get_u32(&mut buf),
+            0x56789ABC,
+            "Should read u32 correctly"
+        );
+        assert_eq!(
+            Buf::get_u64(&mut buf),
+            0xDEADBEEFCAFEBABE,
+            "Should read u64 correctly"
+        );
 
         let mut text_buf = vec![0u8; test_data.len()];
         buf.copy_to_slice(&mut text_buf);
@@ -459,10 +549,14 @@ impl BytesTestHarness {
 
         assert!(!buf.has_remaining(), "Buffer should be fully consumed");
 
-        self.logger.log_assertion("buf_trait_operations", true, serde_json::json!({
-            "all_reads_correct": true,
-            "buffer_fully_consumed": true
-        }));
+        self.logger.log_assertion(
+            "buf_trait_operations",
+            true,
+            serde_json::json!({
+                "all_reads_correct": true,
+                "buffer_fully_consumed": true
+            }),
+        );
 
         // Phase 3: Test chunked operations
         self.logger.log_phase("chunked_operations");
@@ -474,16 +568,26 @@ impl BytesTestHarness {
             chunked_mut.put_slice(chunk);
         }
 
-        assert_eq!(chunked_mut.len(), large_data.len(),
-            "Chunked operations should preserve total size");
-        assert_eq!(&chunked_mut[..], &large_data[..],
-            "Chunked data should match original");
+        assert_eq!(
+            chunked_mut.len(),
+            large_data.len(),
+            "Chunked operations should preserve total size"
+        );
+        assert_eq!(
+            &chunked_mut[..],
+            &large_data[..],
+            "Chunked data should match original"
+        );
 
-        self.logger.log_assertion("chunked_operations", true, serde_json::json!({
-            "chunk_count": large_data.len() / 256,
-            "total_size": large_data.len(),
-            "data_integrity": true
-        }));
+        self.logger.log_assertion(
+            "chunked_operations",
+            true,
+            serde_json::json!({
+                "chunk_count": large_data.len() / 256,
+                "total_size": large_data.len(),
+                "data_integrity": true
+            }),
+        );
     }
 
     /// Test memory efficiency with large data sets
@@ -493,10 +597,13 @@ impl BytesTestHarness {
         let large_size = 1_048_576; // 1MB
         let test_data = vec![0x5A; large_size];
 
-        self.logger.log_event("large_data_prepared", serde_json::json!({
-            "data_size": large_size,
-            "data_pattern": "0x5A"
-        }));
+        self.logger.log_event(
+            "large_data_prepared",
+            serde_json::json!({
+                "data_size": large_size,
+                "data_pattern": "0x5A"
+            }),
+        );
 
         // Phase 1: Test memory-efficient operations
         self.logger.log_phase("memory_efficient_ops");
@@ -534,7 +641,10 @@ impl BytesTestHarness {
         let mut write_buffer = Vec::new();
         {
             let mut writer = MockAsyncIo::new(Vec::new());
-            writer.write_all(&bytes).await.expect("Large write should succeed");
+            writer
+                .write_all(&bytes)
+                .await
+                .expect("Large write should succeed");
             writer.flush().await.expect("Large flush should succeed");
             write_buffer = writer.inner;
         }
@@ -545,7 +655,10 @@ impl BytesTestHarness {
         let mut reader = MockAsyncIo::new(Cursor::new(write_buffer));
 
         let read_start = Instant::now();
-        let bytes_read = reader.read_buf(&mut read_buffer).await.expect("Large read should succeed");
+        let bytes_read = reader
+            .read_buf(&mut read_buffer)
+            .await
+            .expect("Large read should succeed");
         let read_duration = read_start.elapsed();
 
         self.logger.log_metrics(serde_json::json!({
@@ -558,7 +671,11 @@ impl BytesTestHarness {
         }));
 
         assert_eq!(bytes_read, large_size, "Should read all large data");
-        assert_eq!(&read_buffer[..], &test_data[..], "Large data should match after I/O");
+        assert_eq!(
+            &read_buffer[..],
+            &test_data[..],
+            "Large data should match after I/O"
+        );
 
         self.logger.log_assertion("memory_efficiency_validated", true, serde_json::json!({
             "large_data_integrity": true,
@@ -614,10 +731,13 @@ async fn test_bytes_full_pipeline_e2e() {
         b"Message 4: Final message with unicode \xF0\x9F\x9A\x80".to_vec(),
     ];
 
-    harness.logger.log_event("pipeline_messages", serde_json::json!({
-        "message_count": test_messages.len(),
-        "total_bytes": test_messages.iter().map(|m| m.len()).sum::<usize>()
-    }));
+    harness.logger.log_event(
+        "pipeline_messages",
+        serde_json::json!({
+            "message_count": test_messages.len(),
+            "total_bytes": test_messages.iter().map(|m| m.len()).sum::<usize>()
+        }),
+    );
 
     // Phase 1: Assemble messages using BytesMut
     harness.logger.log_phase("pipeline_assembly");
@@ -643,7 +763,10 @@ async fn test_bytes_full_pipeline_e2e() {
     let mut io_buffer = Vec::new();
     {
         let mut writer = MockAsyncIo::new(Vec::new());
-        writer.write_all(&clone_for_io).await.expect("Pipeline write should succeed");
+        writer
+            .write_all(&clone_for_io)
+            .await
+            .expect("Pipeline write should succeed");
         writer.flush().await.expect("Pipeline flush should succeed");
         io_buffer = writer.inner;
     }
@@ -652,7 +775,10 @@ async fn test_bytes_full_pipeline_e2e() {
     harness.logger.log_phase("pipeline_parse");
     let mut reader = MockAsyncIo::new(Cursor::new(io_buffer));
     let mut read_buffer = BytesMut::new();
-    reader.read_buf(&mut read_buffer).await.expect("Pipeline read should succeed");
+    reader
+        .read_buf(&mut read_buffer)
+        .await
+        .expect("Pipeline read should succeed");
 
     // Parse messages back
     let mut parsed_messages = Vec::new();
@@ -672,21 +798,31 @@ async fn test_bytes_full_pipeline_e2e() {
     // Phase 5: Validate full pipeline
     harness.logger.log_phase("pipeline_validation");
 
-    assert_eq!(parsed_messages.len(), test_messages.len(),
-        "Pipeline should preserve message count");
+    assert_eq!(
+        parsed_messages.len(),
+        test_messages.len(),
+        "Pipeline should preserve message count"
+    );
 
     for (i, (original, parsed)) in test_messages.iter().zip(parsed_messages.iter()).enumerate() {
-        assert_eq!(original, parsed,
-            "Pipeline message {} should be preserved", i);
+        assert_eq!(
+            original, parsed,
+            "Pipeline message {} should be preserved",
+            i
+        );
     }
 
-    harness.logger.log_assertion("bytes_pipeline_complete", true, serde_json::json!({
-        "original_messages": test_messages.len(),
-        "parsed_messages": parsed_messages.len(),
-        "assembly_allocations": allocs_assembly,
-        "assembly_bytes": bytes_assembly,
-        "all_validated": true
-    }));
+    harness.logger.log_assertion(
+        "bytes_pipeline_complete",
+        true,
+        serde_json::json!({
+            "original_messages": test_messages.len(),
+            "parsed_messages": parsed_messages.len(),
+            "assembly_allocations": allocs_assembly,
+            "assembly_bytes": bytes_assembly,
+            "all_validated": true
+        }),
+    );
 
     harness.logger.log_phase("bytes_pipeline_complete");
 }

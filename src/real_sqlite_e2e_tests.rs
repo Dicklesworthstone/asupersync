@@ -12,14 +12,14 @@ mod sqlite_e2e_tests {
     use crate::cx::{Cx, CxBuilder};
     use crate::database::{SqliteConnection, SqliteError, SqliteRow, SqliteValue};
     use crate::runtime::RuntimeBuilder;
-    use crate::time::{sleep, Duration, Instant};
+    use crate::time::{Duration, Instant, sleep};
     use crate::types::{Budget, Outcome};
     use serde_json;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     /// Real SQLite database manager for E2E testing
     pub struct RealSqliteDatabase {
@@ -45,7 +45,7 @@ mod sqlite_e2e_tests {
     impl Default for SqliteE2EConfig {
         fn default() -> Self {
             Self {
-                use_memory: true, // Safer for E2E tests
+                use_memory: true,  // Safer for E2E tests
                 enable_wal: false, // Simpler for testing
                 busy_timeout_ms: 1000,
                 cache_size: -2000, // 2MB cache
@@ -112,10 +112,12 @@ mod sqlite_e2e_tests {
             }
 
             let mut details = HashMap::new();
-            details.insert("query_start_time".to_string(),
+            details.insert(
+                "query_start_time".to_string(),
                 serde_json::Value::Number(serde_json::Number::from(
-                    self.start_time.elapsed().as_millis() as u64
-                )));
+                    self.start_time.elapsed().as_millis() as u64,
+                )),
+            );
 
             let event = SqliteLogEvent {
                 timestamp: self.start_time.elapsed().as_micros() as u64,
@@ -142,22 +144,37 @@ mod sqlite_e2e_tests {
             }
         }
 
-        pub fn log_query_complete(&self, tracker: &QueryTracker, rows_affected: i64, error: Option<&str>) {
+        pub fn log_query_complete(
+            &self,
+            tracker: &QueryTracker,
+            rows_affected: i64,
+            error: Option<&str>,
+        ) {
             let execution_time = tracker.start_time.elapsed();
 
             let mut details = HashMap::new();
-            details.insert("query_complete_time".to_string(),
+            details.insert(
+                "query_complete_time".to_string(),
                 serde_json::Value::Number(serde_json::Number::from(
-                    self.start_time.elapsed().as_millis() as u64
-                )));
+                    self.start_time.elapsed().as_millis() as u64,
+                )),
+            );
 
             let event = SqliteLogEvent {
                 timestamp: self.start_time.elapsed().as_micros() as u64,
-                event_type: if error.is_some() { "query_error".to_string() } else { "query_complete".to_string() },
+                event_type: if error.is_some() {
+                    "query_error".to_string()
+                } else {
+                    "query_complete".to_string()
+                },
                 operation: Self::extract_operation(&tracker.sql),
                 sql_query: Some(tracker.sql.clone()),
                 parameters: None,
-                rows_affected: if error.is_none() { Some(rows_affected) } else { None },
+                rows_affected: if error.is_none() {
+                    Some(rows_affected)
+                } else {
+                    None
+                },
                 execution_time_ms: Some(execution_time.as_millis() as u64),
                 error: error.map(String::from),
                 connection_id: Some("main".to_string()),
@@ -170,7 +187,12 @@ mod sqlite_e2e_tests {
             }
         }
 
-        pub fn log_transaction_event(&self, event_type: &str, transaction_id: &str, details: HashMap<String, serde_json::Value>) {
+        pub fn log_transaction_event(
+            &self,
+            event_type: &str,
+            transaction_id: &str,
+            details: HashMap<String, serde_json::Value>,
+        ) {
             let event = SqliteLogEvent {
                 timestamp: self.start_time.elapsed().as_micros() as u64,
                 event_type: event_type.to_string(),
@@ -192,17 +214,29 @@ mod sqlite_e2e_tests {
 
         fn extract_operation(sql: &str) -> String {
             let trimmed = sql.trim().to_uppercase();
-            if trimmed.starts_with("SELECT") { "SELECT".to_string() }
-            else if trimmed.starts_with("INSERT") { "INSERT".to_string() }
-            else if trimmed.starts_with("UPDATE") { "UPDATE".to_string() }
-            else if trimmed.starts_with("DELETE") { "DELETE".to_string() }
-            else if trimmed.starts_with("CREATE") { "CREATE".to_string() }
-            else if trimmed.starts_with("DROP") { "DROP".to_string() }
-            else if trimmed.starts_with("ALTER") { "ALTER".to_string() }
-            else if trimmed.starts_with("BEGIN") { "BEGIN".to_string() }
-            else if trimmed.starts_with("COMMIT") { "COMMIT".to_string() }
-            else if trimmed.starts_with("ROLLBACK") { "ROLLBACK".to_string() }
-            else { "OTHER".to_string() }
+            if trimmed.starts_with("SELECT") {
+                "SELECT".to_string()
+            } else if trimmed.starts_with("INSERT") {
+                "INSERT".to_string()
+            } else if trimmed.starts_with("UPDATE") {
+                "UPDATE".to_string()
+            } else if trimmed.starts_with("DELETE") {
+                "DELETE".to_string()
+            } else if trimmed.starts_with("CREATE") {
+                "CREATE".to_string()
+            } else if trimmed.starts_with("DROP") {
+                "DROP".to_string()
+            } else if trimmed.starts_with("ALTER") {
+                "ALTER".to_string()
+            } else if trimmed.starts_with("BEGIN") {
+                "BEGIN".to_string()
+            } else if trimmed.starts_with("COMMIT") {
+                "COMMIT".to_string()
+            } else if trimmed.starts_with("ROLLBACK") {
+                "ROLLBACK".to_string()
+            } else {
+                "OTHER".to_string()
+            }
         }
 
         pub fn export_json(&self) -> String {
@@ -261,18 +295,26 @@ mod sqlite_e2e_tests {
         /// Validate environment is safe for real database testing
         fn validate_test_environment() -> Result<(), SqliteError> {
             if std::env::var("NODE_ENV").unwrap_or_default() == "production" {
-                return Err(SqliteError::Connection("Cannot run real database E2E tests in production environment".to_string()));
+                return Err(SqliteError::Connection(
+                    "Cannot run real database E2E tests in production environment".to_string(),
+                ));
             }
 
             if std::env::var("REAL_SERVICE_TESTS").unwrap_or_default() != "true" {
-                return Err(SqliteError::Connection("Set REAL_SERVICE_TESTS=true to enable real service testing".to_string()));
+                return Err(SqliteError::Connection(
+                    "Set REAL_SERVICE_TESTS=true to enable real service testing".to_string(),
+                ));
             }
 
             Ok(())
         }
 
         /// Configure database with provided settings
-        async fn configure_database(cx: &Cx, conn: &SqliteConnection, config: &SqliteE2EConfig) -> Result<(), SqliteError> {
+        async fn configure_database(
+            cx: &Cx,
+            conn: &SqliteConnection,
+            config: &SqliteE2EConfig,
+        ) -> Result<(), SqliteError> {
             // Set pragmas based on configuration
             if config.foreign_keys {
                 conn.execute_batch(cx, "PRAGMA foreign_keys = ON;").await?;
@@ -324,15 +366,27 @@ mod sqlite_e2e_tests {
 
                     let operation = SqliteE2ELogger::extract_operation(sql);
                     match operation.as_str() {
-                        "INSERT" => { self.stats.rows_inserted.fetch_add(rows_affected as u64, Ordering::Relaxed); }
-                        "UPDATE" => { self.stats.rows_updated.fetch_add(rows_affected as u64, Ordering::Relaxed); }
-                        "DELETE" => { self.stats.rows_deleted.fetch_add(rows_affected as u64, Ordering::Relaxed); }
+                        "INSERT" => {
+                            self.stats
+                                .rows_inserted
+                                .fetch_add(rows_affected as u64, Ordering::Relaxed);
+                        }
+                        "UPDATE" => {
+                            self.stats
+                                .rows_updated
+                                .fetch_add(rows_affected as u64, Ordering::Relaxed);
+                        }
+                        "DELETE" => {
+                            self.stats
+                                .rows_deleted
+                                .fetch_add(rows_affected as u64, Ordering::Relaxed);
+                        }
                         _ => {}
                     }
 
                     logger.log_query_complete(&tracker, rows_affected, None);
                     Ok(rows_affected)
-                },
+                }
                 Err(e) => {
                     self.stats.query_errors.fetch_add(1, Ordering::Relaxed);
                     logger.log_query_complete(&tracker, 0, Some(&e.to_string()));
@@ -354,11 +408,13 @@ mod sqlite_e2e_tests {
             match self.connection.query(cx, sql, params).await {
                 Ok(rows) => {
                     self.stats.queries_executed.fetch_add(1, Ordering::Relaxed);
-                    self.stats.rows_selected.fetch_add(rows.len() as u64, Ordering::Relaxed);
+                    self.stats
+                        .rows_selected
+                        .fetch_add(rows.len() as u64, Ordering::Relaxed);
 
                     logger.log_query_complete(&tracker, rows.len() as i64, None);
                     Ok(rows)
-                },
+                }
                 Err(e) => {
                     self.stats.query_errors.fetch_add(1, Ordering::Relaxed);
                     logger.log_query_complete(&tracker, 0, Some(&e.to_string()));
@@ -395,67 +451,110 @@ mod sqlite_e2e_tests {
         let database = RealSqliteDatabase::new(&cx, config).await?;
 
         // Create test table
-        database.execute_with_tracking(&cx, "
+        database
+            .execute_with_tracking(
+                &cx,
+                "
             CREATE TABLE users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 email TEXT UNIQUE,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             );
-        ", &[], &logger).await?;
+        ",
+                &[],
+                &logger,
+            )
+            .await?;
 
         // Insert test data
         let insert_params = vec![
             SqliteValue::Text("Alice Johnson".to_string()),
             SqliteValue::Text("alice@example.com".to_string()),
         ];
-        let rows_affected = database.execute_with_tracking(&cx,
-            "INSERT INTO users (name, email) VALUES (?, ?)",
-            &insert_params,
-            &logger
-        ).await?;
+        let rows_affected = database
+            .execute_with_tracking(
+                &cx,
+                "INSERT INTO users (name, email) VALUES (?, ?)",
+                &insert_params,
+                &logger,
+            )
+            .await?;
 
         assert_eq!(rows_affected, 1, "Should insert exactly one row");
 
         // Query data
-        let rows = database.query_with_tracking(&cx, "SELECT * FROM users WHERE name = ?",
-            &[SqliteValue::Text("Alice Johnson".to_string())], &logger).await?;
+        let rows = database
+            .query_with_tracking(
+                &cx,
+                "SELECT * FROM users WHERE name = ?",
+                &[SqliteValue::Text("Alice Johnson".to_string())],
+                &logger,
+            )
+            .await?;
 
         assert_eq!(rows.len(), 1, "Should find exactly one user");
         assert_eq!(rows[0].get_str("name")?, "Alice Johnson");
         assert_eq!(rows[0].get_str("email")?, "alice@example.com");
 
         // Update data
-        let update_rows = database.execute_with_tracking(&cx,
-            "UPDATE users SET email = ? WHERE name = ?",
-            &[
-                SqliteValue::Text("alice.johnson@example.com".to_string()),
-                SqliteValue::Text("Alice Johnson".to_string())
-            ],
-            &logger
-        ).await?;
+        let update_rows = database
+            .execute_with_tracking(
+                &cx,
+                "UPDATE users SET email = ? WHERE name = ?",
+                &[
+                    SqliteValue::Text("alice.johnson@example.com".to_string()),
+                    SqliteValue::Text("Alice Johnson".to_string()),
+                ],
+                &logger,
+            )
+            .await?;
 
         assert_eq!(update_rows, 1, "Should update exactly one row");
 
         // Delete data
-        let delete_rows = database.execute_with_tracking(&cx,
-            "DELETE FROM users WHERE name = ?",
-            &[SqliteValue::Text("Alice Johnson".to_string())],
-            &logger
-        ).await?;
+        let delete_rows = database
+            .execute_with_tracking(
+                &cx,
+                "DELETE FROM users WHERE name = ?",
+                &[SqliteValue::Text("Alice Johnson".to_string())],
+                &logger,
+            )
+            .await?;
 
         assert_eq!(delete_rows, 1, "Should delete exactly one row");
 
         // Verify deletion
-        let remaining_rows = database.query_with_tracking(&cx, "SELECT COUNT(*) as count FROM users", &[], &logger).await?;
-        assert_eq!(remaining_rows[0].get_i64("count")?, 0, "Table should be empty after deletion");
+        let remaining_rows = database
+            .query_with_tracking(&cx, "SELECT COUNT(*) as count FROM users", &[], &logger)
+            .await?;
+        assert_eq!(
+            remaining_rows[0].get_i64("count")?,
+            0,
+            "Table should be empty after deletion"
+        );
 
         // Verify statistics
         let stats = database.stats();
-        assert!(stats.queries_executed.load(Ordering::Relaxed) >= 5, "Should have executed multiple queries");
-        assert_eq!(stats.rows_inserted.load(Ordering::Relaxed), 1, "Should have inserted one row");
-        assert_eq!(stats.rows_updated.load(Ordering::Relaxed), 1, "Should have updated one row");
-        assert_eq!(stats.rows_deleted.load(Ordering::Relaxed), 1, "Should have deleted one row");
+        assert!(
+            stats.queries_executed.load(Ordering::Relaxed) >= 5,
+            "Should have executed multiple queries"
+        );
+        assert_eq!(
+            stats.rows_inserted.load(Ordering::Relaxed),
+            1,
+            "Should have inserted one row"
+        );
+        assert_eq!(
+            stats.rows_updated.load(Ordering::Relaxed),
+            1,
+            "Should have updated one row"
+        );
+        assert_eq!(
+            stats.rows_deleted.load(Ordering::Relaxed),
+            1,
+            "Should have deleted one row"
+        );
 
         eprintln!("SQLite CRUD E2E structured log:\n{}", logger.export_json());
         Ok(())
@@ -475,64 +574,131 @@ mod sqlite_e2e_tests {
         let database = RealSqliteDatabase::new(&cx, config).await?;
 
         // Set up test table
-        database.execute_with_tracking(&cx, "
+        database
+            .execute_with_tracking(
+                &cx,
+                "
             CREATE TABLE accounts (
                 id INTEGER PRIMARY KEY,
                 name TEXT,
                 balance INTEGER
             );
-        ", &[], &logger).await?;
+        ",
+                &[],
+                &logger,
+            )
+            .await?;
 
-        database.execute_with_tracking(&cx, "
+        database
+            .execute_with_tracking(
+                &cx,
+                "
             INSERT INTO accounts (id, name, balance) VALUES
             (1, 'Alice', 1000),
             (2, 'Bob', 500);
-        ", &[], &logger).await?;
+        ",
+                &[],
+                &logger,
+            )
+            .await?;
 
         // Begin transaction
         let mut tx_details = HashMap::new();
-        tx_details.insert("transaction_type".to_string(), serde_json::Value::String("transfer".to_string()));
+        tx_details.insert(
+            "transaction_type".to_string(),
+            serde_json::Value::String("transfer".to_string()),
+        );
         logger.log_transaction_event("transaction_begin", "tx_001", tx_details);
 
-        database.execute_with_tracking(&cx, "BEGIN TRANSACTION;", &[], &logger).await?;
+        database
+            .execute_with_tracking(&cx, "BEGIN TRANSACTION;", &[], &logger)
+            .await?;
 
         // Perform transfers within transaction
-        database.execute_with_tracking(&cx,
-            "UPDATE accounts SET balance = balance - 200 WHERE id = 1",
-            &[], &logger).await?;
+        database
+            .execute_with_tracking(
+                &cx,
+                "UPDATE accounts SET balance = balance - 200 WHERE id = 1",
+                &[],
+                &logger,
+            )
+            .await?;
 
-        database.execute_with_tracking(&cx,
-            "UPDATE accounts SET balance = balance + 200 WHERE id = 2",
-            &[], &logger).await?;
+        database
+            .execute_with_tracking(
+                &cx,
+                "UPDATE accounts SET balance = balance + 200 WHERE id = 2",
+                &[],
+                &logger,
+            )
+            .await?;
 
         // Verify intermediate state within transaction
-        let rows = database.query_with_tracking(&cx,
-            "SELECT SUM(balance) as total FROM accounts", &[], &logger).await?;
+        let rows = database
+            .query_with_tracking(
+                &cx,
+                "SELECT SUM(balance) as total FROM accounts",
+                &[],
+                &logger,
+            )
+            .await?;
         let total_balance = rows[0].get_i64("total")?;
-        assert_eq!(total_balance, 1500, "Total balance should remain constant during transfer");
+        assert_eq!(
+            total_balance, 1500,
+            "Total balance should remain constant during transfer"
+        );
 
         // Commit transaction
-        database.execute_with_tracking(&cx, "COMMIT;", &[], &logger).await?;
+        database
+            .execute_with_tracking(&cx, "COMMIT;", &[], &logger)
+            .await?;
 
         let mut commit_details = HashMap::new();
-        commit_details.insert("commit_time".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(logger.start_time.elapsed().as_millis() as u64)));
+        commit_details.insert(
+            "commit_time".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(
+                logger.start_time.elapsed().as_millis() as u64,
+            )),
+        );
         logger.log_transaction_event("transaction_commit", "tx_001", commit_details);
 
         // Verify final state
-        let final_rows = database.query_with_tracking(&cx,
-            "SELECT id, balance FROM accounts ORDER BY id", &[], &logger).await?;
+        let final_rows = database
+            .query_with_tracking(
+                &cx,
+                "SELECT id, balance FROM accounts ORDER BY id",
+                &[],
+                &logger,
+            )
+            .await?;
 
         assert_eq!(final_rows.len(), 2);
-        assert_eq!(final_rows[0].get_i64("balance")?, 800, "Alice should have 800 after transfer");
-        assert_eq!(final_rows[1].get_i64("balance")?, 700, "Bob should have 700 after transfer");
+        assert_eq!(
+            final_rows[0].get_i64("balance")?,
+            800,
+            "Alice should have 800 after transfer"
+        );
+        assert_eq!(
+            final_rows[1].get_i64("balance")?,
+            700,
+            "Bob should have 700 after transfer"
+        );
 
         // Verify statistics
         let stats = database.stats();
-        assert!(stats.transactions_committed.load(Ordering::Relaxed) >= 1, "Should have committed transaction");
-        assert!(stats.rows_updated.load(Ordering::Relaxed) >= 2, "Should have updated account balances");
+        assert!(
+            stats.transactions_committed.load(Ordering::Relaxed) >= 1,
+            "Should have committed transaction"
+        );
+        assert!(
+            stats.rows_updated.load(Ordering::Relaxed) >= 2,
+            "Should have updated account balances"
+        );
 
-        eprintln!("SQLite Transaction E2E structured log:\n{}", logger.export_json());
+        eprintln!(
+            "SQLite Transaction E2E structured log:\n{}",
+            logger.export_json()
+        );
         Ok(())
     }
 
@@ -553,54 +719,93 @@ mod sqlite_e2e_tests {
         let database = RealSqliteDatabase::new(&cx, config).await?;
 
         // Create tables with foreign key relationship
-        database.execute_with_tracking(&cx, "
+        database
+            .execute_with_tracking(
+                &cx,
+                "
             CREATE TABLE departments (
                 id INTEGER PRIMARY KEY,
                 name TEXT UNIQUE NOT NULL
             );
-        ", &[], &logger).await?;
+        ",
+                &[],
+                &logger,
+            )
+            .await?;
 
-        database.execute_with_tracking(&cx, "
+        database
+            .execute_with_tracking(
+                &cx,
+                "
             CREATE TABLE employees (
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
                 department_id INTEGER,
                 FOREIGN KEY (department_id) REFERENCES departments (id)
             );
-        ", &[], &logger).await?;
+        ",
+                &[],
+                &logger,
+            )
+            .await?;
 
         // Insert department
-        database.execute_with_tracking(&cx,
-            "INSERT INTO departments (id, name) VALUES (1, 'Engineering')",
-            &[], &logger).await?;
+        database
+            .execute_with_tracking(
+                &cx,
+                "INSERT INTO departments (id, name) VALUES (1, 'Engineering')",
+                &[],
+                &logger,
+            )
+            .await?;
 
         // Insert valid employee
-        let valid_insert = database.execute_with_tracking(&cx,
-            "INSERT INTO employees (name, department_id) VALUES (?, ?)",
-            &[
-                SqliteValue::Text("Alice".to_string()),
-                SqliteValue::Integer(1)
-            ],
-            &logger).await;
+        let valid_insert = database
+            .execute_with_tracking(
+                &cx,
+                "INSERT INTO employees (name, department_id) VALUES (?, ?)",
+                &[
+                    SqliteValue::Text("Alice".to_string()),
+                    SqliteValue::Integer(1),
+                ],
+                &logger,
+            )
+            .await;
 
-        assert!(valid_insert.is_ok(), "Should allow valid foreign key reference");
+        assert!(
+            valid_insert.is_ok(),
+            "Should allow valid foreign key reference"
+        );
 
         // Try to insert employee with invalid department_id
-        let invalid_insert = database.execute_with_tracking(&cx,
-            "INSERT INTO employees (name, department_id) VALUES (?, ?)",
-            &[
-                SqliteValue::Text("Bob".to_string()),
-                SqliteValue::Integer(999) // Non-existent department
-            ],
-            &logger).await;
+        let invalid_insert = database
+            .execute_with_tracking(
+                &cx,
+                "INSERT INTO employees (name, department_id) VALUES (?, ?)",
+                &[
+                    SqliteValue::Text("Bob".to_string()),
+                    SqliteValue::Integer(999), // Non-existent department
+                ],
+                &logger,
+            )
+            .await;
 
-        assert!(invalid_insert.is_err(), "Should reject invalid foreign key reference");
+        assert!(
+            invalid_insert.is_err(),
+            "Should reject invalid foreign key reference"
+        );
 
         // Verify foreign key error was counted
         let stats = database.stats();
-        assert!(stats.query_errors.load(Ordering::Relaxed) > 0, "Should have recorded foreign key error");
+        assert!(
+            stats.query_errors.load(Ordering::Relaxed) > 0,
+            "Should have recorded foreign key error"
+        );
 
-        eprintln!("SQLite Foreign Key E2E structured log:\n{}", logger.export_json());
+        eprintln!(
+            "SQLite Foreign Key E2E structured log:\n{}",
+            logger.export_json()
+        );
         Ok(())
     }
 
@@ -618,43 +823,70 @@ mod sqlite_e2e_tests {
         let database = RealSqliteDatabase::new(&cx, config).await?;
 
         // Create test table
-        database.execute_with_tracking(&cx, "
+        database
+            .execute_with_tracking(
+                &cx,
+                "
             CREATE TABLE counters (
                 id INTEGER PRIMARY KEY,
                 value INTEGER DEFAULT 0
             );
-        ", &[], &logger).await?;
+        ",
+                &[],
+                &logger,
+            )
+            .await?;
 
-        database.execute_with_tracking(&cx,
-            "INSERT INTO counters (id, value) VALUES (1, 0)",
-            &[], &logger).await?;
+        database
+            .execute_with_tracking(
+                &cx,
+                "INSERT INTO counters (id, value) VALUES (1, 0)",
+                &[],
+                &logger,
+            )
+            .await?;
 
         // Simulate concurrent increments
         const NUM_INCREMENTS: i64 = 10;
         for i in 0..NUM_INCREMENTS {
-            database.execute_with_tracking(&cx,
-                "UPDATE counters SET value = value + 1 WHERE id = 1",
-                &[], &logger).await?;
+            database
+                .execute_with_tracking(
+                    &cx,
+                    "UPDATE counters SET value = value + 1 WHERE id = 1",
+                    &[],
+                    &logger,
+                )
+                .await?;
 
             // Small delay to simulate concurrent operations
             let _ = sleep(&cx, Duration::from_millis(1)).await;
         }
 
         // Verify final counter value
-        let rows = database.query_with_tracking(&cx,
-            "SELECT value FROM counters WHERE id = 1", &[], &logger).await?;
+        let rows = database
+            .query_with_tracking(&cx, "SELECT value FROM counters WHERE id = 1", &[], &logger)
+            .await?;
 
         assert_eq!(rows.len(), 1);
         let final_value = rows[0].get_i64("value")?;
-        assert_eq!(final_value, NUM_INCREMENTS,
-            "Counter should be incremented {} times, got {}", NUM_INCREMENTS, final_value);
+        assert_eq!(
+            final_value, NUM_INCREMENTS,
+            "Counter should be incremented {} times, got {}",
+            NUM_INCREMENTS, final_value
+        );
 
         // Verify statistics
         let stats = database.stats();
-        assert!(stats.rows_updated.load(Ordering::Relaxed) >= NUM_INCREMENTS as u64,
-            "Should have updated counter {} times", NUM_INCREMENTS);
+        assert!(
+            stats.rows_updated.load(Ordering::Relaxed) >= NUM_INCREMENTS as u64,
+            "Should have updated counter {} times",
+            NUM_INCREMENTS
+        );
 
-        eprintln!("SQLite Concurrent Access E2E structured log:\n{}", logger.export_json());
+        eprintln!(
+            "SQLite Concurrent Access E2E structured log:\n{}",
+            logger.export_json()
+        );
         Ok(())
     }
 }

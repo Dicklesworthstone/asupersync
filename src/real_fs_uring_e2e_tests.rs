@@ -6,17 +6,22 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod real_fs_uring_e2e {
-    use crate::fs::{File, OpenOptions, create_dir_all, remove_file, remove_dir_all, metadata, read_dir};
-    use crate::io::{BufReader, BufWriter, AsyncReadExt, AsyncWriteExt, AsyncSeekExt, SeekFrom};
-    use crate::runtime::{Runtime, spawn};
     use crate::cx::Cx;
-    use crate::time::{sleep, Duration, Instant, timeout};
-    use std::sync::{Arc, Mutex, atomic::{AtomicUsize, AtomicU64, Ordering}};
+    use crate::fs::{
+        File, OpenOptions, create_dir_all, metadata, read_dir, remove_dir_all, remove_file,
+    };
+    use crate::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter, SeekFrom};
+    use crate::runtime::{Runtime, spawn};
+    use crate::time::{Duration, Instant, sleep, timeout};
+    use rand::{Rng, RngCore, thread_rng};
+    use serde_json::{Value, json};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
-    use tempfile::{TempDir, NamedTempFile};
-    use rand::{Rng, thread_rng, RngCore};
-    use serde_json::{json, Value};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    };
+    use tempfile::{NamedTempFile, TempDir};
 
     /// Filesystem test harness with io_uring monitoring and I/O validation
     struct FsUringTestHarness {
@@ -86,32 +91,41 @@ mod real_fs_uring_e2e {
 
             match operation.operation_type.as_str() {
                 op_type if op_type.contains("write") => {
-                    self.bytes_written.fetch_add(operation.bytes_transferred, Ordering::Relaxed);
+                    self.bytes_written
+                        .fetch_add(operation.bytes_transferred, Ordering::Relaxed);
                 }
                 op_type if op_type.contains("read") => {
-                    self.bytes_read.fetch_add(operation.bytes_transferred, Ordering::Relaxed);
+                    self.bytes_read
+                        .fetch_add(operation.bytes_transferred, Ordering::Relaxed);
                 }
                 _ => {}
             }
 
             self.operation_count.fetch_add(1, Ordering::Relaxed);
 
-            self.log("io_operation", json!({
-                "type": operation.operation_type,
-                "file": operation.file_path.to_string_lossy(),
-                "bytes": operation.bytes_transferred,
-                "duration_ms": operation.duration_ms,
-                "buffer_size": operation.buffer_size,
-                "uring": operation.use_uring,
-                "success": operation.success
-            }));
+            self.log(
+                "io_operation",
+                json!({
+                    "type": operation.operation_type,
+                    "file": operation.file_path.to_string_lossy(),
+                    "bytes": operation.bytes_transferred,
+                    "duration_ms": operation.duration_ms,
+                    "buffer_size": operation.buffer_size,
+                    "uring": operation.use_uring,
+                    "success": operation.success
+                }),
+            );
         }
 
         fn get_temp_path(&self, filename: &str) -> PathBuf {
             self.temp_dir.path().join(filename)
         }
 
-        async fn create_test_file(&self, filename: &str, size_bytes: usize) -> Result<PathBuf, String> {
+        async fn create_test_file(
+            &self,
+            filename: &str,
+            size_bytes: usize,
+        ) -> Result<PathBuf, String> {
             let file_path = self.get_temp_path(filename);
             let operation_start = Instant::now();
 
@@ -125,7 +139,8 @@ mod real_fs_uring_e2e {
                     let mut total_written = 0;
 
                     while total_written < size_bytes {
-                        let current_chunk_size = std::cmp::min(chunk_size, size_bytes - total_written);
+                        let current_chunk_size =
+                            std::cmp::min(chunk_size, size_bytes - total_written);
                         let mut chunk = vec![0u8; current_chunk_size];
                         rng.fill_bytes(&mut chunk);
 
@@ -179,7 +194,11 @@ mod real_fs_uring_e2e {
             }
         }
 
-        async fn read_and_verify_file(&self, file_path: &Path, expected_size: usize) -> Result<bool, String> {
+        async fn read_and_verify_file(
+            &self,
+            file_path: &Path,
+            expected_size: usize,
+        ) -> Result<bool, String> {
             let operation_start = Instant::now();
 
             match File::open(file_path).await {
@@ -196,12 +215,16 @@ mod real_fs_uring_e2e {
                                 total_read += bytes_read;
 
                                 // Verify data integrity (basic check)
-                                if buffer[..bytes_read].iter().all(|&b| b == 0) && bytes_read > 100 {
+                                if buffer[..bytes_read].iter().all(|&b| b == 0) && bytes_read > 100
+                                {
                                     // Suspicious - too many zeros
-                                    self.log("data_integrity_warning", json!({
-                                        "file": file_path.to_string_lossy(),
-                                        "suspicious_zeros": bytes_read
-                                    }));
+                                    self.log(
+                                        "data_integrity_warning",
+                                        json!({
+                                            "file": file_path.to_string_lossy(),
+                                            "suspicious_zeros": bytes_read
+                                        }),
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -226,11 +249,14 @@ mod real_fs_uring_e2e {
 
                     let size_matches = total_read == expected_size;
                     if !size_matches {
-                        self.log("size_mismatch", json!({
-                            "file": file_path.to_string_lossy(),
-                            "expected": expected_size,
-                            "actual": total_read
-                        }));
+                        self.log(
+                            "size_mismatch",
+                            json!({
+                                "file": file_path.to_string_lossy(),
+                                "expected": expected_size,
+                                "actual": total_read
+                            }),
+                        );
                     }
 
                     Ok(size_matches)
@@ -255,10 +281,19 @@ mod real_fs_uring_e2e {
             }
         }
 
-        async fn test_random_access_io(&self, file_path: &Path, file_size: usize) -> Result<(), String> {
+        async fn test_random_access_io(
+            &self,
+            file_path: &Path,
+            file_size: usize,
+        ) -> Result<(), String> {
             let operation_start = Instant::now();
 
-            match OpenOptions::new().read(true).write(true).open(file_path).await {
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(file_path)
+                .await
+            {
                 Ok(mut file) => {
                     let mut rng = thread_rng();
 
@@ -289,7 +324,10 @@ mod real_fs_uring_e2e {
 
                         // Verify data
                         if read_buffer != test_data.as_bytes() {
-                            return Err(format!("Random access data mismatch at offset {}", random_offset));
+                            return Err(format!(
+                                "Random access data mismatch at offset {}",
+                                random_offset
+                            ));
                         }
                     }
 
@@ -309,7 +347,7 @@ mod real_fs_uring_e2e {
 
                     Ok(())
                 }
-                Err(e) => Err(format!("Random access file open failed: {}", e))
+                Err(e) => Err(format!("Random access file open failed: {}", e)),
             }
         }
 
@@ -341,53 +379,71 @@ mod real_fs_uring_e2e {
                 concurrent_operations: concurrent_ops,
             };
 
-            self.performance_stats.lock().unwrap().push(snapshot.clone());
+            self.performance_stats
+                .lock()
+                .unwrap()
+                .push(snapshot.clone());
 
-            self.log("performance_snapshot", json!({
-                "total_written_mb": total_written as f64 / 1_048_576.0,
-                "total_read_mb": total_read as f64 / 1_048_576.0,
-                "total_operations": total_ops,
-                "avg_write_speed_mbps": avg_write_speed,
-                "avg_read_speed_mbps": avg_read_speed,
-                "concurrent_ops": concurrent_ops
-            }));
+            self.log(
+                "performance_snapshot",
+                json!({
+                    "total_written_mb": total_written as f64 / 1_048_576.0,
+                    "total_read_mb": total_read as f64 / 1_048_576.0,
+                    "total_operations": total_ops,
+                    "avg_write_speed_mbps": avg_write_speed,
+                    "avg_read_speed_mbps": avg_read_speed,
+                    "concurrent_ops": concurrent_ops
+                }),
+            );
         }
     }
 
     #[tokio::test]
     async fn test_buffered_file_write_read_cycle() {
         let harness = Arc::new(FsUringTestHarness::new().await);
-        harness.log("test_start", json!({"test": "buffered_file_write_read_cycle"}));
+        harness.log(
+            "test_start",
+            json!({"test": "buffered_file_write_read_cycle"}),
+        );
 
         let test_sizes = vec![
-            ("small_file", 1024),        // 1KB
-            ("medium_file", 1_048_576),  // 1MB
-            ("large_file", 10_485_760),  // 10MB
+            ("small_file", 1024),       // 1KB
+            ("medium_file", 1_048_576), // 1MB
+            ("large_file", 10_485_760), // 10MB
         ];
 
         harness.capture_performance_snapshot(0);
 
         for (test_name, size_bytes) in test_sizes {
-            harness.log("creating_test_file", json!({
-                "name": test_name,
-                "size_bytes": size_bytes
-            }));
+            harness.log(
+                "creating_test_file",
+                json!({
+                    "name": test_name,
+                    "size_bytes": size_bytes
+                }),
+            );
 
             // Create test file with buffered writing
             match harness.create_test_file(test_name, size_bytes).await {
                 Ok(file_path) => {
-                    harness.log("file_created", json!({
-                        "name": test_name,
-                        "path": file_path.to_string_lossy(),
-                        "size": size_bytes
-                    }));
+                    harness.log(
+                        "file_created",
+                        json!({
+                            "name": test_name,
+                            "path": file_path.to_string_lossy(),
+                            "size": size_bytes
+                        }),
+                    );
 
                     // Verify file size using metadata
                     match metadata(&file_path).await {
                         Ok(meta) => {
                             let actual_size = meta.len() as usize;
-                            assert_eq!(actual_size, size_bytes,
-                                "File {} size mismatch: expected {}, got {}", test_name, size_bytes, actual_size);
+                            assert_eq!(
+                                actual_size, size_bytes,
+                                "File {} size mismatch: expected {}, got {}",
+                                test_name, size_bytes, actual_size
+                            );
                         }
                         Err(e) => {
                             panic!("Failed to get metadata for {}: {}", test_name, e);
@@ -398,10 +454,13 @@ mod real_fs_uring_e2e {
                     match harness.read_and_verify_file(&file_path, size_bytes).await {
                         Ok(size_valid) => {
                             assert!(size_valid, "File {} size validation failed", test_name);
-                            harness.log("file_verified", json!({
-                                "name": test_name,
-                                "size_valid": size_valid
-                            }));
+                            harness.log(
+                                "file_verified",
+                                json!({
+                                    "name": test_name,
+                                    "size_valid": size_valid
+                                }),
+                            );
                         }
                         Err(e) => {
                             panic!("Failed to verify file {}: {}", test_name, e);
@@ -416,12 +475,15 @@ mod real_fs_uring_e2e {
 
         harness.capture_performance_snapshot(0);
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "files_tested": test_sizes.len(),
-            "buffered_io_validated": true,
-            "message": "Buffered file write/read cycle validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "files_tested": test_sizes.len(),
+                "buffered_io_validated": true,
+                "message": "Buffered file write/read cycle validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
@@ -450,20 +512,31 @@ mod real_fs_uring_e2e {
                         operations_completed += 1;
 
                         // Verify read
-                        if harness.read_and_verify_file(&file_path, file_size).await.unwrap_or(false) {
+                        if harness
+                            .read_and_verify_file(&file_path, file_size)
+                            .await
+                            .unwrap_or(false)
+                        {
                             operations_completed += 1;
                         }
 
                         // Test random access
-                        if harness.test_random_access_io(&file_path, file_size).await.is_ok() {
+                        if harness
+                            .test_random_access_io(&file_path, file_size)
+                            .await
+                            .is_ok()
+                        {
                             operations_completed += 1;
                         }
                     }
                     Err(e) => {
-                        harness.log("concurrent_worker_error", json!({
-                            "worker_id": worker_id,
-                            "error": e
-                        }));
+                        harness.log(
+                            "concurrent_worker_error",
+                            json!({
+                                "worker_id": worker_id,
+                                "error": e
+                            }),
+                        );
                     }
                 }
 
@@ -481,25 +554,35 @@ mod real_fs_uring_e2e {
             let (worker_id, ops_completed) = handle.await;
             total_operations += ops_completed;
 
-            harness.log("concurrent_worker_completed", json!({
-                "worker_id": worker_id,
-                "operations_completed": ops_completed
-            }));
+            harness.log(
+                "concurrent_worker_completed",
+                json!({
+                    "worker_id": worker_id,
+                    "operations_completed": ops_completed
+                }),
+            );
         }
 
         harness.capture_performance_snapshot(0);
 
         // Validate concurrent operations
-        assert!(total_operations >= num_concurrent_files,
-            "Should complete at least {} operations, got {}", num_concurrent_files, total_operations);
+        assert!(
+            total_operations >= num_concurrent_files,
+            "Should complete at least {} operations, got {}",
+            num_concurrent_files,
+            total_operations
+        );
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "concurrent_files": num_concurrent_files,
-            "total_operations": total_operations,
-            "concurrent_io_validated": true,
-            "message": "Concurrent file operations validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "concurrent_files": num_concurrent_files,
+                "total_operations": total_operations,
+                "concurrent_io_validated": true,
+                "message": "Concurrent file operations validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
@@ -522,43 +605,65 @@ mod real_fs_uring_e2e {
 
                     // Test different buffer sizes for reading
                     let read_start = Instant::now();
-                    if harness.read_and_verify_file(&file_path, file_size).await.unwrap_or(false) {
+                    if harness
+                        .read_and_verify_file(&file_path, file_size)
+                        .await
+                        .unwrap_or(false)
+                    {
                         let read_time = read_start.elapsed();
 
-                        let write_speed = (file_size as f64) / create_time.as_secs_f64() / 1_048_576.0;
+                        let write_speed =
+                            (file_size as f64) / create_time.as_secs_f64() / 1_048_576.0;
                         let read_speed = (file_size as f64) / read_time.as_secs_f64() / 1_048_576.0;
 
-                        harness.log("buffer_performance", json!({
-                            "buffer_size": buffer_size,
-                            "file_size_mb": file_size as f64 / 1_048_576.0,
-                            "write_time_ms": create_time.as_millis(),
-                            "read_time_ms": read_time.as_millis(),
-                            "write_speed_mbps": write_speed,
-                            "read_speed_mbps": read_speed
-                        }));
+                        harness.log(
+                            "buffer_performance",
+                            json!({
+                                "buffer_size": buffer_size,
+                                "file_size_mb": file_size as f64 / 1_048_576.0,
+                                "write_time_ms": create_time.as_millis(),
+                                "read_time_ms": read_time.as_millis(),
+                                "write_speed_mbps": write_speed,
+                                "read_speed_mbps": read_speed
+                            }),
+                        );
 
                         // Performance expectations
-                        assert!(write_speed > 1.0, "Write speed should be > 1 MB/s, got {} MB/s", write_speed);
-                        assert!(read_speed > 1.0, "Read speed should be > 1 MB/s, got {} MB/s", read_speed);
+                        assert!(
+                            write_speed > 1.0,
+                            "Write speed should be > 1 MB/s, got {} MB/s",
+                            write_speed
+                        );
+                        assert!(
+                            read_speed > 1.0,
+                            "Read speed should be > 1 MB/s, got {} MB/s",
+                            read_speed
+                        );
                     }
                 }
                 Err(e) => {
-                    harness.log("buffer_test_error", json!({
-                        "buffer_size": buffer_size,
-                        "error": e
-                    }));
+                    harness.log(
+                        "buffer_test_error",
+                        json!({
+                            "buffer_size": buffer_size,
+                            "error": e
+                        }),
+                    );
                 }
             }
         }
 
         harness.capture_performance_snapshot(0);
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "buffer_sizes_tested": buffer_sizes.len(),
-            "performance_validated": true,
-            "message": "Uring buffer performance validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "buffer_sizes_tested": buffer_sizes.len(),
+                "performance_validated": true,
+                "message": "Uring buffer performance validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
@@ -574,9 +679,12 @@ mod real_fs_uring_e2e {
         // Create nested directories
         match create_dir_all(&nested_dir).await {
             Ok(_) => {
-                harness.log("directories_created", json!({
-                    "path": nested_dir.to_string_lossy()
-                }));
+                harness.log(
+                    "directories_created",
+                    json!({
+                        "path": nested_dir.to_string_lossy()
+                    }),
+                );
 
                 // Create files in different directories
                 let files_to_create = vec![
@@ -595,19 +703,27 @@ mod real_fs_uring_e2e {
                             let mut buf_writer = BufWriter::new(file);
                             let test_data = vec![b'X'; size];
 
-                            if buf_writer.write_all(&test_data).await.is_ok() && buf_writer.flush().await.is_ok() {
+                            if buf_writer.write_all(&test_data).await.is_ok()
+                                && buf_writer.flush().await.is_ok()
+                            {
                                 created_files.push(file_path.clone());
-                                harness.log("file_created_in_dir", json!({
-                                    "file": file_path.to_string_lossy(),
-                                    "size": size
-                                }));
+                                harness.log(
+                                    "file_created_in_dir",
+                                    json!({
+                                        "file": file_path.to_string_lossy(),
+                                        "size": size
+                                    }),
+                                );
                             }
                         }
                         Err(e) => {
-                            harness.log("file_creation_error", json!({
-                                "file": file_path.to_string_lossy(),
-                                "error": e.to_string()
-                            }));
+                            harness.log(
+                                "file_creation_error",
+                                json!({
+                                    "file": file_path.to_string_lossy(),
+                                    "error": e.to_string()
+                                }),
+                            );
                         }
                     }
                 }
@@ -619,10 +735,13 @@ mod real_fs_uring_e2e {
 
                         while let Some(entry) = dir_entries.next_entry().await.unwrap_or(None) {
                             entry_count += 1;
-                            harness.log("directory_entry", json!({
-                                "name": entry.file_name().to_string_lossy(),
-                                "path": entry.path().to_string_lossy()
-                            }));
+                            harness.log(
+                                "directory_entry",
+                                json!({
+                                    "name": entry.file_name().to_string_lossy(),
+                                    "path": entry.path().to_string_lossy()
+                                }),
+                            );
                         }
 
                         assert!(entry_count > 0, "Directory should contain entries");
@@ -635,19 +754,25 @@ mod real_fs_uring_e2e {
                 // Clean up files
                 for file_path in created_files {
                     if let Err(e) = remove_file(&file_path).await {
-                        harness.log("cleanup_error", json!({
-                            "file": file_path.to_string_lossy(),
-                            "error": e.to_string()
-                        }));
+                        harness.log(
+                            "cleanup_error",
+                            json!({
+                                "file": file_path.to_string_lossy(),
+                                "error": e.to_string()
+                            }),
+                        );
                     }
                 }
 
                 // Clean up directories
                 if let Err(e) = remove_dir_all(&test_dir).await {
-                    harness.log("cleanup_dir_error", json!({
-                        "dir": test_dir.to_string_lossy(),
-                        "error": e.to_string()
-                    }));
+                    harness.log(
+                        "cleanup_dir_error",
+                        json!({
+                            "dir": test_dir.to_string_lossy(),
+                            "error": e.to_string()
+                        }),
+                    );
                 }
             }
             Err(e) => {
@@ -657,11 +782,14 @@ mod real_fs_uring_e2e {
 
         harness.capture_performance_snapshot(0);
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "directory_ops_validated": true,
-            "message": "Directory operations validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "directory_ops_validated": true,
+                "message": "Directory operations validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
@@ -670,7 +798,7 @@ mod real_fs_uring_e2e {
         harness.log("test_start", json!({"test": "large_file_streaming"}));
 
         let chunk_size = 65536; // 64KB chunks
-        let total_chunks = 100;  // ~6.4MB total
+        let total_chunks = 100; // ~6.4MB total
         let total_size = chunk_size * total_chunks;
 
         harness.capture_performance_snapshot(0);
@@ -714,13 +842,17 @@ mod real_fs_uring_e2e {
                 }
 
                 let write_duration = test_start.elapsed();
-                let write_speed = (bytes_written as f64) / write_duration.as_secs_f64() / 1_048_576.0;
+                let write_speed =
+                    (bytes_written as f64) / write_duration.as_secs_f64() / 1_048_576.0;
 
-                harness.log("streaming_write_complete", json!({
-                    "total_bytes": bytes_written,
-                    "duration_ms": write_duration.as_millis(),
-                    "write_speed_mbps": write_speed
-                }));
+                harness.log(
+                    "streaming_write_complete",
+                    json!({
+                        "total_bytes": bytes_written,
+                        "duration_ms": write_duration.as_millis(),
+                        "write_speed_mbps": write_speed
+                    }),
+                );
 
                 // Stream read and verify
                 let read_start = Instant::now();
@@ -738,8 +870,10 @@ mod real_fs_uring_e2e {
                                     // Verify chunk pattern
                                     let expected_first_byte = (chunk_id % 256) as u8;
                                     if read_buffer[0] != expected_first_byte {
-                                        panic!("Data verification failed at chunk {}: expected {}, got {}",
-                                            chunk_id, expected_first_byte, read_buffer[0]);
+                                        panic!(
+                                            "Data verification failed at chunk {}: expected {}, got {}",
+                                            chunk_id, expected_first_byte, read_buffer[0]
+                                        );
                                     }
                                 }
                                 Err(e) => {
@@ -749,18 +883,33 @@ mod real_fs_uring_e2e {
                         }
 
                         let read_duration = read_start.elapsed();
-                        let read_speed = (bytes_read as f64) / read_duration.as_secs_f64() / 1_048_576.0;
+                        let read_speed =
+                            (bytes_read as f64) / read_duration.as_secs_f64() / 1_048_576.0;
 
-                        harness.log("streaming_read_complete", json!({
-                            "total_bytes": bytes_read,
-                            "duration_ms": read_duration.as_millis(),
-                            "read_speed_mbps": read_speed,
-                            "data_verified": true
-                        }));
+                        harness.log(
+                            "streaming_read_complete",
+                            json!({
+                                "total_bytes": bytes_read,
+                                "duration_ms": read_duration.as_millis(),
+                                "read_speed_mbps": read_speed,
+                                "data_verified": true
+                            }),
+                        );
 
-                        assert_eq!(bytes_read, total_size, "Read size should match written size");
-                        assert!(read_speed > 1.0, "Read speed should be > 1 MB/s, got {} MB/s", read_speed);
-                        assert!(write_speed > 1.0, "Write speed should be > 1 MB/s, got {} MB/s", write_speed);
+                        assert_eq!(
+                            bytes_read, total_size,
+                            "Read size should match written size"
+                        );
+                        assert!(
+                            read_speed > 1.0,
+                            "Read speed should be > 1 MB/s, got {} MB/s",
+                            read_speed
+                        );
+                        assert!(
+                            write_speed > 1.0,
+                            "Write speed should be > 1 MB/s, got {} MB/s",
+                            write_speed
+                        );
                     }
                     Err(e) => {
                         panic!("Failed to open file for streaming read: {}", e);
@@ -774,11 +923,14 @@ mod real_fs_uring_e2e {
 
         harness.capture_performance_snapshot(0);
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "streaming_validated": true,
-            "total_size_mb": total_size as f64 / 1_048_576.0,
-            "message": "Large file streaming validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "streaming_validated": true,
+                "total_size_mb": total_size as f64 / 1_048_576.0,
+                "message": "Large file streaming validated successfully"
+            }),
+        );
     }
 }

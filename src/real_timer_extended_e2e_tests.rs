@@ -6,14 +6,17 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod real_timer_extended_e2e {
-    use crate::time::{sleep, Duration, Instant, Interval, Deadline};
-    use crate::runtime::{Runtime, spawn};
+    use crate::combinator::{race, timeout};
     use crate::cx::{Cx, scope};
-    use crate::combinator::{timeout, race};
-    use std::sync::{Arc, Mutex, atomic::{AtomicUsize, AtomicBool, Ordering}};
+    use crate::runtime::{Runtime, spawn};
+    use crate::time::{Deadline, Duration, Instant, Interval, sleep};
+    use serde_json::{Value, json};
     use std::collections::BTreeMap;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
     use tokio::sync::mpsc;
-    use serde_json::{json, Value};
 
     /// Timer test harness with structured logging and timing validation
     struct TimerTestHarness {
@@ -64,9 +67,8 @@ mod real_timer_extended_e2e {
         fn validate_deadline_monotonic(&self) -> Result<(), String> {
             let records = self.get_timing_records();
 
-            let mut deadline_records: Vec<_> = records.iter()
-                .filter(|r| r.deadline.is_some())
-                .collect();
+            let mut deadline_records: Vec<_> =
+                records.iter().filter(|r| r.deadline.is_some()).collect();
 
             deadline_records.sort_by_key(|r| r.timestamp);
 
@@ -88,8 +90,7 @@ mod real_timer_extended_e2e {
                         return Err(format!(
                             "Deadline-monotone violation: task submitted at {:?} with deadline {:?} \
                              completed before task submitted at {:?} with earlier deadline {:?}",
-                            earlier.timestamp, earlier_deadline,
-                            later.timestamp, later_deadline
+                            earlier.timestamp, earlier_deadline, later.timestamp, later_deadline
                         ));
                     }
                 }
@@ -98,10 +99,14 @@ mod real_timer_extended_e2e {
             Ok(())
         }
 
-        fn validate_interval_skip_behavior(&self, expected_interval: Duration) -> Result<(), String> {
+        fn validate_interval_skip_behavior(
+            &self,
+            expected_interval: Duration,
+        ) -> Result<(), String> {
             let records = self.get_timing_records();
 
-            let interval_records: Vec<_> = records.iter()
+            let interval_records: Vec<_> = records
+                .iter()
                 .filter(|r| r.interval_seq.is_some())
                 .collect();
 
@@ -114,7 +119,8 @@ mod real_timer_extended_e2e {
 
                     // If the actual interval is significantly longer than expected,
                     // we should have skipped some intervals
-                    let expected_skips = (actual_interval.as_millis() / expected_interval.as_millis()) - 1;
+                    let expected_skips =
+                        (actual_interval.as_millis() / expected_interval.as_millis()) - 1;
 
                     if expected_skips > 0 && !record.skipped {
                         return Err(format!(
@@ -194,7 +200,10 @@ mod real_timer_extended_e2e {
                     skipped: false,
                 });
 
-                completion_order.lock().unwrap().push((task_id, completion_time, deadline));
+                completion_order
+                    .lock()
+                    .unwrap()
+                    .push((task_id, completion_time, deadline));
 
                 harness.log("task_completed", json!({
                     "task": task_name,
@@ -214,7 +223,11 @@ mod real_timer_extended_e2e {
 
         // Validate deadline-monotone ordering
         let validation_result = harness.validate_deadline_monotonic();
-        assert!(validation_result.is_ok(), "Deadline-monotone validation failed: {:?}", validation_result);
+        assert!(
+            validation_result.is_ok(),
+            "Deadline-monotone validation failed: {:?}",
+            validation_result
+        );
 
         // Verify completion order respects deadlines
         let completions = completion_order.lock().unwrap();
@@ -225,9 +238,18 @@ mod real_timer_extended_e2e {
         sorted_completions.sort_by_key(|(_, completion_time, _)| *completion_time);
 
         // Should complete in deadline order: task_2 (100ms), task_3 (200ms), task_1 (300ms)
-        assert_eq!(sorted_completions[0].0, 2, "Task 2 should complete first (earliest deadline)");
-        assert_eq!(sorted_completions[1].0, 3, "Task 3 should complete second (middle deadline)");
-        assert_eq!(sorted_completions[2].0, 1, "Task 1 should complete last (latest deadline)");
+        assert_eq!(
+            sorted_completions[0].0, 2,
+            "Task 2 should complete first (earliest deadline)"
+        );
+        assert_eq!(
+            sorted_completions[1].0, 3,
+            "Task 3 should complete second (middle deadline)"
+        );
+        assert_eq!(
+            sorted_completions[2].0, 1,
+            "Task 1 should complete last (latest deadline)"
+        );
 
         harness.log("test_result", json!({
             "passed": true,
@@ -268,7 +290,8 @@ mod real_timer_extended_e2e {
                 let actual_interval = tick_time.duration_since(last_tick_time);
 
                 // Determine if intervals were skipped
-                let expected_intervals = (actual_interval.as_millis() / interval_duration.as_millis()).max(1);
+                let expected_intervals =
+                    (actual_interval.as_millis() / interval_duration.as_millis()).max(1);
                 let skipped = expected_intervals > 1;
                 let skips = expected_intervals - 1;
 
@@ -287,13 +310,16 @@ mod real_timer_extended_e2e {
                     skipped,
                 });
 
-                harness_clone.log("interval_tick", json!({
-                    "tick": tick_number,
-                    "actual_interval_ms": actual_interval.as_millis(),
-                    "expected_interval_ms": interval_duration.as_millis(),
-                    "skipped_intervals": skips,
-                    "total_skips": skip_count_clone.load(Ordering::Relaxed)
-                }));
+                harness_clone.log(
+                    "interval_tick",
+                    json!({
+                        "tick": tick_number,
+                        "actual_interval_ms": actual_interval.as_millis(),
+                        "expected_interval_ms": interval_duration.as_millis(),
+                        "skipped_intervals": skips,
+                        "total_skips": skip_count_clone.load(Ordering::Relaxed)
+                    }),
+                );
 
                 // Simulate some processing time to potentially cause late intervals
                 if tick_number % 3 == 0 {
@@ -321,29 +347,46 @@ mod real_timer_extended_e2e {
 
         // Validate interval skip behavior
         let validation_result = harness.validate_interval_skip_behavior(interval_duration);
-        assert!(validation_result.is_ok(), "Interval skip validation failed: {:?}", validation_result);
+        assert!(
+            validation_result.is_ok(),
+            "Interval skip validation failed: {:?}",
+            validation_result
+        );
 
         // Should have skipped some intervals due to simulated processing delays
-        assert!(total_skips > 0, "Expected some interval skips due to processing delays");
+        assert!(
+            total_skips > 0,
+            "Expected some interval skips due to processing delays"
+        );
 
         // Should have fewer total ticks than naive expectation due to skipping
-        let naive_expected_ticks = (test_duration.as_millis() / interval_duration.as_millis()) as usize;
-        assert!(total_ticks < naive_expected_ticks,
+        let naive_expected_ticks =
+            (test_duration.as_millis() / interval_duration.as_millis()) as usize;
+        assert!(
+            total_ticks < naive_expected_ticks,
             "Should have fewer ticks ({}) than naive expectation ({}) due to skipping",
-            total_ticks, naive_expected_ticks);
+            total_ticks,
+            naive_expected_ticks
+        );
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "skips_detected": total_skips > 0,
-            "timing_behavior_correct": total_ticks < naive_expected_ticks,
-            "message": "Interval skip-on-late behavior validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "skips_detected": total_skips > 0,
+                "timing_behavior_correct": total_ticks < naive_expected_ticks,
+                "message": "Interval skip-on-late behavior validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
     async fn test_deadline_timeout_interaction() {
         let harness = Arc::new(TimerTestHarness::new());
-        harness.log("test_start", json!({"test": "deadline_timeout_interaction"}));
+        harness.log(
+            "test_start",
+            json!({"test": "deadline_timeout_interaction"}),
+        );
 
         let timeout_duration = Duration::from_millis(200);
         let work_duration = Duration::from_millis(300); // Longer than timeout
@@ -368,45 +411,63 @@ mod real_timer_extended_e2e {
             });
 
             "work_completed"
-        }).await;
+        })
+        .await;
 
         let total_time = start_time.elapsed();
 
         match result {
             Ok(_) => {
                 // Work completed before timeout - unexpected
-                harness.log("unexpected_completion", json!({
-                    "message": "Work completed before timeout",
-                    "total_time_ms": total_time.as_millis()
-                }));
+                harness.log(
+                    "unexpected_completion",
+                    json!({
+                        "message": "Work completed before timeout",
+                        "total_time_ms": total_time.as_millis()
+                    }),
+                );
                 panic!("Work should have been cancelled by timeout");
             }
             Err(_) => {
                 // Timeout occurred - expected behavior
-                harness.log("timeout_occurred", json!({
-                    "timeout_ms": timeout_duration.as_millis(),
-                    "actual_time_ms": total_time.as_millis(),
-                    "work_duration_ms": work_duration.as_millis()
-                }));
+                harness.log(
+                    "timeout_occurred",
+                    json!({
+                        "timeout_ms": timeout_duration.as_millis(),
+                        "actual_time_ms": total_time.as_millis(),
+                        "work_duration_ms": work_duration.as_millis()
+                    }),
+                );
 
                 // Validate timeout occurred at the right time
-                assert!(total_time >= timeout_duration, "Timeout should occur after timeout duration");
-                assert!(total_time < timeout_duration + Duration::from_millis(50),
-                    "Timeout should occur promptly");
+                assert!(
+                    total_time >= timeout_duration,
+                    "Timeout should occur after timeout duration"
+                );
+                assert!(
+                    total_time < timeout_duration + Duration::from_millis(50),
+                    "Timeout should occur promptly"
+                );
             }
         }
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "timeout_behavior_correct": result.is_err(),
-            "message": "Deadline timeout interaction validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "timeout_behavior_correct": result.is_err(),
+                "message": "Deadline timeout interaction validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
     async fn test_timer_race_deadline_priority() {
         let harness = Arc::new(TimerTestHarness::new());
-        harness.log("test_start", json!({"test": "timer_race_deadline_priority"}));
+        harness.log(
+            "test_start",
+            json!({"test": "timer_race_deadline_priority"}),
+        );
 
         let base_time = Instant::now();
 
@@ -421,42 +482,58 @@ mod real_timer_extended_e2e {
             sleep(tasks[0].1).then(|| async { tasks[0].0 }),
             race(
                 sleep(tasks[1].1).then(|| async { tasks[1].0 }),
-                sleep(tasks[2].1).then(|| async { tasks[2].0 })
-            ).then(|result| async move {
+                sleep(tasks[2].1).then(|| async { tasks[2].0 }),
+            )
+            .then(|result| async move {
                 match result {
                     Ok(name) => name,
-                    Err(_) => "no_winner"
+                    Err(_) => "no_winner",
                 }
-            })
-        ).await;
+            }),
+        )
+        .await;
 
         let race_time = base_time.elapsed();
 
         match winner {
             Ok(winning_task) => {
-                harness.log("race_winner", json!({
-                    "winner": winning_task,
-                    "race_time_ms": race_time.as_millis()
-                }));
+                harness.log(
+                    "race_winner",
+                    json!({
+                        "winner": winning_task,
+                        "race_time_ms": race_time.as_millis()
+                    }),
+                );
 
                 // Should be the fastest task
-                assert_eq!(winning_task, "fast_task", "Fastest task should win the race");
+                assert_eq!(
+                    winning_task, "fast_task",
+                    "Fastest task should win the race"
+                );
 
                 // Race time should be close to fastest task duration
-                assert!(race_time >= tasks[0].1, "Race should take at least fast task duration");
-                assert!(race_time < tasks[0].1 + Duration::from_millis(20),
-                    "Race should complete promptly after fast task");
+                assert!(
+                    race_time >= tasks[0].1,
+                    "Race should take at least fast task duration"
+                );
+                assert!(
+                    race_time < tasks[0].1 + Duration::from_millis(20),
+                    "Race should complete promptly after fast task"
+                );
             }
             Err(_) => {
                 panic!("Race should have a winner");
             }
         }
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "fastest_task_won": true,
-            "message": "Timer race deadline priority validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "fastest_task_won": true,
+                "message": "Timer race deadline priority validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
@@ -495,7 +572,10 @@ mod real_timer_extended_e2e {
                     skipped: false,
                 });
 
-                completion_times.lock().unwrap().push((i, completion_time, actual_duration));
+                completion_times
+                    .lock()
+                    .unwrap()
+                    .push((i, completion_time, actual_duration));
             });
 
             handles.push(handle);
@@ -507,7 +587,10 @@ mod real_timer_extended_e2e {
         }
 
         let completions = completion_times.lock().unwrap();
-        let mut durations: Vec<Duration> = completions.iter().map(|(_, _, duration)| *duration).collect();
+        let mut durations: Vec<Duration> = completions
+            .iter()
+            .map(|(_, _, duration)| *duration)
+            .collect();
         durations.sort();
 
         // Calculate statistics
@@ -516,33 +599,48 @@ mod real_timer_extended_e2e {
         let median_duration = durations[durations.len() / 2];
         let duration_spread = max_duration.saturating_sub(*min_duration);
 
-        harness.log("timer_precision_stats", json!({
-            "num_timers": num_concurrent_timers,
-            "target_duration_ms": timer_duration.as_millis(),
-            "min_duration_ms": min_duration.as_millis(),
-            "max_duration_ms": max_duration.as_millis(),
-            "median_duration_ms": median_duration.as_millis(),
-            "duration_spread_ms": duration_spread.as_millis(),
-            "expected_window_ms": expected_completion_window.as_millis()
-        }));
+        harness.log(
+            "timer_precision_stats",
+            json!({
+                "num_timers": num_concurrent_timers,
+                "target_duration_ms": timer_duration.as_millis(),
+                "min_duration_ms": min_duration.as_millis(),
+                "max_duration_ms": max_duration.as_millis(),
+                "median_duration_ms": median_duration.as_millis(),
+                "duration_spread_ms": duration_spread.as_millis(),
+                "expected_window_ms": expected_completion_window.as_millis()
+            }),
+        );
 
         // Validate timer precision
-        assert!(duration_spread <= expected_completion_window,
+        assert!(
+            duration_spread <= expected_completion_window,
             "Timer precision under load failed: spread {}ms > expected {}ms",
-            duration_spread.as_millis(), expected_completion_window.as_millis());
+            duration_spread.as_millis(),
+            expected_completion_window.as_millis()
+        );
 
         // All timers should complete close to target duration
         for (_, actual_duration) in durations.iter().enumerate() {
-            let deviation = actual_duration.as_millis().abs_diff(timer_duration.as_millis());
-            assert!(deviation <= expected_completion_window.as_millis(),
+            let deviation = actual_duration
+                .as_millis()
+                .abs_diff(timer_duration.as_millis());
+            assert!(
+                deviation <= expected_completion_window.as_millis(),
                 "Timer {} deviated by {}ms from target {}ms",
-                actual_duration.as_millis(), deviation, timer_duration.as_millis());
+                actual_duration.as_millis(),
+                deviation,
+                timer_duration.as_millis()
+            );
         }
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "precision_maintained": duration_spread <= expected_completion_window,
-            "message": "Timer precision under load validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "precision_maintained": duration_spread <= expected_completion_window,
+                "message": "Timer precision under load validated successfully"
+            }),
+        );
     }
 }

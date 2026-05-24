@@ -21,16 +21,16 @@ mod tests {
     use std::net::{SocketAddr, TcpListener};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use tokio::net::{TcpStream, TcpListener as TokioTcpListener};
+    use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
     use tokio::sync::{RwLock, oneshot};
     use tokio::time::timeout;
 
     // Import actual asupersync implementations
-    use crate::http::h1::server::{Http1Server, HostPolicy};
-    use crate::http::h1::types::{Request, Response, Method, Version};
-    use crate::grpc::server::{ConnectionState};
-    use crate::grpc::streaming::{Request as GrpcRequest, Response as GrpcResponse};
     use crate::cx::Cx;
+    use crate::grpc::server::ConnectionState;
+    use crate::grpc::streaming::{Request as GrpcRequest, Response as GrpcResponse};
+    use crate::http::h1::server::{HostPolicy, Http1Server};
+    use crate::http::h1::types::{Method, Request, Response, Version};
     use crate::time::wall_now;
 
     // ---------------------------------------------------------------------------
@@ -292,7 +292,11 @@ mod tests {
             })
         }
 
-        async fn handle_http1_connection(mut stream: TcpStream, _client_addr: SocketAddr, service: MockHttpService) {
+        async fn handle_http1_connection(
+            mut stream: TcpStream,
+            _client_addr: SocketAddr,
+            service: MockHttpService,
+        ) {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
             let mut buffer = vec![0; 4096];
@@ -500,38 +504,67 @@ mod tests {
         let test_start = Instant::now();
         let mut logger = ProtocolE2ELogger::new("http1_real_server".to_string());
 
-        logger.log_phase(TestPhase::Setup, ProtocolType::Http1, "0.0.0.0:0".parse().unwrap()).await;
+        logger
+            .log_phase(
+                TestPhase::Setup,
+                ProtocolType::Http1,
+                "0.0.0.0:0".parse().unwrap(),
+            )
+            .await;
 
         // Start real HTTP/1.1 server
-        logger.log_phase(TestPhase::ServerStart, ProtocolType::Http1, "0.0.0.0:0".parse().unwrap()).await;
-        let server = RealHttp1Server::start().await.expect("Failed to start HTTP/1.1 server");
+        logger
+            .log_phase(
+                TestPhase::ServerStart,
+                ProtocolType::Http1,
+                "0.0.0.0:0".parse().unwrap(),
+            )
+            .await;
+        let server = RealHttp1Server::start()
+            .await
+            .expect("Failed to start HTTP/1.1 server");
         let server_addr = server.addr();
 
-        logger.log_phase(TestPhase::ClientConnect, ProtocolType::Http1, server_addr).await;
+        logger
+            .log_phase(TestPhase::ClientConnect, ProtocolType::Http1, server_addr)
+            .await;
 
         let mut success = true;
         let mut error = None;
 
         match timeout(Duration::from_secs(5), TcpStream::connect(server_addr)).await {
             Ok(Ok(mut stream)) => {
-                logger.log_protocol_event("connection_opened", None, false).await;
+                logger
+                    .log_protocol_event("connection_opened", None, false)
+                    .await;
 
-                logger.log_phase(TestPhase::Request, ProtocolType::Http1, server_addr).await;
+                logger
+                    .log_phase(TestPhase::Request, ProtocolType::Http1, server_addr)
+                    .await;
 
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
                 // Send HTTP/1.1 health check request
-                let request = b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+                let request =
+                    b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
                 if stream.write_all(request).await.is_ok() {
-                    logger.log_protocol_event("request_sent", Some(request.len() as u64), false).await;
+                    logger
+                        .log_protocol_event("request_sent", Some(request.len() as u64), false)
+                        .await;
 
-                    logger.log_phase(TestPhase::Response, ProtocolType::Http1, server_addr).await;
+                    logger
+                        .log_phase(TestPhase::Response, ProtocolType::Http1, server_addr)
+                        .await;
 
                     let mut response = vec![0; 1024];
                     if let Ok(n) = stream.read(&mut response).await {
-                        logger.log_protocol_event("response_received", Some(n as u64), false).await;
+                        logger
+                            .log_protocol_event("response_received", Some(n as u64), false)
+                            .await;
 
-                        logger.log_phase(TestPhase::Assert, ProtocolType::Http1, server_addr).await;
+                        logger
+                            .log_phase(TestPhase::Assert, ProtocolType::Http1, server_addr)
+                            .await;
 
                         let response_str = String::from_utf8_lossy(&response[..n]);
 
@@ -549,18 +582,24 @@ mod tests {
                     } else {
                         success = false;
                         error = Some("Failed to read response".to_string());
-                        logger.log_protocol_event("protocol_error", None, true).await;
+                        logger
+                            .log_protocol_event("protocol_error", None, true)
+                            .await;
                     }
                 } else {
                     success = false;
                     error = Some("Failed to send request".to_string());
-                    logger.log_protocol_event("protocol_error", None, true).await;
+                    logger
+                        .log_protocol_event("protocol_error", None, true)
+                        .await;
                 }
             }
             Ok(Err(e)) => {
                 success = false;
                 error = Some(format!("Connection failed: {}", e));
-                logger.log_protocol_event("protocol_error", None, true).await;
+                logger
+                    .log_protocol_event("protocol_error", None, true)
+                    .await;
             }
             Err(_) => {
                 success = false;
@@ -569,7 +608,9 @@ mod tests {
             }
         }
 
-        logger.log_phase(TestPhase::Teardown, ProtocolType::Http1, server_addr).await;
+        logger
+            .log_phase(TestPhase::Teardown, ProtocolType::Http1, server_addr)
+            .await;
         let _ = server.stop().await;
 
         let protocol_stats = logger.get_stats().await;
@@ -593,45 +634,78 @@ mod tests {
         let test_start = Instant::now();
         let mut logger = ProtocolE2ELogger::new("grpc_real_server".to_string());
 
-        logger.log_phase(TestPhase::Setup, ProtocolType::Grpc, "0.0.0.0:0".parse().unwrap()).await;
+        logger
+            .log_phase(
+                TestPhase::Setup,
+                ProtocolType::Grpc,
+                "0.0.0.0:0".parse().unwrap(),
+            )
+            .await;
 
         // Start real gRPC server
-        logger.log_phase(TestPhase::ServerStart, ProtocolType::Grpc, "0.0.0.0:0".parse().unwrap()).await;
-        let server = RealGrpcServer::start().await.expect("Failed to start gRPC server");
+        logger
+            .log_phase(
+                TestPhase::ServerStart,
+                ProtocolType::Grpc,
+                "0.0.0.0:0".parse().unwrap(),
+            )
+            .await;
+        let server = RealGrpcServer::start()
+            .await
+            .expect("Failed to start gRPC server");
         let server_addr = server.addr();
 
-        logger.log_phase(TestPhase::ClientConnect, ProtocolType::Grpc, server_addr).await;
+        logger
+            .log_phase(TestPhase::ClientConnect, ProtocolType::Grpc, server_addr)
+            .await;
 
         let mut success = true;
         let mut error = None;
 
         match timeout(Duration::from_secs(5), TcpStream::connect(server_addr)).await {
             Ok(Ok(mut stream)) => {
-                logger.log_protocol_event("connection_opened", None, false).await;
+                logger
+                    .log_protocol_event("connection_opened", None, false)
+                    .await;
 
-                logger.log_phase(TestPhase::ProtocolNegotiation, ProtocolType::Grpc, server_addr).await;
+                logger
+                    .log_phase(
+                        TestPhase::ProtocolNegotiation,
+                        ProtocolType::Grpc,
+                        server_addr,
+                    )
+                    .await;
 
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
                 // Send HTTP/2 connection preface (required for gRPC)
                 let preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
                 if stream.write_all(preface).await.is_ok() {
-                    logger.log_protocol_event("request_sent", Some(preface.len() as u64), false).await;
+                    logger
+                        .log_protocol_event("request_sent", Some(preface.len() as u64), false)
+                        .await;
 
-                    logger.log_phase(TestPhase::Response, ProtocolType::Grpc, server_addr).await;
+                    logger
+                        .log_phase(TestPhase::Response, ProtocolType::Grpc, server_addr)
+                        .await;
 
                     // Read HTTP/2 SETTINGS frame
                     let mut settings_frame = vec![0; 21]; // 9 byte header + 12 byte payload
                     if let Ok(n) = stream.read(&mut settings_frame).await {
-                        logger.log_protocol_event("response_received", Some(n as u64), false).await;
+                        logger
+                            .log_protocol_event("response_received", Some(n as u64), false)
+                            .await;
 
-                        logger.log_phase(TestPhase::Assert, ProtocolType::Grpc, server_addr).await;
+                        logger
+                            .log_phase(TestPhase::Assert, ProtocolType::Grpc, server_addr)
+                            .await;
 
                         // Verify HTTP/2 frame format
                         if n < 9 {
                             success = false;
                             error = Some("HTTP/2 frame too short".to_string());
-                        } else if settings_frame[3] != 0x04 { // SETTINGS frame type
+                        } else if settings_frame[3] != 0x04 {
+                            // SETTINGS frame type
                             success = false;
                             error = Some("Expected HTTP/2 SETTINGS frame".to_string());
                         } else {
@@ -664,18 +738,24 @@ mod tests {
                     } else {
                         success = false;
                         error = Some("Failed to read SETTINGS frame".to_string());
-                        logger.log_protocol_event("protocol_error", None, true).await;
+                        logger
+                            .log_protocol_event("protocol_error", None, true)
+                            .await;
                     }
                 } else {
                     success = false;
                     error = Some("Failed to send HTTP/2 preface".to_string());
-                    logger.log_protocol_event("protocol_error", None, true).await;
+                    logger
+                        .log_protocol_event("protocol_error", None, true)
+                        .await;
                 }
             }
             Ok(Err(e)) => {
                 success = false;
                 error = Some(format!("Connection failed: {}", e));
-                logger.log_protocol_event("protocol_error", None, true).await;
+                logger
+                    .log_protocol_event("protocol_error", None, true)
+                    .await;
             }
             Err(_) => {
                 success = false;
@@ -684,7 +764,9 @@ mod tests {
             }
         }
 
-        logger.log_phase(TestPhase::Teardown, ProtocolType::Grpc, server_addr).await;
+        logger
+            .log_phase(TestPhase::Teardown, ProtocolType::Grpc, server_addr)
+            .await;
         let _ = server.stop().await;
 
         let protocol_stats = logger.get_stats().await;
@@ -737,12 +819,24 @@ mod tests {
         );
 
         // Verify protocol statistics
-        assert!(result.protocol_stats.connections_opened > 0, "No connections opened");
+        assert!(
+            result.protocol_stats.connections_opened > 0,
+            "No connections opened"
+        );
         assert!(result.protocol_stats.requests_sent > 0, "No requests sent");
-        assert!(result.protocol_stats.responses_received > 0, "No responses received");
-        assert_eq!(result.protocol_stats.protocol_errors, 0, "Protocol errors detected");
+        assert!(
+            result.protocol_stats.responses_received > 0,
+            "No responses received"
+        );
+        assert_eq!(
+            result.protocol_stats.protocol_errors, 0,
+            "Protocol errors detected"
+        );
 
-        println!("✅ HTTP/1.1 real server E2E test passed: {} ms", result.duration_ms);
+        println!(
+            "✅ HTTP/1.1 real server E2E test passed: {} ms",
+            result.duration_ms
+        );
     }
 
     #[tokio::test]
@@ -758,12 +852,24 @@ mod tests {
         );
 
         // Verify protocol statistics
-        assert!(result.protocol_stats.connections_opened > 0, "No connections opened");
+        assert!(
+            result.protocol_stats.connections_opened > 0,
+            "No connections opened"
+        );
         assert!(result.protocol_stats.requests_sent > 0, "No requests sent");
-        assert!(result.protocol_stats.responses_received > 0, "No responses received");
-        assert_eq!(result.protocol_stats.protocol_errors, 0, "Protocol errors detected");
+        assert!(
+            result.protocol_stats.responses_received > 0,
+            "No responses received"
+        );
+        assert_eq!(
+            result.protocol_stats.protocol_errors, 0,
+            "Protocol errors detected"
+        );
 
-        println!("✅ gRPC real server E2E test passed: {} ms", result.duration_ms);
+        println!(
+            "✅ gRPC real server E2E test passed: {} ms",
+            result.duration_ms
+        );
     }
 
     #[tokio::test]
@@ -777,8 +883,12 @@ mod tests {
         let all_results = vec![http1_result, grpc_result];
 
         println!("\n=== [br-e2e-2] REAL SERVER E2E COMPLIANCE REPORT ===");
-        println!("| Protocol | Test | Server Addr | Success | Duration | Connections | Reqs/Resps | Errors |");
-        println!("|----------|------|-------------|---------|----------|-------------|------------|--------|");
+        println!(
+            "| Protocol | Test | Server Addr | Success | Duration | Connections | Reqs/Resps | Errors |"
+        );
+        println!(
+            "|----------|------|-------------|---------|----------|-------------|------------|--------|"
+        );
 
         let mut total_duration = 0;
         let mut total_connections = 0;
@@ -824,10 +934,17 @@ mod tests {
         if success_count == all_results.len() {
             println!("\n✅ **REAL SERVER E2E CONFORMANCE ACHIEVED**: All protocol tests passed");
         } else {
-            println!("\n❌ **REAL SERVER E2E CONFORMANCE FAILED**: {} tests failed", all_results.len() - success_count);
+            println!(
+                "\n❌ **REAL SERVER E2E CONFORMANCE FAILED**: {} tests failed",
+                all_results.len() - success_count
+            );
         }
 
         // All tests must pass
-        assert_eq!(success_count, all_results.len(), "Not all real server E2E tests passed");
+        assert_eq!(
+            success_count,
+            all_results.len(),
+            "Not all real server E2E tests passed"
+        );
     }
 }

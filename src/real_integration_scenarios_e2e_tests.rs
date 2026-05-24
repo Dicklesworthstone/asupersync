@@ -14,20 +14,20 @@
 
 #![cfg(all(test, feature = "real-service-e2e"))]
 
-use crate::channel::{mpsc, broadcast, oneshot};
-use crate::combinator::{race, timeout, join, retry};
+use crate::channel::{broadcast, mpsc, oneshot};
 use crate::combinator::circuit_breaker::{CircuitBreaker, CircuitBreakerPolicy, FailurePredicate};
+use crate::combinator::{join, race, retry, timeout};
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind};
-use crate::runtime::{RuntimeBuilder, LabRuntime};
+use crate::runtime::{LabRuntime, RuntimeBuilder};
+use crate::supervision::{BackoffStrategy, RestartConfig, SupervisionStrategy};
 use crate::sync::{Mutex, Semaphore};
-use crate::supervision::{SupervisionStrategy, RestartConfig, BackoffStrategy};
-use crate::time::{sleep, Duration, Instant};
+use crate::time::{Duration, Instant, sleep};
 use crate::types::{Budget, Outcome, RegionId, TaskId, Time};
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::SystemTime;
 use tempfile::TempDir;
 
@@ -54,8 +54,10 @@ impl IntegrationLogger {
             .unwrap()
             .as_millis();
 
-        eprintln!("{{\"timestamp\":{},\"test\":\"{}\",\"elapsed_ms\":{},\"event\":\"{}\",\"data\":{}}}",
-            timestamp, self.test_name, elapsed, event_type, data);
+        eprintln!(
+            "{{\"timestamp\":{},\"test\":\"{}\",\"elapsed_ms\":{},\"event\":\"{}\",\"data\":{}}}",
+            timestamp, self.test_name, elapsed, event_type, data
+        );
     }
 
     fn log_phase(&self, phase: &str) {
@@ -67,18 +69,24 @@ impl IntegrationLogger {
     }
 
     fn log_assertion(&self, assertion: &str, passed: bool, details: serde_json::Value) {
-        self.log_event("assertion", serde_json::json!({
-            "assertion": assertion,
-            "passed": passed,
-            "details": details
-        }));
+        self.log_event(
+            "assertion",
+            serde_json::json!({
+                "assertion": assertion,
+                "passed": passed,
+                "details": details
+            }),
+        );
     }
 }
 
 impl Drop for IntegrationLogger {
     fn drop(&mut self) {
         let elapsed = self.start_time.elapsed().as_millis();
-        self.log_event("integration_test_end", serde_json::json!({"total_duration_ms": elapsed}));
+        self.log_event(
+            "integration_test_end",
+            serde_json::json!({"total_duration_ms": elapsed}),
+        );
     }
 }
 
@@ -154,9 +162,12 @@ impl IntegrationTestHarness {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let failure_injector = FailureInjector::new();
 
-        logger.log_event("harness_init", serde_json::json!({
-            "temp_dir": temp_dir.path().to_string_lossy()
-        }));
+        logger.log_event(
+            "harness_init",
+            serde_json::json!({
+                "temp_dir": temp_dir.path().to_string_lossy()
+            }),
+        );
 
         let runtime = RuntimeBuilder::new()
             .build_lab()
@@ -180,11 +191,14 @@ impl IntegrationTestHarness {
 
         self.failure_injector.set_failure_rate(failure_rate);
 
-        self.logger.log_event("scenario_config", serde_json::json!({
-            "consumer_count": consumer_count,
-            "message_count": message_count,
-            "failure_rate": failure_rate
-        }));
+        self.logger.log_event(
+            "scenario_config",
+            serde_json::json!({
+                "consumer_count": consumer_count,
+                "message_count": message_count,
+                "failure_rate": failure_rate
+            }),
+        );
 
         let (tx, rx) = broadcast::channel(100);
         let consumer_results = Arc::new(Mutex::new(Vec::new()));
@@ -199,42 +213,57 @@ impl IntegrationTestHarness {
             let logger = &self.logger;
             let failure_injector = &self.failure_injector;
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    for i in 0..message_count {
-                        let message = format!("message_{}", i);
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            for i in 0..message_count {
+                                let message = format!("message_{}", i);
 
-                        // Inject occasional producer failures
-                        if let Err(_) = failure_injector.maybe_inject_failure("producer").await {
-                            logger.log_event("producer_failure", serde_json::json!({
-                                "message_id": i,
-                                "reason": "injected_failure"
-                            }));
-                            continue;
-                        }
+                                // Inject occasional producer failures
+                                if let Err(_) =
+                                    failure_injector.maybe_inject_failure("producer").await
+                                {
+                                    logger.log_event(
+                                        "producer_failure",
+                                        serde_json::json!({
+                                            "message_id": i,
+                                            "reason": "injected_failure"
+                                        }),
+                                    );
+                                    continue;
+                                }
 
-                        match tx.send(message.clone()) {
-                            Ok(subscriber_count) => {
-                                logger.log_event("message_published", serde_json::json!({
-                                    "message_id": i,
-                                    "message": message,
-                                    "subscriber_count": subscriber_count
-                                }));
+                                match tx.send(message.clone()) {
+                                    Ok(subscriber_count) => {
+                                        logger.log_event(
+                                            "message_published",
+                                            serde_json::json!({
+                                                "message_id": i,
+                                                "message": message,
+                                                "subscriber_count": subscriber_count
+                                            }),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        logger.log_event(
+                                            "publish_failed",
+                                            serde_json::json!({
+                                                "message_id": i,
+                                                "error": e.to_string()
+                                            }),
+                                        );
+                                    }
+                                }
+
+                                sleep(Duration::from_millis(10)).await;
                             }
-                            Err(e) => {
-                                logger.log_event("publish_failed", serde_json::json!({
-                                    "message_id": i,
-                                    "error": e.to_string()
-                                }));
-                            }
-                        }
 
-                        sleep(Duration::from_millis(10)).await;
-                    }
-
-                    Outcome::Ok(())
-                }).await
-            }).await
+                            Outcome::Ok(())
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 2: Spawn consumers with failure injection
@@ -250,60 +279,87 @@ impl IntegrationTestHarness {
             let failure_injector = &self.failure_injector;
             let logger = &self.logger;
 
-            let consumer_task = self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let mut received_count = 0;
-                    let mut failed_count = 0;
+            let consumer_task = self
+                .runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let mut received_count = 0;
+                            let mut failed_count = 0;
 
-                    loop {
-                        match consumer_rx.recv().await {
-                            Ok(message) => {
-                                // Inject consumer-specific failures
-                                if let Err(_) = failure_injector.maybe_inject_failure(&format!("consumer_{}", consumer_id)).await {
-                                    failed_count += 1;
-                                    failed_deliveries.fetch_add(1, Ordering::Relaxed);
+                            loop {
+                                match consumer_rx.recv().await {
+                                    Ok(message) => {
+                                        // Inject consumer-specific failures
+                                        if let Err(_) = failure_injector
+                                            .maybe_inject_failure(&format!(
+                                                "consumer_{}",
+                                                consumer_id
+                                            ))
+                                            .await
+                                        {
+                                            failed_count += 1;
+                                            failed_deliveries.fetch_add(1, Ordering::Relaxed);
 
-                                    logger.log_event("consumer_failure", serde_json::json!({
-                                        "consumer_id": consumer_id,
-                                        "message": message,
-                                        "reason": "injected_failure"
-                                    }));
-                                    continue;
+                                            logger.log_event(
+                                                "consumer_failure",
+                                                serde_json::json!({
+                                                    "consumer_id": consumer_id,
+                                                    "message": message,
+                                                    "reason": "injected_failure"
+                                                }),
+                                            );
+                                            continue;
+                                        }
+
+                                        // Simulate message processing with potential delays
+                                        failure_injector.maybe_inject_delay().await;
+
+                                        received_count += 1;
+                                        successful_deliveries.fetch_add(1, Ordering::Relaxed);
+
+                                        logger.log_event(
+                                            "message_consumed",
+                                            serde_json::json!({
+                                                "consumer_id": consumer_id,
+                                                "message": message,
+                                                "received_count": received_count
+                                            }),
+                                        );
+                                    }
+                                    Err(broadcast::RecvError::Closed) => {
+                                        logger.log_event(
+                                            "consumer_stream_closed",
+                                            serde_json::json!({
+                                                "consumer_id": consumer_id,
+                                                "final_received_count": received_count,
+                                                "final_failed_count": failed_count
+                                            }),
+                                        );
+                                        break;
+                                    }
+                                    Err(broadcast::RecvError::Lagged(skipped)) => {
+                                        logger.log_event(
+                                            "consumer_lagged",
+                                            serde_json::json!({
+                                                "consumer_id": consumer_id,
+                                                "skipped_messages": skipped
+                                            }),
+                                        );
+                                    }
                                 }
-
-                                // Simulate message processing with potential delays
-                                failure_injector.maybe_inject_delay().await;
-
-                                received_count += 1;
-                                successful_deliveries.fetch_add(1, Ordering::Relaxed);
-
-                                logger.log_event("message_consumed", serde_json::json!({
-                                    "consumer_id": consumer_id,
-                                    "message": message,
-                                    "received_count": received_count
-                                }));
                             }
-                            Err(broadcast::RecvError::Closed) => {
-                                logger.log_event("consumer_stream_closed", serde_json::json!({
-                                    "consumer_id": consumer_id,
-                                    "final_received_count": received_count,
-                                    "final_failed_count": failed_count
-                                }));
-                                break;
-                            }
-                            Err(broadcast::RecvError::Lagged(skipped)) => {
-                                logger.log_event("consumer_lagged", serde_json::json!({
-                                    "consumer_id": consumer_id,
-                                    "skipped_messages": skipped
-                                }));
-                            }
-                        }
-                    }
 
-                    consumer_results.lock().await.push((consumer_id, received_count, failed_count));
-                    Outcome::Ok(())
-                }).await
-            }).await;
+                            consumer_results.lock().await.push((
+                                consumer_id,
+                                received_count,
+                                failed_count,
+                            ));
+                            Outcome::Ok(())
+                        })
+                        .await
+                })
+                .await;
 
             consumer_tasks.push(consumer_task);
         }
@@ -324,16 +380,22 @@ impl IntegrationTestHarness {
         for (i, consumer_task) in consumer_tasks.into_iter().enumerate() {
             match timeout(Duration::from_secs(5), consumer_task).await {
                 Outcome::Ok(result) => {
-                    self.logger.log_event("consumer_completed", serde_json::json!({
-                        "consumer_id": i,
-                        "result": format!("{:?}", result)
-                    }));
+                    self.logger.log_event(
+                        "consumer_completed",
+                        serde_json::json!({
+                            "consumer_id": i,
+                            "result": format!("{:?}", result)
+                        }),
+                    );
                 }
                 Outcome::Cancelled => {
-                    self.logger.log_event("consumer_timeout", serde_json::json!({
-                        "consumer_id": i,
-                        "timeout_duration_ms": 5000
-                    }));
+                    self.logger.log_event(
+                        "consumer_timeout",
+                        serde_json::json!({
+                            "consumer_id": i,
+                            "timeout_duration_ms": 5000
+                        }),
+                    );
                 }
                 _ => {}
             }
@@ -362,18 +424,29 @@ impl IntegrationTestHarness {
         }));
 
         // Assertions
-        assert!(total_successful > 0, "At least some messages should be delivered successfully");
+        assert!(
+            total_successful > 0,
+            "At least some messages should be delivered successfully"
+        );
 
         let expected_min_deliveries = (message_count * consumer_count * (100 - failure_rate)) / 100;
 
-        self.logger.log_assertion("sufficient_deliveries", total_successful >= expected_min_deliveries, serde_json::json!({
-            "actual_deliveries": total_successful,
-            "expected_min": expected_min_deliveries,
-            "failure_rate": failure_rate
-        }));
+        self.logger.log_assertion(
+            "sufficient_deliveries",
+            total_successful >= expected_min_deliveries,
+            serde_json::json!({
+                "actual_deliveries": total_successful,
+                "expected_min": expected_min_deliveries,
+                "failure_rate": failure_rate
+            }),
+        );
 
-        assert!(total_successful >= expected_min_deliveries,
-            "Should deliver at least {}% of messages despite {}% failure rate", 100 - failure_rate, failure_rate);
+        assert!(
+            total_successful >= expected_min_deliveries,
+            "Should deliver at least {}% of messages despite {}% failure rate",
+            100 - failure_rate,
+            failure_rate
+        );
     }
 
     /// [br-integration-2] Circuit breaker cascade recovery
@@ -384,10 +457,13 @@ impl IntegrationTestHarness {
         let service_tiers = 3;
         let requests_per_tier = 20;
 
-        self.logger.log_event("cascade_config", serde_json::json!({
-            "service_tiers": service_tiers,
-            "requests_per_tier": requests_per_tier
-        }));
+        self.logger.log_event(
+            "cascade_config",
+            serde_json::json!({
+                "service_tiers": service_tiers,
+                "requests_per_tier": requests_per_tier
+            }),
+        );
 
         // Phase 1: Setup service tiers with circuit breakers
         self.logger.log_phase("service_tier_setup");
@@ -410,7 +486,10 @@ impl IntegrationTestHarness {
             let breaker = CircuitBreaker::new(policy);
             circuit_breakers.push(breaker);
 
-            failure_counts.lock().await.insert(tier, AtomicUsize::new(0));
+            failure_counts
+                .lock()
+                .await
+                .insert(tier, AtomicUsize::new(0));
         }
 
         // Phase 2: Simulate cascading failures
@@ -435,64 +514,78 @@ impl IntegrationTestHarness {
             let failure_injector = &self.failure_injector;
             let logger = &self.logger;
 
-            let request_task = self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let tier = request_id % service_tiers;
-                    let now = Time::now();
+            let request_task = self
+                .runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let tier = request_id % service_tiers;
+                            let now = Time::now();
 
-                    let result = circuit_breakers_clone[tier].call(now, || {
-                        // Inject failures more frequently in deeper tiers
-                        let tier_failure_rate = match tier {
-                            0 => 10, // Frontend tier: 10% failure
-                            1 => 30, // Middle tier: 30% failure
-                            2 => 90, // Backend tier: 90% failure (simulating downstream issues)
-                            _ => 50,
-                        };
+                            let result = circuit_breakers_clone[tier].call(now, || {
+                                // Inject failures more frequently in deeper tiers
+                                let tier_failure_rate = match tier {
+                                    0 => 10, // Frontend tier: 10% failure
+                                    1 => 30, // Middle tier: 30% failure
+                                    2 => 90, // Backend tier: 90% failure (simulating downstream issues)
+                                    _ => 50,
+                                };
 
-                        let random_failure = fastrand::usize(0..100) < tier_failure_rate;
-                        if random_failure {
-                            return Err(Error::new(
-                                ErrorKind::Service,
-                                format!("Service tier {} failure", tier),
-                            ));
-                        }
+                                let random_failure = fastrand::usize(0..100) < tier_failure_rate;
+                                if random_failure {
+                                    return Err(Error::new(
+                                        ErrorKind::Service,
+                                        format!("Service tier {} failure", tier),
+                                    ));
+                                }
 
-                        Ok(format!("tier_{}_response_{}", tier, request_id))
-                    });
+                                Ok(format!("tier_{}_response_{}", tier, request_id))
+                            });
 
-                    match result {
-                        Ok(response) => {
-                            successful_requests.fetch_add(1, Ordering::Relaxed);
-                            logger.log_event("request_success", serde_json::json!({
-                                "request_id": request_id,
-                                "tier": tier,
-                                "response": response
-                            }));
-                        }
-                        Err(e) => {
-                            failed_requests.fetch_add(1, Ordering::Relaxed);
+                            match result {
+                                Ok(response) => {
+                                    successful_requests.fetch_add(1, Ordering::Relaxed);
+                                    logger.log_event(
+                                        "request_success",
+                                        serde_json::json!({
+                                            "request_id": request_id,
+                                            "tier": tier,
+                                            "response": response
+                                        }),
+                                    );
+                                }
+                                Err(e) => {
+                                    failed_requests.fetch_add(1, Ordering::Relaxed);
 
-                            let error_description = format!("{:?}", e);
-                            if error_description.contains("Open") {
-                                circuit_opened_count.fetch_add(1, Ordering::Relaxed);
-                                logger.log_event("circuit_breaker_opened", serde_json::json!({
-                                    "request_id": request_id,
-                                    "tier": tier,
-                                    "error": error_description
-                                }));
-                            } else {
-                                logger.log_event("request_failure", serde_json::json!({
-                                    "request_id": request_id,
-                                    "tier": tier,
-                                    "error": error_description
-                                }));
+                                    let error_description = format!("{:?}", e);
+                                    if error_description.contains("Open") {
+                                        circuit_opened_count.fetch_add(1, Ordering::Relaxed);
+                                        logger.log_event(
+                                            "circuit_breaker_opened",
+                                            serde_json::json!({
+                                                "request_id": request_id,
+                                                "tier": tier,
+                                                "error": error_description
+                                            }),
+                                        );
+                                    } else {
+                                        logger.log_event(
+                                            "request_failure",
+                                            serde_json::json!({
+                                                "request_id": request_id,
+                                                "tier": tier,
+                                                "error": error_description
+                                            }),
+                                        );
+                                    }
+                                }
                             }
-                        }
-                    }
 
-                    Outcome::Ok(())
-                }).await
-            }).await;
+                            Outcome::Ok(())
+                        })
+                        .await
+                })
+                .await;
 
             request_tasks.push(request_task);
 
@@ -505,11 +598,14 @@ impl IntegrationTestHarness {
 
         for (i, task) in request_tasks.into_iter().enumerate() {
             match timeout(Duration::from_secs(2), task).await {
-                Outcome::Ok(_) => {},
+                Outcome::Ok(_) => {}
                 _ => {
-                    self.logger.log_event("request_timeout", serde_json::json!({
-                        "request_index": i
-                    }));
+                    self.logger.log_event(
+                        "request_timeout",
+                        serde_json::json!({
+                            "request_index": i
+                        }),
+                    );
                 }
             }
         }
@@ -535,45 +631,56 @@ impl IntegrationTestHarness {
             let failure_injector = &self.failure_injector;
             let logger = &self.logger;
 
-            let recovery_task = self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let tier = request_id % service_tiers;
-                    let now = Time::now();
+            let recovery_task = self
+                .runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let tier = request_id % service_tiers;
+                            let now = Time::now();
 
-                    let result = circuit_breakers_clone[tier].call(now, || {
-                        // Much lower failure rate during recovery
-                        if fastrand::usize(0..100) < 5 {
-                            return Err(Error::new(
-                                ErrorKind::Service,
-                                format!("Recovery phase failure in tier {}", tier),
-                            ));
-                        }
+                            let result = circuit_breakers_clone[tier].call(now, || {
+                                // Much lower failure rate during recovery
+                                if fastrand::usize(0..100) < 5 {
+                                    return Err(Error::new(
+                                        ErrorKind::Service,
+                                        format!("Recovery phase failure in tier {}", tier),
+                                    ));
+                                }
 
-                        Ok(format!("recovery_tier_{}_response_{}", tier, request_id))
-                    });
+                                Ok(format!("recovery_tier_{}_response_{}", tier, request_id))
+                            });
 
-                    match result {
-                        Ok(response) => {
-                            successful_requests.fetch_add(1, Ordering::Relaxed);
-                            logger.log_event("recovery_success", serde_json::json!({
-                                "request_id": request_id,
-                                "tier": tier,
-                                "response": response
-                            }));
-                        }
-                        Err(e) => {
-                            failed_requests.fetch_add(1, Ordering::Relaxed);
-                            logger.log_event("recovery_failure", serde_json::json!({
-                                "request_id": request_id,
-                                "tier": tier,
-                                "error": e.to_string()
-                            }));
-                        }
-                    }
+                            match result {
+                                Ok(response) => {
+                                    successful_requests.fetch_add(1, Ordering::Relaxed);
+                                    logger.log_event(
+                                        "recovery_success",
+                                        serde_json::json!({
+                                            "request_id": request_id,
+                                            "tier": tier,
+                                            "response": response
+                                        }),
+                                    );
+                                }
+                                Err(e) => {
+                                    failed_requests.fetch_add(1, Ordering::Relaxed);
+                                    logger.log_event(
+                                        "recovery_failure",
+                                        serde_json::json!({
+                                            "request_id": request_id,
+                                            "tier": tier,
+                                            "error": e.to_string()
+                                        }),
+                                    );
+                                }
+                            }
 
-                    Outcome::Ok(())
-                }).await
-            }).await;
+                            Outcome::Ok(())
+                        })
+                        .await
+                })
+                .await;
 
             recovery_tasks.push(recovery_task);
             sleep(Duration::from_millis(30)).await;
@@ -592,7 +699,8 @@ impl IntegrationTestHarness {
 
         let recovery_successful = final_successful - initial_successful;
         let recovery_failed = final_failed - initial_failed;
-        let recovery_success_rate = recovery_successful as f64 / (recovery_successful + recovery_failed).max(1) as f64;
+        let recovery_success_rate =
+            recovery_successful as f64 / (recovery_successful + recovery_failed).max(1) as f64;
 
         self.logger.log_metrics(serde_json::json!({
             "initial_phase": {
@@ -609,17 +717,32 @@ impl IntegrationTestHarness {
         }));
 
         // Assertions
-        self.logger.log_assertion("circuit_breakers_activated", initial_circuit_opens > 0, serde_json::json!({
-            "circuit_opens": initial_circuit_opens
-        }));
+        self.logger.log_assertion(
+            "circuit_breakers_activated",
+            initial_circuit_opens > 0,
+            serde_json::json!({
+                "circuit_opens": initial_circuit_opens
+            }),
+        );
 
-        self.logger.log_assertion("recovery_improved", recovery_success_rate > 0.8, serde_json::json!({
-            "recovery_success_rate": recovery_success_rate,
-            "threshold": 0.8
-        }));
+        self.logger.log_assertion(
+            "recovery_improved",
+            recovery_success_rate > 0.8,
+            serde_json::json!({
+                "recovery_success_rate": recovery_success_rate,
+                "threshold": 0.8
+            }),
+        );
 
-        assert!(initial_circuit_opens > 0, "Circuit breakers should have activated during cascade");
-        assert!(recovery_success_rate > 0.8, "Recovery phase should show >80% success rate, got {:.1}%", recovery_success_rate * 100.0);
+        assert!(
+            initial_circuit_opens > 0,
+            "Circuit breakers should have activated during cascade"
+        );
+        assert!(
+            recovery_success_rate > 0.8,
+            "Recovery phase should show >80% success rate, got {:.1}%",
+            recovery_success_rate * 100.0
+        );
     }
 
     /// [br-integration-3] Region failure isolation and recovery
@@ -631,10 +754,13 @@ impl IntegrationTestHarness {
 
         self.failure_injector.set_failure_rate(30);
 
-        self.logger.log_event("region_config", serde_json::json!({
-            "region_count": region_count,
-            "work_items_per_region": work_items_per_region
-        }));
+        self.logger.log_event(
+            "region_config",
+            serde_json::json!({
+                "region_count": region_count,
+                "work_items_per_region": work_items_per_region
+            }),
+        );
 
         // Phase 1: Create isolated regions
         self.logger.log_phase("region_creation");
@@ -661,46 +787,63 @@ impl IntegrationTestHarness {
                 _ => 30,
             };
 
-            let region_task = self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    logger.log_event("region_started", serde_json::json!({
-                        "region_id": region_id,
-                        "failure_rate": region_failure_rate
-                    }));
+            let region_task = self
+                .runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            logger.log_event(
+                                "region_started",
+                                serde_json::json!({
+                                    "region_id": region_id,
+                                    "failure_rate": region_failure_rate
+                                }),
+                            );
 
-                    // Simulate work in the region
-                    for work_item in 0..work_items_per_region {
-                        // Inject region-specific failures
-                        if fastrand::usize(0..100) < region_failure_rate {
-                            failed_regions.fetch_add(1, Ordering::Relaxed);
-                            logger.log_event("region_failure", serde_json::json!({
-                                "region_id": region_id,
-                                "work_item": work_item,
-                                "failure_type": "injected"
-                            }));
+                            // Simulate work in the region
+                            for work_item in 0..work_items_per_region {
+                                // Inject region-specific failures
+                                if fastrand::usize(0..100) < region_failure_rate {
+                                    failed_regions.fetch_add(1, Ordering::Relaxed);
+                                    logger.log_event(
+                                        "region_failure",
+                                        serde_json::json!({
+                                            "region_id": region_id,
+                                            "work_item": work_item,
+                                            "failure_type": "injected"
+                                        }),
+                                    );
 
-                            return Outcome::Cancelled; // Simulate region failure
-                        }
+                                    return Outcome::Cancelled; // Simulate region failure
+                                }
 
-                        // Simulate work delay
-                        sleep(Duration::from_millis(20)).await;
+                                // Simulate work delay
+                                sleep(Duration::from_millis(20)).await;
 
-                        successful_work.fetch_add(1, Ordering::Relaxed);
+                                successful_work.fetch_add(1, Ordering::Relaxed);
 
-                        logger.log_event("work_completed", serde_json::json!({
-                            "region_id": region_id,
-                            "work_item": work_item
-                        }));
-                    }
+                                logger.log_event(
+                                    "work_completed",
+                                    serde_json::json!({
+                                        "region_id": region_id,
+                                        "work_item": work_item
+                                    }),
+                                );
+                            }
 
-                    completed_regions.fetch_add(1, Ordering::Relaxed);
-                    logger.log_event("region_completed", serde_json::json!({
-                        "region_id": region_id
-                    }));
+                            completed_regions.fetch_add(1, Ordering::Relaxed);
+                            logger.log_event(
+                                "region_completed",
+                                serde_json::json!({
+                                    "region_id": region_id
+                                }),
+                            );
 
-                    Outcome::Ok(())
-                }).await
-            }).await;
+                            Outcome::Ok(())
+                        })
+                        .await
+                })
+                .await;
 
             region_tasks.push(region_task);
         }
@@ -711,15 +854,21 @@ impl IntegrationTestHarness {
         for (region_id, region_task) in region_tasks.into_iter().enumerate() {
             match timeout(Duration::from_secs(5), region_task).await {
                 Outcome::Ok(result) => {
-                    self.logger.log_event("region_task_completed", serde_json::json!({
-                        "region_id": region_id,
-                        "result": format!("{:?}", result)
-                    }));
+                    self.logger.log_event(
+                        "region_task_completed",
+                        serde_json::json!({
+                            "region_id": region_id,
+                            "result": format!("{:?}", result)
+                        }),
+                    );
                 }
                 Outcome::Cancelled => {
-                    self.logger.log_event("region_task_timeout", serde_json::json!({
-                        "region_id": region_id
-                    }));
+                    self.logger.log_event(
+                        "region_task_timeout",
+                        serde_json::json!({
+                            "region_id": region_id
+                        }),
+                    );
                 }
                 _ => {}
             }
@@ -742,21 +891,42 @@ impl IntegrationTestHarness {
         }));
 
         // Assertions - Some regions should fail but others should succeed (isolation)
-        self.logger.log_assertion("work_completed_despite_failures", total_successful_work > 0, serde_json::json!({
-            "successful_work": total_successful_work
-        }));
+        self.logger.log_assertion(
+            "work_completed_despite_failures",
+            total_successful_work > 0,
+            serde_json::json!({
+                "successful_work": total_successful_work
+            }),
+        );
 
-        self.logger.log_assertion("failures_occurred", total_failed_regions > 0, serde_json::json!({
-            "failed_regions": total_failed_regions
-        }));
+        self.logger.log_assertion(
+            "failures_occurred",
+            total_failed_regions > 0,
+            serde_json::json!({
+                "failed_regions": total_failed_regions
+            }),
+        );
 
-        self.logger.log_assertion("isolation_preserved", total_completed_regions > 0, serde_json::json!({
-            "completed_regions": total_completed_regions
-        }));
+        self.logger.log_assertion(
+            "isolation_preserved",
+            total_completed_regions > 0,
+            serde_json::json!({
+                "completed_regions": total_completed_regions
+            }),
+        );
 
-        assert!(total_successful_work > 0, "Some work should complete despite region failures");
-        assert!(total_failed_regions > 0, "Some regions should fail due to injected failures");
-        assert!(total_completed_regions > 0, "At least one region should complete successfully (isolation)");
+        assert!(
+            total_successful_work > 0,
+            "Some work should complete despite region failures"
+        );
+        assert!(
+            total_failed_regions > 0,
+            "Some regions should fail due to injected failures"
+        );
+        assert!(
+            total_completed_regions > 0,
+            "At least one region should complete successfully (isolation)"
+        );
     }
 
     /// [br-integration-5] Chaos: Kill worker thread mid-task, verify obligation cleanup
@@ -767,11 +937,14 @@ impl IntegrationTestHarness {
         let tasks_per_worker = 8;
         let kill_probability = 40; // 40% chance to kill thread mid-task
 
-        self.logger.log_event("chaos_config", serde_json::json!({
-            "worker_count": worker_count,
-            "tasks_per_worker": tasks_per_worker,
-            "kill_probability": kill_probability
-        }));
+        self.logger.log_event(
+            "chaos_config",
+            serde_json::json!({
+                "worker_count": worker_count,
+                "tasks_per_worker": tasks_per_worker,
+                "kill_probability": kill_probability
+            }),
+        );
 
         // Phase 1: Setup obligation tracking
         self.logger.log_phase("obligation_tracking_setup");
@@ -799,87 +972,111 @@ impl IntegrationTestHarness {
             let active_obligations = Arc::clone(&active_obligations);
             let logger = &self.logger;
 
-            let worker_task = self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    logger.log_event("worker_started", serde_json::json!({
-                        "worker_id": worker_id
-                    }));
+            let worker_task = self
+                .runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            logger.log_event(
+                                "worker_started",
+                                serde_json::json!({
+                                    "worker_id": worker_id
+                                }),
+                            );
 
-                    for task_id in 0..tasks_per_worker {
-                        let obligation_id = format!("worker_{}_task_{}", worker_id, task_id);
+                            for task_id in 0..tasks_per_worker {
+                                let obligation_id =
+                                    format!("worker_{}_task_{}", worker_id, task_id);
 
-                        // Create obligation (simulate resource acquisition)
-                        {
-                            let mut obligations = active_obligations.lock().await;
-                            obligations.insert(obligation_id.clone(), false); // false = not completed
-                        }
-                        obligation_created.fetch_add(1, Ordering::Relaxed);
+                                // Create obligation (simulate resource acquisition)
+                                {
+                                    let mut obligations = active_obligations.lock().await;
+                                    obligations.insert(obligation_id.clone(), false); // false = not completed
+                                }
+                                obligation_created.fetch_add(1, Ordering::Relaxed);
 
-                        logger.log_event("obligation_created", serde_json::json!({
-                            "worker_id": worker_id,
-                            "task_id": task_id,
-                            "obligation_id": obligation_id
-                        }));
+                                logger.log_event(
+                                    "obligation_created",
+                                    serde_json::json!({
+                                        "worker_id": worker_id,
+                                        "task_id": task_id,
+                                        "obligation_id": obligation_id
+                                    }),
+                                );
 
-                        // Chaos injection: random thread termination mid-task
-                        if fastrand::usize(0..100) < kill_probability {
-                            threads_killed.fetch_add(1, Ordering::Relaxed);
+                                // Chaos injection: random thread termination mid-task
+                                if fastrand::usize(0..100) < kill_probability {
+                                    threads_killed.fetch_add(1, Ordering::Relaxed);
 
-                            logger.log_event("chaos_thread_kill", serde_json::json!({
-                                "worker_id": worker_id,
-                                "task_id": task_id,
-                                "obligation_id": obligation_id,
-                                "kill_reason": "chaos_injection"
-                            }));
+                                    logger.log_event(
+                                        "chaos_thread_kill",
+                                        serde_json::json!({
+                                            "worker_id": worker_id,
+                                            "task_id": task_id,
+                                            "obligation_id": obligation_id,
+                                            "kill_reason": "chaos_injection"
+                                        }),
+                                    );
 
-                            // Simulate abrupt thread termination (would trigger region cancellation)
-                            return Outcome::Cancelled;
-                        }
+                                    // Simulate abrupt thread termination (would trigger region cancellation)
+                                    return Outcome::Cancelled;
+                                }
 
-                        // Simulate work with potential for interruption
-                        for work_step in 0..3 {
-                            sleep(Duration::from_millis(50)).await;
+                                // Simulate work with potential for interruption
+                                for work_step in 0..3 {
+                                    sleep(Duration::from_millis(50)).await;
 
-                            // Additional chaos injection during work
-                            if fastrand::usize(0..100) < kill_probability / 2 {
-                                threads_killed.fetch_add(1, Ordering::Relaxed);
+                                    // Additional chaos injection during work
+                                    if fastrand::usize(0..100) < kill_probability / 2 {
+                                        threads_killed.fetch_add(1, Ordering::Relaxed);
 
-                                logger.log_event("chaos_mid_work_kill", serde_json::json!({
-                                    "worker_id": worker_id,
-                                    "task_id": task_id,
-                                    "work_step": work_step,
-                                    "obligation_id": obligation_id
-                                }));
+                                        logger.log_event(
+                                            "chaos_mid_work_kill",
+                                            serde_json::json!({
+                                                "worker_id": worker_id,
+                                                "task_id": task_id,
+                                                "work_step": work_step,
+                                                "obligation_id": obligation_id
+                                            }),
+                                        );
 
-                                return Outcome::Cancelled;
+                                        return Outcome::Cancelled;
+                                    }
+                                }
+
+                                // Complete obligation (simulate resource cleanup)
+                                {
+                                    let mut obligations = active_obligations.lock().await;
+                                    if let Some(completed) = obligations.get_mut(&obligation_id) {
+                                        *completed = true;
+                                        obligation_completed.fetch_add(1, Ordering::Relaxed);
+
+                                        logger.log_event(
+                                            "obligation_completed",
+                                            serde_json::json!({
+                                                "worker_id": worker_id,
+                                                "task_id": task_id,
+                                                "obligation_id": obligation_id
+                                            }),
+                                        );
+                                    }
+                                }
                             }
-                        }
 
-                        // Complete obligation (simulate resource cleanup)
-                        {
-                            let mut obligations = active_obligations.lock().await;
-                            if let Some(completed) = obligations.get_mut(&obligation_id) {
-                                *completed = true;
-                                obligation_completed.fetch_add(1, Ordering::Relaxed);
+                            clean_completions.fetch_add(1, Ordering::Relaxed);
 
-                                logger.log_event("obligation_completed", serde_json::json!({
-                                    "worker_id": worker_id,
-                                    "task_id": task_id,
-                                    "obligation_id": obligation_id
-                                }));
-                            }
-                        }
-                    }
+                            logger.log_event(
+                                "worker_completed_cleanly",
+                                serde_json::json!({
+                                    "worker_id": worker_id
+                                }),
+                            );
 
-                    clean_completions.fetch_add(1, Ordering::Relaxed);
-
-                    logger.log_event("worker_completed_cleanly", serde_json::json!({
-                        "worker_id": worker_id
-                    }));
-
-                    Outcome::Ok(())
-                }).await
-            }).await;
+                            Outcome::Ok(())
+                        })
+                        .await
+                })
+                .await;
 
             worker_tasks.push(worker_task);
         }
@@ -890,15 +1087,21 @@ impl IntegrationTestHarness {
         for (worker_id, worker_task) in worker_tasks.into_iter().enumerate() {
             match timeout(Duration::from_secs(10), worker_task).await {
                 Outcome::Ok(result) => {
-                    self.logger.log_event("worker_task_completed", serde_json::json!({
-                        "worker_id": worker_id,
-                        "result": format!("{:?}", result)
-                    }));
+                    self.logger.log_event(
+                        "worker_task_completed",
+                        serde_json::json!({
+                            "worker_id": worker_id,
+                            "result": format!("{:?}", result)
+                        }),
+                    );
                 }
                 Outcome::Cancelled => {
-                    self.logger.log_event("worker_task_timeout", serde_json::json!({
-                        "worker_id": worker_id
-                    }));
+                    self.logger.log_event(
+                        "worker_task_timeout",
+                        serde_json::json!({
+                            "worker_id": worker_id
+                        }),
+                    );
                 }
                 _ => {}
             }
@@ -913,10 +1116,13 @@ impl IntegrationTestHarness {
         for (obligation_id, completed) in final_obligations.iter() {
             if !completed {
                 leaked_count += 1;
-                self.logger.log_event("obligation_leaked", serde_json::json!({
-                    "obligation_id": obligation_id,
-                    "leak_detected": true
-                }));
+                self.logger.log_event(
+                    "obligation_leaked",
+                    serde_json::json!({
+                        "obligation_id": obligation_id,
+                        "leak_detected": true
+                    }),
+                );
             }
         }
 
@@ -944,22 +1150,45 @@ impl IntegrationTestHarness {
         }));
 
         // Critical assertions for chaos engineering
-        self.logger.log_assertion("chaos_occurred", total_killed > 0, serde_json::json!({
-            "threads_killed": total_killed
-        }));
+        self.logger.log_assertion(
+            "chaos_occurred",
+            total_killed > 0,
+            serde_json::json!({
+                "threads_killed": total_killed
+            }),
+        );
 
-        self.logger.log_assertion("no_obligation_leaks", total_leaked == 0, serde_json::json!({
-            "leaked_obligations": total_leaked,
-            "created_obligations": total_created
-        }));
+        self.logger.log_assertion(
+            "no_obligation_leaks",
+            total_leaked == 0,
+            serde_json::json!({
+                "leaked_obligations": total_leaked,
+                "created_obligations": total_created
+            }),
+        );
 
-        self.logger.log_assertion("some_work_completed", total_completed > 0, serde_json::json!({
-            "completed_obligations": total_completed
-        }));
+        self.logger.log_assertion(
+            "some_work_completed",
+            total_completed > 0,
+            serde_json::json!({
+                "completed_obligations": total_completed
+            }),
+        );
 
-        assert!(total_killed > 0, "Chaos injection should have killed some threads");
-        assert!(total_leaked == 0, "NO obligation leaks allowed despite chaos: {} leaked out of {}", total_leaked, total_created);
-        assert!(total_completed > 0, "Some work should complete despite chaos");
+        assert!(
+            total_killed > 0,
+            "Chaos injection should have killed some threads"
+        );
+        assert!(
+            total_leaked == 0,
+            "NO obligation leaks allowed despite chaos: {} leaked out of {}",
+            total_leaked,
+            total_created
+        );
+        assert!(
+            total_completed > 0,
+            "Some work should complete despite chaos"
+        );
     }
 
     /// [br-integration-6] Hedge pattern: First-success short-circuits slow downstream
@@ -971,12 +1200,15 @@ impl IntegrationTestHarness {
         let slow_response_time = Duration::from_millis(500);
         let fast_response_time = Duration::from_millis(50);
 
-        self.logger.log_event("hedge_config", serde_json::json!({
-            "hedge_count": hedge_count,
-            "requests_to_test": requests_to_test,
-            "slow_response_ms": slow_response_time.as_millis(),
-            "fast_response_ms": fast_response_time.as_millis()
-        }));
+        self.logger.log_event(
+            "hedge_config",
+            serde_json::json!({
+                "hedge_count": hedge_count,
+                "requests_to_test": requests_to_test,
+                "slow_response_ms": slow_response_time.as_millis(),
+                "fast_response_ms": fast_response_time.as_millis()
+            }),
+        );
 
         // Phase 1: Setup downstream services with varying response times
         self.logger.log_phase("downstream_service_setup");
@@ -1003,33 +1235,38 @@ impl IntegrationTestHarness {
                 total_hedge_attempts.fetch_add(1, Ordering::Relaxed);
 
                 let hedge_task = self.runtime.scope(|scope| async move {
-                    scope.spawn(async move {
-                        // Simulate different downstream response characteristics
-                        let response_delay = match hedge_idx {
-                            0 => fast_response_time, // Fast service (primary)
-                            1 => slow_response_time, // Slow service 1
-                            2 => slow_response_time * 2, // Very slow service
-                            3 => {
-                                // Sometimes fast, sometimes slow (unreliable service)
-                                if fastrand::bool() {
-                                    fast_response_time
-                                } else {
-                                    slow_response_time * 3
+                    scope
+                        .spawn(async move {
+                            // Simulate different downstream response characteristics
+                            let response_delay = match hedge_idx {
+                                0 => fast_response_time,     // Fast service (primary)
+                                1 => slow_response_time,     // Slow service 1
+                                2 => slow_response_time * 2, // Very slow service
+                                3 => {
+                                    // Sometimes fast, sometimes slow (unreliable service)
+                                    if fastrand::bool() {
+                                        fast_response_time
+                                    } else {
+                                        slow_response_time * 3
+                                    }
                                 }
-                            }
-                            _ => slow_response_time,
-                        };
+                                _ => slow_response_time,
+                            };
 
-                        sleep(response_delay).await;
+                            sleep(response_delay).await;
 
-                        logger.log_event("hedge_response", serde_json::json!({
-                            "request_id": request_id,
-                            "hedge_idx": hedge_idx,
-                            "response_delay_ms": response_delay.as_millis()
-                        }));
+                            logger.log_event(
+                                "hedge_response",
+                                serde_json::json!({
+                                    "request_id": request_id,
+                                    "hedge_idx": hedge_idx,
+                                    "response_delay_ms": response_delay.as_millis()
+                                }),
+                            );
 
-                        Outcome::Ok(format!("response_from_hedge_{}", hedge_idx))
-                    }).await
+                            Outcome::Ok(format!("response_from_hedge_{}", hedge_idx))
+                        })
+                        .await
                 });
 
                 hedge_tasks.push(hedge_task);
@@ -1045,19 +1282,25 @@ impl IntegrationTestHarness {
                 Outcome::Ok((winner_idx, response)) => {
                     first_success_count.fetch_add(1, Ordering::Relaxed);
 
-                    logger.log_event("hedge_first_success", serde_json::json!({
-                        "request_id": request_id,
-                        "winning_hedge": winner_idx,
-                        "response": response,
-                        "total_duration_ms": hedge_duration.as_millis(),
-                        "short_circuited": hedge_duration < slow_response_time
-                    }));
+                    logger.log_event(
+                        "hedge_first_success",
+                        serde_json::json!({
+                            "request_id": request_id,
+                            "winning_hedge": winner_idx,
+                            "response": response,
+                            "total_duration_ms": hedge_duration.as_millis(),
+                            "short_circuited": hedge_duration < slow_response_time
+                        }),
+                    );
                 }
                 _ => {
-                    logger.log_event("hedge_all_failed", serde_json::json!({
-                        "request_id": request_id,
-                        "duration_ms": hedge_duration.as_millis()
-                    }));
+                    logger.log_event(
+                        "hedge_all_failed",
+                        serde_json::json!({
+                            "request_id": request_id,
+                            "duration_ms": hedge_duration.as_millis()
+                        }),
+                    );
                 }
             }
         }
@@ -1067,7 +1310,8 @@ impl IntegrationTestHarness {
 
         let total_successes = first_success_count.load(Ordering::Relaxed);
         let total_attempts = total_hedge_attempts.load(Ordering::Relaxed);
-        let avg_response_ms = average_response_time.load(Ordering::Relaxed) / requests_to_test.max(1);
+        let avg_response_ms =
+            average_response_time.load(Ordering::Relaxed) / requests_to_test.max(1);
 
         self.logger.log_metrics(serde_json::json!({
             "hedge_results": {
@@ -1081,28 +1325,48 @@ impl IntegrationTestHarness {
         }));
 
         // Assertions
-        self.logger.log_assertion("hedge_successes", total_successes > 0, serde_json::json!({
-            "successful_requests": total_successes,
-            "total_requests": requests_to_test
-        }));
+        self.logger.log_assertion(
+            "hedge_successes",
+            total_successes > 0,
+            serde_json::json!({
+                "successful_requests": total_successes,
+                "total_requests": requests_to_test
+            }),
+        );
 
-        self.logger.log_assertion("hedge_short_circuit", avg_response_ms < slow_response_time.as_millis() as usize, serde_json::json!({
-            "average_response_ms": avg_response_ms,
-            "slow_threshold_ms": slow_response_time.as_millis()
-        }));
+        self.logger.log_assertion(
+            "hedge_short_circuit",
+            avg_response_ms < slow_response_time.as_millis() as usize,
+            serde_json::json!({
+                "average_response_ms": avg_response_ms,
+                "slow_threshold_ms": slow_response_time.as_millis()
+            }),
+        );
 
-        self.logger.log_assertion("hedge_efficiency", total_successes >= requests_to_test * 8 / 10, serde_json::json!({
-            "success_rate": total_successes as f64 / requests_to_test as f64,
-            "expected_rate": 0.8
-        }));
+        self.logger.log_assertion(
+            "hedge_efficiency",
+            total_successes >= requests_to_test * 8 / 10,
+            serde_json::json!({
+                "success_rate": total_successes as f64 / requests_to_test as f64,
+                "expected_rate": 0.8
+            }),
+        );
 
-        assert!(total_successes > 0, "Hedge should have some successful responses");
-        assert!(avg_response_ms < slow_response_time.as_millis() as usize,
+        assert!(
+            total_successes > 0,
+            "Hedge should have some successful responses"
+        );
+        assert!(
+            avg_response_ms < slow_response_time.as_millis() as usize,
             "Hedge should short-circuit slow responses: {}ms avg > {}ms threshold",
-            avg_response_ms, slow_response_time.as_millis());
-        assert!(total_successes >= requests_to_test * 8 / 10,
+            avg_response_ms,
+            slow_response_time.as_millis()
+        );
+        assert!(
+            total_successes >= requests_to_test * 8 / 10,
             "Hedge should achieve >80% success rate: {:.1}%",
-            total_successes as f64 / requests_to_test as f64 * 100.0);
+            total_successes as f64 / requests_to_test as f64 * 100.0
+        );
     }
 
     /// [br-integration-7] Distributed bridge rolling restart with consistency
@@ -1113,11 +1377,14 @@ impl IntegrationTestHarness {
         let messages_per_node = 15;
         let rolling_restart_interval = Duration::from_millis(200);
 
-        self.logger.log_event("bridge_config", serde_json::json!({
-            "node_count": node_count,
-            "messages_per_node": messages_per_node,
-            "rolling_restart_interval_ms": rolling_restart_interval.as_millis()
-        }));
+        self.logger.log_event(
+            "bridge_config",
+            serde_json::json!({
+                "node_count": node_count,
+                "messages_per_node": messages_per_node,
+                "rolling_restart_interval_ms": rolling_restart_interval.as_millis()
+            }),
+        );
 
         // Phase 1: Setup distributed bridge nodes
         self.logger.log_phase("bridge_node_setup");
@@ -1151,100 +1418,134 @@ impl IntegrationTestHarness {
             let coordinator_tx = coordinator_tx.clone();
             let logger = &self.logger;
 
-            let node_task = self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let mut current_generation = 0;
-                    let mut restart_count = 0;
+            let node_task = self
+                .runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let mut current_generation = 0;
+                            let mut restart_count = 0;
 
-                    // Node lifecycle with rolling restarts
-                    loop {
-                        logger.log_event("bridge_node_started", serde_json::json!({
-                            "node_id": node_id,
-                            "generation": current_generation,
-                            "restart_count": restart_count
-                        }));
+                            // Node lifecycle with rolling restarts
+                            loop {
+                                logger.log_event(
+                                    "bridge_node_started",
+                                    serde_json::json!({
+                                        "node_id": node_id,
+                                        "generation": current_generation,
+                                        "restart_count": restart_count
+                                    }),
+                                );
 
-                        // Update node generation
-                        {
-                            let mut generations = node_generations.lock().await;
-                            generations.insert(node_id, current_generation);
-                        }
-
-                        // Process messages for this generation
-                        for msg_id in 0..messages_per_node {
-                            let message = format!("node_{}_gen_{}_msg_{}", node_id, current_generation, msg_id);
-
-                            // Simulate distributed bridge state update
-                            {
-                                let mut state = bridge_state.lock().await;
-                                let node_key = format!("node_{}", node_id);
-                                state.entry(node_key).or_insert_with(Vec::new).push(message.clone());
-
-                                // Consistency check: verify no conflicting updates from same node
-                                if let Some(node_messages) = state.get(&format!("node_{}", node_id)) {
-                                    let expected_count = msg_id + 1 + (restart_count * messages_per_node);
-                                    if node_messages.len() != expected_count {
-                                        consistency_violations.fetch_add(1, Ordering::Relaxed);
-
-                                        logger.log_event("consistency_violation", serde_json::json!({
-                                            "node_id": node_id,
-                                            "expected_count": expected_count,
-                                            "actual_count": node_messages.len(),
-                                            "generation": current_generation
-                                        }));
-                                    }
+                                // Update node generation
+                                {
+                                    let mut generations = node_generations.lock().await;
+                                    generations.insert(node_id, current_generation);
                                 }
+
+                                // Process messages for this generation
+                                for msg_id in 0..messages_per_node {
+                                    let message = format!(
+                                        "node_{}_gen_{}_msg_{}",
+                                        node_id, current_generation, msg_id
+                                    );
+
+                                    // Simulate distributed bridge state update
+                                    {
+                                        let mut state = bridge_state.lock().await;
+                                        let node_key = format!("node_{}", node_id);
+                                        state
+                                            .entry(node_key)
+                                            .or_insert_with(Vec::new)
+                                            .push(message.clone());
+
+                                        // Consistency check: verify no conflicting updates from same node
+                                        if let Some(node_messages) =
+                                            state.get(&format!("node_{}", node_id))
+                                        {
+                                            let expected_count =
+                                                msg_id + 1 + (restart_count * messages_per_node);
+                                            if node_messages.len() != expected_count {
+                                                consistency_violations
+                                                    .fetch_add(1, Ordering::Relaxed);
+
+                                                logger.log_event(
+                                                    "consistency_violation",
+                                                    serde_json::json!({
+                                                        "node_id": node_id,
+                                                        "expected_count": expected_count,
+                                                        "actual_count": node_messages.len(),
+                                                        "generation": current_generation
+                                                    }),
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    messages_processed.fetch_add(1, Ordering::Relaxed);
+
+                                    // Send coordination message
+                                    if coordinator_tx.send(message.clone()).await.is_err() {
+                                        logger.log_event(
+                                            "coordination_send_failed",
+                                            serde_json::json!({
+                                                "node_id": node_id,
+                                                "message": message
+                                            }),
+                                        );
+                                        break;
+                                    }
+
+                                    logger.log_event(
+                                        "bridge_message_processed",
+                                        serde_json::json!({
+                                            "node_id": node_id,
+                                            "message": message,
+                                            "generation": current_generation
+                                        }),
+                                    );
+
+                                    sleep(Duration::from_millis(30)).await;
+                                }
+
+                                // Rolling restart logic
+                                restart_count += 1;
+                                current_generation += 1;
+
+                                if restart_count >= 3 {
+                                    // Limit restarts for test completion
+                                    successful_restarts.fetch_add(1, Ordering::Relaxed);
+
+                                    logger.log_event(
+                                        "bridge_node_final_shutdown",
+                                        serde_json::json!({
+                                            "node_id": node_id,
+                                            "total_restarts": restart_count,
+                                            "final_generation": current_generation
+                                        }),
+                                    );
+                                    break;
+                                }
+
+                                // Simulate restart delay
+                                sleep(rolling_restart_interval).await;
+
+                                logger.log_event(
+                                    "bridge_node_restarting",
+                                    serde_json::json!({
+                                        "node_id": node_id,
+                                        "old_generation": current_generation - 1,
+                                        "new_generation": current_generation,
+                                        "restart_count": restart_count
+                                    }),
+                                );
                             }
 
-                            messages_processed.fetch_add(1, Ordering::Relaxed);
-
-                            // Send coordination message
-                            if coordinator_tx.send(message.clone()).await.is_err() {
-                                logger.log_event("coordination_send_failed", serde_json::json!({
-                                    "node_id": node_id,
-                                    "message": message
-                                }));
-                                break;
-                            }
-
-                            logger.log_event("bridge_message_processed", serde_json::json!({
-                                "node_id": node_id,
-                                "message": message,
-                                "generation": current_generation
-                            }));
-
-                            sleep(Duration::from_millis(30)).await;
-                        }
-
-                        // Rolling restart logic
-                        restart_count += 1;
-                        current_generation += 1;
-
-                        if restart_count >= 3 { // Limit restarts for test completion
-                            successful_restarts.fetch_add(1, Ordering::Relaxed);
-
-                            logger.log_event("bridge_node_final_shutdown", serde_json::json!({
-                                "node_id": node_id,
-                                "total_restarts": restart_count,
-                                "final_generation": current_generation
-                            }));
-                            break;
-                        }
-
-                        // Simulate restart delay
-                        sleep(rolling_restart_interval).await;
-
-                        logger.log_event("bridge_node_restarting", serde_json::json!({
-                            "node_id": node_id,
-                            "old_generation": current_generation - 1,
-                            "new_generation": current_generation,
-                            "restart_count": restart_count
-                        }));
-                    }
-
-                    Outcome::Ok(())
-                }).await
-            }).await;
+                            Outcome::Ok(())
+                        })
+                        .await
+                })
+                .await;
 
             node_tasks.push(node_task);
 
@@ -1256,29 +1557,38 @@ impl IntegrationTestHarness {
         self.logger.log_phase("coordination_monitoring");
 
         let coordination_task = self.runtime.scope(|scope| async move {
-            scope.spawn(async move {
-                let mut coordinator_rx = coordinator_rx;
-                let mut total_coordinated = 0;
+            scope
+                .spawn(async move {
+                    let mut coordinator_rx = coordinator_rx;
+                    let mut total_coordinated = 0;
 
-                while let Some(message) = coordinator_rx.recv().await {
-                    total_coordinated += 1;
+                    while let Some(message) = coordinator_rx.recv().await {
+                        total_coordinated += 1;
 
-                    logger.log_event("coordination_received", serde_json::json!({
-                        "message": message,
-                        "total_coordinated": total_coordinated
-                    }));
+                        logger.log_event(
+                            "coordination_received",
+                            serde_json::json!({
+                                "message": message,
+                                "total_coordinated": total_coordinated
+                            }),
+                        );
 
-                    if total_coordinated >= 200 { // Reasonable limit for test completion
-                        break;
+                        if total_coordinated >= 200 {
+                            // Reasonable limit for test completion
+                            break;
+                        }
                     }
-                }
 
-                logger.log_event("coordination_completed", serde_json::json!({
-                    "total_coordinated": total_coordinated
-                }));
+                    logger.log_event(
+                        "coordination_completed",
+                        serde_json::json!({
+                            "total_coordinated": total_coordinated
+                        }),
+                    );
 
-                Outcome::Ok(total_coordinated)
-            }).await
+                    Outcome::Ok(total_coordinated)
+                })
+                .await
         });
 
         // Phase 4: Execute bridge with rolling restarts
@@ -1295,14 +1605,20 @@ impl IntegrationTestHarness {
             match timeout(Duration::from_secs(5), node_task).await {
                 Outcome::Ok(_) => {
                     completed_nodes += 1;
-                    self.logger.log_event("bridge_node_task_completed", serde_json::json!({
-                        "node_id": node_id
-                    }));
+                    self.logger.log_event(
+                        "bridge_node_task_completed",
+                        serde_json::json!({
+                            "node_id": node_id
+                        }),
+                    );
                 }
                 _ => {
-                    self.logger.log_event("bridge_node_task_timeout", serde_json::json!({
-                        "node_id": node_id
-                    }));
+                    self.logger.log_event(
+                        "bridge_node_task_timeout",
+                        serde_json::json!({
+                            "node_id": node_id
+                        }),
+                    );
                 }
             }
         }
@@ -1335,28 +1651,51 @@ impl IntegrationTestHarness {
         }));
 
         // Assertions
-        self.logger.log_assertion("messages_processed", total_messages > 0, serde_json::json!({
-            "processed_messages": total_messages
-        }));
+        self.logger.log_assertion(
+            "messages_processed",
+            total_messages > 0,
+            serde_json::json!({
+                "processed_messages": total_messages
+            }),
+        );
 
-        self.logger.log_assertion("restarts_completed", total_restarts > 0, serde_json::json!({
-            "successful_restarts": total_restarts,
-            "expected_min": 1
-        }));
+        self.logger.log_assertion(
+            "restarts_completed",
+            total_restarts > 0,
+            serde_json::json!({
+                "successful_restarts": total_restarts,
+                "expected_min": 1
+            }),
+        );
 
-        self.logger.log_assertion("consistency_maintained", total_violations == 0, serde_json::json!({
-            "consistency_violations": total_violations,
-            "total_messages": total_messages
-        }));
+        self.logger.log_assertion(
+            "consistency_maintained",
+            total_violations == 0,
+            serde_json::json!({
+                "consistency_violations": total_violations,
+                "total_messages": total_messages
+            }),
+        );
 
-        self.logger.log_assertion("coordination_active", coordinated_messages > 0, serde_json::json!({
-            "coordinated_messages": coordinated_messages
-        }));
+        self.logger.log_assertion(
+            "coordination_active",
+            coordinated_messages > 0,
+            serde_json::json!({
+                "coordinated_messages": coordinated_messages
+            }),
+        );
 
         assert!(total_messages > 0, "Bridge should process messages");
         assert!(total_restarts > 0, "Rolling restarts should occur");
-        assert!(total_violations == 0, "NO consistency violations allowed during rolling restart: {} violations", total_violations);
-        assert!(coordinated_messages > 0, "Bridge coordination should be active");
+        assert!(
+            total_violations == 0,
+            "NO consistency violations allowed during rolling restart: {} violations",
+            total_violations
+        );
+        assert!(
+            coordinated_messages > 0,
+            "Bridge coordination should be active"
+        );
     }
 
     /// [br-integration-4] Backpressure propagation pipeline
@@ -1367,11 +1706,14 @@ impl IntegrationTestHarness {
         let total_items = 100;
         let slow_stage_delay = Duration::from_millis(100); // Stage 2 is slow
 
-        self.logger.log_event("pipeline_config", serde_json::json!({
-            "pipeline_stages": pipeline_stages,
-            "total_items": total_items,
-            "slow_stage_delay_ms": slow_stage_delay.as_millis()
-        }));
+        self.logger.log_event(
+            "pipeline_config",
+            serde_json::json!({
+                "pipeline_stages": pipeline_stages,
+                "total_items": total_items,
+                "slow_stage_delay_ms": slow_stage_delay.as_millis()
+            }),
+        );
 
         // Phase 1: Setup multi-stage pipeline with bounded channels
         self.logger.log_phase("pipeline_setup");
@@ -1506,14 +1848,20 @@ impl IntegrationTestHarness {
             match timeout(execution_timeout, stage_task).await {
                 Outcome::Ok(_) => {
                     completed_stages += 1;
-                    self.logger.log_event("stage_task_completed", serde_json::json!({
-                        "stage_id": stage_id
-                    }));
+                    self.logger.log_event(
+                        "stage_task_completed",
+                        serde_json::json!({
+                            "stage_id": stage_id
+                        }),
+                    );
                 }
                 Outcome::Cancelled => {
-                    self.logger.log_event("stage_task_timeout", serde_json::json!({
-                        "stage_id": stage_id
-                    }));
+                    self.logger.log_event(
+                        "stage_task_timeout",
+                        serde_json::json!({
+                            "stage_id": stage_id
+                        }),
+                    );
                 }
                 _ => {}
             }
@@ -1527,7 +1875,8 @@ impl IntegrationTestHarness {
         let final_counts = processed_counts.lock().await;
         let total_backpressure_events = backpressure_events.load(Ordering::Relaxed);
 
-        let counts: Vec<usize> = final_counts.iter()
+        let counts: Vec<usize> = final_counts
+            .iter()
             .map(|c| c.load(Ordering::Relaxed))
             .collect();
 
@@ -1541,27 +1890,47 @@ impl IntegrationTestHarness {
         }));
 
         // Assertions
-        self.logger.log_assertion("pipeline_processed_items", counts[0] > 0, serde_json::json!({
-            "stage_0_count": counts[0]
-        }));
+        self.logger.log_assertion(
+            "pipeline_processed_items",
+            counts[0] > 0,
+            serde_json::json!({
+                "stage_0_count": counts[0]
+            }),
+        );
 
-        self.logger.log_assertion("backpressure_occurred", total_backpressure_events > 0, serde_json::json!({
-            "backpressure_events": total_backpressure_events
-        }));
+        self.logger.log_assertion(
+            "backpressure_occurred",
+            total_backpressure_events > 0,
+            serde_json::json!({
+                "backpressure_events": total_backpressure_events
+            }),
+        );
 
         // Verify processing decreased through slow stage due to backpressure
         let slow_stage_processed = counts[2];
         let final_stage_processed = counts[pipeline_stages - 1];
 
-        self.logger.log_assertion("backpressure_limited_throughput",
-            slow_stage_processed < total_items, serde_json::json!({
-            "slow_stage_processed": slow_stage_processed,
-            "total_items": total_items
-        }));
+        self.logger.log_assertion(
+            "backpressure_limited_throughput",
+            slow_stage_processed < total_items,
+            serde_json::json!({
+                "slow_stage_processed": slow_stage_processed,
+                "total_items": total_items
+            }),
+        );
 
-        assert!(counts[0] > 0, "First stage should have processed some items");
-        assert!(total_backpressure_events > 0, "Backpressure events should have occurred due to slow stage");
-        assert!(slow_stage_processed < total_items, "Slow stage should have limited overall throughput");
+        assert!(
+            counts[0] > 0,
+            "First stage should have processed some items"
+        );
+        assert!(
+            total_backpressure_events > 0,
+            "Backpressure events should have occurred due to slow stage"
+        );
+        assert!(
+            slow_stage_processed < total_items,
+            "Slow stage should have limited overall throughput"
+        );
     }
 
     /// [br-integration-8] Pubsub broker death and reconnection resilience
@@ -1572,11 +1941,14 @@ impl IntegrationTestHarness {
         let message_count = 200;
         let broker_kill_interval = Duration::from_millis(500);
 
-        self.logger.log_event("pubsub_broker_death_config", serde_json::json!({
-            "subscriber_count": subscriber_count,
-            "message_count": message_count,
-            "broker_kill_interval_ms": broker_kill_interval.as_millis()
-        }));
+        self.logger.log_event(
+            "pubsub_broker_death_config",
+            serde_json::json!({
+                "subscriber_count": subscriber_count,
+                "message_count": message_count,
+                "broker_kill_interval_ms": broker_kill_interval.as_millis()
+            }),
+        );
 
         // Phase 1: Setup pubsub broker with fault injection
         self.logger.log_phase("broker_setup");
@@ -1595,76 +1967,96 @@ impl IntegrationTestHarness {
             let broker_recoveries = Arc::clone(&broker_recoveries);
             let total_published = Arc::clone(&total_messages_published);
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let mut death_signal_rx = death_signal_rx;
-                    let mut published_count = 0;
-                    let mut death_count = 0;
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let mut death_signal_rx = death_signal_rx;
+                            let mut published_count = 0;
+                            let mut death_count = 0;
 
-                    loop {
-                        // Check for death signal
-                        match death_signal_rx.try_recv() {
-                            Ok(_) => {
-                                death_count += 1;
-                                broker_deaths.fetch_add(1, Ordering::Relaxed);
+                            loop {
+                                // Check for death signal
+                                match death_signal_rx.try_recv() {
+                                    Ok(_) => {
+                                        death_count += 1;
+                                        broker_deaths.fetch_add(1, Ordering::Relaxed);
 
-                                logger.log_event("broker_death", serde_json::json!({
-                                    "death_count": death_count,
-                                    "published_before_death": published_count
-                                }));
+                                        logger.log_event(
+                                            "broker_death",
+                                            serde_json::json!({
+                                                "death_count": death_count,
+                                                "published_before_death": published_count
+                                            }),
+                                        );
 
-                                // Simulate broker restart delay
-                                sleep(Duration::from_millis(200)).await;
+                                        // Simulate broker restart delay
+                                        sleep(Duration::from_millis(200)).await;
 
-                                broker_recoveries.fetch_add(1, Ordering::Relaxed);
-                                logger.log_event("broker_recovery", serde_json::json!({
-                                    "death_count": death_count,
-                                    "recovery_count": death_count
-                                }));
+                                        broker_recoveries.fetch_add(1, Ordering::Relaxed);
+                                        logger.log_event(
+                                            "broker_recovery",
+                                            serde_json::json!({
+                                                "death_count": death_count,
+                                                "recovery_count": death_count
+                                            }),
+                                        );
 
-                                // Resume publishing after recovery
-                            }
-                            Err(_) => {
-                                // Normal operation - publish messages
-                                if published_count < message_count {
-                                    let message = format!("broker_message_{}", published_count);
+                                        // Resume publishing after recovery
+                                    }
+                                    Err(_) => {
+                                        // Normal operation - publish messages
+                                        if published_count < message_count {
+                                            let message =
+                                                format!("broker_message_{}", published_count);
 
-                                    match broker_tx.send(message.clone()) {
-                                        Ok(_) => {
-                                            published_count += 1;
-                                            total_published.fetch_add(1, Ordering::Relaxed);
+                                            match broker_tx.send(message.clone()) {
+                                                Ok(_) => {
+                                                    published_count += 1;
+                                                    total_published.fetch_add(1, Ordering::Relaxed);
 
-                                            logger.log_event("broker_message_published", serde_json::json!({
-                                                "message": message,
-                                                "published_count": published_count
-                                            }));
-                                        }
-                                        Err(_) => {
-                                            logger.log_event("broker_publish_failed", serde_json::json!({
-                                                "message": message,
-                                                "published_count": published_count
-                                            }));
+                                                    logger.log_event(
+                                                        "broker_message_published",
+                                                        serde_json::json!({
+                                                            "message": message,
+                                                            "published_count": published_count
+                                                        }),
+                                                    );
+                                                }
+                                                Err(_) => {
+                                                    logger.log_event(
+                                                        "broker_publish_failed",
+                                                        serde_json::json!({
+                                                            "message": message,
+                                                            "published_count": published_count
+                                                        }),
+                                                    );
+                                                    break;
+                                                }
+                                            }
+
+                                            sleep(Duration::from_millis(50)).await;
+                                        } else {
+                                            // Publishing complete
                                             break;
                                         }
                                     }
-
-                                    sleep(Duration::from_millis(50)).await;
-                                } else {
-                                    // Publishing complete
-                                    break;
                                 }
                             }
-                        }
-                    }
 
-                    logger.log_event("broker_shutdown", serde_json::json!({
-                        "total_published": published_count,
-                        "total_deaths": death_count
-                    }));
+                            logger.log_event(
+                                "broker_shutdown",
+                                serde_json::json!({
+                                    "total_published": published_count,
+                                    "total_deaths": death_count
+                                }),
+                            );
 
-                    Outcome::Ok(published_count)
-                }).await
-            }).await
+                            Outcome::Ok(published_count)
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 2: Setup subscribers with reconnection logic
@@ -1677,61 +2069,80 @@ impl IntegrationTestHarness {
             let logger = self.logger.clone();
             let total_received = Arc::clone(&total_messages_received);
 
-            let subscriber_task = self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let mut received_count = 0;
-                    let mut reconnect_count = 0;
+            let subscriber_task = self
+                .runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let mut received_count = 0;
+                            let mut reconnect_count = 0;
 
-                    loop {
-                        match timeout(Duration::from_millis(100), subscriber_rx.recv()).await {
-                            Outcome::Ok(Ok(message)) => {
-                                received_count += 1;
-                                total_received.fetch_add(1, Ordering::Relaxed);
+                            loop {
+                                match timeout(Duration::from_millis(100), subscriber_rx.recv())
+                                    .await
+                                {
+                                    Outcome::Ok(Ok(message)) => {
+                                        received_count += 1;
+                                        total_received.fetch_add(1, Ordering::Relaxed);
 
-                                logger.log_event("subscriber_message_received", serde_json::json!({
-                                    "subscriber_id": sub_id,
-                                    "message": message,
-                                    "received_count": received_count
-                                }));
+                                        logger.log_event(
+                                            "subscriber_message_received",
+                                            serde_json::json!({
+                                                "subscriber_id": sub_id,
+                                                "message": message,
+                                                "received_count": received_count
+                                            }),
+                                        );
+                                    }
+                                    Outcome::Ok(Err(_)) => {
+                                        // Channel closed - attempt reconnect
+                                        reconnect_count += 1;
+
+                                        logger.log_event(
+                                            "subscriber_reconnect",
+                                            serde_json::json!({
+                                                "subscriber_id": sub_id,
+                                                "reconnect_count": reconnect_count
+                                            }),
+                                        );
+
+                                        // Simulate reconnection delay
+                                        sleep(Duration::from_millis(100)).await;
+
+                                        // In real scenario, would reconnect to new broker instance
+                                        break;
+                                    }
+                                    Outcome::Cancelled => {
+                                        logger.log_event(
+                                            "subscriber_timeout",
+                                            serde_json::json!({
+                                                "subscriber_id": sub_id,
+                                                "received_count": received_count
+                                            }),
+                                        );
+                                        continue;
+                                    }
+                                }
+
+                                if received_count >= message_count / subscriber_count {
+                                    break;
+                                }
                             }
-                            Outcome::Ok(Err(_)) => {
-                                // Channel closed - attempt reconnect
-                                reconnect_count += 1;
 
-                                logger.log_event("subscriber_reconnect", serde_json::json!({
+                            logger.log_event(
+                                "subscriber_complete",
+                                serde_json::json!({
                                     "subscriber_id": sub_id,
+                                    "received_count": received_count,
                                     "reconnect_count": reconnect_count
-                                }));
+                                }),
+                            );
 
-                                // Simulate reconnection delay
-                                sleep(Duration::from_millis(100)).await;
-
-                                // In real scenario, would reconnect to new broker instance
-                                break;
-                            }
-                            Outcome::Cancelled => {
-                                logger.log_event("subscriber_timeout", serde_json::json!({
-                                    "subscriber_id": sub_id,
-                                    "received_count": received_count
-                                }));
-                                continue;
-                            }
-                        }
-
-                        if received_count >= message_count / subscriber_count {
-                            break;
-                        }
-                    }
-
-                    logger.log_event("subscriber_complete", serde_json::json!({
-                        "subscriber_id": sub_id,
-                        "received_count": received_count,
-                        "reconnect_count": reconnect_count
-                    }));
-
-                    Outcome::Ok(received_count)
-                }).await
-            }).await;
+                            Outcome::Ok(received_count)
+                        })
+                        .await
+                })
+                .await;
 
             subscriber_tasks.push(subscriber_task);
         }
@@ -1741,31 +2152,42 @@ impl IntegrationTestHarness {
             let logger = self.logger.clone();
             let death_signal_tx = death_signal_tx;
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    // Wait before first kill
-                    sleep(broker_kill_interval).await;
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            // Wait before first kill
+                            sleep(broker_kill_interval).await;
 
-                    let mut kill_count = 0;
-                    while kill_count < 3 {  // Kill broker 3 times during test
-                        if death_signal_tx.send(()).is_err() {
-                            logger.log_event("death_signal_failed", serde_json::json!({
-                                "kill_count": kill_count
-                            }));
-                            break;
-                        }
+                            let mut kill_count = 0;
+                            while kill_count < 3 {
+                                // Kill broker 3 times during test
+                                if death_signal_tx.send(()).is_err() {
+                                    logger.log_event(
+                                        "death_signal_failed",
+                                        serde_json::json!({
+                                            "kill_count": kill_count
+                                        }),
+                                    );
+                                    break;
+                                }
 
-                        kill_count += 1;
-                        logger.log_event("broker_kill_signal", serde_json::json!({
-                            "kill_count": kill_count
-                        }));
+                                kill_count += 1;
+                                logger.log_event(
+                                    "broker_kill_signal",
+                                    serde_json::json!({
+                                        "kill_count": kill_count
+                                    }),
+                                );
 
-                        sleep(broker_kill_interval).await;
-                    }
+                                sleep(broker_kill_interval).await;
+                            }
 
-                    Outcome::Ok(kill_count)
-                }).await
-            }).await
+                            Outcome::Ok(kill_count)
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 4: Execute pubsub with chaos
@@ -1785,15 +2207,21 @@ impl IntegrationTestHarness {
             match timeout(Duration::from_secs(3), subscriber_task).await {
                 Outcome::Ok(Outcome::Ok(received)) => {
                     total_subscriber_messages += received;
-                    self.logger.log_event("subscriber_task_completed", serde_json::json!({
-                        "subscriber_id": sub_id,
-                        "received_count": received
-                    }));
+                    self.logger.log_event(
+                        "subscriber_task_completed",
+                        serde_json::json!({
+                            "subscriber_id": sub_id,
+                            "received_count": received
+                        }),
+                    );
                 }
                 _ => {
-                    self.logger.log_event("subscriber_task_timeout", serde_json::json!({
-                        "subscriber_id": sub_id
-                    }));
+                    self.logger.log_event(
+                        "subscriber_task_timeout",
+                        serde_json::json!({
+                            "subscriber_id": sub_id
+                        }),
+                    );
                 }
             }
         }
@@ -1819,69 +2247,108 @@ impl IntegrationTestHarness {
         }));
 
         // Critical assertions for broker resilience
-        self.logger.log_assertion("broker_deaths_occurred", total_deaths > 0, serde_json::json!({
-            "total_deaths": total_deaths
-        }));
+        self.logger.log_assertion(
+            "broker_deaths_occurred",
+            total_deaths > 0,
+            serde_json::json!({
+                "total_deaths": total_deaths
+            }),
+        );
 
-        self.logger.log_assertion("broker_recoveries_matched", total_recoveries == total_deaths, serde_json::json!({
-            "recoveries": total_recoveries,
-            "deaths": total_deaths
-        }));
+        self.logger.log_assertion(
+            "broker_recoveries_matched",
+            total_recoveries == total_deaths,
+            serde_json::json!({
+                "recoveries": total_recoveries,
+                "deaths": total_deaths
+            }),
+        );
 
-        self.logger.log_assertion("messages_published", broker_published > 0, serde_json::json!({
-            "published": broker_published
-        }));
+        self.logger.log_assertion(
+            "messages_published",
+            broker_published > 0,
+            serde_json::json!({
+                "published": broker_published
+            }),
+        );
 
-        self.logger.log_assertion("subscribers_received_messages", total_received > 0, serde_json::json!({
-            "received": total_received
-        }));
+        self.logger.log_assertion(
+            "subscribers_received_messages",
+            total_received > 0,
+            serde_json::json!({
+                "received": total_received
+            }),
+        );
 
         // Message delivery should be reasonably successful despite chaos
         let delivery_rate = total_received as f64 / broker_published as f64;
-        self.logger.log_assertion("message_delivery_resilience", delivery_rate > 0.7, serde_json::json!({
-            "delivery_rate": delivery_rate,
-            "threshold": 0.7
-        }));
+        self.logger.log_assertion(
+            "message_delivery_resilience",
+            delivery_rate > 0.7,
+            serde_json::json!({
+                "delivery_rate": delivery_rate,
+                "threshold": 0.7
+            }),
+        );
 
         assert!(total_deaths > 0, "Broker deaths should occur during chaos");
-        assert!(total_recoveries == total_deaths, "All broker deaths should recover: {} recoveries vs {} deaths", total_recoveries, total_deaths);
+        assert!(
+            total_recoveries == total_deaths,
+            "All broker deaths should recover: {} recoveries vs {} deaths",
+            total_recoveries,
+            total_deaths
+        );
         assert!(broker_published > 0, "Broker should publish messages");
-        assert!(total_received > 0, "Subscribers should receive messages despite chaos");
-        assert!(delivery_rate > 0.7, "Message delivery rate should be >70% despite broker deaths: {:.2}%", delivery_rate * 100.0);
+        assert!(
+            total_received > 0,
+            "Subscribers should receive messages despite chaos"
+        );
+        assert!(
+            delivery_rate > 0.7,
+            "Message delivery rate should be >70% despite broker deaths: {:.2}%",
+            delivery_rate * 100.0
+        );
     }
 
     /// [br-integration-9] RaptorQ decode interruption and stream resumption
     async fn test_raptorq_decode_interruption_resume(&self) {
         self.logger.log_phase("raptorq_interruption_setup");
 
-        use crate::raptorq::{Encoder, Decoder, SourceBlockEncoder};
+        use crate::raptorq::{Decoder, Encoder, SourceBlockEncoder};
 
         let source_data = vec![0u8; 8192]; // 8KB source data
         let source_symbol_size = 64; // 64-byte symbols
         let repair_symbol_count = 20; // Generate 20 repair symbols
 
-        self.logger.log_event("raptorq_config", serde_json::json!({
-            "source_data_size": source_data.len(),
-            "source_symbol_size": source_symbol_size,
-            "repair_symbol_count": repair_symbol_count
-        }));
+        self.logger.log_event(
+            "raptorq_config",
+            serde_json::json!({
+                "source_data_size": source_data.len(),
+                "source_symbol_size": source_symbol_size,
+                "repair_symbol_count": repair_symbol_count
+            }),
+        );
 
         // Phase 1: Encode source data for transmission
         self.logger.log_phase("raptorq_encoding");
 
         let mut encoder = Encoder::new(source_symbol_size);
-        let encoded_block = encoder.encode(&source_data, repair_symbol_count)
+        let encoded_block = encoder
+            .encode(&source_data, repair_symbol_count)
             .expect("RaptorQ encoding should succeed");
 
         let source_symbols = encoded_block.source_symbols();
         let repair_symbols = encoded_block.repair_symbols();
         let total_symbols = source_symbols.len() + repair_symbols.len();
 
-        self.logger.log_event("raptorq_encoded", serde_json::json!({
-            "source_symbol_count": source_symbols.len(),
-            "repair_symbol_count": repair_symbols.len(),
-            "total_symbol_count": total_symbols
-        }));
+        self.logger.log_event(
+            "raptorq_encoded",
+            serde_json::json!({
+                "source_symbol_count": source_symbols.len(),
+                "repair_symbol_count": repair_symbols.len(),
+                "total_symbol_count": total_symbols
+            }),
+        );
 
         // Phase 2: Setup interrupted decode simulation
         self.logger.log_phase("raptorq_decode_simulation");
@@ -1901,100 +2368,142 @@ impl IntegrationTestHarness {
             let symbols_before = Arc::clone(&symbols_before_interruption);
             let symbols_after = Arc::clone(&symbols_after_resumption);
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let mut decoder = Decoder::new(source_symbol_size);
-                    let mut symbols_processed = 0;
-                    let mut interruption_count = 0;
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let mut decoder = Decoder::new(source_symbol_size);
+                            let mut symbols_processed = 0;
+                            let mut interruption_count = 0;
 
-                    // Process source symbols with interruption
-                    for (symbol_id, symbol_data) in source_symbols.iter().enumerate() {
-                        if symbol_id == interruption_point {
-                            // Simulate stream interruption
-                            interruption_count += 1;
-                            total_interruptions.fetch_add(1, Ordering::Relaxed);
-                            symbols_before.store(symbols_processed, Ordering::Relaxed);
+                            // Process source symbols with interruption
+                            for (symbol_id, symbol_data) in source_symbols.iter().enumerate() {
+                                if symbol_id == interruption_point {
+                                    // Simulate stream interruption
+                                    interruption_count += 1;
+                                    total_interruptions.fetch_add(1, Ordering::Relaxed);
+                                    symbols_before.store(symbols_processed, Ordering::Relaxed);
 
-                            logger.log_event("raptorq_stream_interrupted", serde_json::json!({
-                                "interruption_count": interruption_count,
-                                "symbols_before_interruption": symbols_processed,
-                                "symbol_id": symbol_id
-                            }));
+                                    logger.log_event(
+                                        "raptorq_stream_interrupted",
+                                        serde_json::json!({
+                                            "interruption_count": interruption_count,
+                                            "symbols_before_interruption": symbols_processed,
+                                            "symbol_id": symbol_id
+                                        }),
+                                    );
 
-                            // Simulate interruption delay (network timeout, etc.)
-                            sleep(interruption_delay).await;
+                                    // Simulate interruption delay (network timeout, etc.)
+                                    sleep(interruption_delay).await;
 
-                            // Resume decoding
-                            total_resumed.fetch_add(1, Ordering::Relaxed);
-                            logger.log_event("raptorq_stream_resumed", serde_json::json!({
-                                "interruption_count": interruption_count,
-                                "resume_at_symbol_id": symbol_id
-                            }));
-                        }
+                                    // Resume decoding
+                                    total_resumed.fetch_add(1, Ordering::Relaxed);
+                                    logger.log_event(
+                                        "raptorq_stream_resumed",
+                                        serde_json::json!({
+                                            "interruption_count": interruption_count,
+                                            "resume_at_symbol_id": symbol_id
+                                        }),
+                                    );
+                                }
 
-                        // Feed symbol to decoder
-                        if decoder.add_source_symbol(symbol_id as u32, symbol_data.clone()).is_ok() {
-                            symbols_processed += 1;
+                                // Feed symbol to decoder
+                                if decoder
+                                    .add_source_symbol(symbol_id as u32, symbol_data.clone())
+                                    .is_ok()
+                                {
+                                    symbols_processed += 1;
 
-                            if symbol_id > interruption_point {
-                                symbols_after.fetch_add(1, Ordering::Relaxed);
+                                    if symbol_id > interruption_point {
+                                        symbols_after.fetch_add(1, Ordering::Relaxed);
+                                    }
+
+                                    logger.log_event(
+                                        "raptorq_symbol_processed",
+                                        serde_json::json!({
+                                            "symbol_id": symbol_id,
+                                            "symbols_processed": symbols_processed,
+                                            "is_after_resumption": symbol_id > interruption_point
+                                        }),
+                                    );
+
+                                    // Check if we can decode yet
+                                    if let Ok(decoded_data) = decoder.try_decode() {
+                                        logger.log_event(
+                                            "raptorq_decode_success",
+                                            serde_json::json!({
+                                                "symbols_processed": symbols_processed,
+                                                "decoded_size": decoded_data.len(),
+                                                "interruption_count": interruption_count
+                                            }),
+                                        );
+
+                                        return Outcome::Ok((
+                                            decoded_data,
+                                            symbols_processed,
+                                            interruption_count,
+                                        ));
+                                    }
+                                } else {
+                                    logger.log_event(
+                                        "raptorq_symbol_rejected",
+                                        serde_json::json!({
+                                            "symbol_id": symbol_id
+                                        }),
+                                    );
+                                }
+
+                                // Simulate network transmission delay
+                                sleep(Duration::from_millis(10)).await;
                             }
 
-                            logger.log_event("raptorq_symbol_processed", serde_json::json!({
-                                "symbol_id": symbol_id,
-                                "symbols_processed": symbols_processed,
-                                "is_after_resumption": symbol_id > interruption_point
-                            }));
+                            // If source symbols weren't enough, try repair symbols
+                            for (repair_id, repair_data) in repair_symbols.iter().enumerate() {
+                                if decoder
+                                    .add_repair_symbol(repair_id as u32, repair_data.clone())
+                                    .is_ok()
+                                {
+                                    symbols_processed += 1;
+                                    symbols_after.fetch_add(1, Ordering::Relaxed);
 
-                            // Check if we can decode yet
-                            if let Ok(decoded_data) = decoder.try_decode() {
-                                logger.log_event("raptorq_decode_success", serde_json::json!({
+                                    if let Ok(decoded_data) = decoder.try_decode() {
+                                        logger.log_event(
+                                            "raptorq_decode_success_with_repair",
+                                            serde_json::json!({
+                                                "symbols_processed": symbols_processed,
+                                                "decoded_size": decoded_data.len(),
+                                                "repair_symbols_used": repair_id + 1,
+                                                "interruption_count": interruption_count
+                                            }),
+                                        );
+
+                                        return Outcome::Ok((
+                                            decoded_data,
+                                            symbols_processed,
+                                            interruption_count,
+                                        ));
+                                    }
+                                }
+
+                                sleep(Duration::from_millis(10)).await;
+                            }
+
+                            logger.log_event(
+                                "raptorq_decode_failed",
+                                serde_json::json!({
                                     "symbols_processed": symbols_processed,
-                                    "decoded_size": decoded_data.len(),
                                     "interruption_count": interruption_count
-                                }));
+                                }),
+                            );
 
-                                return Outcome::Ok((decoded_data, symbols_processed, interruption_count));
-                            }
-                        } else {
-                            logger.log_event("raptorq_symbol_rejected", serde_json::json!({
-                                "symbol_id": symbol_id
-                            }));
-                        }
-
-                        // Simulate network transmission delay
-                        sleep(Duration::from_millis(10)).await;
-                    }
-
-                    // If source symbols weren't enough, try repair symbols
-                    for (repair_id, repair_data) in repair_symbols.iter().enumerate() {
-                        if decoder.add_repair_symbol(repair_id as u32, repair_data.clone()).is_ok() {
-                            symbols_processed += 1;
-                            symbols_after.fetch_add(1, Ordering::Relaxed);
-
-                            if let Ok(decoded_data) = decoder.try_decode() {
-                                logger.log_event("raptorq_decode_success_with_repair", serde_json::json!({
-                                    "symbols_processed": symbols_processed,
-                                    "decoded_size": decoded_data.len(),
-                                    "repair_symbols_used": repair_id + 1,
-                                    "interruption_count": interruption_count
-                                }));
-
-                                return Outcome::Ok((decoded_data, symbols_processed, interruption_count));
-                            }
-                        }
-
-                        sleep(Duration::from_millis(10)).await;
-                    }
-
-                    logger.log_event("raptorq_decode_failed", serde_json::json!({
-                        "symbols_processed": symbols_processed,
-                        "interruption_count": interruption_count
-                    }));
-
-                    Outcome::Err(Error::new(ErrorKind::Other, "RaptorQ decode failed after all symbols"))
-                }).await
-            }).await
+                            Outcome::Err(Error::new(
+                                ErrorKind::Other,
+                                "RaptorQ decode failed after all symbols",
+                            ))
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 3: Execute decode with interruption
@@ -2015,7 +2524,7 @@ impl IntegrationTestHarness {
             Outcome::Ok(Outcome::Ok((decoded_data, symbols_processed, _))) => {
                 (true, decoded_data.len(), symbols_processed)
             }
-            _ => (false, 0, 0)
+            _ => (false, 0, 0),
         };
 
         self.logger.log_metrics(serde_json::json!({
@@ -2032,33 +2541,73 @@ impl IntegrationTestHarness {
         }));
 
         // Critical assertions for RaptorQ resilience
-        self.logger.log_assertion("raptorq_interruption_occurred", interruption_count > 0, serde_json::json!({
-            "interruption_count": interruption_count
-        }));
+        self.logger.log_assertion(
+            "raptorq_interruption_occurred",
+            interruption_count > 0,
+            serde_json::json!({
+                "interruption_count": interruption_count
+            }),
+        );
 
-        self.logger.log_assertion("raptorq_stream_resumed", resume_count == interruption_count, serde_json::json!({
-            "resume_count": resume_count,
-            "interruption_count": interruption_count
-        }));
+        self.logger.log_assertion(
+            "raptorq_stream_resumed",
+            resume_count == interruption_count,
+            serde_json::json!({
+                "resume_count": resume_count,
+                "interruption_count": interruption_count
+            }),
+        );
 
-        self.logger.log_assertion("raptorq_decode_success", decode_success, serde_json::json!({
-            "decode_success": decode_success
-        }));
+        self.logger.log_assertion(
+            "raptorq_decode_success",
+            decode_success,
+            serde_json::json!({
+                "decode_success": decode_success
+            }),
+        );
 
-        self.logger.log_assertion("raptorq_data_integrity", decoded_data_len == source_data.len(), serde_json::json!({
-            "decoded_size": decoded_data_len,
-            "source_size": source_data.len()
-        }));
+        self.logger.log_assertion(
+            "raptorq_data_integrity",
+            decoded_data_len == source_data.len(),
+            serde_json::json!({
+                "decoded_size": decoded_data_len,
+                "source_size": source_data.len()
+            }),
+        );
 
-        self.logger.log_assertion("raptorq_symbols_after_resume", after_count > 0, serde_json::json!({
-            "symbols_after_resume": after_count
-        }));
+        self.logger.log_assertion(
+            "raptorq_symbols_after_resume",
+            after_count > 0,
+            serde_json::json!({
+                "symbols_after_resume": after_count
+            }),
+        );
 
-        assert!(interruption_count > 0, "Stream interruption should occur during decode");
-        assert!(resume_count == interruption_count, "All interruptions should resume: {} resumes vs {} interruptions", resume_count, interruption_count);
-        assert!(decode_success, "RaptorQ decode should succeed despite interruption");
-        assert!(decoded_data_len == source_data.len(), "Decoded data should match source: {} vs {} bytes", decoded_data_len, source_data.len());
-        assert!(after_count > 0, "Symbols should be processed after resumption: {} symbols", after_count);
+        assert!(
+            interruption_count > 0,
+            "Stream interruption should occur during decode"
+        );
+        assert!(
+            resume_count == interruption_count,
+            "All interruptions should resume: {} resumes vs {} interruptions",
+            resume_count,
+            interruption_count
+        );
+        assert!(
+            decode_success,
+            "RaptorQ decode should succeed despite interruption"
+        );
+        assert!(
+            decoded_data_len == source_data.len(),
+            "Decoded data should match source: {} vs {} bytes",
+            decoded_data_len,
+            source_data.len()
+        );
+        assert!(
+            after_count > 0,
+            "Symbols should be processed after resumption: {} symbols",
+            after_count
+        );
     }
 
     /// [br-integration-10] Runtime panic recovery with active subscriptions
@@ -2069,11 +2618,14 @@ impl IntegrationTestHarness {
         let panic_injection_probability = 0.3; // 30% chance of panic per work item
         let total_work_items = 50;
 
-        self.logger.log_event("panic_recovery_config", serde_json::json!({
-            "subscription_count": subscription_count,
-            "panic_injection_probability": panic_injection_probability,
-            "total_work_items": total_work_items
-        }));
+        self.logger.log_event(
+            "panic_recovery_config",
+            serde_json::json!({
+                "subscription_count": subscription_count,
+                "panic_injection_probability": panic_injection_probability,
+                "total_work_items": total_work_items
+            }),
+        );
 
         // Phase 1: Setup active subscriptions
         self.logger.log_phase("subscription_setup");
@@ -2097,127 +2649,164 @@ impl IntegrationTestHarness {
             let surviving_subscriptions = Arc::clone(&surviving_subscriptions);
             let completed_work = Arc::clone(&completed_work);
 
-            let subscription_task = self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let mut processed_items = 0;
-                    let mut panic_recoveries = 0;
-                    let mut subscription_active = true;
+            let subscription_task = self
+                .runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let mut processed_items = 0;
+                            let mut panic_recoveries = 0;
+                            let mut subscription_active = true;
 
-                    while subscription_active {
-                        // Protected work execution with panic boundary
-                        let work_result = std::panic::catch_unwind(|| async {
-                            match timeout(Duration::from_millis(500), subscriber_rx.recv()).await {
-                                Outcome::Ok(Ok(work_item)) => {
-                                    // Simulate work with potential panic
-                                    let panic_roll: f64 = fastrand::f64();
+                            while subscription_active {
+                                // Protected work execution with panic boundary
+                                let work_result = std::panic::catch_unwind(|| async {
+                                    match timeout(Duration::from_millis(500), subscriber_rx.recv())
+                                        .await
+                                    {
+                                        Outcome::Ok(Ok(work_item)) => {
+                                            // Simulate work with potential panic
+                                            let panic_roll: f64 = fastrand::f64();
 
-                                    if panic_roll < panic_injection_probability {
-                                        panic_count.fetch_add(1, Ordering::Relaxed);
+                                            if panic_roll < panic_injection_probability {
+                                                panic_count.fetch_add(1, Ordering::Relaxed);
 
-                                        logger.log_event("subscription_panic", serde_json::json!({
-                                            "subscriber_id": sub_id,
-                                            "work_item": work_item,
-                                            "panic_roll": panic_roll,
-                                            "processed_before_panic": processed_items
-                                        }));
+                                                logger.log_event(
+                                                    "subscription_panic",
+                                                    serde_json::json!({
+                                                        "subscriber_id": sub_id,
+                                                        "work_item": work_item,
+                                                        "panic_roll": panic_roll,
+                                                        "processed_before_panic": processed_items
+                                                    }),
+                                                );
 
-                                        panic!("Injected panic in subscription worker {}", sub_id);
-                                    }
+                                                panic!(
+                                                    "Injected panic in subscription worker {}",
+                                                    sub_id
+                                                );
+                                            }
 
-                                    // Normal processing
-                                    processed_items += 1;
-                                    completed_work.fetch_add(1, Ordering::Relaxed);
+                                            // Normal processing
+                                            processed_items += 1;
+                                            completed_work.fetch_add(1, Ordering::Relaxed);
 
-                                    let result = format!("processed_by_sub_{}_item_{}", sub_id, processed_items);
+                                            let result = format!(
+                                                "processed_by_sub_{}_item_{}",
+                                                sub_id, processed_items
+                                            );
 
-                                    logger.log_event("subscription_work_completed", serde_json::json!({
-                                        "subscriber_id": sub_id,
-                                        "work_item": work_item,
-                                        "result": result,
-                                        "processed_items": processed_items
-                                    }));
+                                            logger.log_event(
+                                                "subscription_work_completed",
+                                                serde_json::json!({
+                                                    "subscriber_id": sub_id,
+                                                    "work_item": work_item,
+                                                    "result": result,
+                                                    "processed_items": processed_items
+                                                }),
+                                            );
 
-                                    if result_tx.send(result).await.is_err() {
-                                        logger.log_event("result_send_failed", serde_json::json!({
-                                            "subscriber_id": sub_id
-                                        }));
-                                        return Outcome::Err(Error::new(ErrorKind::Other, "Result channel closed"));
-                                    }
+                                            if result_tx.send(result).await.is_err() {
+                                                logger.log_event(
+                                                    "result_send_failed",
+                                                    serde_json::json!({
+                                                        "subscriber_id": sub_id
+                                                    }),
+                                                );
+                                                return Outcome::Err(Error::new(
+                                                    ErrorKind::Other,
+                                                    "Result channel closed",
+                                                ));
+                                            }
 
-                                    Outcome::Ok(true)
-                                }
-                                Outcome::Ok(Err(_)) => {
-                                    // Channel closed
-                                    logger.log_event("subscription_channel_closed", serde_json::json!({
-                                        "subscriber_id": sub_id,
-                                        "processed_items": processed_items
-                                    }));
-                                    Outcome::Ok(false)
-                                }
-                                Outcome::Cancelled => {
-                                    // Timeout - continue listening
-                                    Outcome::Ok(true)
-                                }
-                            }
-                        });
-
-                        match work_result {
-                            Ok(future) => {
-                                // No panic occurred, execute the async work
-                                match future.await {
-                                    Outcome::Ok(continue_subscription) => {
-                                        if !continue_subscription {
-                                            subscription_active = false;
+                                            Outcome::Ok(true)
+                                        }
+                                        Outcome::Ok(Err(_)) => {
+                                            // Channel closed
+                                            logger.log_event(
+                                                "subscription_channel_closed",
+                                                serde_json::json!({
+                                                    "subscriber_id": sub_id,
+                                                    "processed_items": processed_items
+                                                }),
+                                            );
+                                            Outcome::Ok(false)
+                                        }
+                                        Outcome::Cancelled => {
+                                            // Timeout - continue listening
+                                            Outcome::Ok(true)
                                         }
                                     }
-                                    Outcome::Err(_) => {
-                                        subscription_active = false;
+                                });
+
+                                match work_result {
+                                    Ok(future) => {
+                                        // No panic occurred, execute the async work
+                                        match future.await {
+                                            Outcome::Ok(continue_subscription) => {
+                                                if !continue_subscription {
+                                                    subscription_active = false;
+                                                }
+                                            }
+                                            Outcome::Err(_) => {
+                                                subscription_active = false;
+                                            }
+                                            Outcome::Cancelled => {
+                                                subscription_active = false;
+                                            }
+                                        }
                                     }
-                                    Outcome::Cancelled => {
-                                        subscription_active = false;
+                                    Err(_panic_info) => {
+                                        // Panic occurred - recover subscription
+                                        panic_recoveries += 1;
+                                        recovery_count.fetch_add(1, Ordering::Relaxed);
+
+                                        logger.log_event(
+                                            "subscription_panic_recovery",
+                                            serde_json::json!({
+                                                "subscriber_id": sub_id,
+                                                "panic_recoveries": panic_recoveries,
+                                                "processed_before_recovery": processed_items
+                                            }),
+                                        );
+
+                                        // Simulate recovery delay
+                                        sleep(Duration::from_millis(100)).await;
+
+                                        // Subscription survives the panic and continues
+                                        logger.log_event(
+                                            "subscription_recovered",
+                                            serde_json::json!({
+                                                "subscriber_id": sub_id,
+                                                "recovery_count": panic_recoveries
+                                            }),
+                                        );
                                     }
                                 }
+
+                                // Subscription survival check
+                                if processed_items >= total_work_items / subscription_count + 5 {
+                                    // Subscription has processed enough work
+                                    subscription_active = false;
+                                }
                             }
-                            Err(_panic_info) => {
-                                // Panic occurred - recover subscription
-                                panic_recoveries += 1;
-                                recovery_count.fetch_add(1, Ordering::Relaxed);
 
-                                logger.log_event("subscription_panic_recovery", serde_json::json!({
+                            surviving_subscriptions.fetch_add(1, Ordering::Relaxed);
+
+                            logger.log_event(
+                                "subscription_final_shutdown",
+                                serde_json::json!({
                                     "subscriber_id": sub_id,
-                                    "panic_recoveries": panic_recoveries,
-                                    "processed_before_recovery": processed_items
-                                }));
+                                    "processed_items": processed_items,
+                                    "panic_recoveries": panic_recoveries
+                                }),
+                            );
 
-                                // Simulate recovery delay
-                                sleep(Duration::from_millis(100)).await;
-
-                                // Subscription survives the panic and continues
-                                logger.log_event("subscription_recovered", serde_json::json!({
-                                    "subscriber_id": sub_id,
-                                    "recovery_count": panic_recoveries
-                                }));
-                            }
-                        }
-
-                        // Subscription survival check
-                        if processed_items >= total_work_items / subscription_count + 5 {
-                            // Subscription has processed enough work
-                            subscription_active = false;
-                        }
-                    }
-
-                    surviving_subscriptions.fetch_add(1, Ordering::Relaxed);
-
-                    logger.log_event("subscription_final_shutdown", serde_json::json!({
-                        "subscriber_id": sub_id,
-                        "processed_items": processed_items,
-                        "panic_recoveries": panic_recoveries
-                    }));
-
-                    Outcome::Ok((processed_items, panic_recoveries))
-                }).await
-            }).await;
+                            Outcome::Ok((processed_items, panic_recoveries))
+                        })
+                        .await
+                })
+                .await;
 
             subscription_tasks.push(subscription_task);
         }
@@ -2228,73 +2817,96 @@ impl IntegrationTestHarness {
         let publisher_task = {
             let logger = self.logger.clone();
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let mut published_count = 0;
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let mut published_count = 0;
 
-                    for work_item in 0..total_work_items {
-                        let work_data = format!("work_item_{}", work_item);
+                            for work_item in 0..total_work_items {
+                                let work_data = format!("work_item_{}", work_item);
 
-                        match work_tx.send(work_data.clone()) {
-                            Ok(_) => {
-                                published_count += 1;
+                                match work_tx.send(work_data.clone()) {
+                                    Ok(_) => {
+                                        published_count += 1;
 
-                                logger.log_event("work_published", serde_json::json!({
-                                    "work_item": work_item,
-                                    "work_data": work_data,
-                                    "published_count": published_count
-                                }));
+                                        logger.log_event(
+                                            "work_published",
+                                            serde_json::json!({
+                                                "work_item": work_item,
+                                                "work_data": work_data,
+                                                "published_count": published_count
+                                            }),
+                                        );
+                                    }
+                                    Err(_) => {
+                                        logger.log_event(
+                                            "work_publish_failed",
+                                            serde_json::json!({
+                                                "work_item": work_item,
+                                                "published_count": published_count
+                                            }),
+                                        );
+                                        break;
+                                    }
+                                }
+
+                                sleep(Duration::from_millis(50)).await;
                             }
-                            Err(_) => {
-                                logger.log_event("work_publish_failed", serde_json::json!({
-                                    "work_item": work_item,
-                                    "published_count": published_count
-                                }));
-                                break;
-                            }
-                        }
 
-                        sleep(Duration::from_millis(50)).await;
-                    }
+                            logger.log_event(
+                                "work_publishing_complete",
+                                serde_json::json!({
+                                    "total_published": published_count
+                                }),
+                            );
 
-                    logger.log_event("work_publishing_complete", serde_json::json!({
-                        "total_published": published_count
-                    }));
-
-                    Outcome::Ok(published_count)
-                }).await
-            }).await
+                            Outcome::Ok(published_count)
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 3: Result collector
         let collector_task = {
             let logger = self.logger.clone();
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let mut result_rx = result_rx;
-                    let mut collected_results = 0;
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let mut result_rx = result_rx;
+                            let mut collected_results = 0;
 
-                    while let Some(result) = result_rx.recv().await {
-                        collected_results += 1;
+                            while let Some(result) = result_rx.recv().await {
+                                collected_results += 1;
 
-                        logger.log_event("result_collected", serde_json::json!({
-                            "result": result,
-                            "collected_count": collected_results
-                        }));
+                                logger.log_event(
+                                    "result_collected",
+                                    serde_json::json!({
+                                        "result": result,
+                                        "collected_count": collected_results
+                                    }),
+                                );
 
-                        if collected_results >= total_work_items {
-                            break;
-                        }
-                    }
+                                if collected_results >= total_work_items {
+                                    break;
+                                }
+                            }
 
-                    logger.log_event("result_collection_complete", serde_json::json!({
-                        "total_collected": collected_results
-                    }));
+                            logger.log_event(
+                                "result_collection_complete",
+                                serde_json::json!({
+                                    "total_collected": collected_results
+                                }),
+                            );
 
-                    Outcome::Ok(collected_results)
-                }).await
-            }).await
+                            Outcome::Ok(collected_results)
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 4: Execute with panic recovery
@@ -2318,16 +2930,22 @@ impl IntegrationTestHarness {
                     total_processed_items += processed;
                     total_subscription_recoveries += recoveries;
 
-                    self.logger.log_event("subscription_task_completed", serde_json::json!({
-                        "subscriber_id": sub_id,
-                        "processed_items": processed,
-                        "panic_recoveries": recoveries
-                    }));
+                    self.logger.log_event(
+                        "subscription_task_completed",
+                        serde_json::json!({
+                            "subscriber_id": sub_id,
+                            "processed_items": processed,
+                            "panic_recoveries": recoveries
+                        }),
+                    );
                 }
                 _ => {
-                    self.logger.log_event("subscription_task_timeout", serde_json::json!({
-                        "subscriber_id": sub_id
-                    }));
+                    self.logger.log_event(
+                        "subscription_task_timeout",
+                        serde_json::json!({
+                            "subscriber_id": sub_id
+                        }),
+                    );
                 }
             }
         }
@@ -2342,12 +2960,12 @@ impl IntegrationTestHarness {
 
         let published_work = match publisher_result {
             Outcome::Ok(Outcome::Ok(count)) => count,
-            _ => 0
+            _ => 0,
         };
 
         let collected_results = match collector_result {
             Outcome::Ok(Outcome::Ok(count)) => count,
-            _ => 0
+            _ => 0,
         };
 
         self.logger.log_metrics(serde_json::json!({
@@ -2365,36 +2983,70 @@ impl IntegrationTestHarness {
         }));
 
         // Critical assertions for panic recovery
-        self.logger.log_assertion("panics_occurred", total_panics > 0, serde_json::json!({
-            "total_panics": total_panics
-        }));
+        self.logger.log_assertion(
+            "panics_occurred",
+            total_panics > 0,
+            serde_json::json!({
+                "total_panics": total_panics
+            }),
+        );
 
-        self.logger.log_assertion("panic_recovery", total_recoveries == total_panics, serde_json::json!({
-            "recoveries": total_recoveries,
-            "panics": total_panics
-        }));
+        self.logger.log_assertion(
+            "panic_recovery",
+            total_recoveries == total_panics,
+            serde_json::json!({
+                "recoveries": total_recoveries,
+                "panics": total_panics
+            }),
+        );
 
-        self.logger.log_assertion("subscriptions_survived", survivors > subscription_count / 2, serde_json::json!({
-            "survivors": survivors,
-            "total_subscriptions": subscription_count
-        }));
+        self.logger.log_assertion(
+            "subscriptions_survived",
+            survivors > subscription_count / 2,
+            serde_json::json!({
+                "survivors": survivors,
+                "total_subscriptions": subscription_count
+            }),
+        );
 
-        self.logger.log_assertion("work_completed", work_completed > 0, serde_json::json!({
-            "work_completed": work_completed
-        }));
+        self.logger.log_assertion(
+            "work_completed",
+            work_completed > 0,
+            serde_json::json!({
+                "work_completed": work_completed
+            }),
+        );
 
         // Work completion should be reasonable despite panics
         let completion_rate = work_completed as f64 / published_work as f64;
-        self.logger.log_assertion("work_completion_resilience", completion_rate > 0.6, serde_json::json!({
-            "completion_rate": completion_rate,
-            "threshold": 0.6
-        }));
+        self.logger.log_assertion(
+            "work_completion_resilience",
+            completion_rate > 0.6,
+            serde_json::json!({
+                "completion_rate": completion_rate,
+                "threshold": 0.6
+            }),
+        );
 
         assert!(total_panics > 0, "Runtime panics should occur during chaos");
-        assert!(total_recoveries == total_panics, "All panics should recover: {} recoveries vs {} panics", total_recoveries, total_panics);
-        assert!(survivors > subscription_count / 2, "Majority of subscriptions should survive: {} survivors out of {}", survivors, subscription_count);
+        assert!(
+            total_recoveries == total_panics,
+            "All panics should recover: {} recoveries vs {} panics",
+            total_recoveries,
+            total_panics
+        );
+        assert!(
+            survivors > subscription_count / 2,
+            "Majority of subscriptions should survive: {} survivors out of {}",
+            survivors,
+            subscription_count
+        );
         assert!(work_completed > 0, "Work should complete despite panics");
-        assert!(completion_rate > 0.6, "Work completion rate should be >60% despite panics: {:.2}%", completion_rate * 100.0);
+        assert!(
+            completion_rate > 0.6,
+            "Work completion rate should be >60% despite panics: {:.2}%",
+            completion_rate * 100.0
+        );
     }
 
     /// [br-integration-11] Burst traffic with rate limiting and sustained throughput
@@ -2410,14 +3062,17 @@ impl IntegrationTestHarness {
         let rate_limit_capacity = 100; // tokens
         let refill_rate = 20; // tokens per second
 
-        self.logger.log_event("burst_traffic_config", serde_json::json!({
-            "burst_size": burst_size,
-            "sustained_rate": sustained_rate,
-            "burst_duration_ms": burst_duration.as_millis(),
-            "observation_period_secs": observation_period.as_secs(),
-            "rate_limit_capacity": rate_limit_capacity,
-            "refill_rate": refill_rate
-        }));
+        self.logger.log_event(
+            "burst_traffic_config",
+            serde_json::json!({
+                "burst_size": burst_size,
+                "sustained_rate": sustained_rate,
+                "burst_duration_ms": burst_duration.as_millis(),
+                "observation_period_secs": observation_period.as_secs(),
+                "rate_limit_capacity": rate_limit_capacity,
+                "refill_rate": refill_rate
+            }),
+        );
 
         // Phase 1: Setup rate limiter
         self.logger.log_phase("rate_limiter_setup");
@@ -2444,33 +3099,42 @@ impl IntegrationTestHarness {
             let total_time = Arc::clone(&total_processing_time);
             let rejections = Arc::clone(&rate_limit_rejections);
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let mut request_rx = request_rx;
-                    let mut processed_count = 0;
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let mut request_rx = request_rx;
+                            let mut processed_count = 0;
 
-                    while let Some((request_id, is_burst, timestamp)) = request_rx.recv().await {
-                        let processing_start = Instant::now();
+                            while let Some((request_id, is_burst, timestamp)) =
+                                request_rx.recv().await
+                            {
+                                let processing_start = Instant::now();
 
-                        // Apply rate limiting
-                        match timeout(Duration::from_millis(100), rate_limiter.acquire()).await {
-                            Outcome::Ok(_permit) => {
-                                // Process request
-                                sleep(Duration::from_millis(10)).await; // Simulate processing
+                                // Apply rate limiting
+                                match timeout(Duration::from_millis(100), rate_limiter.acquire())
+                                    .await
+                                {
+                                    Outcome::Ok(_permit) => {
+                                        // Process request
+                                        sleep(Duration::from_millis(10)).await; // Simulate processing
 
-                                processed_count += 1;
-                                let processing_duration = processing_start.elapsed();
-                                total_time.fetch_add(processing_duration.as_micros() as usize, Ordering::Relaxed);
+                                        processed_count += 1;
+                                        let processing_duration = processing_start.elapsed();
+                                        total_time.fetch_add(
+                                            processing_duration.as_micros() as usize,
+                                            Ordering::Relaxed,
+                                        );
 
-                                if is_burst {
-                                    burst_processed.fetch_add(1, Ordering::Relaxed);
-                                } else {
-                                    sustained_processed.fetch_add(1, Ordering::Relaxed);
-                                }
+                                        if is_burst {
+                                            burst_processed.fetch_add(1, Ordering::Relaxed);
+                                        } else {
+                                            sustained_processed.fetch_add(1, Ordering::Relaxed);
+                                        }
 
-                                let result = format!("processed_request_{}", request_id);
+                                        let result = format!("processed_request_{}", request_id);
 
-                                logger.log_event("request_processed", serde_json::json!({
+                                        logger.log_event("request_processed", serde_json::json!({
                                     "request_id": request_id,
                                     "is_burst": is_burst,
                                     "processing_duration_us": processing_duration.as_micros(),
@@ -2478,30 +3142,38 @@ impl IntegrationTestHarness {
                                     "timestamp": timestamp.elapsed().as_millis()
                                 }));
 
-                                if result_tx.send(result).await.is_err() {
-                                    break;
+                                        if result_tx.send(result).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Outcome::Cancelled => {
+                                        // Rate limited
+                                        rejections.fetch_add(1, Ordering::Relaxed);
+
+                                        logger.log_event(
+                                            "request_rate_limited",
+                                            serde_json::json!({
+                                                "request_id": request_id,
+                                                "is_burst": is_burst,
+                                                "timestamp": timestamp.elapsed().as_millis()
+                                            }),
+                                        );
+                                    }
                                 }
                             }
-                            Outcome::Cancelled => {
-                                // Rate limited
-                                rejections.fetch_add(1, Ordering::Relaxed);
 
-                                logger.log_event("request_rate_limited", serde_json::json!({
-                                    "request_id": request_id,
-                                    "is_burst": is_burst,
-                                    "timestamp": timestamp.elapsed().as_millis()
-                                }));
-                            }
-                        }
-                    }
+                            logger.log_event(
+                                "processing_service_shutdown",
+                                serde_json::json!({
+                                    "total_processed": processed_count
+                                }),
+                            );
 
-                    logger.log_event("processing_service_shutdown", serde_json::json!({
-                        "total_processed": processed_count
-                    }));
-
-                    Outcome::Ok(processed_count)
-                }).await
-            }).await
+                            Outcome::Ok(processed_count)
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 3: Burst traffic generator
@@ -2512,45 +3184,59 @@ impl IntegrationTestHarness {
             let request_tx = request_tx.clone();
             let burst_sent = Arc::clone(&burst_requests_sent);
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let burst_start = Instant::now();
-                    let mut sent_count = 0;
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let burst_start = Instant::now();
+                            let mut sent_count = 0;
 
-                    for request_id in 0..burst_size {
-                        let send_result = request_tx.send((request_id, true, burst_start)).await;
+                            for request_id in 0..burst_size {
+                                let send_result =
+                                    request_tx.send((request_id, true, burst_start)).await;
 
-                        if send_result.is_ok() {
-                            sent_count += 1;
-                            burst_sent.fetch_add(1, Ordering::Relaxed);
+                                if send_result.is_ok() {
+                                    sent_count += 1;
+                                    burst_sent.fetch_add(1, Ordering::Relaxed);
 
-                            if request_id % 50 == 0 {
-                                logger.log_event("burst_progress", serde_json::json!({
-                                    "sent_count": sent_count,
-                                    "request_id": request_id,
-                                    "elapsed_ms": burst_start.elapsed().as_millis()
-                                }));
+                                    if request_id % 50 == 0 {
+                                        logger.log_event(
+                                            "burst_progress",
+                                            serde_json::json!({
+                                                "sent_count": sent_count,
+                                                "request_id": request_id,
+                                                "elapsed_ms": burst_start.elapsed().as_millis()
+                                            }),
+                                        );
+                                    }
+                                } else {
+                                    logger.log_event(
+                                        "burst_send_failed",
+                                        serde_json::json!({
+                                            "request_id": request_id,
+                                            "sent_count": sent_count
+                                        }),
+                                    );
+                                    break;
+                                }
+
+                                // Tight burst - minimal delay
+                                sleep(burst_duration / burst_size as u32).await;
                             }
-                        } else {
-                            logger.log_event("burst_send_failed", serde_json::json!({
-                                "request_id": request_id,
-                                "sent_count": sent_count
-                            }));
-                            break;
-                        }
 
-                        // Tight burst - minimal delay
-                        sleep(burst_duration / burst_size as u32).await;
-                    }
+                            logger.log_event(
+                                "burst_generation_complete",
+                                serde_json::json!({
+                                    "total_sent": sent_count,
+                                    "duration_ms": burst_start.elapsed().as_millis()
+                                }),
+                            );
 
-                    logger.log_event("burst_generation_complete", serde_json::json!({
-                        "total_sent": sent_count,
-                        "duration_ms": burst_start.elapsed().as_millis()
-                    }));
-
-                    Outcome::Ok(sent_count)
-                }).await
-            }).await
+                            Outcome::Ok(sent_count)
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 4: Sustained traffic generator
@@ -2559,42 +3245,57 @@ impl IntegrationTestHarness {
             let request_tx = request_tx.clone();
             let sustained_sent = Arc::clone(&sustained_requests_sent);
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    // Wait for burst to complete
-                    sleep(burst_duration + Duration::from_millis(100)).await;
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            // Wait for burst to complete
+                            sleep(burst_duration + Duration::from_millis(100)).await;
 
-                    let sustained_start = Instant::now();
-                    let mut sent_count = 0;
-                    let request_interval = Duration::from_millis(1000 / sustained_rate as u64);
+                            let sustained_start = Instant::now();
+                            let mut sent_count = 0;
+                            let request_interval =
+                                Duration::from_millis(1000 / sustained_rate as u64);
 
-                    while sustained_start.elapsed() < observation_period {
-                        let request_id = burst_size + sent_count;
+                            while sustained_start.elapsed() < observation_period {
+                                let request_id = burst_size + sent_count;
 
-                        if request_tx.send((request_id, false, sustained_start)).await.is_ok() {
-                            sent_count += 1;
-                            sustained_sent.fetch_add(1, Ordering::Relaxed);
+                                if request_tx
+                                    .send((request_id, false, sustained_start))
+                                    .await
+                                    .is_ok()
+                                {
+                                    sent_count += 1;
+                                    sustained_sent.fetch_add(1, Ordering::Relaxed);
 
-                            logger.log_event("sustained_request_sent", serde_json::json!({
-                                "request_id": request_id,
-                                "sent_count": sent_count,
-                                "elapsed_ms": sustained_start.elapsed().as_millis()
-                            }));
-                        } else {
-                            break;
-                        }
+                                    logger.log_event(
+                                        "sustained_request_sent",
+                                        serde_json::json!({
+                                            "request_id": request_id,
+                                            "sent_count": sent_count,
+                                            "elapsed_ms": sustained_start.elapsed().as_millis()
+                                        }),
+                                    );
+                                } else {
+                                    break;
+                                }
 
-                        sleep(request_interval).await;
-                    }
+                                sleep(request_interval).await;
+                            }
 
-                    logger.log_event("sustained_generation_complete", serde_json::json!({
-                        "total_sent": sent_count,
-                        "duration_ms": sustained_start.elapsed().as_millis()
-                    }));
+                            logger.log_event(
+                                "sustained_generation_complete",
+                                serde_json::json!({
+                                    "total_sent": sent_count,
+                                    "duration_ms": sustained_start.elapsed().as_millis()
+                                }),
+                            );
 
-                    Outcome::Ok(sent_count)
-                }).await
-            }).await
+                            Outcome::Ok(sent_count)
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 5: Execute load test
@@ -2611,7 +3312,8 @@ impl IntegrationTestHarness {
 
         // Wait for generators to complete
         let burst_result = timeout(Duration::from_secs(5), burst_task).await;
-        let sustained_result = timeout(observation_period + Duration::from_secs(2), sustained_task).await;
+        let sustained_result =
+            timeout(observation_period + Duration::from_secs(2), sustained_task).await;
 
         // Allow processing to complete
         drop(request_tx);
@@ -2627,7 +3329,8 @@ impl IntegrationTestHarness {
         let burst_processed = burst_requests_processed.load(Ordering::Relaxed);
         let sustained_processed = sustained_requests_processed.load(Ordering::Relaxed);
         let total_rejections = rate_limit_rejections.load(Ordering::Relaxed);
-        let avg_processing_time = total_processing_time.load(Ordering::Relaxed) / (burst_processed + sustained_processed).max(1);
+        let avg_processing_time = total_processing_time.load(Ordering::Relaxed)
+            / (burst_processed + sustained_processed).max(1);
 
         self.logger.log_metrics(serde_json::json!({
             "burst_traffic_results": {
@@ -2645,50 +3348,90 @@ impl IntegrationTestHarness {
         }));
 
         // Critical assertions for burst and sustained performance
-        self.logger.log_assertion("burst_traffic_generated", burst_sent > 0, serde_json::json!({
-            "burst_sent": burst_sent
-        }));
+        self.logger.log_assertion(
+            "burst_traffic_generated",
+            burst_sent > 0,
+            serde_json::json!({
+                "burst_sent": burst_sent
+            }),
+        );
 
-        self.logger.log_assertion("sustained_traffic_generated", sustained_sent > 0, serde_json::json!({
-            "sustained_sent": sustained_sent
-        }));
+        self.logger.log_assertion(
+            "sustained_traffic_generated",
+            sustained_sent > 0,
+            serde_json::json!({
+                "sustained_sent": sustained_sent
+            }),
+        );
 
-        self.logger.log_assertion("rate_limiting_active", total_rejections > 0, serde_json::json!({
-            "total_rejections": total_rejections
-        }));
+        self.logger.log_assertion(
+            "rate_limiting_active",
+            total_rejections > 0,
+            serde_json::json!({
+                "total_rejections": total_rejections
+            }),
+        );
 
-        self.logger.log_assertion("burst_partially_processed", burst_processed > 0, serde_json::json!({
-            "burst_processed": burst_processed
-        }));
+        self.logger.log_assertion(
+            "burst_partially_processed",
+            burst_processed > 0,
+            serde_json::json!({
+                "burst_processed": burst_processed
+            }),
+        );
 
         // Rate limiting should be effective during burst
         let rejection_rate = total_rejections as f64 / (burst_sent + sustained_sent) as f64;
-        self.logger.log_assertion("rate_limit_effectiveness", rejection_rate > 0.1, serde_json::json!({
-            "rejection_rate": rejection_rate,
-            "threshold": 0.1
-        }));
+        self.logger.log_assertion(
+            "rate_limit_effectiveness",
+            rejection_rate > 0.1,
+            serde_json::json!({
+                "rejection_rate": rejection_rate,
+                "threshold": 0.1
+            }),
+        );
 
         // Sustained throughput should be reasonable after burst
         let sustained_throughput = sustained_processed as f64 / observation_period.as_secs_f64();
-        self.logger.log_assertion("sustained_throughput", sustained_throughput >= sustained_rate as f64 * 0.7, serde_json::json!({
-            "achieved_rps": sustained_throughput,
-            "target_rps": sustained_rate,
-            "threshold": sustained_rate as f64 * 0.7
-        }));
+        self.logger.log_assertion(
+            "sustained_throughput",
+            sustained_throughput >= sustained_rate as f64 * 0.7,
+            serde_json::json!({
+                "achieved_rps": sustained_throughput,
+                "target_rps": sustained_rate,
+                "threshold": sustained_rate as f64 * 0.7
+            }),
+        );
 
         assert!(burst_sent > 0, "Burst traffic should be generated");
         assert!(sustained_sent > 0, "Sustained traffic should be generated");
-        assert!(total_rejections > 0, "Rate limiting should reject some requests: {} rejections", total_rejections);
-        assert!(burst_processed > 0, "Some burst requests should be processed despite rate limiting");
-        assert!(rejection_rate > 0.1, "Rate limiting should be effective: {:.2}% rejection rate", rejection_rate * 100.0);
-        assert!(sustained_throughput >= sustained_rate as f64 * 0.7, "Sustained throughput should be ≥70% of target: {:.1} vs {} RPS", sustained_throughput, sustained_rate);
+        assert!(
+            total_rejections > 0,
+            "Rate limiting should reject some requests: {} rejections",
+            total_rejections
+        );
+        assert!(
+            burst_processed > 0,
+            "Some burst requests should be processed despite rate limiting"
+        );
+        assert!(
+            rejection_rate > 0.1,
+            "Rate limiting should be effective: {:.2}% rejection rate",
+            rejection_rate * 100.0
+        );
+        assert!(
+            sustained_throughput >= sustained_rate as f64 * 0.7,
+            "Sustained throughput should be ≥70% of target: {:.1} vs {} RPS",
+            sustained_throughput,
+            sustained_rate
+        );
     }
 
     /// [br-integration-12] HTTP/2 concurrent connection storm and slot leak detection
     async fn test_http2_connection_storm_slot_leaks(&self) {
         self.logger.log_phase("http2_connection_storm_setup");
 
-        use crate::http::h2::{H2Server, H2Client, H2Connection};
+        use crate::http::h2::{H2Client, H2Connection, H2Server};
         use crate::net::tcp::{TcpListener, TcpStream};
 
         let concurrent_connections = 200; // Massive connection load
@@ -2696,18 +3439,22 @@ impl IntegrationTestHarness {
         let connection_timeout = Duration::from_secs(2);
         let server_port = 8080; // Fixed port for test
 
-        self.logger.log_event("http2_storm_config", serde_json::json!({
-            "concurrent_connections": concurrent_connections,
-            "requests_per_connection": requests_per_connection,
-            "connection_timeout_secs": connection_timeout.as_secs(),
-            "server_port": server_port
-        }));
+        self.logger.log_event(
+            "http2_storm_config",
+            serde_json::json!({
+                "concurrent_connections": concurrent_connections,
+                "requests_per_connection": requests_per_connection,
+                "connection_timeout_secs": connection_timeout.as_secs(),
+                "server_port": server_port
+            }),
+        );
 
         // Phase 1: Setup HTTP/2 server
         self.logger.log_phase("http2_server_setup");
 
         let server_addr = format!("127.0.0.1:{}", server_port);
-        let listener = TcpListener::bind(&server_addr).await
+        let listener = TcpListener::bind(&server_addr)
+            .await
             .expect("Should bind to localhost");
 
         let connections_accepted = Arc::new(AtomicUsize::new(0));
@@ -2850,60 +3597,82 @@ impl IntegrationTestHarness {
             let client_requests = Arc::clone(&total_client_requests);
             let server_addr = server_addr.clone();
 
-            let client_task = self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let client_start = Instant::now();
+            let client_task = self
+                .runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let client_start = Instant::now();
 
-                    // Attempt connection to HTTP/2 server
-                    match timeout(Duration::from_millis(500), TcpStream::connect(&server_addr)).await {
-                        Outcome::Ok(Ok(_stream)) => {
-                            connected.fetch_add(1, Ordering::Relaxed);
+                            // Attempt connection to HTTP/2 server
+                            match timeout(
+                                Duration::from_millis(500),
+                                TcpStream::connect(&server_addr),
+                            )
+                            .await
+                            {
+                                Outcome::Ok(Ok(_stream)) => {
+                                    connected.fetch_add(1, Ordering::Relaxed);
 
-                            logger.log_event("http2_client_connected", serde_json::json!({
-                                "client_id": client_id,
-                                "connect_time_ms": client_start.elapsed().as_millis()
-                            }));
+                                    logger.log_event(
+                                        "http2_client_connected",
+                                        serde_json::json!({
+                                            "client_id": client_id,
+                                            "connect_time_ms": client_start.elapsed().as_millis()
+                                        }),
+                                    );
 
-                            // Send requests over H2 connection
-                            let mut requests_sent = 0;
+                                    // Send requests over H2 connection
+                                    let mut requests_sent = 0;
 
-                            for req_id in 0..requests_per_connection {
-                                // Simulate H2 request
-                                sleep(Duration::from_millis(20)).await;
-                                requests_sent += 1;
-                                client_requests.fetch_add(1, Ordering::Relaxed);
+                                    for req_id in 0..requests_per_connection {
+                                        // Simulate H2 request
+                                        sleep(Duration::from_millis(20)).await;
+                                        requests_sent += 1;
+                                        client_requests.fetch_add(1, Ordering::Relaxed);
 
-                                logger.log_event("http2_client_request", serde_json::json!({
-                                    "client_id": client_id,
-                                    "request_id": req_id,
-                                    "requests_sent": requests_sent
-                                }));
+                                        logger.log_event(
+                                            "http2_client_request",
+                                            serde_json::json!({
+                                                "client_id": client_id,
+                                                "request_id": req_id,
+                                                "requests_sent": requests_sent
+                                            }),
+                                        );
+                                    }
+
+                                    // Hold connection open for a bit
+                                    sleep(connection_timeout / 2).await;
+
+                                    logger.log_event(
+                                        "http2_client_disconnect",
+                                        serde_json::json!({
+                                            "client_id": client_id,
+                                            "requests_sent": requests_sent,
+                                            "duration_ms": client_start.elapsed().as_millis()
+                                        }),
+                                    );
+
+                                    Outcome::Ok(requests_sent)
+                                }
+                                _ => {
+                                    failed.fetch_add(1, Ordering::Relaxed);
+
+                                    logger.log_event(
+                                        "http2_client_connect_failed",
+                                        serde_json::json!({
+                                            "client_id": client_id,
+                                            "connect_time_ms": client_start.elapsed().as_millis()
+                                        }),
+                                    );
+
+                                    Outcome::Err(Error::new(ErrorKind::Other, "Connection failed"))
+                                }
                             }
-
-                            // Hold connection open for a bit
-                            sleep(connection_timeout / 2).await;
-
-                            logger.log_event("http2_client_disconnect", serde_json::json!({
-                                "client_id": client_id,
-                                "requests_sent": requests_sent,
-                                "duration_ms": client_start.elapsed().as_millis()
-                            }));
-
-                            Outcome::Ok(requests_sent)
-                        }
-                        _ => {
-                            failed.fetch_add(1, Ordering::Relaxed);
-
-                            logger.log_event("http2_client_connect_failed", serde_json::json!({
-                                "client_id": client_id,
-                                "connect_time_ms": client_start.elapsed().as_millis()
-                            }));
-
-                            Outcome::Err(Error::new(ErrorKind::Other, "Connection failed"))
-                        }
-                    }
-                }).await
-            }).await;
+                        })
+                        .await
+                })
+                .await;
 
             client_tasks.push(client_task);
 
@@ -2926,9 +3695,12 @@ impl IntegrationTestHarness {
             match timeout(Duration::from_secs(5), client_task).await {
                 Outcome::Ok(Outcome::Ok(_)) => successful_clients += 1,
                 _ => {
-                    self.logger.log_event("http2_client_timeout", serde_json::json!({
-                        "client_id": client_id
-                    }));
+                    self.logger.log_event(
+                        "http2_client_timeout",
+                        serde_json::json!({
+                            "client_id": client_id
+                        }),
+                    );
                 }
             }
         }
@@ -2965,59 +3737,106 @@ impl IntegrationTestHarness {
         }));
 
         // Critical assertions for HTTP/2 performance and slot management
-        self.logger.log_assertion("connections_accepted", total_accepted > 0, serde_json::json!({
-            "accepted": total_accepted
-        }));
+        self.logger.log_assertion(
+            "connections_accepted",
+            total_accepted > 0,
+            serde_json::json!({
+                "accepted": total_accepted
+            }),
+        );
 
-        self.logger.log_assertion("clients_connected", clients_connected_count > 0, serde_json::json!({
-            "connected": clients_connected_count
-        }));
+        self.logger.log_assertion(
+            "clients_connected",
+            clients_connected_count > 0,
+            serde_json::json!({
+                "connected": clients_connected_count
+            }),
+        );
 
         // Connection success rate should be reasonable under load
-        let connection_success_rate = clients_connected_count as f64 / concurrent_connections as f64;
-        self.logger.log_assertion("connection_success_rate", connection_success_rate > 0.7, serde_json::json!({
-            "success_rate": connection_success_rate,
-            "threshold": 0.7
-        }));
+        let connection_success_rate =
+            clients_connected_count as f64 / concurrent_connections as f64;
+        self.logger.log_assertion(
+            "connection_success_rate",
+            connection_success_rate > 0.7,
+            serde_json::json!({
+                "success_rate": connection_success_rate,
+                "threshold": 0.7
+            }),
+        );
 
         // CRITICAL: No active connections should remain (no slot leaks)
-        self.logger.log_assertion("no_active_connections_leak", final_active == 0, serde_json::json!({
-            "final_active": final_active
-        }));
+        self.logger.log_assertion(
+            "no_active_connections_leak",
+            final_active == 0,
+            serde_json::json!({
+                "final_active": final_active
+            }),
+        );
 
         // CRITICAL: Slot allocations should match deallocations (no slot leaks)
         let slot_leaks = allocated_slots.saturating_sub(deallocated_slots);
-        self.logger.log_assertion("no_slot_leaks", slot_leaks == 0, serde_json::json!({
-            "allocated_slots": allocated_slots,
-            "deallocated_slots": deallocated_slots,
-            "leaked_slots": slot_leaks
-        }));
+        self.logger.log_assertion(
+            "no_slot_leaks",
+            slot_leaks == 0,
+            serde_json::json!({
+                "allocated_slots": allocated_slots,
+                "deallocated_slots": deallocated_slots,
+                "leaked_slots": slot_leaks
+            }),
+        );
 
-        assert!(total_accepted > 0, "HTTP/2 server should accept connections");
-        assert!(clients_connected_count > 0, "Clients should successfully connect");
-        assert!(connection_success_rate > 0.7, "Connection success rate should be >70% under load: {:.2}%", connection_success_rate * 100.0);
-        assert!(final_active == 0, "NO active connections should remain after storm: {} active connections leaked", final_active);
-        assert!(slot_leaks == 0, "NO connection slots should leak: {} slots leaked (allocated: {}, deallocated: {})", slot_leaks, allocated_slots, deallocated_slots);
-        assert!(server_requests > 0, "Server should handle requests during connection storm");
+        assert!(
+            total_accepted > 0,
+            "HTTP/2 server should accept connections"
+        );
+        assert!(
+            clients_connected_count > 0,
+            "Clients should successfully connect"
+        );
+        assert!(
+            connection_success_rate > 0.7,
+            "Connection success rate should be >70% under load: {:.2}%",
+            connection_success_rate * 100.0
+        );
+        assert!(
+            final_active == 0,
+            "NO active connections should remain after storm: {} active connections leaked",
+            final_active
+        );
+        assert!(
+            slot_leaks == 0,
+            "NO connection slots should leak: {} slots leaked (allocated: {}, deallocated: {})",
+            slot_leaks,
+            allocated_slots,
+            deallocated_slots
+        );
+        assert!(
+            server_requests > 0,
+            "Server should handle requests during connection storm"
+        );
     }
 
     /// [br-integration-13] High-frequency timer churn and timer wheel stress test
     async fn test_high_frequency_timer_churn_wheel_stress(&self) {
         self.logger.log_phase("timer_churn_setup");
 
-        use crate::time::{sleep, timeout, Instant, Timer, TimerWheel};
+        use crate::time::{Instant, Timer, TimerWheel, sleep, timeout};
 
         let timer_count = 12000; // 12k simultaneous timers
         let churn_frequency = Duration::from_millis(5); // Very high frequency
         let test_duration = Duration::from_secs(8);
         let timer_range_ms = (10, 1000); // Random timer durations
 
-        self.logger.log_event("timer_churn_config", serde_json::json!({
-            "timer_count": timer_count,
-            "churn_frequency_ms": churn_frequency.as_millis(),
-            "test_duration_secs": test_duration.as_secs(),
-            "timer_range_ms": timer_range_ms
-        }));
+        self.logger.log_event(
+            "timer_churn_config",
+            serde_json::json!({
+                "timer_count": timer_count,
+                "churn_frequency_ms": churn_frequency.as_millis(),
+                "test_duration_secs": test_duration.as_secs(),
+                "timer_range_ms": timer_range_ms
+            }),
+        );
 
         // Phase 1: Setup timer tracking
         self.logger.log_phase("timer_tracking_setup");
@@ -3176,34 +3995,45 @@ impl IntegrationTestHarness {
             let active_count = Arc::clone(&active_timer_count);
             let peak_active = Arc::clone(&peak_active_timers);
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let monitor_start = Instant::now();
-                    let mut sample_count = 0;
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let monitor_start = Instant::now();
+                            let mut sample_count = 0;
 
-                    while monitor_start.elapsed() < test_duration + Duration::from_secs(1) {
-                        let current_active = active_count.load(Ordering::Relaxed);
-                        sample_count += 1;
+                            while monitor_start.elapsed() < test_duration + Duration::from_secs(1) {
+                                let current_active = active_count.load(Ordering::Relaxed);
+                                sample_count += 1;
 
-                        if sample_count % 100 == 0 { // Log every 100 samples
-                            logger.log_event("timer_wheel_monitor", serde_json::json!({
-                                "active_timers": current_active,
-                                "peak_active": peak_active.load(Ordering::Relaxed),
-                                "sample_count": sample_count,
-                                "elapsed_ms": monitor_start.elapsed().as_millis()
-                            }));
-                        }
+                                if sample_count % 100 == 0 {
+                                    // Log every 100 samples
+                                    logger.log_event(
+                                        "timer_wheel_monitor",
+                                        serde_json::json!({
+                                            "active_timers": current_active,
+                                            "peak_active": peak_active.load(Ordering::Relaxed),
+                                            "sample_count": sample_count,
+                                            "elapsed_ms": monitor_start.elapsed().as_millis()
+                                        }),
+                                    );
+                                }
 
-                        sleep(Duration::from_millis(10)).await; // Monitor every 10ms
-                    }
+                                sleep(Duration::from_millis(10)).await; // Monitor every 10ms
+                            }
 
-                    logger.log_event("timer_wheel_monitoring_complete", serde_json::json!({
-                        "total_samples": sample_count
-                    }));
+                            logger.log_event(
+                                "timer_wheel_monitoring_complete",
+                                serde_json::json!({
+                                    "total_samples": sample_count
+                                }),
+                            );
 
-                    Outcome::Ok(sample_count)
-                }).await
-            }).await
+                            Outcome::Ok(sample_count)
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 4: Execute timer churn test
@@ -3239,46 +4069,97 @@ impl IntegrationTestHarness {
         }));
 
         // Critical assertions for timer wheel performance
-        self.logger.log_assertion("timers_created", total_created > timer_count / 2, serde_json::json!({
-            "created": total_created,
-            "target": timer_count
-        }));
+        self.logger.log_assertion(
+            "timers_created",
+            total_created > timer_count / 2,
+            serde_json::json!({
+                "created": total_created,
+                "target": timer_count
+            }),
+        );
 
-        self.logger.log_assertion("peak_timer_load", peak_active_count >= timer_count / 2, serde_json::json!({
-            "peak_active": peak_active_count,
-            "target": timer_count / 2
-        }));
+        self.logger.log_assertion(
+            "peak_timer_load",
+            peak_active_count >= timer_count / 2,
+            serde_json::json!({
+                "peak_active": peak_active_count,
+                "target": timer_count / 2
+            }),
+        );
 
-        self.logger.log_assertion("timers_completed", total_completed > 0, serde_json::json!({
-            "completed": total_completed
-        }));
+        self.logger.log_assertion(
+            "timers_completed",
+            total_completed > 0,
+            serde_json::json!({
+                "completed": total_completed
+            }),
+        );
 
         // Timer wheel should handle high load efficiently
         let completion_rate = total_completed as f64 / total_created as f64;
-        self.logger.log_assertion("timer_completion_rate", completion_rate > 0.7, serde_json::json!({
-            "completion_rate": completion_rate,
-            "threshold": 0.7
-        }));
+        self.logger.log_assertion(
+            "timer_completion_rate",
+            completion_rate > 0.7,
+            serde_json::json!({
+                "completion_rate": completion_rate,
+                "threshold": 0.7
+            }),
+        );
 
         // Timer accuracy should be reasonable under high load
-        let accuracy_rate = (total_completed - accuracy_violations_count) as f64 / total_completed as f64;
-        self.logger.log_assertion("timer_accuracy", accuracy_rate > 0.85, serde_json::json!({
-            "accuracy_rate": accuracy_rate,
-            "threshold": 0.85,
-            "violations": accuracy_violations_count
-        }));
+        let accuracy_rate =
+            (total_completed - accuracy_violations_count) as f64 / total_completed as f64;
+        self.logger.log_assertion(
+            "timer_accuracy",
+            accuracy_rate > 0.85,
+            serde_json::json!({
+                "accuracy_rate": accuracy_rate,
+                "threshold": 0.85,
+                "violations": accuracy_violations_count
+            }),
+        );
 
         // No active timers should remain after test
-        self.logger.log_assertion("no_timer_leaks", final_active == 0, serde_json::json!({
-            "final_active": final_active
-        }));
+        self.logger.log_assertion(
+            "no_timer_leaks",
+            final_active == 0,
+            serde_json::json!({
+                "final_active": final_active
+            }),
+        );
 
-        assert!(total_created > timer_count / 2, "Should create significant timer load: {} created vs {} target", total_created, timer_count);
-        assert!(peak_active_count >= timer_count / 2, "Timer wheel should handle high concurrent load: {} peak vs {} target", peak_active_count, timer_count);
-        assert!(total_completed > 0, "Timers should complete successfully under load");
-        assert!(completion_rate > 0.7, "Timer completion rate should be >70% under churn: {:.2}%", completion_rate * 100.0);
-        assert!(accuracy_rate > 0.85, "Timer accuracy should be >85% under load: {:.2}% ({} violations)", accuracy_rate * 100.0, accuracy_violations_count);
-        assert!(final_active == 0, "NO timer leaks after test: {} active timers remain", final_active);
+        assert!(
+            total_created > timer_count / 2,
+            "Should create significant timer load: {} created vs {} target",
+            total_created,
+            timer_count
+        );
+        assert!(
+            peak_active_count >= timer_count / 2,
+            "Timer wheel should handle high concurrent load: {} peak vs {} target",
+            peak_active_count,
+            timer_count
+        );
+        assert!(
+            total_completed > 0,
+            "Timers should complete successfully under load"
+        );
+        assert!(
+            completion_rate > 0.7,
+            "Timer completion rate should be >70% under churn: {:.2}%",
+            completion_rate * 100.0
+        );
+        assert!(
+            accuracy_rate > 0.85,
+            "Timer accuracy should be >85% under load: {:.2}% ({} violations)",
+            accuracy_rate * 100.0,
+            accuracy_violations_count
+        );
+        assert!(
+            final_active == 0,
+            "NO timer leaks after test: {} active timers remain",
+            final_active
+        );
     }
 
     /// [br-integration-14] Multi-hour task with periodic checkpoint and resume
@@ -3291,12 +4172,15 @@ impl IntegrationTestHarness {
         let checkpoint_interval = simulated_hour_duration / 6; // Checkpoint every 10 minutes (simulated)
         let work_units_per_hour = 200; // 200 work units per simulated hour
 
-        self.logger.log_event("checkpoint_config", serde_json::json!({
-            "simulated_hour_duration_secs": simulated_hour_duration.as_secs(),
-            "total_simulated_hours": total_simulated_hours,
-            "checkpoint_interval_secs": checkpoint_interval.as_secs(),
-            "work_units_per_hour": work_units_per_hour
-        }));
+        self.logger.log_event(
+            "checkpoint_config",
+            serde_json::json!({
+                "simulated_hour_duration_secs": simulated_hour_duration.as_secs(),
+                "total_simulated_hours": total_simulated_hours,
+                "checkpoint_interval_secs": checkpoint_interval.as_secs(),
+                "work_units_per_hour": work_units_per_hour
+            }),
+        );
 
         // Phase 1: Setup long-running task state
         self.logger.log_phase("long_running_task_setup");
@@ -3469,7 +4353,8 @@ impl IntegrationTestHarness {
         // Phase 3: Execute long-running task with monitoring
         self.logger.log_phase("long_running_execution");
 
-        let total_timeout = simulated_hour_duration * total_simulated_hours as u32 + Duration::from_secs(30);
+        let total_timeout =
+            simulated_hour_duration * total_simulated_hours as u32 + Duration::from_secs(30);
         let task_result = timeout(total_timeout, task_processor).await;
 
         // Phase 4: Validate checkpoint/resume functionality
@@ -3505,41 +4390,86 @@ impl IntegrationTestHarness {
         }));
 
         // Critical assertions for long-running task reliability
-        self.logger.log_assertion("work_progress", total_progress > 0, serde_json::json!({
-            "progress": total_progress
-        }));
+        self.logger.log_assertion(
+            "work_progress",
+            total_progress > 0,
+            serde_json::json!({
+                "progress": total_progress
+            }),
+        );
 
-        self.logger.log_assertion("checkpoints_created", total_checkpoints > 0, serde_json::json!({
-            "checkpoints": total_checkpoints
-        }));
+        self.logger.log_assertion(
+            "checkpoints_created",
+            total_checkpoints > 0,
+            serde_json::json!({
+                "checkpoints": total_checkpoints
+            }),
+        );
 
-        self.logger.log_assertion("task_interruptions", total_interruptions > 0, serde_json::json!({
-            "interruptions": total_interruptions
-        }));
+        self.logger.log_assertion(
+            "task_interruptions",
+            total_interruptions > 0,
+            serde_json::json!({
+                "interruptions": total_interruptions
+            }),
+        );
 
-        self.logger.log_assertion("resume_operations", total_resumes == total_interruptions, serde_json::json!({
-            "resumes": total_resumes,
-            "interruptions": total_interruptions
-        }));
+        self.logger.log_assertion(
+            "resume_operations",
+            total_resumes == total_interruptions,
+            serde_json::json!({
+                "resumes": total_resumes,
+                "interruptions": total_interruptions
+            }),
+        );
 
         // Work completion should be high despite interruptions
         let completion_rate = total_progress as f64 / expected_work_units as f64;
-        self.logger.log_assertion("completion_rate", completion_rate > 0.9, serde_json::json!({
-            "completion_rate": completion_rate,
-            "threshold": 0.9
-        }));
+        self.logger.log_assertion(
+            "completion_rate",
+            completion_rate > 0.9,
+            serde_json::json!({
+                "completion_rate": completion_rate,
+                "threshold": 0.9
+            }),
+        );
 
         // State consistency should be maintained across resumes
-        self.logger.log_assertion("state_consistency", consistency_violations == 0, serde_json::json!({
-            "violations": consistency_violations
-        }));
+        self.logger.log_assertion(
+            "state_consistency",
+            consistency_violations == 0,
+            serde_json::json!({
+                "violations": consistency_violations
+            }),
+        );
 
         assert!(total_progress > 0, "Long-running task should make progress");
-        assert!(total_checkpoints > 0, "Task should create checkpoints: {} checkpoints", total_checkpoints);
-        assert!(total_interruptions > 0, "Interruptions should occur during long-running task: {} interruptions", total_interruptions);
-        assert!(total_resumes == total_interruptions, "All interruptions should resume: {} resumes vs {} interruptions", total_resumes, total_interruptions);
-        assert!(completion_rate > 0.9, "Task completion should be >90% despite interruptions: {:.2}%", completion_rate * 100.0);
-        assert!(consistency_violations == 0, "NO state consistency violations across checkpoints: {} violations", consistency_violations);
+        assert!(
+            total_checkpoints > 0,
+            "Task should create checkpoints: {} checkpoints",
+            total_checkpoints
+        );
+        assert!(
+            total_interruptions > 0,
+            "Interruptions should occur during long-running task: {} interruptions",
+            total_interruptions
+        );
+        assert!(
+            total_resumes == total_interruptions,
+            "All interruptions should resume: {} resumes vs {} interruptions",
+            total_resumes,
+            total_interruptions
+        );
+        assert!(
+            completion_rate > 0.9,
+            "Task completion should be >90% despite interruptions: {:.2}%",
+            completion_rate * 100.0
+        );
+        assert!(
+            consistency_violations == 0,
+            "NO state consistency violations across checkpoints: {} violations",
+            consistency_violations
+        );
     }
 
     /// [br-integration-15] Memory-pressure-induced backpressure with recovery
@@ -3552,12 +4482,15 @@ impl IntegrationTestHarness {
         let pressure_relief_delay = Duration::from_millis(100);
         let backpressure_detection_threshold = 10; // Queue size threshold
 
-        self.logger.log_event("memory_pressure_config", serde_json::json!({
-            "pressure_threshold_mb": memory_pressure_threshold / (1024 * 1024),
-            "induction_rate_mb": pressure_induction_rate / (1024 * 1024),
-            "relief_delay_ms": pressure_relief_delay.as_millis(),
-            "backpressure_threshold": backpressure_detection_threshold
-        }));
+        self.logger.log_event(
+            "memory_pressure_config",
+            serde_json::json!({
+                "pressure_threshold_mb": memory_pressure_threshold / (1024 * 1024),
+                "induction_rate_mb": pressure_induction_rate / (1024 * 1024),
+                "relief_delay_ms": pressure_relief_delay.as_millis(),
+                "backpressure_threshold": backpressure_detection_threshold
+            }),
+        );
 
         // Phase 1: Setup memory-sensitive processing pipeline
         self.logger.log_phase("memory_pipeline_setup");
@@ -3572,14 +4505,16 @@ impl IntegrationTestHarness {
         let total_processed = Arc::new(AtomicUsize::new(0));
 
         // Memory pressure monitor
-        let pressure_monitor = {
-            let logger = self.logger.clone();
-            let usage = Arc::clone(&memory_usage);
-            let backpressure_events = Arc::clone(&backpressure_events);
-            let allocations = Arc::clone(&memory_allocations);
+        let pressure_monitor =
+            {
+                let logger = self.logger.clone();
+                let usage = Arc::clone(&memory_usage);
+                let backpressure_events = Arc::clone(&backpressure_events);
+                let allocations = Arc::clone(&memory_allocations);
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
+                self.runtime
+                    .scope(|scope| async move {
+                        scope.spawn(async move {
                     let monitor_start = Instant::now();
                     let mut pressure_state = false;
 
@@ -3628,8 +4563,9 @@ impl IntegrationTestHarness {
 
                     Outcome::Ok(backpressure_events.load(Ordering::Relaxed))
                 }).await
-            }).await
-        };
+                    })
+                    .await
+            };
 
         // Processing pipeline with backpressure response
         let processor = {
@@ -3736,75 +4672,98 @@ impl IntegrationTestHarness {
         let producer = {
             let logger = self.logger.clone();
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let mut produced_count = 0;
-                    let item_count = 100;
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let mut produced_count = 0;
+                            let item_count = 100;
 
-                    for item_id in 0..item_count {
-                        // Varying data sizes to create memory pressure patterns
-                        let data_size = match item_id % 10 {
-                            0..=2 => pressure_induction_rate / 4,      // Small items
-                            3..=6 => pressure_induction_rate,          // Medium items
-                            7..=8 => pressure_induction_rate * 2,      // Large items
-                            _ => pressure_induction_rate * 4,          // Very large items
-                        };
+                            for item_id in 0..item_count {
+                                // Varying data sizes to create memory pressure patterns
+                                let data_size = match item_id % 10 {
+                                    0..=2 => pressure_induction_rate / 4, // Small items
+                                    3..=6 => pressure_induction_rate,     // Medium items
+                                    7..=8 => pressure_induction_rate * 2, // Large items
+                                    _ => pressure_induction_rate * 4,     // Very large items
+                                };
 
-                        if input_tx.send((item_id, data_size)).await.is_err() {
-                            logger.log_event("producer_send_failed", serde_json::json!({
-                                "item_id": item_id,
-                                "produced_count": produced_count
-                            }));
-                            break;
-                        }
+                                if input_tx.send((item_id, data_size)).await.is_err() {
+                                    logger.log_event(
+                                        "producer_send_failed",
+                                        serde_json::json!({
+                                            "item_id": item_id,
+                                            "produced_count": produced_count
+                                        }),
+                                    );
+                                    break;
+                                }
 
-                        produced_count += 1;
+                                produced_count += 1;
 
-                        logger.log_event("item_produced", serde_json::json!({
-                            "item_id": item_id,
-                            "data_size_mb": data_size / (1024 * 1024),
-                            "produced_count": produced_count
-                        }));
+                                logger.log_event(
+                                    "item_produced",
+                                    serde_json::json!({
+                                        "item_id": item_id,
+                                        "data_size_mb": data_size / (1024 * 1024),
+                                        "produced_count": produced_count
+                                    }),
+                                );
 
-                        sleep(Duration::from_millis(50)).await;
-                    }
+                                sleep(Duration::from_millis(50)).await;
+                            }
 
-                    logger.log_event("production_complete", serde_json::json!({
-                        "total_produced": produced_count
-                    }));
+                            logger.log_event(
+                                "production_complete",
+                                serde_json::json!({
+                                    "total_produced": produced_count
+                                }),
+                            );
 
-                    Outcome::Ok(produced_count)
-                }).await
-            }).await
+                            Outcome::Ok(produced_count)
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 3: Output collector
         let collector = {
             let logger = self.logger.clone();
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let mut output_rx = output_rx;
-                    let mut collected_count = 0;
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let mut output_rx = output_rx;
+                            let mut collected_count = 0;
 
-                    while let Some(result) = output_rx.recv().await {
-                        collected_count += 1;
+                            while let Some(result) = output_rx.recv().await {
+                                collected_count += 1;
 
-                        if collected_count % 20 == 0 {
-                            logger.log_event("output_collected", serde_json::json!({
-                                "result": result,
-                                "collected_count": collected_count
-                            }));
-                        }
-                    }
+                                if collected_count % 20 == 0 {
+                                    logger.log_event(
+                                        "output_collected",
+                                        serde_json::json!({
+                                            "result": result,
+                                            "collected_count": collected_count
+                                        }),
+                                    );
+                                }
+                            }
 
-                    logger.log_event("collection_complete", serde_json::json!({
-                        "total_collected": collected_count
-                    }));
+                            logger.log_event(
+                                "collection_complete",
+                                serde_json::json!({
+                                    "total_collected": collected_count
+                                }),
+                            );
 
-                    Outcome::Ok(collected_count)
-                }).await
-            }).await
+                            Outcome::Ok(collected_count)
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 4: Execute memory pressure test
@@ -3847,34 +4806,73 @@ impl IntegrationTestHarness {
         }));
 
         // Critical assertions for memory pressure handling
-        self.logger.log_assertion("memory_pressure_detected", total_backpressure > 0, serde_json::json!({
-            "backpressure_events": total_backpressure
-        }));
+        self.logger.log_assertion(
+            "memory_pressure_detected",
+            total_backpressure > 0,
+            serde_json::json!({
+                "backpressure_events": total_backpressure
+            }),
+        );
 
-        self.logger.log_assertion("backpressure_applied", processing_delays_count > 0, serde_json::json!({
-            "processing_delays": processing_delays_count
-        }));
+        self.logger.log_assertion(
+            "backpressure_applied",
+            processing_delays_count > 0,
+            serde_json::json!({
+                "processing_delays": processing_delays_count
+            }),
+        );
 
-        self.logger.log_assertion("memory_relief_occurred", total_relief > 0, serde_json::json!({
-            "relief_events": total_relief
-        }));
+        self.logger.log_assertion(
+            "memory_relief_occurred",
+            total_relief > 0,
+            serde_json::json!({
+                "relief_events": total_relief
+            }),
+        );
 
-        self.logger.log_assertion("items_processed", items_processed > 0, serde_json::json!({
-            "processed": items_processed
-        }));
+        self.logger.log_assertion(
+            "items_processed",
+            items_processed > 0,
+            serde_json::json!({
+                "processed": items_processed
+            }),
+        );
 
         // Recovery should be effective
         let recovery_rate = total_relief as f64 / total_backpressure.max(1) as f64;
-        self.logger.log_assertion("memory_recovery_rate", recovery_rate > 0.5, serde_json::json!({
-            "recovery_rate": recovery_rate,
-            "threshold": 0.5
-        }));
+        self.logger.log_assertion(
+            "memory_recovery_rate",
+            recovery_rate > 0.5,
+            serde_json::json!({
+                "recovery_rate": recovery_rate,
+                "threshold": 0.5
+            }),
+        );
 
-        assert!(total_backpressure > 0, "Memory pressure should be detected: {} events", total_backpressure);
-        assert!(processing_delays_count > 0, "Backpressure should cause processing delays: {} delays", processing_delays_count);
-        assert!(total_relief > 0, "Memory relief should occur: {} relief events", total_relief);
-        assert!(items_processed > 0, "Items should be processed despite pressure");
-        assert!(recovery_rate > 0.5, "Memory recovery rate should be >50%: {:.2}%", recovery_rate * 100.0);
+        assert!(
+            total_backpressure > 0,
+            "Memory pressure should be detected: {} events",
+            total_backpressure
+        );
+        assert!(
+            processing_delays_count > 0,
+            "Backpressure should cause processing delays: {} delays",
+            processing_delays_count
+        );
+        assert!(
+            total_relief > 0,
+            "Memory relief should occur: {} relief events",
+            total_relief
+        );
+        assert!(
+            items_processed > 0,
+            "Items should be processed despite pressure"
+        );
+        assert!(
+            recovery_rate > 0.5,
+            "Memory recovery rate should be >50%: {:.2}%",
+            recovery_rate * 100.0
+        );
     }
 
     /// [br-integration-16] Partition tolerance test with split-brain detection and healing
@@ -3888,12 +4886,15 @@ impl IntegrationTestHarness {
         let healing_delay = Duration::from_millis(500);
         let consensus_threshold = (node_count / 2) + 1; // Majority required
 
-        self.logger.log_event("partition_config", serde_json::json!({
-            "node_count": node_count,
-            "partition_duration_secs": partition_duration.as_secs(),
-            "healing_delay_ms": healing_delay.as_millis(),
-            "consensus_threshold": consensus_threshold
-        }));
+        self.logger.log_event(
+            "partition_config",
+            serde_json::json!({
+                "node_count": node_count,
+                "partition_duration_secs": partition_duration.as_secs(),
+                "healing_delay_ms": healing_delay.as_millis(),
+                "consensus_threshold": consensus_threshold
+            }),
+        );
 
         // Phase 1: Setup distributed node cluster
         self.logger.log_phase("cluster_setup");
@@ -4096,65 +5097,78 @@ impl IntegrationTestHarness {
             let partition_map = Arc::clone(&partition_map);
             let healings = Arc::clone(&healing_operations);
 
-            self.runtime.scope(|scope| async move {
-                scope.spawn(async move {
-                    let coord_start = Instant::now();
+            self.runtime
+                .scope(|scope| async move {
+                    scope
+                        .spawn(async move {
+                            let coord_start = Instant::now();
 
-                    // Wait for cluster to stabilize
-                    sleep(Duration::from_millis(500)).await;
+                            // Wait for cluster to stabilize
+                            sleep(Duration::from_millis(500)).await;
 
-                    // Create partition - isolate nodes 0 and 1
-                    {
-                        let mut partition_set = partition_map.lock().await;
-                        partition_set.insert(0);
-                        partition_set.insert(1);
-                    }
+                            // Create partition - isolate nodes 0 and 1
+                            {
+                                let mut partition_set = partition_map.lock().await;
+                                partition_set.insert(0);
+                                partition_set.insert(1);
+                            }
 
-                    logger.log_event("partition_created", serde_json::json!({
-                        "partitioned_nodes": [0, 1],
-                        "remaining_nodes": [2, 3, 4]
-                    }));
+                            logger.log_event(
+                                "partition_created",
+                                serde_json::json!({
+                                    "partitioned_nodes": [0, 1],
+                                    "remaining_nodes": [2, 3, 4]
+                                }),
+                            );
 
-                    // Maintain partition
-                    sleep(partition_duration).await;
+                            // Maintain partition
+                            sleep(partition_duration).await;
 
-                    // Heal partition
-                    {
-                        let mut partition_set = partition_map.lock().await;
-                        partition_set.clear();
-                    }
+                            // Heal partition
+                            {
+                                let mut partition_set = partition_map.lock().await;
+                                partition_set.clear();
+                            }
 
-                    let healing_id = healings.fetch_add(1, Ordering::Relaxed);
+                            let healing_id = healings.fetch_add(1, Ordering::Relaxed);
 
-                    logger.log_event("partition_healed", serde_json::json!({
-                        "healing_id": healing_id,
-                        "partition_duration_ms": partition_duration.as_millis()
-                    }));
+                            logger.log_event(
+                                "partition_healed",
+                                serde_json::json!({
+                                    "healing_id": healing_id,
+                                    "partition_duration_ms": partition_duration.as_millis()
+                                }),
+                            );
 
-                    // Allow healing to complete
-                    sleep(healing_delay).await;
+                            // Allow healing to complete
+                            sleep(healing_delay).await;
 
-                    // Send split-brain detection messages
-                    for _ in 0..5 {
-                        let split_brain_msg = serde_json::json!({
-                            "type": "split_brain_check",
-                            "timestamp": coord_start.elapsed().as_millis()
-                        });
+                            // Send split-brain detection messages
+                            for _ in 0..5 {
+                                let split_brain_msg = serde_json::json!({
+                                    "type": "split_brain_check",
+                                    "timestamp": coord_start.elapsed().as_millis()
+                                });
 
-                        if coordinator_tx.send(split_brain_msg.to_string()).is_err() {
-                            break;
-                        }
+                                if coordinator_tx.send(split_brain_msg.to_string()).is_err() {
+                                    break;
+                                }
 
-                        sleep(Duration::from_millis(200)).await;
-                    }
+                                sleep(Duration::from_millis(200)).await;
+                            }
 
-                    logger.log_event("partition_coordinator_complete", serde_json::json!({
-                        "total_healing_operations": healings.load(Ordering::Relaxed)
-                    }));
+                            logger.log_event(
+                                "partition_coordinator_complete",
+                                serde_json::json!({
+                                    "total_healing_operations": healings.load(Ordering::Relaxed)
+                                }),
+                            );
 
-                    Outcome::Ok(healings.load(Ordering::Relaxed))
-                }).await
-            }).await
+                            Outcome::Ok(healings.load(Ordering::Relaxed))
+                        })
+                        .await
+                })
+                .await
         };
 
         // Phase 4: Execute partition tolerance test
@@ -4171,9 +5185,12 @@ impl IntegrationTestHarness {
             match timeout(Duration::from_secs(5), node_task).await {
                 Outcome::Ok(Outcome::Ok(_)) => successful_nodes += 1,
                 _ => {
-                    self.logger.log_event("node_timeout", serde_json::json!({
-                        "node_id": node_id
-                    }));
+                    self.logger.log_event(
+                        "node_timeout",
+                        serde_json::json!({
+                            "node_id": node_id
+                        }),
+                    );
                 }
             }
         }
@@ -4226,40 +5243,89 @@ impl IntegrationTestHarness {
         }));
 
         // Critical assertions for partition tolerance
-        self.logger.log_assertion("partition_events", total_partitions > 0, serde_json::json!({
-            "partition_events": total_partitions
-        }));
+        self.logger.log_assertion(
+            "partition_events",
+            total_partitions > 0,
+            serde_json::json!({
+                "partition_events": total_partitions
+            }),
+        );
 
-        self.logger.log_assertion("split_brain_detection", total_split_brains > 0, serde_json::json!({
-            "split_brain_detections": total_split_brains
-        }));
+        self.logger.log_assertion(
+            "split_brain_detection",
+            total_split_brains > 0,
+            serde_json::json!({
+                "split_brain_detections": total_split_brains
+            }),
+        );
 
-        self.logger.log_assertion("healing_operations", total_healings > 0, serde_json::json!({
-            "healing_operations": total_healings
-        }));
+        self.logger.log_assertion(
+            "healing_operations",
+            total_healings > 0,
+            serde_json::json!({
+                "healing_operations": total_healings
+            }),
+        );
 
-        self.logger.log_assertion("node_survival", successful_nodes >= consensus_threshold, serde_json::json!({
-            "successful_nodes": successful_nodes,
-            "consensus_threshold": consensus_threshold
-        }));
+        self.logger.log_assertion(
+            "node_survival",
+            successful_nodes >= consensus_threshold,
+            serde_json::json!({
+                "successful_nodes": successful_nodes,
+                "consensus_threshold": consensus_threshold
+            }),
+        );
 
         // No consensus violations should occur
-        self.logger.log_assertion("no_consensus_violations", total_violations == 0, serde_json::json!({
-            "violations": total_violations
-        }));
+        self.logger.log_assertion(
+            "no_consensus_violations",
+            total_violations == 0,
+            serde_json::json!({
+                "violations": total_violations
+            }),
+        );
 
         // State consistency after healing
-        self.logger.log_assertion("post_healing_consistency", final_state_consistency >= consensus_threshold, serde_json::json!({
-            "consistent_nodes": final_state_consistency,
-            "threshold": consensus_threshold
-        }));
+        self.logger.log_assertion(
+            "post_healing_consistency",
+            final_state_consistency >= consensus_threshold,
+            serde_json::json!({
+                "consistent_nodes": final_state_consistency,
+                "threshold": consensus_threshold
+            }),
+        );
 
-        assert!(total_partitions > 0, "Network partitions should occur: {} events", total_partitions);
-        assert!(total_split_brains > 0, "Split-brain scenarios should be detected: {} detections", total_split_brains);
-        assert!(total_healings > 0, "Partition healing should occur: {} healing operations", total_healings);
-        assert!(successful_nodes >= consensus_threshold, "Majority of nodes should survive partition: {} vs {} threshold", successful_nodes, consensus_threshold);
-        assert!(total_violations == 0, "NO consensus violations during partition: {} violations", total_violations);
-        assert!(final_state_consistency >= consensus_threshold, "State consistency should be restored after healing: {} consistent nodes", final_state_consistency);
+        assert!(
+            total_partitions > 0,
+            "Network partitions should occur: {} events",
+            total_partitions
+        );
+        assert!(
+            total_split_brains > 0,
+            "Split-brain scenarios should be detected: {} detections",
+            total_split_brains
+        );
+        assert!(
+            total_healings > 0,
+            "Partition healing should occur: {} healing operations",
+            total_healings
+        );
+        assert!(
+            successful_nodes >= consensus_threshold,
+            "Majority of nodes should survive partition: {} vs {} threshold",
+            successful_nodes,
+            consensus_threshold
+        );
+        assert!(
+            total_violations == 0,
+            "NO consensus violations during partition: {} violations",
+            total_violations
+        );
+        assert!(
+            final_state_consistency >= consensus_threshold,
+            "State consistency should be restored after healing: {} consistent nodes",
+            final_state_consistency
+        );
     }
 }
 
@@ -4283,7 +5349,8 @@ async fn test_region_failure_isolation_integration() {
 
 #[tokio::test]
 async fn test_backpressure_propagation_pipeline_integration() {
-    let harness = IntegrationTestHarness::new("backpressure_propagation_pipeline_integration").await;
+    let harness =
+        IntegrationTestHarness::new("backpressure_propagation_pipeline_integration").await;
     harness.test_backpressure_propagation_pipeline().await;
 }
 
@@ -4299,20 +5366,27 @@ async fn test_comprehensive_integration_scenario() {
     // This test combines pubsub, circuit breakers, supervision, and backpressure
     // in a single complex scenario that tests the full asupersync stack
 
-    harness.logger.log_event("comprehensive_config", serde_json::json!({
-        "scenario": "multi_component_integration",
-        "components": ["pubsub", "circuit_breaker", "supervision", "backpressure"]
-    }));
+    harness.logger.log_event(
+        "comprehensive_config",
+        serde_json::json!({
+            "scenario": "multi_component_integration",
+            "components": ["pubsub", "circuit_breaker", "supervision", "backpressure"]
+        }),
+    );
 
     // The implementation would combine all previous scenarios
     // For brevity, we'll validate that the harness is properly set up
     // and can coordinate multiple integration scenarios
 
-    harness.logger.log_assertion("comprehensive_harness_ready", true, serde_json::json!({
-        "harness_initialized": true,
-        "failure_injector_ready": true,
-        "runtime_available": true
-    }));
+    harness.logger.log_assertion(
+        "comprehensive_harness_ready",
+        true,
+        serde_json::json!({
+            "harness_initialized": true,
+            "failure_injector_ready": true,
+            "runtime_available": true
+        }),
+    );
 
     harness.logger.log_phase("comprehensive_scenario_complete");
 }
@@ -4321,19 +5395,22 @@ async fn test_comprehensive_integration_scenario() {
 
 #[tokio::test]
 async fn test_chaos_thread_kill_obligation_cleanup_integration() {
-    let harness = IntegrationTestHarness::new("chaos_thread_kill_obligation_cleanup_integration").await;
+    let harness =
+        IntegrationTestHarness::new("chaos_thread_kill_obligation_cleanup_integration").await;
     harness.test_chaos_thread_kill_obligation_cleanup().await;
 }
 
 #[tokio::test]
 async fn test_hedge_first_success_short_circuit_integration() {
-    let harness = IntegrationTestHarness::new("hedge_first_success_short_circuit_integration").await;
+    let harness =
+        IntegrationTestHarness::new("hedge_first_success_short_circuit_integration").await;
     harness.test_hedge_first_success_short_circuit().await;
 }
 
 #[tokio::test]
 async fn test_distributed_bridge_rolling_restart_integration() {
-    let harness = IntegrationTestHarness::new("distributed_bridge_rolling_restart_integration").await;
+    let harness =
+        IntegrationTestHarness::new("distributed_bridge_rolling_restart_integration").await;
     harness.test_distributed_bridge_rolling_restart().await;
 }
 
@@ -4345,13 +5422,15 @@ async fn test_pubsub_broker_death_reconnect_integration() {
 
 #[tokio::test]
 async fn test_raptorq_decode_interruption_resume_integration() {
-    let harness = IntegrationTestHarness::new("raptorq_decode_interruption_resume_integration").await;
+    let harness =
+        IntegrationTestHarness::new("raptorq_decode_interruption_resume_integration").await;
     harness.test_raptorq_decode_interruption_resume().await;
 }
 
 #[tokio::test]
 async fn test_runtime_panic_recovery_subscriptions_integration() {
-    let harness = IntegrationTestHarness::new("runtime_panic_recovery_subscriptions_integration").await;
+    let harness =
+        IntegrationTestHarness::new("runtime_panic_recovery_subscriptions_integration").await;
     harness.test_runtime_panic_recovery_subscriptions().await;
 }
 
@@ -4359,19 +5438,22 @@ async fn test_runtime_panic_recovery_subscriptions_integration() {
 
 #[tokio::test]
 async fn test_burst_traffic_rate_limit_throughput_integration() {
-    let harness = IntegrationTestHarness::new("burst_traffic_rate_limit_throughput_integration").await;
+    let harness =
+        IntegrationTestHarness::new("burst_traffic_rate_limit_throughput_integration").await;
     harness.test_burst_traffic_rate_limit_throughput().await;
 }
 
 #[tokio::test]
 async fn test_http2_connection_storm_slot_leaks_integration() {
-    let harness = IntegrationTestHarness::new("http2_connection_storm_slot_leaks_integration").await;
+    let harness =
+        IntegrationTestHarness::new("http2_connection_storm_slot_leaks_integration").await;
     harness.test_http2_connection_storm_slot_leaks().await;
 }
 
 #[tokio::test]
 async fn test_high_frequency_timer_churn_wheel_stress_integration() {
-    let harness = IntegrationTestHarness::new("high_frequency_timer_churn_wheel_stress_integration").await;
+    let harness =
+        IntegrationTestHarness::new("high_frequency_timer_churn_wheel_stress_integration").await;
     harness.test_high_frequency_timer_churn_wheel_stress().await;
 }
 
@@ -4379,18 +5461,21 @@ async fn test_high_frequency_timer_churn_wheel_stress_integration() {
 
 #[tokio::test]
 async fn test_multi_hour_task_checkpoint_resume_integration() {
-    let harness = IntegrationTestHarness::new("multi_hour_task_checkpoint_resume_integration").await;
+    let harness =
+        IntegrationTestHarness::new("multi_hour_task_checkpoint_resume_integration").await;
     harness.test_multi_hour_task_checkpoint_resume().await;
 }
 
 #[tokio::test]
 async fn test_memory_pressure_backpressure_recovery_integration() {
-    let harness = IntegrationTestHarness::new("memory_pressure_backpressure_recovery_integration").await;
+    let harness =
+        IntegrationTestHarness::new("memory_pressure_backpressure_recovery_integration").await;
     harness.test_memory_pressure_backpressure_recovery().await;
 }
 
 #[tokio::test]
 async fn test_partition_tolerance_split_brain_healing_integration() {
-    let harness = IntegrationTestHarness::new("partition_tolerance_split_brain_healing_integration").await;
+    let harness =
+        IntegrationTestHarness::new("partition_tolerance_split_brain_healing_integration").await;
     harness.test_partition_tolerance_split_brain_healing().await;
 }

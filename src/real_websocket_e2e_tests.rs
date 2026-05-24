@@ -22,15 +22,17 @@ mod tests {
     use std::net::{SocketAddr, TcpListener};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use tokio::net::{TcpStream, TcpListener as TokioTcpListener};
+    use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
     use tokio::sync::{RwLock, oneshot};
     use tokio::time::timeout;
 
     // Import actual asupersync WebSocket implementations
-    use crate::net::websocket::handshake::{ServerHandshake, HandshakeError, HttpRequest, AcceptResponse};
-    use crate::net::websocket::frame::{Frame, Opcode, FrameCodec};
-    use crate::net::websocket::close::{CloseReason, CloseState};
     use crate::bytes::{Bytes, BytesMut};
+    use crate::net::websocket::close::{CloseReason, CloseState};
+    use crate::net::websocket::frame::{Frame, FrameCodec, Opcode};
+    use crate::net::websocket::handshake::{
+        AcceptResponse, HandshakeError, HttpRequest, ServerHandshake,
+    };
 
     // ---------------------------------------------------------------------------
     // WebSocket E2E Test Framework
@@ -170,16 +172,16 @@ mod tests {
     fn generate_websocket_key() -> String {
         use base64::Engine;
         let key_bytes: [u8; 16] = [
-            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+            0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88,
         ];
         base64::engine::general_purpose::STANDARD.encode(key_bytes)
     }
 
     /// Computes WebSocket Sec-WebSocket-Accept response
     fn compute_websocket_accept(key: &str) -> String {
-        use sha1::{Sha1, Digest};
         use base64::Engine;
+        use sha1::{Digest, Sha1};
 
         const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
         let mut hasher = Sha1::new();
@@ -305,7 +307,12 @@ mod tests {
                                 0x01 => {
                                     // Text frame - echo back
                                     if masked && n >= 6 {
-                                        let mask = [frame_buffer[2], frame_buffer[3], frame_buffer[4], frame_buffer[5]];
+                                        let mask = [
+                                            frame_buffer[2],
+                                            frame_buffer[3],
+                                            frame_buffer[4],
+                                            frame_buffer[5],
+                                        ];
                                         let payload_len = (frame_buffer[1] & 0x7F) as usize;
 
                                         if n >= 6 + payload_len {
@@ -339,9 +346,15 @@ mod tests {
                                         pong_response.push(payload_len as u8);
 
                                         if payload_len > 0 && n >= 6 + payload_len {
-                                            let mask = [frame_buffer[2], frame_buffer[3], frame_buffer[4], frame_buffer[5]];
+                                            let mask = [
+                                                frame_buffer[2],
+                                                frame_buffer[3],
+                                                frame_buffer[4],
+                                                frame_buffer[5],
+                                            ];
                                             for i in 0..payload_len {
-                                                pong_response.push(frame_buffer[6 + i] ^ mask[i % 4]);
+                                                pong_response
+                                                    .push(frame_buffer[6 + i] ^ mask[i % 4]);
                                             }
                                         }
 
@@ -389,23 +402,35 @@ mod tests {
         let test_start = Instant::now();
         let mut logger = WebSocketE2ELogger::new("websocket_full_handshake".to_string());
 
-        logger.log_phase(WebSocketPhase::Setup, "0.0.0.0:0".parse().unwrap()).await;
+        logger
+            .log_phase(WebSocketPhase::Setup, "0.0.0.0:0".parse().unwrap())
+            .await;
 
         // Start real WebSocket server
-        logger.log_phase(WebSocketPhase::ServerStart, "0.0.0.0:0".parse().unwrap()).await;
-        let server = RealWebSocketServer::start().await.expect("Failed to start WebSocket server");
+        logger
+            .log_phase(WebSocketPhase::ServerStart, "0.0.0.0:0".parse().unwrap())
+            .await;
+        let server = RealWebSocketServer::start()
+            .await
+            .expect("Failed to start WebSocket server");
         let server_addr = server.addr();
 
-        logger.log_phase(WebSocketPhase::TcpConnect, server_addr).await;
+        logger
+            .log_phase(WebSocketPhase::TcpConnect, server_addr)
+            .await;
 
         let mut success = true;
         let mut error = None;
 
         match timeout(Duration::from_secs(10), TcpStream::connect(server_addr)).await {
             Ok(Ok(mut stream)) => {
-                logger.log_websocket_event("tcp_connection", None, false).await;
+                logger
+                    .log_websocket_event("tcp_connection", None, false)
+                    .await;
 
-                logger.log_phase(WebSocketPhase::HttpUpgrade, server_addr).await;
+                logger
+                    .log_phase(WebSocketPhase::HttpUpgrade, server_addr)
+                    .await;
 
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -424,9 +449,17 @@ mod tests {
                 );
 
                 if stream.write_all(upgrade_request.as_bytes()).await.is_ok() {
-                    logger.log_websocket_event("http_upgrade", Some(upgrade_request.len() as u64), false).await;
+                    logger
+                        .log_websocket_event(
+                            "http_upgrade",
+                            Some(upgrade_request.len() as u64),
+                            false,
+                        )
+                        .await;
 
-                    logger.log_phase(WebSocketPhase::WebSocketHandshake, server_addr).await;
+                    logger
+                        .log_phase(WebSocketPhase::WebSocketHandshake, server_addr)
+                        .await;
 
                     // Read WebSocket upgrade response
                     let mut response = vec![0; 1024];
@@ -434,16 +467,22 @@ mod tests {
                         let response_str = String::from_utf8_lossy(&response[..n]);
 
                         // Verify WebSocket handshake response
-                        if response_str.contains("101 Switching Protocols") &&
-                           response_str.contains("Upgrade: websocket") &&
-                           response_str.contains("Connection: Upgrade") {
-
+                        if response_str.contains("101 Switching Protocols")
+                            && response_str.contains("Upgrade: websocket")
+                            && response_str.contains("Connection: Upgrade")
+                        {
                             // Verify Sec-WebSocket-Accept
                             let expected_accept = compute_websocket_accept(&ws_key);
-                            if response_str.contains(&format!("Sec-WebSocket-Accept: {}", expected_accept)) {
-                                logger.log_websocket_event("handshake_success", None, false).await;
+                            if response_str
+                                .contains(&format!("Sec-WebSocket-Accept: {}", expected_accept))
+                            {
+                                logger
+                                    .log_websocket_event("handshake_success", None, false)
+                                    .await;
 
-                                logger.log_phase(WebSocketPhase::FrameExchange, server_addr).await;
+                                logger
+                                    .log_phase(WebSocketPhase::FrameExchange, server_addr)
+                                    .await;
 
                                 // Test frame exchange (text frame)
                                 let test_message = "Hello WebSocket!";
@@ -460,48 +499,92 @@ mod tests {
                                 }
 
                                 if stream.write_all(&frame).await.is_ok() {
-                                    logger.log_websocket_event("frame_sent", Some(frame.len() as u64), false).await;
+                                    logger
+                                        .log_websocket_event(
+                                            "frame_sent",
+                                            Some(frame.len() as u64),
+                                            false,
+                                        )
+                                        .await;
 
                                     // Read echo response
                                     let mut frame_response = vec![0; 256];
                                     if let Ok(n) = stream.read(&mut frame_response).await {
-                                        logger.log_websocket_event("frame_received", Some(n as u64), false).await;
+                                        logger
+                                            .log_websocket_event(
+                                                "frame_received",
+                                                Some(n as u64),
+                                                false,
+                                            )
+                                            .await;
 
                                         // Verify echo response
-                                        if n >= 2 && frame_response[0] == 0x81 { // FIN + text frame
+                                        if n >= 2 && frame_response[0] == 0x81 {
+                                            // FIN + text frame
                                             let payload_len = (frame_response[1] & 0x7F) as usize;
-                                            if payload_len == test_message.len() && n >= 2 + payload_len {
-                                                let echoed = String::from_utf8_lossy(&frame_response[2..2 + payload_len]);
+                                            if payload_len == test_message.len()
+                                                && n >= 2 + payload_len
+                                            {
+                                                let echoed = String::from_utf8_lossy(
+                                                    &frame_response[2..2 + payload_len],
+                                                );
                                                 if echoed == test_message {
-                                                    logger.log_phase(WebSocketPhase::CloseHandshake, server_addr).await;
+                                                    logger
+                                                        .log_phase(
+                                                            WebSocketPhase::CloseHandshake,
+                                                            server_addr,
+                                                        )
+                                                        .await;
 
                                                     // Test close handshake
-                                                    let close_frame = vec![0x88, 0x80, 0x00, 0x00, 0x00, 0x00]; // Masked close frame
-                                                    if stream.write_all(&close_frame).await.is_ok() {
+                                                    let close_frame =
+                                                        vec![0x88, 0x80, 0x00, 0x00, 0x00, 0x00]; // Masked close frame
+                                                    if stream.write_all(&close_frame).await.is_ok()
+                                                    {
                                                         // Read close response
                                                         let mut close_response = vec![0; 32];
-                                                        if let Ok(n) = stream.read(&mut close_response).await {
-                                                            if n >= 2 && close_response[0] == 0x88 { // Close frame
-                                                                logger.log_websocket_event("close_handshake", None, false).await;
+                                                        if let Ok(n) =
+                                                            stream.read(&mut close_response).await
+                                                        {
+                                                            if n >= 2 && close_response[0] == 0x88 {
+                                                                // Close frame
+                                                                logger
+                                                                    .log_websocket_event(
+                                                                        "close_handshake",
+                                                                        None,
+                                                                        false,
+                                                                    )
+                                                                    .await;
                                                             } else {
                                                                 success = false;
-                                                                error = Some("Invalid close response".to_string());
+                                                                error = Some(
+                                                                    "Invalid close response"
+                                                                        .to_string(),
+                                                                );
                                                             }
                                                         } else {
                                                             success = false;
-                                                            error = Some("Failed to receive close response".to_string());
+                                                            error = Some(
+                                                                "Failed to receive close response"
+                                                                    .to_string(),
+                                                            );
                                                         }
                                                     } else {
                                                         success = false;
-                                                        error = Some("Failed to send close frame".to_string());
+                                                        error = Some(
+                                                            "Failed to send close frame"
+                                                                .to_string(),
+                                                        );
                                                     }
                                                 } else {
                                                     success = false;
-                                                    error = Some("Echo message mismatch".to_string());
+                                                    error =
+                                                        Some("Echo message mismatch".to_string());
                                                 }
                                             } else {
                                                 success = false;
-                                                error = Some("Invalid echo frame length".to_string());
+                                                error =
+                                                    Some("Invalid echo frame length".to_string());
                                             }
                                         } else {
                                             success = false;
@@ -518,17 +601,23 @@ mod tests {
                             } else {
                                 success = false;
                                 error = Some("Invalid Sec-WebSocket-Accept".to_string());
-                                logger.log_websocket_event("handshake_failure", None, true).await;
+                                logger
+                                    .log_websocket_event("handshake_failure", None, true)
+                                    .await;
                             }
                         } else {
                             success = false;
                             error = Some("Invalid WebSocket upgrade response".to_string());
-                            logger.log_websocket_event("handshake_failure", None, true).await;
+                            logger
+                                .log_websocket_event("handshake_failure", None, true)
+                                .await;
                         }
                     } else {
                         success = false;
                         error = Some("Failed to read upgrade response".to_string());
-                        logger.log_websocket_event("handshake_failure", None, true).await;
+                        logger
+                            .log_websocket_event("handshake_failure", None, true)
+                            .await;
                     }
                 } else {
                     success = false;
@@ -545,7 +634,9 @@ mod tests {
             }
         }
 
-        logger.log_phase(WebSocketPhase::Teardown, server_addr).await;
+        logger
+            .log_phase(WebSocketPhase::Teardown, server_addr)
+            .await;
         let _ = server.stop().await;
 
         let ws_stats = logger.get_stats().await;
@@ -568,9 +659,13 @@ mod tests {
         let test_start = Instant::now();
         let mut logger = WebSocketE2ELogger::new("websocket_ping_pong".to_string());
 
-        logger.log_phase(WebSocketPhase::Setup, "0.0.0.0:0".parse().unwrap()).await;
+        logger
+            .log_phase(WebSocketPhase::Setup, "0.0.0.0:0".parse().unwrap())
+            .await;
 
-        let server = RealWebSocketServer::start().await.expect("Failed to start WebSocket server");
+        let server = RealWebSocketServer::start()
+            .await
+            .expect("Failed to start WebSocket server");
         let server_addr = server.addr();
 
         let mut success = true;
@@ -579,7 +674,9 @@ mod tests {
         // Connect and perform handshake
         match timeout(Duration::from_secs(5), TcpStream::connect(server_addr)).await {
             Ok(Ok(mut stream)) => {
-                logger.log_websocket_event("tcp_connection", None, false).await;
+                logger
+                    .log_websocket_event("tcp_connection", None, false)
+                    .await;
 
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -596,7 +693,9 @@ mod tests {
                         let response_str = String::from_utf8_lossy(&response[..n]);
 
                         if response_str.contains("101 Switching Protocols") {
-                            logger.log_websocket_event("handshake_success", None, false).await;
+                            logger
+                                .log_websocket_event("handshake_success", None, false)
+                                .await;
 
                             // Send ping frame
                             let ping_payload = b"ping test";
@@ -609,15 +708,28 @@ mod tests {
                             }
 
                             if stream.write_all(&ping_frame).await.is_ok() {
-                                logger.log_websocket_event("frame_sent", Some(ping_frame.len() as u64), false).await;
+                                logger
+                                    .log_websocket_event(
+                                        "frame_sent",
+                                        Some(ping_frame.len() as u64),
+                                        false,
+                                    )
+                                    .await;
 
                                 // Read pong response
                                 let mut pong_response = vec![0; 64];
                                 if let Ok(n) = stream.read(&mut pong_response).await {
-                                    logger.log_websocket_event("frame_received", Some(n as u64), false).await;
+                                    logger
+                                        .log_websocket_event(
+                                            "frame_received",
+                                            Some(n as u64),
+                                            false,
+                                        )
+                                        .await;
 
                                     // Verify pong frame
-                                    if n >= 2 && pong_response[0] == 0x8A { // FIN + pong frame
+                                    if n >= 2 && pong_response[0] == 0x8A {
+                                        // FIN + pong frame
                                         let pong_len = (pong_response[1] & 0x7F) as usize;
                                         if pong_len == ping_payload.len() && n >= 2 + pong_len {
                                             let pong_payload = &pong_response[2..2 + pong_len];
@@ -705,12 +817,21 @@ mod tests {
         // Verify WebSocket statistics
         assert!(result.ws_stats.tcp_connections > 0, "No TCP connections");
         assert!(result.ws_stats.http_upgrades > 0, "No HTTP upgrades");
-        assert!(result.ws_stats.handshake_success > 0, "No successful handshakes");
+        assert!(
+            result.ws_stats.handshake_success > 0,
+            "No successful handshakes"
+        );
         assert!(result.ws_stats.frames_sent > 0, "No frames sent");
         assert!(result.ws_stats.frames_received > 0, "No frames received");
-        assert_eq!(result.ws_stats.handshake_failures, 0, "Handshake failures detected");
+        assert_eq!(
+            result.ws_stats.handshake_failures, 0,
+            "Handshake failures detected"
+        );
 
-        println!("✅ WebSocket full handshake E2E test passed: {} ms", result.duration_ms);
+        println!(
+            "✅ WebSocket full handshake E2E test passed: {} ms",
+            result.duration_ms
+        );
     }
 
     #[tokio::test]
@@ -729,7 +850,10 @@ mod tests {
         assert!(result.ws_stats.frames_sent > 0, "No ping sent");
         assert!(result.ws_stats.frames_received > 0, "No pong received");
 
-        println!("✅ WebSocket ping/pong E2E test passed: {} ms", result.duration_ms);
+        println!(
+            "✅ WebSocket ping/pong E2E test passed: {} ms",
+            result.duration_ms
+        );
     }
 
     #[tokio::test]
@@ -743,8 +867,12 @@ mod tests {
         let all_results = vec![handshake_result, ping_pong_result];
 
         println!("\n=== [br-e2e-3] WEBSOCKET E2E COMPLIANCE REPORT ===");
-        println!("| Test | Server Addr | Success | Duration | TCP | Upgrades | Handshakes | Frames S/R | Bytes |");
-        println!("|------|-------------|---------|----------|-----|----------|------------|------------|-------|");
+        println!(
+            "| Test | Server Addr | Success | Duration | TCP | Upgrades | Handshakes | Frames S/R | Bytes |"
+        );
+        println!(
+            "|------|-------------|---------|----------|-----|----------|------------|------------|-------|"
+        );
 
         let mut total_duration = 0;
         let mut total_connections = 0;
@@ -794,10 +922,17 @@ mod tests {
         if success_count == all_results.len() {
             println!("\n✅ **WEBSOCKET E2E CONFORMANCE ACHIEVED**: All protocol tests passed");
         } else {
-            println!("\n❌ **WEBSOCKET E2E CONFORMANCE FAILED**: {} tests failed", all_results.len() - success_count);
+            println!(
+                "\n❌ **WEBSOCKET E2E CONFORMANCE FAILED**: {} tests failed",
+                all_results.len() - success_count
+            );
         }
 
         // All tests must pass
-        assert_eq!(success_count, all_results.len(), "Not all WebSocket E2E tests passed");
+        assert_eq!(
+            success_count,
+            all_results.len(),
+            "Not all WebSocket E2E tests passed"
+        );
     }
 }

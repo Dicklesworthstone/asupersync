@@ -12,7 +12,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 #[cfg(any(test, feature = "test-internals"))]
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{BTreeMap, HashMap};
 #[cfg(any(test, feature = "test-internals"))]
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 #[cfg(any(test, feature = "test-internals"))]
@@ -133,7 +133,10 @@ impl MockNetworkProcessor {
     }
 
     /// Test TCP connect→close round-trip
-    pub fn test_tcp_connect_close_roundtrip(&mut self, remote_addr: SocketAddr) -> Result<(), String> {
+    pub fn test_tcp_connect_close_roundtrip(
+        &mut self,
+        remote_addr: SocketAddr,
+    ) -> Result<(), String> {
         let local_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
         let connect_time = Instant::now();
 
@@ -167,7 +170,10 @@ impl MockNetworkProcessor {
         }
 
         if connection.connection_state != TcpConnectionState::Closed {
-            return Err(format!("Connection not properly closed: {:?}", connection.connection_state));
+            return Err(format!(
+                "Connection not properly closed: {:?}",
+                connection.connection_state
+            ));
         }
 
         self.tcp_connections.push(connection);
@@ -219,13 +225,16 @@ impl MockNetworkProcessor {
 
         {
             let mut cache = self.dns_cache.lock().unwrap();
-            cache.insert(hostname.to_string(), MockDnsEntry {
-                hostname: hostname.to_string(),
-                resolved_ips: initial_ips.clone(),
-                ttl,
-                cached_at: now,
-                lookup_count: 1,
-            });
+            cache.insert(
+                hostname.to_string(),
+                MockDnsEntry {
+                    hostname: hostname.to_string(),
+                    resolved_ips: initial_ips.clone(),
+                    ttl,
+                    cached_at: now,
+                    lookup_count: 1,
+                },
+            );
         }
 
         // Second lookup - should return cached result (idempotency test)
@@ -295,11 +304,17 @@ impl MockNetworkProcessor {
 
         // Verify protocol symmetry - both sides must agree on version and cipher
         if handshake.protocol_version != "TLSv1.3" {
-            return Err(format!("Unexpected TLS version: {}", handshake.protocol_version));
+            return Err(format!(
+                "Unexpected TLS version: {}",
+                handshake.protocol_version
+            ));
         }
 
         if !handshake.cipher_suite.starts_with("TLS_") {
-            return Err(format!("Invalid cipher suite format: {}", handshake.cipher_suite));
+            return Err(format!(
+                "Invalid cipher suite format: {}",
+                handshake.cipher_suite
+            ));
         }
 
         self.tls_handshakes.push(handshake);
@@ -307,7 +322,11 @@ impl MockNetworkProcessor {
     }
 
     /// Test WebSocket connect→close round-trip
-    pub fn test_websocket_connect_close_roundtrip(&mut self, url: &str, subprotocols: Vec<String>) -> Result<(), String> {
+    pub fn test_websocket_connect_close_roundtrip(
+        &mut self,
+        url: &str,
+        subprotocols: Vec<String>,
+    ) -> Result<(), String> {
         let connect_time = Instant::now();
 
         let mut connection = MockWebSocketConnection {
@@ -350,7 +369,10 @@ impl MockNetworkProcessor {
         }
 
         if connection.connection_state != WebSocketState::Closed {
-            return Err(format!("WebSocket not properly closed: {:?}", connection.connection_state));
+            return Err(format!(
+                "WebSocket not properly closed: {:?}",
+                connection.connection_state
+            ));
         }
 
         self.websocket_connections.push(connection);
@@ -491,10 +513,23 @@ impl MockCliProcessor {
 
         // Verify diagnostic completeness
         if let Some(last_run) = self.diagnostic_runs.last() {
-            let required_categories = ["runtime", "memory", "network", "filesystem", "configuration"];
+            let required_categories = [
+                "runtime",
+                "memory",
+                "network",
+                "filesystem",
+                "configuration",
+            ];
             for category in &required_categories {
-                if !last_run.diagnostic_results.iter().any(|r| r.category == *category) {
-                    return Err(format!("Missing required diagnostic category: {}", category));
+                if !last_run
+                    .diagnostic_results
+                    .iter()
+                    .any(|r| r.category == *category)
+                {
+                    return Err(format!(
+                        "Missing required diagnostic category: {}",
+                        category
+                    ));
                 }
             }
         }
@@ -502,7 +537,10 @@ impl MockCliProcessor {
         Ok(())
     }
 
-    fn generate_deterministic_diagnostics(&self, system_info: &SystemInfo) -> Vec<DiagnosticResult> {
+    fn generate_deterministic_diagnostics(
+        &self,
+        system_info: &SystemInfo,
+    ) -> Vec<DiagnosticResult> {
         let mut results = Vec::new();
 
         // Runtime diagnostic (deterministic based on system info)
@@ -546,7 +584,10 @@ impl MockCliProcessor {
         results.push(DiagnosticResult {
             category: "configuration".to_string(),
             status: DiagnosticStatus::Info,
-            message: format!("OS: {} | CPU cores: {}", system_info.os_version, system_info.cpu_cores),
+            message: format!(
+                "OS: {} | CPU cores: {}",
+                system_info.os_version, system_info.cpu_cores
+            ),
             details: None,
         });
 
@@ -573,7 +614,11 @@ impl MockCliProcessor {
     }
 
     /// Test CLI command reproducibility
-    pub fn test_command_reproducibility(&mut self, command: &str, args: Vec<String>) -> Result<(), String> {
+    pub fn test_command_reproducibility(
+        &mut self,
+        command: &str,
+        args: Vec<String>,
+    ) -> Result<(), String> {
         let mut command_results = Vec::new();
 
         // Run same command multiple times
@@ -601,7 +646,10 @@ impl MockCliProcessor {
         // Verify reproducibility (same inputs should produce same outputs)
         let first_result = &command_results[0];
         for result in &command_results[1..] {
-            if result.0 != first_result.0 || result.1 != first_result.1 || result.2 != first_result.2 {
+            if result.0 != first_result.0
+                || result.1 != first_result.1
+                || result.2 != first_result.2
+            {
                 return Err("CLI command not reproducible - outputs differ".to_string());
             }
         }
@@ -636,7 +684,10 @@ impl MockCliProcessor {
             let signature = format!("{}:{}", cmd.command, cmd.args.join(","));
             if let Some(previous_exit_code) = command_signatures.get(&signature) {
                 if *previous_exit_code != cmd.exit_code {
-                    return Err(format!("CLI command {} has inconsistent exit codes", signature));
+                    return Err(format!(
+                        "CLI command {} has inconsistent exit codes",
+                        signature
+                    ));
                 }
             } else {
                 command_signatures.insert(signature, cmd.exit_code);
@@ -751,7 +802,11 @@ impl MockAuditProcessor {
             },
         };
 
-        self.record_audit_event(&root_context.context_id, AuditEventType::ContextCreated, HashMap::new());
+        self.record_audit_event(
+            &root_context.context_id,
+            AuditEventType::ContextCreated,
+            HashMap::new(),
+        );
 
         // Test context derivation (child contexts inherit ambient properties)
         let mut derived_contexts: Vec<AuditContext> = Vec::new();
@@ -799,7 +854,11 @@ impl MockAuditProcessor {
             };
 
             self.propagation_paths.push(propagation);
-            self.record_audit_event(&child_context.context_id, AuditEventType::ContextCreated, HashMap::new());
+            self.record_audit_event(
+                &child_context.context_id,
+                AuditEventType::ContextCreated,
+                HashMap::new(),
+            );
             derived_contexts.push(child_context);
         }
 
@@ -816,11 +875,15 @@ impl MockAuditProcessor {
         // Test context property isolation (changes don't affect parent)
         if let Some(chain) = self.context_chains.last_mut() {
             if let Some(last_child) = chain.derived_contexts.last_mut() {
-                last_child.metadata.insert("local_prop".to_string(), "local_value".to_string());
+                last_child
+                    .metadata
+                    .insert("local_prop".to_string(), "local_value".to_string());
 
                 // Verify isolation - parent should not have this property
                 if chain.root_context.metadata.contains_key("local_prop") {
-                    return Err("Child context property leaked to parent (isolation violated)".to_string());
+                    return Err(
+                        "Child context property leaked to parent (isolation violated)".to_string(),
+                    );
                 }
             }
         }
@@ -843,7 +906,9 @@ impl MockAuditProcessor {
         self.record_audit_event(context_id, AuditEventType::ContextDestroyed, HashMap::new());
 
         // Verify event ordering consistency
-        let context_events: Vec<&MockAuditEvent> = self.audit_events.iter()
+        let context_events: Vec<&MockAuditEvent> = self
+            .audit_events
+            .iter()
             .filter(|event| event.context_id == context_id)
             .collect();
 
@@ -866,7 +931,12 @@ impl MockAuditProcessor {
         Ok(())
     }
 
-    fn record_audit_event(&mut self, context_id: &str, event_type: AuditEventType, details: HashMap<String, String>) {
+    fn record_audit_event(
+        &mut self,
+        context_id: &str,
+        event_type: AuditEventType,
+        details: HashMap<String, String>,
+    ) {
         let event = MockAuditEvent {
             event_id: format!("event-{:06}", self.audit_events.len() + 1),
             context_id: context_id.to_string(),
@@ -940,9 +1010,9 @@ pub struct ConformanceTestResult {
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequirementLevel {
-    Must,    // Protocol requirement or specification mandate
-    Should,  // Best practice or recommended behavior
-    May,     // Optional enhancement or optimization
+    Must,   // Protocol requirement or specification mandate
+    Should, // Best practice or recommended behavior
+    May,    // Optional enhancement or optimization
 }
 
 #[cfg(any(test, feature = "test-internals"))]
@@ -975,10 +1045,25 @@ impl NetCliAuditConformanceHarness {
     fn test_network_conformance(&mut self) -> Result<(), String> {
         // Test TCP connect→close round-trip
         let tcp_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443);
-        match self.network_processor.test_tcp_connect_close_roundtrip(tcp_addr) {
-            Ok(()) => self.record_test("net_tcp_connect_close_roundtrip", "network", RequirementLevel::Must, TestStatus::Pass, None),
+        match self
+            .network_processor
+            .test_tcp_connect_close_roundtrip(tcp_addr)
+        {
+            Ok(()) => self.record_test(
+                "net_tcp_connect_close_roundtrip",
+                "network",
+                RequirementLevel::Must,
+                TestStatus::Pass,
+                None,
+            ),
             Err(e) => {
-                self.record_test("net_tcp_connect_close_roundtrip", "network", RequirementLevel::Must, TestStatus::Fail, Some(e.clone()));
+                self.record_test(
+                    "net_tcp_connect_close_roundtrip",
+                    "network",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
                 return Err(e);
             }
         }
@@ -986,18 +1071,45 @@ impl NetCliAuditConformanceHarness {
         // Test UDP session round-trip
         let udp_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53);
         match self.network_processor.test_udp_session_roundtrip(udp_addr) {
-            Ok(()) => self.record_test("net_udp_session_roundtrip", "network", RequirementLevel::Must, TestStatus::Pass, None),
+            Ok(()) => self.record_test(
+                "net_udp_session_roundtrip",
+                "network",
+                RequirementLevel::Must,
+                TestStatus::Pass,
+                None,
+            ),
             Err(e) => {
-                self.record_test("net_udp_session_roundtrip", "network", RequirementLevel::Must, TestStatus::Fail, Some(e.clone()));
+                self.record_test(
+                    "net_udp_session_roundtrip",
+                    "network",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
                 return Err(e);
             }
         }
 
         // Test DNS lookup caching idempotency
-        match self.network_processor.test_dns_caching_idempotency("example.com") {
-            Ok(()) => self.record_test("net_dns_caching_idempotency", "network", RequirementLevel::Must, TestStatus::Pass, None),
+        match self
+            .network_processor
+            .test_dns_caching_idempotency("example.com")
+        {
+            Ok(()) => self.record_test(
+                "net_dns_caching_idempotency",
+                "network",
+                RequirementLevel::Must,
+                TestStatus::Pass,
+                None,
+            ),
             Err(e) => {
-                self.record_test("net_dns_caching_idempotency", "network", RequirementLevel::Must, TestStatus::Fail, Some(e.clone()));
+                self.record_test(
+                    "net_dns_caching_idempotency",
+                    "network",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
                 return Err(e);
             }
         }
@@ -1005,29 +1117,70 @@ impl NetCliAuditConformanceHarness {
         // Test TLS handshake symmetry
         let tls_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(142, 250, 191, 14)), 443);
         match self.network_processor.test_tls_handshake_symmetry(tls_addr) {
-            Ok(()) => self.record_test("net_tls_handshake_symmetry", "network", RequirementLevel::Must, TestStatus::Pass, None),
+            Ok(()) => self.record_test(
+                "net_tls_handshake_symmetry",
+                "network",
+                RequirementLevel::Must,
+                TestStatus::Pass,
+                None,
+            ),
             Err(e) => {
-                self.record_test("net_tls_handshake_symmetry", "network", RequirementLevel::Must, TestStatus::Fail, Some(e.clone()));
+                self.record_test(
+                    "net_tls_handshake_symmetry",
+                    "network",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
                 return Err(e);
             }
         }
 
         // Test WebSocket connect→close round-trip
         let subprotocols = vec!["chat".to_string(), "superchat".to_string()];
-        match self.network_processor.test_websocket_connect_close_roundtrip("ws://example.com/chat", subprotocols) {
-            Ok(()) => self.record_test("net_websocket_connect_close_roundtrip", "network", RequirementLevel::Must, TestStatus::Pass, None),
+        match self
+            .network_processor
+            .test_websocket_connect_close_roundtrip("ws://example.com/chat", subprotocols)
+        {
+            Ok(()) => self.record_test(
+                "net_websocket_connect_close_roundtrip",
+                "network",
+                RequirementLevel::Must,
+                TestStatus::Pass,
+                None,
+            ),
             Err(e) => {
-                self.record_test("net_websocket_connect_close_roundtrip", "network", RequirementLevel::Must, TestStatus::Fail, Some(e.clone()));
+                self.record_test(
+                    "net_websocket_connect_close_roundtrip",
+                    "network",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
                 return Err(e);
             }
         }
 
         // Validate overall network invariants
-        self.network_processor.validate_network_invariants().map_err(|e| {
-            self.record_test("net_overall_invariants", "network", RequirementLevel::Must, TestStatus::Fail, Some(e.clone()));
-            e
-        })?;
-        self.record_test("net_overall_invariants", "network", RequirementLevel::Must, TestStatus::Pass, None);
+        self.network_processor
+            .validate_network_invariants()
+            .map_err(|e| {
+                self.record_test(
+                    "net_overall_invariants",
+                    "network",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
+                e
+            })?;
+        self.record_test(
+            "net_overall_invariants",
+            "network",
+            RequirementLevel::Must,
+            TestStatus::Pass,
+            None,
+        );
 
         Ok(())
     }
@@ -1042,9 +1195,21 @@ impl NetCliAuditConformanceHarness {
         };
 
         match self.cli_processor.test_diagnostic_determinism(system_info) {
-            Ok(()) => self.record_test("cli_diagnostic_determinism", "cli", RequirementLevel::Must, TestStatus::Pass, None),
+            Ok(()) => self.record_test(
+                "cli_diagnostic_determinism",
+                "cli",
+                RequirementLevel::Must,
+                TestStatus::Pass,
+                None,
+            ),
             Err(e) => {
-                self.record_test("cli_diagnostic_determinism", "cli", RequirementLevel::Must, TestStatus::Fail, Some(e.clone()));
+                self.record_test(
+                    "cli_diagnostic_determinism",
+                    "cli",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
                 return Err(e);
             }
         }
@@ -1057,15 +1222,24 @@ impl NetCliAuditConformanceHarness {
         ];
 
         for (command, args) in &commands {
-            match self.cli_processor.test_command_reproducibility(command, args.clone()) {
+            match self
+                .cli_processor
+                .test_command_reproducibility(command, args.clone())
+            {
                 Ok(()) => self.record_test(
                     &format!("cli_command_reproducibility_{}", command),
-                    "cli", RequirementLevel::Must, TestStatus::Pass, None
+                    "cli",
+                    RequirementLevel::Must,
+                    TestStatus::Pass,
+                    None,
                 ),
                 Err(e) => {
                     self.record_test(
                         &format!("cli_command_reproducibility_{}", command),
-                        "cli", RequirementLevel::Must, TestStatus::Fail, Some(e.clone())
+                        "cli",
+                        RequirementLevel::Must,
+                        TestStatus::Fail,
+                        Some(e.clone()),
                     );
                     return Err(e);
                 }
@@ -1074,10 +1248,22 @@ impl NetCliAuditConformanceHarness {
 
         // Validate overall CLI invariants
         self.cli_processor.validate_cli_invariants().map_err(|e| {
-            self.record_test("cli_overall_invariants", "cli", RequirementLevel::Must, TestStatus::Fail, Some(e.clone()));
+            self.record_test(
+                "cli_overall_invariants",
+                "cli",
+                RequirementLevel::Must,
+                TestStatus::Fail,
+                Some(e.clone()),
+            );
             e
         })?;
-        self.record_test("cli_overall_invariants", "cli", RequirementLevel::Must, TestStatus::Pass, None);
+        self.record_test(
+            "cli_overall_invariants",
+            "cli",
+            RequirementLevel::Must,
+            TestStatus::Pass,
+            None,
+        );
 
         Ok(())
     }
@@ -1085,33 +1271,78 @@ impl NetCliAuditConformanceHarness {
     fn test_audit_conformance(&mut self) -> Result<(), String> {
         // Test ambient context propagation
         match self.audit_processor.test_ambient_context_propagation() {
-            Ok(()) => self.record_test("audit_ambient_context_propagation", "audit", RequirementLevel::Must, TestStatus::Pass, None),
+            Ok(()) => self.record_test(
+                "audit_ambient_context_propagation",
+                "audit",
+                RequirementLevel::Must,
+                TestStatus::Pass,
+                None,
+            ),
             Err(e) => {
-                self.record_test("audit_ambient_context_propagation", "audit", RequirementLevel::Must, TestStatus::Fail, Some(e.clone()));
+                self.record_test(
+                    "audit_ambient_context_propagation",
+                    "audit",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
                 return Err(e);
             }
         }
 
         // Test audit event consistency
         match self.audit_processor.test_audit_event_consistency() {
-            Ok(()) => self.record_test("audit_event_consistency", "audit", RequirementLevel::Must, TestStatus::Pass, None),
+            Ok(()) => self.record_test(
+                "audit_event_consistency",
+                "audit",
+                RequirementLevel::Must,
+                TestStatus::Pass,
+                None,
+            ),
             Err(e) => {
-                self.record_test("audit_event_consistency", "audit", RequirementLevel::Must, TestStatus::Fail, Some(e.clone()));
+                self.record_test(
+                    "audit_event_consistency",
+                    "audit",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
                 return Err(e);
             }
         }
 
         // Validate overall audit invariants
-        self.audit_processor.validate_audit_invariants().map_err(|e| {
-            self.record_test("audit_overall_invariants", "audit", RequirementLevel::Must, TestStatus::Fail, Some(e.clone()));
-            e
-        })?;
-        self.record_test("audit_overall_invariants", "audit", RequirementLevel::Must, TestStatus::Pass, None);
+        self.audit_processor
+            .validate_audit_invariants()
+            .map_err(|e| {
+                self.record_test(
+                    "audit_overall_invariants",
+                    "audit",
+                    RequirementLevel::Must,
+                    TestStatus::Fail,
+                    Some(e.clone()),
+                );
+                e
+            })?;
+        self.record_test(
+            "audit_overall_invariants",
+            "audit",
+            RequirementLevel::Must,
+            TestStatus::Pass,
+            None,
+        );
 
         Ok(())
     }
 
-    fn record_test(&mut self, name: &str, module: &str, level: RequirementLevel, status: TestStatus, error: Option<String>) {
+    fn record_test(
+        &mut self,
+        name: &str,
+        module: &str,
+        level: RequirementLevel,
+        status: TestStatus,
+        error: Option<String>,
+    ) {
         self.test_results.push(ConformanceTestResult {
             test_name: name.to_string(),
             module: module.to_string(),
@@ -1169,14 +1400,23 @@ impl NetCliAuditConformanceHarness {
             };
 
             println!("{} module:", module);
-            println!("  MUST requirements: {}/{} ({:.1}%)", stats.must_pass, stats.must_total, must_score);
-            println!("  SHOULD requirements: {}/{} ({:.1}%)", stats.should_pass, stats.should_total, should_score);
+            println!(
+                "  MUST requirements: {}/{} ({:.1}%)",
+                stats.must_pass, stats.must_total, must_score
+            );
+            println!(
+                "  SHOULD requirements: {}/{} ({:.1}%)",
+                stats.should_pass, stats.should_total, should_score
+            );
 
             overall_must_pass += stats.must_pass;
             overall_must_total += stats.must_total;
 
             if must_score < 100.0 {
-                println!("  ⚠ CRITICAL: {} MUST requirements failed", stats.must_total - stats.must_pass);
+                println!(
+                    "  ⚠ CRITICAL: {} MUST requirements failed",
+                    stats.must_total - stats.must_pass
+                );
             }
         }
 
@@ -1187,10 +1427,16 @@ impl NetCliAuditConformanceHarness {
         };
 
         println!();
-        println!("Overall MUST compliance: {}/{} ({:.1}%)", overall_must_pass, overall_must_total, overall_score);
+        println!(
+            "Overall MUST compliance: {}/{} ({:.1}%)",
+            overall_must_pass, overall_must_total, overall_score
+        );
 
         if overall_score < 95.0 {
-            return Err(format!("MUST requirement compliance below 95%: {:.1}%", overall_score));
+            return Err(format!(
+                "MUST requirement compliance below 95%: {:.1}%",
+                overall_score
+            ));
         }
 
         Ok(())
@@ -1223,7 +1469,9 @@ mod tests {
         });
 
         // Verify we tested all major modules
-        let test_modules: std::collections::HashSet<&str> = harness.test_results.iter()
+        let test_modules: std::collections::HashSet<&str> = harness
+            .test_results
+            .iter()
             .map(|r| r.module.as_str())
             .collect();
 
@@ -1237,7 +1485,9 @@ mod tests {
         let mut processor = MockNetworkProcessor::new();
 
         let tcp_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-        processor.test_tcp_connect_close_roundtrip(tcp_addr).unwrap();
+        processor
+            .test_tcp_connect_close_roundtrip(tcp_addr)
+            .unwrap();
 
         let udp_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 53);
         processor.test_udp_session_roundtrip(udp_addr).unwrap();
@@ -1249,8 +1499,12 @@ mod tests {
     fn test_dns_caching_idempotency() {
         let mut processor = MockNetworkProcessor::new();
 
-        processor.test_dns_caching_idempotency("test.example.com").unwrap();
-        processor.test_dns_caching_idempotency("another.example.com").unwrap();
+        processor
+            .test_dns_caching_idempotency("test.example.com")
+            .unwrap();
+        processor
+            .test_dns_caching_idempotency("another.example.com")
+            .unwrap();
 
         let cache = processor.dns_cache.lock().unwrap();
         assert_eq!(cache.len(), 2);
@@ -1285,7 +1539,9 @@ mod tests {
         processor.validate_cli_invariants().unwrap();
 
         // Verify determinism by checking all runs have same hash
-        let output_hashes: Vec<&String> = processor.diagnostic_runs.iter()
+        let output_hashes: Vec<&String> = processor
+            .diagnostic_runs
+            .iter()
             .map(|run| &run.output_hash)
             .collect();
         assert!(output_hashes.iter().all(|hash| *hash == &output_hashes[0]));
@@ -1314,7 +1570,9 @@ mod tests {
         let mut processor = MockNetworkProcessor::new();
 
         let subprotocols = vec!["echo".to_string()];
-        processor.test_websocket_connect_close_roundtrip("ws://localhost:8080/echo", subprotocols).unwrap();
+        processor
+            .test_websocket_connect_close_roundtrip("ws://localhost:8080/echo", subprotocols)
+            .unwrap();
 
         assert_eq!(processor.websocket_connections.len(), 1);
         let connection = &processor.websocket_connections[0];
@@ -1327,17 +1585,27 @@ mod tests {
     fn test_cli_command_reproducibility() {
         let mut processor = MockCliProcessor::new();
 
-        processor.test_command_reproducibility("doctor", vec![]).unwrap();
-        processor.test_command_reproducibility("status", vec![]).unwrap();
+        processor
+            .test_command_reproducibility("doctor", vec![])
+            .unwrap();
+        processor
+            .test_command_reproducibility("status", vec![])
+            .unwrap();
 
         processor.validate_cli_invariants().unwrap();
 
         // Verify same commands have consistent results
-        let doctor_commands: Vec<&MockCliCommand> = processor.command_history.iter()
+        let doctor_commands: Vec<&MockCliCommand> = processor
+            .command_history
+            .iter()
             .filter(|cmd| cmd.command == "doctor")
             .collect();
 
         assert!(doctor_commands.len() >= 3); // Should have multiple runs
-        assert!(doctor_commands.iter().all(|cmd| cmd.exit_code == doctor_commands[0].exit_code));
+        assert!(
+            doctor_commands
+                .iter()
+                .all(|cmd| cmd.exit_code == doctor_commands[0].exit_code)
+        );
     }
 }

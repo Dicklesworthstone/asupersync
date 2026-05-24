@@ -21,9 +21,9 @@ use crate::stream::StreamExt;
 use std::io::{self, Cursor};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH, Instant};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
-use tokio::io::{AsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt, duplex, BufReader, BufWriter};
+use tokio::io::{AsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt, BufReader, BufWriter, duplex};
 
 // Structured JSON-line logging for CI debugging
 struct TestLogger {
@@ -48,8 +48,10 @@ impl TestLogger {
             .unwrap()
             .as_millis();
 
-        eprintln!("{{\"timestamp\":{},\"test\":\"{}\",\"elapsed_ms\":{},\"event\":\"{}\",\"data\":{}}}",
-            timestamp, self.test_name, elapsed, event_type, data);
+        eprintln!(
+            "{{\"timestamp\":{},\"test\":\"{}\",\"elapsed_ms\":{},\"event\":\"{}\",\"data\":{}}}",
+            timestamp, self.test_name, elapsed, event_type, data
+        );
     }
 
     fn log_phase(&self, phase: &str) {
@@ -61,18 +63,24 @@ impl TestLogger {
     }
 
     fn log_assertion(&self, assertion: &str, passed: bool, details: serde_json::Value) {
-        self.log_event("assertion", serde_json::json!({
-            "assertion": assertion,
-            "passed": passed,
-            "details": details
-        }));
+        self.log_event(
+            "assertion",
+            serde_json::json!({
+                "assertion": assertion,
+                "passed": passed,
+                "details": details
+            }),
+        );
     }
 }
 
 impl Drop for TestLogger {
     fn drop(&mut self) {
         let elapsed = self.start_time.elapsed().as_millis();
-        self.log_event("test_end", serde_json::json!({"total_duration_ms": elapsed}));
+        self.log_event(
+            "test_end",
+            serde_json::json!({"total_duration_ms": elapsed}),
+        );
     }
 }
 
@@ -161,16 +169,19 @@ impl CodecTestHarness {
         let test_messages = vec![
             b"short".to_vec(),
             b"medium length message for testing".to_vec(),
-            vec![0u8; 1024], // 1KB of zeros
+            vec![0u8; 1024],  // 1KB of zeros
             vec![42u8; 4096], // 4KB of 42s
             b"unicode: \xF0\x9F\x8E\x89 emoji test \xF0\x9F\x94\xA5".to_vec(),
             vec![], // Empty message
         ];
 
-        self.logger.log_event("test_messages_prepared", serde_json::json!({
-            "message_count": test_messages.len(),
-            "sizes": test_messages.iter().map(|m| m.len()).collect::<Vec<_>>()
-        }));
+        self.logger.log_event(
+            "test_messages_prepared",
+            serde_json::json!({
+                "message_count": test_messages.len(),
+                "sizes": test_messages.iter().map(|m| m.len()).collect::<Vec<_>>()
+            }),
+        );
 
         // Phase 1: Encode all messages
         self.logger.log_phase("encoding");
@@ -178,14 +189,18 @@ impl CodecTestHarness {
 
         for (i, message) in test_messages.iter().enumerate() {
             let bytes_msg = Bytes::copy_from_slice(message);
-            codec.encode(bytes_msg, &mut encoded_buffer)
+            codec
+                .encode(bytes_msg, &mut encoded_buffer)
                 .expect("Encoding should succeed");
 
-            self.logger.log_event("message_encoded", serde_json::json!({
-                "index": i,
-                "original_size": message.len(),
-                "buffer_size_after": encoded_buffer.len()
-            }));
+            self.logger.log_event(
+                "message_encoded",
+                serde_json::json!({
+                    "index": i,
+                    "original_size": message.len(),
+                    "buffer_size_after": encoded_buffer.len()
+                }),
+            );
         }
 
         self.logger.log_metrics(serde_json::json!({
@@ -205,10 +220,13 @@ impl CodecTestHarness {
         while let Some(result) = framed_read.next().await {
             let decoded = result.expect("Decoding should succeed");
 
-            self.logger.log_event("message_decoded", serde_json::json!({
-                "index": decode_index,
-                "decoded_size": decoded.len()
-            }));
+            self.logger.log_event(
+                "message_decoded",
+                serde_json::json!({
+                    "index": decode_index,
+                    "decoded_size": decoded.len()
+                }),
+            );
 
             decoded_messages.push(decoded);
             decode_index += 1;
@@ -216,26 +234,45 @@ impl CodecTestHarness {
 
         // Phase 3: Validate round-trip correctness
         self.logger.log_phase("validation");
-        assert_eq!(decoded_messages.len(), test_messages.len(),
-            "Should decode same number of messages");
+        assert_eq!(
+            decoded_messages.len(),
+            test_messages.len(),
+            "Should decode same number of messages"
+        );
 
-        for (i, (original, decoded)) in test_messages.iter().zip(decoded_messages.iter()).enumerate() {
+        for (i, (original, decoded)) in test_messages
+            .iter()
+            .zip(decoded_messages.iter())
+            .enumerate()
+        {
             let matches = original == &decoded[..];
 
-            self.logger.log_assertion("message_roundtrip", matches, serde_json::json!({
-                "index": i,
-                "original_size": original.len(),
-                "decoded_size": decoded.len()
-            }));
+            self.logger.log_assertion(
+                "message_roundtrip",
+                matches,
+                serde_json::json!({
+                    "index": i,
+                    "original_size": original.len(),
+                    "decoded_size": decoded.len()
+                }),
+            );
 
-            assert_eq!(original, &decoded[..],
-                "Message {} should match after round-trip", i);
+            assert_eq!(
+                original,
+                &decoded[..],
+                "Message {} should match after round-trip",
+                i
+            );
         }
 
-        self.logger.log_assertion("all_messages_validated", true, serde_json::json!({
-            "total_messages": test_messages.len(),
-            "all_passed": true
-        }));
+        self.logger.log_assertion(
+            "all_messages_validated",
+            true,
+            serde_json::json!({
+                "total_messages": test_messages.len(),
+                "all_passed": true
+            }),
+        );
     }
 
     /// Test framed read/write with real I/O operations
@@ -250,10 +287,13 @@ impl CodecTestHarness {
             b"final frame".to_vec(),
         ];
 
-        self.logger.log_event("frames_prepared", serde_json::json!({
-            "frame_count": frames.len(),
-            "frame_sizes": frames.iter().map(|f| f.len()).collect::<Vec<_>>()
-        }));
+        self.logger.log_event(
+            "frames_prepared",
+            serde_json::json!({
+                "frame_count": frames.len(),
+                "frame_sizes": frames.iter().map(|f| f.len()).collect::<Vec<_>>()
+            }),
+        );
 
         // Phase 1: Write frames using FramedWrite
         self.logger.log_phase("framed_write");
@@ -264,19 +304,25 @@ impl CodecTestHarness {
 
             for (i, frame) in frames.iter().enumerate() {
                 let bytes_frame = Bytes::copy_from_slice(frame);
-                framed_write.send(bytes_frame)
+                framed_write
+                    .send(bytes_frame)
                     .expect("Frame send should succeed");
 
-                self.logger.log_event("frame_sent", serde_json::json!({
-                    "index": i,
-                    "frame_size": frame.len()
-                }));
+                self.logger.log_event(
+                    "frame_sent",
+                    serde_json::json!({
+                        "index": i,
+                        "frame_size": frame.len()
+                    }),
+                );
             }
 
             // Flush all data
-            framed_write.poll_flush(&mut std::task::Context::from_waker(
-                &std::task::Waker::noop()
-            )).expect("Flush should succeed");
+            framed_write
+                .poll_flush(&mut std::task::Context::from_waker(
+                    &std::task::Waker::noop(),
+                ))
+                .expect("Flush should succeed");
 
             write_buffer = framed_write.into_inner().inner;
         }
@@ -297,10 +343,13 @@ impl CodecTestHarness {
         while let Some(result) = framed_read.next().await {
             let frame = result.expect("Frame read should succeed");
 
-            self.logger.log_event("frame_read", serde_json::json!({
-                "index": read_index,
-                "frame_size": frame.len()
-            }));
+            self.logger.log_event(
+                "frame_read",
+                serde_json::json!({
+                    "index": read_index,
+                    "frame_size": frame.len()
+                }),
+            );
 
             read_frames.push(frame.to_vec());
             read_index += 1;
@@ -308,26 +357,40 @@ impl CodecTestHarness {
 
         // Phase 3: Validate I/O round-trip
         self.logger.log_phase("io_validation");
-        assert_eq!(read_frames.len(), frames.len(),
-            "Should read same number of frames");
+        assert_eq!(
+            read_frames.len(),
+            frames.len(),
+            "Should read same number of frames"
+        );
 
         for (i, (original, read)) in frames.iter().zip(read_frames.iter()).enumerate() {
             let matches = original == read;
 
-            self.logger.log_assertion("frame_io_roundtrip", matches, serde_json::json!({
-                "index": i,
-                "original_size": original.len(),
-                "read_size": read.len()
-            }));
+            self.logger.log_assertion(
+                "frame_io_roundtrip",
+                matches,
+                serde_json::json!({
+                    "index": i,
+                    "original_size": original.len(),
+                    "read_size": read.len()
+                }),
+            );
 
-            assert_eq!(original, read,
-                "Frame {} should match after I/O round-trip", i);
+            assert_eq!(
+                original, read,
+                "Frame {} should match after I/O round-trip",
+                i
+            );
         }
 
-        self.logger.log_assertion("io_integrity_complete", true, serde_json::json!({
-            "total_frames": frames.len(),
-            "io_validated": true
-        }));
+        self.logger.log_assertion(
+            "io_integrity_complete",
+            true,
+            serde_json::json!({
+                "total_frames": frames.len(),
+                "io_validated": true
+            }),
+        );
     }
 
     /// Test codec configuration variations
@@ -336,16 +399,37 @@ impl CodecTestHarness {
 
         let test_configs = vec![
             ("default", LengthDelimitedCodec::new()),
-            ("big_endian", LengthDelimitedCodec::builder().big_endian(true).new_codec()),
-            ("little_endian", LengthDelimitedCodec::builder().big_endian(false).new_codec()),
-            ("max_frame_1kb", LengthDelimitedCodec::builder().max_frame_length(1024).new_codec()),
-            ("length_field_2bytes", LengthDelimitedCodec::builder().length_field_length(2).new_codec()),
+            (
+                "big_endian",
+                LengthDelimitedCodec::builder().big_endian(true).new_codec(),
+            ),
+            (
+                "little_endian",
+                LengthDelimitedCodec::builder()
+                    .big_endian(false)
+                    .new_codec(),
+            ),
+            (
+                "max_frame_1kb",
+                LengthDelimitedCodec::builder()
+                    .max_frame_length(1024)
+                    .new_codec(),
+            ),
+            (
+                "length_field_2bytes",
+                LengthDelimitedCodec::builder()
+                    .length_field_length(2)
+                    .new_codec(),
+            ),
         ];
 
-        self.logger.log_event("configs_prepared", serde_json::json!({
-            "config_count": test_configs.len(),
-            "config_names": test_configs.iter().map(|(name, _)| name).collect::<Vec<_>>()
-        }));
+        self.logger.log_event(
+            "configs_prepared",
+            serde_json::json!({
+                "config_count": test_configs.len(),
+                "config_names": test_configs.iter().map(|(name, _)| name).collect::<Vec<_>>()
+            }),
+        );
 
         let test_message = b"test message for configuration validation".to_vec();
 
@@ -368,21 +452,32 @@ impl CodecTestHarness {
                         Ok(decoded) => {
                             let matches = test_message == decoded[..];
 
-                            self.logger.log_assertion("config_roundtrip", matches, serde_json::json!({
-                                "config": config_name,
-                                "original_size": test_message.len(),
-                                "decoded_size": decoded.len(),
-                                "encoded_size": encoded.len()
-                            }));
+                            self.logger.log_assertion(
+                                "config_roundtrip",
+                                matches,
+                                serde_json::json!({
+                                    "config": config_name,
+                                    "original_size": test_message.len(),
+                                    "decoded_size": decoded.len(),
+                                    "encoded_size": encoded.len()
+                                }),
+                            );
 
-                            assert_eq!(test_message, decoded[..],
-                                "Config {} should preserve message", config_name);
+                            assert_eq!(
+                                test_message,
+                                decoded[..],
+                                "Config {} should preserve message",
+                                config_name
+                            );
                         }
                         Err(e) => {
-                            self.logger.log_event("config_decode_error", serde_json::json!({
-                                "config": config_name,
-                                "error": e.to_string()
-                            }));
+                            self.logger.log_event(
+                                "config_decode_error",
+                                serde_json::json!({
+                                    "config": config_name,
+                                    "error": e.to_string()
+                                }),
+                            );
                             panic!("Decode failed for config {}: {}", config_name, e);
                         }
                     }
@@ -390,11 +485,18 @@ impl CodecTestHarness {
                     panic!("No frame decoded for config {}", config_name);
                 }
             } else {
-                self.logger.log_event("config_encode_error", serde_json::json!({
-                    "config": config_name,
-                    "error": encode_result.unwrap_err().to_string()
-                }));
-                panic!("Encode failed for config {}: {:?}", config_name, encode_result.unwrap_err());
+                self.logger.log_event(
+                    "config_encode_error",
+                    serde_json::json!({
+                        "config": config_name,
+                        "error": encode_result.unwrap_err().to_string()
+                    }),
+                );
+                panic!(
+                    "Encode failed for config {}: {:?}",
+                    config_name,
+                    encode_result.unwrap_err()
+                );
             }
         }
     }
@@ -432,18 +534,24 @@ impl CodecTestHarness {
                 match result {
                     Ok(frame) => {
                         frame_count += 1;
-                        self.logger.log_event("unexpected_success", serde_json::json!({
-                            "test_case": test_name,
-                            "frame_size": frame.len()
-                        }));
+                        self.logger.log_event(
+                            "unexpected_success",
+                            serde_json::json!({
+                                "test_case": test_name,
+                                "frame_size": frame.len()
+                            }),
+                        );
                     }
                     Err(error) => {
                         error_occurred = true;
-                        self.logger.log_event("expected_error", serde_json::json!({
-                            "test_case": test_name,
-                            "error_type": format!("{:?}", error.kind()),
-                            "error_message": error.to_string()
-                        }));
+                        self.logger.log_event(
+                            "expected_error",
+                            serde_json::json!({
+                                "test_case": test_name,
+                                "error_type": format!("{:?}", error.kind()),
+                                "error_message": error.to_string()
+                            }),
+                        );
                         break;
                     }
                 }
@@ -455,11 +563,15 @@ impl CodecTestHarness {
             }
 
             // Some test cases might not error immediately (e.g., truncated data might just end the stream)
-            self.logger.log_assertion("error_handling", true, serde_json::json!({
-                "test_case": test_name,
-                "error_occurred": error_occurred,
-                "frames_before_error": frame_count
-            }));
+            self.logger.log_assertion(
+                "error_handling",
+                true,
+                serde_json::json!({
+                    "test_case": test_name,
+                    "error_occurred": error_occurred,
+                    "frames_before_error": frame_count
+                }),
+            );
         }
     }
 
@@ -470,13 +582,19 @@ impl CodecTestHarness {
         // Test with various buffer sizes and frame patterns
         let test_patterns = vec![
             ("small_frames", vec![vec![1u8; 10]; 100]), // 100 small frames
-            ("large_frame", vec![vec![2u8; 1024]]), // 1 large frame
-            ("mixed_sizes", (0..20).map(|i| vec![i as u8; i * 10 + 1]).collect::<Vec<_>>()),
+            ("large_frame", vec![vec![2u8; 1024]]),     // 1 large frame
+            (
+                "mixed_sizes",
+                (0..20)
+                    .map(|i| vec![i as u8; i * 10 + 1])
+                    .collect::<Vec<_>>(),
+            ),
             ("empty_frames", vec![vec![]; 10]), // Empty frames
         ];
 
         for (pattern_name, frames) in test_patterns {
-            self.logger.log_phase(&format!("buffer_test_{}", pattern_name));
+            self.logger
+                .log_phase(&format!("buffer_test_{}", pattern_name));
 
             // Encode all frames
             let mut encoded_buffer = BytesMut::new();
@@ -484,7 +602,8 @@ impl CodecTestHarness {
 
             for frame in &frames {
                 let bytes_frame = Bytes::copy_from_slice(frame);
-                codec.encode(bytes_frame, &mut encoded_buffer)
+                codec
+                    .encode(bytes_frame, &mut encoded_buffer)
                     .expect("Frame encoding should succeed");
             }
 
@@ -523,18 +642,29 @@ impl CodecTestHarness {
             }));
 
             // Validate all frames decoded correctly
-            assert_eq!(decoded_frames.len(), frames.len(),
-                "Pattern {} should decode all frames", pattern_name);
+            assert_eq!(
+                decoded_frames.len(),
+                frames.len(),
+                "Pattern {} should decode all frames",
+                pattern_name
+            );
 
             for (i, (original, decoded)) in frames.iter().zip(decoded_frames.iter()).enumerate() {
-                assert_eq!(original, decoded,
-                    "Pattern {} frame {} should match", pattern_name, i);
+                assert_eq!(
+                    original, decoded,
+                    "Pattern {} frame {} should match",
+                    pattern_name, i
+                );
             }
 
-            self.logger.log_assertion("buffer_pattern_validated", true, serde_json::json!({
-                "pattern": pattern_name,
-                "all_frames_matched": true
-            }));
+            self.logger.log_assertion(
+                "buffer_pattern_validated",
+                true,
+                serde_json::json!({
+                    "pattern": pattern_name,
+                    "all_frames_matched": true
+                }),
+            );
         }
     }
 }
@@ -585,10 +715,13 @@ async fn test_codec_full_pipeline_e2e() {
         b"final message".to_vec(),
     ];
 
-    harness.logger.log_event("pipeline_messages", serde_json::json!({
-        "message_count": messages.len(),
-        "total_bytes": messages.iter().map(|m| m.len()).sum::<usize>()
-    }));
+    harness.logger.log_event(
+        "pipeline_messages",
+        serde_json::json!({
+            "message_count": messages.len(),
+            "total_bytes": messages.iter().map(|m| m.len()).sum::<usize>()
+        }),
+    );
 
     // Phase 1: Encode and write through FramedWrite
     harness.logger.log_phase("pipeline_encode_write");
@@ -599,12 +732,16 @@ async fn test_codec_full_pipeline_e2e() {
 
         for message in &messages {
             let bytes_msg = Bytes::copy_from_slice(message);
-            framed_write.send(bytes_msg).expect("Pipeline write should succeed");
+            framed_write
+                .send(bytes_msg)
+                .expect("Pipeline write should succeed");
         }
 
-        framed_write.poll_flush(&mut std::task::Context::from_waker(
-            &std::task::Waker::noop()
-        )).expect("Pipeline flush should succeed");
+        framed_write
+            .poll_flush(&mut std::task::Context::from_waker(
+                &std::task::Waker::noop(),
+            ))
+            .expect("Pipeline flush should succeed");
 
         pipeline_buffer = framed_write.into_inner().inner;
     }
@@ -623,20 +760,30 @@ async fn test_codec_full_pipeline_e2e() {
     // Phase 3: Validate full pipeline
     harness.logger.log_phase("pipeline_validation");
 
-    assert_eq!(decoded_messages.len(), messages.len(),
-        "Pipeline should preserve message count");
+    assert_eq!(
+        decoded_messages.len(),
+        messages.len(),
+        "Pipeline should preserve message count"
+    );
 
     for (i, (original, decoded)) in messages.iter().zip(decoded_messages.iter()).enumerate() {
-        assert_eq!(original, decoded,
-            "Pipeline message {} should be preserved", i);
+        assert_eq!(
+            original, decoded,
+            "Pipeline message {} should be preserved",
+            i
+        );
     }
 
-    harness.logger.log_assertion("pipeline_complete", true, serde_json::json!({
-        "original_messages": messages.len(),
-        "decoded_messages": decoded_messages.len(),
-        "pipeline_bytes": pipeline_buffer.len(),
-        "all_validated": true
-    }));
+    harness.logger.log_assertion(
+        "pipeline_complete",
+        true,
+        serde_json::json!({
+            "original_messages": messages.len(),
+            "decoded_messages": decoded_messages.len(),
+            "pipeline_bytes": pipeline_buffer.len(),
+            "all_validated": true
+        }),
+    );
 
     harness.logger.log_phase("pipeline_complete");
 }

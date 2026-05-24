@@ -16,16 +16,16 @@ mod tests {
         dead_code
     )]
 
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
     use std::io;
     use std::net::{SocketAddr, TcpListener};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
     use tokio::net::TcpStream;
     use tokio::sync::RwLock;
     use tokio::time::timeout;
-    use serde::{Deserialize, Serialize};
 
     // ---------------------------------------------------------------------------
     // E2E Test Framework Infrastructure
@@ -318,7 +318,8 @@ mod tests {
             match stream.read(&mut buffer).await {
                 Ok(n) if n > 0 => {
                     // Simple gRPC-like response (HTTP/2 preface + headers + data)
-                    let response = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x01\x00\x00\x00\x00";
+                    let response =
+                        b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x01\x00\x00\x00\x00";
                     let _ = stream.write_all(response).await;
                     let _ = stream.flush().await;
                 }
@@ -357,20 +358,28 @@ mod tests {
 
         // Start HTTP test server
         logger.log_phase(TestPhase::ServerStart, None).await;
-        let server = HttpTestServer::start().await.expect("Failed to start HTTP server");
+        let server = HttpTestServer::start()
+            .await
+            .expect("Failed to start HTTP server");
         let server_addr = server.addr();
 
-        logger.log_phase(TestPhase::ClientConnect, Some(server_addr)).await;
+        logger
+            .log_phase(TestPhase::ClientConnect, Some(server_addr))
+            .await;
 
         // Test 1: Health check endpoint
-        logger.log_tcp_event("connection_attempt", server_addr, None).await;
+        logger
+            .log_tcp_event("connection_attempt", server_addr, None)
+            .await;
 
         let mut success = true;
         let mut error = None;
 
         match timeout(Duration::from_secs(5), TcpStream::connect(server_addr)).await {
             Ok(Ok(mut stream)) => {
-                logger.log_tcp_event("connection_established", server_addr, None).await;
+                logger
+                    .log_tcp_event("connection_established", server_addr, None)
+                    .await;
 
                 logger.log_phase(TestPhase::Act, Some(server_addr)).await;
 
@@ -379,11 +388,15 @@ mod tests {
                 // Send HTTP health check request
                 let request = b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
                 if stream.write_all(request).await.is_ok() {
-                    logger.log_tcp_event("request_sent", server_addr, Some(request.len() as u64)).await;
+                    logger
+                        .log_tcp_event("request_sent", server_addr, Some(request.len() as u64))
+                        .await;
 
                     let mut response = vec![0; 1024];
                     if let Ok(n) = stream.read(&mut response).await {
-                        logger.log_tcp_event("response_received", server_addr, Some(n as u64)).await;
+                        logger
+                            .log_tcp_event("response_received", server_addr, Some(n as u64))
+                            .await;
 
                         logger.log_phase(TestPhase::Assert, Some(server_addr)).await;
 
@@ -412,7 +425,9 @@ mod tests {
             }
         }
 
-        logger.log_phase(TestPhase::Teardown, Some(server_addr)).await;
+        logger
+            .log_phase(TestPhase::Teardown, Some(server_addr))
+            .await;
         let _ = server.stop().await;
 
         let tcp_stats = logger.get_tcp_stats().await;
@@ -440,20 +455,28 @@ mod tests {
 
         // Start gRPC test server
         logger.log_phase(TestPhase::ServerStart, None).await;
-        let server = GrpcTestServer::start().await.expect("Failed to start gRPC server");
+        let server = GrpcTestServer::start()
+            .await
+            .expect("Failed to start gRPC server");
         let server_addr = server.addr();
 
-        logger.log_phase(TestPhase::ClientConnect, Some(server_addr)).await;
+        logger
+            .log_phase(TestPhase::ClientConnect, Some(server_addr))
+            .await;
 
         // Test gRPC connection and preface
-        logger.log_tcp_event("connection_attempt", server_addr, None).await;
+        logger
+            .log_tcp_event("connection_attempt", server_addr, None)
+            .await;
 
         let mut success = true;
         let mut error = None;
 
         match timeout(Duration::from_secs(5), TcpStream::connect(server_addr)).await {
             Ok(Ok(mut stream)) => {
-                logger.log_tcp_event("connection_established", server_addr, None).await;
+                logger
+                    .log_tcp_event("connection_established", server_addr, None)
+                    .await;
 
                 logger.log_phase(TestPhase::Act, Some(server_addr)).await;
 
@@ -462,11 +485,15 @@ mod tests {
                 // Send HTTP/2 connection preface (gRPC requirement)
                 let preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
                 if stream.write_all(preface).await.is_ok() {
-                    logger.log_tcp_event("request_sent", server_addr, Some(preface.len() as u64)).await;
+                    logger
+                        .log_tcp_event("request_sent", server_addr, Some(preface.len() as u64))
+                        .await;
 
                     let mut response = vec![0; 1024];
                     if let Ok(n) = stream.read(&mut response).await {
-                        logger.log_tcp_event("response_received", server_addr, Some(n as u64)).await;
+                        logger
+                            .log_tcp_event("response_received", server_addr, Some(n as u64))
+                            .await;
 
                         logger.log_phase(TestPhase::Assert, Some(server_addr)).await;
 
@@ -497,7 +524,9 @@ mod tests {
             }
         }
 
-        logger.log_phase(TestPhase::Teardown, Some(server_addr)).await;
+        logger
+            .log_phase(TestPhase::Teardown, Some(server_addr))
+            .await;
         let _ = server.stop().await;
 
         let tcp_stats = logger.get_tcp_stats().await;
@@ -577,18 +606,24 @@ mod tests {
         // Wait for server to start
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        logger.log_phase(TestPhase::ClientConnect, Some(server_addr)).await;
+        logger
+            .log_phase(TestPhase::ClientConnect, Some(server_addr))
+            .await;
 
         let mut success = true;
         let mut error = None;
 
         // Test publish-subscribe pattern
-        logger.log_tcp_event("connection_attempt", server_addr, None).await;
+        logger
+            .log_tcp_event("connection_attempt", server_addr, None)
+            .await;
 
         // Publisher connection
         match timeout(Duration::from_secs(5), TcpStream::connect(server_addr)).await {
             Ok(Ok(mut pub_stream)) => {
-                logger.log_tcp_event("connection_established", server_addr, None).await;
+                logger
+                    .log_tcp_event("connection_established", server_addr, None)
+                    .await;
 
                 logger.log_phase(TestPhase::Act, Some(server_addr)).await;
 
@@ -597,11 +632,15 @@ mod tests {
                 // Publish a message
                 let pub_msg = b"PUB test_message_123";
                 if pub_stream.write_all(pub_msg).await.is_ok() {
-                    logger.log_tcp_event("request_sent", server_addr, Some(pub_msg.len() as u64)).await;
+                    logger
+                        .log_tcp_event("request_sent", server_addr, Some(pub_msg.len() as u64))
+                        .await;
 
                     let mut response = [0; 256];
                     if let Ok(n) = pub_stream.read(&mut response).await {
-                        logger.log_tcp_event("response_received", server_addr, Some(n as u64)).await;
+                        logger
+                            .log_tcp_event("response_received", server_addr, Some(n as u64))
+                            .await;
 
                         let response_str = String::from_utf8_lossy(&response[..n]);
 
@@ -610,22 +649,32 @@ mod tests {
                             error = Some("Publish failed".to_string());
                         } else {
                             // Now test subscribe
-                            if let Ok(mut sub_stream) = timeout(Duration::from_secs(2), TcpStream::connect(server_addr)).await? {
+                            if let Ok(mut sub_stream) =
+                                timeout(Duration::from_secs(2), TcpStream::connect(server_addr))
+                                    .await?
+                            {
                                 let sub_msg = b"SUB";
                                 if sub_stream.write_all(sub_msg).await.is_ok() {
                                     let mut sub_response = [0; 256];
                                     if let Ok(n) = sub_stream.read(&mut sub_response).await {
-                                        let sub_response_str = String::from_utf8_lossy(&sub_response[..n]);
+                                        let sub_response_str =
+                                            String::from_utf8_lossy(&sub_response[..n]);
 
-                                        logger.log_phase(TestPhase::Assert, Some(server_addr)).await;
+                                        logger
+                                            .log_phase(TestPhase::Assert, Some(server_addr))
+                                            .await;
 
                                         if !sub_response_str.contains("MSGS 1") {
                                             success = false;
-                                            error = Some("Subscribe didn't receive published message".to_string());
+                                            error = Some(
+                                                "Subscribe didn't receive published message"
+                                                    .to_string(),
+                                            );
                                         }
                                     } else {
                                         success = false;
-                                        error = Some("Failed to read subscribe response".to_string());
+                                        error =
+                                            Some("Failed to read subscribe response".to_string());
                                     }
                                 } else {
                                     success = false;
@@ -655,7 +704,9 @@ mod tests {
             }
         }
 
-        logger.log_phase(TestPhase::Teardown, Some(server_addr)).await;
+        logger
+            .log_phase(TestPhase::Teardown, Some(server_addr))
+            .await;
         let _ = shutdown_tx.send(());
         let _ = handle.await;
 
@@ -780,11 +831,17 @@ mod tests {
         }
 
         fn get_request_count(&self, addr: SocketAddr) -> u64 {
-            self.servers.get(&addr).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)
+            self.servers
+                .get(&addr)
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(0)
         }
 
         fn get_request_distribution(&self) -> HashMap<SocketAddr, u64> {
-            self.servers.iter().map(|(addr, counter)| (*addr, counter.load(Ordering::Relaxed))).collect()
+            self.servers
+                .iter()
+                .map(|(addr, counter)| (*addr, counter.load(Ordering::Relaxed)))
+                .collect()
         }
 
         fn get_total_requests(&self) -> usize {
@@ -833,17 +890,34 @@ mod tests {
                     // Make actual request to backend
                     match timeout(Duration::from_secs(2), TcpStream::connect(backend_addr)).await {
                         Ok(Ok(mut stream)) => {
-                            logger.log_tcp_event("connection_established", backend_addr, None).await;
+                            logger
+                                .log_tcp_event("connection_established", backend_addr, None)
+                                .await;
 
                             use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                            let request = format!("GET /api?key={}&seq={} HTTP/1.1\r\nHost: localhost\r\n\r\n", key, i);
+                            let request = format!(
+                                "GET /api?key={}&seq={} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                                key, i
+                            );
 
                             if stream.write_all(request.as_bytes()).await.is_ok() {
-                                logger.log_tcp_event("request_sent", backend_addr, Some(request.len() as u64)).await;
+                                logger
+                                    .log_tcp_event(
+                                        "request_sent",
+                                        backend_addr,
+                                        Some(request.len() as u64),
+                                    )
+                                    .await;
 
                                 let mut response = [0; 256];
                                 if stream.read(&mut response).await.is_ok() {
-                                    logger.log_tcp_event("response_received", backend_addr, Some(response.len() as u64)).await;
+                                    logger
+                                        .log_tcp_event(
+                                            "response_received",
+                                            backend_addr,
+                                            Some(response.len() as u64),
+                                        )
+                                        .await;
                                 }
                             }
                         }
@@ -860,7 +934,9 @@ mod tests {
             }
         }
 
-        logger.log_phase(TestPhase::Assert, Some(backend_addr)).await;
+        logger
+            .log_phase(TestPhase::Assert, Some(backend_addr))
+            .await;
 
         // Verify rate limiting worked
         let backend_requests = harness.get_request_count(backend_addr);
@@ -868,7 +944,10 @@ mod tests {
 
         if backend_requests > expected_max + 2 {
             success = false;
-            error = Some(format!("Rate limiting failed: got {} requests, expected ≤{}", backend_requests, expected_max));
+            error = Some(format!(
+                "Rate limiting failed: got {} requests, expected ≤{}",
+                backend_requests, expected_max
+            ));
         }
 
         let result = TestResult {
@@ -909,21 +988,34 @@ mod tests {
         for i in 0..total_requests {
             let backend_addr = backends[i % backends.len()];
 
-            logger.log_tcp_event("connection_attempt", backend_addr, None).await;
+            logger
+                .log_tcp_event("connection_attempt", backend_addr, None)
+                .await;
 
             match timeout(Duration::from_secs(3), TcpStream::connect(backend_addr)).await {
                 Ok(Ok(mut stream)) => {
-                    logger.log_tcp_event("connection_established", backend_addr, None).await;
+                    logger
+                        .log_tcp_event("connection_established", backend_addr, None)
+                        .await;
 
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let request = format!("GET /api/item/{} HTTP/1.1\r\nHost: localhost\r\n\r\n", i);
+                    let request =
+                        format!("GET /api/item/{} HTTP/1.1\r\nHost: localhost\r\n\r\n", i);
 
                     if stream.write_all(request.as_bytes()).await.is_ok() {
-                        logger.log_tcp_event("request_sent", backend_addr, Some(request.len() as u64)).await;
+                        logger
+                            .log_tcp_event("request_sent", backend_addr, Some(request.len() as u64))
+                            .await;
 
                         let mut response = [0; 256];
                         if stream.read(&mut response).await.is_ok() {
-                            logger.log_tcp_event("response_received", backend_addr, Some(response.len() as u64)).await;
+                            logger
+                                .log_tcp_event(
+                                    "response_received",
+                                    backend_addr,
+                                    Some(response.len() as u64),
+                                )
+                                .await;
                         }
                     }
                 }
@@ -946,7 +1038,10 @@ mod tests {
 
             if count != expected_count {
                 success = false;
-                error = Some(format!("Load balancer distribution uneven: backend {} got {} requests, expected {}", backend_addr, count, expected_count));
+                error = Some(format!(
+                    "Load balancer distribution uneven: backend {} got {} requests, expected {}",
+                    backend_addr, count, expected_count
+                ));
                 break;
             }
         }
@@ -974,7 +1069,7 @@ mod tests {
         logger.log_phase(TestPhase::Setup, None).await;
 
         // Start backends with different response times
-        let fast_backend = harness.start_test_backend(50).await;  // 50ms response
+        let fast_backend = harness.start_test_backend(50).await; // 50ms response
         let slow_backend1 = harness.start_test_backend(500).await; // 500ms response
         let slow_backend2 = harness.start_test_backend(1000).await; // 1000ms response
 
@@ -1068,16 +1163,28 @@ mod tests {
                 // Should be fast backend that wins
                 if winning_backend != fast_backend {
                     success = false;
-                    error = Some(format!("Expected fast backend to win hedge, but {} won", winning_backend));
+                    error = Some(format!(
+                        "Expected fast backend to win hedge, but {} won",
+                        winning_backend
+                    ));
                 }
 
                 // Response should be quick (under 200ms including network overhead)
                 if response_time > Duration::from_millis(200) {
                     success = false;
-                    error = Some(format!("Hedge response too slow: {}ms", response_time.as_millis()));
+                    error = Some(format!(
+                        "Hedge response too slow: {}ms",
+                        response_time.as_millis()
+                    ));
                 }
 
-                logger.log_tcp_event("response_received", winning_backend, Some(response_time.as_millis() as u64)).await;
+                logger
+                    .log_tcp_event(
+                        "response_received",
+                        winning_backend,
+                        Some(response_time.as_millis() as u64),
+                    )
+                    .await;
             }
             None => {
                 success = false;
@@ -1117,12 +1224,21 @@ mod tests {
         );
 
         // Verify TCP statistics
-        assert!(result.tcp_stats.connections_attempted > 0, "No connection attempts recorded");
-        assert!(result.tcp_stats.connections_established > 0, "No connections established");
+        assert!(
+            result.tcp_stats.connections_attempted > 0,
+            "No connection attempts recorded"
+        );
+        assert!(
+            result.tcp_stats.connections_established > 0,
+            "No connections established"
+        );
         assert!(result.tcp_stats.bytes_sent > 0, "No bytes sent");
         assert!(result.tcp_stats.bytes_received > 0, "No bytes received");
 
-        println!("✅ HTTP E2E conformance test passed: {} ms", result.duration_ms);
+        println!(
+            "✅ HTTP E2E conformance test passed: {} ms",
+            result.duration_ms
+        );
     }
 
     #[tokio::test]
@@ -1138,12 +1254,21 @@ mod tests {
         );
 
         // Verify TCP statistics
-        assert!(result.tcp_stats.connections_attempted > 0, "No connection attempts recorded");
-        assert!(result.tcp_stats.connections_established > 0, "No connections established");
+        assert!(
+            result.tcp_stats.connections_attempted > 0,
+            "No connection attempts recorded"
+        );
+        assert!(
+            result.tcp_stats.connections_established > 0,
+            "No connections established"
+        );
         assert!(result.tcp_stats.bytes_sent > 0, "No bytes sent");
         assert!(result.tcp_stats.bytes_received > 0, "No bytes received");
 
-        println!("✅ gRPC E2E conformance test passed: {} ms", result.duration_ms);
+        println!(
+            "✅ gRPC E2E conformance test passed: {} ms",
+            result.duration_ms
+        );
     }
 
     #[tokio::test]
@@ -1159,12 +1284,21 @@ mod tests {
         );
 
         // Verify TCP statistics
-        assert!(result.tcp_stats.connections_attempted > 0, "No connection attempts recorded");
-        assert!(result.tcp_stats.connections_established > 0, "No connections established");
+        assert!(
+            result.tcp_stats.connections_attempted > 0,
+            "No connection attempts recorded"
+        );
+        assert!(
+            result.tcp_stats.connections_established > 0,
+            "No connections established"
+        );
         assert!(result.tcp_stats.bytes_sent > 0, "No bytes sent");
         assert!(result.tcp_stats.bytes_received > 0, "No bytes received");
 
-        println!("✅ Messaging E2E conformance test passed: {} ms", result.duration_ms);
+        println!(
+            "✅ Messaging E2E conformance test passed: {} ms",
+            result.duration_ms
+        );
     }
 
     #[tokio::test]
@@ -1180,10 +1314,19 @@ mod tests {
         );
 
         // Verify TCP statistics
-        assert!(result.tcp_stats.connections_attempted > 0, "No connection attempts recorded");
-        assert!(result.tcp_stats.connections_established > 0, "No connections established");
+        assert!(
+            result.tcp_stats.connections_attempted > 0,
+            "No connection attempts recorded"
+        );
+        assert!(
+            result.tcp_stats.connections_established > 0,
+            "No connections established"
+        );
 
-        println!("✅ Rate limiter multi-key E2E test passed: {} ms", result.duration_ms);
+        println!(
+            "✅ Rate limiter multi-key E2E test passed: {} ms",
+            result.duration_ms
+        );
     }
 
     #[tokio::test]
@@ -1199,10 +1342,19 @@ mod tests {
         );
 
         // Verify TCP statistics
-        assert!(result.tcp_stats.connections_attempted > 0, "No connection attempts recorded");
-        assert!(result.tcp_stats.connections_established > 0, "No connections established");
+        assert!(
+            result.tcp_stats.connections_attempted > 0,
+            "No connection attempts recorded"
+        );
+        assert!(
+            result.tcp_stats.connections_established > 0,
+            "No connections established"
+        );
 
-        println!("✅ Load balancer round-robin E2E test passed: {} ms", result.duration_ms);
+        println!(
+            "✅ Load balancer round-robin E2E test passed: {} ms",
+            result.duration_ms
+        );
     }
 
     #[tokio::test]
@@ -1218,10 +1370,19 @@ mod tests {
         );
 
         // Verify TCP statistics
-        assert!(result.tcp_stats.connections_attempted > 0, "No connection attempts recorded");
-        assert!(result.tcp_stats.connections_established > 0, "No connections established");
+        assert!(
+            result.tcp_stats.connections_attempted > 0,
+            "No connection attempts recorded"
+        );
+        assert!(
+            result.tcp_stats.connections_established > 0,
+            "No connections established"
+        );
 
-        println!("✅ Hedge cancel-on-first-success E2E test passed: {} ms", result.duration_ms);
+        println!(
+            "✅ Hedge cancel-on-first-success E2E test passed: {} ms",
+            result.duration_ms
+        );
     }
 
     #[tokio::test]
@@ -1239,13 +1400,21 @@ mod tests {
         let hedge_result = test_hedge_cancel_first_success().await;
 
         let all_results = vec![
-            http_result, grpc_result, messaging_result,
-            rate_limiter_result, load_balancer_result, hedge_result
+            http_result,
+            grpc_result,
+            messaging_result,
+            rate_limiter_result,
+            load_balancer_result,
+            hedge_result,
         ];
 
         println!("\n=== [br-e2e-1] E2E CONFORMANCE REPORT ===");
-        println!("| Service | Test | TCP Addr | Success | Duration | Connections | Bytes Sent/Recv |");
-        println!("|---------|------|----------|---------|----------|-------------|-----------------|");
+        println!(
+            "| Service | Test | TCP Addr | Success | Duration | Connections | Bytes Sent/Recv |"
+        );
+        println!(
+            "|---------|------|----------|---------|----------|-------------|-----------------|"
+        );
 
         let mut total_duration = 0;
         let mut total_connections = 0;
@@ -1280,13 +1449,22 @@ mod tests {
         println!("- Tests passed: {}/{}", success_count, all_results.len());
         println!("- Total duration: {}ms", total_duration);
         println!("- TCP connections established: {}", total_connections);
-        println!("- Network I/O: {} bytes sent, {} bytes received", total_bytes_sent, total_bytes_received);
-        println!("- Environment: CARGO_TARGET_DIR={}", std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "default".to_string()));
+        println!(
+            "- Network I/O: {} bytes sent, {} bytes received",
+            total_bytes_sent, total_bytes_received
+        );
+        println!(
+            "- Environment: CARGO_TARGET_DIR={}",
+            std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "default".to_string())
+        );
 
         if success_count == all_results.len() {
             println!("\n✅ **E2E CONFORMANCE ACHIEVED**: All real service TCP tests passed");
         } else {
-            println!("\n❌ **E2E CONFORMANCE FAILED**: {} tests failed", all_results.len() - success_count);
+            println!(
+                "\n❌ **E2E CONFORMANCE FAILED**: {} tests failed",
+                all_results.len() - success_count
+            );
         }
 
         // All tests must pass

@@ -10,13 +10,13 @@
 
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind};
-use crate::runtime::{RuntimeBuilder, LabRuntime};
+use crate::runtime::{LabRuntime, RuntimeBuilder};
 use crate::sync::{AtomicBool, AtomicUsize, Ordering};
-use crate::time::{sleep, Duration, Instant};
+use crate::time::{Duration, Instant, sleep};
 use crate::types::Outcome;
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 /// Subsystem mutation tester for targeted component validation
@@ -46,9 +46,17 @@ impl SubsystemMutationTester {
         }
     }
 
-    fn log_subsystem_mutation(&self, mutation_id: &str, component: &str, mutation_type: &str, detected: bool) {
-        eprintln!("{{\"subsystem_mutation\":\"{}\",\"id\":\"{}\",\"component\":\"{}\",\"type\":\"{}\",\"detected\":{}}}",
-            self.test_name, mutation_id, component, mutation_type, detected);
+    fn log_subsystem_mutation(
+        &self,
+        mutation_id: &str,
+        component: &str,
+        mutation_type: &str,
+        detected: bool,
+    ) {
+        eprintln!(
+            "{{\"subsystem_mutation\":\"{}\",\"id\":\"{}\",\"component\":\"{}\",\"type\":\"{}\",\"detected\":{}}}",
+            self.test_name, mutation_id, component, mutation_type, detected
+        );
 
         self.mutations_applied.fetch_add(1, Ordering::Relaxed);
         if detected {
@@ -59,106 +67,129 @@ impl SubsystemMutationTester {
     /// [br-mutation-13] Observability counter increment regression mutations
     async fn test_observability_counter_mutations(&self) {
         // Test various counter increment regressions in observability system
-        use crate::observability::{Metrics, Counter, Histogram};
+        use crate::observability::{Counter, Histogram, Metrics};
 
-        let metrics_detected = self.runtime.scope(|scope| async move {
-            // Setup observability metrics
-            let request_counter = Counter::new("requests_total", "Total HTTP requests");
-            let error_counter = Counter::new("errors_total", "Total errors");
-            let response_histogram = Histogram::new("response_duration", "Response time distribution");
+        let metrics_detected = self
+            .runtime
+            .scope(|scope| async move {
+                // Setup observability metrics
+                let request_counter = Counter::new("requests_total", "Total HTTP requests");
+                let error_counter = Counter::new("errors_total", "Total errors");
+                let response_histogram =
+                    Histogram::new("response_duration", "Response time distribution");
 
-            let total_requests = 100;
-            let error_mutations = Arc::new(AtomicUsize::new(0));
-            let missing_increments = Arc::new(AtomicUsize::new(0));
-            let incorrect_increments = Arc::new(AtomicUsize::new(0));
+                let total_requests = 100;
+                let error_mutations = Arc::new(AtomicUsize::new(0));
+                let missing_increments = Arc::new(AtomicUsize::new(0));
+                let incorrect_increments = Arc::new(AtomicUsize::new(0));
 
-            let task = scope.spawn(async move {
-                for req_id in 0..total_requests {
-                    let start_time = Instant::now();
+                let task = scope
+                    .spawn(async move {
+                        for req_id in 0..total_requests {
+                            let start_time = Instant::now();
 
-                    // Simulate request processing with mutations
-                    sleep(Duration::from_millis(10)).await;
+                            // Simulate request processing with mutations
+                            sleep(Duration::from_millis(10)).await;
 
-                    // MUTATION 1: Skip counter increment for some requests
-                    if req_id % 7 == 0 {
-                        missing_increments.fetch_add(1, Ordering::Relaxed);
-                        // Intentionally skip request_counter.inc() - should be detected
-                    } else {
-                        request_counter.inc();
-                    }
+                            // MUTATION 1: Skip counter increment for some requests
+                            if req_id % 7 == 0 {
+                                missing_increments.fetch_add(1, Ordering::Relaxed);
+                                // Intentionally skip request_counter.inc() - should be detected
+                            } else {
+                                request_counter.inc();
+                            }
 
-                    // Simulate error conditions with mutations
-                    if req_id % 15 == 0 {
-                        // MUTATION 2: Increment wrong counter for errors
-                        if req_id % 30 == 0 {
-                            incorrect_increments.fetch_add(1, Ordering::Relaxed);
-                            request_counter.inc(); // Wrong counter - should increment error_counter
+                            // Simulate error conditions with mutations
+                            if req_id % 15 == 0 {
+                                // MUTATION 2: Increment wrong counter for errors
+                                if req_id % 30 == 0 {
+                                    incorrect_increments.fetch_add(1, Ordering::Relaxed);
+                                    request_counter.inc(); // Wrong counter - should increment error_counter
+                                } else {
+                                    error_counter.inc(); // Correct
+                                }
+                                error_mutations.fetch_add(1, Ordering::Relaxed);
+                            }
+
+                            // Record response time (this should be consistent)
+                            let duration = start_time.elapsed();
+                            response_histogram.observe(duration.as_secs_f64());
+
+                            if req_id % 25 == 0 {
+                                // Validate counter consistency
+                                let request_count = request_counter.get();
+                                let error_count = error_counter.get();
+
+                                // Expected counts based on mutations
+                                let expected_requests =
+                                    req_id + 1 - missing_increments.load(Ordering::Relaxed);
+                                let expected_errors = error_mutations.load(Ordering::Relaxed);
+
+                                // Check for discrepancies (should detect counter mutations)
+                                if request_count != expected_requests
+                                    || error_count != expected_errors
+                                {
+                                    return Outcome::Err(Error::new(
+                                        ErrorKind::Other,
+                                        format!(
+                                            "Counter mutation detected: req {} != {}, err {} != {}",
+                                            request_count,
+                                            expected_requests,
+                                            error_count,
+                                            expected_errors
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Final validation
+                        let final_requests = request_counter.get();
+                        let final_errors = error_counter.get();
+                        let missed = missing_increments.load(Ordering::Relaxed);
+                        let incorrect = incorrect_increments.load(Ordering::Relaxed);
+
+                        // Check if observability system detected counter inconsistencies
+                        let expected_requests = total_requests - missed + incorrect;
+                        let expected_errors = error_mutations.load(Ordering::Relaxed) - incorrect;
+
+                        if final_requests != expected_requests || final_errors != expected_errors {
+                            Outcome::Ok(true) // Mutations detected
                         } else {
-                            error_counter.inc(); // Correct
+                            Outcome::Ok(false) // Mutations not detected (bad)
                         }
-                        error_mutations.fetch_add(1, Ordering::Relaxed);
-                    }
+                    })
+                    .await;
 
-                    // Record response time (this should be consistent)
-                    let duration = start_time.elapsed();
-                    response_histogram.observe(duration.as_secs_f64());
-
-                    if req_id % 25 == 0 {
-                        // Validate counter consistency
-                        let request_count = request_counter.get();
-                        let error_count = error_counter.get();
-
-                        // Expected counts based on mutations
-                        let expected_requests = req_id + 1 - missing_increments.load(Ordering::Relaxed);
-                        let expected_errors = error_mutations.load(Ordering::Relaxed);
-
-                        // Check for discrepancies (should detect counter mutations)
-                        if request_count != expected_requests || error_count != expected_errors {
-                            return Outcome::Err(Error::new(ErrorKind::Other,
-                                format!("Counter mutation detected: req {} != {}, err {} != {}",
-                                    request_count, expected_requests, error_count, expected_errors)));
-                        }
-                    }
-                }
-
-                // Final validation
-                let final_requests = request_counter.get();
-                let final_errors = error_counter.get();
-                let missed = missing_increments.load(Ordering::Relaxed);
-                let incorrect = incorrect_increments.load(Ordering::Relaxed);
-
-                // Check if observability system detected counter inconsistencies
-                let expected_requests = total_requests - missed + incorrect;
-                let expected_errors = error_mutations.load(Ordering::Relaxed) - incorrect;
-
-                if final_requests != expected_requests || final_errors != expected_errors {
-                    Outcome::Ok(true) // Mutations detected
-                } else {
-                    Outcome::Ok(false) // Mutations not detected (bad)
-                }
-            }).await;
-
-            task.await.unwrap_or(Outcome::Ok(false))
-        }).await;
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
 
         let detected = matches!(metrics_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-13", "observability", "counter_increment_regression", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-13",
+            "observability",
+            "counter_increment_regression",
+            detected,
+        );
     }
 
     /// [br-mutation-14] Trace causality DAG event-order swap mutations
     async fn test_trace_causality_mutations(&self) {
         // Test event ordering and causality violations in trace system
-        use crate::trace::{TraceId, SpanId, TraceEvent, CausalityDAG};
+        use crate::trace::{CausalityDAG, SpanId, TraceEvent, TraceId};
 
-        let causality_detected = self.runtime.scope(|scope| async move {
-            let trace_id = TraceId::new();
-            let causality_dag = CausalityDAG::new();
+        let causality_detected =
+            self.runtime
+                .scope(|scope| async move {
+                    let trace_id = TraceId::new();
+                    let causality_dag = CausalityDAG::new();
 
-            let event_count = 20;
-            let ordering_violations = Arc::new(AtomicUsize::new(0));
-            let causality_errors = Arc::new(AtomicUsize::new(0));
+                    let event_count = 20;
+                    let ordering_violations = Arc::new(AtomicUsize::new(0));
+                    let causality_errors = Arc::new(AtomicUsize::new(0));
 
-            let task = scope.spawn(async move {
+                    let task = scope.spawn(async move {
                 let mut events = Vec::new();
                 let mut span_counter = 0;
 
@@ -231,27 +262,35 @@ impl SubsystemMutationTester {
                 }
             }).await;
 
-            task.await.unwrap_or(Outcome::Ok(false))
-        }).await;
+                    task.await.unwrap_or(Outcome::Ok(false))
+                })
+                .await;
 
         let detected = matches!(causality_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-14", "trace", "causality_dag_event_order_swap", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-14",
+            "trace",
+            "causality_dag_event_order_swap",
+            detected,
+        );
     }
 
     /// [br-mutation-15] Security authenticated encryption tag-flip mutations
     async fn test_security_auth_encryption_mutations(&self) {
         // Test bit-level tampering detection in authenticated encryption
-        use crate::security::{AuthenticatedEncryption, EncryptionKey, AuthTag};
+        use crate::security::{AuthTag, AuthenticatedEncryption, EncryptionKey};
 
-        let auth_detected = self.runtime.scope(|scope| async move {
-            let encryption_key = EncryptionKey::generate();
-            let auth_enc = AuthenticatedEncryption::new(encryption_key);
+        let auth_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let encryption_key = EncryptionKey::generate();
+                let auth_enc = AuthenticatedEncryption::new(encryption_key);
 
-            let message_count = 15;
-            let tag_flip_mutations = Arc::new(AtomicUsize::new(0));
-            let tampering_detected = Arc::new(AtomicUsize::new(0));
+                let message_count = 15;
+                let tag_flip_mutations = Arc::new(AtomicUsize::new(0));
+                let tampering_detected = Arc::new(AtomicUsize::new(0));
 
-            let task = scope.spawn(async move {
+                let task = scope.spawn(async move {
                 for msg_id in 0..message_count {
                     let plaintext = format!("Secret message #{} with important data", msg_id);
                     let additional_data = format!("metadata_{}", msg_id);
@@ -323,16 +362,22 @@ impl SubsystemMutationTester {
                 }
             }).await;
 
-            task.await.unwrap_or(Outcome::Ok(false))
-        }).await;
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
 
         let detected = matches!(auth_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-15", "security", "auth_encryption_tag_flip", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-15",
+            "security",
+            "auth_encryption_tag_flip",
+            detected,
+        );
     }
 
     /// Additional observability mutation: metric aggregation corruption
     async fn test_observability_aggregation_mutations(&self) {
-        use crate::observability::{Histogram, Summary, Gauge};
+        use crate::observability::{Gauge, Histogram, Summary};
 
         let aggregation_detected = self.runtime.scope(|scope| async move {
             let response_histogram = Histogram::new("response_time", "HTTP response times");
@@ -395,22 +440,29 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(aggregation_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-13b", "observability", "metric_aggregation_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-13b",
+            "observability",
+            "metric_aggregation_corruption",
+            detected,
+        );
     }
 
     /// Additional trace mutation: span relationship corruption
     async fn test_trace_span_relationship_mutations(&self) {
-        use crate::trace::{TraceId, SpanId, Span, SpanContext};
+        use crate::trace::{Span, SpanContext, SpanId, TraceId};
 
-        let span_detected = self.runtime.scope(|scope| async move {
-            let trace_id = TraceId::new();
-            let span_tree = Arc::new(std::sync::Mutex::new(HashMap::<SpanId, Span>::new()));
+        let span_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let trace_id = TraceId::new();
+                let span_tree = Arc::new(std::sync::Mutex::new(HashMap::<SpanId, Span>::new()));
 
-            let span_count = 25;
-            let relationship_corruptions = Arc::new(AtomicUsize::new(0));
-            let validation_errors = Arc::new(AtomicUsize::new(0));
+                let span_count = 25;
+                let relationship_corruptions = Arc::new(AtomicUsize::new(0));
+                let validation_errors = Arc::new(AtomicUsize::new(0));
 
-            let task = scope.spawn(async move {
+                let task = scope.spawn(async move {
                 let mut parent_stack = Vec::new();
 
                 for span_idx in 0..span_count {
@@ -483,114 +535,137 @@ impl SubsystemMutationTester {
                 }
             }).await;
 
-            task.await.unwrap_or(Outcome::Ok(false))
-        }).await;
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
 
         let detected = matches!(span_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-14b", "trace", "span_relationship_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-14b",
+            "trace",
+            "span_relationship_corruption",
+            detected,
+        );
     }
 
     /// Additional security mutation: encryption key corruption
     async fn test_security_key_corruption_mutations(&self) {
-        use crate::security::{EncryptionKey, KeyDerivation, CryptoError};
+        use crate::security::{CryptoError, EncryptionKey, KeyDerivation};
 
-        let key_detected = self.runtime.scope(|scope| async move {
-            let master_key = EncryptionKey::generate();
-            let key_derivation = KeyDerivation::new(master_key);
+        let key_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let master_key = EncryptionKey::generate();
+                let key_derivation = KeyDerivation::new(master_key);
 
-            let derivation_count = 20;
-            let key_corruptions = Arc::new(AtomicUsize::new(0));
-            let crypto_errors = Arc::new(AtomicUsize::new(0));
+                let derivation_count = 20;
+                let key_corruptions = Arc::new(AtomicUsize::new(0));
+                let crypto_errors = Arc::new(AtomicUsize::new(0));
 
-            let task = scope.spawn(async move {
-                for derive_id in 0..derivation_count {
-                    let context = format!("derive_context_{}", derive_id);
-                    let salt = format!("salt_{}", derive_id);
+                let task = scope
+                    .spawn(async move {
+                        for derive_id in 0..derivation_count {
+                            let context = format!("derive_context_{}", derive_id);
+                            let salt = format!("salt_{}", derive_id);
 
-                    // Derive key
-                    let derived_key = match key_derivation.derive(&context, salt.as_bytes()) {
-                        Ok(key) => key,
-                        Err(_) => continue,
-                    };
+                            // Derive key
+                            let derived_key = match key_derivation.derive(&context, salt.as_bytes())
+                            {
+                                Ok(key) => key,
+                                Err(_) => continue,
+                            };
 
-                    // MUTATION: Corrupt derived key bytes
-                    let mut key_bytes = derived_key.as_bytes().to_vec();
-                    if derive_id % 5 == 0 {
-                        key_corruptions.fetch_add(1, Ordering::Relaxed);
+                            // MUTATION: Corrupt derived key bytes
+                            let mut key_bytes = derived_key.as_bytes().to_vec();
+                            if derive_id % 5 == 0 {
+                                key_corruptions.fetch_add(1, Ordering::Relaxed);
 
-                        // Flip random bits in key
-                        if !key_bytes.is_empty() {
-                            let corrupt_position = derive_id % key_bytes.len();
-                            key_bytes[corrupt_position] ^= 0xFF; // Flip all bits in one byte
-                        }
-                    }
+                                // Flip random bits in key
+                                if !key_bytes.is_empty() {
+                                    let corrupt_position = derive_id % key_bytes.len();
+                                    key_bytes[corrupt_position] ^= 0xFF; // Flip all bits in one byte
+                                }
+                            }
 
-                    // Try to use potentially corrupted key
-                    let corrupted_key = EncryptionKey::from_bytes(&key_bytes);
+                            // Try to use potentially corrupted key
+                            let corrupted_key = EncryptionKey::from_bytes(&key_bytes);
 
-                    // Encrypt test data with corrupted key
-                    let test_data = b"test encryption data";
-                    match corrupted_key.encrypt(test_data) {
-                        Ok(encrypted) => {
-                            // Try to decrypt with original derived key
-                            match derived_key.decrypt(&encrypted) {
-                                Ok(decrypted) => {
-                                    if decrypted != test_data && derive_id % 5 == 0 {
-                                        // Key corruption caused decryption mismatch
-                                        crypto_errors.fetch_add(1, Ordering::Relaxed);
+                            // Encrypt test data with corrupted key
+                            let test_data = b"test encryption data";
+                            match corrupted_key.encrypt(test_data) {
+                                Ok(encrypted) => {
+                                    // Try to decrypt with original derived key
+                                    match derived_key.decrypt(&encrypted) {
+                                        Ok(decrypted) => {
+                                            if decrypted != test_data && derive_id % 5 == 0 {
+                                                // Key corruption caused decryption mismatch
+                                                crypto_errors.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                        }
+                                        Err(_) => {
+                                            if derive_id % 5 == 0 {
+                                                // Key corruption caused decryption failure
+                                                crypto_errors.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                        }
                                     }
                                 }
                                 Err(_) => {
                                     if derive_id % 5 == 0 {
-                                        // Key corruption caused decryption failure
+                                        // Key corruption caused encryption failure
                                         crypto_errors.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
                             }
+
+                            sleep(Duration::from_millis(3)).await;
                         }
-                        Err(_) => {
-                            if derive_id % 5 == 0 {
-                                // Key corruption caused encryption failure
-                                crypto_errors.fetch_add(1, Ordering::Relaxed);
-                            }
+
+                        let corruptions = key_corruptions.load(Ordering::Relaxed);
+                        let errors = crypto_errors.load(Ordering::Relaxed);
+
+                        // Crypto operations should detect key corruption
+                        if errors > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Key corruption detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(
+                                ErrorKind::Other,
+                                format!(
+                                    "Key corruption not detected: {} corruptions, {} errors",
+                                    corruptions, errors
+                                ),
+                            ))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
                         }
-                    }
+                    })
+                    .await;
 
-                    sleep(Duration::from_millis(3)).await;
-                }
-
-                let corruptions = key_corruptions.load(Ordering::Relaxed);
-                let errors = crypto_errors.load(Ordering::Relaxed);
-
-                // Crypto operations should detect key corruption
-                if errors > 0 && corruptions > 0 {
-                    Outcome::Ok(true) // Key corruption detected
-                } else if corruptions > 0 {
-                    Outcome::Err(Error::new(ErrorKind::Other,
-                        format!("Key corruption not detected: {} corruptions, {} errors",
-                            corruptions, errors)))
-                } else {
-                    Outcome::Ok(false) // No corruptions
-                }
-            }).await;
-
-            task.await.unwrap_or(Outcome::Ok(false))
-        }).await;
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
 
         let detected = matches!(key_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-15b", "security", "encryption_key_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-15b",
+            "security",
+            "encryption_key_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-16] Plan graph topology edge insertion regression mutations
     async fn test_plan_graph_topology_mutations(&self) {
-        use crate::plan::{PlanGraph, PlanNode, PlanEdge, TopologyError};
+        use crate::plan::{PlanEdge, PlanGraph, PlanNode, TopologyError};
 
-        let plan_detected = self.runtime.scope(|scope| async move {
-            let graph_size = 20;
-            let topology_corruptions = Arc::new(AtomicUsize::new(0));
-            let validation_errors = Arc::new(AtomicUsize::new(0));
+        let plan_detected =
+            self.runtime
+                .scope(|scope| async move {
+                    let graph_size = 20;
+                    let topology_corruptions = Arc::new(AtomicUsize::new(0));
+                    let validation_errors = Arc::new(AtomicUsize::new(0));
 
-            let task = scope.spawn(async move {
+                    let task = scope.spawn(async move {
                 let mut plan_graph = PlanGraph::new();
 
                 // Build initial plan graph
@@ -664,16 +739,22 @@ impl SubsystemMutationTester {
                 }
             }).await;
 
-            task.await.unwrap_or(Outcome::Ok(false))
-        }).await;
+                    task.await.unwrap_or(Outcome::Ok(false))
+                })
+                .await;
 
         let detected = matches!(plan_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-16", "plan", "graph_topology_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-16",
+            "plan",
+            "graph_topology_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-17] RaptorQ systematic symbol decode regression mutations
     async fn test_raptorq_systematic_symbol_mutations(&self) {
-        use crate::raptorq::{Encoder, Decoder, EncodingPacket, Symbol, K_MAX};
+        use crate::raptorq::{Decoder, Encoder, EncodingPacket, K_MAX, Symbol};
 
         let raptorq_detected = self.runtime.scope(|scope| async move {
             let source_block_size = 64; // K symbols
@@ -760,12 +841,17 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(raptorq_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-17", "raptorq", "systematic_symbol_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-17",
+            "raptorq",
+            "systematic_symbol_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-18] Distributed consistent hash ring rebalance corruption mutations
     async fn test_distributed_consistent_hash_mutations(&self) {
-        use crate::distributed::{ConsistentHashRing, Node, Hash, RebalanceError};
+        use crate::distributed::{ConsistentHashRing, Hash, Node, RebalanceError};
 
         let distributed_detected = self.runtime.scope(|scope| async move {
             let initial_node_count = 8;
@@ -874,19 +960,26 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(distributed_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-18", "distributed", "consistent_hash_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-18",
+            "distributed",
+            "consistent_hash_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-19] gRPC status code mapping regression mutations
     async fn test_grpc_status_code_mapping_mutations(&self) {
-        use crate::grpc::{StatusCode, Status, GrpcError, GrpcResponse};
+        use crate::grpc::{GrpcError, GrpcResponse, Status, StatusCode};
 
-        let grpc_detected = self.runtime.scope(|scope| async move {
-            let rpc_call_count = 25;
-            let status_corruptions = Arc::new(AtomicUsize::new(0));
-            let mapping_errors = Arc::new(AtomicUsize::new(0));
+        let grpc_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let rpc_call_count = 25;
+                let status_corruptions = Arc::new(AtomicUsize::new(0));
+                let mapping_errors = Arc::new(AtomicUsize::new(0));
 
-            let task = scope.spawn(async move {
+                let task = scope.spawn(async move {
                 for rpc_idx in 0..rpc_call_count {
                     // Simulate various gRPC responses with status codes
                     let expected_status = match rpc_idx % 7 {
@@ -967,11 +1060,17 @@ impl SubsystemMutationTester {
                 }
             }).await;
 
-            task.await.unwrap_or(Outcome::Ok(false))
-        }).await;
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
 
         let detected = matches!(grpc_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-19", "grpc", "status_code_mapping_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-19",
+            "grpc",
+            "status_code_mapping_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-20] Messaging Kafka offset commit regression mutations
@@ -1076,7 +1175,12 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(kafka_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-20", "messaging", "kafka_offset_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-20",
+            "messaging",
+            "kafka_offset_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-21] Web CSRF token rotation regression mutations
@@ -1189,12 +1293,17 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(csrf_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-21", "web", "csrf_token_rotation_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-21",
+            "web",
+            "csrf_token_rotation_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-22] Cancel propagation signal short-circuit regression mutations
     async fn test_cancel_propagation_mutations(&self) {
-        use crate::cancel::{CancelToken, CancelSignal, CancelledError, CancelScope};
+        use crate::cancel::{CancelScope, CancelSignal, CancelToken, CancelledError};
 
         let cancel_detected = self.runtime.scope(|scope| async move {
             let cancel_chain_count = 15;
@@ -1291,12 +1400,17 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(cancel_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-22", "cancel", "propagation_shortcircuit_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-22",
+            "cancel",
+            "propagation_shortcircuit_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-23] Obligation ledger leak detection regression mutations
     async fn test_obligation_ledger_mutations(&self) {
-        use crate::obligation::{ObligationLedger, ObligationId, Obligation, LeakDetector};
+        use crate::obligation::{LeakDetector, Obligation, ObligationId, ObligationLedger};
 
         let ledger_detected = self.runtime.scope(|scope| async move {
             let obligation_count = 25;
@@ -1411,12 +1525,19 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(ledger_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-23", "obligation", "ledger_leak_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-23",
+            "obligation",
+            "ledger_leak_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-24] Supervision restart policy regression mutations
     async fn test_supervision_mutations(&self) {
-        use crate::supervision::{Supervisor, RestartPolicy, ExitSignal, ChildSpec, SupervisionError};
+        use crate::supervision::{
+            ChildSpec, ExitSignal, RestartPolicy, SupervisionError, Supervisor,
+        };
 
         let supervision_detected = self.runtime.scope(|scope| async move {
             let child_count = 12;
@@ -1532,7 +1653,12 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(supervision_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-24", "supervision", "restart_policy_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-24",
+            "supervision",
+            "restart_policy_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-25] Cx/Scope region close=quiescence early-close regression mutations
@@ -1647,12 +1773,17 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(scope_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-25", "cx_scope", "region_quiescence_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-25",
+            "cx_scope",
+            "region_quiescence_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-26] Runtime scheduler priority lane starvation regression mutations
     async fn test_runtime_scheduler_mutations(&self) {
-        use crate::runtime::{Scheduler, Priority, Task, SchedulingPolicy};
+        use crate::runtime::{Priority, Scheduler, SchedulingPolicy, Task};
 
         let scheduler_detected = self.runtime.scope(|scope| async move {
             let scheduler_test_count = 15;
@@ -1786,12 +1917,17 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(scheduler_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-26", "runtime_scheduler", "priority_lane_starvation_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-26",
+            "runtime_scheduler",
+            "priority_lane_starvation_corruption",
+            detected,
+        );
     }
 
     /// [br-mutation-27] Net/TCP split→merge buffer reordering regression mutations
     async fn test_net_tcp_split_merge_mutations(&self) {
-        use crate::net::tcp::{TcpStream, SplitStream, StreamBuffer};
+        use crate::net::tcp::{SplitStream, StreamBuffer, TcpStream};
 
         let tcp_detected = self.runtime.scope(|scope| async move {
             let connection_count = 12;
@@ -1967,7 +2103,12 @@ impl SubsystemMutationTester {
         }).await;
 
         let detected = matches!(tcp_detected, Outcome::Ok(true) | Outcome::Err(_));
-        self.log_subsystem_mutation("br-mutation-27", "net_tcp", "split_merge_reordering_corruption", detected);
+        self.log_subsystem_mutation(
+            "br-mutation-27",
+            "net_tcp",
+            "split_merge_reordering_corruption",
+            detected,
+        );
     }
 
     /// Generate subsystem testing summary
@@ -2012,11 +2153,18 @@ async fn test_observability_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply observability mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.85,
+    assert!(
+        detection_rate >= 0.85,
         "Observability subsystem should detect ≥85% of metric mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"observability_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"observability_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2038,11 +2186,18 @@ async fn test_trace_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply trace mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.90,
+    assert!(
+        detection_rate >= 0.90,
         "Trace subsystem should detect ≥90% of causality mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"trace_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"trace_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2064,11 +2219,18 @@ async fn test_security_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply security mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.95,
+    assert!(
+        detection_rate >= 0.95,
         "Security subsystem should detect ≥95% of cryptographic mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"security_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"security_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2089,11 +2251,18 @@ async fn test_plan_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply plan mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.85,
+    assert!(
+        detection_rate >= 0.85,
         "Plan subsystem should detect ≥85% of topology mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"plan_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"plan_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2114,11 +2283,18 @@ async fn test_raptorq_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply raptorq mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.92,
+    assert!(
+        detection_rate >= 0.92,
         "RaptorQ subsystem should detect ≥92% of systematic symbol mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"raptorq_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"raptorq_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2139,11 +2315,18 @@ async fn test_distributed_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply distributed mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.88,
+    assert!(
+        detection_rate >= 0.88,
         "Distributed subsystem should detect ≥88% of consistent hash mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"distributed_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"distributed_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2164,11 +2347,18 @@ async fn test_grpc_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply grpc mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.87,
+    assert!(
+        detection_rate >= 0.87,
         "gRPC subsystem should detect ≥87% of status code mapping mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"grpc_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"grpc_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2189,11 +2379,18 @@ async fn test_messaging_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply messaging mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.89,
+    assert!(
+        detection_rate >= 0.89,
         "Messaging subsystem should detect ≥89% of Kafka offset mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"messaging_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"messaging_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2214,11 +2411,18 @@ async fn test_web_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply web mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.91,
+    assert!(
+        detection_rate >= 0.91,
         "Web subsystem should detect ≥91% of CSRF token rotation mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"web_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"web_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2239,11 +2443,18 @@ async fn test_cancel_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply cancel mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.93,
+    assert!(
+        detection_rate >= 0.93,
         "Cancel subsystem should detect ≥93% of propagation mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"cancel_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"cancel_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2264,11 +2475,18 @@ async fn test_obligation_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply obligation mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.94,
+    assert!(
+        detection_rate >= 0.94,
         "Obligation subsystem should detect ≥94% of leak mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"obligation_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"obligation_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2289,11 +2507,18 @@ async fn test_supervision_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply supervision mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.91,
+    assert!(
+        detection_rate >= 0.91,
         "Supervision subsystem should detect ≥91% of restart policy mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"supervision_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"supervision_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2314,11 +2539,18 @@ async fn test_cx_scope_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply cx/scope mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.95,
+    assert!(
+        detection_rate >= 0.95,
         "Cx/Scope subsystem should detect ≥95% of region quiescence mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"cx_scope_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"cx_scope_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2339,11 +2571,18 @@ async fn test_runtime_scheduler_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply runtime/scheduler mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.92,
+    assert!(
+        detection_rate >= 0.92,
         "Runtime/Scheduler subsystem should detect ≥92% of priority lane mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"runtime_scheduler_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"runtime_scheduler_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2364,11 +2603,18 @@ async fn test_net_tcp_subsystem_mutation_sensitivity() {
     assert!(applied > 0, "Should apply net/tcp mutations");
 
     let detection_rate = detected as f64 / applied as f64;
-    assert!(detection_rate >= 0.89,
+    assert!(
+        detection_rate >= 0.89,
         "Net/TCP subsystem should detect ≥89% of split→merge buffer mutations: {:.1}% ({}/{})",
-        detection_rate * 100.0, detected, applied);
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
 
-    eprintln!("{{\"net_tcp_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+    eprintln!(
+        "{{\"net_tcp_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
 }
 
 #[tokio::test]
@@ -2402,10 +2648,16 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     sec_tester.test_security_key_corruption_mutations().await;
 
     plan_tester.test_plan_graph_topology_mutations().await;
-    raptorq_tester.test_raptorq_systematic_symbol_mutations().await;
-    distributed_tester.test_distributed_consistent_hash_mutations().await;
+    raptorq_tester
+        .test_raptorq_systematic_symbol_mutations()
+        .await;
+    distributed_tester
+        .test_distributed_consistent_hash_mutations()
+        .await;
     grpc_tester.test_grpc_status_code_mapping_mutations().await;
-    messaging_tester.test_messaging_kafka_offset_mutations().await;
+    messaging_tester
+        .test_messaging_kafka_offset_mutations()
+        .await;
     web_tester.test_web_csrf_token_mutations().await;
     cancel_tester.test_cancel_propagation_mutations().await;
     obligation_tester.test_obligation_ledger_mutations().await;
@@ -2415,37 +2667,41 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     tcp_tester.test_net_tcp_split_merge_mutations().await;
 
     // Calculate overall subsystem detection rate
-    let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed) +
-                       trace_tester.mutations_applied.load(Ordering::Relaxed) +
-                       sec_tester.mutations_applied.load(Ordering::Relaxed) +
-                       plan_tester.mutations_applied.load(Ordering::Relaxed) +
-                       raptorq_tester.mutations_applied.load(Ordering::Relaxed) +
-                       distributed_tester.mutations_applied.load(Ordering::Relaxed) +
-                       grpc_tester.mutations_applied.load(Ordering::Relaxed) +
-                       messaging_tester.mutations_applied.load(Ordering::Relaxed) +
-                       web_tester.mutations_applied.load(Ordering::Relaxed) +
-                       cancel_tester.mutations_applied.load(Ordering::Relaxed) +
-                       obligation_tester.mutations_applied.load(Ordering::Relaxed) +
-                       supervision_tester.mutations_applied.load(Ordering::Relaxed) +
-                       cx_scope_tester.mutations_applied.load(Ordering::Relaxed) +
-                       scheduler_tester.mutations_applied.load(Ordering::Relaxed) +
-                       tcp_tester.mutations_applied.load(Ordering::Relaxed);
+    let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed)
+        + trace_tester.mutations_applied.load(Ordering::Relaxed)
+        + sec_tester.mutations_applied.load(Ordering::Relaxed)
+        + plan_tester.mutations_applied.load(Ordering::Relaxed)
+        + raptorq_tester.mutations_applied.load(Ordering::Relaxed)
+        + distributed_tester.mutations_applied.load(Ordering::Relaxed)
+        + grpc_tester.mutations_applied.load(Ordering::Relaxed)
+        + messaging_tester.mutations_applied.load(Ordering::Relaxed)
+        + web_tester.mutations_applied.load(Ordering::Relaxed)
+        + cancel_tester.mutations_applied.load(Ordering::Relaxed)
+        + obligation_tester.mutations_applied.load(Ordering::Relaxed)
+        + supervision_tester.mutations_applied.load(Ordering::Relaxed)
+        + cx_scope_tester.mutations_applied.load(Ordering::Relaxed)
+        + scheduler_tester.mutations_applied.load(Ordering::Relaxed)
+        + tcp_tester.mutations_applied.load(Ordering::Relaxed);
 
-    let total_detected = obs_tester.mutations_detected.load(Ordering::Relaxed) +
-                        trace_tester.mutations_detected.load(Ordering::Relaxed) +
-                        sec_tester.mutations_detected.load(Ordering::Relaxed) +
-                        plan_tester.mutations_detected.load(Ordering::Relaxed) +
-                        raptorq_tester.mutations_detected.load(Ordering::Relaxed) +
-                        distributed_tester.mutations_detected.load(Ordering::Relaxed) +
-                        grpc_tester.mutations_detected.load(Ordering::Relaxed) +
-                        messaging_tester.mutations_detected.load(Ordering::Relaxed) +
-                        web_tester.mutations_detected.load(Ordering::Relaxed) +
-                        cancel_tester.mutations_detected.load(Ordering::Relaxed) +
-                        obligation_tester.mutations_detected.load(Ordering::Relaxed) +
-                        supervision_tester.mutations_detected.load(Ordering::Relaxed) +
-                        cx_scope_tester.mutations_detected.load(Ordering::Relaxed) +
-                        scheduler_tester.mutations_detected.load(Ordering::Relaxed) +
-                        tcp_tester.mutations_detected.load(Ordering::Relaxed);
+    let total_detected = obs_tester.mutations_detected.load(Ordering::Relaxed)
+        + trace_tester.mutations_detected.load(Ordering::Relaxed)
+        + sec_tester.mutations_detected.load(Ordering::Relaxed)
+        + plan_tester.mutations_detected.load(Ordering::Relaxed)
+        + raptorq_tester.mutations_detected.load(Ordering::Relaxed)
+        + distributed_tester
+            .mutations_detected
+            .load(Ordering::Relaxed)
+        + grpc_tester.mutations_detected.load(Ordering::Relaxed)
+        + messaging_tester.mutations_detected.load(Ordering::Relaxed)
+        + web_tester.mutations_detected.load(Ordering::Relaxed)
+        + cancel_tester.mutations_detected.load(Ordering::Relaxed)
+        + obligation_tester.mutations_detected.load(Ordering::Relaxed)
+        + supervision_tester
+            .mutations_detected
+            .load(Ordering::Relaxed)
+        + cx_scope_tester.mutations_detected.load(Ordering::Relaxed)
+        + scheduler_tester.mutations_detected.load(Ordering::Relaxed)
+        + tcp_tester.mutations_detected.load(Ordering::Relaxed);
 
     let overall_detection_rate = if total_applied > 0 {
         total_detected as f64 / total_applied as f64
@@ -2453,13 +2709,22 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         0.0
     };
 
-    eprintln!("{{\"comprehensive_subsystem_results\":{{\"total_applied\":{},\"total_detected\":{},\"detection_rate\":{:.2},\"threshold\":0.90}}}}",
-        total_applied, total_detected, overall_detection_rate);
+    eprintln!(
+        "{{\"comprehensive_subsystem_results\":{{\"total_applied\":{},\"total_detected\":{},\"detection_rate\":{:.2},\"threshold\":0.90}}}}",
+        total_applied, total_detected, overall_detection_rate
+    );
 
     assert!(total_applied > 0, "Should apply subsystem mutations");
-    assert!(overall_detection_rate >= 0.90,
+    assert!(
+        overall_detection_rate >= 0.90,
         "Overall subsystem mutation detection should be ≥90%: {:.1}% ({}/{})",
-        overall_detection_rate * 100.0, total_detected, total_applied);
+        overall_detection_rate * 100.0,
+        total_detected,
+        total_applied
+    );
 
-    eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", overall_detection_rate);
+    eprintln!(
+        "{{\"comprehensive_subsystem_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        overall_detection_rate
+    );
 }

@@ -263,11 +263,11 @@ pub mod database_primitives_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod deterministic_state_golden_tests;
 #[cfg(any(test, feature = "test-internals"))]
-pub mod distributed_security_codec_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
 pub mod distributed_obligation_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod distributed_primitives_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod distributed_security_codec_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod distributed_service_messaging_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
@@ -282,6 +282,10 @@ pub mod golden_artifacts_tests;
 pub mod grpc_protocol_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod http_grpc_protocol_metamorphic_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod integration_mutation_testing;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod integration_scenario_mutations;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod io_bytes_time_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
@@ -310,64 +314,58 @@ pub mod protocol_serialization_golden_tests;
 pub mod public_api_golden_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod raptorq_deep_dive_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod raptorq_rfc6330_conformance_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_service_e2e_tests;
+pub mod real_bytes_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_cancel_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_channel_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_codec_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_cx_registry_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_distributed_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_fs_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_fs_uring_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_grpc_bidirectional_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_grpc_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_websocket_e2e_tests;
+pub mod real_http_h2_concurrent_load_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_integration_scenarios_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_net_dns_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_obligation_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_obligation_leak_check_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_quic_native_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_sqlite_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_tcp_unix_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_fs_e2e_tests;
+pub mod real_raptorq_systematic_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_service_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_sqlite_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_supervision_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_tcp_unix_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_timer_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_timer_extended_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_channel_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_obligation_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_cancel_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_cx_registry_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_supervision_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_obligation_leak_check_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_net_dns_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_fs_uring_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_raptorq_systematic_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_grpc_bidirectional_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_http_h2_concurrent_load_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_distributed_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_codec_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_bytes_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_integration_scenarios_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod integration_mutation_testing;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod integration_scenario_mutations;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod subsystem_mutation_testing;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod raptorq_rfc6330_conformance_tests;
+pub mod real_websocket_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
@@ -376,6 +374,8 @@ pub mod scheduler_priority_conformance_tests;
 pub mod server_session_evidence_epoch_spork_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod service_layer_conformance_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod subsystem_mutation_testing;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod supervision_genserver_actor_io_fs_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]

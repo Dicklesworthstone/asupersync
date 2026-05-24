@@ -10,12 +10,12 @@
 #[cfg(any(test, feature = "test-internals"))]
 mod quic_native_e2e_tests {
     use crate::cx::{Cx, CxBuilder};
+    use crate::net::UdpSocket;
     use crate::net::quic_native::{
         OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointConfig, ReceivedPacket,
     };
-    use crate::net::UdpSocket;
     use crate::runtime::RuntimeBuilder;
-    use crate::time::{sleep, Duration, Instant};
+    use crate::time::{Duration, Instant, sleep};
     use crate::types::{Budget, Outcome};
     use serde_json;
     use std::collections::HashMap;
@@ -104,12 +104,17 @@ mod quic_native_e2e_tests {
             packet_type: &str,
         ) {
             let mut details = HashMap::new();
-            details.insert("direction".to_string(), serde_json::Value::String("outbound".to_string()));
+            details.insert(
+                "direction".to_string(),
+                serde_json::Value::String("outbound".to_string()),
+            );
             if let Some(send_time) = packet.send_time {
-                details.insert("send_time_ms".to_string(),
+                details.insert(
+                    "send_time_ms".to_string(),
                     serde_json::Value::Number(serde_json::Number::from(
-                        send_time.duration_since(self.start_time).as_millis() as u64
-                    )));
+                        send_time.duration_since(self.start_time).as_millis() as u64,
+                    )),
+                );
             }
 
             let event = QuicLogEvent {
@@ -135,16 +140,26 @@ mod quic_native_e2e_tests {
             packet_type: &str,
         ) {
             let mut details = HashMap::new();
-            details.insert("direction".to_string(), serde_json::Value::String("inbound".to_string()));
-            details.insert("receive_time_ms".to_string(),
+            details.insert(
+                "direction".to_string(),
+                serde_json::Value::String("inbound".to_string()),
+            );
+            details.insert(
+                "receive_time_ms".to_string(),
                 serde_json::Value::Number(serde_json::Number::from(
-                    packet.receive_time.duration_since(self.start_time).as_millis() as u64
-                )));
+                    packet
+                        .receive_time
+                        .duration_since(self.start_time)
+                        .as_millis() as u64,
+                )),
+            );
             if let Some(transmit_time) = packet.transmit_time {
-                details.insert("transmit_time_ms".to_string(),
+                details.insert(
+                    "transmit_time_ms".to_string(),
                     serde_json::Value::Number(serde_json::Number::from(
-                        transmit_time.duration_since(self.start_time).as_millis() as u64
-                    )));
+                        transmit_time.duration_since(self.start_time).as_millis() as u64,
+                    )),
+                );
             }
 
             let event = QuicLogEvent {
@@ -163,7 +178,12 @@ mod quic_native_e2e_tests {
             }
         }
 
-        pub fn log_connection_event(&self, event_type: &str, connection_id: &str, details: HashMap<String, serde_json::Value>) {
+        pub fn log_connection_event(
+            &self,
+            event_type: &str,
+            connection_id: &str,
+            details: HashMap<String, serde_json::Value>,
+        ) {
             let event = QuicLogEvent {
                 timestamp: self.start_time.elapsed().as_micros() as u64,
                 event_type: event_type.to_string(),
@@ -199,15 +219,20 @@ mod quic_native_e2e_tests {
 
     impl RealQuicServer {
         /// Create a new real QUIC server with actual UDP endpoint
-        pub async fn new(cx: &Cx, config: QuicServerConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        pub async fn new(
+            cx: &Cx,
+            config: QuicServerConfig,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
             // Validate environment for real service testing
             Self::validate_test_environment()?;
 
             // Create UDP socket with ephemeral port
-            let socket = UdpSocket::bind(config.bind_addr).await
+            let socket = UdpSocket::bind(config.bind_addr)
+                .await
                 .map_err(|e| format!("Failed to bind UDP socket: {:?}", e))?;
 
-            let local_addr = socket.local_addr()
+            let local_addr = socket
+                .local_addr()
                 .map_err(|e| format!("Failed to get local address: {:?}", e))?;
 
             // Create QUIC UDP endpoint
@@ -235,11 +260,15 @@ mod quic_native_e2e_tests {
         fn validate_test_environment() -> Result<(), String> {
             // Production safety guards
             if std::env::var("NODE_ENV").unwrap_or_default() == "production" {
-                return Err("Cannot run real service E2E tests in production environment".to_string());
+                return Err(
+                    "Cannot run real service E2E tests in production environment".to_string(),
+                );
             }
 
             if std::env::var("REAL_SERVICE_TESTS").unwrap_or_default() != "true" {
-                return Err("Set REAL_SERVICE_TESTS=true to enable real service testing".to_string());
+                return Err(
+                    "Set REAL_SERVICE_TESTS=true to enable real service testing".to_string()
+                );
             }
 
             Ok(())
@@ -272,28 +301,37 @@ mod quic_native_e2e_tests {
                     Ok(packets) => {
                         for packet in packets {
                             stats.packets_received.fetch_add(1, Ordering::Relaxed);
-                            stats.bytes_received.fetch_add(packet.data.len() as u64, Ordering::Relaxed);
+                            stats
+                                .bytes_received
+                                .fetch_add(packet.data.len() as u64, Ordering::Relaxed);
 
                             // For E2E testing, echo simple packets back
                             if packet.data.len() > 0 {
                                 let response = OutgoingPacket {
                                     dst_addr: packet.src_addr,
-                                    data: format!("QUIC_ECHO:{}", String::from_utf8_lossy(&packet.data)).into_bytes(),
+                                    data: format!(
+                                        "QUIC_ECHO:{}",
+                                        String::from_utf8_lossy(&packet.data)
+                                    )
+                                    .into_bytes(),
                                     send_time: Some(Instant::now()),
                                 };
 
                                 match endpoint.send_packet(cx, &response).await {
                                     Ok(()) => {
                                         stats.packets_sent.fetch_add(1, Ordering::Relaxed);
-                                        stats.bytes_sent.fetch_add(response.data.len() as u64, Ordering::Relaxed);
-                                    },
+                                        stats.bytes_sent.fetch_add(
+                                            response.data.len() as u64,
+                                            Ordering::Relaxed,
+                                        );
+                                    }
                                     Err(_) => {
                                         stats.packet_drops.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
                             }
                         }
-                    },
+                    }
                     Err(_) => {
                         // Short delay on error to prevent tight loops
                         let _ = sleep(cx, Duration::from_millis(10)).await;
@@ -329,7 +367,8 @@ mod quic_native_e2e_tests {
 
     #[tokio::test]
     #[ignore] // Requires REAL_SERVICE_TESTS=true
-    async fn test_real_quic_server_basic_packet_exchange() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_real_quic_server_basic_packet_exchange() -> Result<(), Box<dyn std::error::Error>>
+    {
         validate_quic_e2e_environment()?;
 
         let runtime = RuntimeBuilder::new().build()?;
@@ -353,7 +392,8 @@ mod quic_native_e2e_tests {
 
         // Create client endpoint
         let client_config = QuicUdpEndpointConfig::default();
-        let client_socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
+        let client_socket =
+            UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
 
         let mut client_endpoint = QuicUdpEndpoint::bind(&cx, client_socket, client_config).await?;
 
@@ -376,16 +416,25 @@ mod quic_native_e2e_tests {
         logger.log_packet_received(response, Some("client-test"), "Echo");
 
         let response_text = String::from_utf8_lossy(&response.data);
-        assert!(response_text.starts_with("QUIC_ECHO:"),
-            "Response should be echoed back: {}", response_text);
+        assert!(
+            response_text.starts_with("QUIC_ECHO:"),
+            "Response should be echoed back: {}",
+            response_text
+        );
 
         // Stop server
         server.stop(&cx).await?;
 
         // Verify statistics
         let stats = server.stats();
-        assert!(stats.packets_received.load(Ordering::Relaxed) > 0, "Server should have received packets");
-        assert!(stats.packets_sent.load(Ordering::Relaxed) > 0, "Server should have sent packets");
+        assert!(
+            stats.packets_received.load(Ordering::Relaxed) > 0,
+            "Server should have received packets"
+        );
+        assert!(
+            stats.packets_sent.load(Ordering::Relaxed) > 0,
+            "Server should have sent packets"
+        );
 
         eprintln!("QUIC E2E structured log:\n{}", logger.export_json());
         Ok(())
@@ -393,7 +442,8 @@ mod quic_native_e2e_tests {
 
     #[tokio::test]
     #[ignore] // Requires REAL_SERVICE_TESTS=true
-    async fn test_real_quic_server_multiple_connections() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_real_quic_server_multiple_connections() -> Result<(), Box<dyn std::error::Error>>
+    {
         validate_quic_e2e_environment()?;
 
         let runtime = RuntimeBuilder::new().build()?;
@@ -422,16 +472,21 @@ mod quic_native_e2e_tests {
         let mut client_endpoints = Vec::new();
 
         for i in 0..NUM_CLIENTS {
-            let client_socket = UdpSocket::bind(&cx, &UdpSocketConfig {
-                bind_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
-                reuse_address: true,
-                broadcast: false,
-                multicast_loop: None,
-                multicast_ttl: None,
-                ttl: None,
-            }).await?;
+            let client_socket = UdpSocket::bind(
+                &cx,
+                &UdpSocketConfig {
+                    bind_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    reuse_address: true,
+                    broadcast: false,
+                    multicast_loop: None,
+                    multicast_ttl: None,
+                    ttl: None,
+                },
+            )
+            .await?;
 
-            let client_endpoint = QuicUdpEndpoint::bind(&cx, client_socket, QuicUdpEndpointConfig::default()).await?;
+            let client_endpoint =
+                QuicUdpEndpoint::bind(&cx, client_socket, QuicUdpEndpointConfig::default()).await?;
             client_endpoints.push(client_endpoint);
 
             // Send packet from each client
@@ -451,7 +506,11 @@ mod quic_native_e2e_tests {
         for (i, endpoint) in client_endpoints.iter_mut().enumerate() {
             if let Ok(packets) = endpoint.receive_batch(&cx, 1).await {
                 for packet in packets {
-                    logger.log_packet_received(&packet, Some(&format!("client-{}", i)), "MultiClientEcho");
+                    logger.log_packet_received(
+                        &packet,
+                        Some(&format!("client-{}", i)),
+                        "MultiClientEcho",
+                    );
                     total_responses += 1;
                 }
             }
@@ -460,13 +519,21 @@ mod quic_native_e2e_tests {
         server.stop(&cx).await?;
 
         // Verify all clients received responses
-        assert!(total_responses > 0, "Should receive responses from multiple clients");
+        assert!(
+            total_responses > 0,
+            "Should receive responses from multiple clients"
+        );
 
         let stats = server.stats();
-        assert!(stats.packets_received.load(Ordering::Relaxed) >= NUM_CLIENTS as u64,
-            "Server should receive packets from all clients");
+        assert!(
+            stats.packets_received.load(Ordering::Relaxed) >= NUM_CLIENTS as u64,
+            "Server should receive packets from all clients"
+        );
 
-        eprintln!("Multi-client QUIC E2E structured log:\n{}", logger.export_json());
+        eprintln!(
+            "Multi-client QUIC E2E structured log:\n{}",
+            logger.export_json()
+        );
         Ok(())
     }
 
@@ -498,20 +565,34 @@ mod quic_native_e2e_tests {
 
         sleep(&cx, Duration::from_millis(10)).await?;
 
-        details.insert("shutdown_initiated_ms".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(start_time.elapsed().as_millis() as u64)));
+        details.insert(
+            "shutdown_initiated_ms".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(
+                start_time.elapsed().as_millis() as u64
+            )),
+        );
         logger.log_connection_event("server_shutdown_start", "main", details.clone());
 
         server.stop(&cx).await?;
 
-        details.insert("shutdown_completed_ms".to_string(),
-            serde_json::Value::Number(serde_json::Number::from(start_time.elapsed().as_millis() as u64)));
+        details.insert(
+            "shutdown_completed_ms".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(
+                start_time.elapsed().as_millis() as u64
+            )),
+        );
         logger.log_connection_event("server_shutdown_complete", "main", details);
 
         // Verify server stopped running
-        assert!(!server.is_running.load(Ordering::SeqCst), "Server should be stopped");
+        assert!(
+            !server.is_running.load(Ordering::SeqCst),
+            "Server should be stopped"
+        );
 
-        eprintln!("Shutdown QUIC E2E structured log:\n{}", logger.export_json());
+        eprintln!(
+            "Shutdown QUIC E2E structured log:\n{}",
+            logger.export_json()
+        );
         Ok(())
     }
 }

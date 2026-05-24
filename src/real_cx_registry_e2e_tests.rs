@@ -9,27 +9,27 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 use crate::{
-    cx::{Cx, CxBuilder, CapabilitySet, Capability, CapabilityId},
-    runtime::{RuntimeBuilder, Region},
-    record::{PermitRegistry, Registry, RegistryEntry, RegistryKey},
-    obligation::{commit_permit, abort_permit, Permit, ObligationId},
-    combinator::{race, join, timeout},
-    error::{Outcome, AsupersyncError},
-    time::{Duration, sleep, Instant},
-    channel::{mpsc, oneshot},
-    sync::{Arc, Mutex, RwLock},
-    types::{TaskId, RegionId},
     cancel::CancelToken,
+    channel::{mpsc, oneshot},
+    combinator::{join, race, timeout},
+    cx::{Capability, CapabilityId, CapabilitySet, Cx, CxBuilder},
+    error::{AsupersyncError, Outcome},
+    obligation::{ObligationId, Permit, abort_permit, commit_permit},
+    record::{PermitRegistry, Registry, RegistryEntry, RegistryKey},
+    runtime::{Region, RuntimeBuilder},
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, Instant, sleep},
+    types::{RegionId, TaskId},
 };
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 use std::{
-    sync::atomic::{AtomicU64, AtomicBool, Ordering},
-    collections::{HashMap, HashSet, BTreeMap},
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 #[cfg(all(test, feature = "real-service-e2e"))]
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Real cx/registry manager that coordinates actual capability and registry operations
 /// Uses asupersync capability primitives with real registry state and concurrent reservations
@@ -176,7 +176,9 @@ impl RealCxRegistryManager {
             // Create permits within this capability context
             for j in 0..config.permit_count {
                 let permit_cx = cx.with_capability_set(capability_set.clone())?;
-                let permit = permit_cx.create_permit(format!("permit-{}-{}", i, j)).await?;
+                let permit = permit_cx
+                    .create_permit(format!("permit-{}-{}", i, j))
+                    .await?;
                 permits.push(permit);
                 self.stats.permits_created.fetch_add(1, Ordering::Relaxed);
             }
@@ -190,7 +192,9 @@ impl RealCxRegistryManager {
             };
 
             capability_contexts.push(context);
-            self.stats.capabilities_created.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .capabilities_created
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         // Test commit_permit operations for each context
@@ -219,13 +223,17 @@ impl RealCxRegistryManager {
                         }
                         Err(_) => {
                             // Failed abort counts as capability violation
-                            self.stats.capability_violations.fetch_add(1, Ordering::Relaxed);
+                            self.stats
+                                .capability_violations
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
             }
 
-            self.stats.capabilities_committed.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .capabilities_committed
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         let end_time = Instant::now();
@@ -237,7 +245,9 @@ impl RealCxRegistryManager {
             0.0
         };
 
-        self.stats.total_operations.fetch_add(total_permits, Ordering::Relaxed);
+        self.stats
+            .total_operations
+            .fetch_add(total_permits, Ordering::Relaxed);
 
         self.logger.log_operation(
             "capability_lifecycle",
@@ -275,7 +285,9 @@ impl RealCxRegistryManager {
 
         // Create permits and register them
         for i in 0..permit_count {
-            let permit = permit_cx.create_permit(format!("cycle-permit-{}", i)).await?;
+            let permit = permit_cx
+                .create_permit(format!("cycle-permit-{}", i))
+                .await?;
             let registry_key = RegistryKey::new(format!("key-{}", i));
 
             // Register the permit in the registry
@@ -288,7 +300,9 @@ impl RealCxRegistryManager {
             permits.push(permit);
             registry_keys.push(registry_key);
             self.stats.permits_created.fetch_add(1, Ordering::Relaxed);
-            self.stats.registry_entries_created.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .registry_entries_created
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         // Commit permits in cycles and verify registry consistency
@@ -316,7 +330,9 @@ impl RealCxRegistryManager {
                         if let Some(entry) = registry.get_mut(&registry_key) {
                             entry.set_committed(true);
                             registry_operations += 1;
-                            self.stats.registry_entries_updated.fetch_add(1, Ordering::Relaxed);
+                            self.stats
+                                .registry_entries_updated
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -326,7 +342,9 @@ impl RealCxRegistryManager {
                         let mut registry = self.registry.write().await;
                         if registry.remove(&registry_key).is_some() {
                             registry_operations += 1;
-                            self.stats.registry_entries_removed.fetch_add(1, Ordering::Relaxed);
+                            self.stats
+                                .registry_entries_removed
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
@@ -337,7 +355,9 @@ impl RealCxRegistryManager {
         let operation_latency = end_time.duration_since(start_time).as_nanos() as u64;
         let success_rate = committed_count as f64 / permit_count as f64;
 
-        self.stats.total_operations.fetch_add(committed_count + registry_operations, Ordering::Relaxed);
+        self.stats
+            .total_operations
+            .fetch_add(committed_count + registry_operations, Ordering::Relaxed);
 
         self.logger.log_operation(
             "permit_commit_cycle",
@@ -404,7 +424,8 @@ impl RealCxRegistryManager {
                         key: target_key.clone(),
                         holder_id: worker_id as u64,
                         reservation_time: Instant::now(),
-                        expiry_time: Instant::now() + Duration::from_millis(config.reservation_duration_ms),
+                        expiry_time: Instant::now()
+                            + Duration::from_millis(config.reservation_duration_ms),
                         committed: false,
                     };
 
@@ -413,7 +434,9 @@ impl RealCxRegistryManager {
                     match registry_guard.try_reserve(&target_key, worker_id as u64) {
                         Ok(()) => {
                             // Successful reservation
-                            stats.concurrent_reservations.fetch_add(1, Ordering::Relaxed);
+                            stats
+                                .concurrent_reservations
+                                .fetch_add(1, Ordering::Relaxed);
                             worker_reservations.push(reservation);
                         }
                         Err(_) => {
@@ -433,13 +456,23 @@ impl RealCxRegistryManager {
 
                     let mut registry_guard = registry.write().await;
                     if should_commit {
-                        if registry_guard.commit_reservation(&reservation.key, worker_id as u64).is_ok() {
+                        if registry_guard
+                            .commit_reservation(&reservation.key, worker_id as u64)
+                            .is_ok()
+                        {
                             reservation.committed = true;
-                            stats.registry_entries_updated.fetch_add(1, Ordering::Relaxed);
+                            stats
+                                .registry_entries_updated
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                     } else {
-                        if registry_guard.abort_reservation(&reservation.key, worker_id as u64).is_ok() {
-                            stats.registry_entries_removed.fetch_add(1, Ordering::Relaxed);
+                        if registry_guard
+                            .abort_reservation(&reservation.key, worker_id as u64)
+                            .is_ok()
+                        {
+                            stats
+                                .registry_entries_removed
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     drop(registry_guard);
@@ -475,10 +508,12 @@ impl RealCxRegistryManager {
         };
 
         let conflicts = self.stats.reservation_conflicts.load(Ordering::Relaxed);
-        let registry_ops = self.stats.registry_entries_updated.load(Ordering::Relaxed) +
-                          self.stats.registry_entries_removed.load(Ordering::Relaxed);
+        let registry_ops = self.stats.registry_entries_updated.load(Ordering::Relaxed)
+            + self.stats.registry_entries_removed.load(Ordering::Relaxed);
 
-        self.stats.total_operations.fetch_add(total_reservations + registry_ops, Ordering::Relaxed);
+        self.stats
+            .total_operations
+            .fetch_add(total_reservations + registry_ops, Ordering::Relaxed);
 
         self.logger.log_operation(
             "concurrent_reservations",
@@ -520,10 +555,9 @@ impl RealCxRegistryManager {
             let attenuated_cx = current_cx.with_capability_set(attenuated_set.clone())?;
 
             // Test operations at this attenuation level
-            let permit_result = self.test_permit_at_attenuation_level(
-                &attenuated_cx,
-                level,
-            ).await;
+            let permit_result = self
+                .test_permit_at_attenuation_level(&attenuated_cx, level)
+                .await;
 
             attenuation_chain.push((level, attenuated_set, permit_result));
             current_cx = attenuated_cx;
@@ -533,11 +567,13 @@ impl RealCxRegistryManager {
         let operation_latency = end_time.duration_since(start_time).as_nanos() as u64;
 
         // Analyze attenuation results
-        let successful_operations = attenuation_chain.iter()
+        let successful_operations = attenuation_chain
+            .iter()
             .filter(|(_, _, result)| result.is_ok())
             .count() as u64;
 
-        let security_violations = attenuation_chain.iter()
+        let security_violations = attenuation_chain
+            .iter()
             .filter(|(_, _, result)| {
                 if let Err(ref err) = result {
                     err.to_string().contains("capability")
@@ -549,9 +585,15 @@ impl RealCxRegistryManager {
 
         let success_rate = successful_operations as f64 / attenuation_depth as f64;
 
-        self.stats.capabilities_created.fetch_add(attenuation_depth as u64, Ordering::Relaxed);
-        self.stats.capability_violations.fetch_add(security_violations, Ordering::Relaxed);
-        self.stats.total_operations.fetch_add(attenuation_depth as u64, Ordering::Relaxed);
+        self.stats
+            .capabilities_created
+            .fetch_add(attenuation_depth as u64, Ordering::Relaxed);
+        self.stats
+            .capability_violations
+            .fetch_add(security_violations, Ordering::Relaxed);
+        self.stats
+            .total_operations
+            .fetch_add(attenuation_depth as u64, Ordering::Relaxed);
 
         self.logger.log_operation(
             "capability_attenuation",
@@ -609,10 +651,14 @@ impl RealCxRegistryManager {
 
                 match violation_result {
                     Ok(()) => successful_operations += 1,
-                    Err(ref err) if err.to_string().contains("capability") ||
-                                   err.to_string().contains("unauthorized") => {
+                    Err(ref err)
+                        if err.to_string().contains("capability")
+                            || err.to_string().contains("unauthorized") =>
+                    {
                         security_violations += 1;
-                        self.stats.capability_violations.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .capability_violations
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                     Err(_) => {
                         // Other error types
@@ -626,7 +672,9 @@ impl RealCxRegistryManager {
 
         let success_rate = successful_operations as f64 / total_attempts as f64;
 
-        self.stats.total_operations.fetch_add(total_attempts as u64, Ordering::Relaxed);
+        self.stats
+            .total_operations
+            .fetch_add(total_attempts as u64, Ordering::Relaxed);
 
         self.logger.log_operation(
             "security_validation",
@@ -696,7 +744,9 @@ impl RealCxRegistryManager {
         cx: &Cx,
         level: usize,
     ) -> Result<(), AsupersyncError> {
-        let permit = cx.create_permit(format!("attenuated-permit-{}", level)).await?;
+        let permit = cx
+            .create_permit(format!("attenuated-permit-{}", level))
+            .await?;
         self.stats.permits_created.fetch_add(1, Ordering::Relaxed);
 
         // Higher levels should have more restrictions
@@ -758,17 +808,33 @@ impl RealCxRegistryManager {
             total_permits_created: self.stats.permits_created.load(Ordering::Relaxed),
             total_permits_committed: self.stats.permits_committed.load(Ordering::Relaxed),
             total_permits_aborted: self.stats.permits_aborted.load(Ordering::Relaxed),
-            total_registry_entries_created: self.stats.registry_entries_created.load(Ordering::Relaxed),
-            total_registry_entries_updated: self.stats.registry_entries_updated.load(Ordering::Relaxed),
-            total_registry_entries_removed: self.stats.registry_entries_removed.load(Ordering::Relaxed),
-            total_concurrent_reservations: self.stats.concurrent_reservations.load(Ordering::Relaxed),
+            total_registry_entries_created: self
+                .stats
+                .registry_entries_created
+                .load(Ordering::Relaxed),
+            total_registry_entries_updated: self
+                .stats
+                .registry_entries_updated
+                .load(Ordering::Relaxed),
+            total_registry_entries_removed: self
+                .stats
+                .registry_entries_removed
+                .load(Ordering::Relaxed),
+            total_concurrent_reservations: self
+                .stats
+                .concurrent_reservations
+                .load(Ordering::Relaxed),
             total_reservation_conflicts: self.stats.reservation_conflicts.load(Ordering::Relaxed),
             total_capability_violations: self.stats.capability_violations.load(Ordering::Relaxed),
             total_operations: self.stats.total_operations.load(Ordering::Relaxed),
             security_violation_rate: {
                 let total_ops = self.stats.total_operations.load(Ordering::Relaxed);
                 let violations = self.stats.capability_violations.load(Ordering::Relaxed);
-                if total_ops > 0 { violations as f64 / total_ops as f64 } else { 0.0 }
+                if total_ops > 0 {
+                    violations as f64 / total_ops as f64
+                } else {
+                    0.0
+                }
             },
         }
     }
@@ -784,30 +850,42 @@ impl CxRegistryE2ELogger {
     }
 
     fn log_phase(&self, phase: &str) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"phase_change\",\"phase\":\"{}\"}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 phase);
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"phase_change\",\"phase\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            phase
+        );
     }
 
-    fn log_operation(&self, operation_type: &str, capabilities: u64, registry_ops: u64, successful_ops: u64) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"cx_registry_operation\",\"operation_type\":\"{}\",\"capabilities\":{},\"registry_ops\":{},\"successful_ops\":{}}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 operation_type,
-                 capabilities,
-                 registry_ops,
-                 successful_ops);
+    fn log_operation(
+        &self,
+        operation_type: &str,
+        capabilities: u64,
+        registry_ops: u64,
+        successful_ops: u64,
+    ) {
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"cx_registry_operation\",\"operation_type\":\"{}\",\"capabilities\":{},\"registry_ops\":{},\"successful_ops\":{}}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            operation_type,
+            capabilities,
+            registry_ops,
+            successful_ops
+        );
     }
 
     fn log_stats_summary(&self, stats: &CxRegistryE2EStatsSummary) {
-        eprintln!("{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"stats_summary\",\"data\":{}}}",
-                 chrono::Utc::now().to_rfc3339(),
-                 self.test_id,
-                 self.component,
-                 serde_json::to_string(stats).unwrap_or_else(|_| "{}".to_string()));
+        eprintln!(
+            "{{\"ts\":\"{}\",\"test_id\":\"{}\",\"component\":\"{}\",\"event\":\"stats_summary\",\"data\":{}}}",
+            chrono::Utc::now().to_rfc3339(),
+            self.test_id,
+            self.component,
+            serde_json::to_string(stats).unwrap_or_else(|_| "{}".to_string())
+        );
     }
 }
 
@@ -888,10 +966,15 @@ mod tests {
                 ..CxRegistryE2EConfig::default()
             };
 
-            let operation = manager.test_capability_lifecycle(&cx, &config).await
+            let operation = manager
+                .test_capability_lifecycle(&cx, &config)
+                .await
                 .expect("Capability lifecycle should succeed");
 
-            assert_eq!(operation.operation_type, CxRegistryOperationType::CapabilityLifecycle);
+            assert_eq!(
+                operation.operation_type,
+                CxRegistryOperationType::CapabilityLifecycle
+            );
             assert_eq!(operation.capabilities_involved, 3);
             assert!(operation.success_rate >= 0.8);
             assert!(operation.security_violations <= 1);
@@ -916,10 +999,15 @@ mod tests {
             let manager = RealCxRegistryManager::new("permit-test");
             let cx = Cx::root();
 
-            let operation = manager.test_permit_commit_cycle(&cx, 10).await
+            let operation = manager
+                .test_permit_commit_cycle(&cx, 10)
+                .await
                 .expect("Permit commit cycle should succeed");
 
-            assert_eq!(operation.operation_type, CxRegistryOperationType::PermitCommitCycle);
+            assert_eq!(
+                operation.operation_type,
+                CxRegistryOperationType::PermitCommitCycle
+            );
             assert!(operation.registry_operations >= 10);
             assert!(operation.success_rate >= 0.7);
             assert_eq!(operation.security_violations, 0);
@@ -951,10 +1039,15 @@ mod tests {
                 ..CxRegistryE2EConfig::default()
             };
 
-            let operation = manager.test_concurrent_registry_reservations(&cx, &config).await
+            let operation = manager
+                .test_concurrent_registry_reservations(&cx, &config)
+                .await
                 .expect("Concurrent reservations should succeed");
 
-            assert_eq!(operation.operation_type, CxRegistryOperationType::ConcurrentReservation);
+            assert_eq!(
+                operation.operation_type,
+                CxRegistryOperationType::ConcurrentReservation
+            );
             assert_eq!(operation.concurrent_operations, 3);
             assert!(operation.success_rate >= 0.5);
 
@@ -977,10 +1070,15 @@ mod tests {
             let manager = RealCxRegistryManager::new("attenuation-test");
             let cx = Cx::root();
 
-            let operation = manager.test_capability_attenuation(&cx, 4).await
+            let operation = manager
+                .test_capability_attenuation(&cx, 4)
+                .await
                 .expect("Capability attenuation should succeed");
 
-            assert_eq!(operation.operation_type, CxRegistryOperationType::CapabilityAttenuation);
+            assert_eq!(
+                operation.operation_type,
+                CxRegistryOperationType::CapabilityAttenuation
+            );
             assert_eq!(operation.capabilities_involved, 4);
             assert!(operation.success_rate >= 0.5); // Some attenuation levels should fail
             assert!(operation.security_violations <= 2); // Expected in deep attenuation
@@ -1004,10 +1102,15 @@ mod tests {
             let manager = RealCxRegistryManager::new("security-test");
             let cx = Cx::root();
 
-            let operation = manager.test_security_validation(&cx, 4).await
+            let operation = manager
+                .test_security_validation(&cx, 4)
+                .await
                 .expect("Security validation should succeed");
 
-            assert_eq!(operation.operation_type, CxRegistryOperationType::SecurityValidation);
+            assert_eq!(
+                operation.operation_type,
+                CxRegistryOperationType::SecurityValidation
+            );
             assert!(operation.security_violations > 0); // Security violations expected
             assert!(operation.success_rate <= 0.5); // Most should fail due to security
 
@@ -1040,35 +1143,43 @@ mod tests {
                 permit_count: 3,
                 ..CxRegistryE2EConfig::default()
             };
-            let capability_op = manager.test_capability_lifecycle(&cx, &config).await
+            let capability_op = manager
+                .test_capability_lifecycle(&cx, &config)
+                .await
                 .expect("Capability lifecycle should succeed");
             all_operations.push(capability_op);
 
             // 2. Permit commit cycle
-            let permit_op = manager.test_permit_commit_cycle(&cx, 5).await
+            let permit_op = manager
+                .test_permit_commit_cycle(&cx, 5)
+                .await
                 .expect("Permit commit cycle should succeed");
             all_operations.push(permit_op);
 
             // 3. Capability attenuation
-            let attenuation_op = manager.test_capability_attenuation(&cx, 3).await
+            let attenuation_op = manager
+                .test_capability_attenuation(&cx, 3)
+                .await
                 .expect("Capability attenuation should succeed");
             all_operations.push(attenuation_op);
 
             // 4. Security validation
-            let security_op = manager.test_security_validation(&cx, 2).await
+            let security_op = manager
+                .test_security_validation(&cx, 2)
+                .await
                 .expect("Security validation should succeed");
             all_operations.push(security_op);
 
             // Validate comprehensive results
             assert_eq!(all_operations.len(), 4);
 
-            let total_capabilities: u64 = all_operations.iter()
+            let total_capabilities: u64 = all_operations
+                .iter()
                 .map(|op| op.capabilities_involved)
                 .sum();
 
-            let total_violations: u64 = all_operations.iter()
-                .map(|op| op.security_violations)
-                .sum();
+            let total_violations: u64 =
+                all_operations.iter().map(|op| op.security_violations).sum();
 
             // Validate overall metrics
             assert!(total_capabilities >= 8);

@@ -6,21 +6,24 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod real_grpc_bidirectional_e2e {
+    use crate::channel::mpsc;
+    use crate::cx::{Cx, scope};
     use crate::grpc::{
-        GrpcServer, GrpcClient, GrpcService, GrpcMethod, GrpcStream,
-        BidirectionalStream, ServerStreamingMethod, ClientStreamingMethod,
-        GrpcRequest, GrpcResponse, GrpcStatus, GrpcMetadata,
+        BidirectionalStream, ClientStreamingMethod, GrpcClient, GrpcMetadata, GrpcMethod,
+        GrpcRequest, GrpcResponse, GrpcServer, GrpcService, GrpcStatus, GrpcStream,
+        ServerStreamingMethod,
     };
     use crate::net::tcp::TcpListener;
     use crate::runtime::{Runtime, spawn};
-    use crate::cx::{Cx, scope};
-    use crate::time::{sleep, Duration, Instant, timeout};
-    use crate::channel::mpsc;
-    use std::sync::{Arc, Mutex, atomic::{AtomicUsize, AtomicU64, Ordering}};
+    use crate::time::{Duration, Instant, sleep, timeout};
+    use bytes::Bytes;
+    use serde_json::{Value, json};
     use std::collections::HashMap;
     use std::net::SocketAddr;
-    use serde_json::{json, Value};
-    use bytes::Bytes;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    };
 
     /// gRPC test harness with bidirectional streaming monitoring
     struct GrpcBidirectionalTestHarness {
@@ -71,10 +74,10 @@ mod real_grpc_bidirectional_e2e {
     impl GrpcBidirectionalTestHarness {
         async fn new() -> Self {
             // Find available port for test server
-            let listener = TcpListener::bind("127.0.0.1:0").await
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
                 .expect("Failed to bind test server");
-            let server_addr = listener.local_addr()
-                .expect("Failed to get server address");
+            let server_addr = listener.local_addr().expect("Failed to get server address");
 
             Self {
                 server_addr,
@@ -100,30 +103,36 @@ mod real_grpc_bidirectional_e2e {
         fn record_stream_stats(&self, stats: StreamStats) {
             self.stream_stats.lock().unwrap().push(stats.clone());
 
-            self.log("grpc_stream_stats", json!({
-                "stream_id": stats.stream_id,
-                "type": stats.stream_type,
-                "messages_sent": stats.messages_sent,
-                "messages_received": stats.messages_received,
-                "bytes_sent": stats.bytes_sent,
-                "bytes_received": stats.bytes_received,
-                "duration_ms": stats.stream_duration_ms,
-                "success": stats.completed_successfully
-            }));
+            self.log(
+                "grpc_stream_stats",
+                json!({
+                    "stream_id": stats.stream_id,
+                    "type": stats.stream_type,
+                    "messages_sent": stats.messages_sent,
+                    "messages_received": stats.messages_received,
+                    "bytes_sent": stats.bytes_sent,
+                    "bytes_received": stats.bytes_received,
+                    "duration_ms": stats.stream_duration_ms,
+                    "success": stats.completed_successfully
+                }),
+            );
         }
 
         fn record_message(&self, message_log: GrpcMessageLog) {
             self.message_log.lock().unwrap().push(message_log.clone());
 
             if message_log.message_id % 10 == 0 || message_log.is_end_stream {
-                self.log("grpc_message", json!({
-                    "stream_id": message_log.stream_id,
-                    "direction": message_log.direction,
-                    "message_id": message_log.message_id,
-                    "size": message_log.message_size,
-                    "sequence": message_log.sequence_number,
-                    "end_stream": message_log.is_end_stream
-                }));
+                self.log(
+                    "grpc_message",
+                    json!({
+                        "stream_id": message_log.stream_id,
+                        "direction": message_log.direction,
+                        "message_id": message_log.message_id,
+                        "size": message_log.message_size,
+                        "sequence": message_log.sequence_number,
+                        "end_stream": message_log.is_end_stream
+                    }),
+                );
             }
         }
 
@@ -136,10 +145,12 @@ mod real_grpc_bidirectional_e2e {
         }
 
         async fn start_test_server(&self) -> Result<Arc<GrpcServer>, String> {
-            let server = Arc::new(GrpcServer::builder()
-                .add_service(TestBidirectionalService::new(self.clone()))
-                .build()
-                .map_err(|e| format!("Server build failed: {}", e))?);
+            let server = Arc::new(
+                GrpcServer::builder()
+                    .add_service(TestBidirectionalService::new(self.clone()))
+                    .build()
+                    .map_err(|e| format!("Server build failed: {}", e))?,
+            );
 
             let server_clone = Arc::clone(&server);
             let bind_addr = self.server_addr;
@@ -154,9 +165,12 @@ mod real_grpc_bidirectional_e2e {
             // Wait for server to start
             sleep(Duration::from_millis(100)).await;
 
-            self.log("grpc_server_started", json!({
-                "address": self.server_addr.to_string()
-            }));
+            self.log(
+                "grpc_server_started",
+                json!({
+                    "address": self.server_addr.to_string()
+                }),
+            );
 
             Ok(server)
         }
@@ -166,9 +180,12 @@ mod real_grpc_bidirectional_e2e {
                 .await
                 .map_err(|e| format!("Client connection failed: {}", e))?;
 
-            self.log("grpc_client_connected", json!({
-                "server_address": self.server_addr.to_string()
-            }));
+            self.log(
+                "grpc_client_connected",
+                json!({
+                    "server_address": self.server_addr.to_string()
+                }),
+            );
 
             Ok(client)
         }
@@ -187,7 +204,8 @@ mod real_grpc_bidirectional_e2e {
             });
 
             // Create bidirectional stream
-            let mut stream = client.bidirectional_stream("test.EchoService/BidirectionalEcho")
+            let mut stream = client
+                .bidirectional_stream("test.EchoService/BidirectionalEcho")
                 .await
                 .map_err(|e| format!("Failed to create bidirectional stream: {}", e))?;
 
@@ -240,7 +258,13 @@ mod real_grpc_bidirectional_e2e {
                         Ok(response_bytes) => {
                             received_count += 1;
                             let response_size = response_bytes.len();
-                            let _ = recv_tx.send((received_count, response_size, received_count >= message_count)).await;
+                            let _ = recv_tx
+                                .send((
+                                    received_count,
+                                    response_size,
+                                    received_count >= message_count,
+                                ))
+                                .await;
 
                             if received_count >= message_count {
                                 break;
@@ -320,7 +344,11 @@ mod real_grpc_bidirectional_e2e {
                 bytes_received,
                 stream_duration_ms: stream_duration.as_millis() as u64,
                 completed_successfully: success,
-                error: if success { None } else { Some("Message count mismatch".to_string()) },
+                error: if success {
+                    None
+                } else {
+                    Some("Message count mismatch".to_string())
+                },
             };
 
             self.record_stream_stats(stats.clone());
@@ -332,27 +360,36 @@ mod real_grpc_bidirectional_e2e {
             let connection_stats = self.connection_stats.lock().unwrap();
 
             // Check success rate
-            let successful_streams = stream_stats.iter().filter(|s| s.completed_successfully).count();
+            let successful_streams = stream_stats
+                .iter()
+                .filter(|s| s.completed_successfully)
+                .count();
             let total_streams = stream_stats.len();
             let success_rate = successful_streams as f64 / total_streams as f64;
 
             if success_rate < 0.9 {
                 return Err(format!(
                     "Success rate too low: {:.1}% ({}/{})",
-                    success_rate * 100.0, successful_streams, total_streams
+                    success_rate * 100.0,
+                    successful_streams,
+                    total_streams
                 ));
             }
 
             // Check average message throughput
-            let avg_duration: f64 = stream_stats.iter()
+            let avg_duration: f64 = stream_stats
+                .iter()
                 .filter(|s| s.completed_successfully)
                 .map(|s| s.stream_duration_ms as f64)
-                .sum::<f64>() / successful_streams as f64;
+                .sum::<f64>()
+                / successful_streams as f64;
 
-            let avg_messages_per_stream: f64 = stream_stats.iter()
+            let avg_messages_per_stream: f64 = stream_stats
+                .iter()
                 .filter(|s| s.completed_successfully)
                 .map(|s| (s.messages_sent + s.messages_received) as f64)
-                .sum::<f64>() / successful_streams as f64;
+                .sum::<f64>()
+                / successful_streams as f64;
 
             let messages_per_second = (avg_messages_per_stream * 1000.0) / avg_duration;
 
@@ -406,28 +443,38 @@ mod real_grpc_bidirectional_e2e {
                         message_count += 1;
 
                         // Echo the message back
-                        let echo_message = format!("Echo: {}", String::from_utf8_lossy(&request_bytes));
+                        let echo_message =
+                            format!("Echo: {}", String::from_utf8_lossy(&request_bytes));
                         let echo_bytes = Bytes::from(echo_message.as_bytes().to_vec());
 
                         if let Err(e) = stream.send_message(echo_bytes).await {
-                            self.harness.log("server_send_error", json!({
-                                "stream_id": stream_id,
-                                "error": e.to_string()
-                            }));
+                            self.harness.log(
+                                "server_send_error",
+                                json!({
+                                    "stream_id": stream_id,
+                                    "error": e.to_string()
+                                }),
+                            );
                             break;
                         }
 
-                        self.harness.log("server_echo", json!({
-                            "stream_id": stream_id,
-                            "message_count": message_count,
-                            "message_size": request_bytes.len()
-                        }));
+                        self.harness.log(
+                            "server_echo",
+                            json!({
+                                "stream_id": stream_id,
+                                "message_count": message_count,
+                                "message_size": request_bytes.len()
+                            }),
+                        );
                     }
                     Err(e) => {
-                        self.harness.log("server_receive_error", json!({
-                            "stream_id": stream_id,
-                            "error": e.to_string()
-                        }));
+                        self.harness.log(
+                            "server_receive_error",
+                            json!({
+                                "stream_id": stream_id,
+                                "error": e.to_string()
+                            }),
+                        );
                         break;
                     }
                 }
@@ -435,16 +482,22 @@ mod real_grpc_bidirectional_e2e {
 
             // Finish the stream
             if let Err(e) = stream.finish_send().await {
-                self.harness.log("server_finish_error", json!({
-                    "stream_id": stream_id,
-                    "error": e.to_string()
-                }));
+                self.harness.log(
+                    "server_finish_error",
+                    json!({
+                        "stream_id": stream_id,
+                        "error": e.to_string()
+                    }),
+                );
             }
 
-            self.harness.log("server_stream_complete", json!({
-                "stream_id": stream_id,
-                "total_messages": message_count
-            }));
+            self.harness.log(
+                "server_stream_complete",
+                json!({
+                    "stream_id": stream_id,
+                    "total_messages": message_count
+                }),
+            );
 
             Ok(())
         }
@@ -456,28 +509,46 @@ mod real_grpc_bidirectional_e2e {
         harness.log("test_start", json!({"test": "single_bidirectional_stream"}));
 
         // Start gRPC server
-        let _server = harness.start_test_server().await
+        let _server = harness
+            .start_test_server()
+            .await
             .expect("Failed to start test server");
 
         // Create client
-        let client = harness.create_client().await
+        let client = harness
+            .create_client()
+            .await
             .expect("Failed to create client");
 
         // Test single bidirectional stream
         let message_count = 20;
-        let stream_result = harness.test_bidirectional_echo_stream(&client, 1, message_count).await;
+        let stream_result = harness
+            .test_bidirectional_echo_stream(&client, 1, message_count)
+            .await;
 
         match stream_result {
             Ok(stats) => {
-                assert!(stats.completed_successfully, "Stream should complete successfully");
-                assert_eq!(stats.messages_sent, message_count, "Should send all messages");
-                assert_eq!(stats.messages_received, message_count, "Should receive all messages");
+                assert!(
+                    stats.completed_successfully,
+                    "Stream should complete successfully"
+                );
+                assert_eq!(
+                    stats.messages_sent, message_count,
+                    "Should send all messages"
+                );
+                assert_eq!(
+                    stats.messages_received, message_count,
+                    "Should receive all messages"
+                );
 
-                harness.log("single_stream_success", json!({
-                    "messages_sent": stats.messages_sent,
-                    "messages_received": stats.messages_received,
-                    "duration_ms": stats.stream_duration_ms
-                }));
+                harness.log(
+                    "single_stream_success",
+                    json!({
+                        "messages_sent": stats.messages_sent,
+                        "messages_received": stats.messages_received,
+                        "duration_ms": stats.stream_duration_ms
+                    }),
+                );
             }
             Err(e) => {
                 panic!("Single bidirectional stream test failed: {}", e);
@@ -486,28 +557,44 @@ mod real_grpc_bidirectional_e2e {
 
         // Validate performance
         let validation_result = harness.validate_bidirectional_performance();
-        assert!(validation_result.is_ok(), "Performance validation failed: {:?}", validation_result);
+        assert!(
+            validation_result.is_ok(),
+            "Performance validation failed: {:?}",
+            validation_result
+        );
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "stream_completed": true,
-            "message_count": message_count,
-            "message": "Single bidirectional stream validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "stream_completed": true,
+                "message_count": message_count,
+                "message": "Single bidirectional stream validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
     async fn test_concurrent_bidirectional_streams() {
         let harness = Arc::new(GrpcBidirectionalTestHarness::new().await);
-        harness.log("test_start", json!({"test": "concurrent_bidirectional_streams"}));
+        harness.log(
+            "test_start",
+            json!({"test": "concurrent_bidirectional_streams"}),
+        );
 
         // Start gRPC server
-        let _server = harness.start_test_server().await
+        let _server = harness
+            .start_test_server()
+            .await
             .expect("Failed to start test server");
 
         // Create client
-        let client = Arc::new(harness.create_client().await
-            .expect("Failed to create client"));
+        let client = Arc::new(
+            harness
+                .create_client()
+                .await
+                .expect("Failed to create client"),
+        );
 
         let num_concurrent_streams = 5;
         let messages_per_stream = 10;
@@ -520,7 +607,9 @@ mod real_grpc_bidirectional_e2e {
             let harness = Arc::clone(&harness);
 
             let handle = spawn(async move {
-                harness.test_bidirectional_echo_stream(&client, stream_id as u64, messages_per_stream).await
+                harness
+                    .test_bidirectional_echo_stream(&client, stream_id as u64, messages_per_stream)
+                    .await
             });
 
             stream_handles.push(handle);
@@ -538,70 +627,98 @@ mod real_grpc_bidirectional_e2e {
                         total_messages += stats.messages_sent + stats.messages_received;
                     }
 
-                    harness.log("concurrent_stream_result", json!({
-                        "stream_id": stats.stream_id,
-                        "success": stats.completed_successfully,
-                        "messages_sent": stats.messages_sent,
-                        "messages_received": stats.messages_received
-                    }));
+                    harness.log(
+                        "concurrent_stream_result",
+                        json!({
+                            "stream_id": stats.stream_id,
+                            "success": stats.completed_successfully,
+                            "messages_sent": stats.messages_sent,
+                            "messages_received": stats.messages_received
+                        }),
+                    );
                 }
                 Err(e) => {
-                    harness.log("concurrent_stream_error", json!({
-                        "error": e
-                    }));
+                    harness.log(
+                        "concurrent_stream_error",
+                        json!({
+                            "error": e
+                        }),
+                    );
                 }
             }
         }
 
         // Validate concurrent performance
-        assert_eq!(successful_streams, num_concurrent_streams,
-            "All concurrent streams should complete successfully");
+        assert_eq!(
+            successful_streams, num_concurrent_streams,
+            "All concurrent streams should complete successfully"
+        );
 
         let expected_total_messages = num_concurrent_streams * messages_per_stream * 2; // Send + receive
-        assert_eq!(total_messages, expected_total_messages,
-            "Total message count should match expected");
+        assert_eq!(
+            total_messages, expected_total_messages,
+            "Total message count should match expected"
+        );
 
         let validation_result = harness.validate_bidirectional_performance();
-        assert!(validation_result.is_ok(), "Concurrent performance validation failed: {:?}", validation_result);
+        assert!(
+            validation_result.is_ok(),
+            "Concurrent performance validation failed: {:?}",
+            validation_result
+        );
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "concurrent_streams": num_concurrent_streams,
-            "successful_streams": successful_streams,
-            "total_messages": total_messages,
-            "message": "Concurrent bidirectional streams validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "concurrent_streams": num_concurrent_streams,
+                "successful_streams": successful_streams,
+                "total_messages": total_messages,
+                "message": "Concurrent bidirectional streams validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
     async fn test_bidirectional_stream_error_handling() {
         let harness = Arc::new(GrpcBidirectionalTestHarness::new().await);
-        harness.log("test_start", json!({"test": "bidirectional_stream_error_handling"}));
+        harness.log(
+            "test_start",
+            json!({"test": "bidirectional_stream_error_handling"}),
+        );
 
         // Start gRPC server
-        let _server = harness.start_test_server().await
+        let _server = harness
+            .start_test_server()
+            .await
             .expect("Failed to start test server");
 
         // Create client
-        let client = harness.create_client().await
+        let client = harness
+            .create_client()
+            .await
             .expect("Failed to create client");
 
         // Test error handling scenarios
         let error_scenarios = vec![
             ("large_message", 1000000), // 1MB message - may hit limits
-            ("rapid_messages", 100),     // Rapid message sending
+            ("rapid_messages", 100),    // Rapid message sending
         ];
 
         for (scenario_name, message_param) in error_scenarios {
-            harness.log("error_scenario_start", json!({
-                "scenario": scenario_name,
-                "parameter": message_param
-            }));
+            harness.log(
+                "error_scenario_start",
+                json!({
+                    "scenario": scenario_name,
+                    "parameter": message_param
+                }),
+            );
 
             let stream_result = match scenario_name {
                 "large_message" => {
                     // Test with very large message
-                    let mut stream = client.bidirectional_stream("test.EchoService/BidirectionalEcho")
+                    let mut stream = client
+                        .bidirectional_stream("test.EchoService/BidirectionalEcho")
                         .await
                         .expect("Failed to create stream");
 
@@ -610,13 +727,17 @@ mod real_grpc_bidirectional_e2e {
                 }
                 "rapid_messages" => {
                     // Test with rapid message sending
-                    let mut stream = client.bidirectional_stream("test.EchoService/BidirectionalEcho")
+                    let mut stream = client
+                        .bidirectional_stream("test.EchoService/BidirectionalEcho")
                         .await
                         .expect("Failed to create stream");
 
                     for i in 0..message_param {
                         let message = format!("Rapid message {}", i);
-                        if let Err(e) = stream.send_message(Bytes::from(message.as_bytes().to_vec())).await {
+                        if let Err(e) = stream
+                            .send_message(Bytes::from(message.as_bytes().to_vec()))
+                            .await
+                        {
                             break;
                         }
                     }
@@ -625,48 +746,65 @@ mod real_grpc_bidirectional_e2e {
                 _ => Ok(()),
             };
 
-            harness.log("error_scenario_result", json!({
-                "scenario": scenario_name,
-                "result": if stream_result.is_ok() { "success" } else { "error" },
-                "error": stream_result.err().map(|e| e.to_string())
-            }));
+            harness.log(
+                "error_scenario_result",
+                json!({
+                    "scenario": scenario_name,
+                    "result": if stream_result.is_ok() { "success" } else { "error" },
+                    "error": stream_result.err().map(|e| e.to_string())
+                }),
+            );
         }
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "error_scenarios_tested": error_scenarios.len(),
-            "message": "Bidirectional stream error handling validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "error_scenarios_tested": error_scenarios.len(),
+                "message": "Bidirectional stream error handling validated successfully"
+            }),
+        );
     }
 
     #[tokio::test]
     async fn test_bidirectional_stream_flow_control() {
         let harness = Arc::new(GrpcBidirectionalTestHarness::new().await);
-        harness.log("test_start", json!({"test": "bidirectional_stream_flow_control"}));
+        harness.log(
+            "test_start",
+            json!({"test": "bidirectional_stream_flow_control"}),
+        );
 
         // Start gRPC server
-        let _server = harness.start_test_server().await
+        let _server = harness
+            .start_test_server()
+            .await
             .expect("Failed to start test server");
 
         // Create client
-        let client = harness.create_client().await
+        let client = harness
+            .create_client()
+            .await
             .expect("Failed to create client");
 
         // Test flow control with different message sizes and rates
         let flow_control_tests = vec![
-            ("small_fast", 100, 10),    // 100 small messages, 10ms interval
-            ("medium_slow", 50, 50),    // 50 medium messages, 50ms interval
-            ("large_burst", 20, 0),     // 20 large messages, no delay
+            ("small_fast", 100, 10), // 100 small messages, 10ms interval
+            ("medium_slow", 50, 50), // 50 medium messages, 50ms interval
+            ("large_burst", 20, 0),  // 20 large messages, no delay
         ];
 
         for (test_name, message_count, delay_ms) in flow_control_tests {
-            harness.log("flow_control_test_start", json!({
-                "test": test_name,
-                "message_count": message_count,
-                "delay_ms": delay_ms
-            }));
+            harness.log(
+                "flow_control_test_start",
+                json!({
+                    "test": test_name,
+                    "message_count": message_count,
+                    "delay_ms": delay_ms
+                }),
+            );
 
-            let mut stream = client.bidirectional_stream("test.EchoService/BidirectionalEcho")
+            let mut stream = client
+                .bidirectional_stream("test.EchoService/BidirectionalEcho")
                 .await
                 .expect("Failed to create stream");
 
@@ -682,7 +820,10 @@ mod real_grpc_bidirectional_e2e {
                 for i in 0..message_count {
                     let message = format!("{} message {} with flow control", test_name, i);
 
-                    match stream.send_message(Bytes::from(message.as_bytes().to_vec())).await {
+                    match stream
+                        .send_message(Bytes::from(message.as_bytes().to_vec()))
+                        .await
+                    {
                         Ok(_) => {
                             let _ = send_tx.send(i).await;
                             if delay_ms > 0 {
@@ -690,11 +831,14 @@ mod real_grpc_bidirectional_e2e {
                             }
                         }
                         Err(e) => {
-                            harness.log("flow_control_send_error", json!({
-                                "test": test_name,
-                                "message_id": i,
-                                "error": e.to_string()
-                            }));
+                            harness.log(
+                                "flow_control_send_error",
+                                json!({
+                                    "test": test_name,
+                                    "message_id": i,
+                                    "error": e.to_string()
+                                }),
+                            );
                             break;
                         }
                     }
@@ -712,10 +856,13 @@ mod real_grpc_bidirectional_e2e {
                             messages_received += 1;
                         }
                         Err(e) => {
-                            harness.log("flow_control_receive_error", json!({
-                                "test": test_name,
-                                "error": e.to_string()
-                            }));
+                            harness.log(
+                                "flow_control_receive_error",
+                                json!({
+                                    "test": test_name,
+                                    "error": e.to_string()
+                                }),
+                            );
                             break;
                         }
                     }
@@ -732,23 +879,37 @@ mod real_grpc_bidirectional_e2e {
             let final_received = receiver_task.await;
             let test_duration = test_start.elapsed();
 
-            harness.log("flow_control_test_result", json!({
-                "test": test_name,
-                "messages_sent": messages_sent,
-                "messages_received": final_received,
-                "duration_ms": test_duration.as_millis(),
-                "expected_count": message_count
-            }));
+            harness.log(
+                "flow_control_test_result",
+                json!({
+                    "test": test_name,
+                    "messages_sent": messages_sent,
+                    "messages_received": final_received,
+                    "duration_ms": test_duration.as_millis(),
+                    "expected_count": message_count
+                }),
+            );
 
             // Validate flow control worked correctly
-            assert_eq!(messages_sent, message_count, "{}: Should send all messages", test_name);
-            assert_eq!(final_received, message_count, "{}: Should receive all messages", test_name);
+            assert_eq!(
+                messages_sent, message_count,
+                "{}: Should send all messages",
+                test_name
+            );
+            assert_eq!(
+                final_received, message_count,
+                "{}: Should receive all messages",
+                test_name
+            );
         }
 
-        harness.log("test_result", json!({
-            "passed": true,
-            "flow_control_tests": flow_control_tests.len(),
-            "message": "Bidirectional stream flow control validated successfully"
-        }));
+        harness.log(
+            "test_result",
+            json!({
+                "passed": true,
+                "flow_control_tests": flow_control_tests.len(),
+                "message": "Bidirectional stream flow control validated successfully"
+            }),
+        );
     }
 }
