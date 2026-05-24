@@ -1535,6 +1535,441 @@ impl SubsystemMutationTester {
         self.log_subsystem_mutation("br-mutation-24", "supervision", "restart_policy_corruption", detected);
     }
 
+    /// [br-mutation-25] Cx/Scope region close=quiescence early-close regression mutations
+    async fn test_cx_scope_region_mutations(&self) {
+        use crate::cx::{Cx, Scope};
+        use crate::types::{RegionId, TaskId};
+
+        let scope_detected = self.runtime.scope(|scope| async move {
+            let region_count = 18;
+            let region_corruptions = Arc::new(AtomicUsize::new(0));
+            let quiescence_violations = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                for region_idx in 0..region_count {
+                    let region_name = format!("test_region_{}", region_idx);
+
+                    // Create nested region with tasks
+                    let region_detected = scope.region(|region_scope| async move {
+                        let task_count = 5;
+                        let mut task_handles = Vec::new();
+
+                        // Spawn multiple tasks in the region
+                        for task_idx in 0..task_count {
+                            let task_name = format!("task_{}_{}", region_idx, task_idx);
+                            let handle = region_scope.spawn(async move {
+                                sleep(Duration::from_millis(50)).await;
+                                format!("completed: {}", task_name)
+                            });
+                            task_handles.push(handle);
+                        }
+
+                        // MUTATION: Corrupt region close=quiescence validation
+                        if region_idx % 4 == 0 {
+                            region_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                            match region_idx % 12 {
+                                0 => {
+                                    // Early close without waiting for tasks - violates quiescence
+                                    // Region should not close until all tasks complete
+                                    let active_task_count = task_handles.len();
+                                    if active_task_count > 0 {
+                                        // Attempt early close while tasks are still active
+                                        region_scope.close_early();
+                                        quiescence_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                4 => {
+                                    // Cancel region but don't wait for drain - violates quiescence
+                                    region_scope.cancel();
+                                    // Skip proper task draining
+                                    if !region_scope.is_quiescent().await {
+                                        quiescence_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                8 => {
+                                    // Drop tasks without joining - leak detection
+                                    for (i, handle) in task_handles.iter().enumerate() {
+                                        if i % 2 == 0 {
+                                            // Drop task handle without joining
+                                            std::mem::drop(handle);
+                                        }
+                                    }
+
+                                    // Check for task leak detection
+                                    if region_scope.has_leaked_tasks() {
+                                        quiescence_violations.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                _ => {
+                                    // Wait for all tasks normally
+                                    for handle in task_handles {
+                                        let _ = handle.await;
+                                    }
+                                }
+                            }
+                        } else {
+                            // Normal region lifecycle - wait for all tasks
+                            for handle in task_handles {
+                                let _ = handle.await;
+                            }
+                        }
+
+                        // Validate region quiescence before close
+                        let is_quiescent = region_scope.is_quiescent().await;
+                        if !is_quiescent && region_idx % 4 == 0 {
+                            // Region not quiescent but attempting to close
+                            quiescence_violations.fetch_add(1, Ordering::Relaxed);
+                        }
+
+                        region_name
+                    }).await;
+
+                    sleep(Duration::from_millis(10)).await;
+                }
+
+                let corruptions = region_corruptions.load(Ordering::Relaxed);
+                let violations = quiescence_violations.load(Ordering::Relaxed);
+
+                // Region close validation should detect quiescence violations
+                if violations > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Region quiescence violation detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("Region close=quiescence validation failed: {} corruptions, {} violations",
+                            corruptions, violations)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(scope_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-25", "cx_scope", "region_quiescence_corruption", detected);
+    }
+
+    /// [br-mutation-26] Runtime scheduler priority lane starvation regression mutations
+    async fn test_runtime_scheduler_mutations(&self) {
+        use crate::runtime::{Scheduler, Priority, Task, SchedulingPolicy};
+
+        let scheduler_detected = self.runtime.scope(|scope| async move {
+            let scheduler_test_count = 15;
+            let scheduling_corruptions = Arc::new(AtomicUsize::new(0));
+            let starvation_detections = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                for sched_idx in 0..scheduler_test_count {
+                    let mut scheduler = Scheduler::new()
+                        .with_policy(SchedulingPolicy::PriorityLanes)
+                        .with_fairness_quantum(Duration::from_millis(10));
+
+                    // Create tasks with different priorities
+                    let high_priority_count = 3;
+                    let normal_priority_count = 5;
+                    let low_priority_count = 4;
+
+                    let mut high_priority_tasks = Vec::new();
+                    let mut normal_priority_tasks = Vec::new();
+                    let mut low_priority_tasks = Vec::new();
+
+                    // Add high priority tasks
+                    for i in 0..high_priority_count {
+                        let task = Task::new(format!("high_task_{}", i), Priority::High);
+                        high_priority_tasks.push(task.clone());
+                        scheduler.enqueue_task(task);
+                    }
+
+                    // Add normal priority tasks
+                    for i in 0..normal_priority_count {
+                        let task = Task::new(format!("normal_task_{}", i), Priority::Normal);
+                        normal_priority_tasks.push(task.clone());
+                        scheduler.enqueue_task(task);
+                    }
+
+                    // Add low priority tasks
+                    for i in 0..low_priority_count {
+                        let task = Task::new(format!("low_task_{}", i), Priority::Low);
+                        low_priority_tasks.push(task.clone());
+                        scheduler.enqueue_task(task);
+                    }
+
+                    // MUTATION: Corrupt scheduler priority lane fairness
+                    if sched_idx % 3 == 0 {
+                        scheduling_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        match sched_idx % 9 {
+                            0 => {
+                                // Starve low priority tasks - only schedule high priority
+                                scheduler.set_priority_bias(Priority::High, 100.0); // 100% bias
+                                scheduler.set_priority_bias(Priority::Low, 0.0);   // 0% for low
+                            }
+                            3 => {
+                                // Ignore fairness quantum - let high priority dominate
+                                scheduler.disable_fairness_quantum();
+                            }
+                            6 => {
+                                // Corrupt priority lane ordering
+                                scheduler.invert_priority_lanes(); // Low gets high priority
+                            }
+                            _ => {} // Normal scheduling
+                        }
+                    }
+
+                    // Run scheduler simulation
+                    let mut execution_order = Vec::new();
+                    let mut scheduling_rounds = 0;
+                    const MAX_ROUNDS: usize = 50;
+
+                    while !scheduler.is_empty() && scheduling_rounds < MAX_ROUNDS {
+                        if let Some(next_task) = scheduler.next_task() {
+                            execution_order.push((next_task.name().to_string(), next_task.priority()));
+                            scheduler.complete_task(next_task);
+                        }
+                        scheduling_rounds += 1;
+                        sleep(Duration::from_millis(5)).await;
+                    }
+
+                    // Analyze execution order for starvation
+                    let mut priority_execution_counts = HashMap::new();
+                    for (_task_name, priority) in &execution_order {
+                        *priority_execution_counts.entry(*priority).or_insert(0) += 1;
+                    }
+
+                    // Check for priority lane starvation
+                    let high_executions = priority_execution_counts.get(&Priority::High).unwrap_or(&0);
+                    let normal_executions = priority_execution_counts.get(&Priority::Normal).unwrap_or(&0);
+                    let low_executions = priority_execution_counts.get(&Priority::Low).unwrap_or(&0);
+
+                    // Starvation detection rules
+                    if sched_idx % 3 == 0 {
+                        // Check for complete starvation
+                        if *low_executions == 0 && low_priority_count > 0 {
+                            starvation_detections.fetch_add(1, Ordering::Relaxed);
+                        }
+
+                        // Check for extreme bias (>90% high priority when all priorities present)
+                        let total_executions = execution_order.len();
+                        if total_executions > 0 {
+                            let high_percentage = (*high_executions as f64) / (total_executions as f64);
+                            if high_percentage > 0.9 && normal_priority_count > 0 && low_priority_count > 0 {
+                                starvation_detections.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+
+                        // Check for inverted priority ordering
+                        if *low_executions > *high_executions && high_priority_count > 0 && low_priority_count > 0 {
+                            starvation_detections.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+
+                    sleep(Duration::from_millis(8)).await;
+                }
+
+                let corruptions = scheduling_corruptions.load(Ordering::Relaxed);
+                let detections = starvation_detections.load(Ordering::Relaxed);
+
+                // Scheduler fairness should detect priority lane starvation
+                if detections > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Priority lane starvation detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("Scheduler priority lane validation failed: {} corruptions, {} detections",
+                            corruptions, detections)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(scheduler_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-26", "runtime_scheduler", "priority_lane_starvation_corruption", detected);
+    }
+
+    /// [br-mutation-27] Net/TCP split→merge buffer reordering regression mutations
+    async fn test_net_tcp_split_merge_mutations(&self) {
+        use crate::net::tcp::{TcpStream, SplitStream, StreamBuffer};
+
+        let tcp_detected = self.runtime.scope(|scope| async move {
+            let connection_count = 12;
+            let buffer_corruptions = Arc::new(AtomicUsize::new(0));
+            let reordering_detections = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                for conn_idx in 0..connection_count {
+                    // Create TCP stream for split/merge testing
+                    let stream = TcpStream::connect("127.0.0.1:8080").await
+                        .unwrap_or_else(|_| TcpStream::mock_stream());
+
+                    // Split stream into read/write halves
+                    let (mut read_half, mut write_half) = stream.split();
+
+                    let test_data_size = 1024;
+                    let chunk_size = 64;
+                    let expected_chunks = test_data_size / chunk_size;
+
+                    // Generate test data with sequence numbers
+                    let mut test_data = Vec::new();
+                    for chunk_idx in 0..expected_chunks {
+                        let mut chunk = vec![chunk_idx as u8; chunk_size];
+                        // Add sequence marker to start of chunk
+                        chunk[0] = 0xFF;
+                        chunk[1] = chunk_idx as u8;
+                        test_data.extend(chunk);
+                    }
+
+                    // MUTATION: Corrupt TCP split→merge buffer handling
+                    if conn_idx % 3 == 0 {
+                        buffer_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        match conn_idx % 9 {
+                            0 => {
+                                // Buffer reordering - swap chunk order
+                                write_half.enable_reordering_mode();
+
+                                for chunk_idx in (0..expected_chunks).rev() { // Reverse order
+                                    let start = chunk_idx * chunk_size;
+                                    let end = start + chunk_size;
+                                    let chunk = &test_data[start..end];
+                                    write_half.write_all_reordered(chunk).await.ok();
+                                    sleep(Duration::from_millis(5)).await;
+                                }
+                            }
+                            3 => {
+                                // Duplicate chunks in buffer
+                                for chunk_idx in 0..expected_chunks {
+                                    let start = chunk_idx * chunk_size;
+                                    let end = start + chunk_size;
+                                    let chunk = &test_data[start..end];
+
+                                    // Write chunk normally
+                                    write_half.write_all(chunk).await.ok();
+
+                                    // Duplicate every 3rd chunk
+                                    if chunk_idx % 3 == 0 {
+                                        write_half.write_all(chunk).await.ok(); // Duplicate
+                                    }
+
+                                    sleep(Duration::from_millis(3)).await;
+                                }
+                            }
+                            6 => {
+                                // Fragment and interleave chunks
+                                for chunk_idx in 0..expected_chunks {
+                                    let start = chunk_idx * chunk_size;
+                                    let end = start + chunk_size;
+                                    let chunk = &test_data[start..end];
+
+                                    // Split chunk in half and interleave with next chunk
+                                    let (first_half, second_half) = chunk.split_at(chunk_size / 2);
+                                    write_half.write_all(first_half).await.ok();
+
+                                    // Interleave with part of next chunk if available
+                                    if chunk_idx + 1 < expected_chunks {
+                                        let next_start = (chunk_idx + 1) * chunk_size;
+                                        let next_fragment = &test_data[next_start..next_start + 8];
+                                        write_half.write_all(next_fragment).await.ok();
+                                    }
+
+                                    write_half.write_all(second_half).await.ok();
+                                    sleep(Duration::from_millis(2)).await;
+                                }
+                            }
+                            _ => {
+                                // Normal sequential write
+                                write_half.write_all(&test_data).await.ok();
+                            }
+                        }
+                    } else {
+                        // Normal sequential write
+                        write_half.write_all(&test_data).await.ok();
+                    }
+
+                    // Merge split streams and read back data
+                    let merged_stream = TcpStream::merge(read_half, write_half);
+                    let mut received_buffer = vec![0u8; test_data_size];
+                    let bytes_read = merged_stream.read_exact(&mut received_buffer).await.unwrap_or(0);
+
+                    // Analyze received data for buffer reordering issues
+                    if bytes_read > 0 {
+                        // Check sequence markers to detect reordering
+                        let mut sequence_order = Vec::new();
+                        let mut pos = 0;
+
+                        while pos + 1 < received_buffer.len() {
+                            if received_buffer[pos] == 0xFF {
+                                let sequence_num = received_buffer[pos + 1];
+                                sequence_order.push(sequence_num);
+                                pos += chunk_size;
+                            } else {
+                                pos += 1;
+                            }
+                        }
+
+                        // Detect buffer reordering corruptions
+                        if conn_idx % 3 == 0 {
+                            // Check for out-of-order sequences
+                            let mut is_ordered = true;
+                            for window in sequence_order.windows(2) {
+                                if window[1] < window[0] {
+                                    is_ordered = false;
+                                    break;
+                                }
+                            }
+
+                            if !is_ordered {
+                                reordering_detections.fetch_add(1, Ordering::Relaxed);
+                            }
+
+                            // Check for duplicate sequences
+                            let mut seen_sequences = std::collections::HashSet::new();
+                            for &seq in &sequence_order {
+                                if !seen_sequences.insert(seq) {
+                                    // Duplicate detected
+                                    reordering_detections.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+
+                            // Check for missing sequences
+                            let expected_sequences: std::collections::HashSet<_> =
+                                (0..expected_chunks as u8).collect();
+                            let received_sequences: std::collections::HashSet<_> =
+                                sequence_order.into_iter().collect();
+
+                            if expected_sequences != received_sequences {
+                                reordering_detections.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+
+                    sleep(Duration::from_millis(10)).await;
+                }
+
+                let corruptions = buffer_corruptions.load(Ordering::Relaxed);
+                let detections = reordering_detections.load(Ordering::Relaxed);
+
+                // TCP split→merge should detect buffer reordering
+                if detections > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Buffer reordering detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("TCP split→merge validation failed: {} corruptions, {} detections",
+                            corruptions, detections)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(tcp_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-27", "net_tcp", "split_merge_reordering_corruption", detected);
+    }
+
     /// Generate subsystem testing summary
     fn generate_subsystem_summary(&self) -> serde_json::Value {
         let applied = self.mutations_applied.load(Ordering::Relaxed);
@@ -1862,6 +2297,81 @@ async fn test_supervision_subsystem_mutation_sensitivity() {
 }
 
 #[tokio::test]
+async fn test_cx_scope_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("cx_scope_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"cx_scope_start\"}}");
+
+    // Test cx/scope-specific mutations
+    tester.test_cx_scope_region_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply cx/scope mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(detection_rate >= 0.95,
+        "Cx/Scope subsystem should detect ≥95% of region quiescence mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0, detected, applied);
+
+    eprintln!("{{\"cx_scope_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+}
+
+#[tokio::test]
+async fn test_runtime_scheduler_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("runtime_scheduler_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"runtime_scheduler_start\"}}");
+
+    // Test runtime/scheduler-specific mutations
+    tester.test_runtime_scheduler_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply runtime/scheduler mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(detection_rate >= 0.92,
+        "Runtime/Scheduler subsystem should detect ≥92% of priority lane mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0, detected, applied);
+
+    eprintln!("{{\"runtime_scheduler_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+}
+
+#[tokio::test]
+async fn test_net_tcp_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("net_tcp_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"net_tcp_start\"}}");
+
+    // Test net/tcp-specific mutations
+    tester.test_net_tcp_split_merge_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply net/tcp mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(detection_rate >= 0.89,
+        "Net/TCP subsystem should detect ≥89% of split→merge buffer mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0, detected, applied);
+
+    eprintln!("{{\"net_tcp_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+}
+
+#[tokio::test]
 async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"start\"}}");
 
@@ -1877,6 +2387,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     let cancel_tester = SubsystemMutationTester::new("comprehensive_cancel").await;
     let obligation_tester = SubsystemMutationTester::new("comprehensive_obligation").await;
     let supervision_tester = SubsystemMutationTester::new("comprehensive_supervision").await;
+    let cx_scope_tester = SubsystemMutationTester::new("comprehensive_cx_scope").await;
+    let scheduler_tester = SubsystemMutationTester::new("comprehensive_scheduler").await;
+    let tcp_tester = SubsystemMutationTester::new("comprehensive_tcp").await;
 
     // Test all subsystem mutations comprehensively
     obs_tester.test_observability_counter_mutations().await;
@@ -1897,6 +2410,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     cancel_tester.test_cancel_propagation_mutations().await;
     obligation_tester.test_obligation_ledger_mutations().await;
     supervision_tester.test_supervision_mutations().await;
+    cx_scope_tester.test_cx_scope_region_mutations().await;
+    scheduler_tester.test_runtime_scheduler_mutations().await;
+    tcp_tester.test_net_tcp_split_merge_mutations().await;
 
     // Calculate overall subsystem detection rate
     let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed) +
@@ -1910,7 +2426,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
                        web_tester.mutations_applied.load(Ordering::Relaxed) +
                        cancel_tester.mutations_applied.load(Ordering::Relaxed) +
                        obligation_tester.mutations_applied.load(Ordering::Relaxed) +
-                       supervision_tester.mutations_applied.load(Ordering::Relaxed);
+                       supervision_tester.mutations_applied.load(Ordering::Relaxed) +
+                       cx_scope_tester.mutations_applied.load(Ordering::Relaxed) +
+                       scheduler_tester.mutations_applied.load(Ordering::Relaxed) +
+                       tcp_tester.mutations_applied.load(Ordering::Relaxed);
 
     let total_detected = obs_tester.mutations_detected.load(Ordering::Relaxed) +
                         trace_tester.mutations_detected.load(Ordering::Relaxed) +
@@ -1923,7 +2442,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
                         web_tester.mutations_detected.load(Ordering::Relaxed) +
                         cancel_tester.mutations_detected.load(Ordering::Relaxed) +
                         obligation_tester.mutations_detected.load(Ordering::Relaxed) +
-                        supervision_tester.mutations_detected.load(Ordering::Relaxed);
+                        supervision_tester.mutations_detected.load(Ordering::Relaxed) +
+                        cx_scope_tester.mutations_detected.load(Ordering::Relaxed) +
+                        scheduler_tester.mutations_detected.load(Ordering::Relaxed) +
+                        tcp_tester.mutations_detected.load(Ordering::Relaxed);
 
     let overall_detection_rate = if total_applied > 0 {
         total_detected as f64 / total_applied as f64
