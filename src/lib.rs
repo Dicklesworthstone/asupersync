@@ -472,6 +472,8 @@ pub mod real_raptorq_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_encoding_raptorq_decoding_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_raptorq_linalg_raptorq_systematic_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_proof_raptorq_regression_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_scheduler_e2e_tests;
