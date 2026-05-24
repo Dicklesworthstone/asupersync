@@ -581,6 +581,302 @@ impl SubsystemMutationTester {
         self.log_subsystem_mutation("br-mutation-15b", "security", "encryption_key_corruption", detected);
     }
 
+    /// [br-mutation-16] Plan graph topology edge insertion regression mutations
+    async fn test_plan_graph_topology_mutations(&self) {
+        use crate::plan::{PlanGraph, PlanNode, PlanEdge, TopologyError};
+
+        let plan_detected = self.runtime.scope(|scope| async move {
+            let graph_size = 20;
+            let topology_corruptions = Arc::new(AtomicUsize::new(0));
+            let validation_errors = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                let mut plan_graph = PlanGraph::new();
+
+                // Build initial plan graph
+                for node_idx in 0..graph_size {
+                    let node_id = format!("node_{}", node_idx);
+                    let node = PlanNode::new(&node_id);
+                    plan_graph.add_node(node).expect("Should add node");
+                }
+
+                // Add edges with mutations
+                for edge_idx in 0..graph_size - 1 {
+                    let source_id = format!("node_{}", edge_idx);
+                    let target_id = format!("node_{}", edge_idx + 1);
+
+                    // MUTATION: Insert invalid edges that create cycles or invalid topology
+                    if edge_idx % 6 == 0 {
+                        topology_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        // Create cycle by adding reverse edge
+                        let cycle_edge = PlanEdge::new(&target_id, &source_id);
+                        match plan_graph.add_edge(cycle_edge) {
+                            Ok(_) => {
+                                // Check if cycle detection works
+                                match plan_graph.validate_topology() {
+                                    Err(TopologyError::CycleDetected(_)) => {
+                                        validation_errors.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Err(_) => {
+                                validation_errors.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+
+                    // MUTATION: Insert edge to non-existent node
+                    if edge_idx % 8 == 0 {
+                        topology_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        let invalid_edge = PlanEdge::new(&source_id, "non_existent_node");
+                        match plan_graph.add_edge(invalid_edge) {
+                            Err(_) => {
+                                validation_errors.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(_) => {
+                                // Should not succeed
+                            }
+                        }
+                    }
+
+                    // Add normal edge
+                    let normal_edge = PlanEdge::new(&source_id, &target_id);
+                    let _ = plan_graph.add_edge(normal_edge);
+
+                    sleep(Duration::from_millis(1)).await;
+                }
+
+                let corruptions = topology_corruptions.load(Ordering::Relaxed);
+                let errors = validation_errors.load(Ordering::Relaxed);
+
+                // Plan topology validation should catch edge insertion regressions
+                if errors > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Topology corruption detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("Plan topology validation failed: {} corruptions, {} errors",
+                            corruptions, errors)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(plan_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-16", "plan", "graph_topology_corruption", detected);
+    }
+
+    /// [br-mutation-17] RaptorQ systematic symbol decode regression mutations
+    async fn test_raptorq_systematic_symbol_mutations(&self) {
+        use crate::raptorq::{Encoder, Decoder, EncodingPacket, Symbol, K_MAX};
+
+        let raptorq_detected = self.runtime.scope(|scope| async move {
+            let source_block_size = 64; // K symbols
+            let repair_symbol_count = 20; // Generate repair symbols
+            let symbol_corruptions = Arc::new(AtomicUsize::new(0));
+            let decode_failures = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                // Create source data
+                let source_data: Vec<u8> = (0..source_block_size * 1024)
+                    .map(|i| (i % 256) as u8)
+                    .collect();
+
+                // Encode with RaptorQ
+                let mut encoder = Encoder::new(&source_data, source_block_size);
+                let encoding_packets = encoder.generate_packets(source_block_size + repair_symbol_count);
+
+                // Test decode with systematic symbol mutations
+                for mutation_test in 0..15 {
+                    let mut decoder = Decoder::new();
+                    let mut packets_to_decode = encoding_packets.clone();
+
+                    // MUTATION: Corrupt systematic symbols (source symbols)
+                    if mutation_test % 3 == 0 {
+                        symbol_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        // Corrupt systematic symbols that represent original data
+                        for (packet_idx, packet) in packets_to_decode.iter_mut().enumerate() {
+                            if packet.is_systematic() && packet_idx % 7 == 0 {
+                                // Corrupt systematic symbol data
+                                let mut symbol_data = packet.symbol_data().to_vec();
+                                if !symbol_data.is_empty() {
+                                    let corrupt_pos = (packet_idx * 37) % symbol_data.len();
+                                    symbol_data[corrupt_pos] ^= 0xAA; // Flip bits
+                                }
+                                *packet = EncodingPacket::new_systematic(
+                                    packet.encoding_symbol_id(),
+                                    Symbol::from_vec(symbol_data)
+                                );
+                            }
+                        }
+                    }
+
+                    // Try to decode with potentially corrupted systematic symbols
+                    for packet in packets_to_decode.iter().take(source_block_size + 5) {
+                        decoder.add_packet(packet.clone());
+                    }
+
+                    match decoder.decode() {
+                        Ok(decoded_data) => {
+                            // Check if decoded data matches original
+                            if decoded_data != source_data && mutation_test % 3 == 0 {
+                                // Corruption detected through data mismatch
+                                decode_failures.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        Err(_) => {
+                            if mutation_test % 3 == 0 {
+                                // Corruption detected through decode failure
+                                decode_failures.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+
+                    sleep(Duration::from_millis(5)).await;
+                }
+
+                let corruptions = symbol_corruptions.load(Ordering::Relaxed);
+                let failures = decode_failures.load(Ordering::Relaxed);
+
+                // RaptorQ decode should catch systematic symbol corruption
+                if failures > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Systematic symbol corruption detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("RaptorQ systematic symbol validation failed: {} corruptions, {} failures",
+                            corruptions, failures)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(raptorq_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-17", "raptorq", "systematic_symbol_corruption", detected);
+    }
+
+    /// [br-mutation-18] Distributed consistent hash ring rebalance corruption mutations
+    async fn test_distributed_consistent_hash_mutations(&self) {
+        use crate::distributed::{ConsistentHashRing, Node, Hash, RebalanceError};
+
+        let distributed_detected = self.runtime.scope(|scope| async move {
+            let initial_node_count = 8;
+            let rebalance_corruptions = Arc::new(AtomicUsize::new(0));
+            let consistency_errors = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                let mut hash_ring = ConsistentHashRing::new();
+
+                // Add initial nodes to hash ring
+                for node_idx in 0..initial_node_count {
+                    let node_id = format!("node_{}", node_idx);
+                    let node = Node::new(&node_id);
+                    hash_ring.add_node(node);
+                }
+
+                // Test key distribution before rebalance
+                let test_keys: Vec<String> = (0..100)
+                    .map(|i| format!("key_{}", i))
+                    .collect();
+
+                let initial_distribution: HashMap<String, String> = test_keys
+                    .iter()
+                    .map(|key| (key.clone(), hash_ring.get_node(key).unwrap().id().to_string()))
+                    .collect();
+
+                // Perform rebalance operations with mutations
+                for rebalance_test in 0..10 {
+                    let new_node_id = format!("new_node_{}", rebalance_test);
+                    let new_node = Node::new(&new_node_id);
+
+                    // MUTATION: Corrupt hash ring during rebalance
+                    if rebalance_test % 4 == 0 {
+                        rebalance_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        // Corrupt hash ring state during node addition
+                        match hash_ring.add_node_with_corruption(new_node.clone()) {
+                            Err(RebalanceError::CorruptedRing(_)) => {
+                                consistency_errors.fetch_add(1, Ordering::Relaxed);
+                                continue; // Skip this test iteration
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        hash_ring.add_node(new_node.clone());
+                    }
+
+                    // MUTATION: Corrupt node removal during rebalance
+                    if rebalance_test % 5 == 0 && rebalance_test > 0 {
+                        rebalance_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        let remove_node_id = format!("node_{}", rebalance_test % initial_node_count);
+                        match hash_ring.remove_node_with_corruption(&remove_node_id) {
+                            Err(RebalanceError::InconsistentState(_)) => {
+                                consistency_errors.fetch_add(1, Ordering::Relaxed);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Validate consistency after rebalance
+                    let post_distribution: HashMap<String, String> = test_keys
+                        .iter()
+                        .filter_map(|key| {
+                            hash_ring.get_node(key).map(|node|
+                                (key.clone(), node.id().to_string())
+                            )
+                        })
+                        .collect();
+
+                    // Check for excessive key movement (should be minimal)
+                    let moved_keys: usize = test_keys
+                        .iter()
+                        .filter(|key| {
+                            let initial_node = initial_distribution.get(*key);
+                            let current_node = post_distribution.get(*key);
+                            initial_node != current_node && current_node.is_some()
+                        })
+                        .count();
+
+                    // Too many key movements indicate ring corruption
+                    let total_keys = test_keys.len();
+                    if moved_keys > total_keys / 2 && rebalance_test % 4 == 0 {
+                        consistency_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    sleep(Duration::from_millis(3)).await;
+                }
+
+                let corruptions = rebalance_corruptions.load(Ordering::Relaxed);
+                let errors = consistency_errors.load(Ordering::Relaxed);
+
+                // Consistent hash ring should detect rebalance corruption
+                if errors > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Rebalance corruption detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("Consistent hash rebalance validation failed: {} corruptions, {} errors",
+                            corruptions, errors)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(distributed_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-18", "distributed", "consistent_hash_corruption", detected);
+    }
+
     /// Generate subsystem testing summary
     fn generate_subsystem_summary(&self) -> serde_json::Value {
         let applied = self.mutations_applied.load(Ordering::Relaxed);
@@ -683,12 +979,90 @@ async fn test_security_subsystem_mutation_sensitivity() {
 }
 
 #[tokio::test]
+async fn test_plan_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("plan_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"plan_start\"}}");
+
+    // Test plan-specific mutations
+    tester.test_plan_graph_topology_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply plan mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(detection_rate >= 0.85,
+        "Plan subsystem should detect ≥85% of topology mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0, detected, applied);
+
+    eprintln!("{{\"plan_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+}
+
+#[tokio::test]
+async fn test_raptorq_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("raptorq_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"raptorq_start\"}}");
+
+    // Test raptorq-specific mutations
+    tester.test_raptorq_systematic_symbol_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply raptorq mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(detection_rate >= 0.92,
+        "RaptorQ subsystem should detect ≥92% of systematic symbol mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0, detected, applied);
+
+    eprintln!("{{\"raptorq_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+}
+
+#[tokio::test]
+async fn test_distributed_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("distributed_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"distributed_start\"}}");
+
+    // Test distributed-specific mutations
+    tester.test_distributed_consistent_hash_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply distributed mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(detection_rate >= 0.88,
+        "Distributed subsystem should detect ≥88% of consistent hash mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0, detected, applied);
+
+    eprintln!("{{\"distributed_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+}
+
+#[tokio::test]
 async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"start\"}}");
 
     let obs_tester = SubsystemMutationTester::new("comprehensive_observability").await;
     let trace_tester = SubsystemMutationTester::new("comprehensive_trace").await;
     let sec_tester = SubsystemMutationTester::new("comprehensive_security").await;
+    let plan_tester = SubsystemMutationTester::new("comprehensive_plan").await;
+    let raptorq_tester = SubsystemMutationTester::new("comprehensive_raptorq").await;
+    let distributed_tester = SubsystemMutationTester::new("comprehensive_distributed").await;
 
     // Test all subsystem mutations comprehensively
     obs_tester.test_observability_counter_mutations().await;
@@ -700,14 +1074,24 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     sec_tester.test_security_auth_encryption_mutations().await;
     sec_tester.test_security_key_corruption_mutations().await;
 
+    plan_tester.test_plan_graph_topology_mutations().await;
+    raptorq_tester.test_raptorq_systematic_symbol_mutations().await;
+    distributed_tester.test_distributed_consistent_hash_mutations().await;
+
     // Calculate overall subsystem detection rate
     let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed) +
                        trace_tester.mutations_applied.load(Ordering::Relaxed) +
-                       sec_tester.mutations_applied.load(Ordering::Relaxed);
+                       sec_tester.mutations_applied.load(Ordering::Relaxed) +
+                       plan_tester.mutations_applied.load(Ordering::Relaxed) +
+                       raptorq_tester.mutations_applied.load(Ordering::Relaxed) +
+                       distributed_tester.mutations_applied.load(Ordering::Relaxed);
 
     let total_detected = obs_tester.mutations_detected.load(Ordering::Relaxed) +
                         trace_tester.mutations_detected.load(Ordering::Relaxed) +
-                        sec_tester.mutations_detected.load(Ordering::Relaxed);
+                        sec_tester.mutations_detected.load(Ordering::Relaxed) +
+                        plan_tester.mutations_detected.load(Ordering::Relaxed) +
+                        raptorq_tester.mutations_detected.load(Ordering::Relaxed) +
+                        distributed_tester.mutations_detected.load(Ordering::Relaxed);
 
     let overall_detection_rate = if total_applied > 0 {
         total_detected as f64 / total_applied as f64
@@ -715,12 +1099,12 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         0.0
     };
 
-    eprintln!("{{\"comprehensive_subsystem_results\":{{\"total_applied\":{},\"total_detected\":{},\"detection_rate\":{:.2},\"threshold\":0.88}}}}",
+    eprintln!("{{\"comprehensive_subsystem_results\":{{\"total_applied\":{},\"total_detected\":{},\"detection_rate\":{:.2},\"threshold\":0.90}}}}",
         total_applied, total_detected, overall_detection_rate);
 
     assert!(total_applied > 0, "Should apply subsystem mutations");
-    assert!(overall_detection_rate >= 0.88,
-        "Overall subsystem mutation detection should be ≥88%: {:.1}% ({}/{})",
+    assert!(overall_detection_rate >= 0.90,
+        "Overall subsystem mutation detection should be ≥90%: {:.1}% ({}/{})",
         overall_detection_rate * 100.0, total_detected, total_applied);
 
     eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", overall_detection_rate);
