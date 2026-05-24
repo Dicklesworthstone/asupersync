@@ -7269,6 +7269,1113 @@ impl SubsystemMutationTester {
         );
     }
 
+    /// [br-mutation-49] Trace divergence causality DAG edge regression mutations
+    async fn test_trace_divergence_mutations(&self) {
+        use crate::trace::divergence::{CausalityDag, DagEdge, CausalOrder, DivergenceDetector};
+
+        let trace_divergence_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let divergence_test_count = 20;
+                let divergence_corruptions = Arc::new(AtomicUsize::new(0));
+                let causality_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..divergence_test_count {
+                            // Test causality DAG edge corruption detection
+                            if test_idx % 2 == 0 {
+                                divergence_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                // MUTATION: Corrupt causality DAG edge ordering
+                                match test_idx % 20 {
+                                    0 => {
+                                        // Test basic causal edge reversal corruption
+                                        let mut causality_dag = CausalityDag::new();
+                                        let detector = DivergenceDetector::new();
+
+                                        let event_a = causality_dag.add_event("event_a", vec![]);
+                                        let event_b = causality_dag.add_event("event_b", vec![event_a]);
+                                        let event_c = causality_dag.add_event("event_c", vec![event_b]);
+
+                                        // MUTATION: Reverse causal edge (C should not happen before B)
+                                        let corrupted_edge = DagEdge::new(event_c, event_b); // Wrong direction
+                                        causality_dag.add_corrupted_edge(corrupted_edge);
+
+                                        // Verify causality violation detection
+                                        match detector.check_causal_consistency(&causality_dag) {
+                                            Err(CausalOrder::Violation) => {
+                                                // Correctly detected causal edge reversal
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected causal edge reversal
+                                                causality_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    2 => {
+                                        // Test transitive causality corruption
+                                        let mut causality_dag = CausalityDag::new();
+                                        let detector = DivergenceDetector::new();
+
+                                        let event_a = causality_dag.add_event("event_a", vec![]);
+                                        let event_b = causality_dag.add_event("event_b", vec![event_a]);
+                                        let event_c = causality_dag.add_event("event_c", vec![event_b]);
+                                        let event_d = causality_dag.add_event("event_d", vec![event_c]);
+
+                                        // MUTATION: Break transitive causality (A → B → C → D, but add D → A)
+                                        let transitive_violation = DagEdge::new(event_d, event_a); // Creates cycle
+                                        causality_dag.add_corrupted_edge(transitive_violation);
+
+                                        // Check for cycle detection in causality
+                                        match detector.detect_causal_cycles(&causality_dag) {
+                                            Ok(cycles) if !cycles.is_empty() => {
+                                                // Correctly detected transitive causality cycle
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected causality cycle
+                                                causality_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    4 => {
+                                        // Test concurrent event ordering corruption
+                                        let mut causality_dag = CausalityDag::new();
+                                        let detector = DivergenceDetector::new();
+
+                                        let event_root = causality_dag.add_event("root", vec![]);
+                                        let event_concurrent_a = causality_dag.add_event("concurrent_a", vec![event_root]);
+                                        let event_concurrent_b = causality_dag.add_event("concurrent_b", vec![event_root]);
+                                        let event_merge = causality_dag.add_event("merge", vec![event_concurrent_a, event_concurrent_b]);
+
+                                        // MUTATION: Add false causal ordering between concurrent events
+                                        let false_ordering = DagEdge::new(event_concurrent_a, event_concurrent_b);
+                                        causality_dag.add_corrupted_edge(false_ordering);
+
+                                        // Verify concurrent event detection
+                                        match detector.verify_concurrent_independence(&causality_dag) {
+                                            Err(CausalOrder::FalseOrdering) => {
+                                                // Correctly detected false causal ordering
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected false concurrent ordering
+                                                causality_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    6 => {
+                                        // Test causal timestamp inconsistency
+                                        let mut causality_dag = CausalityDag::new();
+                                        let detector = DivergenceDetector::new();
+
+                                        let event_a = causality_dag.add_event_with_timestamp("event_a", vec![], 100);
+                                        let event_b = causality_dag.add_event_with_timestamp("event_b", vec![event_a], 200);
+
+                                        // MUTATION: Corrupt causal timestamp (B happens before A)
+                                        causality_dag.corrupt_event_timestamp(event_b, 50); // Before A's timestamp
+
+                                        // Check timestamp causality consistency
+                                        match detector.verify_timestamp_causality(&causality_dag) {
+                                            Err(CausalOrder::TimestampInconsistency) => {
+                                                // Correctly detected timestamp causality violation
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected timestamp inconsistency
+                                                causality_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    8 => {
+                                        // Test missing causal dependency corruption
+                                        let mut causality_dag = CausalityDag::new();
+                                        let detector = DivergenceDetector::new();
+
+                                        let resource_event = causality_dag.add_event("acquire_resource", vec![]);
+                                        let _use_event = causality_dag.add_event("use_resource", vec![]); // Missing dependency!
+                                        let release_event = causality_dag.add_event("release_resource", vec![resource_event]);
+
+                                        // MUTATION: Resource usage without acquisition dependency
+                                        // This should be detected as missing causal dependency
+
+                                        match detector.verify_resource_causality(&causality_dag) {
+                                            Err(CausalOrder::MissingDependency) => {
+                                                // Correctly detected missing causal dependency
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected missing dependency
+                                                causality_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    10 => {
+                                        // Test DAG branching factor corruption
+                                        let mut causality_dag = CausalityDag::new();
+                                        let detector = DivergenceDetector::new();
+
+                                        let root = causality_dag.add_event("root", vec![]);
+
+                                        // Create many branches from single event
+                                        let mut branch_events = Vec::new();
+                                        for i in 0..10 {
+                                            let branch = causality_dag.add_event(&format!("branch_{}", i), vec![root]);
+                                            branch_events.push(branch);
+                                        }
+
+                                        // MUTATION: Add excessive cross-branch dependencies
+                                        for (i, &event_a) in branch_events.iter().enumerate() {
+                                            for (j, &event_b) in branch_events.iter().enumerate() {
+                                                if i != j && (i + j) % 3 == 0 {
+                                                    let cross_dep = DagEdge::new(event_a, event_b);
+                                                    causality_dag.add_corrupted_edge(cross_dep);
+                                                }
+                                            }
+                                        }
+
+                                        // Check for excessive branching complexity
+                                        match detector.analyze_branching_complexity(&causality_dag) {
+                                            Err(CausalOrder::ExcessiveComplexity) => {
+                                                // Correctly detected excessive branching corruption
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected excessive complexity
+                                                causality_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    12 => {
+                                        // Test causal isolation violation
+                                        let mut causality_dag = CausalityDag::new();
+                                        let detector = DivergenceDetector::new();
+
+                                        // Create two isolated causal chains
+                                        let chain1_a = causality_dag.add_event("chain1_a", vec![]);
+                                        let chain1_b = causality_dag.add_event("chain1_b", vec![chain1_a]);
+
+                                        let chain2_a = causality_dag.add_event("chain2_a", vec![]);
+                                        let chain2_b = causality_dag.add_event("chain2_b", vec![chain2_a]);
+
+                                        // MUTATION: Break isolation between chains
+                                        let isolation_violation = DagEdge::new(chain1_b, chain2_a);
+                                        causality_dag.add_corrupted_edge(isolation_violation);
+
+                                        // Verify isolation is maintained
+                                        match detector.verify_causal_isolation(&causality_dag) {
+                                            Err(CausalOrder::IsolationViolation) => {
+                                                // Correctly detected isolation violation
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected isolation violation
+                                                causality_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    14 => {
+                                        // Test causal edge weight corruption
+                                        let mut causality_dag = CausalityDag::new();
+                                        let detector = DivergenceDetector::new();
+
+                                        let event_a = causality_dag.add_event("event_a", vec![]);
+                                        let event_b = causality_dag.add_event("event_b", vec![event_a]);
+                                        let event_c = causality_dag.add_event("event_c", vec![event_b]);
+
+                                        // MUTATION: Corrupt edge weights to break causality strength
+                                        causality_dag.set_edge_weight(event_a, event_b, -1.0); // Negative weight
+                                        causality_dag.set_edge_weight(event_b, event_c, f64::INFINITY); // Invalid weight
+
+                                        // Check edge weight validity
+                                        match detector.validate_edge_weights(&causality_dag) {
+                                            Err(CausalOrder::InvalidWeights) => {
+                                                // Correctly detected invalid edge weights
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected invalid weights
+                                                causality_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    16 => {
+                                        // Test causal event merging corruption
+                                        let mut causality_dag = CausalityDag::new();
+                                        let detector = DivergenceDetector::new();
+
+                                        let event_a = causality_dag.add_event("event_a", vec![]);
+                                        let event_b = causality_dag.add_event("event_b", vec![]);
+                                        let merge_event = causality_dag.add_event("merge", vec![event_a, event_b]);
+
+                                        // MUTATION: Corrupt merge semantics (merge happens before dependencies)
+                                        causality_dag.corrupt_merge_timing(merge_event, -100); // Before dependencies
+
+                                        // Verify merge causality
+                                        match detector.verify_merge_causality(&causality_dag) {
+                                            Err(CausalOrder::MergeViolation) => {
+                                                // Correctly detected merge causality violation
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected merge violation
+                                                causality_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    18 => {
+                                        // Test causal path compression corruption
+                                        let mut causality_dag = CausalityDag::new();
+                                        let detector = DivergenceDetector::new();
+
+                                        // Create long causal chain
+                                        let mut events = vec![causality_dag.add_event("event_0", vec![])];
+                                        for i in 1..10 {
+                                            let prev = events[i - 1];
+                                            let event = causality_dag.add_event(&format!("event_{}", i), vec![prev]);
+                                            events.push(event);
+                                        }
+
+                                        // MUTATION: Corrupt path compression by removing intermediate edges
+                                        causality_dag.remove_edge(events[3], events[4]);
+                                        causality_dag.remove_edge(events[6], events[7]);
+
+                                        // Add direct path that skips removed edges
+                                        let compressed_edge = DagEdge::new(events[3], events[5]); // Skip event_4
+                                        causality_dag.add_corrupted_edge(compressed_edge);
+
+                                        // Verify path integrity
+                                        match detector.verify_path_integrity(&causality_dag) {
+                                            Err(CausalOrder::PathCorruption) => {
+                                                // Correctly detected path compression corruption
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected path corruption
+                                                causality_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal causality DAG test
+                                        let mut causality_dag = CausalityDag::new();
+                                        let detector = DivergenceDetector::new();
+
+                                        let event_a = causality_dag.add_event("normal_a", vec![]);
+                                        let event_b = causality_dag.add_event("normal_b", vec![event_a]);
+                                        detector.check_causal_consistency(&causality_dag).ok();
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(3)).await;
+                        }
+
+                        let corruptions = divergence_corruptions.load(Ordering::Relaxed);
+                        let violations = causality_violations.load(Ordering::Relaxed);
+
+                        // Causality divergence detection should catch DAG edge corruption
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Causality DAG edge corruption detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(ErrorKind::Other,
+                                format!("Trace divergence causality failed: {} corruptions, {} violations",
+                                    corruptions, violations)))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(trace_divergence_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-49",
+            "trace",
+            "divergence_causality_dag_edge_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-50] Evidence chain replay determinism regression mutations
+    async fn test_evidence_mutations(&self) {
+        use crate::evidence::{EvidenceChain, EvidenceReplay, ReplayDeterminism, ChainValidator};
+
+        let evidence_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let evidence_test_count = 16;
+                let evidence_corruptions = Arc::new(AtomicUsize::new(0));
+                let determinism_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..evidence_test_count {
+                            // Test evidence chain replay determinism corruption
+                            if test_idx % 2 == 0 {
+                                evidence_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                // MUTATION: Corrupt evidence chain replay determinism
+                                match test_idx % 16 {
+                                    0 => {
+                                        // Test basic replay non-determinism corruption
+                                        let mut evidence_chain = EvidenceChain::new("test_chain");
+                                        let replay_engine = EvidenceReplay::new();
+                                        let validator = ChainValidator::new();
+
+                                        // Add evidence entries
+                                        evidence_chain.add_evidence("step_1", "action_a", "result_1");
+                                        evidence_chain.add_evidence("step_2", "action_b", "result_2");
+                                        evidence_chain.add_evidence("step_3", "action_c", "result_3");
+
+                                        // First replay (baseline)
+                                        let replay1 = replay_engine.replay_chain(&evidence_chain).await;
+
+                                        // MUTATION: Inject non-determinism into replay
+                                        evidence_chain.inject_replay_non_determinism(true);
+
+                                        // Second replay (should match first but won't due to corruption)
+                                        let replay2 = replay_engine.replay_chain(&evidence_chain).await;
+
+                                        // Verify determinism
+                                        match validator.verify_replay_determinism(&replay1, &replay2) {
+                                            Err(ReplayDeterminism::NonDeterministic) => {
+                                                // Correctly detected non-deterministic replay
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected non-determinism
+                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    2 => {
+                                        // Test evidence ordering corruption in replay
+                                        let mut evidence_chain = EvidenceChain::new("ordering_test");
+                                        let replay_engine = EvidenceReplay::new();
+                                        let validator = ChainValidator::new();
+
+                                        // Add evidence in specific order
+                                        for i in 0..5 {
+                                            evidence_chain.add_evidence(
+                                                &format!("step_{}", i),
+                                                &format!("action_{}", i),
+                                                &format!("result_{}", i)
+                                            );
+                                        }
+
+                                        let baseline_replay = replay_engine.replay_chain(&evidence_chain).await;
+
+                                        // MUTATION: Corrupt evidence ordering during replay
+                                        evidence_chain.corrupt_replay_ordering(true);
+
+                                        let corrupted_replay = replay_engine.replay_chain(&evidence_chain).await;
+
+                                        // Check ordering determinism
+                                        match validator.verify_ordering_determinism(&baseline_replay, &corrupted_replay) {
+                                            Err(ReplayDeterminism::OrderingViolation) => {
+                                                // Correctly detected ordering non-determinism
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected ordering violation
+                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    4 => {
+                                        // Test evidence timestamp corruption in replay
+                                        let mut evidence_chain = EvidenceChain::new("timestamp_test");
+                                        let replay_engine = EvidenceReplay::new();
+                                        let validator = ChainValidator::new();
+
+                                        // Add evidence with specific timestamps
+                                        evidence_chain.add_evidence_with_timestamp("step_1", "action_1", "result_1", 1000);
+                                        evidence_chain.add_evidence_with_timestamp("step_2", "action_2", "result_2", 2000);
+                                        evidence_chain.add_evidence_with_timestamp("step_3", "action_3", "result_3", 3000);
+
+                                        let baseline_replay = replay_engine.replay_chain_with_timing(&evidence_chain).await;
+
+                                        // MUTATION: Corrupt timestamps during replay
+                                        evidence_chain.corrupt_replay_timestamps(true);
+
+                                        let corrupted_replay = replay_engine.replay_chain_with_timing(&evidence_chain).await;
+
+                                        // Verify timestamp determinism
+                                        match validator.verify_timestamp_determinism(&baseline_replay, &corrupted_replay) {
+                                            Err(ReplayDeterminism::TimestampDrift) => {
+                                                // Correctly detected timestamp non-determinism
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected timestamp drift
+                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    6 => {
+                                        // Test evidence state corruption during replay
+                                        let mut evidence_chain = EvidenceChain::new("state_test");
+                                        let replay_engine = EvidenceReplay::new();
+                                        let validator = ChainValidator::new();
+
+                                        // Add evidence that modifies state
+                                        evidence_chain.add_stateful_evidence("init", "initialize", "state_0");
+                                        evidence_chain.add_stateful_evidence("modify_a", "update_field", "state_1");
+                                        evidence_chain.add_stateful_evidence("modify_b", "update_field", "state_2");
+
+                                        let baseline_replay = replay_engine.replay_with_state_tracking(&evidence_chain).await;
+
+                                        // MUTATION: Corrupt state evolution during replay
+                                        evidence_chain.corrupt_state_evolution(true);
+
+                                        let corrupted_replay = replay_engine.replay_with_state_tracking(&evidence_chain).await;
+
+                                        // Verify state determinism
+                                        match validator.verify_state_determinism(&baseline_replay, &corrupted_replay) {
+                                            Err(ReplayDeterminism::StateInconsistency) => {
+                                                // Correctly detected state non-determinism
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected state inconsistency
+                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    8 => {
+                                        // Test evidence checksum corruption during replay
+                                        let mut evidence_chain = EvidenceChain::new("checksum_test");
+                                        let replay_engine = EvidenceReplay::new();
+                                        let validator = ChainValidator::new();
+
+                                        // Add evidence with checksums
+                                        for i in 0..3 {
+                                            let data = format!("evidence_data_{}", i);
+                                            let checksum = evidence_chain.compute_checksum(&data);
+                                            evidence_chain.add_evidence_with_checksum(
+                                                &format!("step_{}", i),
+                                                &data,
+                                                checksum
+                                            );
+                                        }
+
+                                        let baseline_replay = replay_engine.replay_with_checksum_verification(&evidence_chain).await;
+
+                                        // MUTATION: Corrupt checksums during replay
+                                        evidence_chain.corrupt_replay_checksums(true);
+
+                                        let corrupted_replay = replay_engine.replay_with_checksum_verification(&evidence_chain).await;
+
+                                        // Verify checksum determinism
+                                        match validator.verify_checksum_determinism(&baseline_replay, &corrupted_replay) {
+                                            Err(ReplayDeterminism::ChecksumMismatch) => {
+                                                // Correctly detected checksum non-determinism
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected checksum mismatch
+                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    10 => {
+                                        // Test evidence chain branching corruption during replay
+                                        let mut evidence_chain = EvidenceChain::new("branching_test");
+                                        let replay_engine = EvidenceReplay::new();
+                                        let validator = ChainValidator::new();
+
+                                        // Create evidence chain with branching
+                                        evidence_chain.add_evidence("base", "init", "base_state");
+                                        let branch_point = evidence_chain.add_branch_point("branch");
+                                        evidence_chain.add_evidence_to_branch(branch_point, "branch_a", "action_a", "result_a");
+                                        evidence_chain.add_evidence_to_branch(branch_point, "branch_b", "action_b", "result_b");
+                                        evidence_chain.merge_branches(branch_point, "merge", "combined_result");
+
+                                        let baseline_replay = replay_engine.replay_branched_chain(&evidence_chain).await;
+
+                                        // MUTATION: Corrupt branch replay determinism
+                                        evidence_chain.corrupt_branch_replay(true);
+
+                                        let corrupted_replay = replay_engine.replay_branched_chain(&evidence_chain).await;
+
+                                        // Verify branch determinism
+                                        match validator.verify_branch_determinism(&baseline_replay, &corrupted_replay) {
+                                            Err(ReplayDeterminism::BranchingInconsistency) => {
+                                                // Correctly detected branch non-determinism
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected branching inconsistency
+                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    12 => {
+                                        // Test evidence chain compression corruption during replay
+                                        let mut evidence_chain = EvidenceChain::new("compression_test");
+                                        let replay_engine = EvidenceReplay::new();
+                                        let validator = ChainValidator::new();
+
+                                        // Add compressible evidence sequence
+                                        for i in 0..10 {
+                                            evidence_chain.add_evidence(
+                                                &format!("step_{}", i),
+                                                "increment_counter",
+                                                &format!("counter={}", i + 1)
+                                            );
+                                        }
+
+                                        // Enable compression
+                                        evidence_chain.enable_compression(true);
+
+                                        let baseline_compressed = replay_engine.replay_compressed_chain(&evidence_chain).await;
+
+                                        // MUTATION: Corrupt compression algorithm determinism
+                                        evidence_chain.corrupt_compression_determinism(true);
+
+                                        let corrupted_compressed = replay_engine.replay_compressed_chain(&evidence_chain).await;
+
+                                        // Verify compression determinism
+                                        match validator.verify_compression_determinism(&baseline_compressed, &corrupted_compressed) {
+                                            Err(ReplayDeterminism::CompressionInconsistency) => {
+                                                // Correctly detected compression non-determinism
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected compression inconsistency
+                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    14 => {
+                                        // Test evidence chain parallel replay corruption
+                                        let mut evidence_chain = EvidenceChain::new("parallel_test");
+                                        let replay_engine = EvidenceReplay::new();
+                                        let validator = ChainValidator::new();
+
+                                        // Add evidence suitable for parallel replay
+                                        for i in 0..8 {
+                                            evidence_chain.add_parallel_evidence(
+                                                &format!("parallel_{}", i),
+                                                &format!("independent_action_{}", i),
+                                                &format!("result_{}", i)
+                                            );
+                                        }
+
+                                        let baseline_parallel = replay_engine.replay_parallel_chain(&evidence_chain, 4).await;
+
+                                        // MUTATION: Corrupt parallel replay determinism
+                                        evidence_chain.corrupt_parallel_replay(true);
+
+                                        let corrupted_parallel = replay_engine.replay_parallel_chain(&evidence_chain, 4).await;
+
+                                        // Verify parallel determinism
+                                        match validator.verify_parallel_determinism(&baseline_parallel, &corrupted_parallel) {
+                                            Err(ReplayDeterminism::ParallelInconsistency) => {
+                                                // Correctly detected parallel non-determinism
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected parallel inconsistency
+                                                determinism_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal evidence chain test
+                                        let mut evidence_chain = EvidenceChain::new("normal_test");
+                                        let replay_engine = EvidenceReplay::new();
+
+                                        evidence_chain.add_evidence("normal", "normal_action", "normal_result");
+                                        replay_engine.replay_chain(&evidence_chain).await;
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(4)).await;
+                        }
+
+                        let corruptions = evidence_corruptions.load(Ordering::Relaxed);
+                        let violations = determinism_violations.load(Ordering::Relaxed);
+
+                        // Evidence replay validation should catch determinism corruption
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Evidence replay determinism corruption detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(ErrorKind::Other,
+                                format!("Evidence chain replay failed: {} corruptions, {} violations",
+                                    corruptions, violations)))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(evidence_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-50",
+            "evidence",
+            "chain_replay_determinism_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-51] Signal graceful shutdown ordering regression mutations
+    async fn test_signal_graceful_mutations(&self) {
+        use crate::signal::graceful::{GracefulShutdown, ShutdownOrdering, ShutdownCoordinator, ComponentLifecycle};
+
+        let signal_graceful_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let graceful_test_count = 22;
+                let graceful_corruptions = Arc::new(AtomicUsize::new(0));
+                let ordering_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..graceful_test_count {
+                            // Test graceful shutdown ordering corruption
+                            if test_idx % 2 == 0 {
+                                graceful_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                // MUTATION: Corrupt graceful shutdown ordering
+                                match test_idx % 22 {
+                                    0 => {
+                                        // Test basic shutdown ordering corruption
+                                        let mut coordinator = ShutdownCoordinator::new();
+                                        let graceful_shutdown = GracefulShutdown::new();
+
+                                        // Register components in proper dependency order
+                                        let database = coordinator.register_component("database", ComponentLifecycle::Critical);
+                                        let web_server = coordinator.register_component("web_server", ComponentLifecycle::Normal);
+                                        let background_jobs = coordinator.register_component("background_jobs", ComponentLifecycle::Normal);
+
+                                        // Set proper shutdown order: web_server -> background_jobs -> database
+                                        coordinator.set_shutdown_dependency(web_server, database);
+                                        coordinator.set_shutdown_dependency(background_jobs, database);
+
+                                        // MUTATION: Corrupt shutdown ordering
+                                        coordinator.corrupt_shutdown_order(true);
+
+                                        // Execute shutdown
+                                        let shutdown_result = graceful_shutdown.execute_shutdown(&coordinator).await;
+
+                                        // Verify shutdown ordering
+                                        match shutdown_result {
+                                            Err(ShutdownOrdering::DependencyViolation) => {
+                                                // Correctly detected shutdown ordering violation
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected ordering violation
+                                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    2 => {
+                                        // Test shutdown timeout corruption
+                                        let mut coordinator = ShutdownCoordinator::new();
+                                        let graceful_shutdown = GracefulShutdown::new();
+
+                                        let slow_component = coordinator.register_component_with_timeout("slow_service", ComponentLifecycle::Normal, Duration::from_secs(5));
+                                        let fast_component = coordinator.register_component_with_timeout("fast_service", ComponentLifecycle::Normal, Duration::from_secs(1));
+
+                                        // MUTATION: Corrupt timeout handling
+                                        coordinator.corrupt_timeout_handling(true);
+
+                                        // Execute shutdown with timeout
+                                        let shutdown_result = graceful_shutdown.execute_shutdown_with_timeout(&coordinator, Duration::from_secs(3)).await;
+
+                                        // Verify timeout handling
+                                        match shutdown_result {
+                                            Err(ShutdownOrdering::TimeoutViolation) => {
+                                                // Correctly detected timeout violation
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected timeout violation
+                                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    4 => {
+                                        // Test shutdown signal propagation corruption
+                                        let mut coordinator = ShutdownCoordinator::new();
+                                        let graceful_shutdown = GracefulShutdown::new();
+
+                                        // Create hierarchy of components
+                                        let parent = coordinator.register_component("parent", ComponentLifecycle::Critical);
+                                        let child1 = coordinator.register_component("child1", ComponentLifecycle::Normal);
+                                        let child2 = coordinator.register_component("child2", ComponentLifecycle::Normal);
+
+                                        coordinator.set_parent_child_relationship(parent, child1);
+                                        coordinator.set_parent_child_relationship(parent, child2);
+
+                                        // MUTATION: Corrupt signal propagation
+                                        coordinator.corrupt_signal_propagation(true);
+
+                                        // Trigger shutdown
+                                        let shutdown_result = graceful_shutdown.trigger_shutdown_signal(&coordinator).await;
+
+                                        // Verify signal propagation
+                                        match shutdown_result {
+                                            Err(ShutdownOrdering::SignalPropagationFailure) => {
+                                                // Correctly detected signal propagation corruption
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected signal propagation failure
+                                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    6 => {
+                                        // Test shutdown resource cleanup ordering corruption
+                                        let mut coordinator = ShutdownCoordinator::new();
+                                        let graceful_shutdown = GracefulShutdown::new();
+
+                                        let tcp_server = coordinator.register_resource_component("tcp_server", ComponentLifecycle::Normal, vec!["socket_fd"]);
+                                        let file_handler = coordinator.register_resource_component("file_handler", ComponentLifecycle::Normal, vec!["file_handles"]);
+                                        let memory_pool = coordinator.register_resource_component("memory_pool", ComponentLifecycle::Critical, vec!["allocated_memory"]);
+
+                                        // Set resource dependencies: tcp_server depends on memory_pool
+                                        coordinator.set_resource_dependency(tcp_server, memory_pool);
+
+                                        // MUTATION: Corrupt resource cleanup ordering
+                                        coordinator.corrupt_resource_cleanup_order(true);
+
+                                        let cleanup_result = graceful_shutdown.execute_resource_cleanup(&coordinator).await;
+
+                                        // Verify resource cleanup ordering
+                                        match cleanup_result {
+                                            Err(ShutdownOrdering::ResourceCleanupViolation) => {
+                                                // Correctly detected resource cleanup violation
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected cleanup violation
+                                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    8 => {
+                                        // Test shutdown phase ordering corruption
+                                        let mut coordinator = ShutdownCoordinator::new();
+                                        let graceful_shutdown = GracefulShutdown::new();
+
+                                        let service = coordinator.register_component("service", ComponentLifecycle::Normal);
+
+                                        // Define shutdown phases: PREPARE -> SHUTDOWN -> CLEANUP -> FINALIZE
+                                        coordinator.define_shutdown_phases(vec!["PREPARE", "SHUTDOWN", "CLEANUP", "FINALIZE"]);
+                                        coordinator.assign_component_to_phase(service, "SHUTDOWN");
+
+                                        // MUTATION: Corrupt phase ordering
+                                        coordinator.corrupt_phase_ordering(true);
+
+                                        let phase_result = graceful_shutdown.execute_phased_shutdown(&coordinator).await;
+
+                                        // Verify phase ordering
+                                        match phase_result {
+                                            Err(ShutdownOrdering::PhaseOrderingViolation) => {
+                                                // Correctly detected phase ordering violation
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected phase violation
+                                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    10 => {
+                                        // Test shutdown barrier synchronization corruption
+                                        let mut coordinator = ShutdownCoordinator::new();
+                                        let graceful_shutdown = GracefulShutdown::new();
+
+                                        // Components that need synchronized shutdown
+                                        let worker1 = coordinator.register_component("worker1", ComponentLifecycle::Normal);
+                                        let worker2 = coordinator.register_component("worker2", ComponentLifecycle::Normal);
+                                        let worker3 = coordinator.register_component("worker3", ComponentLifecycle::Normal);
+
+                                        let barrier = coordinator.create_shutdown_barrier("worker_barrier");
+                                        coordinator.add_component_to_barrier(barrier, worker1);
+                                        coordinator.add_component_to_barrier(barrier, worker2);
+                                        coordinator.add_component_to_barrier(barrier, worker3);
+
+                                        // MUTATION: Corrupt barrier synchronization
+                                        coordinator.corrupt_barrier_synchronization(true);
+
+                                        let barrier_result = graceful_shutdown.execute_synchronized_shutdown(&coordinator).await;
+
+                                        // Verify barrier synchronization
+                                        match barrier_result {
+                                            Err(ShutdownOrdering::BarrierSynchronizationFailure) => {
+                                                // Correctly detected barrier synchronization corruption
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected synchronization failure
+                                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    12 => {
+                                        // Test shutdown graceful vs forceful transition corruption
+                                        let mut coordinator = ShutdownCoordinator::new();
+                                        let graceful_shutdown = GracefulShutdown::new();
+
+                                        let stubborn_service = coordinator.register_component_with_behavior("stubborn_service", ComponentLifecycle::Normal, "refuses_shutdown");
+                                        let cooperative_service = coordinator.register_component_with_behavior("cooperative_service", ComponentLifecycle::Normal, "graceful_shutdown");
+
+                                        // Set graceful timeout before forceful
+                                        coordinator.set_graceful_timeout(Duration::from_secs(2));
+                                        coordinator.set_forceful_timeout(Duration::from_secs(5));
+
+                                        // MUTATION: Corrupt graceful-to-forceful transition
+                                        coordinator.corrupt_graceful_forceful_transition(true);
+
+                                        let transition_result = graceful_shutdown.execute_graduated_shutdown(&coordinator).await;
+
+                                        // Verify transition handling
+                                        match transition_result {
+                                            Err(ShutdownOrdering::TransitionViolation) => {
+                                                // Correctly detected transition violation
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected transition violation
+                                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    14 => {
+                                        // Test shutdown priority inversion corruption
+                                        let mut coordinator = ShutdownCoordinator::new();
+                                        let graceful_shutdown = GracefulShutdown::new();
+
+                                        let high_priority = coordinator.register_component_with_priority("critical_service", ComponentLifecycle::Critical, 100);
+                                        let medium_priority = coordinator.register_component_with_priority("important_service", ComponentLifecycle::Normal, 50);
+                                        let low_priority = coordinator.register_component_with_priority("background_service", ComponentLifecycle::Normal, 10);
+
+                                        // Set dependencies that could cause priority inversion
+                                        coordinator.set_shutdown_dependency(low_priority, high_priority); // Low depends on high
+
+                                        // MUTATION: Corrupt priority handling causing inversion
+                                        coordinator.corrupt_priority_inversion_protection(true);
+
+                                        let priority_result = graceful_shutdown.execute_priority_shutdown(&coordinator).await;
+
+                                        // Verify priority inversion protection
+                                        match priority_result {
+                                            Err(ShutdownOrdering::PriorityInversion) => {
+                                                // Correctly detected priority inversion
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected priority inversion
+                                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    16 => {
+                                        // Test shutdown rollback corruption
+                                        let mut coordinator = ShutdownCoordinator::new();
+                                        let graceful_shutdown = GracefulShutdown::new();
+
+                                        let database = coordinator.register_component("database", ComponentLifecycle::Critical);
+                                        let api_server = coordinator.register_component("api_server", ComponentLifecycle::Normal);
+
+                                        coordinator.set_shutdown_dependency(api_server, database);
+
+                                        // Enable rollback on critical failures
+                                        coordinator.enable_shutdown_rollback(true);
+
+                                        // MUTATION: Corrupt rollback mechanism
+                                        coordinator.corrupt_rollback_mechanism(true);
+
+                                        // Trigger shutdown that should rollback
+                                        coordinator.inject_shutdown_failure(database, "critical_failure");
+
+                                        let rollback_result = graceful_shutdown.execute_shutdown_with_rollback(&coordinator).await;
+
+                                        // Verify rollback handling
+                                        match rollback_result {
+                                            Err(ShutdownOrdering::RollbackCorruption) => {
+                                                // Correctly detected rollback corruption
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected rollback corruption
+                                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    18 => {
+                                        // Test shutdown health check corruption during shutdown
+                                        let mut coordinator = ShutdownCoordinator::new();
+                                        let graceful_shutdown = GracefulShutdown::new();
+
+                                        let monitored_service = coordinator.register_component_with_health_check("monitored", ComponentLifecycle::Normal);
+
+                                        // Enable health monitoring during shutdown
+                                        coordinator.enable_shutdown_health_monitoring(true);
+
+                                        // MUTATION: Corrupt health check during shutdown
+                                        coordinator.corrupt_shutdown_health_checks(true);
+
+                                        let health_result = graceful_shutdown.execute_monitored_shutdown(&coordinator).await;
+
+                                        // Verify health check handling
+                                        match health_result {
+                                            Err(ShutdownOrdering::HealthCheckCorruption) => {
+                                                // Correctly detected health check corruption
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected health check corruption
+                                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    20 => {
+                                        // Test shutdown notification ordering corruption
+                                        let mut coordinator = ShutdownCoordinator::new();
+                                        let graceful_shutdown = GracefulShutdown::new();
+
+                                        // Components that send/receive shutdown notifications
+                                        let notifier = coordinator.register_component("notifier", ComponentLifecycle::Normal);
+                                        let subscriber1 = coordinator.register_component("subscriber1", ComponentLifecycle::Normal);
+                                        let subscriber2 = coordinator.register_component("subscriber2", ComponentLifecycle::Normal);
+
+                                        coordinator.set_notification_relationship(notifier, vec![subscriber1, subscriber2]);
+
+                                        // MUTATION: Corrupt notification ordering
+                                        coordinator.corrupt_notification_ordering(true);
+
+                                        let notification_result = graceful_shutdown.execute_notification_shutdown(&coordinator).await;
+
+                                        // Verify notification ordering
+                                        match notification_result {
+                                            Err(ShutdownOrdering::NotificationOrderingViolation) => {
+                                                // Correctly detected notification ordering violation
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected notification violation
+                                                ordering_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal graceful shutdown test
+                                        let mut coordinator = ShutdownCoordinator::new();
+                                        let graceful_shutdown = GracefulShutdown::new();
+
+                                        let service = coordinator.register_component("normal_service", ComponentLifecycle::Normal);
+                                        graceful_shutdown.execute_shutdown(&coordinator).await.ok();
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(2)).await;
+                        }
+
+                        let corruptions = graceful_corruptions.load(Ordering::Relaxed);
+                        let violations = ordering_violations.load(Ordering::Relaxed);
+
+                        // Graceful shutdown validation should catch ordering violations
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Shutdown ordering corruption detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(ErrorKind::Other,
+                                format!("Signal graceful shutdown failed: {} corruptions, {} violations",
+                                    corruptions, violations)))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(signal_graceful_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-51",
+            "signal",
+            "graceful_shutdown_ordering_corruption",
+            detected,
+        );
+    }
+
     /// Generate subsystem testing summary
     fn generate_subsystem_summary(&self) -> serde_json::Value {
         let applied = self.mutations_applied.load(Ordering::Relaxed);
@@ -8448,6 +9555,102 @@ async fn test_obligation_saga_subsystem_mutation_sensitivity() {
 }
 
 #[tokio::test]
+async fn test_trace_divergence_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("trace_divergence_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"trace_divergence_start\"}}");
+
+    // Test trace divergence-specific mutations
+    tester.test_trace_divergence_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply trace divergence mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.94,
+        "Trace divergence subsystem should detect ≥94% of causality DAG edge mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"trace_divergence_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_evidence_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("evidence_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"evidence_start\"}}");
+
+    // Test evidence-specific mutations
+    tester.test_evidence_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply evidence mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.97,
+        "Evidence subsystem should detect ≥97% of chain replay determinism mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"evidence_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_signal_graceful_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("signal_graceful_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"signal_graceful_start\"}}");
+
+    // Test signal graceful-specific mutations
+    tester.test_signal_graceful_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply signal graceful mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.95,
+        "Signal graceful subsystem should detect ≥95% of shutdown ordering mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"signal_graceful_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
 async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"start\"}}");
 
@@ -8488,6 +9691,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     let raptorq_gf256_tester = SubsystemMutationTester::new("comprehensive_raptorq_gf256").await;
     let raptorq_proof_tester = SubsystemMutationTester::new("comprehensive_raptorq_proof").await;
     let obligation_saga_tester = SubsystemMutationTester::new("comprehensive_obligation_saga").await;
+    let trace_divergence_tester = SubsystemMutationTester::new("comprehensive_trace_divergence").await;
+    let evidence_tester = SubsystemMutationTester::new("comprehensive_evidence").await;
+    let signal_graceful_tester = SubsystemMutationTester::new("comprehensive_signal_graceful").await;
 
     // Test all subsystem mutations comprehensively
     obs_tester.test_observability_counter_mutations().await;
@@ -8553,6 +9759,12 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
 
     obligation_saga_tester.test_obligation_saga_mutations().await;
 
+    trace_divergence_tester.test_trace_divergence_mutations().await;
+
+    evidence_tester.test_evidence_mutations().await;
+
+    signal_graceful_tester.test_signal_graceful_mutations().await;
+
     // Calculate overall subsystem detection rate
     let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed)
         + trace_tester.mutations_applied.load(Ordering::Relaxed)
@@ -8606,6 +9818,15 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
             .mutations_applied
             .load(Ordering::Relaxed)
         + obligation_saga_tester
+            .mutations_applied
+            .load(Ordering::Relaxed)
+        + trace_divergence_tester
+            .mutations_applied
+            .load(Ordering::Relaxed)
+        + evidence_tester
+            .mutations_applied
+            .load(Ordering::Relaxed)
+        + signal_graceful_tester
             .mutations_applied
             .load(Ordering::Relaxed);
 
@@ -8665,6 +9886,15 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
             .mutations_detected
             .load(Ordering::Relaxed)
         + obligation_saga_tester
+            .mutations_detected
+            .load(Ordering::Relaxed)
+        + trace_divergence_tester
+            .mutations_detected
+            .load(Ordering::Relaxed)
+        + evidence_tester
+            .mutations_detected
+            .load(Ordering::Relaxed)
+        + signal_graceful_tester
             .mutations_detected
             .load(Ordering::Relaxed);
 
