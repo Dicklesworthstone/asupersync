@@ -15,7 +15,7 @@ mod raptorq_e2e_tests {
         RaptorQReceiverBuilder, RaptorQSender, RaptorQSenderBuilder, ReceiveOutcome, SendOutcome,
     };
     use crate::runtime::RuntimeBuilder;
-    use crate::time::{Duration, Instant, sleep};
+    use crate::time::{Duration, Instant, sleep, timeout};
     use crate::transport::memory::{MemorySymbolSink, MemorySymbolStream};
     use crate::types::resource::PoolConfig;
     use crate::types::symbol::{ObjectId, ObjectParams};
@@ -479,69 +479,72 @@ mod raptorq_e2e_tests {
     #[tokio::test]
     #[ignore] // Requires REAL_SERVICE_TESTS=true
     async fn test_real_raptorq_basic_encode_decode() -> Result<(), Box<dyn std::error::Error>> {
-        validate_raptorq_e2e_environment()?;
+        timeout(Duration::from_secs(120), async {
+            validate_raptorq_e2e_environment()?;
 
-        let runtime = RuntimeBuilder::new().build()?;
-        let cx_builder = CxBuilder::new(&runtime);
-        let cx = cx_builder.build();
+            let runtime = RuntimeBuilder::new().build()?;
+            let cx_builder = CxBuilder::new(&runtime);
+            let cx = cx_builder.build();
 
-        let logger = RaptorQE2ELogger::new();
-        let codec = RealRaptorQCodec::new(RaptorQE2EConfig::default())?;
+            let logger = RaptorQE2ELogger::new();
+            let codec = RealRaptorQCodec::new(RaptorQE2EConfig::default())?;
 
-        // Test basic encode→decode cycle
-        let test_data = b"Hello, RaptorQ! This is a test message for encode/decode verification.";
-        let object_id = ObjectId::new();
+            // Test basic encode→decode cycle
+            let test_data = b"Hello, RaptorQ! This is a test message for encode/decode verification.";
+            let object_id = ObjectId::new();
 
-        let receive_outcome = codec
-            .encode_decode_cycle(
-                &cx, object_id, test_data, false, // No symbol loss
-                0.0, &logger,
-            )
-            .await?;
+            let receive_outcome = codec
+                .encode_decode_cycle(
+                    &cx, object_id, test_data, false, // No symbol loss
+                    0.0, &logger,
+                )
+                .await?;
 
-        // Verify decoded data matches original
-        assert_eq!(
-            &receive_outcome.data, test_data,
-            "Decoded data should match original"
-        );
-        assert!(
-            receive_outcome.symbols_received > 0,
-            "Should have received symbols"
-        );
+            // Verify decoded data matches original
+            assert_eq!(
+                &receive_outcome.data, test_data,
+                "Decoded data should match original"
+            );
+            assert!(
+                receive_outcome.symbols_received > 0,
+                "Should have received symbols"
+            );
 
-        // Verify statistics
-        let stats = codec.stats();
-        assert_eq!(
-            stats.objects_encoded.load(Ordering::Relaxed),
-            1,
-            "Should have encoded one object"
-        );
-        assert_eq!(
-            stats.objects_decoded.load(Ordering::Relaxed),
-            1,
-            "Should have decoded one object"
-        );
-        assert_eq!(
-            stats.decode_successes.load(Ordering::Relaxed),
-            1,
-            "Should have one successful decode"
-        );
-        assert_eq!(
-            stats.bytes_encoded.load(Ordering::Relaxed),
-            test_data.len() as u64,
-            "Should track encoded bytes"
-        );
-        assert_eq!(
-            stats.bytes_decoded.load(Ordering::Relaxed),
-            test_data.len() as u64,
-            "Should track decoded bytes"
-        );
+            // Verify statistics
+            let stats = codec.stats();
+            assert_eq!(
+                stats.objects_encoded.load(Ordering::Relaxed),
+                1,
+                "Should have encoded one object"
+            );
+            assert_eq!(
+                stats.objects_decoded.load(Ordering::Relaxed),
+                1,
+                "Should have decoded one object"
+            );
+            assert_eq!(
+                stats.decode_successes.load(Ordering::Relaxed),
+                1,
+                "Should have one successful decode"
+            );
+            assert_eq!(
+                stats.bytes_encoded.load(Ordering::Relaxed),
+                test_data.len() as u64,
+                "Should track encoded bytes"
+            );
+            assert_eq!(
+                stats.bytes_decoded.load(Ordering::Relaxed),
+                test_data.len() as u64,
+                "Should track decoded bytes"
+            );
 
-        eprintln!(
-            "RaptorQ Basic E2E structured log:\n{}",
-            logger.export_json()
-        );
-        Ok(())
+            eprintln!(
+                "RaptorQ Basic E2E structured log:\n{}",
+                logger.export_json()
+            );
+            Ok::<(), Box<dyn std::error::Error>>(())
+        }).await
+        .map_err(|_| "RaptorQ basic encode/decode test timed out after 120 seconds".into())
     }
 
     #[tokio::test]

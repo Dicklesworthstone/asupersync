@@ -15,6 +15,7 @@
 
 use crate::bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use crate::time::{Duration, timeout};
 
 use std::io::{self, Cursor};
 use std::pin::Pin;
@@ -708,8 +709,11 @@ fn test_zero_copy_operations_e2e() {
 
 #[tokio::test]
 async fn test_bytes_io_integration_e2e() {
-    let harness = BytesTestHarness::new("bytes_io_integration_e2e");
-    harness.test_bytes_io_integration().await;
+    timeout(Duration::from_secs(15), async {
+        let harness = BytesTestHarness::new("bytes_io_integration_e2e");
+        harness.test_bytes_io_integration().await;
+    }).await
+    .expect("Bytes I/O integration test timed out after 15 seconds");
 }
 
 #[tokio::test]

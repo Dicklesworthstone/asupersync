@@ -14,7 +14,7 @@ mod tcp_unix_e2e_tests {
     use crate::net::tcp::{TcpListener, TcpStream};
     use crate::net::unix::{UnixDatagram, UnixListener, UnixStream};
     use crate::runtime::RuntimeBuilder;
-    use crate::time::{Duration, Instant, sleep};
+    use crate::time::{Duration, Instant, sleep, timeout};
     use crate::types::Outcome;
     use serde_json;
     use std::collections::HashMap;
@@ -564,83 +564,86 @@ mod tcp_unix_e2e_tests {
     #[tokio::test]
     #[ignore] // Requires REAL_SERVICE_TESTS=true
     async fn test_real_tcp_echo_server() -> Result<(), Box<dyn std::error::Error>> {
-        validate_socket_e2e_environment()?;
+        timeout(Duration::from_secs(45), async {
+            validate_socket_e2e_environment()?;
 
-        let runtime = RuntimeBuilder::new().build()?;
-        let cx_builder = CxBuilder::new(&runtime);
-        let cx = cx_builder.build();
+            let runtime = RuntimeBuilder::new().build()?;
+            let cx_builder = CxBuilder::new(&runtime);
+            let cx = cx_builder.build();
 
-        let logger = SocketE2ELogger::new();
-        let server = RealTcpServer::new().await?;
-        let server_addr = server.local_addr();
+            let logger = SocketE2ELogger::new();
+            let server = RealTcpServer::new().await?;
+            let server_addr = server.local_addr();
 
-        // Start server in background
-        let server_handle = {
-            let server = &server;
-            let cx = &cx;
-            let logger = &logger;
-            async move { server.start_echo_server(cx, logger).await }
-        };
+            // Start server in background
+            let server_handle = {
+                let server = &server;
+                let cx = &cx;
+                let logger = &logger;
+                async move { server.start_echo_server(cx, logger).await }
+            };
 
-        // Give server time to start
-        let _ = sleep(&cx, Duration::from_millis(50)).await;
+            // Give server time to start
+            let _ = sleep(&cx, Duration::from_millis(50)).await;
 
-        // Connect as client and send test message
-        let mut client_stream = TcpStream::connect(server_addr).await?;
-        let test_message = b"Hello TCP World!";
+            // Connect as client and send test message
+            let mut client_stream = TcpStream::connect(server_addr).await?;
+            let test_message = b"Hello TCP World!";
 
-        logger.log_data_transfer(
-            "tcp",
-            "client",
-            "send",
-            test_message.len(),
-            Some(&String::from_utf8_lossy(test_message)),
-        );
+            logger.log_data_transfer(
+                "tcp",
+                "client",
+                "send",
+                test_message.len(),
+                Some(&String::from_utf8_lossy(test_message)),
+            );
 
-        client_stream.write_all(test_message).await?;
+            client_stream.write_all(test_message).await?;
 
-        // Read echo response
-        let mut response_buffer = vec![0u8; 1024];
-        let n = client_stream.read(&mut response_buffer).await?;
-        let response = String::from_utf8_lossy(&response_buffer[..n]);
+            // Read echo response
+            let mut response_buffer = vec![0u8; 1024];
+            let n = client_stream.read(&mut response_buffer).await?;
+            let response = String::from_utf8_lossy(&response_buffer[..n]);
 
-        logger.log_data_transfer("tcp", "client", "receive", n, Some(&response));
+            logger.log_data_transfer("tcp", "client", "receive", n, Some(&response));
 
-        assert!(
-            response.starts_with("TCP_ECHO:"),
-            "Should receive TCP echo: {}",
-            response
-        );
-        assert!(
-            response.contains("Hello TCP World!"),
-            "Echo should contain original message: {}",
-            response
-        );
+            assert!(
+                response.starts_with("TCP_ECHO:"),
+                "Should receive TCP echo: {}",
+                response
+            );
+            assert!(
+                response.contains("Hello TCP World!"),
+                "Echo should contain original message: {}",
+                response
+            );
 
-        // Stop server
-        server.stop(&cx).await?;
+            // Stop server
+            server.stop(&cx).await?;
 
-        // Verify statistics
-        let stats = server.stats();
-        assert!(
-            stats.connections_accepted.load(Ordering::Relaxed) > 0,
-            "Should accept connections"
-        );
-        assert!(
-            stats.messages_echoed.load(Ordering::Relaxed) > 0,
-            "Should echo messages"
-        );
-        assert!(
-            stats.bytes_sent.load(Ordering::Relaxed) > 0,
-            "Should send bytes"
-        );
-        assert!(
-            stats.bytes_received.load(Ordering::Relaxed) > 0,
-            "Should receive bytes"
-        );
+            // Verify statistics
+            let stats = server.stats();
+            assert!(
+                stats.connections_accepted.load(Ordering::Relaxed) > 0,
+                "Should accept connections"
+            );
+            assert!(
+                stats.messages_echoed.load(Ordering::Relaxed) > 0,
+                "Should echo messages"
+            );
+            assert!(
+                stats.bytes_sent.load(Ordering::Relaxed) > 0,
+                "Should send bytes"
+            );
+            assert!(
+                stats.bytes_received.load(Ordering::Relaxed) > 0,
+                "Should receive bytes"
+            );
 
-        eprintln!("TCP E2E structured log:\n{}", logger.export_json());
-        Ok(())
+            eprintln!("TCP E2E structured log:\n{}", logger.export_json());
+            Ok::<(), Box<dyn std::error::Error>>(())
+        }).await
+        .map_err(|_| "TCP echo server test timed out after 45 seconds".into())
     }
 
     #[tokio::test]
