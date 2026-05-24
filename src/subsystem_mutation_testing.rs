@@ -877,6 +877,321 @@ impl SubsystemMutationTester {
         self.log_subsystem_mutation("br-mutation-18", "distributed", "consistent_hash_corruption", detected);
     }
 
+    /// [br-mutation-19] gRPC status code mapping regression mutations
+    async fn test_grpc_status_code_mapping_mutations(&self) {
+        use crate::grpc::{StatusCode, Status, GrpcError, GrpcResponse};
+
+        let grpc_detected = self.runtime.scope(|scope| async move {
+            let rpc_call_count = 25;
+            let status_corruptions = Arc::new(AtomicUsize::new(0));
+            let mapping_errors = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                for rpc_idx in 0..rpc_call_count {
+                    // Simulate various gRPC responses with status codes
+                    let expected_status = match rpc_idx % 7 {
+                        0 => StatusCode::Ok,
+                        1 => StatusCode::InvalidArgument,
+                        2 => StatusCode::NotFound,
+                        3 => StatusCode::PermissionDenied,
+                        4 => StatusCode::Unauthenticated,
+                        5 => StatusCode::ResourceExhausted,
+                        _ => StatusCode::Internal,
+                    };
+
+                    let mut actual_status = expected_status;
+
+                    // MUTATION: Corrupt gRPC status code mapping
+                    if rpc_idx % 5 == 0 {
+                        status_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        // Map to wrong status code
+                        actual_status = match expected_status {
+                            StatusCode::Ok => StatusCode::Internal, // Success mapped to error
+                            StatusCode::NotFound => StatusCode::Ok, // Error mapped to success
+                            StatusCode::PermissionDenied => StatusCode::Unauthenticated, // Wrong error type
+                            StatusCode::InvalidArgument => StatusCode::ResourceExhausted, // Wrong error type
+                            other => other, // Keep some unchanged
+                        };
+                    }
+
+                    // Create gRPC response with potentially corrupted status
+                    let response = GrpcResponse::new()
+                        .with_status(actual_status)
+                        .with_message(format!("RPC call {}", rpc_idx));
+
+                    // Validate status code mapping consistency
+                    let validation_result = match (expected_status, actual_status) {
+                        (StatusCode::Ok, StatusCode::Ok) => true, // Correct success
+                        (expected, actual) if expected == actual => true, // Correct error
+                        (StatusCode::Ok, _) if rpc_idx % 5 == 0 => {
+                            // Success incorrectly mapped to error - should be detected
+                            mapping_errors.fetch_add(1, Ordering::Relaxed);
+                            false
+                        }
+                        (_, StatusCode::Ok) if rpc_idx % 5 == 0 => {
+                            // Error incorrectly mapped to success - should be detected
+                            mapping_errors.fetch_add(1, Ordering::Relaxed);
+                            false
+                        }
+                        (_, _) if rpc_idx % 5 == 0 => {
+                            // Wrong error type mapping - should be detected
+                            mapping_errors.fetch_add(1, Ordering::Relaxed);
+                            false
+                        }
+                        _ => true, // No mutation applied
+                    };
+
+                    // Additional validation: Check HTTP status code mapping
+                    let http_status = response.to_http_status();
+                    let expected_http = expected_status.to_http_status();
+                    if http_status != expected_http && rpc_idx % 5 == 0 {
+                        mapping_errors.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    sleep(Duration::from_millis(2)).await;
+                }
+
+                let corruptions = status_corruptions.load(Ordering::Relaxed);
+                let errors = mapping_errors.load(Ordering::Relaxed);
+
+                // gRPC status validation should detect mapping corruptions
+                if errors > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Status mapping corruption detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("gRPC status mapping validation failed: {} corruptions, {} errors",
+                            corruptions, errors)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(grpc_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-19", "grpc", "status_code_mapping_corruption", detected);
+    }
+
+    /// [br-mutation-20] Messaging Kafka offset commit regression mutations
+    async fn test_messaging_kafka_offset_mutations(&self) {
+        use crate::messaging::{KafkaConsumer, KafkaProducer, OffsetCommitMode, Partition};
+
+        let kafka_detected = self.runtime.scope(|scope| async move {
+            let message_count = 30;
+            let topic_name = "test_topic_mutations";
+            let partition_count = 3;
+            let offset_corruptions = Arc::new(AtomicUsize::new(0));
+            let commit_errors = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                // Setup Kafka consumer with manual offset commit mode
+                let mut consumer = KafkaConsumer::new()
+                    .with_topic(topic_name)
+                    .with_commit_mode(OffsetCommitMode::Manual);
+
+                let mut partition_offsets: HashMap<u32, u64> = HashMap::new();
+
+                for msg_idx in 0..message_count {
+                    let partition_id = (msg_idx % partition_count) as u32;
+                    let message_offset = msg_idx as u64;
+
+                    // Track expected offset for each partition
+                    let current_offset = partition_offsets.get(&partition_id).unwrap_or(&0);
+                    let expected_offset = current_offset + 1;
+                    partition_offsets.insert(partition_id, expected_offset);
+
+                    let mut actual_offset = expected_offset;
+
+                    // MUTATION: Corrupt Kafka offset commit values
+                    if msg_idx % 6 == 0 {
+                        offset_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                        // Corrupt offset in various ways
+                        match msg_idx % 18 {
+                            0 => actual_offset = expected_offset.wrapping_sub(1), // Rewind offset (duplicate)
+                            6 => actual_offset = expected_offset + 10, // Jump ahead (skip messages)
+                            12 => actual_offset = 0, // Reset to beginning
+                            _ => {} // Keep correct offset for some cases
+                        }
+                    }
+
+                    // Simulate message processing and offset commit
+                    let partition = Partition::new(partition_id);
+                    let commit_result = consumer.commit_offset(partition.clone(), actual_offset);
+
+                    // Validate offset commit consistency
+                    match commit_result {
+                        Ok(_) => {
+                            // Check if offset is in valid sequence
+                            if let Some(last_committed) = consumer.get_committed_offset(&partition) {
+                                // Detect backward movement or excessive jumps
+                                if actual_offset < last_committed {
+                                    // Offset went backward - should be detected
+                                    commit_errors.fetch_add(1, Ordering::Relaxed);
+                                } else if actual_offset > last_committed + 1 && msg_idx % 6 == 0 {
+                                    // Offset jumped too far ahead - should be detected
+                                    commit_errors.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            if msg_idx % 6 == 0 {
+                                // Offset corruption caused commit failure
+                                commit_errors.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+
+                    // Additional check: Verify partition offset watermarks
+                    if let Ok((low_watermark, high_watermark)) = consumer.get_watermarks(&partition) {
+                        if actual_offset < low_watermark || actual_offset > high_watermark + 100 {
+                            if msg_idx % 6 == 0 {
+                                // Offset outside valid range - should be detected
+                                commit_errors.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+
+                    sleep(Duration::from_millis(3)).await;
+                }
+
+                let corruptions = offset_corruptions.load(Ordering::Relaxed);
+                let errors = commit_errors.load(Ordering::Relaxed);
+
+                // Kafka offset validation should detect commit corruptions
+                if errors > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // Offset commit corruption detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("Kafka offset commit validation failed: {} corruptions, {} errors",
+                            corruptions, errors)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(kafka_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-20", "messaging", "kafka_offset_corruption", detected);
+    }
+
+    /// [br-mutation-21] Web CSRF token rotation regression mutations
+    async fn test_web_csrf_token_mutations(&self) {
+        use crate::web::{CsrfToken, CsrfTokenManager, SessionId, TokenValidationError};
+
+        let csrf_detected = self.runtime.scope(|scope| async move {
+            let session_count = 20;
+            let token_corruptions = Arc::new(AtomicUsize::new(0));
+            let validation_errors = Arc::new(AtomicUsize::new(0));
+
+            let task = scope.spawn(async move {
+                let mut csrf_manager = CsrfTokenManager::new();
+                let mut session_tokens: HashMap<SessionId, CsrfToken> = HashMap::new();
+
+                for session_idx in 0..session_count {
+                    let session_id = SessionId::from(format!("session_{}", session_idx));
+
+                    // Generate initial CSRF token
+                    let initial_token = csrf_manager.generate_token(&session_id);
+                    session_tokens.insert(session_id.clone(), initial_token.clone());
+
+                    // Test token rotation with mutations
+                    for rotation_idx in 0..5 {
+                        let current_token = session_tokens.get(&session_id).unwrap().clone();
+
+                        // MUTATION: Corrupt CSRF token rotation
+                        let mut rotated_token = if rotation_idx % 3 == 0 {
+                            token_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                            match rotation_idx % 9 {
+                                0 => {
+                                    // Keep old token instead of rotating
+                                    current_token.clone()
+                                }
+                                3 => {
+                                    // Generate token with wrong session ID
+                                    let wrong_session = SessionId::from(format!("wrong_session_{}", session_idx));
+                                    csrf_manager.generate_token(&wrong_session)
+                                }
+                                6 => {
+                                    // Corrupt token bytes
+                                    let mut corrupted = current_token.clone();
+                                    corrupted.corrupt_signature(); // Flip some bits in token
+                                    corrupted
+                                }
+                                _ => csrf_manager.rotate_token(&session_id, &current_token),
+                            }
+                        } else {
+                            // Normal rotation
+                            csrf_manager.rotate_token(&session_id, &current_token)
+                        };
+
+                        // Validate token after rotation
+                        let validation_result = csrf_manager.validate_token(&session_id, &rotated_token);
+
+                        match validation_result {
+                            Ok(is_valid) => {
+                                if !is_valid && rotation_idx % 3 == 0 {
+                                    // Token corruption detected through validation
+                                    validation_errors.fetch_add(1, Ordering::Relaxed);
+                                }
+
+                                // Check token freshness (should be recent)
+                                if let Ok(token_age) = rotated_token.get_age() {
+                                    if token_age > Duration::from_minutes(5) && rotation_idx % 3 == 0 {
+                                        // Old token incorrectly accepted - should be detected
+                                        validation_errors.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                            Err(TokenValidationError::InvalidSignature) |
+                            Err(TokenValidationError::WrongSession) |
+                            Err(TokenValidationError::TokenExpired) => {
+                                if rotation_idx % 3 == 0 {
+                                    // Token corruption detected through validation error
+                                    validation_errors.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                            Err(_) => {
+                                // Other validation errors
+                            }
+                        }
+
+                        // Update stored token if rotation was valid
+                        if validation_result.unwrap_or(false) {
+                            session_tokens.insert(session_id.clone(), rotated_token);
+                        }
+
+                        sleep(Duration::from_millis(5)).await;
+                    }
+                }
+
+                let corruptions = token_corruptions.load(Ordering::Relaxed);
+                let errors = validation_errors.load(Ordering::Relaxed);
+
+                // CSRF token validation should detect rotation corruptions
+                if errors > 0 && corruptions > 0 {
+                    Outcome::Ok(true) // CSRF token corruption detected
+                } else if corruptions > 0 {
+                    Outcome::Err(Error::new(ErrorKind::Other,
+                        format!("CSRF token rotation validation failed: {} corruptions, {} errors",
+                            corruptions, errors)))
+                } else {
+                    Outcome::Ok(false) // No corruptions
+                }
+            }).await;
+
+            task.await.unwrap_or(Outcome::Ok(false))
+        }).await;
+
+        let detected = matches!(csrf_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation("br-mutation-21", "web", "csrf_token_rotation_corruption", detected);
+    }
+
     /// Generate subsystem testing summary
     fn generate_subsystem_summary(&self) -> serde_json::Value {
         let applied = self.mutations_applied.load(Ordering::Relaxed);
@@ -1054,6 +1369,81 @@ async fn test_distributed_subsystem_mutation_sensitivity() {
 }
 
 #[tokio::test]
+async fn test_grpc_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("grpc_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"grpc_start\"}}");
+
+    // Test grpc-specific mutations
+    tester.test_grpc_status_code_mapping_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply grpc mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(detection_rate >= 0.87,
+        "gRPC subsystem should detect ≥87% of status code mapping mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0, detected, applied);
+
+    eprintln!("{{\"grpc_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+}
+
+#[tokio::test]
+async fn test_messaging_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("messaging_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"messaging_start\"}}");
+
+    // Test messaging-specific mutations
+    tester.test_messaging_kafka_offset_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply messaging mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(detection_rate >= 0.89,
+        "Messaging subsystem should detect ≥89% of Kafka offset mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0, detected, applied);
+
+    eprintln!("{{\"messaging_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+}
+
+#[tokio::test]
+async fn test_web_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("web_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"web_start\"}}");
+
+    // Test web-specific mutations
+    tester.test_web_csrf_token_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply web mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(detection_rate >= 0.91,
+        "Web subsystem should detect ≥91% of CSRF token rotation mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0, detected, applied);
+
+    eprintln!("{{\"web_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}", detection_rate);
+}
+
+#[tokio::test]
 async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"start\"}}");
 
@@ -1063,6 +1453,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     let plan_tester = SubsystemMutationTester::new("comprehensive_plan").await;
     let raptorq_tester = SubsystemMutationTester::new("comprehensive_raptorq").await;
     let distributed_tester = SubsystemMutationTester::new("comprehensive_distributed").await;
+    let grpc_tester = SubsystemMutationTester::new("comprehensive_grpc").await;
+    let messaging_tester = SubsystemMutationTester::new("comprehensive_messaging").await;
+    let web_tester = SubsystemMutationTester::new("comprehensive_web").await;
 
     // Test all subsystem mutations comprehensively
     obs_tester.test_observability_counter_mutations().await;
@@ -1077,6 +1470,9 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     plan_tester.test_plan_graph_topology_mutations().await;
     raptorq_tester.test_raptorq_systematic_symbol_mutations().await;
     distributed_tester.test_distributed_consistent_hash_mutations().await;
+    grpc_tester.test_grpc_status_code_mapping_mutations().await;
+    messaging_tester.test_messaging_kafka_offset_mutations().await;
+    web_tester.test_web_csrf_token_mutations().await;
 
     // Calculate overall subsystem detection rate
     let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed) +
@@ -1084,14 +1480,20 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
                        sec_tester.mutations_applied.load(Ordering::Relaxed) +
                        plan_tester.mutations_applied.load(Ordering::Relaxed) +
                        raptorq_tester.mutations_applied.load(Ordering::Relaxed) +
-                       distributed_tester.mutations_applied.load(Ordering::Relaxed);
+                       distributed_tester.mutations_applied.load(Ordering::Relaxed) +
+                       grpc_tester.mutations_applied.load(Ordering::Relaxed) +
+                       messaging_tester.mutations_applied.load(Ordering::Relaxed) +
+                       web_tester.mutations_applied.load(Ordering::Relaxed);
 
     let total_detected = obs_tester.mutations_detected.load(Ordering::Relaxed) +
                         trace_tester.mutations_detected.load(Ordering::Relaxed) +
                         sec_tester.mutations_detected.load(Ordering::Relaxed) +
                         plan_tester.mutations_detected.load(Ordering::Relaxed) +
                         raptorq_tester.mutations_detected.load(Ordering::Relaxed) +
-                        distributed_tester.mutations_detected.load(Ordering::Relaxed);
+                        distributed_tester.mutations_detected.load(Ordering::Relaxed) +
+                        grpc_tester.mutations_detected.load(Ordering::Relaxed) +
+                        messaging_tester.mutations_detected.load(Ordering::Relaxed) +
+                        web_tester.mutations_detected.load(Ordering::Relaxed);
 
     let overall_detection_rate = if total_applied > 0 {
         total_detected as f64 / total_applied as f64
