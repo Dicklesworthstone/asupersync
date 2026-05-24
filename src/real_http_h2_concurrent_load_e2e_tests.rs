@@ -609,8 +609,8 @@ mod real_http_h2_concurrent_load_e2e {
                                 "scenario": scenario.name,
                                 "error": e
                             }),
-                    );
-                }
+                        );
+                    }
             }
 
             // Calculate scenario-specific success rate
