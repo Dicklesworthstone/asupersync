@@ -1938,6 +1938,162 @@ pub struct AgentMailPaneWorkflowTranscript {
     pub steps: Vec<AgentMailPaneWorkflowStep>,
 }
 
+/// Deterministic ASW operator cockpit status contract.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSwarmStatusContract {
+    /// Contract version for compatibility checks.
+    pub contract_version: String,
+    /// Beads pane contract this status surface consumes.
+    pub beads_command_center_version: String,
+    /// Agent Mail pane contract this status surface consumes.
+    pub agent_mail_pane_version: String,
+    /// Required git status fields in lexical order.
+    pub required_git_fields: Vec<String>,
+    /// Required reservation fields in lexical order.
+    pub required_reservation_fields: Vec<String>,
+    /// Required RCH fields in lexical order.
+    pub required_rch_fields: Vec<String>,
+    /// Required proof-frontier fields in lexical order.
+    pub required_proof_fields: Vec<String>,
+    /// Structured event taxonomy in lexical order.
+    pub event_taxonomy: Vec<String>,
+    /// Safe recommendation action taxonomy in lexical order.
+    pub recommendation_taxonomy: Vec<String>,
+}
+
+/// Normalized git status signal for the swarm cockpit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSwarmGitStatus {
+    /// Current local branch name.
+    pub branch: String,
+    /// Optional upstream tracking branch.
+    pub upstream: Option<String>,
+    /// Commits ahead of upstream.
+    pub ahead: u32,
+    /// Commits behind upstream.
+    pub behind: u32,
+    /// Dirty paths in lexical order.
+    pub dirty_paths: Vec<String>,
+    /// Ahead commit ids that are not owned by the current agent.
+    pub unowned_ahead_commits: Vec<String>,
+}
+
+/// Normalized Agent Mail file reservation signal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSwarmReservation {
+    /// Reservation identifier.
+    pub id: u64,
+    /// Agent holding the reservation.
+    pub agent: String,
+    /// Reserved path or glob.
+    pub path: String,
+    /// Whether the reservation is exclusive.
+    pub exclusive: bool,
+    /// Whether this reservation conflicts with the current intended edit.
+    pub conflict: bool,
+    /// Reservation expiry timestamp.
+    pub expires_ts: String,
+}
+
+/// Normalized RCH worker/admission signal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSwarmRchStatus {
+    /// Worker admission state.
+    pub worker_state: String,
+    /// Queue depth observed by the operator surface.
+    pub queue_depth: u32,
+    /// Effective worker capacity for this lane.
+    pub capacity: u32,
+    /// Optional latest RCH refusal text.
+    pub last_refusal: Option<String>,
+}
+
+/// Normalized validation/proof frontier row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSwarmProofFrontierItem {
+    /// Proof lane identifier.
+    pub lane: String,
+    /// Lane status (`green`, `yellow_frontier`, `red_blocked`).
+    pub status: String,
+    /// Exact command that produced the status.
+    pub command: String,
+    /// Optional first blocker extracted from proof output.
+    pub first_blocker: Option<String>,
+}
+
+/// Safe next action emitted by the ASW cockpit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSwarmRecommendation {
+    /// Stable action identifier.
+    pub action: String,
+    /// Recommendation severity (`info`, `warning`, `critical`).
+    pub severity: String,
+    /// Deterministic explanation.
+    pub reason: String,
+    /// Evidence references supporting this recommendation.
+    pub evidence_refs: Vec<String>,
+}
+
+/// Structured ASW status event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSwarmStatusEvent {
+    /// Event kind.
+    pub event_kind: String,
+    /// Source signal (`beads`, `mail`, `git`, `reservations`, `rch`, `proof`, `snapshot`).
+    pub source: String,
+    /// Deterministic event message.
+    pub message: String,
+}
+
+/// Deterministic ASW operator cockpit snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSwarmStatusSnapshot {
+    /// Snapshot schema version.
+    pub schema_version: String,
+    /// Overall health (`passing`, `degraded`, `critical`).
+    pub health_status: String,
+    /// Operator readiness score from 0 to 100.
+    pub readiness_score: u8,
+    /// Active agent names in lexical order.
+    pub active_agents: Vec<String>,
+    /// Count of ready bead rows.
+    pub ready_bead_count: u32,
+    /// Count of blocked bead rows.
+    pub blocked_bead_count: u32,
+    /// Count of stale bead rows.
+    pub stale_bead_count: u32,
+    /// Count of active reservations.
+    pub reservation_count: u32,
+    /// Count of reservation conflicts.
+    pub reservation_conflict_count: u32,
+    /// Count of dirty git paths.
+    pub dirty_path_count: u32,
+    /// Commits ahead of upstream.
+    pub ahead_count: u32,
+    /// Commits behind upstream.
+    pub behind_count: u32,
+    /// RCH queue depth.
+    pub rch_queue_depth: u32,
+    /// RCH capacity.
+    pub rch_capacity: u32,
+    /// Proof lanes with blockers or frontier status.
+    pub proof_frontier_blocker_count: u32,
+    /// Git status signal.
+    pub git: AgentSwarmGitStatus,
+    /// Active reservation signals.
+    pub reservations: Vec<AgentSwarmReservation>,
+    /// RCH worker/admission signal.
+    pub rch: AgentSwarmRchStatus,
+    /// Proof frontier rows.
+    pub proof_frontier: Vec<AgentSwarmProofFrontierItem>,
+    /// Safe next actions.
+    pub recommendations: Vec<AgentSwarmRecommendation>,
+    /// Evidence references used by this snapshot.
+    pub evidence_refs: Vec<String>,
+    /// Structured status events.
+    pub events: Vec<AgentSwarmStatusEvent>,
+}
+
 /// Deterministic timeline explorer contract for findings/evidence drill-down.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvidenceTimelineContract {
@@ -2850,6 +3006,64 @@ impl Outputtable for AgentMailPaneContract {
     }
 }
 
+impl Outputtable for AgentSwarmStatusSnapshot {
+    fn human_format(&self) -> String {
+        let mut lines = vec![
+            format!(
+                "ASW swarm status: {} (score={})",
+                self.health_status, self.readiness_score
+            ),
+            format!("Agents: {}", self.active_agents.join(", ")),
+            format!(
+                "Beads: ready={} blocked={} stale={}",
+                self.ready_bead_count, self.blocked_bead_count, self.stale_bead_count
+            ),
+            format!(
+                "Git: {} ahead={} behind={} dirty={}",
+                self.git.branch, self.ahead_count, self.behind_count, self.dirty_path_count
+            ),
+            format!(
+                "Reservations: total={} conflicts={}",
+                self.reservation_count, self.reservation_conflict_count
+            ),
+            format!(
+                "RCH: {} queue={}/{}",
+                self.rch.worker_state, self.rch_queue_depth, self.rch_capacity
+            ),
+            format!(
+                "Proof frontier: blockers={}",
+                self.proof_frontier_blocker_count
+            ),
+        ];
+
+        if self.recommendations.is_empty() {
+            lines.push("Recommendations: none".to_string());
+        } else {
+            lines.push("Recommendations:".to_string());
+            for recommendation in &self.recommendations {
+                lines.push(format!(
+                    "  - {} [{}]: {}",
+                    recommendation.action, recommendation.severity, recommendation.reason
+                ));
+            }
+        }
+        lines.join("\n")
+    }
+
+    fn human_summary(&self) -> String {
+        format!(
+            "{}\tscore={}\tready={}\tblocked={}\tdirty={}\tconflicts={}\tproof_blockers={}",
+            self.health_status,
+            self.readiness_score,
+            self.ready_bead_count,
+            self.blocked_bead_count,
+            self.dirty_path_count,
+            self.reservation_conflict_count,
+            self.proof_frontier_blocker_count
+        )
+    }
+}
+
 impl Outputtable for CoreDiagnosticsReportContract {
     fn human_format(&self) -> String {
         let mut lines = Vec::new();
@@ -3255,6 +3469,7 @@ const SCENARIO_COMPOSER_CONTRACT_VERSION: &str = "doctor-scenario-composer-v1";
 const E2E_HARNESS_CONTRACT_VERSION: &str = "doctor-e2e-harness-v1";
 const BEADS_COMMAND_CENTER_CONTRACT_VERSION: &str = "doctor-beads-command-center-v1";
 const AGENT_MAIL_PANE_CONTRACT_VERSION: &str = "doctor-agent-mail-pane-v1";
+const AGENT_SWARM_STATUS_CONTRACT_VERSION: &str = "doctor-agent-swarm-status-v1";
 const EVIDENCE_TIMELINE_CONTRACT_VERSION: &str = "doctor-evidence-timeline-v1";
 const DOCTOR_SCENARIO_COVERAGE_PACK_CONTRACT_VERSION: &str = "doctor-scenario-coverage-packs-v1";
 const DOCTOR_SCENARIO_COVERAGE_PACK_REPORT_VERSION: &str =
@@ -13094,6 +13309,683 @@ pub fn run_agent_mail_pane_smoke(
     })
 }
 
+/// Returns the canonical ASW operator swarm-status contract.
+#[must_use]
+pub fn agent_swarm_status_contract() -> AgentSwarmStatusContract {
+    AgentSwarmStatusContract {
+        contract_version: AGENT_SWARM_STATUS_CONTRACT_VERSION.to_string(),
+        beads_command_center_version: BEADS_COMMAND_CENTER_CONTRACT_VERSION.to_string(),
+        agent_mail_pane_version: AGENT_MAIL_PANE_CONTRACT_VERSION.to_string(),
+        required_git_fields: vec![
+            "ahead".to_string(),
+            "behind".to_string(),
+            "branch".to_string(),
+            "dirty_paths".to_string(),
+            "upstream".to_string(),
+        ],
+        required_reservation_fields: vec![
+            "agent".to_string(),
+            "conflict".to_string(),
+            "exclusive".to_string(),
+            "expires_ts".to_string(),
+            "id".to_string(),
+            "path".to_string(),
+        ],
+        required_rch_fields: vec![
+            "capacity".to_string(),
+            "last_refusal".to_string(),
+            "queue_depth".to_string(),
+            "worker_state".to_string(),
+        ],
+        required_proof_fields: vec![
+            "command".to_string(),
+            "first_blocker".to_string(),
+            "lane".to_string(),
+            "status".to_string(),
+        ],
+        event_taxonomy: vec![
+            "dirty_tree_detected".to_string(),
+            "proof_frontier_blocked".to_string(),
+            "rch_refusal_classified".to_string(),
+            "recommendation_emitted".to_string(),
+            "reservation_conflict".to_string(),
+            "snapshot_built".to_string(),
+            "stale_work_detected".to_string(),
+            "unowned_ahead_commit".to_string(),
+        ],
+        recommendation_taxonomy: vec![
+            "acknowledge_required_mail".to_string(),
+            "claim_top_ready_bead".to_string(),
+            "coordinate_reservation_conflict".to_string(),
+            "fix_first_proof_blocker".to_string(),
+            "inspect_dirty_paths".to_string(),
+            "inspect_unowned_ahead_commit".to_string(),
+            "push_owned_main_commits".to_string(),
+            "refresh_from_origin_main".to_string(),
+            "refresh_stale_bead_snapshot".to_string(),
+            "retry_rch_after_capacity_recovers".to_string(),
+        ],
+    }
+}
+
+/// Validates invariants for [`AgentSwarmStatusContract`].
+///
+/// # Errors
+///
+/// Returns `Err` when schema versions, fields, or taxonomies drift from the
+/// canonical deterministic cockpit surface.
+pub fn validate_agent_swarm_status_contract(
+    contract: &AgentSwarmStatusContract,
+) -> Result<(), String> {
+    if contract.contract_version != AGENT_SWARM_STATUS_CONTRACT_VERSION {
+        return Err(format!(
+            "unexpected contract_version {}",
+            contract.contract_version
+        ));
+    }
+    if contract.beads_command_center_version != BEADS_COMMAND_CENTER_CONTRACT_VERSION {
+        return Err("beads_command_center_version must match command-center contract".to_string());
+    }
+    if contract.agent_mail_pane_version != AGENT_MAIL_PANE_CONTRACT_VERSION {
+        return Err("agent_mail_pane_version must match Agent Mail pane contract".to_string());
+    }
+
+    validate_lexical_string_set(&contract.required_git_fields, "required_git_fields")?;
+    validate_lexical_string_set(
+        &contract.required_reservation_fields,
+        "required_reservation_fields",
+    )?;
+    validate_lexical_string_set(&contract.required_rch_fields, "required_rch_fields")?;
+    validate_lexical_string_set(&contract.required_proof_fields, "required_proof_fields")?;
+    validate_lexical_string_set(&contract.event_taxonomy, "event_taxonomy")?;
+    validate_lexical_string_set(&contract.recommendation_taxonomy, "recommendation_taxonomy")?;
+
+    for required in ["ahead", "behind", "branch", "dirty_paths", "upstream"] {
+        if !contract
+            .required_git_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_git_fields missing {required}"));
+        }
+    }
+    for required in ["agent", "conflict", "exclusive", "expires_ts", "id", "path"] {
+        if !contract
+            .required_reservation_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_reservation_fields missing {required}"));
+        }
+    }
+    for required in ["capacity", "last_refusal", "queue_depth", "worker_state"] {
+        if !contract
+            .required_rch_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_rch_fields missing {required}"));
+        }
+    }
+    for required in ["command", "first_blocker", "lane", "status"] {
+        if !contract
+            .required_proof_fields
+            .iter()
+            .any(|field| field == required)
+        {
+            return Err(format!("required_proof_fields missing {required}"));
+        }
+    }
+    Ok(())
+}
+
+fn count_to_u32(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+fn subtract_score(score: &mut u8, penalty: u8) {
+    *score = score.saturating_sub(penalty);
+}
+
+fn parse_git_divergence_token(token: &str) -> Option<(&str, u32)> {
+    let trimmed = token.trim();
+    if let Some(raw) = trimmed.strip_prefix("ahead ") {
+        return raw.parse::<u32>().ok().map(|count| ("ahead", count));
+    }
+    if let Some(raw) = trimmed.strip_prefix("behind ") {
+        return raw.parse::<u32>().ok().map(|count| ("behind", count));
+    }
+    None
+}
+
+fn push_agent_swarm_recommendation(
+    recommendations: &mut Vec<AgentSwarmRecommendation>,
+    events: &mut Vec<AgentSwarmStatusEvent>,
+    action: &str,
+    severity: &str,
+    reason: String,
+    evidence_refs: Vec<String>,
+) {
+    recommendations.push(AgentSwarmRecommendation {
+        action: action.to_string(),
+        severity: severity.to_string(),
+        reason,
+        evidence_refs,
+    });
+    events.push(AgentSwarmStatusEvent {
+        event_kind: "recommendation_emitted".to_string(),
+        source: "snapshot".to_string(),
+        message: action.to_string(),
+    });
+}
+
+/// Parses `git status --short --branch` output into a normalized cockpit signal.
+///
+/// # Errors
+///
+/// Returns `Err` when the short-status header is missing.
+pub fn parse_git_short_status(
+    raw_status: &str,
+    unowned_ahead_commits: &[String],
+) -> Result<AgentSwarmGitStatus, String> {
+    let mut branch = None;
+    let mut upstream = None;
+    let mut ahead = 0;
+    let mut behind = 0;
+    let mut dirty_paths = Vec::new();
+
+    for line in raw_status.lines() {
+        if let Some(header) = line.strip_prefix("## ") {
+            let (branch_part, divergence) = header
+                .split_once('[')
+                .map_or((header.trim(), None), |(left, right)| {
+                    (left.trim(), Some(right.trim_end_matches(']').trim()))
+                });
+            if let Some((local, remote)) = branch_part.split_once("...") {
+                branch = Some(local.trim().to_string());
+                let remote = remote.trim();
+                if !remote.is_empty() {
+                    upstream = Some(remote.to_string());
+                }
+            } else if !branch_part.is_empty() {
+                branch = Some(branch_part.to_string());
+            }
+
+            if let Some(divergence) = divergence {
+                for token in divergence.split(',') {
+                    match parse_git_divergence_token(token) {
+                        Some(("ahead", count)) => ahead = count,
+                        Some(("behind", count)) => behind = count,
+                        _ => {}
+                    }
+                }
+            }
+            continue;
+        }
+
+        if line.trim().is_empty() {
+            continue;
+        }
+        let path = line.get(3..).unwrap_or(line).trim();
+        if !path.is_empty() {
+            dirty_paths.push(path.to_string());
+        }
+    }
+
+    let Some(branch) = branch else {
+        return Err("git status header must start with `## `".to_string());
+    };
+    dirty_paths.sort();
+    dirty_paths.dedup();
+    let mut unowned_ahead_commits = unowned_ahead_commits.to_vec();
+    unowned_ahead_commits.sort();
+    unowned_ahead_commits.dedup();
+
+    Ok(AgentSwarmGitStatus {
+        branch,
+        upstream,
+        ahead,
+        behind,
+        dirty_paths,
+        unowned_ahead_commits,
+    })
+}
+
+/// Builds a deterministic ASW operator cockpit snapshot.
+///
+/// # Errors
+///
+/// Returns `Err` when the status contract is invalid.
+#[allow(clippy::too_many_arguments)]
+pub fn build_agent_swarm_status_snapshot(
+    contract: &AgentSwarmStatusContract,
+    beads: &BeadsCommandCenterSnapshot,
+    mail: &AgentMailPaneSnapshot,
+    git: AgentSwarmGitStatus,
+    reservations: &[AgentSwarmReservation],
+    rch: AgentSwarmRchStatus,
+    proof_frontier: &[AgentSwarmProofFrontierItem],
+) -> Result<AgentSwarmStatusSnapshot, String> {
+    validate_agent_swarm_status_contract(contract)?;
+
+    let mut events = Vec::new();
+    let mut evidence_refs = Vec::new();
+    let mut active_agents = BTreeSet::new();
+    for message in mail
+        .inbox
+        .iter()
+        .chain(mail.outbox.iter())
+        .chain(mail.thread_messages.iter())
+    {
+        active_agents.insert(message.from.clone());
+        evidence_refs.push(format!("mail:{}", message.id));
+    }
+    for contact in &mail.contacts {
+        active_agents.insert(contact.peer.clone());
+    }
+    for reservation in reservations {
+        active_agents.insert(reservation.agent.clone());
+        evidence_refs.push(format!(
+            "reservation:{}:{}",
+            reservation.id, reservation.path
+        ));
+    }
+    for item in &beads.ready_work {
+        evidence_refs.push(format!("bead:{}", item.id));
+    }
+    for item in &beads.blocked_work {
+        evidence_refs.push(format!("bead:{}", item.id));
+    }
+    for proof in proof_frontier {
+        evidence_refs.push(format!("proof:{}", proof.lane));
+    }
+    for path in &git.dirty_paths {
+        evidence_refs.push(format!("git:dirty:{path}"));
+    }
+    for commit in &git.unowned_ahead_commits {
+        evidence_refs.push(format!("git:unowned-ahead:{commit}"));
+    }
+    evidence_refs.sort();
+    evidence_refs.dedup();
+
+    let ready_bead_count = count_to_u32(beads.ready_work.len());
+    let blocked_bead_count = count_to_u32(beads.blocked_work.len());
+    let stale_bead_count = if beads.stale {
+        ready_bead_count.saturating_add(blocked_bead_count)
+    } else {
+        0
+    };
+    let reservation_count = count_to_u32(reservations.len());
+    let reservation_conflict_count = count_to_u32(
+        reservations
+            .iter()
+            .filter(|reservation| reservation.conflict)
+            .count(),
+    );
+    let dirty_path_count = count_to_u32(git.dirty_paths.len());
+    let proof_frontier_blocker_count = count_to_u32(
+        proof_frontier
+            .iter()
+            .filter(|proof| proof.status != "green" || proof.first_blocker.is_some())
+            .count(),
+    );
+
+    if dirty_path_count > 0 {
+        events.push(AgentSwarmStatusEvent {
+            event_kind: "dirty_tree_detected".to_string(),
+            source: "git".to_string(),
+            message: format!("{dirty_path_count} dirty paths require ownership review"),
+        });
+    }
+    if stale_bead_count > 0 {
+        events.push(AgentSwarmStatusEvent {
+            event_kind: "stale_work_detected".to_string(),
+            source: "beads".to_string(),
+            message: format!("{stale_bead_count} bead rows came from a stale snapshot"),
+        });
+    }
+    if reservation_conflict_count > 0 {
+        events.push(AgentSwarmStatusEvent {
+            event_kind: "reservation_conflict".to_string(),
+            source: "reservations".to_string(),
+            message: format!("{reservation_conflict_count} reservation conflicts detected"),
+        });
+    }
+    if rch.last_refusal.is_some() {
+        events.push(AgentSwarmStatusEvent {
+            event_kind: "rch_refusal_classified".to_string(),
+            source: "rch".to_string(),
+            message: "latest RCH result was an admission refusal".to_string(),
+        });
+    }
+    if proof_frontier_blocker_count > 0 {
+        events.push(AgentSwarmStatusEvent {
+            event_kind: "proof_frontier_blocked".to_string(),
+            source: "proof".to_string(),
+            message: format!("{proof_frontier_blocker_count} proof lanes require attention"),
+        });
+    }
+    if !git.unowned_ahead_commits.is_empty() {
+        events.push(AgentSwarmStatusEvent {
+            event_kind: "unowned_ahead_commit".to_string(),
+            source: "git".to_string(),
+            message: format!(
+                "{} ahead commits need ownership review",
+                git.unowned_ahead_commits.len()
+            ),
+        });
+    }
+
+    let mut recommendations = Vec::new();
+
+    if reservation_conflict_count > 0 {
+        let refs = reservations
+            .iter()
+            .filter(|reservation| reservation.conflict)
+            .map(|reservation| format!("reservation:{}:{}", reservation.id, reservation.path))
+            .collect::<Vec<_>>();
+        push_agent_swarm_recommendation(
+            &mut recommendations,
+            &mut events,
+            "coordinate_reservation_conflict",
+            "critical",
+            "coordinate with the reservation holder before editing overlapping paths".to_string(),
+            refs,
+        );
+    }
+    if dirty_path_count > 0 {
+        push_agent_swarm_recommendation(
+            &mut recommendations,
+            &mut events,
+            "inspect_dirty_paths",
+            "warning",
+            "review dirty paths and separate owned changes from peer edits".to_string(),
+            git.dirty_paths
+                .iter()
+                .map(|path| format!("git:dirty:{path}"))
+                .collect(),
+        );
+    }
+    if git.behind > 0 {
+        push_agent_swarm_recommendation(
+            &mut recommendations,
+            &mut events,
+            "refresh_from_origin_main",
+            "warning",
+            "refresh from origin/main before final proof".to_string(),
+            vec!["git:behind".to_string()],
+        );
+    }
+    if git.ahead > 0 {
+        push_agent_swarm_recommendation(
+            &mut recommendations,
+            &mut events,
+            "push_owned_main_commits",
+            "info",
+            "push owned main commits after proof passes".to_string(),
+            vec!["git:ahead".to_string()],
+        );
+    }
+    if !git.unowned_ahead_commits.is_empty() {
+        push_agent_swarm_recommendation(
+            &mut recommendations,
+            &mut events,
+            "inspect_unowned_ahead_commit",
+            "warning",
+            "inspect ahead commit ownership before publishing".to_string(),
+            git.unowned_ahead_commits
+                .iter()
+                .map(|commit| format!("git:unowned-ahead:{commit}"))
+                .collect(),
+        );
+    }
+    if let Some(refusal) = &rch.last_refusal {
+        push_agent_swarm_recommendation(
+            &mut recommendations,
+            &mut events,
+            "retry_rch_after_capacity_recovers",
+            "critical",
+            "preserve the exact RCH refusal and retry after worker capacity recovers".to_string(),
+            vec![format!("rch:refusal:{refusal}")],
+        );
+    }
+    if proof_frontier_blocker_count > 0 {
+        let refs = proof_frontier
+            .iter()
+            .filter(|proof| proof.status != "green" || proof.first_blocker.is_some())
+            .map(|proof| format!("proof:{}", proof.lane))
+            .collect::<Vec<_>>();
+        push_agent_swarm_recommendation(
+            &mut recommendations,
+            &mut events,
+            "fix_first_proof_blocker",
+            "critical",
+            "fix or surface the first proof blocker before widening scope".to_string(),
+            refs,
+        );
+    }
+    if stale_bead_count > 0 {
+        push_agent_swarm_recommendation(
+            &mut recommendations,
+            &mut events,
+            "refresh_stale_bead_snapshot",
+            "warning",
+            "refresh bead state before claiming additional work".to_string(),
+            vec!["beads:stale".to_string()],
+        );
+    }
+    if mail.pending_ack_count > 0 {
+        push_agent_swarm_recommendation(
+            &mut recommendations,
+            &mut events,
+            "acknowledge_required_mail",
+            "warning",
+            "acknowledge required coordination messages before closeout".to_string(),
+            vec!["mail:pending_ack".to_string()],
+        );
+    }
+    if recommendations.is_empty() && ready_bead_count > 0 {
+        let refs = beads
+            .ready_work
+            .first()
+            .map(|item| vec![format!("bead:{}", item.id)])
+            .unwrap_or_default();
+        push_agent_swarm_recommendation(
+            &mut recommendations,
+            &mut events,
+            "claim_top_ready_bead",
+            "info",
+            "claim the highest-priority ready bead and reserve its paths".to_string(),
+            refs,
+        );
+    }
+
+    let mut readiness_score = 100;
+    let dirty_penalty = u8::try_from(dirty_path_count.saturating_mul(5).min(20)).unwrap_or(20);
+    subtract_score(&mut readiness_score, dirty_penalty);
+    if git.ahead > 0 {
+        subtract_score(&mut readiness_score, 5);
+    }
+    if git.behind > 0 {
+        subtract_score(&mut readiness_score, 10);
+    }
+    if !git.unowned_ahead_commits.is_empty() {
+        subtract_score(&mut readiness_score, 10);
+    }
+    let conflict_penalty =
+        u8::try_from(reservation_conflict_count.saturating_mul(20).min(40)).unwrap_or(40);
+    subtract_score(&mut readiness_score, conflict_penalty);
+    if rch.last_refusal.is_some() || (rch.capacity > 0 && rch.queue_depth >= rch.capacity) {
+        subtract_score(&mut readiness_score, 15);
+    }
+    let proof_penalty =
+        u8::try_from(proof_frontier_blocker_count.saturating_mul(15).min(45)).unwrap_or(45);
+    subtract_score(&mut readiness_score, proof_penalty);
+    if stale_bead_count > 0 {
+        subtract_score(&mut readiness_score, 10);
+    }
+    if mail.pending_ack_count > 0 {
+        subtract_score(&mut readiness_score, 5);
+    }
+
+    let health_status = if reservation_conflict_count > 0
+        || rch.last_refusal.is_some()
+        || proof_frontier_blocker_count > 0
+    {
+        "critical"
+    } else if dirty_path_count > 0
+        || git.ahead > 0
+        || git.behind > 0
+        || stale_bead_count > 0
+        || mail.pending_ack_count > 0
+    {
+        "degraded"
+    } else {
+        "passing"
+    }
+    .to_string();
+
+    let mut reservations = reservations.to_vec();
+    reservations.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let mut proof_frontier = proof_frontier.to_vec();
+    proof_frontier.sort_by(|left, right| left.lane.cmp(&right.lane));
+
+    events.push(AgentSwarmStatusEvent {
+        event_kind: "snapshot_built".to_string(),
+        source: "snapshot".to_string(),
+        message: format!(
+            "agents={} ready={} blocked={} dirty={} conflicts={} proof_blockers={}",
+            active_agents.len(),
+            ready_bead_count,
+            blocked_bead_count,
+            dirty_path_count,
+            reservation_conflict_count,
+            proof_frontier_blocker_count
+        ),
+    });
+
+    Ok(AgentSwarmStatusSnapshot {
+        schema_version: contract.contract_version.clone(),
+        health_status,
+        readiness_score,
+        active_agents: active_agents.into_iter().collect(),
+        ready_bead_count,
+        blocked_bead_count,
+        stale_bead_count,
+        reservation_count,
+        reservation_conflict_count,
+        dirty_path_count,
+        ahead_count: git.ahead,
+        behind_count: git.behind,
+        rch_queue_depth: rch.queue_depth,
+        rch_capacity: rch.capacity,
+        proof_frontier_blocker_count,
+        git,
+        reservations,
+        rch,
+        proof_frontier,
+        recommendations,
+        evidence_refs,
+        events,
+    })
+}
+
+/// Runs a deterministic ASW swarm-status smoke snapshot.
+///
+/// # Errors
+///
+/// Returns `Err` when any underlying command-center fixture fails to build.
+pub fn run_agent_swarm_status_smoke(
+    contract: &AgentSwarmStatusContract,
+) -> Result<AgentSwarmStatusSnapshot, String> {
+    let beads_contract = beads_command_center_contract();
+    let beads = build_beads_command_center_snapshot(
+        &beads_contract,
+        r#"[
+  {"id":"asupersync-oxqrae.5","title":"Ship operator cockpit and doctor commands","status":"in_progress","priority":1,"assignee":"GreenMountain"},
+  {"id":"asupersync-oxqrae.10","title":"Implement compaction-safe handoff verifier","status":"open","priority":1}
+]"#,
+        r#"[
+  {
+    "id":"asupersync-oxqrae.10",
+    "title":"Implement compaction-safe handoff verifier",
+    "status":"open",
+    "priority":1,
+    "blocked_by":[{"id":"asupersync-oxqrae.5"}]
+  }
+]"#,
+        r#"{
+  "triage": {
+    "quick_ref": {
+      "top_picks": [
+        {"id":"asupersync-oxqrae.5","title":"Ship operator cockpit and doctor commands","score":0.42,"unblocks":2,"reasons":["available","release-critical"]}
+      ]
+    }
+  }
+}"#,
+        "all",
+        420,
+    )?;
+
+    let mail_contract = agent_mail_pane_contract();
+    let mail_transcript = run_agent_mail_pane_smoke(&mail_contract)?;
+    let mail = mail_transcript
+        .steps
+        .last()
+        .map(|step| step.snapshot.clone())
+        .ok_or_else(|| "agent mail smoke transcript must include at least one step".to_string())?;
+
+    let git = parse_git_short_status(
+        "## main...origin/main [ahead 1]\n M src/cli/doctor/mod.rs\n",
+        &["5941c2911".to_string()],
+    )?;
+    let reservations = vec![
+        AgentSwarmReservation {
+            id: 23870,
+            agent: "GreenMountain".to_string(),
+            path: "src/cli/doctor/**".to_string(),
+            exclusive: true,
+            conflict: false,
+            expires_ts: "2026-05-24T23:02:31Z".to_string(),
+        },
+        AgentSwarmReservation {
+            id: 23874,
+            agent: "WindyCastle".to_string(),
+            path: ".beads/issues.jsonl".to_string(),
+            exclusive: true,
+            conflict: true,
+            expires_ts: "2026-05-25T00:01:30Z".to_string(),
+        },
+    ];
+    let rch = AgentSwarmRchStatus {
+        worker_state: "admission_refused".to_string(),
+        queue_depth: 8,
+        capacity: 8,
+        last_refusal: Some("no remote worker admitted this lane".to_string()),
+    };
+    let proof_frontier = vec![AgentSwarmProofFrontierItem {
+        lane: "cargo test --lib admission".to_string(),
+        status: "red_blocked".to_string(),
+        command: "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_p6 cargo test --lib admission"
+            .to_string(),
+        first_blocker: Some("first proof frontier blocker".to_string()),
+    }];
+
+    build_agent_swarm_status_snapshot(
+        contract,
+        &beads,
+        &mail,
+        git,
+        &reservations,
+        rch,
+        &proof_frontier,
+    )
+}
+
 /// Returns the canonical evidence-timeline explorer contract.
 #[must_use]
 pub fn evidence_timeline_contract() -> EvidenceTimelineContract {
@@ -21625,6 +22517,79 @@ impl RuntimeState {
                 .iter()
                 .any(|event| event.event_kind == "thread_view_updated")
         );
+    }
+
+    #[test]
+    fn agent_swarm_status_contract_validates() {
+        let contract = agent_swarm_status_contract();
+        validate_agent_swarm_status_contract(&contract).expect("valid ASW status contract");
+    }
+
+    #[test]
+    fn parse_git_short_status_summarizes_dirty_and_ahead() {
+        let parsed = parse_git_short_status(
+            "## main...origin/main [ahead 2, behind 1]\n M src/cli/doctor/mod.rs\n?? tests/operator_swarm_status_contract.rs\n",
+            &["def456".to_string(), "abc123".to_string(), "abc123".to_string()],
+        )
+        .expect("parse git status");
+
+        assert_eq!(parsed.branch, "main");
+        assert_eq!(parsed.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(parsed.ahead, 2);
+        assert_eq!(parsed.behind, 1);
+        assert_eq!(
+            parsed.dirty_paths,
+            vec![
+                "src/cli/doctor/mod.rs".to_string(),
+                "tests/operator_swarm_status_contract.rs".to_string(),
+            ]
+        );
+        assert_eq!(
+            parsed.unowned_ahead_commits,
+            vec!["abc123".to_string(), "def456".to_string()]
+        );
+    }
+
+    #[test]
+    fn agent_swarm_status_smoke_is_deterministic_and_safe() {
+        let contract = agent_swarm_status_contract();
+        let first = run_agent_swarm_status_smoke(&contract).expect("first swarm status");
+        let second = run_agent_swarm_status_smoke(&contract).expect("second swarm status");
+        assert_eq!(first, second);
+        assert_eq!(first.schema_version, "doctor-agent-swarm-status-v1");
+        assert_eq!(first.health_status, "critical");
+        assert_eq!(first.readiness_score, 20);
+        assert_eq!(first.ready_bead_count, 2);
+        assert_eq!(first.blocked_bead_count, 1);
+        assert_eq!(first.stale_bead_count, 3);
+        assert_eq!(first.reservation_conflict_count, 1);
+        assert_eq!(first.proof_frontier_blocker_count, 1);
+        assert!(first.active_agents.contains(&"GreenMountain".to_string()));
+        assert!(
+            first
+                .recommendations
+                .iter()
+                .any(|recommendation| recommendation.action == "fix_first_proof_blocker")
+        );
+
+        let joined_recommendations = first
+            .recommendations
+            .iter()
+            .map(|recommendation| recommendation.reason.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in [
+            "git reset",
+            "git clean",
+            "checkout -b",
+            "switch -c",
+            "worktree",
+        ] {
+            assert!(
+                !joined_recommendations.contains(forbidden),
+                "recommendations must not include forbidden operation: {forbidden}"
+            );
+        }
     }
 
     #[test]

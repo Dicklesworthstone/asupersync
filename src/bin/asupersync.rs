@@ -28,13 +28,14 @@ use asupersync::atp::{
 use asupersync::cli::doctor::{
     AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
     AdvancedRemediationDelta, AdvancedTroubleshootingPlaybook, AdvancedTrustTransition,
-    DoctorScenarioCoveragePackSmokeReport, DoctorScenarioCoveragePacksContract,
-    DoctorStressSoakContract, DoctorStressSoakSmokeReport, EvidenceTimelineContract,
-    EvidenceTimelineWorkflowTranscript, advanced_diagnostics_report_bundle,
+    AgentSwarmStatusSnapshot, DoctorScenarioCoveragePackSmokeReport,
+    DoctorScenarioCoveragePacksContract, DoctorStressSoakContract, DoctorStressSoakSmokeReport,
+    EvidenceTimelineContract, EvidenceTimelineWorkflowTranscript,
+    advanced_diagnostics_report_bundle, agent_swarm_status_contract,
     build_doctor_scenario_coverage_pack_smoke_report, build_doctor_stress_soak_smoke_report,
     doctor_scenario_coverage_packs_contract, doctor_stress_soak_contract,
-    evidence_timeline_contract, run_evidence_timeline_keyboard_flow_smoke,
-    validate_advanced_diagnostics_report_extension,
+    evidence_timeline_contract, run_agent_swarm_status_smoke,
+    run_evidence_timeline_keyboard_flow_smoke, validate_advanced_diagnostics_report_extension,
     validate_advanced_diagnostics_report_extension_contract,
 };
 use asupersync::cli::{
@@ -540,6 +541,8 @@ enum DoctorCommand {
     PackageCli(DoctorPackageCliArgs),
     /// Render a deterministic runtime task-console wire snapshot from JSON input
     TaskConsoleView(DoctorTaskConsoleViewArgs),
+    /// Emit ASW operator swarm-status cockpit snapshot
+    SwarmStatus,
 }
 
 #[derive(Args, Debug)]
@@ -1958,6 +1961,7 @@ fn run_doctor(args: DoctorArgs, output: &mut Output) -> Result<(), CliError> {
         DoctorCommand::FrankenExport(export_args) => doctor_franken_export(&export_args, output),
         DoctorCommand::PackageCli(package_args) => doctor_package_cli(&package_args, output),
         DoctorCommand::TaskConsoleView(view_args) => doctor_task_console_view(&view_args, output),
+        DoctorCommand::SwarmStatus => doctor_swarm_status(output),
     }
 }
 
@@ -2149,6 +2153,23 @@ fn doctor_stress_soak_smoke_command(
     })?;
     let payload = DoctorStressSoakSmokeOutput { report };
     output.write(&payload).map_err(|err| {
+        CliError::new("output_error", "Failed to write output").detail(err.to_string())
+    })?;
+    Ok(())
+}
+
+fn doctor_swarm_status(output: &mut Output) -> Result<(), CliError> {
+    let contract = agent_swarm_status_contract();
+    let snapshot: AgentSwarmStatusSnapshot =
+        run_agent_swarm_status_smoke(&contract).map_err(|err| {
+            CliError::new(
+                "doctor_swarm_status_error",
+                "Failed to build ASW swarm-status snapshot",
+            )
+            .detail(err)
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+    output.write(&snapshot).map_err(|err| {
         CliError::new("output_error", "Failed to write output").detail(err.to_string())
     })?;
     Ok(())
