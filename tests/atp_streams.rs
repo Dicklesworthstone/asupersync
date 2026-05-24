@@ -3,9 +3,17 @@
 //! Tests for ATP stream scheduling, flow control, reassembly, and lifecycle.
 
 use asupersync::{
+    Outcome,
     bytes::Bytes,
-    net::atp::streams::{
-        AtpStream, ConnectionFlowControl, StreamId, StreamManager, StreamPriority, StreamScheduler,
+    net::atp::{
+        protocol::{
+            packet_assembly::{PacketAssembler, PacketConstraints, PacketNumberSpace},
+            quic_frames::QuicFrame,
+        },
+        streams::{
+            AtpStream, ConnectionFlowControl, StreamId, StreamManager, StreamPriority,
+            StreamScheduler,
+        },
     },
 };
 
@@ -104,6 +112,82 @@ fn test_stream_send_receive() {
     let received = stream.receive_data(&cx, 0, data, false).unwrap();
     assert_eq!(received.len(), 1);
     assert_eq!(received[0], Bytes::from("hello world"));
+}
+
+#[test]
+fn test_stream_manager_drains_quic_stream_frames_into_packet_bytes() {
+    let cx = test_cx();
+    let mut manager = StreamManager::new(false);
+    let data_stream = manager
+        .open_stream(&cx, true, StreamPriority::Data)
+        .unwrap();
+    let control_stream = manager
+        .open_stream(&cx, true, StreamPriority::Control)
+        .unwrap();
+
+    manager
+        .queue_stream_data(&cx, data_stream, Bytes::from_static(b"abcdef"), true)
+        .unwrap();
+    manager
+        .queue_stream_data(&cx, control_stream, Bytes::from_static(b"go"), false)
+        .unwrap();
+
+    let frames = match manager.drain_quic_stream_frames(3, 3) {
+        Outcome::Ok(frames) => frames,
+        other => panic!("stream frames should drain cleanly, got {other:?}"),
+    };
+
+    assert_eq!(frames.len(), 3);
+    assert!(matches!(
+        &frames[0],
+        QuicFrame::Stream {
+            stream_id,
+            offset: None,
+            data,
+            fin: false
+        } if stream_id.value() == control_stream.id && data.as_ref() == b"go"
+    ));
+    assert!(matches!(
+        &frames[1],
+        QuicFrame::Stream {
+            stream_id,
+            offset: None,
+            data,
+            fin: false
+        } if stream_id.value() == data_stream.id && data.as_ref() == b"abc"
+    ));
+    assert!(matches!(
+        &frames[2],
+        QuicFrame::Stream {
+            stream_id,
+            offset: Some(offset),
+            data,
+            fin: true
+        } if stream_id.value() == data_stream.id
+            && offset.value() == 3
+            && data.as_ref() == b"def"
+    ));
+    assert!(manager.next_scheduled_stream().is_none());
+
+    let mut assembler = PacketAssembler::new(
+        PacketConstraints::new()
+            .with_packet_number_space(PacketNumberSpace::ApplicationData)
+            .without_anti_amplification(),
+    );
+    for frame in frames {
+        assembler.add_quic_frame(frame);
+    }
+
+    let packet = assembler
+        .assemble_packet()
+        .expect("packet assembly should not fail")
+        .expect("stream frames should produce one packet");
+    assert_eq!(packet.frames.len(), 3);
+    assert!(packet.ack_eliciting);
+    assert!(packet.retransmittable);
+
+    let encoded = packet.encode_frames().expect("encode stream packet");
+    assert!(encoded.len() > b"abcdefgo".len());
 }
 
 #[test]
