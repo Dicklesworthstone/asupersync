@@ -335,6 +335,8 @@ pub mod real_codec_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_codec_length_delimited_framed_read_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_combinator_race_bracket_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_combinator_supervision_failure_propagation_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cx_macaroon_obligation_recovery_e2e_tests;
