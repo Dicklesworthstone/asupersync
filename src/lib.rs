@@ -321,6 +321,10 @@ pub mod real_quic_native_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod real_sqlite_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod real_tcp_unix_e2e_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod real_raptorq_e2e_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod raptorq_rfc6330_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
