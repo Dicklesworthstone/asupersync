@@ -3,7 +3,10 @@
 //! This test verifies that our newly created conformance test harnesses for the
 //! runtime+scheduler domain are properly integrated and working correctly.
 
-use asupersync::tests::conformance::{
+#[path = "conformance/mod.rs"]
+mod conformance;
+
+use conformance::{
     KernelConformanceHarness, ReactorConformanceHarness, RemoteConformanceHarness,
     RuntimeRequirementLevel, RuntimeTestCategory, RuntimeTestVerdict, SchedulerConformanceHarness,
     harness::run_full_runtime_conformance_suite,
@@ -196,7 +199,7 @@ fn test_full_runtime_conformance_suite() {
 
 #[test]
 fn test_coverage_statistics() {
-    use asupersync::tests::conformance::harness::CoverageStats;
+    use crate::conformance::harness::CoverageStats;
 
     let results = run_full_runtime_conformance_suite();
     let stats = CoverageStats::from_results(&results);
@@ -236,7 +239,7 @@ fn test_coverage_statistics() {
 
 #[test]
 fn test_conformance_report_generation() {
-    use asupersync::tests::conformance::harness::generate_conformance_report;
+    use crate::conformance::harness::generate_conformance_report;
 
     let report = generate_conformance_report();
     println!("\n{}", report);
