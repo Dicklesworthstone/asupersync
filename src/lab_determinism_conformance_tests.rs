@@ -38,9 +38,9 @@
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 #[cfg(test)]
@@ -462,9 +462,7 @@ impl MockLabRuntime {
 
     pub fn verify_round_trip(&self, original_snapshot: &RuntimeSnapshot) -> bool {
         match &self.snapshot_data {
-            Some(restored) => {
-                self.compare_snapshots(original_snapshot, restored)
-            }
+            Some(restored) => self.compare_snapshots(original_snapshot, restored),
             None => false,
         }
     }
@@ -514,7 +512,11 @@ impl MockLabRuntime {
                 TaskState {
                     task_id: i,
                     region_id: i / 2,
-                    status: if rng.next_bool(0.7) { TaskStatus::Completed } else { TaskStatus::Running },
+                    status: if rng.next_bool(0.7) {
+                        TaskStatus::Completed
+                    } else {
+                        TaskStatus::Running
+                    },
                     logical_time: i * 1000,
                     cancellation_token: None,
                 },
@@ -641,7 +643,6 @@ const LAB_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::ChaosDeterminism,
         description: "Cancellation chaos points are reproducible",
     },
-
     // Scenario Replayability Tests
     ConformanceCase {
         id: "LAB-REPLAY-01",
@@ -664,7 +665,6 @@ const LAB_CONFORMANCE_CASES: &[ConformanceCase] = &[
         category: TestCategory::ScenarioReplayability,
         description: "Oracle reports maintain consistency across replay",
     },
-
     // Snapshot/Restore Tests
     ConformanceCase {
         id: "LAB-SNAPSHOT-01",
@@ -719,7 +719,12 @@ mod tests {
         let chaos_config = ChaosConfig {
             max_events: 10,
             injection_probability: 0.8,
-            enabled_types: vec![ChaosEventType::Cancellation, ChaosEventType::Delay { duration: Duration::from_millis(1) }],
+            enabled_types: vec![
+                ChaosEventType::Cancellation,
+                ChaosEventType::Delay {
+                    duration: Duration::from_millis(1),
+                },
+            ],
         };
 
         let mut runtime1 = MockLabRuntime::new(seed);
@@ -732,7 +737,11 @@ mod tests {
             TestResult::Pass
         } else {
             TestResult::Fail {
-                reason: format!("Chaos sequences differ: {} vs {} events", events1.len(), events2.len()),
+                reason: format!(
+                    "Chaos sequences differ: {} vs {} events",
+                    events1.len(),
+                    events2.len()
+                ),
             }
         }
     }
@@ -830,14 +839,12 @@ mod tests {
         let scenario = TestScenario {
             id: "cert_test".to_string(),
             description: "Certificate test".to_string(),
-            fault_events: vec![
-                FaultEvent {
-                    fault_id: "cert_fault".to_string(),
-                    timing: Duration::from_millis(50),
-                    fault_type: "cancel".to_string(),
-                    target: "task_cert".to_string(),
-                },
-            ],
+            fault_events: vec![FaultEvent {
+                fault_id: "cert_fault".to_string(),
+                timing: Duration::from_millis(50),
+                fault_type: "cancel".to_string(),
+                target: "task_cert".to_string(),
+            }],
             expected_oracles: vec!["cert_oracle".to_string()],
         };
 
@@ -863,14 +870,12 @@ mod tests {
         let scenario = TestScenario {
             id: "oracle_test".to_string(),
             description: "Oracle consistency test".to_string(),
-            fault_events: vec![
-                FaultEvent {
-                    fault_id: "oracle_fault".to_string(),
-                    timing: Duration::from_millis(75),
-                    fault_type: "delay".to_string(),
-                    target: "task_oracle".to_string(),
-                },
-            ],
+            fault_events: vec![FaultEvent {
+                fault_id: "oracle_fault".to_string(),
+                timing: Duration::from_millis(75),
+                fault_type: "delay".to_string(),
+                target: "task_oracle".to_string(),
+            }],
             expected_oracles: vec!["consistency_oracle".to_string()],
         };
 
@@ -939,7 +944,10 @@ mod tests {
         for (task_id, task_state) in &snapshot.task_states {
             if !snapshot.region_tree.contains_key(&task_state.region_id) {
                 return TestResult::Fail {
-                    reason: format!("Task {} references non-existent region {}", task_id, task_state.region_id),
+                    reason: format!(
+                        "Task {} references non-existent region {}",
+                        task_id, task_state.region_id
+                    ),
                 };
             }
         }
@@ -948,7 +956,10 @@ mod tests {
         for (obligation_id, obligation) in &snapshot.obligation_map {
             if !snapshot.task_states.contains_key(&obligation.task_id) {
                 return TestResult::Fail {
-                    reason: format!("Obligation {} references non-existent task {}", obligation_id, obligation.task_id),
+                    reason: format!(
+                        "Obligation {} references non-existent task {}",
+                        obligation_id, obligation.task_id
+                    ),
                 };
             }
         }
@@ -981,11 +992,14 @@ mod tests {
         }
 
         let total = pass_count + fail_count + skip_count;
-        println!("\nLab Conformance Results: {}/{} passed, {} failed, {} skipped",
-                pass_count, total, fail_count, skip_count);
+        println!(
+            "\nLab Conformance Results: {}/{} passed, {} failed, {} skipped",
+            pass_count, total, fail_count, skip_count
+        );
 
         // Require 100% MUST compliance
-        let must_cases: Vec<_> = LAB_CONFORMANCE_CASES.iter()
+        let must_cases: Vec<_> = LAB_CONFORMANCE_CASES
+            .iter()
             .filter(|c| c.level == RequirementLevel::Must)
             .collect();
 
@@ -996,7 +1010,11 @@ mod tests {
             }
         }
 
-        assert_eq!(must_failures, 0, "{} MUST requirements failed", must_failures);
+        assert_eq!(
+            must_failures, 0,
+            "{} MUST requirements failed",
+            must_failures
+        );
     }
 
     // Property-based testing
