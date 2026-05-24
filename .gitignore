@@ -48,6 +48,9 @@ criterion/
 **/.beads/last-touched
 **/.beads/.local_version
 
+# Golden test artifacts (generated during test failures for diffing)
+tests/golden/**/*.actual
+
 # Golden artifact test temporaries (should not be committed)
 tests/golden/**/*.actual
 

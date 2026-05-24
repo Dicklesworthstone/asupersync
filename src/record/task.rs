@@ -2250,4 +2250,28 @@ mod tests {
         );
         crate::test_complete!("transition_table_is_exhaustive");
     }
+
+    // Proptest support for TaskPhase
+    #[cfg(feature = "test-internals")]
+    mod proptest_support {
+        use super::TaskPhase;
+        use proptest::prelude::*;
+
+        impl Arbitrary for TaskPhase {
+            type Parameters = ();
+            type Strategy = BoxedStrategy<Self>;
+
+            fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
+                prop_oneof![
+                    Just(TaskPhase::Created),
+                    Just(TaskPhase::Running),
+                    Just(TaskPhase::CancelRequested),
+                    Just(TaskPhase::Cancelling),
+                    Just(TaskPhase::Finalizing),
+                    Just(TaskPhase::Completed),
+                ]
+                .boxed()
+            }
+        }
+    }
 }

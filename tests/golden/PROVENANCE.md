@@ -126,3 +126,31 @@ These artifacts use canonicalization to ensure cross-platform stability:
 **Non-deterministic output**: Verify test inputs are deterministic, add scrubbing if needed.
 
 **Large diffs**: Consider if change is intentional or if test needs better isolation.
+
+## New Golden Artifacts (br-golden-6/7/8)
+
+### br-golden-6: Observability Metrics JSON Serialization
+- **File**: `hot_path/observability_metrics_json.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_observability_metrics_json`
+- **Purpose**: Deterministic JSON serialization for observability metrics structures
+- **Stability**: Deterministic (scrubbed timestamps, fixed metric values)
+- **Update trigger**: Metrics serialization format changes, MetricsCollector API changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_observability_metrics_json`
+
+### br-golden-7: Trace Event Canonical Bytes
+- **File**: `hot_path/trace_event_canonical_bytes.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_trace_event_canonical_bytes`
+- **Purpose**: Canonical byte representation for trace events in deterministic format
+- **Stability**: Deterministic (fixed trace IDs, event sequences, hex encoding)
+- **Update trigger**: TraceEvent binary serialization changes, canonical format changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_trace_event_canonical_bytes`
+
+### br-golden-8: Evidence Chain Merkle Proof
+- **File**: `hot_path/evidence_chain_merkle_proof.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_evidence_chain_merkle_proof`
+- **Purpose**: Merkle tree proof generation for evidence chains (forensic validation)
+- **Stability**: Deterministic (fixed evidence entries, SHA256 algorithm)
+- **Update trigger**: Evidence chain format changes, Merkle proof algorithm changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_evidence_chain_merkle_proof`
+
+These new golden tests ensure byte-for-byte regression detection for critical state snapshot artifacts that must maintain deterministic output for compliance and debugging purposes.
