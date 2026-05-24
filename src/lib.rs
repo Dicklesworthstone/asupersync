@@ -331,6 +331,8 @@ pub mod real_channel_oneshot_cx_scope_cancellation_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_supervision_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_channel_watch_obligation_ledger_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_codec_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_codec_length_delimited_framed_read_integration_e2e_tests;
