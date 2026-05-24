@@ -464,6 +464,15 @@ name = "otlp_trace_exporter_bench"
 harness = false
 required-features = ["test-internals"]
 
+[[bench]]
+name = "atp_autotune_decision"
+path = "benches/atp/autotune/decision.rs"
+harness = false
+
+[[test]]
+name = "atp_autotune_safety_regression"
+path = "tests/atp/autotune_regression/safety.rs"
+
 [[example]]
 name = "spork_minimal_supervised_app"
 required-features = ["test-internals"]
