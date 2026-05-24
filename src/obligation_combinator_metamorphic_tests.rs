@@ -30,8 +30,8 @@ use proptest::prelude::*;
 #[test]
 fn mr_obligation_ledger_ordering() {
     use crate::obligation::ledger::{LedgerError, ObligationLedger};
-    use crate::record::{ObligationKind, ObligationRecord, ObligationState, SourceLocation};
-    use crate::types::{ObligationId, RegionId, TaskId};
+    use crate::record::{ObligationAbortReason, ObligationKind, ObligationState};
+    use crate::types::{RegionId, TaskId, Time};
 
     proptest!(|(
         region_id_seed in 0u64..1000u64,
@@ -41,30 +41,33 @@ fn mr_obligation_ledger_ordering() {
         let region_id = RegionId::for_test(region_id_seed);
         let mut ledger = ObligationLedger::new();
 
-        // Reserve multiple obligations
+        // Reserve multiple obligations.
         let mut obligations = Vec::new();
         for i in 0..obligation_count {
-            let obligation_id = ObligationId::for_test(i as u64);
-            let source = SourceLocation::test("test", i as u32, i as u32);
-
-            ledger.reserve(
-                obligation_id,
-                region_id,
-                TaskId::for_test(i as u64),
+            let token = ledger.acquire(
                 ObligationKind::SendPermit,
-                source,
+                TaskId::for_test(i as u64),
+                region_id,
+                Time::from_nanos(i as u64),
             );
-            obligations.push(obligation_id);
+            obligations.push((token.id(), Some(token)));
         }
 
         // Resolve obligations in different orders
         let mut resolved = Vec::new();
         for &idx in resolution_order.iter().take(obligation_count) {
-            if idx < obligations.len() && !resolved.contains(&obligations[idx]) {
-                let obligation_id = obligations[idx];
+            if idx < obligations.len() {
+                let obligation_id = obligations[idx].0;
+                if resolved.contains(&obligation_id) {
+                    continue;
+                }
 
                 // Test that resolution succeeds for reserved obligations
-                ledger.commit(obligation_id);
+                let token = obligations[idx]
+                    .1
+                    .take()
+                    .expect("selected obligation should still hold its token");
+                ledger.commit(token, Time::from_nanos(1_000 + idx as u64));
                 resolved.push(obligation_id);
 
                 // Test state consistency: committed obligations should be in terminal state
@@ -86,11 +89,15 @@ fn mr_obligation_ledger_ordering() {
 
         // Test that double-resolution fails appropriately
         for &resolved_obligation in &resolved {
-            // Attempting to commit an already-committed obligation should fail
-            let result = ledger.try_commit(resolved_obligation);
+            // Attempting to resolve an already-committed obligation should fail.
+            let result = ledger.try_abort_by_id(
+                resolved_obligation,
+                Time::from_nanos(2_000),
+                ObligationAbortReason::Explicit,
+            );
             prop_assert!(
-                result.is_err(),
-                "Obligation ordering violation: double-commit should fail for {:?}",
+                matches!(result, Err(LedgerError::AlreadyResolved { .. })),
+                "Obligation ordering violation: double-resolution should fail for {:?}",
                 resolved_obligation
             );
         }
@@ -107,10 +114,9 @@ fn mr_obligation_ledger_ordering() {
 ///   - Random ordering affecting leak detection outcomes
 #[test]
 fn mr_leak_check_determinism() {
-    use crate::obligation::leak_check::{LeakCheckConfig, LeakChecker};
     use crate::obligation::ledger::ObligationLedger;
-    use crate::record::{ObligationKind, SourceLocation};
-    use crate::types::{ObligationId, RegionId, TaskId};
+    use crate::record::ObligationKind;
+    use crate::types::{RegionId, TaskId, Time};
 
     proptest!(|(
         seed in 0u64..1000u64,
@@ -127,16 +133,21 @@ fn mr_leak_check_determinism() {
 
                 // Add normal obligations
                 for i in 0..obligation_count {
-                    let obligation_id = ObligationId::for_test(i as u64);
-                    let source = SourceLocation::test("test", i as u32, i as u32);
-                    ledger.reserve(obligation_id, region_id, TaskId::for_test(i as u64),
-                                   ObligationKind::SendPermit, source);
-                    obligations.push(obligation_id);
+                    let token = ledger.acquire(
+                        ObligationKind::SendPermit,
+                        TaskId::for_test(i as u64),
+                        region_id,
+                        Time::from_nanos(i as u64),
+                    );
+                    obligations.push(Some(token));
                 }
 
                 // Commit some obligations, leave others as potential leaks
-                for i in leaked_count..obligation_count {
-                    ledger.commit(obligations[i]);
+                for (i, token) in obligations.iter_mut().enumerate().skip(leaked_count) {
+                    let token = token
+                        .take()
+                        .expect("unresolved obligation should still hold its token");
+                    ledger.commit(token, Time::from_nanos(1_000 + i as u64));
                 }
 
                 ledger
@@ -148,28 +159,31 @@ fn mr_leak_check_determinism() {
 
             for _run in 0..check_count {
                 let ledger = create_ledger();
-                let config = LeakCheckConfig::default();
-                let checker = LeakChecker::new(config);
-
-                let leak_result = checker.check_region(&ledger, region_id);
-                results.push(leak_result);
+                let leak_result = ledger.check_region_leaks(region_id);
+                results.push((leak_result.is_clean(), leak_result.leaked.len()));
             }
 
             // All runs should produce identical results
             for i in 1..check_count {
                 prop_assert_eq!(
-                    results[0].has_leaks(),
-                    results[i].has_leaks(),
-                    "Leak check determinism violation: run 0 found leaks={}, run {} found leaks={}",
-                    results[0].has_leaks(), i, results[i].has_leaks()
+                    results[0].0,
+                    results[i].0,
+                    "Leak check determinism violation: run 0 clean={}, run {} clean={}",
+                    results[0].0, i, results[i].0
                 );
 
                 prop_assert_eq!(
-                    results[0].leaked_count(),
-                    results[i].leaked_count(),
+                    results[0].1,
+                    results[i].1,
                     "Leak check determinism violation: leaked count differs between runs"
                 );
             }
+
+            prop_assert_eq!(
+                results[0].1,
+                leaked_count,
+                "Leak check determinism violation: leaked count should match unresolved token count"
+            );
         }
     });
 }
@@ -255,6 +269,10 @@ fn mr_lyapunov_decrease() {
         draining_regions_before in 0usize..=5usize,
         resolutions in 1usize..=5usize,
     )| {
+        let live_tasks_before = live_tasks_before as u32;
+        let pending_obligations_before = pending_obligations_before as u32;
+        let draining_regions_before = draining_regions_before as u32;
+        let resolutions = resolutions as u32;
         let weights = PotentialWeights::default();
         let governor = LyapunovGovernor::new(weights);
 
@@ -268,6 +286,12 @@ fn mr_lyapunov_decrease() {
             deadline_pressure: 0.0,
             pending_send_permits: pending_obligations_before / 2,
             pending_acks: pending_obligations_before - (pending_obligations_before / 2),
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 0,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         };
 
         let potential_before = governor.compute_potential(&state_before);
@@ -286,6 +310,12 @@ fn mr_lyapunov_decrease() {
             pending_send_permits: (pending_obligations_before.saturating_sub(resolved_obligations)) / 2,
             pending_acks: (pending_obligations_before.saturating_sub(resolved_obligations)) -
                           ((pending_obligations_before.saturating_sub(resolved_obligations)) / 2),
+            pending_leases: 0,
+            pending_io_ops: 0,
+            cancel_requested_tasks: 0,
+            cancelling_tasks: 0,
+            finalizing_tasks: 0,
+            ready_queue_depth: 0,
         };
 
         let potential_after = governor.compute_potential(&state_after);
@@ -321,7 +351,7 @@ fn mr_retry_idempotency() {
     use std::time::Duration;
 
     proptest!(|(
-        success_value in 0i32..1000i32,
+        _success_value in 0i32..1000i32,
         should_succeed: bool,
     )| {
         // Test the property that single-attempt retry is equivalent to direct execution
@@ -340,6 +370,11 @@ fn mr_retry_idempotency() {
             multiplier: 2.0,
             jitter: 0.0,
         };
+
+        prop_assert!(
+            multi_attempt_policy.max_attempts > single_attempt_policy.max_attempts,
+            "Retry idempotency: comparison policy should exercise retry behavior"
+        );
 
         // For successful operations, single-attempt retry should behave identically to no retry
         if should_succeed {
@@ -384,8 +419,7 @@ fn mr_retry_idempotency() {
 ///   - Resource cleanup order dependencies
 #[test]
 fn mr_race_symmetry() {
-    use crate::combinator::race::{Race2, RaceResult};
-    use crate::types::Outcome;
+    use crate::combinator::race::RaceResult;
 
     proptest!(|(
         outcome_a in prop::sample::select(vec!["success_a", "error_a"]),
@@ -444,9 +478,6 @@ fn mr_race_symmetry() {
 ///   - Incorrect aggregation of successful vs failed operations
 #[test]
 fn mr_quorum_threshold_invariants() {
-    use crate::combinator::quorum::{QuorumError, QuorumOutcome};
-    use std::collections::HashSet;
-
     proptest!(|(
         total_operations in 1usize..=10usize,
         quorum_threshold in 1usize..=10usize,
@@ -519,7 +550,7 @@ fn mr_quorum_threshold_invariants() {
 ///   - Incorrect delay calculation or application
 #[test]
 fn mr_hedge_convergence() {
-    use crate::combinator::hedge::{HedgeConfig, HedgePolicy};
+    use crate::combinator::hedge::HedgeConfig;
     use std::time::Duration;
 
     proptest!(|(
@@ -532,11 +563,7 @@ fn mr_hedge_convergence() {
             let slow_latency = Duration::from_millis(slow_latency_ms);
             let hedge_delay = Duration::from_millis(hedge_delay_ms);
 
-            let policy = HedgePolicy {
-                initial_request_timeout: Duration::from_secs(1),
-                hedge_delay,
-                max_additional_requests: 2,
-            };
+            let policy = HedgeConfig::new(hedge_delay);
 
             // Test hedge timing logic
             let fast_advantage = slow_latency.saturating_sub(fast_latency);
@@ -558,15 +585,14 @@ fn mr_hedge_convergence() {
                 );
             }
 
-            // Test configuration validity
-            prop_assert!(
-                policy.max_additional_requests > 0,
-                "Hedge convergence: should allow at least one additional request"
+            prop_assert_eq!(
+                policy.hedge_delay,
+                hedge_delay,
+                "Hedge convergence: config should preserve the requested hedge delay"
             );
-
             prop_assert!(
-                policy.hedge_delay < policy.initial_request_timeout,
-                "Hedge convergence: hedge delay should be less than total timeout"
+                !policy.backup_spawned,
+                "Hedge convergence: static config should not mark a backup spawned"
             );
 
             // Convergence property: smaller hedge delays should favor faster sources more
@@ -596,7 +622,7 @@ fn mr_hedge_convergence() {
 ///   - Frame inference bugs in proof generation
 #[test]
 fn mr_separation_logic_frame_rule() {
-    use crate::obligation::separation_logic::{FrameRule, HeapState, SeparationProof};
+    use crate::obligation::separation_logic::HeapState;
     use std::collections::BTreeMap;
 
     proptest!(|(
