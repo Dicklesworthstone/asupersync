@@ -9,6 +9,7 @@ use crate::config::RaptorQConfig;
 use crate::cx::Cx;
 use crate::raptorq::builder::RaptorQSenderBuilder;
 use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+use crate::raptorq::linalg::GaussianResult;
 use crate::raptorq::systematic::SystematicEncoder;
 use crate::security::AuthenticatedSymbol;
 use crate::transport::sink::SymbolSink;
@@ -1708,8 +1709,8 @@ fn mr_minimal_viable_round_trip() {
             // Test 1: Exactly K symbols should decode successfully
             let k_symbols: Vec<_> = received.iter().take(k_actual).cloned().collect();
             let decode_result = {
-                let mut decoder = create_test_decoder(&symbols[..k_actual], k_actual, symbol_size_actual);
-                decoder.add_symbols(&k_symbols).and_then(|_| decoder.decode())
+                let decoder = create_test_decoder(&symbols[..k_actual], k_actual, symbol_size_actual);
+                decoder.decode(&k_symbols)
             };
 
             prop_assert!(
@@ -1722,8 +1723,8 @@ fn mr_minimal_viable_round_trip() {
             if received.len() > k_actual {
                 let k_minus_1_symbols: Vec<_> = received.iter().take(k_actual - 1).cloned().collect();
                 let decode_result = {
-                    let mut decoder = create_test_decoder(&symbols[..k_actual-1], k_actual, symbol_size_actual);
-                    decoder.add_symbols(&k_minus_1_symbols).and_then(|_| decoder.decode())
+                    let decoder = create_test_decoder(&symbols[..k_actual - 1], k_actual, symbol_size_actual);
+                    decoder.decode(&k_minus_1_symbols)
                 };
 
                 prop_assert!(
