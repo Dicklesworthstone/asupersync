@@ -38,7 +38,7 @@ fn mr_obligation_ledger_ordering() {
         obligation_count in 1usize..=10usize,
         resolution_order in prop::collection::vec(0usize..10usize, 1..=10),
     )| {
-        let region_id = RegionId::for_test(region_id_seed);
+        let region_id = RegionId::new_for_test(region_id_seed as u32, 0);
         let mut ledger = ObligationLedger::new();
 
         // Reserve multiple obligations.
@@ -46,7 +46,7 @@ fn mr_obligation_ledger_ordering() {
         for i in 0..obligation_count {
             let token = ledger.acquire(
                 ObligationKind::SendPermit,
-                TaskId::for_test(i as u64),
+                TaskId::new_for_test(i as u32, 0),
                 region_id,
                 Time::from_nanos(i as u64),
             );
@@ -72,7 +72,7 @@ fn mr_obligation_ledger_ordering() {
 
                 // Test state consistency: committed obligations should be in terminal state
                 if let Some(record) = ledger.get(obligation_id) {
-                    match record.state() {
+                    match record.state {
                         ObligationState::Committed { .. } => {
                             // Expected - commitment succeeded
                         }
@@ -124,7 +124,7 @@ fn mr_leak_check_determinism() {
         leaked_count in 0usize..=3usize,
     )| {
         if leaked_count <= obligation_count {
-            let region_id = RegionId::for_test(seed);
+            let region_id = RegionId::new_for_test(seed as u32, 0);
 
             // Create identical ledger states for multiple runs
             let create_ledger = || {
@@ -135,7 +135,7 @@ fn mr_leak_check_determinism() {
                 for i in 0..obligation_count {
                     let token = ledger.acquire(
                         ObligationKind::SendPermit,
-                        TaskId::for_test(i as u64),
+                        TaskId::new_for_test(i as u32, 0),
                         region_id,
                         Time::from_nanos(i as u64),
                     );
@@ -212,12 +212,12 @@ fn mr_eprocess_monotonicity() {
         };
 
         let mut monitor = LeakMonitor::new(config);
-        let mut previous_e_value = monitor.current_e_value();
+        let mut previous_e_value = monitor.e_value();
 
         // Add observations one by one and check monotonicity
         for &observation_age_ns in &observations {
             monitor.observe(observation_age_ns);
-            let current_e_value = monitor.current_e_value();
+            let current_e_value = monitor.e_value();
 
             // E-values should be non-decreasing (allowing for floating point precision)
             prop_assert!(
@@ -242,7 +242,7 @@ fn mr_eprocess_monotonicity() {
                 monitor_long.observe(long_age);
 
                 prop_assert!(
-                    monitor_long.current_e_value() >= monitor_short.current_e_value(),
+                    monitor_long.e_value() >= monitor_short.e_value(),
                     "E-process monotonicity violation: longer-aged observation should increase e-value more"
                 );
             }
@@ -274,7 +274,7 @@ fn mr_lyapunov_decrease() {
         let draining_regions_before = draining_regions_before as u32;
         let resolutions = resolutions as u32;
         let weights = PotentialWeights::default();
-        let governor = LyapunovGovernor::new(weights);
+        let mut governor = LyapunovGovernor::new(weights);
 
         // State before resolution
         let state_before = StateSnapshot {
@@ -632,9 +632,9 @@ fn mr_separation_logic_frame_rule() {
         region_seed in 0u64..1000u64,
     )| {
         if target_index < obligation_count {
-            let target = ObligationId::for_test(target_index as u64);
-            let holder = TaskId::for_test(holder_seed);
-            let region = RegionId::for_test(region_seed);
+            let target = ObligationId::new_for_test(target_index as u32, 0);
+            let holder = TaskId::new_for_test(holder_seed as u32, 0);
+            let region = RegionId::new_for_test(region_seed as u32, 0);
             let frame = FrameCondition::single_obligation(target, holder, region);
 
             prop_assert!(
@@ -651,7 +651,7 @@ fn mr_separation_logic_frame_rule() {
             );
 
             for i in 0..obligation_count {
-                let obligation = ObligationId::for_test(i as u64);
+                let obligation = ObligationId::new_for_test(i as u32, 0);
                 prop_assert_eq!(
                     frame.is_framed(obligation),
                     i != target_index,
@@ -659,8 +659,10 @@ fn mr_separation_logic_frame_rule() {
                 );
             }
 
-            let other_holder = TaskId::for_test(holder_seed.saturating_add(1_000_000));
-            let other_region = RegionId::for_test(region_seed.saturating_add(1_000_000));
+            let other_holder =
+                TaskId::new_for_test(holder_seed.saturating_add(1_000_000) as u32, 0);
+            let other_region =
+                RegionId::new_for_test(region_seed.saturating_add(1_000_000) as u32, 0);
             prop_assert!(
                 frame.task_is_framed(other_holder),
                 "Frame rule violation: unrelated task pending count should remain framed"
