@@ -458,6 +458,8 @@ pub mod real_obligation_leak_check_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_leak_check_lab_oracle_obligation_leak_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_obligation_recovery_trace_integrity_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_saga_obligation_separation_logic_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_observability_spectral_health_observability_diagnostics_integration_e2e_tests;
