@@ -823,12 +823,14 @@ mod tests {
             prop_assert_eq!(decoded_request.version, original_request.version,
                 "Version mismatch after round-trip");
 
-            // Header preservation (order may change, but values must be preserved)
+            // Header preservation (order may change, but values must be preserved).
+            // The header iterator yields shared references; clone them so the macro
+            // doesn't move out of the loop binding.
             for (orig_name, orig_value) in &original_request.headers {
                 let decoded_value = decoded_request.get_header(orig_name)
-                    .expect(&format!("Header '{}' missing after round-trip", orig_name));
-                prop_assert_eq!(decoded_value, orig_value,
-                    "Header '{}' value changed: '{}' vs '{}'", orig_name, orig_value, decoded_value);
+                    .unwrap_or_else(|| panic!("Header '{}' missing after round-trip", orig_name));
+                prop_assert_eq!(decoded_value.clone(), orig_value.clone(),
+                    "Header '{}' value changed", orig_name);
             }
 
             // Body preservation
@@ -921,9 +923,11 @@ mod tests {
             let folded_decoded = MockHttpRequest::decode_h1(&folded_encoded)
                 .expect("Failed to decode folded request");
 
-            // Semantic equivalence: folded header should normalize to single-line value
-            prop_assert_eq!(single_decoded.method, folded_decoded.method);
-            prop_assert_eq!(single_decoded.uri, folded_decoded.uri);
+            // Semantic equivalence: folded header should normalize to single-line value.
+            // Clone the borrowed fields so prop_assert_eq! doesn't partially-move the
+            // decoded structs ahead of the followup header borrow.
+            prop_assert_eq!(single_decoded.method.clone(), folded_decoded.method.clone());
+            prop_assert_eq!(single_decoded.uri.clone(), folded_decoded.uri.clone());
 
             // Header values should be semantically equivalent (whitespace normalized)
             let single_header_value = single_decoded.get_header(&header_name).unwrap();
@@ -1404,9 +1408,11 @@ mod tests {
                     MockGrpcStatus::Unauthenticated | MockGrpcStatus::PermissionDenied |
                     MockGrpcStatus::ResourceExhausted | MockGrpcStatus::Unimplemented |
                     MockGrpcStatus::Unavailable | MockGrpcStatus::DeadlineExceeded => {
-                        prop_assert_eq!(back_to_grpc, Some(grpc_status.clone()),
-                            "Bijection failed for {:?}: gRPC -> {} -> {:?}",
-                            grpc_status, http_status, back_to_grpc);
+                        let expected = Some(grpc_status.clone());
+                        let grpc_status_dbg = grpc_status.clone();
+                        prop_assert_eq!(back_to_grpc, expected,
+                            "Bijection failed for {:?} at HTTP status {}",
+                            grpc_status_dbg, http_status);
                     }
                     _ => {
                         // For ambiguous mappings, ensure at least some valid mapping exists

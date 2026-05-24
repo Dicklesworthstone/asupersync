@@ -941,9 +941,8 @@ fn test_mr_h3_frame_round_trip() {
             );
 
             prop_assert_eq!(
-                deserialized_frame.payload, original_frame.payload,
-                "H3 frame payload should be preserved: {:?} != {:?}",
-                deserialized_frame.payload, original_frame.payload
+                deserialized_frame.payload.clone(), original_frame.payload.clone(),
+                "H3 frame payload should be preserved"
             );
         } else {
             // If deserialization fails, check if serialization is valid
