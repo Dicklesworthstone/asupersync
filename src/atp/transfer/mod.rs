@@ -1359,7 +1359,9 @@ fn validate_source_trace(
 #[cfg(test)]
 mod tests {
     use super::super::actor::{TransferActorTopology, TransferChildRole, TransferRegionId};
-    use super::super::autotune::{AtpAutotuneMetric, AtpAutotuneMetricSample};
+    use super::super::autotune::{
+        AtpAutotuneApplicationOutcome, AtpAutotuneMetric, AtpAutotuneMetricSample,
+    };
     use super::*;
 
     fn manifest() -> TransferManifestRef {
