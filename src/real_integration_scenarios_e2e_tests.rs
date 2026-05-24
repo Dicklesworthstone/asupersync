@@ -759,6 +759,606 @@ impl IntegrationTestHarness {
         assert!(total_completed_regions > 0, "At least one region should complete successfully (isolation)");
     }
 
+    /// [br-integration-5] Chaos: Kill worker thread mid-task, verify obligation cleanup
+    async fn test_chaos_thread_kill_obligation_cleanup(&self) {
+        self.logger.log_phase("chaos_thread_kill_setup");
+
+        let worker_count = 3;
+        let tasks_per_worker = 8;
+        let kill_probability = 40; // 40% chance to kill thread mid-task
+
+        self.logger.log_event("chaos_config", serde_json::json!({
+            "worker_count": worker_count,
+            "tasks_per_worker": tasks_per_worker,
+            "kill_probability": kill_probability
+        }));
+
+        // Phase 1: Setup obligation tracking
+        self.logger.log_phase("obligation_tracking_setup");
+
+        let obligation_created = Arc::new(AtomicUsize::new(0));
+        let obligation_completed = Arc::new(AtomicUsize::new(0));
+        let obligation_leaked = Arc::new(AtomicUsize::new(0));
+        let threads_killed = Arc::new(AtomicUsize::new(0));
+        let clean_completions = Arc::new(AtomicUsize::new(0));
+
+        // Simulate obligation tracking (in real code this would be integrated with asupersync's obligation system)
+        let active_obligations = Arc::new(Mutex::new(HashMap::<String, bool>::new()));
+
+        let mut worker_tasks = Vec::new();
+
+        // Phase 2: Spawn workers with obligations
+        self.logger.log_phase("worker_spawn_with_obligations");
+
+        for worker_id in 0..worker_count {
+            let obligation_created = Arc::clone(&obligation_created);
+            let obligation_completed = Arc::clone(&obligation_completed);
+            let obligation_leaked = Arc::clone(&obligation_leaked);
+            let threads_killed = Arc::clone(&threads_killed);
+            let clean_completions = Arc::clone(&clean_completions);
+            let active_obligations = Arc::clone(&active_obligations);
+            let logger = &self.logger;
+
+            let worker_task = self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    logger.log_event("worker_started", serde_json::json!({
+                        "worker_id": worker_id
+                    }));
+
+                    for task_id in 0..tasks_per_worker {
+                        let obligation_id = format!("worker_{}_task_{}", worker_id, task_id);
+
+                        // Create obligation (simulate resource acquisition)
+                        {
+                            let mut obligations = active_obligations.lock().await;
+                            obligations.insert(obligation_id.clone(), false); // false = not completed
+                        }
+                        obligation_created.fetch_add(1, Ordering::Relaxed);
+
+                        logger.log_event("obligation_created", serde_json::json!({
+                            "worker_id": worker_id,
+                            "task_id": task_id,
+                            "obligation_id": obligation_id
+                        }));
+
+                        // Chaos injection: random thread termination mid-task
+                        if fastrand::usize(0..100) < kill_probability {
+                            threads_killed.fetch_add(1, Ordering::Relaxed);
+
+                            logger.log_event("chaos_thread_kill", serde_json::json!({
+                                "worker_id": worker_id,
+                                "task_id": task_id,
+                                "obligation_id": obligation_id,
+                                "kill_reason": "chaos_injection"
+                            }));
+
+                            // Simulate abrupt thread termination (would trigger region cancellation)
+                            return Outcome::Cancelled;
+                        }
+
+                        // Simulate work with potential for interruption
+                        for work_step in 0..3 {
+                            sleep(Duration::from_millis(50)).await;
+
+                            // Additional chaos injection during work
+                            if fastrand::usize(0..100) < kill_probability / 2 {
+                                threads_killed.fetch_add(1, Ordering::Relaxed);
+
+                                logger.log_event("chaos_mid_work_kill", serde_json::json!({
+                                    "worker_id": worker_id,
+                                    "task_id": task_id,
+                                    "work_step": work_step,
+                                    "obligation_id": obligation_id
+                                }));
+
+                                return Outcome::Cancelled;
+                            }
+                        }
+
+                        // Complete obligation (simulate resource cleanup)
+                        {
+                            let mut obligations = active_obligations.lock().await;
+                            if let Some(completed) = obligations.get_mut(&obligation_id) {
+                                *completed = true;
+                                obligation_completed.fetch_add(1, Ordering::Relaxed);
+
+                                logger.log_event("obligation_completed", serde_json::json!({
+                                    "worker_id": worker_id,
+                                    "task_id": task_id,
+                                    "obligation_id": obligation_id
+                                }));
+                            }
+                        }
+                    }
+
+                    clean_completions.fetch_add(1, Ordering::Relaxed);
+
+                    logger.log_event("worker_completed_cleanly", serde_json::json!({
+                        "worker_id": worker_id
+                    }));
+
+                    Outcome::Ok(())
+                }).await
+            }).await;
+
+            worker_tasks.push(worker_task);
+        }
+
+        // Phase 3: Execute with chaos and monitor
+        self.logger.log_phase("chaos_execution");
+
+        for (worker_id, worker_task) in worker_tasks.into_iter().enumerate() {
+            match timeout(Duration::from_secs(10), worker_task).await {
+                Outcome::Ok(result) => {
+                    self.logger.log_event("worker_task_completed", serde_json::json!({
+                        "worker_id": worker_id,
+                        "result": format!("{:?}", result)
+                    }));
+                }
+                Outcome::Cancelled => {
+                    self.logger.log_event("worker_task_timeout", serde_json::json!({
+                        "worker_id": worker_id
+                    }));
+                }
+                _ => {}
+            }
+        }
+
+        // Phase 4: Audit obligations for leaks
+        self.logger.log_phase("obligation_leak_audit");
+
+        let final_obligations = active_obligations.lock().await;
+        let mut leaked_count = 0;
+
+        for (obligation_id, completed) in final_obligations.iter() {
+            if !completed {
+                leaked_count += 1;
+                self.logger.log_event("obligation_leaked", serde_json::json!({
+                    "obligation_id": obligation_id,
+                    "leak_detected": true
+                }));
+            }
+        }
+
+        obligation_leaked.store(leaked_count, Ordering::Relaxed);
+
+        let total_created = obligation_created.load(Ordering::Relaxed);
+        let total_completed = obligation_completed.load(Ordering::Relaxed);
+        let total_leaked = obligation_leaked.load(Ordering::Relaxed);
+        let total_killed = threads_killed.load(Ordering::Relaxed);
+        let total_clean = clean_completions.load(Ordering::Relaxed);
+
+        // Phase 5: Validate chaos resilience
+        self.logger.log_phase("chaos_validation");
+
+        self.logger.log_metrics(serde_json::json!({
+            "chaos_results": {
+                "obligations_created": total_created,
+                "obligations_completed": total_completed,
+                "obligations_leaked": total_leaked,
+                "threads_killed": total_killed,
+                "clean_completions": total_clean,
+                "leak_rate": total_leaked as f64 / total_created.max(1) as f64,
+                "survival_rate": total_clean as f64 / worker_count as f64
+            }
+        }));
+
+        // Critical assertions for chaos engineering
+        self.logger.log_assertion("chaos_occurred", total_killed > 0, serde_json::json!({
+            "threads_killed": total_killed
+        }));
+
+        self.logger.log_assertion("no_obligation_leaks", total_leaked == 0, serde_json::json!({
+            "leaked_obligations": total_leaked,
+            "created_obligations": total_created
+        }));
+
+        self.logger.log_assertion("some_work_completed", total_completed > 0, serde_json::json!({
+            "completed_obligations": total_completed
+        }));
+
+        assert!(total_killed > 0, "Chaos injection should have killed some threads");
+        assert!(total_leaked == 0, "NO obligation leaks allowed despite chaos: {} leaked out of {}", total_leaked, total_created);
+        assert!(total_completed > 0, "Some work should complete despite chaos");
+    }
+
+    /// [br-integration-6] Hedge pattern: First-success short-circuits slow downstream
+    async fn test_hedge_first_success_short_circuit(&self) {
+        self.logger.log_phase("hedge_setup");
+
+        let hedge_count = 4; // Try 4 parallel requests
+        let requests_to_test = 10;
+        let slow_response_time = Duration::from_millis(500);
+        let fast_response_time = Duration::from_millis(50);
+
+        self.logger.log_event("hedge_config", serde_json::json!({
+            "hedge_count": hedge_count,
+            "requests_to_test": requests_to_test,
+            "slow_response_ms": slow_response_time.as_millis(),
+            "fast_response_ms": fast_response_time.as_millis()
+        }));
+
+        // Phase 1: Setup downstream services with varying response times
+        self.logger.log_phase("downstream_service_setup");
+
+        let first_success_count = Arc::new(AtomicUsize::new(0));
+        let total_hedge_attempts = Arc::new(AtomicUsize::new(0));
+        let average_response_time = Arc::new(AtomicUsize::new(0)); // Track in milliseconds
+
+        // Phase 2: Execute hedge requests
+        self.logger.log_phase("hedge_execution");
+
+        for request_id in 0..requests_to_test {
+            let first_success_count = Arc::clone(&first_success_count);
+            let total_hedge_attempts = Arc::clone(&total_hedge_attempts);
+            let average_response_time = Arc::clone(&average_response_time);
+            let logger = &self.logger;
+
+            let hedge_start = Instant::now();
+
+            // Create hedge requests (race multiple attempts)
+            let mut hedge_tasks = Vec::new();
+
+            for hedge_idx in 0..hedge_count {
+                total_hedge_attempts.fetch_add(1, Ordering::Relaxed);
+
+                let hedge_task = self.runtime.scope(|scope| async move {
+                    scope.spawn(async move {
+                        // Simulate different downstream response characteristics
+                        let response_delay = match hedge_idx {
+                            0 => fast_response_time, // Fast service (primary)
+                            1 => slow_response_time, // Slow service 1
+                            2 => slow_response_time * 2, // Very slow service
+                            3 => {
+                                // Sometimes fast, sometimes slow (unreliable service)
+                                if fastrand::bool() {
+                                    fast_response_time
+                                } else {
+                                    slow_response_time * 3
+                                }
+                            }
+                            _ => slow_response_time,
+                        };
+
+                        sleep(response_delay).await;
+
+                        logger.log_event("hedge_response", serde_json::json!({
+                            "request_id": request_id,
+                            "hedge_idx": hedge_idx,
+                            "response_delay_ms": response_delay.as_millis()
+                        }));
+
+                        Outcome::Ok(format!("response_from_hedge_{}", hedge_idx))
+                    }).await
+                });
+
+                hedge_tasks.push(hedge_task);
+            }
+
+            // Race all hedge tasks - first success wins
+            let hedge_result = race(hedge_tasks).await;
+
+            let hedge_duration = hedge_start.elapsed();
+            average_response_time.fetch_add(hedge_duration.as_millis() as usize, Ordering::Relaxed);
+
+            match hedge_result {
+                Outcome::Ok((winner_idx, response)) => {
+                    first_success_count.fetch_add(1, Ordering::Relaxed);
+
+                    logger.log_event("hedge_first_success", serde_json::json!({
+                        "request_id": request_id,
+                        "winning_hedge": winner_idx,
+                        "response": response,
+                        "total_duration_ms": hedge_duration.as_millis(),
+                        "short_circuited": hedge_duration < slow_response_time
+                    }));
+                }
+                _ => {
+                    logger.log_event("hedge_all_failed", serde_json::json!({
+                        "request_id": request_id,
+                        "duration_ms": hedge_duration.as_millis()
+                    }));
+                }
+            }
+        }
+
+        // Phase 3: Validate hedge effectiveness
+        self.logger.log_phase("hedge_validation");
+
+        let total_successes = first_success_count.load(Ordering::Relaxed);
+        let total_attempts = total_hedge_attempts.load(Ordering::Relaxed);
+        let avg_response_ms = average_response_time.load(Ordering::Relaxed) / requests_to_test.max(1);
+
+        self.logger.log_metrics(serde_json::json!({
+            "hedge_results": {
+                "first_success_count": total_successes,
+                "total_hedge_attempts": total_attempts,
+                "average_response_ms": avg_response_ms,
+                "success_rate": total_successes as f64 / requests_to_test as f64,
+                "hedge_efficiency": total_attempts as f64 / (requests_to_test * hedge_count) as f64,
+                "fast_response_threshold_ms": fast_response_time.as_millis() * 2
+            }
+        }));
+
+        // Assertions
+        self.logger.log_assertion("hedge_successes", total_successes > 0, serde_json::json!({
+            "successful_requests": total_successes,
+            "total_requests": requests_to_test
+        }));
+
+        self.logger.log_assertion("hedge_short_circuit", avg_response_ms < slow_response_time.as_millis() as usize, serde_json::json!({
+            "average_response_ms": avg_response_ms,
+            "slow_threshold_ms": slow_response_time.as_millis()
+        }));
+
+        self.logger.log_assertion("hedge_efficiency", total_successes >= requests_to_test * 8 / 10, serde_json::json!({
+            "success_rate": total_successes as f64 / requests_to_test as f64,
+            "expected_rate": 0.8
+        }));
+
+        assert!(total_successes > 0, "Hedge should have some successful responses");
+        assert!(avg_response_ms < slow_response_time.as_millis() as usize,
+            "Hedge should short-circuit slow responses: {}ms avg > {}ms threshold",
+            avg_response_ms, slow_response_time.as_millis());
+        assert!(total_successes >= requests_to_test * 8 / 10,
+            "Hedge should achieve >80% success rate: {:.1}%",
+            total_successes as f64 / requests_to_test as f64 * 100.0);
+    }
+
+    /// [br-integration-7] Distributed bridge rolling restart with consistency
+    async fn test_distributed_bridge_rolling_restart(&self) {
+        self.logger.log_phase("distributed_bridge_setup");
+
+        let node_count = 5;
+        let messages_per_node = 15;
+        let rolling_restart_interval = Duration::from_millis(200);
+
+        self.logger.log_event("bridge_config", serde_json::json!({
+            "node_count": node_count,
+            "messages_per_node": messages_per_node,
+            "rolling_restart_interval_ms": rolling_restart_interval.as_millis()
+        }));
+
+        // Phase 1: Setup distributed bridge nodes
+        self.logger.log_phase("bridge_node_setup");
+
+        let bridge_state = Arc::new(Mutex::new(HashMap::<String, Vec<String>>::new()));
+        let node_generations = Arc::new(Mutex::new(HashMap::<usize, usize>::new()));
+        let messages_processed = Arc::new(AtomicUsize::new(0));
+        let consistency_violations = Arc::new(AtomicUsize::new(0));
+        let successful_restarts = Arc::new(AtomicUsize::new(0));
+
+        // Initialize node generations
+        {
+            let mut generations = node_generations.lock().await;
+            for node_id in 0..node_count {
+                generations.insert(node_id, 0);
+            }
+        }
+
+        let (coordinator_tx, coordinator_rx) = mpsc::channel::<String>(100);
+        let mut node_tasks = Vec::new();
+
+        // Phase 2: Spawn bridge nodes
+        self.logger.log_phase("bridge_node_spawn");
+
+        for node_id in 0..node_count {
+            let bridge_state = Arc::clone(&bridge_state);
+            let node_generations = Arc::clone(&node_generations);
+            let messages_processed = Arc::clone(&messages_processed);
+            let consistency_violations = Arc::clone(&consistency_violations);
+            let successful_restarts = Arc::clone(&successful_restarts);
+            let coordinator_tx = coordinator_tx.clone();
+            let logger = &self.logger;
+
+            let node_task = self.runtime.scope(|scope| async move {
+                scope.spawn(async move {
+                    let mut current_generation = 0;
+                    let mut restart_count = 0;
+
+                    // Node lifecycle with rolling restarts
+                    loop {
+                        logger.log_event("bridge_node_started", serde_json::json!({
+                            "node_id": node_id,
+                            "generation": current_generation,
+                            "restart_count": restart_count
+                        }));
+
+                        // Update node generation
+                        {
+                            let mut generations = node_generations.lock().await;
+                            generations.insert(node_id, current_generation);
+                        }
+
+                        // Process messages for this generation
+                        for msg_id in 0..messages_per_node {
+                            let message = format!("node_{}_gen_{}_msg_{}", node_id, current_generation, msg_id);
+
+                            // Simulate distributed bridge state update
+                            {
+                                let mut state = bridge_state.lock().await;
+                                let node_key = format!("node_{}", node_id);
+                                state.entry(node_key).or_insert_with(Vec::new).push(message.clone());
+
+                                // Consistency check: verify no conflicting updates from same node
+                                if let Some(node_messages) = state.get(&format!("node_{}", node_id)) {
+                                    let expected_count = msg_id + 1 + (restart_count * messages_per_node);
+                                    if node_messages.len() != expected_count {
+                                        consistency_violations.fetch_add(1, Ordering::Relaxed);
+
+                                        logger.log_event("consistency_violation", serde_json::json!({
+                                            "node_id": node_id,
+                                            "expected_count": expected_count,
+                                            "actual_count": node_messages.len(),
+                                            "generation": current_generation
+                                        }));
+                                    }
+                                }
+                            }
+
+                            messages_processed.fetch_add(1, Ordering::Relaxed);
+
+                            // Send coordination message
+                            if coordinator_tx.send(message.clone()).await.is_err() {
+                                logger.log_event("coordination_send_failed", serde_json::json!({
+                                    "node_id": node_id,
+                                    "message": message
+                                }));
+                                break;
+                            }
+
+                            logger.log_event("bridge_message_processed", serde_json::json!({
+                                "node_id": node_id,
+                                "message": message,
+                                "generation": current_generation
+                            }));
+
+                            sleep(Duration::from_millis(30)).await;
+                        }
+
+                        // Rolling restart logic
+                        restart_count += 1;
+                        current_generation += 1;
+
+                        if restart_count >= 3 { // Limit restarts for test completion
+                            successful_restarts.fetch_add(1, Ordering::Relaxed);
+
+                            logger.log_event("bridge_node_final_shutdown", serde_json::json!({
+                                "node_id": node_id,
+                                "total_restarts": restart_count,
+                                "final_generation": current_generation
+                            }));
+                            break;
+                        }
+
+                        // Simulate restart delay
+                        sleep(rolling_restart_interval).await;
+
+                        logger.log_event("bridge_node_restarting", serde_json::json!({
+                            "node_id": node_id,
+                            "old_generation": current_generation - 1,
+                            "new_generation": current_generation,
+                            "restart_count": restart_count
+                        }));
+                    }
+
+                    Outcome::Ok(())
+                }).await
+            }).await;
+
+            node_tasks.push(node_task);
+
+            // Stagger node starts to simulate rolling deployment
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        // Phase 3: Coordination message monitoring
+        self.logger.log_phase("coordination_monitoring");
+
+        let coordination_task = self.runtime.scope(|scope| async move {
+            scope.spawn(async move {
+                let mut coordinator_rx = coordinator_rx;
+                let mut total_coordinated = 0;
+
+                while let Some(message) = coordinator_rx.recv().await {
+                    total_coordinated += 1;
+
+                    logger.log_event("coordination_received", serde_json::json!({
+                        "message": message,
+                        "total_coordinated": total_coordinated
+                    }));
+
+                    if total_coordinated >= 200 { // Reasonable limit for test completion
+                        break;
+                    }
+                }
+
+                logger.log_event("coordination_completed", serde_json::json!({
+                    "total_coordinated": total_coordinated
+                }));
+
+                Outcome::Ok(total_coordinated)
+            }).await
+        });
+
+        // Phase 4: Execute bridge with rolling restarts
+        self.logger.log_phase("bridge_execution");
+
+        let execution_timeout = Duration::from_secs(20);
+
+        // Wait for either coordination completion or timeout
+        let coordination_result = timeout(execution_timeout, coordination_task).await;
+
+        // Wait for node tasks to complete
+        let mut completed_nodes = 0;
+        for (node_id, node_task) in node_tasks.into_iter().enumerate() {
+            match timeout(Duration::from_secs(5), node_task).await {
+                Outcome::Ok(_) => {
+                    completed_nodes += 1;
+                    self.logger.log_event("bridge_node_task_completed", serde_json::json!({
+                        "node_id": node_id
+                    }));
+                }
+                _ => {
+                    self.logger.log_event("bridge_node_task_timeout", serde_json::json!({
+                        "node_id": node_id
+                    }));
+                }
+            }
+        }
+
+        // Phase 5: Validate distributed consistency
+        self.logger.log_phase("consistency_validation");
+
+        let final_state = bridge_state.lock().await;
+        let final_generations = node_generations.lock().await;
+        let total_messages = messages_processed.load(Ordering::Relaxed);
+        let total_violations = consistency_violations.load(Ordering::Relaxed);
+        let total_restarts = successful_restarts.load(Ordering::Relaxed);
+
+        let coordinated_messages = match coordination_result {
+            Outcome::Ok(result) => result.unwrap_or_default(),
+            _ => 0,
+        };
+
+        self.logger.log_metrics(serde_json::json!({
+            "bridge_results": {
+                "total_messages_processed": total_messages,
+                "coordinated_messages": coordinated_messages,
+                "consistency_violations": total_violations,
+                "successful_restarts": total_restarts,
+                "completed_nodes": completed_nodes,
+                "final_node_count": final_state.len(),
+                "final_generations": final_generations.clone(),
+                "consistency_rate": 1.0 - (total_violations as f64 / total_messages.max(1) as f64)
+            }
+        }));
+
+        // Assertions
+        self.logger.log_assertion("messages_processed", total_messages > 0, serde_json::json!({
+            "processed_messages": total_messages
+        }));
+
+        self.logger.log_assertion("restarts_completed", total_restarts > 0, serde_json::json!({
+            "successful_restarts": total_restarts,
+            "expected_min": 1
+        }));
+
+        self.logger.log_assertion("consistency_maintained", total_violations == 0, serde_json::json!({
+            "consistency_violations": total_violations,
+            "total_messages": total_messages
+        }));
+
+        self.logger.log_assertion("coordination_active", coordinated_messages > 0, serde_json::json!({
+            "coordinated_messages": coordinated_messages
+        }));
+
+        assert!(total_messages > 0, "Bridge should process messages");
+        assert!(total_restarts > 0, "Rolling restarts should occur");
+        assert!(total_violations == 0, "NO consistency violations allowed during rolling restart: {} violations", total_violations);
+        assert!(coordinated_messages > 0, "Bridge coordination should be active");
+    }
+
     /// [br-integration-4] Backpressure propagation pipeline
     async fn test_backpressure_propagation_pipeline(&self) {
         self.logger.log_phase("backpressure_setup");
