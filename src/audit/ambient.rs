@@ -10,6 +10,8 @@
 //! - **Spawn**: Direct `std::thread::spawn` bypassing Cx/scheduler.
 //! - **Entropy**: Direct `getrandom` / `rand` bypassing Cx entropy capability.
 //! - **IO**: Direct `std::net` / `std::fs` bypassing Cx IO capability.
+//! - **Env**: Direct runtime environment access bypassing explicit configuration capabilities.
+//! - **Output**: Direct stdout/stderr macros bypassing structured tracing or caller-owned sinks.
 //!
 //! # Exemptions
 //!
@@ -51,6 +53,10 @@ pub enum AmbientCategory {
     Entropy,
     /// Direct network/filesystem IO.
     Io,
+    /// Direct runtime environment access.
+    Env,
+    /// Direct stdout/stderr output.
+    Output,
 }
 
 /// Severity of the finding.
@@ -158,6 +164,16 @@ pub const GREP_PATTERNS: &[(&str, AmbientCategory)] = &[
     (r"std::net::TcpStream", AmbientCategory::Io),
     (r"std::fs::File::open", AmbientCategory::Io),
     (r"std::fs::File::create", AmbientCategory::Io),
+    (r"env::var\(", AmbientCategory::Env),
+    (r"env::var_os\(", AmbientCategory::Env),
+    (r"env::vars\(", AmbientCategory::Env),
+    (r"env::set_var\(", AmbientCategory::Env),
+    (r"env::remove_var\(", AmbientCategory::Env),
+    (r"println!\(", AmbientCategory::Output),
+    (r"eprintln!\(", AmbientCategory::Output),
+    (r"print!\(", AmbientCategory::Output),
+    (r"eprint!\(", AmbientCategory::Output),
+    (r"dbg!\(", AmbientCategory::Output),
 ];
 
 #[cfg(test)]
@@ -210,6 +226,8 @@ mod tests {
         assert!(categories.contains(&AmbientCategory::Spawn));
         assert!(categories.contains(&AmbientCategory::Entropy));
         assert!(categories.contains(&AmbientCategory::Io));
+        assert!(categories.contains(&AmbientCategory::Env));
+        assert!(categories.contains(&AmbientCategory::Output));
     }
 
     #[test]
@@ -241,6 +259,9 @@ mod tests {
     // - Code inside `#[cfg(test)] mod tests { ... }` is excluded from scanning.
     // - Files listed in EXEMPT_PREFIXES are skipped entirely (these ARE the
     //   capability providers).
+    // - Top-level `src/*_tests.rs`/conformance/metamorphic/e2e harnesses are
+    //   test surfaces even when compiled through the lib-test crate rather than
+    //   nested under an inline `#[cfg(test)] mod tests`.
     // - To add a NEW ambient authority usage: add it to KNOWN_FINDINGS,
     //   bump AMBIENT_VIOLATION_CEILING, and justify in the PR description.
 
@@ -291,12 +312,33 @@ mod tests {
     }
 
     fn is_exempt(rel_path: &str) -> bool {
-        EXEMPT_PREFIXES.iter().any(|p| rel_path.starts_with(p))
+        EXEMPT_PREFIXES.iter().any(|p| rel_path.starts_with(p)) || is_test_surface(rel_path)
+    }
+
+    fn is_test_surface(rel_path: &str) -> bool {
+        let file_name = Path::new(rel_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(rel_path);
+
+        file_name.ends_with("_tests.rs")
+            || file_name.ends_with("_test.rs")
+            || file_name.ends_with("_conformance_tests.rs")
+            || file_name.ends_with("_metamorphic_tests.rs")
+            || file_name.ends_with("_e2e_tests.rs")
+            || file_name.starts_with("real_") && file_name.ends_with(".rs")
     }
 
     /// Convert a grep-style regex pattern to a literal search string.
     fn pattern_to_literal(pattern: &str) -> String {
         pattern.replace(r"\(", "(").replace(r"\)", ")")
+    }
+
+    fn line_contains_literal(line: &str, literal: &str) -> bool {
+        line.match_indices(literal).any(|(idx, _)| {
+            let before = line[..idx].chars().next_back();
+            !matches!(before, Some(ch) if ch.is_ascii_alphanumeric() || ch == '_')
+        })
     }
 
     /// Return (line_number, line_text) pairs from non-test, non-comment code.
@@ -380,6 +422,32 @@ mod tests {
         }
     }
 
+    fn scan_source(rel: &str, content: &str) -> Vec<Violation> {
+        let mut violations = Vec::new();
+
+        if is_exempt(rel) {
+            return violations;
+        }
+
+        let lines = non_test_lines(content);
+
+        for (pattern, category) in GREP_PATTERNS {
+            let literal = pattern_to_literal(pattern);
+            for (line_num, line_text) in &lines {
+                if line_contains_literal(line_text, &literal) {
+                    violations.push(Violation {
+                        file: rel.to_string(),
+                        line: *line_num,
+                        pattern: literal.clone(),
+                        category: *category,
+                    });
+                }
+            }
+        }
+
+        violations
+    }
+
     fn scan_directory(dir: &Path, root: &Path) -> Vec<Violation> {
         let mut violations = Vec::new();
         for file_path in collect_rs_files(dir) {
@@ -389,29 +457,11 @@ mod tests {
                 .to_string_lossy()
                 .replace('\\', "/");
 
-            if is_exempt(&rel) {
-                continue;
-            }
-
             let Ok(content) = std::fs::read_to_string(&file_path) else {
                 continue;
             };
 
-            let lines = non_test_lines(&content);
-
-            for (pattern, category) in GREP_PATTERNS {
-                let literal = pattern_to_literal(pattern);
-                for (line_num, line_text) in &lines {
-                    if line_text.contains(&literal) {
-                        violations.push(Violation {
-                            file: rel.clone(),
-                            line: *line_num,
-                            pattern: literal.clone(),
-                            category: *category,
-                        });
-                    }
-                }
-            }
+            violations.extend(scan_source(&rel, &content));
         }
         violations
     }
@@ -431,7 +481,8 @@ mod tests {
     ) -> bool {
         let literal = pattern_to_literal(pattern);
         non_test_lines(content).into_iter().any(|(line_num, line)| {
-            expected_line.abs_diff(line_num as u32) <= max_line_distance && line.contains(&literal)
+            expected_line.abs_diff(line_num as u32) <= max_line_distance
+                && line_contains_literal(&line, &literal)
         })
     }
 
@@ -572,6 +623,73 @@ let x = Instant::now();
             1,
             "Should have exactly one non-comment Instant::now() line"
         );
+    }
+
+    #[test]
+    fn top_level_test_surfaces_are_exempt_from_scanning() {
+        assert!(is_exempt("real_integration_scenarios_e2e_tests.rs"));
+        assert!(is_exempt("raptorq_rfc6330_conformance_tests.rs"));
+        assert!(is_exempt("cancel_cx_runtime_channel_metamorphic_tests.rs"));
+        assert!(!is_exempt("service/runtime.rs"));
+    }
+
+    #[test]
+    fn scanner_allows_documented_test_surface_ambient_output() {
+        let source = r#"
+fn test_helper() {
+    std::env::var("ASUPERSYNC_TEST_LOG").ok();
+    eprintln!("stage log");
+}
+"#;
+        let violations = scan_source("real_integration_scenarios_e2e_tests.rs", source);
+        assert!(
+            violations.is_empty(),
+            "test-surface carve-outs should not count as production ambient authority: {}",
+            format_violations(&violations)
+        );
+    }
+
+    #[test]
+    fn scanner_rejects_production_env_and_output_patterns() {
+        let source = r#"
+fn production_path() {
+    let _ = std::env::var("ASUPERSYNC_RUNTIME_FLAG");
+    eprintln!("bypasses structured tracing");
+}
+"#;
+        let violations = scan_source("service/runtime.rs", source);
+
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.category == AmbientCategory::Env),
+            "expected env access violation, got: {}",
+            format_violations(&violations)
+        );
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.category == AmbientCategory::Output),
+            "expected output violation, got: {}",
+            format_violations(&violations)
+        );
+    }
+
+    #[test]
+    fn output_patterns_do_not_double_count_stderr_macros_as_stdout() {
+        let source = r#"
+fn production_path() {
+    eprintln!("stderr");
+}
+"#;
+        let violations = scan_source("service/runtime.rs", source);
+        let output_patterns: Vec<_> = violations
+            .iter()
+            .filter(|v| v.category == AmbientCategory::Output)
+            .map(|v| v.pattern.as_str())
+            .collect();
+
+        assert_eq!(output_patterns, vec!["eprintln!("]);
     }
 
     // =========================================================================

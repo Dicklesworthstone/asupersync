@@ -137,6 +137,24 @@ Validation for the ledger contract is also `rch`-scoped:
 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_ledger cargo test -p asupersync --test validation_frontier_ledger_contract -- --nocapture
 ```
 
+## Capability And Ambient-Effect Gate
+
+The no-ambient-authority lane is anchored in `src/audit/ambient.rs`. It scans production `src/` Rust files for direct wall-clock time, OS randomness, filesystem/network construction, runtime environment access, stdout/stderr macros, and thread-spawn patterns that bypass `Cx` or explicit capability providers.
+
+The scanner deliberately separates three classes of code:
+
+1. Production runtime modules, where ambient effects are violations unless routed through a provider or documented in `KNOWN_FINDINGS`.
+2. Provider modules such as `src/fs/`, `src/util/entropy.rs`, `src/time/driver.rs`, `src/runtime/blocking_pool.rs`, and `src/web/debug.rs`, where the module is the explicit capability boundary.
+3. Test/fuzz/compat surfaces, including inline `#[cfg(test)]` modules and top-level `src/*_tests.rs`, `*_conformance_tests.rs`, `*_metamorphic_tests.rs`, and `*_e2e_tests.rs` harnesses, where ambient output, environment, and host fixtures are allowed as test instrumentation.
+
+Future allowlist updates must be narrow. If a production runtime file needs a new ambient effect, prefer moving the effect behind an existing capability provider. If the effect is intentionally a provider boundary, add or update the exact provider/test carve-out, add a `KNOWN_FINDINGS` entry when the usage should remain visible in the catalog, and update scanner tests so one allowed carve-out and one rejected production pattern prove the invariant still holds.
+
+The focused proof lane for this gate is:
+
+```bash
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ambient_authority cargo test -p asupersync --lib audit::ambient -- --nocapture
+```
+
 ## Validation
 
 ```bash
@@ -150,3 +168,4 @@ rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C deb
 - `artifacts/claim_evidence_graph_v1.json` -- Claim/evidence graph
 - `artifacts/capability_token_model_v1.json` -- Revocation integrity
 - `artifacts/crash_recovery_validation_v1.json` -- Reproducibility
+- `src/audit/ambient.rs` -- Production ambient-effect scanner and capability carve-outs
