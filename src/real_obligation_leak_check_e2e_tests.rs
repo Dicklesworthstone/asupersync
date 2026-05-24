@@ -3,21 +3,23 @@
 //! Tests obligation ledger with random spawn/abort sequences to validate
 //! zero leaks. Uses real asupersync obligation tracking with comprehensive
 //! leak detection and ledger state validation.
+//!
+//! Focused chaos lane:
+//! `RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_obligation_cleanup_e2e" ASUPERSYNC_TEST_ARTIFACTS_DIR=target/e2e-results/obligation-cleanup/artifacts cargo test -p asupersync --features real-service-e2e test_client_disconnect_forced_cancel_cleans_pending_obligations -- --nocapture --test-threads=1`
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod real_obligation_leak_check_e2e {
-    use crate::cx::{Cx, scope};
     use crate::obligation::{LeakCheckResult, ObligationId, ObligationLedger, ObligationState};
-    use crate::runtime::{Runtime, spawn};
+    use crate::runtime::{RuntimeBuilder, spawn};
     use crate::time::{Duration, Instant, sleep};
-    use crate::types::{Budget, Outcome};
     use rand::{Rng, seq::SliceRandom, thread_rng};
     use serde_json::{Value, json};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+    use std::{env, fs, path::Path};
 
     /// Obligation test harness with leak detection and random sequence generation
     struct ObligationLeakTestHarness {
@@ -367,6 +369,43 @@ mod real_obligation_leak_check_e2e {
 
             Ok(())
         }
+
+        fn write_artifact_bundle(&self, test_id: &str, summary: Value) -> std::io::Result<()> {
+            let Ok(root) = env::var("ASUPERSYNC_TEST_ARTIFACTS_DIR") else {
+                return Ok(());
+            };
+
+            let artifact_dir = Path::new(&root).join(test_id);
+            fs::create_dir_all(&artifact_dir)?;
+
+            let log_entries = self.log_entries.lock().unwrap();
+            let mut events = String::new();
+            for entry in log_entries.iter() {
+                events.push_str(
+                    &serde_json::to_string(entry)
+                        .expect("structured obligation E2E log entry should serialize"),
+                );
+                events.push('\n');
+            }
+            fs::write(artifact_dir.join("events.ndjson"), events)?;
+            fs::write(
+                artifact_dir.join("summary.json"),
+                serde_json::to_string_pretty(&summary)
+                    .expect("structured obligation E2E summary should serialize"),
+            )?;
+
+            self.log(
+                "artifact_bundle_written",
+                json!({
+                    "test_id": test_id,
+                    "artifact_dir": artifact_dir.display().to_string(),
+                    "events_path": artifact_dir.join("events.ndjson").display().to_string(),
+                    "summary_path": artifact_dir.join("summary.json").display().to_string()
+                }),
+            );
+
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -624,26 +663,57 @@ mod real_obligation_leak_check_e2e {
         );
 
         let cleanup_started = Instant::now();
-        for (index, obligation_id) in pending_obligations.iter().copied().enumerate() {
-            harness
-                .abort_obligation(obligation_id, "client_disconnect_forced_cancel")
-                .await
-                .expect("forced cancellation should abort every pending obligation");
+        let cleanup_runtime = RuntimeBuilder::new()
+            .with_name("obligation-chaos-client-disconnect-cleanup")
+            .worker_threads(2)
+            .build()
+            .expect("real cleanup runtime should build for obligation chaos E2E");
+        let runtime_handle = cleanup_runtime.handle();
+        let cleanup_tasks_started = Arc::new(AtomicUsize::new(0));
+        let cleanup_tasks_completed = Arc::new(AtomicUsize::new(0));
+        let cleanup_region_closed = Arc::new(AtomicBool::new(false));
+        let mut cleanup_handles = Vec::with_capacity(pending_obligations.len());
 
-            if index % 4 == 3 {
-                harness.log(
-                    "stage_progress",
-                    json!({
-                        "stage": "abort_pending_after_disconnect",
-                        "aborted": index + 1,
-                        "elapsed_ms": cleanup_started.elapsed().as_millis()
-                    }),
-                );
-            }
+        for (index, obligation_id) in pending_obligations.iter().copied().enumerate() {
+            let cleanup_harness = Arc::clone(&harness);
+            let tasks_started = Arc::clone(&cleanup_tasks_started);
+            let tasks_completed = Arc::clone(&cleanup_tasks_completed);
+            let handle = runtime_handle.spawn(async move {
+                tasks_started.fetch_add(1, Ordering::AcqRel);
+                cleanup_harness
+                    .abort_obligation(obligation_id, "client_disconnect_forced_cancel")
+                    .await
+                    .expect("forced cancellation should abort every pending obligation");
+                let completed = tasks_completed.fetch_add(1, Ordering::AcqRel) + 1;
+
+                if index % 4 == 3 {
+                    cleanup_harness.log(
+                        "stage_progress",
+                        json!({
+                            "stage": "abort_pending_after_disconnect",
+                            "aborted": completed,
+                            "elapsed_ms": cleanup_started.elapsed().as_millis()
+                        }),
+                    );
+                }
+            });
+            cleanup_handles.push(handle);
         }
+
+        cleanup_runtime.block_on(async {
+            for handle in cleanup_handles {
+                handle.await;
+            }
+        });
+        cleanup_region_closed.store(true, Ordering::Release);
         let cleanup_elapsed = cleanup_started.elapsed();
 
         let after_cancel = harness.perform_leak_check("after_forced_cancel").await;
+        let cleanup_task_start_count = cleanup_tasks_started.load(Ordering::Acquire);
+        let cleanup_task_complete_count = cleanup_tasks_completed.load(Ordering::Acquire);
+        let cleanup_region_is_closed = cleanup_region_closed.load(Ordering::Acquire);
+        let cleanup_runtime_is_quiescent = cleanup_runtime.is_quiescent();
+
         harness.log(
             "forced_cancel_cleanup_complete",
             json!({
@@ -651,6 +721,11 @@ mod real_obligation_leak_check_e2e {
                 "pending_after": after_cancel.pending_obligations,
                 "leaked_after": after_cancel.leaked_obligations,
                 "ledger_consistent": after_cancel.ledger_consistent,
+                "cleanup_tasks_started": cleanup_task_start_count,
+                "cleanup_tasks_completed": cleanup_task_complete_count,
+                "cleanup_region_closed": cleanup_region_is_closed,
+                "cleanup_runtime_quiescent": cleanup_runtime_is_quiescent,
+                "region_close_implies_quiescence": cleanup_region_is_closed && cleanup_runtime_is_quiescent,
                 "cleanup_elapsed_ms": cleanup_elapsed.as_millis(),
                 "cleanup_budget_ms": cleanup_budget.as_millis()
             }),
@@ -669,6 +744,22 @@ mod real_obligation_leak_check_e2e {
         assert_eq!(
             after_cancel.leaked_obligations, 0,
             "Forced cancellation must not leak obligations"
+        );
+        assert_eq!(
+            cleanup_task_start_count, pending_count,
+            "Forced cancellation should spawn one cleanup task per pending obligation"
+        );
+        assert_eq!(
+            cleanup_task_complete_count, pending_count,
+            "Forced cancellation cleanup tasks must all complete"
+        );
+        assert!(
+            cleanup_region_is_closed,
+            "Cleanup region marker should close after all cleanup tasks join"
+        );
+        assert!(
+            cleanup_runtime_is_quiescent,
+            "Cleanup runtime should be quiescent after forced cancellation joins"
         );
         assert!(
             after_cancel.ledger_consistent,
@@ -689,9 +780,31 @@ mod real_obligation_leak_check_e2e {
                 "scenario": "client_disconnect_during_reserved_send",
                 "zero_pending": after_cancel.pending_obligations == 0,
                 "zero_leaks": after_cancel.leaked_obligations == 0,
+                "no_task_leaks": cleanup_task_complete_count == pending_count,
+                "region_close_implies_quiescence": cleanup_region_is_closed && cleanup_runtime_is_quiescent,
                 "cleanup_within_budget": cleanup_elapsed <= cleanup_budget
             }),
         );
+
+        harness
+            .write_artifact_bundle(
+                "client_disconnect_forced_cancel_cleanup",
+                json!({
+                    "schema_version": "obligation-chaos-e2e-summary-v1",
+                    "scenario": "client_disconnect_during_reserved_send",
+                    "pending_before": before_cancel.pending_obligations,
+                    "pending_after": after_cancel.pending_obligations,
+                    "leaked_after": after_cancel.leaked_obligations,
+                    "ledger_consistent": after_cancel.ledger_consistent,
+                    "cleanup_tasks_started": cleanup_task_start_count,
+                    "cleanup_tasks_completed": cleanup_task_complete_count,
+                    "cleanup_region_closed": cleanup_region_is_closed,
+                    "cleanup_runtime_quiescent": cleanup_runtime_is_quiescent,
+                    "cleanup_elapsed_ms": cleanup_elapsed.as_millis(),
+                    "cleanup_budget_ms": cleanup_budget.as_millis()
+                }),
+            )
+            .expect("artifact bundle should be written when artifact env is set");
     }
 
     #[tokio::test]
