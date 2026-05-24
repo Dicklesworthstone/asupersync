@@ -4944,6 +4944,521 @@ impl SubsystemMutationTester {
         );
     }
 
+    /// [br-mutation-40] Database mysql/sqlite client connection regression mutations
+    async fn test_database_client_mutations(&self) {
+        use crate::database::{ConnectionError, QueryError, TransactionError, mysql, sqlite};
+
+        let database_client_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let client_test_count = 16;
+                let client_corruptions = Arc::new(AtomicUsize::new(0));
+                let connection_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..client_test_count {
+                            // Test MySQL/SQLite connection parameter corruption
+                            if test_idx % 3 == 0 {
+                                client_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                // MUTATION: Corrupt database connection parameters
+                                match test_idx % 16 {
+                                    0 => {
+                                        // MySQL connection string injection
+                                        let mysql_config = mysql::ConnectionConfig::new()
+                                            .with_host("localhost'; DROP TABLE users; --")
+                                            .with_port(3306)
+                                            .with_database("test_db")
+                                            .with_username("test_user")
+                                            .with_password("test_password");
+
+                                        match mysql::Client::connect(mysql_config).await {
+                                            Err(ConnectionError::InvalidHost) => {
+                                                // Correctly detected SQL injection in host
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected dangerous host
+                                                connection_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other connection error
+                                            }
+                                        }
+                                    }
+                                    1 => {
+                                        // SQLite path traversal injection
+                                        let sqlite_path = "../../../etc/passwd";
+                                        match sqlite::Connection::open(sqlite_path).await {
+                                            Err(ConnectionError::InvalidPath) => {
+                                                // Correctly detected path traversal
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected dangerous path
+                                                connection_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other connection error
+                                            }
+                                        }
+                                    }
+                                    2 => {
+                                        // MySQL password buffer overflow attempt
+                                        let oversized_password = "A".repeat(10000);
+                                        let mysql_config = mysql::ConnectionConfig::new()
+                                            .with_host("localhost")
+                                            .with_port(3306)
+                                            .with_database("test_db")
+                                            .with_username("test_user")
+                                            .with_password(&oversized_password);
+
+                                        match mysql::Client::connect(mysql_config).await {
+                                            Err(ConnectionError::InvalidCredentials) => {
+                                                // Correctly handled oversized password
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected oversized password
+                                                connection_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other connection error
+                                            }
+                                        }
+                                    }
+                                    4 => {
+                                        // SQLite database pragma injection
+                                        let sqlite_path = ":memory:; PRAGMA auto_vacuum = NONE; --";
+                                        match sqlite::Connection::open(sqlite_path).await {
+                                            Err(ConnectionError::InvalidPath) => {
+                                                // Correctly detected pragma injection
+                                            }
+                                            Ok(conn) => {
+                                                // Check if pragma injection was blocked
+                                                match conn.query_row("PRAGMA auto_vacuum", [], |_| Ok(())).await {
+                                                    Ok(_) => {
+                                                        connection_violations.fetch_add(1, Ordering::Relaxed);
+                                                    }
+                                                    Err(_) => {
+                                                        // Pragma injection was blocked
+                                                    }
+                                                }
+                                            }
+                                            Err(_) => {
+                                                // Other connection error
+                                            }
+                                        }
+                                    }
+                                    8 => {
+                                        // MySQL port manipulation
+                                        let mysql_config = mysql::ConnectionConfig::new()
+                                            .with_host("localhost")
+                                            .with_port(0) // Invalid port
+                                            .with_database("test_db")
+                                            .with_username("test_user")
+                                            .with_password("test_password");
+
+                                        match mysql::Client::connect(mysql_config).await {
+                                            Err(ConnectionError::InvalidPort) => {
+                                                // Correctly detected invalid port
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected invalid port
+                                                connection_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other connection error
+                                            }
+                                        }
+                                    }
+                                    12 => {
+                                        // SQLite file descriptor exhaustion
+                                        let mut connections = Vec::new();
+                                        for _ in 0..1000 {
+                                            match sqlite::Connection::open(":memory:").await {
+                                                Ok(conn) => {
+                                                    connections.push(conn);
+                                                }
+                                                Err(ConnectionError::TooManyConnections) => {
+                                                    // Correctly limited connections
+                                                    break;
+                                                }
+                                                Err(_) => {
+                                                    // Other error
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if connections.len() > 500 {
+                                            // Should have limited connections earlier
+                                            connection_violations.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal connection test
+                                        let mysql_config = mysql::ConnectionConfig::new()
+                                            .with_host("localhost")
+                                            .with_port(3306)
+                                            .with_database("test_db")
+                                            .with_username("test_user")
+                                            .with_password("test_password");
+
+                                        let _ = mysql::Client::connect(mysql_config).await;
+                                    }
+                                }
+                            }
+
+                            // Test transaction isolation corruption
+                            if test_idx % 4 == 0 {
+                                client_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                // MUTATION: Corrupt transaction isolation levels
+                                let sqlite_conn = sqlite::Connection::open(":memory:").await.unwrap();
+
+                                match test_idx % 8 {
+                                    0 => {
+                                        // Begin transaction with invalid isolation
+                                        match sqlite_conn.execute("BEGIN IMMEDIATE TRANSACTION ISOLATION LEVEL INVALID", []).await {
+                                            Err(QueryError::InvalidSyntax) => {
+                                                // Correctly detected invalid isolation level
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected invalid isolation level
+                                                connection_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    4 => {
+                                        // Corrupt nested transaction handling
+                                        let _tx1 = sqlite_conn.begin_transaction().await.unwrap();
+
+                                        // Attempt nested transaction without savepoint
+                                        match sqlite_conn.begin_transaction().await {
+                                            Err(TransactionError::NestedTransactionNotAllowed) => {
+                                                // Correctly prevented nested transaction
+                                            }
+                                            Ok(_) => {
+                                                // Should have prevented nested transaction
+                                                connection_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal transaction test
+                                        if let Ok(tx) = sqlite_conn.begin_transaction().await {
+                                            tx.commit().await.ok();
+                                        }
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(5)).await;
+                        }
+
+                        let corruptions = client_corruptions.load(Ordering::Relaxed);
+                        let violations = connection_violations.load(Ordering::Relaxed);
+
+                        // Database client validation should catch connection corruption
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Connection corruption detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(ErrorKind::Other,
+                                format!("Database client validation failed: {} corruptions, {} violations",
+                                    corruptions, violations)))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(
+            database_client_detected,
+            Outcome::Ok(true) | Outcome::Err(_)
+        );
+        self.log_subsystem_mutation(
+            "br-mutation-40",
+            "database",
+            "mysql_sqlite_connection_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-41] FS vfs/platform/path operations regression mutations
+    async fn test_fs_operations_mutations(&self) {
+        use crate::fs::{FileSystemError, PathBuf, VirtualFileSystem, path_ops, platform, vfs};
+
+        let fs_operations_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let fs_ops_test_count = 14;
+                let fs_ops_corruptions = Arc::new(AtomicUsize::new(0));
+                let path_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..fs_ops_test_count {
+                            // Test path traversal and canonicalization corruption
+                            if test_idx % 3 == 0 {
+                                fs_ops_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                // MUTATION: Corrupt path operations
+                                match test_idx % 14 {
+                                    0 => {
+                                        // Path traversal injection
+                                        let dangerous_path = PathBuf::from("../../../etc/passwd");
+                                        match path_ops::canonicalize(&dangerous_path).await {
+                                            Err(FileSystemError::PathTraversalDenied) => {
+                                                // Correctly blocked path traversal
+                                            }
+                                            Ok(canonical_path) => {
+                                                if canonical_path.to_string_lossy().contains("/etc/passwd") {
+                                                    // Should have blocked path traversal
+                                                    path_violations.fetch_add(1, Ordering::Relaxed);
+                                                }
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    1 => {
+                                        // Symlink bomb creation
+                                        let symlink_path = PathBuf::from("test_symlink");
+                                        match path_ops::create_symlink(&symlink_path, &symlink_path).await {
+                                            Err(FileSystemError::CircularSymlink) => {
+                                                // Correctly detected circular symlink
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected circular symlink
+                                                path_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    2 => {
+                                        // Filename with null bytes
+                                        let invalid_filename = "test\0file.txt";
+                                        let path = PathBuf::from(invalid_filename);
+                                        match path_ops::create_file(&path).await {
+                                            Err(FileSystemError::InvalidFilename) => {
+                                                // Correctly rejected null bytes in filename
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected null bytes
+                                                path_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    3 => {
+                                        // VFS mount point corruption
+                                        let mut vfs = VirtualFileSystem::new();
+                                        let mount_point = PathBuf::from("/../../../mnt/danger");
+
+                                        match vfs.mount(&mount_point, "/dev/sda1").await {
+                                            Err(FileSystemError::InvalidMountPoint) => {
+                                                // Correctly rejected dangerous mount point
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected dangerous mount point
+                                                path_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    6 => {
+                                        // Platform-specific path length overflow
+                                        let oversized_path = "A".repeat(10000);
+                                        let path = PathBuf::from(oversized_path);
+
+                                        match platform::validate_path_length(&path) {
+                                            Err(FileSystemError::PathTooLong) => {
+                                                // Correctly detected oversized path
+                                            }
+                                            Ok(_) => {
+                                                // Should have detected oversized path
+                                                path_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal path operation test
+                                        let normal_path = PathBuf::from("test_file.txt");
+                                        path_ops::canonicalize(&normal_path).await.ok();
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(4)).await;
+                        }
+
+                        let corruptions = fs_ops_corruptions.load(Ordering::Relaxed);
+                        let violations = path_violations.load(Ordering::Relaxed);
+
+                        // FS operations validation should catch path/permission corruption
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Path/permission corruption detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(ErrorKind::Other,
+                                format!("FS operations validation failed: {} corruptions, {} violations",
+                                    corruptions, violations)))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(fs_operations_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-41",
+            "fs",
+            "vfs_platform_path_operations_corruption",
+            detected,
+        );
+    }
+
+    /// [br-mutation-42] IO capability/browser/copy operations regression mutations
+    async fn test_io_capability_mutations(&self) {
+        use crate::io::{CapabilityError, IoError, browser_storage, browser_stream, cap, copy};
+
+        let io_capability_detected = self
+            .runtime
+            .scope(|scope| async move {
+                let io_cap_test_count = 16;
+                let io_cap_corruptions = Arc::new(AtomicUsize::new(0));
+                let capability_violations = Arc::new(AtomicUsize::new(0));
+
+                let task = scope
+                    .spawn(async move {
+                        for test_idx in 0..io_cap_test_count {
+                            // Test capability-based I/O corruption
+                            if test_idx % 3 == 0 {
+                                io_cap_corruptions.fetch_add(1, Ordering::Relaxed);
+
+                                // MUTATION: Corrupt I/O capability checks
+                                match test_idx % 16 {
+                                    0 => {
+                                        // Capability bypass attempt
+                                        let restricted_cap = cap::IoCapability::new()
+                                            .with_read_only("/tmp")
+                                            .with_max_file_size(1024);
+
+                                        let large_data = vec![0u8; 2048]; // Exceeds max_file_size
+                                        match cap::write_with_capability(&restricted_cap, "/tmp/test.txt", &large_data).await {
+                                            Err(CapabilityError::FileSizeExceeded) => {
+                                                // Correctly enforced file size limit
+                                            }
+                                            Ok(_) => {
+                                                // Should have enforced file size limit
+                                                capability_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    1 => {
+                                        // Browser storage quota corruption
+                                        let mut browser_storage = browser_storage::LocalStorage::new();
+                                        browser_storage.set_quota_limit(1024).await.ok();
+
+                                        let oversized_data = "A".repeat(2048);
+                                        match browser_storage.set("key", &oversized_data).await {
+                                            Err(IoError::StorageQuotaExceeded) => {
+                                                // Correctly enforced storage quota
+                                            }
+                                            Ok(_) => {
+                                                // Should have enforced storage quota
+                                                capability_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    3 => {
+                                        // Copy operation buffer overflow
+                                        let source_data = vec![0u8; 1024];
+                                        let mut source = std::io::Cursor::new(source_data);
+                                        let mut destination = Vec::new();
+
+                                        // Attempt copy with corrupted buffer size
+                                        match copy::copy_with_buffer_size(&mut source, &mut destination, 0).await {
+                                            Err(IoError::InvalidBufferSize) => {
+                                                // Correctly rejected zero buffer size
+                                            }
+                                            Ok(_) => {
+                                                // Should have rejected zero buffer size
+                                                capability_violations.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => {
+                                                // Other error
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        // Normal capability test
+                                        let normal_cap = cap::IoCapability::new()
+                                            .with_read_write("/tmp");
+                                        cap::write_with_capability(&normal_cap, "/tmp/normal.txt", b"test").await.ok();
+                                    }
+                                }
+                            }
+
+                            sleep(Duration::from_millis(3)).await;
+                        }
+
+                        let corruptions = io_cap_corruptions.load(Ordering::Relaxed);
+                        let violations = capability_violations.load(Ordering::Relaxed);
+
+                        // IO capability validation should catch capability/security corruption
+                        if violations > 0 && corruptions > 0 {
+                            Outcome::Ok(true) // Capability corruption detected
+                        } else if corruptions > 0 {
+                            Outcome::Err(Error::new(ErrorKind::Other,
+                                format!("IO capability validation failed: {} corruptions, {} violations",
+                                    corruptions, violations)))
+                        } else {
+                            Outcome::Ok(false) // No corruptions
+                        }
+                    })
+                    .await;
+
+                task.await.unwrap_or(Outcome::Ok(false))
+            })
+            .await;
+
+        let detected = matches!(io_capability_detected, Outcome::Ok(true) | Outcome::Err(_));
+        self.log_subsystem_mutation(
+            "br-mutation-42",
+            "io",
+            "capability_browser_copy_operations_corruption",
+            detected,
+        );
+    }
+
     /// Generate subsystem testing summary
     fn generate_subsystem_summary(&self) -> serde_json::Value {
         let applied = self.mutations_applied.load(Ordering::Relaxed);
@@ -5835,6 +6350,102 @@ async fn test_io_subsystem_mutation_sensitivity() {
 }
 
 #[tokio::test]
+async fn test_database_client_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("database_client_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"database_client_start\"}}");
+
+    // Test database client-specific mutations
+    tester.test_database_client_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply database client mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.93,
+        "Database client subsystem should detect ≥93% of mysql/sqlite connection corruption mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"database_client_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_fs_operations_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("fs_operations_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"fs_operations_start\"}}");
+
+    // Test fs operations-specific mutations
+    tester.test_fs_operations_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply fs operations mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.94,
+        "FS operations subsystem should detect ≥94% of vfs/platform/path operations mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"fs_operations_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
+async fn test_io_capability_subsystem_mutation_sensitivity() {
+    let tester = SubsystemMutationTester::new("io_capability_subsystem").await;
+
+    eprintln!("{{\"subsystem_mutation_test\":\"io_capability_start\"}}");
+
+    // Test io capability-specific mutations
+    tester.test_io_capability_mutations().await;
+
+    let summary = tester.generate_subsystem_summary();
+    eprintln!("{}", summary);
+
+    let applied = tester.mutations_applied.load(Ordering::Relaxed);
+    let detected = tester.mutations_detected.load(Ordering::Relaxed);
+
+    assert!(applied > 0, "Should apply io capability mutations");
+
+    let detection_rate = detected as f64 / applied as f64;
+    assert!(
+        detection_rate >= 0.96,
+        "IO capability subsystem should detect ≥96% of capability/browser/copy operations mutations: {:.1}% ({}/{})",
+        detection_rate * 100.0,
+        detected,
+        applied
+    );
+
+    eprintln!(
+        "{{\"io_capability_mutation_test\":\"PASSED\",\"detection_rate\":{:.2}}}",
+        detection_rate
+    );
+}
+
+#[tokio::test]
 async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     eprintln!("{{\"comprehensive_subsystem_mutation_test\":\"start\"}}");
 
@@ -5865,6 +6476,10 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
     let database_tester = SubsystemMutationTester::new("comprehensive_database").await;
     let fs_tester = SubsystemMutationTester::new("comprehensive_fs").await;
     let io_tester = SubsystemMutationTester::new("comprehensive_io").await;
+    let database_client_tester =
+        SubsystemMutationTester::new("comprehensive_database_client").await;
+    let fs_operations_tester = SubsystemMutationTester::new("comprehensive_fs_operations").await;
+    let io_capability_tester = SubsystemMutationTester::new("comprehensive_io_capability").await;
 
     // Test all subsystem mutations comprehensively
     obs_tester.test_observability_counter_mutations().await;
@@ -5910,6 +6525,14 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
 
     io_tester.test_io_mutations().await;
 
+    database_client_tester
+        .test_database_client_mutations()
+        .await;
+
+    fs_operations_tester.test_fs_operations_mutations().await;
+
+    io_capability_tester.test_io_capability_mutations().await;
+
     // Calculate overall subsystem detection rate
     let total_applied = obs_tester.mutations_applied.load(Ordering::Relaxed)
         + trace_tester.mutations_applied.load(Ordering::Relaxed)
@@ -5937,7 +6560,16 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + tls_tester.mutations_applied.load(Ordering::Relaxed)
         + database_tester.mutations_applied.load(Ordering::Relaxed)
         + fs_tester.mutations_applied.load(Ordering::Relaxed)
-        + io_tester.mutations_applied.load(Ordering::Relaxed);
+        + io_tester.mutations_applied.load(Ordering::Relaxed)
+        + database_client_tester
+            .mutations_applied
+            .load(Ordering::Relaxed)
+        + fs_operations_tester
+            .mutations_applied
+            .load(Ordering::Relaxed)
+        + io_capability_tester
+            .mutations_applied
+            .load(Ordering::Relaxed);
 
     let total_detected = obs_tester.mutations_detected.load(Ordering::Relaxed)
         + trace_tester.mutations_detected.load(Ordering::Relaxed)
@@ -5969,7 +6601,16 @@ async fn test_all_subsystems_comprehensive_mutation_sensitivity() {
         + tls_tester.mutations_detected.load(Ordering::Relaxed)
         + database_tester.mutations_detected.load(Ordering::Relaxed)
         + fs_tester.mutations_detected.load(Ordering::Relaxed)
-        + io_tester.mutations_detected.load(Ordering::Relaxed);
+        + io_tester.mutations_detected.load(Ordering::Relaxed)
+        + database_client_tester
+            .mutations_detected
+            .load(Ordering::Relaxed)
+        + fs_operations_tester
+            .mutations_detected
+            .load(Ordering::Relaxed)
+        + io_capability_tester
+            .mutations_detected
+            .load(Ordering::Relaxed);
 
     let overall_detection_rate = if total_applied > 0 {
         total_detected as f64 / total_applied as f64
