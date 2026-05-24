@@ -133,12 +133,11 @@ impl TestSnapshotBuilder {
     fn build_snapshot(&self, timestamp: Time) -> RuntimeKernelSnapshot {
         let id = SnapshotId(self.id_counter.fetch_add(1, Ordering::SeqCst));
 
+        // Use the lib's `test_default` helper for non-pinned fields so this
+        // snapshot stays valid as the struct accretes new fields. The
+        // explicitly-listed values are the ones this conformance test pins.
         RuntimeKernelSnapshot {
             id,
-            version: SNAPSHOT_VERSION,
-            timestamp,
-
-            // Scheduler state
             ready_queue_len: 10,
             cancel_lane_len: 2,
             finalize_lane_len: 1,
@@ -146,11 +145,9 @@ impl TestSnapshotBuilder {
             active_regions: 3,
             cancel_streak_current: 1,
             cancel_streak_limit: 5,
-
-            // Obligation state
             outstanding_obligations: 7,
             obligation_leak_count: 0,
-            // I/O state (would include actual I/O metrics in real implementation)
+            ..RuntimeKernelSnapshot::test_default(0, timestamp)
         }
     }
 

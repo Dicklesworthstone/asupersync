@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Mock task identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MockTaskId(u64);
 
 impl MockTaskId {
@@ -35,7 +35,7 @@ impl MockTaskId {
 }
 
 /// Mock worker identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MockWorkerId(usize);
 
 impl MockWorkerId {
@@ -76,7 +76,7 @@ pub enum SchedulerLane {
 }
 
 /// Mock task for testing.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct MockTask {
     id: MockTaskId,
     priority: TaskPriority,
@@ -86,6 +86,48 @@ struct MockTask {
     execution_count: AtomicU64,
     should_panic: AtomicBool,
     execution_duration: Duration,
+}
+
+// Manual `Clone` because `AtomicU64`/`AtomicBool` are not `Clone`; snapshot
+// the current atomic values into fresh atomics on clone so each instance
+// owns its own counter (no shared state between clones).
+impl Clone for MockTask {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            priority: self.priority,
+            state: self.state,
+            created_at: self.created_at,
+            worker_affinity: self.worker_affinity,
+            execution_count: AtomicU64::new(self.execution_count.load(Ordering::Relaxed)),
+            should_panic: AtomicBool::new(self.should_panic.load(Ordering::Relaxed)),
+            execution_duration: self.execution_duration,
+        }
+    }
+}
+
+// `MockTask` is placed into `BinaryHeap<(TaskPriority, MockTaskId, MockTask)>`
+// in the mock intrusive heap below; the heap orders by the full tuple, so
+// every element type must be `Ord`. Order by `id`; atomics make a content
+// ordering meaningless and the id alone uniquely identifies the task.
+impl PartialEq for MockTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for MockTask {}
+
+impl PartialOrd for MockTask {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MockTask {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
 }
 
 impl MockTask {
