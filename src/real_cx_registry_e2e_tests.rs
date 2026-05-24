@@ -29,6 +29,35 @@ use std::{
 };
 
 #[cfg(all(test, feature = "real-service-e2e"))]
+/// Scoped environment variable guard that restores original value on drop
+struct EnvGuard {
+    key: String,
+    original_value: Option<String>,
+}
+
+#[cfg(all(test, feature = "real-service-e2e"))]
+impl EnvGuard {
+    fn set(key: &str, value: &str) -> Self {
+        let original_value = std::env::var(key).ok();
+        std::env::set_var(key, value);
+        Self {
+            key: key.to_string(),
+            original_value,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "real-service-e2e"))]
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.original_value {
+            Some(value) => std::env::set_var(&self.key, value),
+            None => std::env::remove_var(&self.key),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "real-service-e2e"))]
 use serde::{Deserialize, Serialize};
 
 /// Real cx/registry manager that coordinates actual capability and registry operations
@@ -949,7 +978,7 @@ mod tests {
 
     #[test]
     fn test_capability_lifecycle_basic() {
-        std::env::set_var("CX_REGISTRY_E2E_TESTS", "true");
+        let _env_guard = EnvGuard::set("CX_REGISTRY_E2E_TESTS", "true");
         validate_cx_registry_e2e_environment().expect("Environment validation failed");
 
         let runtime = RuntimeBuilder::new()

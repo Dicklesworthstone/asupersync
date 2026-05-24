@@ -18,9 +18,31 @@ mod tests {
     use crate::types::Time;
     use franken_evidence::EvidenceLedger;
     use std::collections::HashMap;
+    use std::io;
+    use std::net::{SocketAddr, TcpListener};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
+
+    /// Allocate a single test port dynamically to avoid conflicts
+    fn allocate_test_port() -> io::Result<u16> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        Ok(addr.port())
+    }
+
+    /// Allocate multiple test ports for multi-connection scenarios
+    fn allocate_test_ports(count: usize) -> io::Result<Vec<SocketAddr>> {
+        let mut addrs = Vec::new();
+        for _ in 0..count {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let addr = listener.local_addr()?;
+            addrs.push(addr);
+            // Drop listener to free port for actual use
+            drop(listener);
+        }
+        Ok(addrs)
+    }
 
     // Test data factories for realistic scenarios
     #[derive(Debug, Clone)]
@@ -176,8 +198,9 @@ mod tests {
                 .build();
             self.evidence_sink.emit(&evidence);
 
-            // Register connection with manager
-            let remote_addr = "127.0.0.1:12345".parse().unwrap();
+            // Register connection with manager using dynamic port
+            let test_port = allocate_test_port().expect("Failed to allocate test port");
+            let remote_addr = format!("127.0.0.1:{}", test_port).parse().unwrap();
             let (conn_id, guard) = self.connection_manager
                 .register_connection(remote_addr)
                 .map_err(|e| format!("Connection registration failed: {:?}", e))?;
@@ -442,9 +465,11 @@ mod tests {
 
             logger.phase("connection_limit_test");
 
-            let remote_addr1 = "127.0.0.1:11111".parse().unwrap();
-            let remote_addr2 = "127.0.0.1:11112".parse().unwrap();
-            let remote_addr3 = "127.0.0.1:11113".parse().unwrap();
+            // Allocate dynamic ports for multi-connection test
+            let test_addrs = allocate_test_ports(3).expect("Failed to allocate test ports");
+            let remote_addr1 = test_addrs[0];
+            let remote_addr2 = test_addrs[1];
+            let remote_addr3 = test_addrs[2];
 
             // First two connections should succeed
             let (conn1_id, _guard1) = connection_manager.register_connection(remote_addr1)
@@ -639,7 +664,8 @@ mod tests {
 
             logger.phase("connection_registration");
 
-            let remote_addr = "127.0.0.1:15000".parse().unwrap();
+            let test_port = allocate_test_port().expect("Failed to allocate test port");
+            let remote_addr = format!("127.0.0.1:{}", test_port).parse().unwrap();
             let (conn_id, guard) = connection_manager.register_connection(remote_addr)
                 .expect("Connection should be registered");
 

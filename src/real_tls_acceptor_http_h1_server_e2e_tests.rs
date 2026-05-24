@@ -30,10 +30,18 @@ mod tests {
     use crate::cx::Cx;
     use crate::time::{Duration, Instant};
     use std::collections::HashMap;
-    use std::net::SocketAddr;
+    use std::io;
+    use std::net::{SocketAddr, TcpListener};
     use std::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
     use std::sync::Arc;
     use tokio::sync::{Mutex, RwLock};
+
+    /// Allocate a test port dynamically to avoid conflicts with parallel tests
+    fn allocate_test_port() -> io::Result<u16> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        Ok(addr.port())
+    }
 
     /// TLS acceptor with integrated HTTP/1.1 server for secure request processing
     struct TlsHttpServer {
@@ -960,8 +968,10 @@ mod tests {
                 _ => {}
             }
 
-            // Perform normal handshake
-            let connection_id = server.accept_connection("127.0.0.1:12345".parse().unwrap()).await?;
+            // Perform normal handshake with dynamic port allocation
+            let test_port = allocate_test_port().map_err(|e| format!("Port allocation failed: {}", e))?;
+            let client_addr = format!("127.0.0.1:{}", test_port).parse().unwrap();
+            let connection_id = server.accept_connection(client_addr).await?;
 
             let handshake_duration = start_time.elapsed();
             self.client_stats.handshake_duration = Some(handshake_duration);
