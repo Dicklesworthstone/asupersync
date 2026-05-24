@@ -433,6 +433,8 @@ pub mod real_net_udp_net_quic_native_datagram_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_websocket_frame_sync_notify_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_net_websocket_handshake_http_h1_server_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_websocket_http_h1_upgrade_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_choreography_pipeline_obligation_session_types_integration_e2e_tests;
