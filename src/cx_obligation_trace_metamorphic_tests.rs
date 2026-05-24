@@ -37,8 +37,8 @@
 #[cfg(test)]
 mod tests {
     use crate::cx::macaroon::{Caveat, CaveatPredicate, MacaroonToken};
-    use crate::obligation::{ObligationVar, VarState};
     use crate::obligation::lyapunov::{LyapunovGovernor, PotentialWeights, StateSnapshot};
+    use crate::obligation::{ObligationVar, VarState};
     use crate::record::ObligationKind;
     use crate::security::key::AuthKey;
     use crate::trace::dpor::{DetectedRace, Race, RaceAnalysis, RaceKind};
