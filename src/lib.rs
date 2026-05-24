@@ -381,6 +381,8 @@ pub mod real_epoch_sharded_state_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_fs_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_fs_file_messaging_redis_stream_durability_rdb_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_fs_uring_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_fs_uring_io_buf_writer_integration_e2e_tests;
