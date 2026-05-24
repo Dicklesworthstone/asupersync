@@ -381,6 +381,8 @@ pub mod real_grpc_server_grpc_health_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_grpc_streaming_service_hedge_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_grpc_web_grpc_interceptor_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_grpc_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h2_concurrent_load_e2e_tests;
