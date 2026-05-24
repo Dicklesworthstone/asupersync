@@ -313,8 +313,9 @@ mod real_net_dns_e2e {
         }
     }
 
-    #[tokio::test]
-    async fn test_dns_lookup_cache_ttl_cycle() {
+    #[test]
+    fn test_dns_lookup_cache_ttl_cycle() {
+        crate::lab::runtime::block_on(async {
         let harness = Arc::new(DnsTestHarness::new().await);
         harness.log("test_start", json!({"test": "dns_lookup_cache_ttl_cycle"}));
 
@@ -426,6 +427,9 @@ mod real_net_dns_e2e {
                 "message": "DNS lookup → cache → TTL invalidation cycle validated successfully"
             }),
         );
+
+        Ok::<(), Box<dyn std::error::Error>>(())
+        }).unwrap();
     }
 
     #[tokio::test]
