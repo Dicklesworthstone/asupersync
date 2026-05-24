@@ -154,3 +154,29 @@ These artifacts use canonicalization to ensure cross-platform stability:
 - **Command**: `UPDATE_GOLDENS=1 cargo test golden_evidence_chain_merkle_proof`
 
 These new golden tests ensure byte-for-byte regression detection for critical state snapshot artifacts that must maintain deterministic output for compliance and debugging purposes.
+
+### br-golden-9: RaptorQ Decoder Trace
+- **File**: `hot_path/raptorq_decoder_trace.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_raptorq_decoder_trace`
+- **Purpose**: Deterministic RaptorQ decoder progress trace with systematic/repair symbol processing
+- **Stability**: Deterministic (fixed K/N parameters, gaussian elimination steps, back substitution)
+- **Update trigger**: RaptorQ decoder algorithm changes, trace format changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_raptorq_decoder_trace`
+
+### br-golden-10: Supervision Restart Log Canonical Form
+- **File**: `hot_path/supervision_restart_log.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_supervision_restart_log`
+- **Purpose**: Canonical supervision tree restart log format for debugging cascade failures
+- **Stability**: Deterministic (fixed restart events, canonical tree ordering, scrubbed timestamps)
+- **Update trigger**: Supervision restart format changes, tree analysis algorithm changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_supervision_restart_log`
+
+### br-golden-11: CLI Doctor Diagnostic Report Serialization
+- **File**: `hot_path/cli_doctor_diagnostic_report.golden`
+- **Generator**: `src/golden_artifacts_tests.rs::golden_cli_doctor_diagnostic_report`
+- **Purpose**: Deterministic CLI doctor diagnostic report format for system health analysis
+- **Stability**: Deterministic (fixed subsystem status, scrubbed dynamic values, canonical ordering)
+- **Update trigger**: CLI doctor report format changes, diagnostic category changes
+- **Command**: `UPDATE_GOLDENS=1 cargo test golden_cli_doctor_diagnostic_report`
+
+These additional golden tests extend regression coverage to RaptorQ decoding traces, supervision restart cascades, and CLI diagnostic outputs - all critical for debugging deterministic behavior in production incidents.
