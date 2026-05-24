@@ -25,8 +25,8 @@
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
-    use std::cmp::{Ordering, Reverse};
-    use std::collections::{BTreeMap, HashMap, VecDeque};
+    use std::cmp::Ordering;
+    use std::collections::HashMap;
 
     /// Scheduler priority conformance test infrastructure
     struct SchedulerConformanceTester {
@@ -376,9 +376,9 @@ mod tests {
             priorities in prop::collection::vec(0u32..100, 20..50),
         )| {
             // SCH-1.1: Min-heap property preserved after all operations
-            for (seq_idx, operations) in operation_sequences.iter().enumerate() {
+            'operation_sequence: for (seq_idx, operations) in operation_sequences.iter().enumerate() {
                 let mut heap = IntrusiveMinHeap::new();
-                let mut available_tasks = task_ids.iter().zip(priorities.iter())
+                let available_tasks = task_ids.iter().zip(priorities.iter())
                     .map(|(&id, &prio)| (TaskId(id), Priority(prio)))
                     .collect::<Vec<_>>();
                 let mut next_task_idx = 0;
@@ -403,7 +403,7 @@ mod tests {
                                             "Heap insertion should succeed for unique tasks",
                                             result
                                         );
-                                        return;
+                                        continue 'operation_sequence;
                                     }
                                 }
 
