@@ -414,6 +414,8 @@ pub mod real_obligation_e2e_tests;
 ))]
 pub mod real_obligation_leak_check_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_obligation_leak_check_lab_oracle_obligation_leak_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_plan_scheduler_certificate_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_quic_native_e2e_tests;
