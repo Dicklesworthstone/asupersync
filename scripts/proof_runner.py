@@ -3299,6 +3299,7 @@ class ProofRunner:
         markers = [
             "remote required",
             "refusing local fallback",
+            "active_project_exclusion=[COUNT]",
             "error:",
             "failed-local",
             "blocked-external",

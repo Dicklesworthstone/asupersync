@@ -412,6 +412,28 @@ update `artifacts/proof_lane_manifest_v1.json`,
 `artifacts/proof_status_snapshot_v1.json`, and the exact validation frontier
 record together instead of broadening the claim.
 
+Promote a red proof into the deterministic failure corpus when the blocker is
+likely to recur and the raw stage log can be replayed without contacting the
+original service. The canonical manifest is
+`artifacts/failure_corpus_manifest_v1.json`, checked by
+`tests/failure_corpus_manifest_contract.rs`.
+
+Replay a stored corpus case:
+
+```bash
+python3 scripts/proof_runner.py --failure-corpus-replay FC-RCH-ADMISSION-001 --output json
+```
+
+Scrub a raw transcript before adding a new case:
+
+```bash
+python3 scripts/proof_runner.py --failure-corpus-scrub-input /path/to/raw.log --output json
+```
+
+Only promote cases that preserve the first blocker, proof lane, decision class,
+stage logs, and replay command after scrubbing. Do not promote cases that require
+live credentials, peer-owned dirty paths, or external services to reproduce.
+
 Use these colors for operator and agent decisions:
 
 | State | Meaning | Allowed agent action |
