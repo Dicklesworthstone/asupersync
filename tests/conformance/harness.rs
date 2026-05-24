@@ -36,7 +36,7 @@ impl RequirementLevel {
 }
 
 /// Test categories for organizational purposes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TestCategory {
     // Remote execution categories
     DistributedStructuredConcurrency,
@@ -392,6 +392,15 @@ pub fn run_full_runtime_conformance_suite() -> Vec<ConformanceTestResult> {
     results.extend(scheduler_harness.run_full_suite());
 
     results
+}
+
+/// Run the full runtime+scheduler conformance suite and return its markdown
+/// report. Free-function wrapper for callers that want a one-shot "produce a
+/// report" entry point without depending on `CoverageStats` plumbing.
+pub fn generate_conformance_report() -> String {
+    let results = run_full_runtime_conformance_suite();
+    let stats = CoverageStats::from_results(&results);
+    stats.generate_report()
 }
 
 #[cfg(test)]
