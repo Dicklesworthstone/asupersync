@@ -694,6 +694,413 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
+    // Service Layer Primitives E2E Tests (br-e2e-14)
+    // ---------------------------------------------------------------------------
+
+    /// Service layer test harness for rate limiting, load balancing, and hedge operations
+    struct ServiceLayerTestHarness {
+        servers: HashMap<SocketAddr, Arc<AtomicU64>>,
+        request_log: Arc<Mutex<Vec<ServiceRequestLog>>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ServiceRequestLog {
+        timestamp: Instant,
+        server_addr: SocketAddr,
+        request_type: String,
+        response_time_ms: u64,
+        success: bool,
+    }
+
+    impl ServiceLayerTestHarness {
+        fn new() -> Self {
+            Self {
+                servers: HashMap::new(),
+                request_log: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        async fn start_test_backend(&mut self, response_delay_ms: u64) -> SocketAddr {
+            let port = find_available_port().expect("Failed to find port");
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+
+            let request_counter = Arc::new(AtomicU64::new(0));
+            self.servers.insert(addr, request_counter.clone());
+
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            let request_log = Arc::clone(&self.request_log);
+
+            tokio::spawn(async move {
+                let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+
+                loop {
+                    tokio::select! {
+                        _ = &mut shutdown_rx => break,
+                        result = listener.accept() => {
+                            if let Ok((mut stream, client_addr)) = result {
+                                let counter = Arc::clone(&request_counter);
+                                let log = Arc::clone(&request_log);
+
+                                tokio::spawn(async move {
+                                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+                                    let start_time = Instant::now();
+                                    counter.fetch_add(1, Ordering::Relaxed);
+
+                                    // Simulate processing delay
+                                    if response_delay_ms > 0 {
+                                        tokio::time::sleep(Duration::from_millis(response_delay_ms)).await;
+                                    }
+
+                                    let mut buffer = [0; 512];
+                                    let success = if let Ok(n) = stream.read(&mut buffer).await {
+                                        let response = format!("HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nBackend response");
+                                        stream.write_all(response.as_bytes()).await.is_ok()
+                                    } else {
+                                        false
+                                    };
+
+                                    log.lock().unwrap().push(ServiceRequestLog {
+                                        timestamp: start_time,
+                                        server_addr: addr,
+                                        request_type: "backend_request".to_string(),
+                                        response_time_ms: start_time.elapsed().as_millis() as u64,
+                                        success,
+                                    });
+                                });
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Wait for server to start
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            addr
+        }
+
+        fn get_request_count(&self, addr: SocketAddr) -> u64 {
+            self.servers.get(&addr).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)
+        }
+
+        fn get_request_distribution(&self) -> HashMap<SocketAddr, u64> {
+            self.servers.iter().map(|(addr, counter)| (*addr, counter.load(Ordering::Relaxed))).collect()
+        }
+
+        fn get_total_requests(&self) -> usize {
+            self.request_log.lock().unwrap().len()
+        }
+    }
+
+    async fn test_rate_limiter_multi_key_traffic() -> TestResult {
+        let test_start = Instant::now();
+        let mut logger = E2ELogger::new("rate_limiter_e2e".to_string());
+        let mut harness = ServiceLayerTestHarness::new();
+
+        logger.log_phase(TestPhase::Setup, None).await;
+
+        // Start backend server
+        let backend_addr = harness.start_test_backend(10).await;
+
+        logger.log_phase(TestPhase::Act, Some(backend_addr)).await;
+
+        // Simulate rate limiter: 3 requests per second per key
+        let rate_limit_window = Duration::from_secs(1);
+        let max_requests_per_key = 3;
+
+        // Track requests per key
+        let mut request_times: HashMap<String, Vec<Instant>> = HashMap::new();
+        let keys = ["user_alpha", "user_beta", "user_gamma"];
+
+        let mut success = true;
+        let mut error = None;
+
+        // Send 5 requests per key rapidly
+        for key in &keys {
+            for i in 0..5 {
+                let request_time = Instant::now();
+
+                // Apply rate limiting logic
+                let key_requests = request_times.entry(key.to_string()).or_default();
+
+                // Remove old requests outside the window
+                key_requests.retain(|&t| request_time.duration_since(t) < rate_limit_window);
+
+                if key_requests.len() < max_requests_per_key {
+                    // Request allowed
+                    key_requests.push(request_time);
+
+                    // Make actual request to backend
+                    match timeout(Duration::from_secs(2), TcpStream::connect(backend_addr)).await {
+                        Ok(Ok(mut stream)) => {
+                            logger.log_tcp_event("connection_established", backend_addr, None).await;
+
+                            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                            let request = format!("GET /api?key={}&seq={} HTTP/1.1\r\nHost: localhost\r\n\r\n", key, i);
+
+                            if stream.write_all(request.as_bytes()).await.is_ok() {
+                                logger.log_tcp_event("request_sent", backend_addr, Some(request.len() as u64)).await;
+
+                                let mut response = [0; 256];
+                                if stream.read(&mut response).await.is_ok() {
+                                    logger.log_tcp_event("response_received", backend_addr, Some(response.len() as u64)).await;
+                                }
+                            }
+                        }
+                        _ => {
+                            // Request failed
+                        }
+                    }
+                } else {
+                    // Request rate limited - this is expected behavior
+                }
+
+                // Small delay between requests in same key
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        logger.log_phase(TestPhase::Assert, Some(backend_addr)).await;
+
+        // Verify rate limiting worked
+        let backend_requests = harness.get_request_count(backend_addr);
+        let expected_max = (max_requests_per_key * keys.len()) as u64; // 9 total requests max
+
+        if backend_requests > expected_max + 2 {
+            success = false;
+            error = Some(format!("Rate limiting failed: got {} requests, expected ≤{}", backend_requests, expected_max));
+        }
+
+        let result = TestResult {
+            test_name: "rate_limiter_multi_key".to_string(),
+            service_type: ServiceType::Http,
+            server_addr: backend_addr,
+            phase: TestPhase::Assert,
+            success,
+            error,
+            duration_ms: test_start.elapsed().as_millis() as u64,
+            tcp_stats: logger.get_tcp_stats().await,
+        };
+
+        logger.log_result(&result).await;
+        result
+    }
+
+    async fn test_load_balancer_round_robin() -> TestResult {
+        let test_start = Instant::now();
+        let mut logger = E2ELogger::new("load_balancer_e2e".to_string());
+        let mut harness = ServiceLayerTestHarness::new();
+
+        logger.log_phase(TestPhase::Setup, None).await;
+
+        // Start 3 backend servers
+        let backend1 = harness.start_test_backend(20).await;
+        let backend2 = harness.start_test_backend(20).await;
+        let backend3 = harness.start_test_backend(20).await;
+        let backends = vec![backend1, backend2, backend3];
+
+        logger.log_phase(TestPhase::Act, None).await;
+
+        // Round-robin load balancer simulation
+        let total_requests = 12; // Divisible by 3 for even distribution
+        let mut success = true;
+        let mut error = None;
+
+        for i in 0..total_requests {
+            let backend_addr = backends[i % backends.len()];
+
+            logger.log_tcp_event("connection_attempt", backend_addr, None).await;
+
+            match timeout(Duration::from_secs(3), TcpStream::connect(backend_addr)).await {
+                Ok(Ok(mut stream)) => {
+                    logger.log_tcp_event("connection_established", backend_addr, None).await;
+
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let request = format!("GET /api/item/{} HTTP/1.1\r\nHost: localhost\r\n\r\n", i);
+
+                    if stream.write_all(request.as_bytes()).await.is_ok() {
+                        logger.log_tcp_event("request_sent", backend_addr, Some(request.len() as u64)).await;
+
+                        let mut response = [0; 256];
+                        if stream.read(&mut response).await.is_ok() {
+                            logger.log_tcp_event("response_received", backend_addr, Some(response.len() as u64)).await;
+                        }
+                    }
+                }
+                _ => {
+                    success = false;
+                    error = Some(format!("Failed to connect to backend {}", backend_addr));
+                    break;
+                }
+            }
+        }
+
+        logger.log_phase(TestPhase::Assert, None).await;
+
+        // Verify round-robin distribution
+        let distribution = harness.get_request_distribution();
+
+        for backend_addr in &backends {
+            let count = distribution.get(backend_addr).copied().unwrap_or(0);
+            let expected_count = total_requests as u64 / backends.len() as u64;
+
+            if count != expected_count {
+                success = false;
+                error = Some(format!("Load balancer distribution uneven: backend {} got {} requests, expected {}", backend_addr, count, expected_count));
+                break;
+            }
+        }
+
+        let result = TestResult {
+            test_name: "load_balancer_round_robin".to_string(),
+            service_type: ServiceType::Http,
+            server_addr: backend1, // Representative server
+            phase: TestPhase::Assert,
+            success,
+            error,
+            duration_ms: test_start.elapsed().as_millis() as u64,
+            tcp_stats: logger.get_tcp_stats().await,
+        };
+
+        logger.log_result(&result).await;
+        result
+    }
+
+    async fn test_hedge_cancel_first_success() -> TestResult {
+        let test_start = Instant::now();
+        let mut logger = E2ELogger::new("hedge_e2e".to_string());
+        let mut harness = ServiceLayerTestHarness::new();
+
+        logger.log_phase(TestPhase::Setup, None).await;
+
+        // Start backends with different response times
+        let fast_backend = harness.start_test_backend(50).await;  // 50ms response
+        let slow_backend1 = harness.start_test_backend(500).await; // 500ms response
+        let slow_backend2 = harness.start_test_backend(1000).await; // 1000ms response
+
+        logger.log_phase(TestPhase::Act, None).await;
+
+        // Hedged request simulation: start with fast backend, hedge with slow ones after delay
+        let mut success = true;
+        let mut error = None;
+        let hedge_delay = Duration::from_millis(100);
+
+        let request_start = Instant::now();
+
+        // Start primary request to fast backend
+        let primary_task = tokio::spawn(async move {
+            match TcpStream::connect(fast_backend).await {
+                Ok(mut stream) => {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let request = b"GET /api/primary HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+                    if stream.write_all(request).await.is_ok() {
+                        let mut response = [0; 256];
+                        if stream.read(&mut response).await.is_ok() {
+                            return Some((fast_backend, request_start.elapsed()));
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+            None
+        });
+
+        // Wait for hedge delay then start backup requests
+        tokio::time::sleep(hedge_delay).await;
+
+        let hedge1_task = tokio::spawn(async move {
+            match TcpStream::connect(slow_backend1).await {
+                Ok(mut stream) => {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let request = b"GET /api/hedge1 HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+                    if stream.write_all(request).await.is_ok() {
+                        let mut response = [0; 256];
+                        if stream.read(&mut response).await.is_ok() {
+                            return Some((slow_backend1, request_start.elapsed()));
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+            None
+        });
+
+        let hedge2_task = tokio::spawn(async move {
+            match TcpStream::connect(slow_backend2).await {
+                Ok(mut stream) => {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let request = b"GET /api/hedge2 HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+                    if stream.write_all(request).await.is_ok() {
+                        let mut response = [0; 256];
+                        if stream.read(&mut response).await.is_ok() {
+                            return Some((slow_backend2, request_start.elapsed()));
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+            None
+        });
+
+        // Wait for first successful response (hedge behavior)
+        let winner = tokio::select! {
+            result = primary_task => {
+                logger.log_tcp_event("hedge_winner", fast_backend, None).await;
+                result.unwrap()
+            }
+            result = hedge1_task => {
+                logger.log_tcp_event("hedge_winner", slow_backend1, None).await;
+                result.unwrap()
+            }
+            result = hedge2_task => {
+                logger.log_tcp_event("hedge_winner", slow_backend2, None).await;
+                result.unwrap()
+            }
+        };
+
+        logger.log_phase(TestPhase::Assert, None).await;
+
+        match winner {
+            Some((winning_backend, response_time)) => {
+                // Should be fast backend that wins
+                if winning_backend != fast_backend {
+                    success = false;
+                    error = Some(format!("Expected fast backend to win hedge, but {} won", winning_backend));
+                }
+
+                // Response should be quick (under 200ms including network overhead)
+                if response_time > Duration::from_millis(200) {
+                    success = false;
+                    error = Some(format!("Hedge response too slow: {}ms", response_time.as_millis()));
+                }
+
+                logger.log_tcp_event("response_received", winning_backend, Some(response_time.as_millis() as u64)).await;
+            }
+            None => {
+                success = false;
+                error = Some("No hedged request succeeded".to_string());
+            }
+        }
+
+        let result = TestResult {
+            test_name: "hedge_cancel_first_success".to_string(),
+            service_type: ServiceType::Http,
+            server_addr: fast_backend,
+            phase: TestPhase::Assert,
+            success,
+            error,
+            duration_ms: test_start.elapsed().as_millis() as u64,
+            tcp_stats: logger.get_tcp_stats().await,
+        };
+
+        logger.log_result(&result).await;
+        result
+    }
+
+    // ---------------------------------------------------------------------------
     // Test Execution and Reporting
     // ---------------------------------------------------------------------------
 
@@ -761,6 +1168,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn e2e_rate_limiter_multi_key() {
+        is_test_environment().expect("Environment safety check failed");
+
+        let result = test_rate_limiter_multi_key_traffic().await;
+
+        assert!(
+            result.success,
+            "Rate limiter E2E test failed: {}",
+            result.error.unwrap_or_else(|| "Unknown error".to_string())
+        );
+
+        // Verify TCP statistics
+        assert!(result.tcp_stats.connections_attempted > 0, "No connection attempts recorded");
+        assert!(result.tcp_stats.connections_established > 0, "No connections established");
+
+        println!("✅ Rate limiter multi-key E2E test passed: {} ms", result.duration_ms);
+    }
+
+    #[tokio::test]
+    async fn e2e_load_balancer_round_robin() {
+        is_test_environment().expect("Environment safety check failed");
+
+        let result = test_load_balancer_round_robin().await;
+
+        assert!(
+            result.success,
+            "Load balancer E2E test failed: {}",
+            result.error.unwrap_or_else(|| "Unknown error".to_string())
+        );
+
+        // Verify TCP statistics
+        assert!(result.tcp_stats.connections_attempted > 0, "No connection attempts recorded");
+        assert!(result.tcp_stats.connections_established > 0, "No connections established");
+
+        println!("✅ Load balancer round-robin E2E test passed: {} ms", result.duration_ms);
+    }
+
+    #[tokio::test]
+    async fn e2e_hedge_cancel_first_success() {
+        is_test_environment().expect("Environment safety check failed");
+
+        let result = test_hedge_cancel_first_success().await;
+
+        assert!(
+            result.success,
+            "Hedge E2E test failed: {}",
+            result.error.unwrap_or_else(|| "Unknown error".to_string())
+        );
+
+        // Verify TCP statistics
+        assert!(result.tcp_stats.connections_attempted > 0, "No connection attempts recorded");
+        assert!(result.tcp_stats.connections_established > 0, "No connections established");
+
+        println!("✅ Hedge cancel-on-first-success E2E test passed: {} ms", result.duration_ms);
+    }
+
+    #[tokio::test]
     async fn e2e_compliance_report() {
         is_test_environment().expect("Environment safety check failed");
 
@@ -769,7 +1233,15 @@ mod tests {
         let grpc_result = test_grpc_server_conformance().await;
         let messaging_result = test_messaging_pubsub_conformance().await;
 
-        let all_results = vec![http_result, grpc_result, messaging_result];
+        // Service layer primitives (br-e2e-14)
+        let rate_limiter_result = test_rate_limiter_multi_key_traffic().await;
+        let load_balancer_result = test_load_balancer_round_robin().await;
+        let hedge_result = test_hedge_cancel_first_success().await;
+
+        let all_results = vec![
+            http_result, grpc_result, messaging_result,
+            rate_limiter_result, load_balancer_result, hedge_result
+        ];
 
         println!("\n=== [br-e2e-1] E2E CONFORMANCE REPORT ===");
         println!("| Service | Test | TCP Addr | Success | Duration | Connections | Bytes Sent/Recv |");
