@@ -339,6 +339,8 @@ pub mod real_fs_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_fs_uring_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_fs_uring_raptorq_encoder_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_grpc_bidirectional_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_grpc_server_database_postgres_e2e_tests;
