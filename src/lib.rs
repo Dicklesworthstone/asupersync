@@ -695,6 +695,8 @@ pub mod real_database_sqlite_obligation_saga_integration_e2e_tests;
 pub mod real_fs_uring_io_buf_writer_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_lab_oracle_plan_certificate_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_messaging_kafka_trace_event_integration_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
