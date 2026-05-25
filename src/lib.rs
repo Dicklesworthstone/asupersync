@@ -379,6 +379,8 @@ pub mod real_distributed_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_distributed_obligation_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_distributed_snapshot_distributed_bridge_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_distributed_snapshot_raptorq_encoder_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_e2e_hardening_consolidation;
