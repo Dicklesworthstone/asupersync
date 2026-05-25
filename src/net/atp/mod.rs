@@ -22,6 +22,7 @@ pub mod handshake;
 pub mod datagram;
 pub mod discovery;
 pub mod object;
+pub mod ops;
 pub mod path;
 #[path = "protocol/mod.rs"]
 pub mod protocol;
