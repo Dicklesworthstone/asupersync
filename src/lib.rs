@@ -552,6 +552,8 @@ pub mod real_sqlite_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_supervision_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_sync_notify_channel_watch_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_sync_semaphore_obligation_ledger_commit_abort_backpressure_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_tcp_unix_e2e_tests;
