@@ -7,6 +7,8 @@ const SCRIPT_PATH: &str = "scripts/atp_perf/workflow_acceptance_smoke.py";
 const CONTRACT_VERSION: &str = "atp-n9-workflow-acceptance-v1";
 const REPORT_SCHEMA_VERSION: &str = "atp-n9-workflow-report-v1";
 const EVENT_SCHEMA_VERSION: &str = "atp-n9-workflow-event-v1";
+const SCHEDULER_PROFILE_SCHEMA_VERSION: &str = "atp-e5-scheduler-workload-profile-v1";
+const SCHEDULER_GATE_SCHEMA_VERSION: &str = "atp-e5-scheduler-benchmark-gate-v1";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -196,6 +198,93 @@ fn metric_budgets_and_bottleneck_classes_are_stable() {
 }
 
 #[test]
+fn scheduler_workload_profiles_cover_atp_e5_gate_surfaces() {
+    let report = run_contract_smoke();
+    assert_eq!(
+        report["scheduler_profile_schema_version"].as_str(),
+        Some(SCHEDULER_PROFILE_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        report["scheduler_benchmark_gate"]["schema_version"].as_str(),
+        Some(SCHEDULER_GATE_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        report["scheduler_benchmark_gate"]["bead_id"].as_str(),
+        Some("asupersync-nva98g")
+    );
+
+    let profile_classes = array(&report, "scheduler_workload_profiles")
+        .iter()
+        .map(|profile| {
+            profile["workload_class"]
+                .as_str()
+                .expect("workload_class must be string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    for required_class in [
+        "bulk_file",
+        "sync_tree",
+        "media",
+        "sparse_image",
+        "artifact",
+        "stream",
+        "relay_only",
+        "lossy",
+        "high_bdp",
+        "mobile_unstable",
+    ] {
+        assert!(
+            profile_classes.contains(required_class),
+            "scheduler workload catalog must cover {required_class}"
+        );
+    }
+
+    let scheduler_metrics = array(&report, "scheduler_metric_budgets")
+        .iter()
+        .map(|metric| {
+            metric["metric"]
+                .as_str()
+                .expect("scheduler metric name must be string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    for required_metric in [
+        "wall_clock_ms",
+        "verified_completion",
+        "time_to_first_usable_file_ms",
+        "bytes_wasted",
+        "cpu_ms_per_gib",
+        "memory_peak_bytes",
+        "disk_amplification_ratio",
+        "queueing_pressure_score",
+        "repair_roi_score",
+    ] {
+        assert!(
+            scheduler_metrics.contains(required_metric),
+            "scheduler metric budget must include {required_metric}"
+        );
+    }
+
+    let signals = string_set(
+        &report["scheduler_benchmark_gate"],
+        "required_scheduler_signals",
+    );
+    for required_signal in [
+        "chunk_priorities",
+        "stream_priorities",
+        "hedging",
+        "pressure_feedback",
+        "repair_decision",
+    ] {
+        assert!(
+            signals.contains(required_signal),
+            "scheduler benchmark gate must require {required_signal}"
+        );
+    }
+}
+
+#[test]
 fn emitted_artifacts_have_required_schema_and_replay_fields() {
     let report = run_contract_smoke();
     assert_eq!(report["status"].as_str(), Some("pass"));
@@ -238,6 +327,8 @@ fn emitted_artifacts_have_required_schema_and_replay_fields() {
             "proof_root",
             "metrics",
             "thresholds",
+            "scheduler_profile",
+            "scheduler_decisions",
             "regression_thresholds",
             "bottleneck_classification",
             "failure_explanation",
@@ -264,5 +355,36 @@ fn emitted_artifacts_have_required_schema_and_replay_fields() {
                 .all(Value::is_string),
             "path summary must expose path mode strings"
         );
+        assert_eq!(
+            event["scheduler_decisions"]["schema_version"].as_str(),
+            Some(SCHEDULER_PROFILE_SCHEMA_VERSION)
+        );
+        for required_signal in [
+            "chunk_priorities",
+            "stream_priorities",
+            "hedging",
+            "pressure_feedback",
+            "repair_decision",
+        ] {
+            assert!(
+                !event["scheduler_decisions"][required_signal].is_null(),
+                "{} must include scheduler signal {required_signal}",
+                event["workflow_id"].as_str().unwrap_or("<unknown>")
+            );
+        }
+        for required_metric in [
+            "wall_clock_ms",
+            "verified_completion",
+            "time_to_first_usable_file_ms",
+            "disk_amplification_ratio",
+            "queueing_pressure_score",
+            "repair_roi_score",
+        ] {
+            assert!(
+                !event["metrics"][required_metric].is_null(),
+                "{} must include ATP-E5 metric {required_metric}",
+                event["workflow_id"].as_str().unwrap_or("<unknown>")
+            );
+        }
     }
 }

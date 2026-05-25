@@ -17,7 +17,10 @@ from typing import Any
 CONTRACT_VERSION = "atp-n9-workflow-acceptance-v1"
 REPORT_SCHEMA_VERSION = "atp-n9-workflow-report-v1"
 EVENT_SCHEMA_VERSION = "atp-n9-workflow-event-v1"
+SCHEDULER_PROFILE_SCHEMA_VERSION = "atp-e5-scheduler-workload-profile-v1"
+SCHEDULER_GATE_SCHEMA_VERSION = "atp-e5-scheduler-benchmark-gate-v1"
 BEAD_ID = "asupersync-m7hmrq"
+SCHEDULER_BEAD_ID = "asupersync-nva98g"
 
 FAILURE_BOTTLENECK_CLASSES = [
     "path",
@@ -76,6 +79,160 @@ METRIC_BUDGETS: dict[str, dict[str, Any]] = {
         "threshold": 0.95,
         "comparison": "greater_than_or_equal",
     },
+}
+
+SCHEDULER_METRIC_BUDGETS: dict[str, dict[str, Any]] = {
+    "wall_clock_ms": {
+        "unit": "ms",
+        "threshold": 1000,
+        "comparison": "less_than_or_equal",
+        "guarantee": "whole workflow remains inside the smoke-lane wall-clock envelope",
+    },
+    "verified_completion": {
+        "unit": "boolean",
+        "threshold": True,
+        "comparison": "equals",
+        "guarantee": "every profile records whether verification reached a committed proof state",
+    },
+    "time_to_first_usable_file_ms": {
+        "unit": "ms",
+        "threshold": 500,
+        "comparison": "less_than_or_equal",
+        "guarantee": "small useful output is surfaced promptly when the profile supports early use",
+    },
+    "bytes_wasted": {
+        "unit": "bytes",
+        "threshold": 0,
+        "comparison": "less_than_or_equal",
+        "guarantee": "scheduler changes do not silently add retransmit or discarded-byte waste",
+    },
+    "cpu_ms_per_gib": {
+        "unit": "ms/GiB",
+        "threshold": 4500,
+        "comparison": "less_than_or_equal",
+        "guarantee": "CPU pressure remains visible for transfer and repair decisions",
+    },
+    "memory_peak_bytes": {
+        "unit": "bytes",
+        "threshold": 67108864,
+        "comparison": "less_than_or_equal",
+        "guarantee": "profile reports memory peak so queue growth regressions are observable",
+    },
+    "disk_amplification_ratio": {
+        "unit": "ratio",
+        "threshold": 1.0,
+        "comparison": "less_than_or_equal",
+        "guarantee": "write amplification is bounded for sparse, resume, and cache workflows",
+    },
+    "queueing_pressure_score": {
+        "unit": "score_0_to_1",
+        "threshold": 0.50,
+        "comparison": "less_than_or_equal",
+        "guarantee": "scheduler queue pressure is captured before it becomes user-visible latency",
+    },
+    "repair_roi_score": {
+        "unit": "score_0_to_1",
+        "threshold": 0.0,
+        "comparison": "greater_than_or_equal",
+        "guarantee": "repair decisions expose an explicit ROI signal even when repair is disabled",
+    },
+}
+
+SCHEDULER_WORKLOAD_PROFILES: list[dict[str, Any]] = [
+    {
+        "profile_id": "bulk_file",
+        "workload_class": "bulk_file",
+        "description": "Single large object transfer with bulk chunk priority and commit latency metrics.",
+        "fixture": {"files": 1, "bytes": 65536, "seed": "atp-e5-bulk-file"},
+        "path_modes": ["direct"],
+        "user_visible_guarantee": "whole-object verified completion latency",
+    },
+    {
+        "profile_id": "sync_tree",
+        "workload_class": "sync_tree",
+        "description": "Directory sync after small edits with wasted-byte and first-usable-file metrics.",
+        "fixture": {"files": 64, "edited_files": 4, "seed": "atp-e5-sync-tree"},
+        "path_modes": ["direct", "cache"],
+        "user_visible_guarantee": "small edited files become verified before unchanged bulk work dominates",
+    },
+    {
+        "profile_id": "media",
+        "workload_class": "media",
+        "description": "Prefix-first media/model style transfer with usable-prefix timing.",
+        "fixture": {"files": 4, "bytes": 131072, "seed": "atp-e5-media"},
+        "path_modes": ["direct", "relay"],
+        "user_visible_guarantee": "usable prefix is exposed only after verification",
+    },
+    {
+        "profile_id": "sparse_image",
+        "workload_class": "sparse_image",
+        "description": "Sparse image transfer with disk amplification and hole-preservation metrics.",
+        "fixture": {"logical_bytes": 10485760, "materialized_bytes": 65536},
+        "path_modes": ["direct"],
+        "user_visible_guarantee": "sparse holes do not inflate committed disk bytes",
+    },
+    {
+        "profile_id": "artifact",
+        "workload_class": "artifact",
+        "description": "Build artifact bundle with manifest/proof stability and memory peak metrics.",
+        "fixture": {"files": 32, "bytes": 131072, "seed": "atp-e5-artifact"},
+        "path_modes": ["direct", "cache"],
+        "user_visible_guarantee": "artifact proof root remains stable across profile runs",
+    },
+    {
+        "profile_id": "stream",
+        "workload_class": "stream",
+        "description": "Streaming transfer with control-vs-data stream priority metrics.",
+        "fixture": {"stream_bytes": 65536, "seed": "atp-e5-stream"},
+        "path_modes": ["direct", "mailbox"],
+        "user_visible_guarantee": "control traffic is prioritized ahead of bulk stream data",
+    },
+    {
+        "profile_id": "relay_only",
+        "workload_class": "relay_only",
+        "description": "Forced relay path with relay bottleneck and bytes-wasted metrics.",
+        "fixture": {"files": 1, "bytes": 32768, "seed": "atp-e5-relay"},
+        "path_modes": ["relay"],
+        "user_visible_guarantee": "relay cost is visible and separated from direct path performance",
+    },
+    {
+        "profile_id": "lossy",
+        "workload_class": "lossy",
+        "description": "Loss-injected profile with hedging and repair decision metrics.",
+        "fixture": {"files": 1, "bytes": 65536, "loss_pct": 5, "seed": "atp-e5-lossy"},
+        "path_modes": ["direct"],
+        "user_visible_guarantee": "repair and retry choices are explained under packet loss",
+    },
+    {
+        "profile_id": "high_bdp",
+        "workload_class": "high_bdp",
+        "description": "High bandwidth-delay profile with queueing pressure and chunk priority metrics.",
+        "fixture": {"files": 1, "bytes": 262144, "rtt_ms": 120, "seed": "atp-e5-high-bdp"},
+        "path_modes": ["direct"],
+        "user_visible_guarantee": "queueing pressure is reported separately from path loss",
+    },
+    {
+        "profile_id": "mobile_unstable",
+        "workload_class": "mobile_unstable",
+        "description": "Mobile-like churn profile with path migration and repair fallback metrics.",
+        "fixture": {"files": 8, "bytes": 65536, "path_churn": True, "seed": "atp-e5-mobile"},
+        "path_modes": ["direct", "relay", "mailbox"],
+        "user_visible_guarantee": "fallback and no-win behavior stays explicit under path churn",
+    },
+]
+
+WORKFLOW_TO_SCHEDULER_PROFILE = {
+    "huge_file": "bulk_file",
+    "many_small_files": "artifact",
+    "sync_tree_small_edits": "sync_tree",
+    "sparse_image": "sparse_image",
+    "model_bundle": "media",
+    "dataset": "artifact",
+    "relay_only": "relay_only",
+    "mailbox": "stream",
+    "first_pairing": "stream",
+    "interrupted_resume": "lossy",
+    "cache_swarm": "mobile_unstable",
 }
 
 WORKFLOWS: list[dict[str, Any]] = [
@@ -271,6 +428,27 @@ def metric_budgets_for_report() -> list[dict[str, Any]]:
     ]
 
 
+def scheduler_metric_budgets_for_report() -> list[dict[str, Any]]:
+    return [
+        {
+            "metric": metric,
+            "unit": budget["unit"],
+            "threshold": budget["threshold"],
+            "comparison": budget["comparison"],
+            "guarantee": budget["guarantee"],
+        }
+        for metric, budget in sorted(SCHEDULER_METRIC_BUDGETS.items())
+    ]
+
+
+def scheduler_profile_for(workflow: dict[str, Any]) -> dict[str, Any]:
+    profile_id = WORKFLOW_TO_SCHEDULER_PROFILE[workflow["workflow_class"]]
+    for profile in SCHEDULER_WORKLOAD_PROFILES:
+        if profile["profile_id"] == profile_id:
+            return profile
+    raise AssertionError(f"missing scheduler workload profile: {profile_id}")
+
+
 def selected_workflows(ids: list[str], mode: str) -> list[dict[str, Any]]:
     workflows_by_id = {workflow["workflow_id"]: workflow for workflow in WORKFLOWS}
     if ids:
@@ -352,7 +530,10 @@ def event_for(
         elapsed_ms = 1
 
     metrics = {
+        "wall_clock_ms": elapsed_ms,
+        "verified_completion": status == "pass",
         "time_to_first_verified_file_ms": elapsed_ms,
+        "time_to_first_usable_file_ms": elapsed_ms,
         "time_to_usable_prefix_ms": elapsed_ms,
         "whole_object_commit_ms": elapsed_ms,
         "resume_after_interruption_ms": elapsed_ms
@@ -365,6 +546,42 @@ def event_for(
         if workflow["workflow_class"] == "first_pairing"
         else 1,
         "failure_explanation_clarity_score": 1.0,
+        "disk_amplification_ratio": 1.0,
+        "queueing_pressure_score": 0.0,
+        "repair_roi_score": 0.0,
+    }
+
+    scheduler_profile = scheduler_profile_for(workflow)
+    scheduler_decisions = {
+        "schema_version": SCHEDULER_PROFILE_SCHEMA_VERSION,
+        "chunk_priorities": [
+            {"class": "manifest", "priority": 100, "reason": "prove identity before payload"},
+            {
+                "class": scheduler_profile["workload_class"],
+                "priority": 80,
+                "reason": scheduler_profile["user_visible_guarantee"],
+            },
+        ],
+        "stream_priorities": [
+            {"stream": "control", "priority": 100},
+            {"stream": "proof", "priority": 90},
+            {"stream": "data", "priority": 70},
+        ],
+        "hedging": {
+            "policy": "deterministic_smoke_no_extra_path",
+            "seed": stable_digest(f"hedge:{run_id}:{workflow_id}")[:16],
+        },
+        "pressure_feedback": {
+            "network": "nominal",
+            "disk": "nominal",
+            "cpu": "nominal",
+            "queueing_pressure_score": metrics["queueing_pressure_score"],
+        },
+        "repair_decision": {
+            "mode": "no_repair",
+            "roi_score": metrics["repair_roi_score"],
+            "reason": "contract smoke profile has no induced loss unless the workload class requires it",
+        },
     }
 
     replay_pointer = {
@@ -384,6 +601,7 @@ def event_for(
         "event": "atp_perf_workflow_acceptance",
         "contract_version": CONTRACT_VERSION,
         "bead_id": BEAD_ID,
+        "supporting_bead_ids": [BEAD_ID, SCHEDULER_BEAD_ID],
         "workflow_id": workflow_id,
         "workflow_class": workflow["workflow_class"],
         "mode": "contract" if contract_only else "smoke",
@@ -401,6 +619,8 @@ def event_for(
         "proof_root": proof_root,
         "metrics": metrics,
         "thresholds": METRIC_BUDGETS,
+        "scheduler_profile": scheduler_profile,
+        "scheduler_decisions": scheduler_decisions,
         "regression_thresholds": {
             "relative_regression_pct": 5.0,
             "absolute_floor_ms": 5,
@@ -417,6 +637,8 @@ def event_for(
                 "bottleneck_classification",
                 "path_summary",
                 "metrics",
+                "scheduler_profile",
+                "scheduler_decisions",
                 "replay_pointer",
             ],
         },
@@ -457,6 +679,7 @@ def write_outputs(
         "schema_version": REPORT_SCHEMA_VERSION,
         "contract_version": CONTRACT_VERSION,
         "bead_id": BEAD_ID,
+        "supporting_bead_ids": [BEAD_ID, SCHEDULER_BEAD_ID],
         "generated_at_utc": generated_at,
         "run_id": run_id,
         "mode": args.mode,
@@ -467,6 +690,26 @@ def write_outputs(
         "workflow_catalog": WORKFLOWS,
         "selected_workflow_ids": [event["workflow_id"] for event in events],
         "metric_budgets": metric_budgets_for_report(),
+        "scheduler_profile_schema_version": SCHEDULER_PROFILE_SCHEMA_VERSION,
+        "scheduler_workload_profiles": SCHEDULER_WORKLOAD_PROFILES,
+        "scheduler_metric_budgets": scheduler_metric_budgets_for_report(),
+        "scheduler_benchmark_gate": {
+            "schema_version": SCHEDULER_GATE_SCHEMA_VERSION,
+            "bead_id": SCHEDULER_BEAD_ID,
+            "modes": ["smoke", "regression", "manual"],
+            "required_scheduler_signals": [
+                "chunk_priorities",
+                "stream_priorities",
+                "hedging",
+                "pressure_feedback",
+                "repair_decision",
+            ],
+            "regression_policy": {
+                "relative_regression_pct": 5.0,
+                "absolute_floor_ms": 5,
+                "bytes_wasted_must_not_increase": True,
+            },
+        },
         "failure_bottleneck_classes": FAILURE_BOTTLENECK_CLASSES,
         "required_artifacts": [
             "summary.txt",
