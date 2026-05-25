@@ -275,6 +275,26 @@ SDK, relay, mailbox, swarm, and replay consumers. The script
 `scripts/run_atp_session_negotiation_e2e.sh` wraps that lane and writes a
 deterministic run directory under `target/atp-session-negotiation-e2e/`.
 
+### Adapter Parity Matrix
+
+`src/net/atp/protocol/session.rs` exposes `ATP_ADAPTER_PARITY_MATRIX` as the
+checked source for ATP adapter parity and downgrade summaries. The matrix keeps
+compatibility adapters explicit: unsupported features must either fail closed or
+emit stable downgrade reasons during session negotiation.
+
+| Adapter | Supported first slice | Explicit downgrade surface | Proof summary label |
+|---|---|---|---|
+| `native_quic` | encryption policy, proof bundles, resume, repair, datagrams, compression, swarm, mailbox, relay | H3, WebTransport, and MASQUE adapter feature bits are unnecessary on the native path | `native_quic_full_atp` |
+| `h3_adapter` | encryption policy, proof bundles, resume, repair, compression, H3 adapter | datagrams, WebTransport, MASQUE, swarm, mailbox | `h3_adapter_stream` |
+| `webtransport_adapter` | encryption policy, proof bundles, resume, repair, datagrams, WebTransport adapter | H3, MASQUE, mailbox, swarm | `webtransport_adapter_browser` |
+| `masque_connect_udp` | encryption policy, proof bundles, resume, repair, datagrams, relay, MASQUE adapter | H3, WebTransport, mailbox, swarm | `masque_connect_udp_proxy` |
+| `tcp_tls_443_fallback` | encryption policy, proof bundles, resume, repair, compression, relay | datagrams, H3, WebTransport, MASQUE, mailbox, swarm | `tcp_tls_443_fallback_relay` |
+
+`tests/atp_session_negotiation.rs` verifies that this matrix covers native
+QUIC, H3, WebTransport, MASQUE/CONNECT-UDP, and TCP/TLS 443 fallback, and that
+offered-but-unselected adapter features produce stable downgrade reason codes
+instead of generic peer-policy text.
+
 ### Platform and Policy Feedback
 
 `src/atp/platform/mod.rs` reports host capabilities that ATP disk and packaging

@@ -8,13 +8,18 @@
 
 use asupersync::atp::path::PathCandidateId;
 use asupersync::net::atp::protocol::{
-    AtpFeature, CapabilityAction, CapabilityGrant, CapabilityGrantId, CapabilityScope, ClientHello,
-    FeatureSet, PeerId, SessionContextKind, SessionNegotiator, SessionPolicy, SessionTraceId,
-    TransferNonce,
+    ATP_ADAPTER_PARITY_MATRIX, AtpAdapterKind, AtpFeature, CapabilityAction, CapabilityGrant,
+    CapabilityGrantId, CapabilityScope, ClientHello, FeatureSet, PeerId, SessionContextKind,
+    SessionNegotiator, SessionPolicy, SessionTraceId, TransferNonce,
 };
+use std::collections::BTreeSet;
 
 fn peer(label: &str) -> PeerId {
     PeerId::from_label(label)
+}
+
+fn relay_peer() -> PeerId {
+    peer("relay")
 }
 
 fn grant(
@@ -183,7 +188,17 @@ fn e2e_relay_mailbox_swarm_and_downgrade_paths_are_explicit() {
             AtpFeature::Repair,
         ];
         let hello = hello(context, action, &offered);
-        let mut policy = policy(peer("bob"), context, action, &supported);
+        let hello = if context == SessionContextKind::Relay {
+            hello.with_relay_peer(relay_peer())
+        } else {
+            hello
+        };
+        let policy = policy(peer("bob"), context, action, &supported);
+        let mut policy = if context == SessionContextKind::Relay {
+            policy.with_trusted_relays(&[relay_peer()])
+        } else {
+            policy
+        };
         let mut server = SessionNegotiator::server(peer("bob"));
 
         let (server_hello, _frame, _proof) =
@@ -203,6 +218,122 @@ fn e2e_relay_mailbox_swarm_and_downgrade_paths_are_explicit() {
                 .any(|warning| warning.feature == AtpFeature::Compression)
         );
     }
+}
+
+#[test]
+fn e2e_adapter_parity_matrix_and_downgrade_reasons_are_explicit() {
+    let adapters = ATP_ADAPTER_PARITY_MATRIX
+        .iter()
+        .map(|row| row.adapter)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        adapters,
+        BTreeSet::from([
+            AtpAdapterKind::NativeQuic,
+            AtpAdapterKind::H3,
+            AtpAdapterKind::WebTransport,
+            AtpAdapterKind::MasqueConnectUdp,
+            AtpAdapterKind::TcpTls443Fallback,
+        ])
+    );
+
+    for row in ATP_ADAPTER_PARITY_MATRIX {
+        assert!(
+            !row.supported_features.is_empty(),
+            "{} must declare supported features",
+            row.adapter.code()
+        );
+        assert!(
+            !row.unsupported_features.is_empty(),
+            "{} must declare explicit downgrade features",
+            row.adapter.code()
+        );
+        assert!(
+            !row.adapter_downgrade_reason.trim().is_empty(),
+            "{} must expose a stable downgrade reason",
+            row.adapter.code()
+        );
+        assert!(
+            row.proof_summary_label.contains(row.adapter.code())
+                || row.adapter == AtpAdapterKind::NativeQuic,
+            "{} proof summary must name the adapter",
+            row.adapter.code()
+        );
+        for feature in row.supported_features {
+            assert!(
+                !row.downgrades(*feature),
+                "{} must not both support and downgrade {}",
+                row.adapter.code(),
+                feature.code()
+            );
+        }
+        if let Some(feature) = row.adapter.negotiated_feature() {
+            assert!(
+                row.supports(feature),
+                "{} must support its advertised negotiation feature",
+                row.adapter.code()
+            );
+        }
+    }
+
+    let native = ATP_ADAPTER_PARITY_MATRIX
+        .iter()
+        .find(|row| row.adapter == AtpAdapterKind::NativeQuic)
+        .expect("native QUIC row");
+    assert!(native.supports(AtpFeature::Datagrams));
+    assert!(native.supports(AtpFeature::Swarm));
+    assert!(native.supports(AtpFeature::ProofBundles));
+
+    let tcp_tls = ATP_ADAPTER_PARITY_MATRIX
+        .iter()
+        .find(|row| row.adapter == AtpAdapterKind::TcpTls443Fallback)
+        .expect("TCP/TLS fallback row");
+    assert!(tcp_tls.downgrades(AtpFeature::Datagrams));
+    assert_eq!(
+        tcp_tls.adapter_downgrade_reason,
+        "tcp_tls_443_fallback_lacks_datagrams"
+    );
+
+    let hello = hello(
+        SessionContextKind::Direct,
+        CapabilityAction::Write,
+        &[
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::Repair,
+            AtpFeature::H3Adapter,
+            AtpFeature::WebTransportAdapter,
+            AtpFeature::MasqueAdapter,
+            AtpFeature::Datagrams,
+        ],
+    );
+    let mut policy = policy(
+        peer("bob"),
+        SessionContextKind::Direct,
+        CapabilityAction::Write,
+        &[AtpFeature::EncryptionPolicy, AtpFeature::Repair],
+    );
+    let mut server = SessionNegotiator::server(peer("bob"));
+
+    let (server_hello, _frame, _proof) = server.accept_client_hello(&hello, &mut policy).unwrap();
+    let warnings = server_hello
+        .downgrade_warnings
+        .iter()
+        .map(|warning| (warning.feature, warning.reason_code))
+        .collect::<BTreeSet<_>>();
+
+    assert!(warnings.contains(&(AtpFeature::H3Adapter, "h3_adapter_not_supported_by_peer")));
+    assert!(warnings.contains(&(
+        AtpFeature::WebTransportAdapter,
+        "webtransport_adapter_not_supported_by_peer"
+    )));
+    assert!(warnings.contains(&(
+        AtpFeature::MasqueAdapter,
+        "masque_adapter_not_supported_by_peer"
+    )));
+    assert!(warnings.contains(&(
+        AtpFeature::Datagrams,
+        "datagrams_not_supported_by_selected_adapter"
+    )));
 }
 
 #[test]

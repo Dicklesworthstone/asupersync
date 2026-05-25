@@ -265,7 +265,202 @@ impl AtpFeature {
             Self::Resume => "resume",
         }
     }
+
+    /// Stable reason code emitted when this optional feature is offered but not
+    /// selected.
+    #[must_use]
+    pub const fn downgrade_reason_code(self) -> &'static str {
+        match self {
+            Self::H3Adapter => "h3_adapter_not_supported_by_peer",
+            Self::WebTransportAdapter => "webtransport_adapter_not_supported_by_peer",
+            Self::MasqueAdapter => "masque_adapter_not_supported_by_peer",
+            Self::Datagrams => "datagrams_not_supported_by_selected_adapter",
+            Self::Compression => "compression_not_supported_by_peer_policy",
+            Self::Relay => "relay_not_supported_by_peer_policy",
+            Self::Mailbox => "mailbox_not_supported_by_peer_policy",
+            Self::Swarm => "swarm_not_supported_by_peer_policy",
+            Self::Repair => "repair_not_supported_by_peer_policy",
+            Self::ProofBundles => "proof_bundles_not_supported_by_peer_policy",
+            Self::Resume => "resume_not_supported_by_peer_policy",
+            Self::EncryptionPolicy => "encryption_policy_required",
+        }
+    }
 }
+
+/// ATP adapter families whose parity and downgrade behavior are tracked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AtpAdapterKind {
+    /// Native ATP over Asupersync-owned QUIC.
+    NativeQuic,
+    /// ATP framed over HTTP/3 request/stream semantics.
+    H3,
+    /// Browser-facing WebTransport adapter.
+    WebTransport,
+    /// MASQUE CONNECT-UDP enterprise-egress adapter.
+    MasqueConnectUdp,
+    /// Hostile-network TCP/TLS 443 relay fallback.
+    TcpTls443Fallback,
+}
+
+impl AtpAdapterKind {
+    /// Stable adapter code for diagnostics, docs, and proof summaries.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::NativeQuic => "native_quic",
+            Self::H3 => "h3_adapter",
+            Self::WebTransport => "webtransport_adapter",
+            Self::MasqueConnectUdp => "masque_connect_udp",
+            Self::TcpTls443Fallback => "tcp_tls_443_fallback",
+        }
+    }
+
+    /// Feature bit that advertises this adapter during session negotiation.
+    #[must_use]
+    pub const fn negotiated_feature(self) -> Option<AtpFeature> {
+        match self {
+            Self::NativeQuic | Self::TcpTls443Fallback => None,
+            Self::H3 => Some(AtpFeature::H3Adapter),
+            Self::WebTransport => Some(AtpFeature::WebTransportAdapter),
+            Self::MasqueConnectUdp => Some(AtpFeature::MasqueAdapter),
+        }
+    }
+}
+
+/// One checked row in the ATP adapter parity matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtpAdapterParity {
+    /// Adapter family covered by the row.
+    pub adapter: AtpAdapterKind,
+    /// Features that may be selected for this adapter without downgrade.
+    pub supported_features: &'static [AtpFeature],
+    /// Features that must fail closed or downgrade explicitly for this adapter.
+    pub unsupported_features: &'static [AtpFeature],
+    /// Stable reason emitted when the adapter itself cannot satisfy a requested
+    /// capability.
+    pub adapter_downgrade_reason: &'static str,
+    /// Stable proof summary label for CLI and audit artifacts.
+    pub proof_summary_label: &'static str,
+}
+
+impl AtpAdapterParity {
+    /// Whether this adapter row supports the feature directly.
+    #[must_use]
+    pub fn supports(self, feature: AtpFeature) -> bool {
+        self.supported_features.contains(&feature)
+    }
+
+    /// Whether this adapter row explicitly rejects or downgrades the feature.
+    #[must_use]
+    pub fn downgrades(self, feature: AtpFeature) -> bool {
+        self.unsupported_features.contains(&feature)
+    }
+}
+
+/// Checked ATP adapter parity matrix used by docs, tests, and proof summaries.
+pub const ATP_ADAPTER_PARITY_MATRIX: [AtpAdapterParity; 5] = [
+    AtpAdapterParity {
+        adapter: AtpAdapterKind::NativeQuic,
+        supported_features: &[
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::ProofBundles,
+            AtpFeature::Resume,
+            AtpFeature::Repair,
+            AtpFeature::Datagrams,
+            AtpFeature::Compression,
+            AtpFeature::Swarm,
+            AtpFeature::Mailbox,
+            AtpFeature::Relay,
+        ],
+        unsupported_features: &[
+            AtpFeature::H3Adapter,
+            AtpFeature::WebTransportAdapter,
+            AtpFeature::MasqueAdapter,
+        ],
+        adapter_downgrade_reason: "native_quic_requires_no_compat_adapter",
+        proof_summary_label: "native_quic_full_atp",
+    },
+    AtpAdapterParity {
+        adapter: AtpAdapterKind::H3,
+        supported_features: &[
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::ProofBundles,
+            AtpFeature::Resume,
+            AtpFeature::Repair,
+            AtpFeature::Compression,
+            AtpFeature::H3Adapter,
+        ],
+        unsupported_features: &[
+            AtpFeature::Datagrams,
+            AtpFeature::WebTransportAdapter,
+            AtpFeature::MasqueAdapter,
+            AtpFeature::Swarm,
+            AtpFeature::Mailbox,
+        ],
+        adapter_downgrade_reason: "h3_adapter_lacks_native_datagram_and_swarm_parity",
+        proof_summary_label: "h3_adapter_stream",
+    },
+    AtpAdapterParity {
+        adapter: AtpAdapterKind::WebTransport,
+        supported_features: &[
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::ProofBundles,
+            AtpFeature::Resume,
+            AtpFeature::Repair,
+            AtpFeature::Datagrams,
+            AtpFeature::WebTransportAdapter,
+        ],
+        unsupported_features: &[
+            AtpFeature::H3Adapter,
+            AtpFeature::MasqueAdapter,
+            AtpFeature::Mailbox,
+            AtpFeature::Swarm,
+        ],
+        adapter_downgrade_reason: "webtransport_adapter_browser_policy_limited",
+        proof_summary_label: "webtransport_adapter_browser",
+    },
+    AtpAdapterParity {
+        adapter: AtpAdapterKind::MasqueConnectUdp,
+        supported_features: &[
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::ProofBundles,
+            AtpFeature::Resume,
+            AtpFeature::Repair,
+            AtpFeature::Datagrams,
+            AtpFeature::Relay,
+            AtpFeature::MasqueAdapter,
+        ],
+        unsupported_features: &[
+            AtpFeature::H3Adapter,
+            AtpFeature::WebTransportAdapter,
+            AtpFeature::Mailbox,
+            AtpFeature::Swarm,
+        ],
+        adapter_downgrade_reason: "masque_connect_udp_requires_proxy_authority",
+        proof_summary_label: "masque_connect_udp_proxy",
+    },
+    AtpAdapterParity {
+        adapter: AtpAdapterKind::TcpTls443Fallback,
+        supported_features: &[
+            AtpFeature::EncryptionPolicy,
+            AtpFeature::ProofBundles,
+            AtpFeature::Resume,
+            AtpFeature::Repair,
+            AtpFeature::Compression,
+            AtpFeature::Relay,
+        ],
+        unsupported_features: &[
+            AtpFeature::Datagrams,
+            AtpFeature::H3Adapter,
+            AtpFeature::WebTransportAdapter,
+            AtpFeature::MasqueAdapter,
+            AtpFeature::Mailbox,
+            AtpFeature::Swarm,
+        ],
+        adapter_downgrade_reason: "tcp_tls_443_fallback_lacks_datagrams",
+        proof_summary_label: "tcp_tls_443_fallback_relay",
+    },
+];
 
 /// Deterministic set of negotiated ATP features.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1465,7 +1660,7 @@ fn select_features(
         .filter(|feature| !selected.contains(*feature))
         .map(|feature| DowngradeWarning {
             feature,
-            reason_code: "peer_does_not_support_optional_feature",
+            reason_code: feature.downgrade_reason_code(),
         })
         .collect();
 
