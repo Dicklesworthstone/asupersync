@@ -11,10 +11,9 @@ use crate::channel::{mpsc, oneshot};
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
 use crate::time::Sleep;
-use crate::types::{Budget, RegionId, TaskId, TraceId};
+use crate::types::{RegionId, TaskId, TraceId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info, warn};
 

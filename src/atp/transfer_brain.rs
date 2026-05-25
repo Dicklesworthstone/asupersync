@@ -6,7 +6,7 @@
 
 use crate::atp::object::ObjectId;
 use crate::error::{Error, ErrorKind, Result};
-use crate::types::{Budget, Time, TraceId};
+use crate::types::{Budget, TraceId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime};
