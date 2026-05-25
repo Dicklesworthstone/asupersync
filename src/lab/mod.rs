@@ -56,6 +56,7 @@ pub mod conformal;
 pub mod crashpack;
 pub mod dual_run;
 pub mod explorer;
+pub mod fixtures;
 pub mod fuzz;
 pub mod http;
 pub mod injection;
@@ -113,6 +114,11 @@ pub use dual_run::{
 pub use explorer::{
     CoverageMetrics, DporCoverageMetrics, DporExplorer, ExplorationReport, ExplorerConfig,
     RunResult, ScheduleExplorer, TopologyExplorer, ViolationReport,
+};
+pub use fixtures::{
+    E2eReport, ExpectedOutcome, PerformanceImpact, ProofArtifactRef, RegimeSummary,
+    RepairDecisionLog, RepairRoiE2eHarness, RepairRoiE2eResult, RepairRoiE2eScenario,
+    TransferConfig, TransferResult,
 };
 pub use fuzz::{
     FuzzConfig, FuzzFinding, FuzzHarness, FuzzRegressionCase, FuzzRegressionCorpus, FuzzReport,
