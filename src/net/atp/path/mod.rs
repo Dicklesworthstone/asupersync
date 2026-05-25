@@ -62,6 +62,193 @@ pub enum TailscalePreference {
     Disabled,
 }
 
+/// Router-assist protocols that may expose a public UDP mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RouterAssistProtocol {
+    /// UPnP IGD port mapping.
+    UpnpIgd,
+    /// NAT-PMP port mapping.
+    NatPmp,
+    /// Port Control Protocol mapping.
+    Pcp,
+}
+
+impl RouterAssistProtocol {
+    /// Stable protocol code for path logs and doctor output.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::UpnpIgd => "upnp_igd",
+            Self::NatPmp => "nat_pmp",
+            Self::Pcp => "pcp",
+        }
+    }
+}
+
+/// Policy for using optional router-assist providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouterAssistPolicy {
+    enabled: bool,
+    mapping_mutation_allowed: bool,
+    max_mapping_lifetime_micros: u64,
+    prefer_pcp: bool,
+}
+
+impl RouterAssistPolicy {
+    /// Router assist is disabled; hole punching must use rendezvous or fallback.
+    pub const DISABLED: Self = Self {
+        enabled: false,
+        mapping_mutation_allowed: false,
+        max_mapping_lifetime_micros: 0,
+        prefer_pcp: false,
+    };
+
+    /// Build a capability-gated router-assist policy.
+    #[must_use]
+    pub const fn new(mapping_mutation_allowed: bool, max_mapping_lifetime_micros: u64) -> Self {
+        Self {
+            enabled: true,
+            mapping_mutation_allowed,
+            max_mapping_lifetime_micros,
+            prefer_pcp: true,
+        }
+    }
+
+    /// Prefer PCP over NAT-PMP/UPnP when multiple mappings are available.
+    #[must_use]
+    pub const fn with_prefer_pcp(mut self, prefer_pcp: bool) -> Self {
+        self.prefer_pcp = prefer_pcp;
+        self
+    }
+
+    /// Whether router assist is enabled at all.
+    #[must_use]
+    pub const fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    /// Whether the caller granted authority to mutate router mappings.
+    #[must_use]
+    pub const fn mapping_mutation_allowed(self) -> bool {
+        self.mapping_mutation_allowed
+    }
+
+    /// Maximum mapping lifetime admitted by policy.
+    #[must_use]
+    pub const fn max_mapping_lifetime_micros(self) -> u64 {
+        self.max_mapping_lifetime_micros
+    }
+}
+
+/// Deterministic router-assist provider failure surfaced as a non-fatal caveat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouterAssistProviderFailure {
+    reason: String,
+}
+
+impl RouterAssistProviderFailure {
+    /// Construct a provider failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouterAssistCandidateError::EmptyFailureReason`] when the
+    /// reason is empty or whitespace.
+    pub fn new(reason: impl Into<String>) -> Result<Self, RouterAssistCandidateError> {
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(RouterAssistCandidateError::EmptyFailureReason);
+        }
+        Ok(Self { reason })
+    }
+
+    /// Stable failure reason for path logs.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+/// Provider-reported public mapping candidate for optional router assist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouterAssistProviderCandidate {
+    provider_label: String,
+    protocol: RouterAssistProtocol,
+    internal_endpoint: ObservedEndpoint,
+    external_endpoint: ObservedEndpoint,
+    lease_lifetime_micros: u64,
+    observed_at_micros: u64,
+}
+
+impl RouterAssistProviderCandidate {
+    /// Build a provider candidate without invoking a router API.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouterAssistCandidateError::EmptyProviderLabel`] or
+    /// [`RouterAssistCandidateError::ZeroLeaseLifetime`] for invalid metadata.
+    pub fn new(
+        provider_label: impl Into<String>,
+        protocol: RouterAssistProtocol,
+        internal_endpoint: ObservedEndpoint,
+        external_endpoint: ObservedEndpoint,
+        lease_lifetime_micros: u64,
+        observed_at_micros: u64,
+    ) -> Result<Self, RouterAssistCandidateError> {
+        let provider_label = provider_label.into();
+        if provider_label.trim().is_empty() {
+            return Err(RouterAssistCandidateError::EmptyProviderLabel);
+        }
+        if lease_lifetime_micros == 0 {
+            return Err(RouterAssistCandidateError::ZeroLeaseLifetime);
+        }
+
+        Ok(Self {
+            provider_label,
+            protocol,
+            internal_endpoint,
+            external_endpoint,
+            lease_lifetime_micros,
+            observed_at_micros,
+        })
+    }
+
+    /// Provider label used in diagnostic output.
+    #[must_use]
+    pub fn provider_label(&self) -> &str {
+        &self.provider_label
+    }
+
+    /// Router-assist protocol used by this mapping.
+    #[must_use]
+    pub const fn protocol(&self) -> RouterAssistProtocol {
+        self.protocol
+    }
+
+    /// Local UDP endpoint that would receive traffic.
+    #[must_use]
+    pub const fn internal_endpoint(&self) -> &ObservedEndpoint {
+        &self.internal_endpoint
+    }
+
+    /// Public UDP endpoint advertised through rendezvous.
+    #[must_use]
+    pub const fn external_endpoint(&self) -> &ObservedEndpoint {
+        &self.external_endpoint
+    }
+
+    /// Mapping lifetime reported by the provider.
+    #[must_use]
+    pub const fn lease_lifetime_micros(&self) -> u64 {
+        self.lease_lifetime_micros
+    }
+
+    /// Deterministic observation timestamp.
+    #[must_use]
+    pub const fn observed_at_micros(&self) -> u64 {
+        self.observed_at_micros
+    }
+}
+
 /// Deterministic provider failure surfaced as a non-fatal path caveat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TailscaleProviderFailure {
@@ -267,6 +454,47 @@ impl TailscaleCandidateSet {
     }
 }
 
+/// Selected router-assist candidates plus policy caveat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouterAssistCandidateSet {
+    candidates: Vec<RouterAssistProviderCandidate>,
+    selected: Option<RouterAssistProviderCandidate>,
+    provider_failure: Option<RouterAssistProviderFailure>,
+    caveat: &'static str,
+}
+
+impl RouterAssistCandidateSet {
+    /// Policy-approved router-assist candidates.
+    #[must_use]
+    pub fn candidates(&self) -> &[RouterAssistProviderCandidate] {
+        &self.candidates
+    }
+
+    /// Deterministically selected router-assist candidate, if one is usable.
+    #[must_use]
+    pub const fn selected(&self) -> Option<&RouterAssistProviderCandidate> {
+        self.selected.as_ref()
+    }
+
+    /// Non-fatal provider failure, if any.
+    #[must_use]
+    pub const fn provider_failure(&self) -> Option<&RouterAssistProviderFailure> {
+        self.provider_failure.as_ref()
+    }
+
+    /// Stable caveat code for path logs and doctor output.
+    #[must_use]
+    pub const fn caveat(&self) -> &'static str {
+        self.caveat
+    }
+
+    /// Router assist is always optional; relay/rendezvous fallback remains valid.
+    #[must_use]
+    pub const fn is_required(&self) -> bool {
+        false
+    }
+}
+
 /// Validation errors for Tailscale candidate input.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TailscaleCandidateError {
@@ -278,6 +506,20 @@ pub enum TailscaleCandidateError {
     EmptyPeerLabel,
     /// Provider failure reason was empty.
     #[error("tailscale provider failure reason is empty")]
+    EmptyFailureReason,
+}
+
+/// Validation errors for router-assist provider input.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RouterAssistCandidateError {
+    /// Provider label was empty.
+    #[error("router-assist provider label is empty")]
+    EmptyProviderLabel,
+    /// Mapping lease lifetime was zero.
+    #[error("router-assist lease lifetime is zero")]
+    ZeroLeaseLifetime,
+    /// Provider failure reason was empty.
+    #[error("router-assist provider failure reason is empty")]
     EmptyFailureReason,
 }
 
@@ -905,6 +1147,89 @@ pub fn select_tailscale_candidates(
     }
 }
 
+/// Select optional router-assist mappings under explicit capability policy.
+#[must_use]
+pub fn select_router_assist_candidates(
+    policy: RouterAssistPolicy,
+    provider_output: Result<Vec<RouterAssistProviderCandidate>, RouterAssistProviderFailure>,
+) -> RouterAssistCandidateSet {
+    if !policy.enabled() {
+        return RouterAssistCandidateSet {
+            candidates: Vec::new(),
+            selected: None,
+            provider_failure: None,
+            caveat: "router_assist_disabled",
+        };
+    }
+
+    if !policy.mapping_mutation_allowed() {
+        return RouterAssistCandidateSet {
+            candidates: Vec::new(),
+            selected: None,
+            provider_failure: None,
+            caveat: "router_assist_mapping_capability_denied",
+        };
+    }
+
+    if policy.max_mapping_lifetime_micros() == 0 {
+        return RouterAssistCandidateSet {
+            candidates: Vec::new(),
+            selected: None,
+            provider_failure: None,
+            caveat: "router_assist_invalid_lifetime_policy",
+        };
+    }
+
+    let provider_candidates = match provider_output {
+        Ok(candidates) => candidates,
+        Err(failure) => {
+            return RouterAssistCandidateSet {
+                candidates: Vec::new(),
+                selected: None,
+                provider_failure: Some(failure),
+                caveat: "router_assist_provider_failed_nonfatal",
+            };
+        }
+    };
+
+    let candidates = provider_candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.lease_lifetime_micros() <= policy.max_mapping_lifetime_micros()
+        })
+        .collect::<Vec<_>>();
+    let selected = candidates
+        .iter()
+        .min_by_key(|candidate| {
+            (
+                router_assist_protocol_rank(candidate.protocol(), policy.prefer_pcp),
+                candidate.observed_at_micros(),
+                candidate.external_endpoint().port(),
+            )
+        })
+        .cloned();
+    let caveat = if selected.is_some() {
+        "router_assist_candidate_selected"
+    } else {
+        "router_assist_no_policy_approved_candidates"
+    };
+
+    RouterAssistCandidateSet {
+        candidates,
+        selected,
+        provider_failure: None,
+        caveat,
+    }
+}
+
+const fn router_assist_protocol_rank(protocol: RouterAssistProtocol, prefer_pcp: bool) -> u8 {
+    match (prefer_pcp, protocol) {
+        (true, RouterAssistProtocol::Pcp) | (false, RouterAssistProtocol::NatPmp) => 0,
+        (true, RouterAssistProtocol::NatPmp) | (false, RouterAssistProtocol::Pcp) => 1,
+        (_, RouterAssistProtocol::UpnpIgd) => 2,
+    }
+}
+
 fn has_incompatible_mappings(observations: &[EndpointObservation]) -> bool {
     let Some(first) = observations.first() else {
         return false;
@@ -939,6 +1264,24 @@ mod tests {
             123,
         )
         .expect("tailscale candidate")
+    }
+
+    fn router_assist_candidate(
+        provider_label: &str,
+        protocol: RouterAssistProtocol,
+        external_port: u16,
+        lease_lifetime_micros: u64,
+        observed_at_micros: u64,
+    ) -> RouterAssistProviderCandidate {
+        RouterAssistProviderCandidate::new(
+            provider_label,
+            protocol,
+            endpoint("10.0.0.2", 41_641),
+            endpoint("198.51.100.7", external_port),
+            lease_lifetime_micros,
+            observed_at_micros,
+        )
+        .expect("router-assist candidate")
     }
 
     fn observation(
@@ -1085,6 +1428,82 @@ mod tests {
             candidate.proof_summary().caveat,
             "tailscale_magic_dns_candidate"
         );
+    }
+
+    #[test]
+    fn router_assist_disabled_ignores_provider_candidates() {
+        let candidate =
+            router_assist_candidate("upnp", RouterAssistProtocol::UpnpIgd, 49_152, 60_000_000, 1);
+
+        let set =
+            select_router_assist_candidates(RouterAssistPolicy::DISABLED, Ok(vec![candidate]));
+
+        assert_eq!(set.caveat(), "router_assist_disabled");
+        assert!(set.candidates().is_empty());
+        assert!(set.selected().is_none());
+        assert!(!set.is_required());
+    }
+
+    #[test]
+    fn router_assist_requires_explicit_mapping_capability() {
+        let policy = RouterAssistPolicy::new(false, 60_000_000);
+        let candidate =
+            router_assist_candidate("pcp", RouterAssistProtocol::Pcp, 50_000, 60_000_000, 1);
+
+        let set = select_router_assist_candidates(policy, Ok(vec![candidate]));
+
+        assert_eq!(set.caveat(), "router_assist_mapping_capability_denied");
+        assert!(set.candidates().is_empty());
+        assert!(set.selected().is_none());
+        assert!(set.provider_failure().is_none());
+    }
+
+    #[test]
+    fn router_assist_provider_failure_is_nonfatal() {
+        let policy = RouterAssistPolicy::new(true, 60_000_000);
+        let failure =
+            RouterAssistProviderFailure::new("router control socket unavailable").expect("failure");
+
+        let set = select_router_assist_candidates(policy, Err(failure));
+
+        assert_eq!(set.caveat(), "router_assist_provider_failed_nonfatal");
+        assert!(set.candidates().is_empty());
+        assert!(set.selected().is_none());
+        assert_eq!(
+            set.provider_failure()
+                .map(RouterAssistProviderFailure::reason),
+            Some("router control socket unavailable")
+        );
+    }
+
+    #[test]
+    fn router_assist_selection_filters_lifetime_and_prefers_pcp() {
+        let policy = RouterAssistPolicy::new(true, 60_000_000);
+        let expired_by_policy = router_assist_candidate(
+            "long-upnp",
+            RouterAssistProtocol::UpnpIgd,
+            49_152,
+            120_000_000,
+            1,
+        );
+        let nat_pmp = router_assist_candidate(
+            "nat-pmp",
+            RouterAssistProtocol::NatPmp,
+            49_153,
+            30_000_000,
+            2,
+        );
+        let pcp = router_assist_candidate("pcp", RouterAssistProtocol::Pcp, 49_154, 30_000_000, 3);
+
+        let set =
+            select_router_assist_candidates(policy, Ok(vec![expired_by_policy, nat_pmp, pcp]));
+
+        assert_eq!(set.caveat(), "router_assist_candidate_selected");
+        assert_eq!(set.candidates().len(), 2);
+        let selected = set.selected().expect("selected pcp mapping");
+        assert_eq!(selected.protocol(), RouterAssistProtocol::Pcp);
+        assert_eq!(selected.protocol().code(), "pcp");
+        assert_eq!(selected.external_endpoint().port(), 49_154);
     }
 
     #[test]
