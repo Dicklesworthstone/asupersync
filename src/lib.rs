@@ -685,6 +685,8 @@ pub mod real_tls_connector_net_quic_native_integration_e2e_tests;
 pub mod real_fs_uring_raptorq_decoder_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_observability_otel_trace_distributed_span_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_web_websocket_channel_broadcast_integration_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
