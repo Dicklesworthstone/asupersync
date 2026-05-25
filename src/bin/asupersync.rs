@@ -9140,6 +9140,7 @@ mod tests {
         assert!(rendered.contains("send_buffer_pressure"));
         assert!(rendered.contains("atp.autotune.loss_permille"));
         assert!(rendered.contains("Next settings:"));
+        assert!(rendered.contains("Repair mode:"));
         assert!(rendered.contains("Repair action:"));
         assert!(rendered.contains("Repair ROI:"));
         Ok(())

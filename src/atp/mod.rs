@@ -51,7 +51,7 @@ pub use autotune::{
     AtpAutotuneTelemetryError, AtpAutotuneTelemetryReport, AtpBottleneckKind, AtpBottleneckSignal,
     AtpRepairAction, AtpRepairCoordinator, AtpRepairCoordinatorDecision,
     AtpRepairCoordinatorPolicy, AtpRepairDecisionFactor, AtpRepairDecisionFactorEffect,
-    AtpRepairDecisionFactorKind, AtpRepairPathMode, AtpRepairRoiInputs,
+    AtpRepairDecisionFactorKind, AtpRepairMode, AtpRepairPathMode, AtpRepairRoiInputs,
     AtpTransferPressureSnapshot,
 };
 pub use diagnostics::{
