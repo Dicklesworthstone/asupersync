@@ -8,12 +8,13 @@ const ARTIFACT_PATH: &str = "artifacts/swarm_evidence_pack_contract_v1.json";
 const CONTRACT_TEST: &str = "tests/swarm_evidence_pack_contract.rs";
 const CONTRACT_SCHEMA_VERSION: &str = "swarm-evidence-pack-contract-v1";
 const PACK_SCHEMA_VERSION: &str = "swarm-evidence-pack-v1";
-const REQUIRED_FIXTURES: [&str; 5] = [
+const REQUIRED_FIXTURES: [&str; 6] = [
     "happy_path",
     "blocked_tracker",
     "disk_critical_source_only_fallback",
     "stale_in_progress",
     "all_children_closed_epic_closeout",
+    "swarm_grade_parent_open_child_closeout_refusal",
 ];
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -411,6 +412,39 @@ fn required_fixture_semantics_are_pinned() {
             "open_child_count"
         ),
         0
+    );
+
+    let open_parent = fixture(&artifact, "swarm_grade_parent_open_child_closeout_refusal");
+    assert_eq!(
+        string(open_parent, "expected_replay_status"),
+        "rejected",
+        "9u057b parent closeout must fail while child work remains open"
+    );
+    assert!(
+        array(open_parent, "expected_findings")
+            .iter()
+            .any(|finding| finding.as_str() == Some("epic_closeout_has_open_children")),
+        "9u057b open-child fixture must report the closeout contradiction"
+    );
+    let open_pack = pack(open_parent);
+    let open_children = array(
+        open_pack
+            .get("ready_queue_state")
+            .expect("ready_queue_state must exist"),
+        "children",
+    );
+    assert!(
+        open_children
+            .iter()
+            .any(|child| child.get("status").and_then(JsonValue::as_str) != Some("closed")),
+        "9u057b fixture must include at least one non-closed child"
+    );
+    assert!(
+        u64_value(
+            open_pack.get("final_closeout").expect("final_closeout"),
+            "open_child_count"
+        ) > 0,
+        "9u057b fixture must preserve open_child_count evidence"
     );
 }
 

@@ -553,6 +553,101 @@
           "proof_claims_require_remote_exit": true
         }
       }
+    },
+    {
+      "fixture_id": "swarm_grade_parent_open_child_closeout_refusal",
+      "description": "Swarm-grade proof parent asupersync-9u057b must not be closed while a child modernization bead remains open or owned by another agent.",
+      "expected_replay_status": "rejected",
+      "expected_findings": ["epic_closeout_has_open_children"],
+      "pack": {
+        "schema_version": "swarm-evidence-pack-v1",
+        "pack_id": "open-child-parent-9u057b",
+        "created_at_utc": "2026-05-25T08:50:00Z",
+        "source_hashes": {
+          "ready_queue_state": "sha256:9u057b-ready-queue-open-child",
+          "reservations": "sha256:9u057b-reservations-open-child",
+          "dirty_paths": "sha256:9u057b-dirty-paths-open-child",
+          "proof_outcomes": "sha256:9u057b-proof-outcomes-open-child",
+          "disk_pressure": "sha256:9u057b-disk-pressure-open-child",
+          "chosen_action": "sha256:9u057b-chosen-action-open-child",
+          "final_closeout": "sha256:9u057b-final-closeout-open-child"
+        },
+        "ready_queue_state": {
+          "observed_at_utc": "2026-05-25T08:49:00Z",
+          "evidence_age_seconds": 60,
+          "ready_beads": ["asupersync-9u057b"],
+          "in_progress_beads": ["asupersync-9u057b.8"],
+          "stale_in_progress": [],
+          "children": [
+            {"bead_id": "asupersync-9u057b.1", "status": "closed"},
+            {"bead_id": "asupersync-9u057b.2", "status": "closed"},
+            {"bead_id": "asupersync-9u057b.3", "status": "closed"},
+            {"bead_id": "asupersync-9u057b.4", "status": "closed"},
+            {"bead_id": "asupersync-9u057b.5", "status": "closed"},
+            {"bead_id": "asupersync-9u057b.6", "status": "closed"},
+            {"bead_id": "asupersync-9u057b.7", "status": "closed"},
+            {
+              "bead_id": "asupersync-9u057b.8",
+              "status": "open",
+              "assignee": "WindyCastle"
+            }
+          ]
+        },
+        "reservations": {
+          "observed_at_utc": "2026-05-25T08:49:05Z",
+          "evidence_age_seconds": 55,
+          "tracker_reserved": false,
+          "active": []
+        },
+        "dirty_paths": {
+          "observed_at_utc": "2026-05-25T08:49:10Z",
+          "evidence_age_seconds": 50,
+          "count": 0,
+          "paths": []
+        },
+        "proof_outcomes": {
+          "observed_at_utc": "2026-05-25T08:49:20Z",
+          "evidence_age_seconds": 40,
+          "remote_required": false,
+          "local_fallback_detected": false,
+          "proofs": []
+        },
+        "disk_pressure": {
+          "observed_at_utc": "2026-05-25T08:49:30Z",
+          "evidence_age_seconds": 30,
+          "status": "ok",
+          "free_bytes": 75161927680,
+          "retrieval_blocked": false
+        },
+        "chosen_action": {
+          "observed_at_utc": "2026-05-25T08:49:40Z",
+          "evidence_age_seconds": 20,
+          "action": "close_parent_epic",
+          "bead_id": "asupersync-9u057b",
+          "requires_tracker_reservation": true,
+          "requires_remote_proof": false,
+          "mutation_authorized_by_pack": false
+        },
+        "final_closeout": {
+          "observed_at_utc": "2026-05-25T08:49:50Z",
+          "evidence_age_seconds": 10,
+          "status": "blocked",
+          "commit": "",
+          "proof_claimed": false,
+          "proof_remote_exit": null,
+          "open_child_count": 1,
+          "close_reason": "parent closeout rejected: asupersync-9u057b.8 remains open and owned"
+        },
+        "safety_invariants": {
+          "no_deletion_commands": true,
+          "no_branch_or_worktree_commands": true,
+          "no_local_cargo_fallback": true,
+          "report_only_until_reserved": true,
+          "source_hashes_cover_all_sections": true,
+          "closeout_requires_commit_or_explicit_defer": true,
+          "proof_claims_require_remote_exit": true
+        }
+      }
     }
   ],
   "validation": {
