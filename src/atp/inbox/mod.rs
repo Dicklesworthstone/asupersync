@@ -831,6 +831,7 @@ pub struct LocalInbox {
     grants: BTreeMap<String, ReceiveGrant>,
     items: BTreeMap<String, InboxItem>,
     mailbox_records: BTreeMap<String, MailboxStorageRecord>,
+    mailbox_last_seen_sequences: BTreeMap<String, u64>,
 }
 
 impl LocalInbox {
@@ -841,6 +842,7 @@ impl LocalInbox {
             grants: BTreeMap::new(),
             items: BTreeMap::new(),
             mailbox_records: BTreeMap::new(),
+            mailbox_last_seen_sequences: BTreeMap::new(),
         }
     }
 
@@ -1032,8 +1034,17 @@ impl LocalInbox {
             .mailbox_records
             .get(mailbox_id)
             .ok_or_else(|| InboxError::UnknownMailboxRecord(mailbox_id.to_string()))?;
+        let recorded_last_seen = self.mailbox_last_seen_sequences.get(mailbox_id).copied();
+        let effective_last_seen = match (last_seen_sequence, recorded_last_seen) {
+            (Some(caller_sequence), Some(recorded_sequence)) => {
+                Some(caller_sequence.max(recorded_sequence))
+            }
+            (Some(caller_sequence), None) => Some(caller_sequence),
+            (None, Some(recorded_sequence)) => Some(recorded_sequence),
+            (None, None) => None,
+        };
         record
-            .validate_retrieval(receipt, last_seen_sequence)
+            .validate_retrieval(receipt, effective_last_seen)
             .map_err(InboxError::MailboxSecurity)?;
 
         let item = self
@@ -1044,6 +1055,8 @@ impl LocalInbox {
         item.state = InboxState::Active;
         item.bytes_received = receipt.bytes_returned.min(item.bytes_total);
         item.updated_epoch_secs = now_epoch_secs;
+        self.mailbox_last_seen_sequences
+            .insert(mailbox_id.to_string(), receipt.sequence);
         Ok(())
     }
 
@@ -1533,6 +1546,51 @@ mod tests {
             .start_mailbox_retrieval("mailbox-1", &stored_mailbox_receipt(128), None, 13)
             .unwrap(); // ubs:ignore - test oracle
 
+        let item = inbox.list()[0]; // ubs:ignore - test oracle
+        assert_eq!(item.state, InboxState::Active);
+        assert_eq!(item.bytes_received, 128);
+        assert_eq!(item.updated_epoch_secs, 13);
+    }
+
+    #[test]
+    fn mailbox_get_pending_rejects_replay_even_without_caller_sequence() {
+        let mut inbox = LocalInbox::new();
+        let mut quota = QuotaLedger::new();
+        quota.set_limit(QuotaBucket::Mailbox, QuotaLimit::new(1024, 4));
+        inbox
+            .offer(offer("in-1", "/data/inbox/project", 128))
+            .unwrap(); // ubs:ignore - test oracle
+        inbox.allow(ReceiveGrant::new(
+            "grant-1",
+            "peer-a",
+            receive_actions(),
+            GrantScope::PathPrefix(PathBuf::from("/data/inbox")),
+        ));
+        inbox
+            .store_mailbox(
+                "in-1",
+                "grant-1",
+                mailbox_store_request("mailbox-1", 128),
+                &mut quota,
+                11,
+            )
+            .unwrap(); // ubs:ignore - test oracle
+        let receipt = stored_mailbox_receipt(128);
+        inbox
+            .start_mailbox_retrieval("mailbox-1", &receipt, None, 13)
+            .unwrap(); // ubs:ignore - test oracle
+
+        let err = inbox
+            .start_mailbox_retrieval("mailbox-1", &receipt, None, 14)
+            .unwrap_err(); // ubs:ignore - test oracle
+
+        assert_eq!(
+            err,
+            InboxError::MailboxSecurity(MailboxSecurityError::Replay {
+                last_seen_sequence: Some(1),
+                observed_sequence: 1
+            })
+        );
         let item = inbox.list()[0]; // ubs:ignore - test oracle
         assert_eq!(item.state, InboxState::Active);
         assert_eq!(item.bytes_received, 128);
