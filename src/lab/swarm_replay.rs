@@ -32,6 +32,10 @@ pub const SWARM_AGENT_RUN_SCHEMA_VERSION: &str = "asupersync.swarm-agent-run-lab
 /// Stable schema version for swarm what-if admission plans.
 pub const SWARM_WHAT_IF_PLAN_SCHEMA_VERSION: &str = "asupersync.swarm-what-if-plan.v1";
 
+/// Stable schema version for compaction-safe swarm handoff verification.
+pub const SWARM_HANDOFF_VERIFICATION_SCHEMA_VERSION: &str =
+    "asupersync.swarm-handoff-verification.v1";
+
 const MAX_FIRST_SLICE_TASKS: usize = 10_000;
 
 /// Deterministic workload knobs for a swarm replay lab run.
@@ -810,6 +814,164 @@ pub struct SwarmWhatIfPlan {
     pub branch_or_worktree_required: bool,
 }
 
+/// Self-contained capsule emitted before compaction or session handoff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffCapsule {
+    /// Stable capsule id for replay and operator logs.
+    pub capsule_id: String,
+    /// Current agent identity from the handoff summary.
+    pub current_agent: String,
+    /// Generated timestamp as epoch seconds.
+    pub generated_at_epoch_secs: u64,
+    /// Documentation hash or read-receipt hash expected by the resumed agent.
+    pub expected_docs_hash: Option<String>,
+    /// Documentation hash observed by the resumed agent.
+    pub observed_docs_hash: Option<String>,
+    /// Main commit hash expected by the handoff.
+    pub expected_main_hash: Option<String>,
+    /// Main commit hash observed by the resumed agent.
+    pub observed_main_hash: Option<String>,
+    /// Beads the handoff claims are actively owned by this agent.
+    pub claimed_bead_ids: Vec<String>,
+    /// Active file reservations captured in the handoff.
+    pub active_reservations: Vec<SwarmHandoffReservation>,
+    /// Dirty paths classified by ownership at handoff time.
+    pub dirty_paths: Vec<SwarmHandoffDirtyPath>,
+    /// Exact proof commands and observed proof status.
+    pub proof_commands: Vec<SwarmHandoffProofCommand>,
+    /// Inbox ack state needed before continuing.
+    pub inbox_acks: Vec<SwarmHandoffInboxAck>,
+    /// Commits pushed by the previous agent session.
+    pub pushed_commits: Vec<SwarmHandoffCommit>,
+    /// First blocker carried by the compacted handoff, if any.
+    pub first_blocker: Option<String>,
+}
+
+/// Reservation evidence captured in a handoff capsule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffReservation {
+    /// Reserved path or glob.
+    pub path_pattern: String,
+    /// Agent that holds the reservation.
+    pub holder_agent: String,
+    /// Time the reservation was observed, as epoch seconds.
+    pub observed_at_epoch_secs: u64,
+    /// Reservation expiry, as epoch seconds.
+    pub expires_at_epoch_secs: u64,
+}
+
+/// Ownership class for a dirty handoff path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmHandoffDirtyOwner {
+    /// Dirty path belongs to the current handoff agent.
+    CurrentAgent,
+    /// Dirty path belongs to another known agent.
+    PeerAgent,
+    /// Dirty path ownership is not known.
+    Unknown,
+}
+
+/// Dirty path evidence captured in a handoff capsule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffDirtyPath {
+    /// Repository-relative path.
+    pub path: String,
+    /// Ownership classification for the dirty path.
+    pub owner: SwarmHandoffDirtyOwner,
+    /// Optional owner name after redaction policy has been applied.
+    pub owner_agent: Option<String>,
+}
+
+/// Proof command evidence captured in a handoff capsule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffProofCommand {
+    /// Exact command that was or must be replayed.
+    pub command: String,
+    /// Whether this proof lane requires remote RCH execution.
+    pub remote_required: bool,
+    /// Whether remote RCH execution was observed.
+    pub remote_observed: bool,
+    /// Process exit status, if the proof ran.
+    pub exit_status: Option<i32>,
+    /// First blocker from the proof lane, if it did not pass.
+    pub first_blocker: Option<String>,
+}
+
+/// Inbox ack evidence captured in a handoff capsule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffInboxAck {
+    /// Agent Mail message id.
+    pub message_id: u64,
+    /// Whether the message required acknowledgement.
+    pub ack_required: bool,
+    /// Whether the acknowledgement was observed.
+    pub acknowledged: bool,
+}
+
+/// Commit evidence captured in a handoff capsule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffCommit {
+    /// Pushed commit id.
+    pub commit_id: String,
+    /// Whether the commit reached `main`.
+    pub pushed_to_main: bool,
+    /// Whether `main` was mirrored to `master`.
+    pub synced_to_master: bool,
+    /// Whether Beads or handoff notes recorded the commit.
+    pub recorded_in_beads_comment: bool,
+}
+
+/// Verifier decision for a compaction-safe handoff capsule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmHandoffDecision {
+    /// Evidence is fresh enough to continue.
+    Continue,
+    /// Refresh a narrow live snapshot before continuing.
+    NarrowRefreshRequired,
+    /// Coordinate with another agent or mailbox before continuing.
+    CoordinateFirst,
+    /// Fail closed; the capsule is not safe to continue from.
+    UnsafeToContinue,
+}
+
+/// One verifier reason explaining a handoff decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffVerifierReason {
+    /// Stable machine-readable reason code.
+    pub code: String,
+    /// Operator-facing reason.
+    pub detail: String,
+    /// Concrete next action.
+    pub action: String,
+}
+
+/// Deterministic, non-mutating handoff verification result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmHandoffVerification {
+    /// Stable schema version.
+    pub schema_version: String,
+    /// Capsule id copied from input.
+    pub capsule_id: String,
+    /// Final verifier decision.
+    pub decision: SwarmHandoffDecision,
+    /// All reasons that contributed to the decision.
+    pub reasons: Vec<SwarmHandoffVerifierReason>,
+    /// Number of narrow-refresh findings.
+    pub stale_evidence_count: usize,
+    /// Number of coordination findings.
+    pub coordination_required_count: usize,
+    /// Number of fail-closed findings.
+    pub unsafe_issue_count: usize,
+    /// Short operator-facing next action.
+    pub next_action: String,
+    /// Whether a future agent can replay the capsule without this conversation.
+    pub self_contained: bool,
+    /// Whether verification mutated Git, Beads, Agent Mail, or RCH.
+    pub mutates_external_state: bool,
+}
+
 /// Plans a deterministic swarm admission wave without launching live work.
 pub fn plan_swarm_admission_wave(
     scenario: &SwarmWhatIfScenario,
@@ -925,6 +1087,263 @@ pub fn plan_swarm_admission_wave(
         destructive_cleanup_required: false,
         branch_or_worktree_required: false,
     })
+}
+
+/// Verifies a compaction-safe handoff capsule without touching live services.
+#[must_use]
+pub fn verify_swarm_handoff_capsule(capsule: &SwarmHandoffCapsule) -> SwarmHandoffVerification {
+    let mut decision = SwarmHandoffDecision::Continue;
+    let mut reasons = Vec::new();
+    let mut stale_evidence_count = 0usize;
+    let mut coordination_required_count = 0usize;
+    let mut unsafe_issue_count = 0usize;
+
+    if capsule.capsule_id.trim().is_empty() {
+        add_handoff_reason(
+            &mut reasons,
+            &mut decision,
+            SwarmHandoffDecision::UnsafeToContinue,
+            "missing_capsule_id",
+            "handoff capsule is missing a stable id",
+            "recreate the handoff capsule before continuing",
+        );
+        unsafe_issue_count = unsafe_issue_count.saturating_add(1);
+    }
+    if capsule.current_agent.trim().is_empty() {
+        add_handoff_reason(
+            &mut reasons,
+            &mut decision,
+            SwarmHandoffDecision::UnsafeToContinue,
+            "missing_agent",
+            "handoff capsule is missing the current agent identity",
+            "refresh Agent Mail identity before continuing",
+        );
+        unsafe_issue_count = unsafe_issue_count.saturating_add(1);
+    }
+    if capsule.claimed_bead_ids.is_empty() {
+        add_handoff_reason(
+            &mut reasons,
+            &mut decision,
+            SwarmHandoffDecision::NarrowRefreshRequired,
+            "missing_claimed_bead",
+            "handoff capsule does not identify an active bead",
+            "refresh Beads state and claim a concrete bead before continuing",
+        );
+        stale_evidence_count = stale_evidence_count.saturating_add(1);
+    }
+
+    if capsule.expected_docs_hash != capsule.observed_docs_hash {
+        add_handoff_reason(
+            &mut reasons,
+            &mut decision,
+            SwarmHandoffDecision::NarrowRefreshRequired,
+            "stale_docs_hash",
+            "documentation or AGENTS read-receipt hash changed after compaction",
+            "reread required docs and regenerate the capsule",
+        );
+        stale_evidence_count = stale_evidence_count.saturating_add(1);
+    }
+    if capsule.expected_main_hash != capsule.observed_main_hash {
+        add_handoff_reason(
+            &mut reasons,
+            &mut decision,
+            SwarmHandoffDecision::NarrowRefreshRequired,
+            "stale_main_hash",
+            "observed main commit does not match the handoff capsule",
+            "refresh git status and proof commands against current main",
+        );
+        stale_evidence_count = stale_evidence_count.saturating_add(1);
+    }
+
+    if capsule.proof_commands.is_empty()
+        || capsule
+            .proof_commands
+            .iter()
+            .any(|proof| proof.command.trim().is_empty())
+    {
+        add_handoff_reason(
+            &mut reasons,
+            &mut decision,
+            SwarmHandoffDecision::UnsafeToContinue,
+            "missing_proof_command",
+            "handoff capsule lacks an exact replayable proof command",
+            "capture the exact rch proof command before continuing",
+        );
+        unsafe_issue_count = unsafe_issue_count.saturating_add(1);
+    }
+
+    for proof in &capsule.proof_commands {
+        if proof.remote_required && !proof.remote_observed {
+            add_handoff_reason(
+                &mut reasons,
+                &mut decision,
+                SwarmHandoffDecision::UnsafeToContinue,
+                "missing_remote_proof",
+                "remote-required proof did not observe remote RCH execution",
+                "rerun the proof with rch and do not treat local fallback as green",
+            );
+            unsafe_issue_count = unsafe_issue_count.saturating_add(1);
+        }
+        if proof.exit_status != Some(0) || proof.first_blocker.is_some() {
+            add_handoff_reason(
+                &mut reasons,
+                &mut decision,
+                SwarmHandoffDecision::UnsafeToContinue,
+                "proof_not_green",
+                "proof evidence is failing, missing, or carries a first blocker",
+                "surface the first blocker before continuing implementation",
+            );
+            unsafe_issue_count = unsafe_issue_count.saturating_add(1);
+        }
+    }
+
+    for reservation in &capsule.active_reservations {
+        if reservation.expires_at_epoch_secs <= reservation.observed_at_epoch_secs {
+            add_handoff_reason(
+                &mut reasons,
+                &mut decision,
+                SwarmHandoffDecision::NarrowRefreshRequired,
+                "stale_reservation",
+                format!(
+                    "reservation {} expired before or at the observed handoff time",
+                    reservation.path_pattern
+                ),
+                "refresh file reservations before editing",
+            );
+            stale_evidence_count = stale_evidence_count.saturating_add(1);
+        } else if reservation.holder_agent != capsule.current_agent {
+            add_handoff_reason(
+                &mut reasons,
+                &mut decision,
+                SwarmHandoffDecision::CoordinateFirst,
+                "peer_reservation",
+                format!(
+                    "reservation {} is held by {}",
+                    reservation.path_pattern, reservation.holder_agent
+                ),
+                "coordinate with the reservation holder before touching the path",
+            );
+            coordination_required_count = coordination_required_count.saturating_add(1);
+        }
+    }
+
+    for dirty_path in &capsule.dirty_paths {
+        match dirty_path.owner {
+            SwarmHandoffDirtyOwner::CurrentAgent => {
+                add_handoff_reason(
+                    &mut reasons,
+                    &mut decision,
+                    SwarmHandoffDecision::NarrowRefreshRequired,
+                    "dirty_owned_path",
+                    format!("current agent has dirty path {}", dirty_path.path),
+                    "inspect and preserve owned dirty work before continuing",
+                );
+                stale_evidence_count = stale_evidence_count.saturating_add(1);
+            }
+            SwarmHandoffDirtyOwner::PeerAgent => {
+                add_handoff_reason(
+                    &mut reasons,
+                    &mut decision,
+                    SwarmHandoffDecision::CoordinateFirst,
+                    "dirty_peer_path",
+                    format!(
+                        "peer-owned dirty path {} blocks safe continuation",
+                        dirty_path.path
+                    ),
+                    "avoid the path or coordinate with the peer owner",
+                );
+                coordination_required_count = coordination_required_count.saturating_add(1);
+            }
+            SwarmHandoffDirtyOwner::Unknown => {
+                add_handoff_reason(
+                    &mut reasons,
+                    &mut decision,
+                    SwarmHandoffDecision::CoordinateFirst,
+                    "dirty_unknown_owner_path",
+                    format!("dirty path {} has unknown ownership", dirty_path.path),
+                    "classify dirty ownership before continuing",
+                );
+                coordination_required_count = coordination_required_count.saturating_add(1);
+            }
+        }
+    }
+
+    for ack in &capsule.inbox_acks {
+        if ack.ack_required && !ack.acknowledged {
+            add_handoff_reason(
+                &mut reasons,
+                &mut decision,
+                SwarmHandoffDecision::CoordinateFirst,
+                "unresolved_inbox_ack",
+                format!("message {} still requires acknowledgement", ack.message_id),
+                "acknowledge or answer required inbox messages before continuing",
+            );
+            coordination_required_count = coordination_required_count.saturating_add(1);
+        }
+    }
+
+    for commit in &capsule.pushed_commits {
+        if commit.pushed_to_main && !commit.recorded_in_beads_comment {
+            add_handoff_reason(
+                &mut reasons,
+                &mut decision,
+                SwarmHandoffDecision::CoordinateFirst,
+                "pushed_commit_missing_comment",
+                format!(
+                    "commit {} reached main without a Beads or handoff comment",
+                    commit.commit_id
+                ),
+                "record the pushed commit in Beads or the handoff before continuing",
+            );
+            coordination_required_count = coordination_required_count.saturating_add(1);
+        }
+        if commit.pushed_to_main && !commit.synced_to_master {
+            add_handoff_reason(
+                &mut reasons,
+                &mut decision,
+                SwarmHandoffDecision::NarrowRefreshRequired,
+                "missing_master_sync",
+                format!(
+                    "commit {} reached main without main-to-master sync",
+                    commit.commit_id
+                ),
+                "sync master from main before release handoff",
+            );
+            stale_evidence_count = stale_evidence_count.saturating_add(1);
+        }
+    }
+
+    if let Some(first_blocker) = &capsule.first_blocker {
+        add_handoff_reason(
+            &mut reasons,
+            &mut decision,
+            SwarmHandoffDecision::UnsafeToContinue,
+            "unresolved_first_blocker",
+            format!("handoff still carries first blocker: {first_blocker}"),
+            "resolve or explicitly surface the blocker before continuing",
+        );
+        unsafe_issue_count = unsafe_issue_count.saturating_add(1);
+    }
+
+    SwarmHandoffVerification {
+        schema_version: SWARM_HANDOFF_VERIFICATION_SCHEMA_VERSION.to_string(),
+        capsule_id: capsule.capsule_id.clone(),
+        decision,
+        stale_evidence_count,
+        coordination_required_count,
+        unsafe_issue_count,
+        next_action: handoff_next_action(decision).to_string(),
+        self_contained: !capsule.capsule_id.trim().is_empty()
+            && !capsule.current_agent.trim().is_empty()
+            && !capsule.claimed_bead_ids.is_empty()
+            && !capsule.proof_commands.is_empty()
+            && capsule
+                .proof_commands
+                .iter()
+                .all(|proof| !proof.command.trim().is_empty()),
+        mutates_external_state: false,
+        reasons,
+    }
 }
 
 /// Deterministic knobs for the synthetic agent-run lab harness.
@@ -1810,6 +2229,46 @@ fn build_agent_run_summary(
 
 fn count_agent_events(events: &[SwarmAgentRunEvent], kind: SwarmAgentRunEventKind) -> usize {
     events.iter().filter(|event| event.kind == kind).count()
+}
+
+fn add_handoff_reason(
+    reasons: &mut Vec<SwarmHandoffVerifierReason>,
+    decision: &mut SwarmHandoffDecision,
+    candidate: SwarmHandoffDecision,
+    code: impl Into<String>,
+    detail: impl Into<String>,
+    action: impl Into<String>,
+) {
+    escalate_handoff_decision(decision, candidate);
+    reasons.push(SwarmHandoffVerifierReason {
+        code: code.into(),
+        detail: detail.into(),
+        action: action.into(),
+    });
+}
+
+fn escalate_handoff_decision(decision: &mut SwarmHandoffDecision, candidate: SwarmHandoffDecision) {
+    if handoff_decision_rank(candidate) > handoff_decision_rank(*decision) {
+        *decision = candidate;
+    }
+}
+
+const fn handoff_decision_rank(decision: SwarmHandoffDecision) -> u8 {
+    match decision {
+        SwarmHandoffDecision::Continue => 0,
+        SwarmHandoffDecision::NarrowRefreshRequired => 1,
+        SwarmHandoffDecision::CoordinateFirst => 2,
+        SwarmHandoffDecision::UnsafeToContinue => 3,
+    }
+}
+
+const fn handoff_next_action(decision: SwarmHandoffDecision) -> &'static str {
+    match decision {
+        SwarmHandoffDecision::Continue => "continue from capsule",
+        SwarmHandoffDecision::NarrowRefreshRequired => "refresh narrow live evidence",
+        SwarmHandoffDecision::CoordinateFirst => "coordinate before continuing",
+        SwarmHandoffDecision::UnsafeToContinue => "fail closed and surface blocker",
+    }
 }
 
 fn weighted_demand_units(workloads: &[SwarmWhatIfWorkload]) -> usize {

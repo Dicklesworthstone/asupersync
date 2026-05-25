@@ -619,6 +619,13 @@ impl PathRace {
         self.candidates.get(&id)
     }
 
+    /// Iterate candidates in deterministic candidate-id order for path doctor
+    /// documents, trace logs, and proof summaries.
+    #[must_use]
+    pub fn candidates(&self) -> impl Iterator<Item = &PathCandidate> + '_ {
+        self.candidates.values()
+    }
+
     /// Cleanup records for candidates that lost after a winner was chosen.
     #[must_use]
     pub fn cleanup_records(&self) -> &[PathLoserCleanup] {

@@ -1,12 +1,15 @@
 //! Contract tests for deterministic swarm replay lab scenarios.
 
 use asupersync::lab::{
-    SWARM_AGENT_RUN_SCHEMA_VERSION, SWARM_PRESSURE_SCHEMA_VERSION, SWARM_REPLAY_SCHEMA_VERSION,
-    SwarmAgentRunEventKind, SwarmAgentRunScenario, SwarmDiskPressureLevel,
-    SwarmDiskPressureTransition, SwarmPressureEventKind, SwarmPressureLane, SwarmPressureScenario,
-    SwarmRchWorkerEvent, SwarmRchWorkerEventKind, SwarmReplayError, SwarmReplayEventKind,
-    SwarmReplayScenario, SwarmReplayTaskStatus, run_swarm_agent_run_scenario,
-    run_swarm_pressure_scenario, run_swarm_replay_scenario,
+    SWARM_AGENT_RUN_SCHEMA_VERSION, SWARM_HANDOFF_VERIFICATION_SCHEMA_VERSION,
+    SWARM_PRESSURE_SCHEMA_VERSION, SWARM_REPLAY_SCHEMA_VERSION, SwarmAgentRunEventKind,
+    SwarmAgentRunScenario, SwarmDiskPressureLevel, SwarmDiskPressureTransition,
+    SwarmHandoffCapsule, SwarmHandoffCommit, SwarmHandoffDecision, SwarmHandoffDirtyOwner,
+    SwarmHandoffDirtyPath, SwarmHandoffInboxAck, SwarmHandoffProofCommand, SwarmHandoffReservation,
+    SwarmPressureEventKind, SwarmPressureLane, SwarmPressureScenario, SwarmRchWorkerEvent,
+    SwarmRchWorkerEventKind, SwarmReplayError, SwarmReplayEventKind, SwarmReplayScenario,
+    SwarmReplayTaskStatus, run_swarm_agent_run_scenario, run_swarm_pressure_scenario,
+    run_swarm_replay_scenario, verify_swarm_handoff_capsule,
 };
 
 fn cancellation_scenario(seed: u64) -> SwarmReplayScenario {
@@ -135,6 +138,45 @@ fn agent_run_scenario(seed: u64) -> SwarmAgentRunScenario {
         validation_blocker_agent: Some(3),
         crash_agent: Some(5),
         max_steps: 20_000,
+    }
+}
+
+fn fresh_handoff_capsule() -> SwarmHandoffCapsule {
+    SwarmHandoffCapsule {
+        capsule_id: "handoff-asw10-0001".to_string(),
+        current_agent: "GreenMountain".to_string(),
+        generated_at_epoch_secs: 1_779_660_000,
+        expected_docs_hash: Some("docs:ag-v1".to_string()),
+        observed_docs_hash: Some("docs:ag-v1".to_string()),
+        expected_main_hash: Some("main:abc123".to_string()),
+        observed_main_hash: Some("main:abc123".to_string()),
+        claimed_bead_ids: vec!["asupersync-oxqrae.10".to_string()],
+        active_reservations: vec![SwarmHandoffReservation {
+            path_pattern: "src/lab/swarm_replay.rs".to_string(),
+            holder_agent: "GreenMountain".to_string(),
+            observed_at_epoch_secs: 1_779_660_000,
+            expires_at_epoch_secs: 1_779_663_600,
+        }],
+        dirty_paths: Vec::new(),
+        proof_commands: vec![SwarmHandoffProofCommand {
+            command: "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_p6 cargo test -p asupersync --test swarm_replay_lab_contract handoff_capsule".to_string(),
+            remote_required: true,
+            remote_observed: true,
+            exit_status: Some(0),
+            first_blocker: None,
+        }],
+        inbox_acks: vec![SwarmHandoffInboxAck {
+            message_id: 15_914,
+            ack_required: true,
+            acknowledged: true,
+        }],
+        pushed_commits: vec![SwarmHandoffCommit {
+            commit_id: "abc1234".to_string(),
+            pushed_to_main: true,
+            synced_to_master: true,
+            recorded_in_beads_comment: true,
+        }],
+        first_blocker: None,
     }
 }
 
@@ -440,6 +482,158 @@ fn deterministic_agent_run_lab_models_claim_reserve_proof_commit_blocker_and_rec
     assert_eq!(
         first_json, second_json,
         "agent-run JSON summary must be byte stable"
+    );
+}
+
+#[test]
+fn handoff_capsule_verifier_allows_fresh_self_contained_capsule() {
+    let capsule = fresh_handoff_capsule();
+    let first = verify_swarm_handoff_capsule(&capsule);
+    let second = verify_swarm_handoff_capsule(&capsule);
+
+    assert_eq!(first, second, "verification must be deterministic");
+    assert_eq!(
+        first.schema_version,
+        SWARM_HANDOFF_VERIFICATION_SCHEMA_VERSION
+    );
+    assert_eq!(first.capsule_id, capsule.capsule_id);
+    assert_eq!(first.decision, SwarmHandoffDecision::Continue);
+    assert!(first.reasons.is_empty());
+    assert_eq!(first.stale_evidence_count, 0);
+    assert_eq!(first.coordination_required_count, 0);
+    assert_eq!(first.unsafe_issue_count, 0);
+    assert_eq!(first.next_action, "continue from capsule");
+    assert!(first.self_contained);
+    assert!(
+        !first.mutates_external_state,
+        "handoff verification must not mutate Git, Beads, Agent Mail, or RCH"
+    );
+
+    let first_json = serde_json::to_vec(&first).expect("serialize first handoff verification");
+    let second_json = serde_json::to_vec(&second).expect("serialize second handoff verification");
+    assert_eq!(
+        first_json, second_json,
+        "handoff verifier JSON must be byte stable"
+    );
+}
+
+#[test]
+fn handoff_capsule_verifier_fails_closed_for_compaction_gaps() {
+    let mut stale_docs = fresh_handoff_capsule();
+    stale_docs.observed_docs_hash = Some("docs:changed".to_string());
+    let verification = verify_swarm_handoff_capsule(&stale_docs);
+    assert_eq!(
+        verification.decision,
+        SwarmHandoffDecision::NarrowRefreshRequired
+    );
+    assert!(
+        verification
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "stale_docs_hash")
+    );
+
+    let mut missing_proof = fresh_handoff_capsule();
+    missing_proof.proof_commands.clear();
+    let verification = verify_swarm_handoff_capsule(&missing_proof);
+    assert_eq!(
+        verification.decision,
+        SwarmHandoffDecision::UnsafeToContinue
+    );
+    assert!(
+        verification
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "missing_proof_command")
+    );
+    assert!(!verification.self_contained);
+
+    let mut local_fallback = fresh_handoff_capsule();
+    local_fallback.proof_commands[0].remote_observed = false;
+    let verification = verify_swarm_handoff_capsule(&local_fallback);
+    assert_eq!(
+        verification.decision,
+        SwarmHandoffDecision::UnsafeToContinue
+    );
+    assert!(
+        verification
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "missing_remote_proof")
+    );
+
+    let mut stale_reservation = fresh_handoff_capsule();
+    stale_reservation.active_reservations[0].expires_at_epoch_secs =
+        stale_reservation.active_reservations[0].observed_at_epoch_secs;
+    let verification = verify_swarm_handoff_capsule(&stale_reservation);
+    assert_eq!(
+        verification.decision,
+        SwarmHandoffDecision::NarrowRefreshRequired
+    );
+    assert!(
+        verification
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "stale_reservation")
+    );
+
+    let mut dirty_owned = fresh_handoff_capsule();
+    dirty_owned.dirty_paths.push(SwarmHandoffDirtyPath {
+        path: "src/lab/swarm_replay.rs".to_string(),
+        owner: SwarmHandoffDirtyOwner::CurrentAgent,
+        owner_agent: Some("GreenMountain".to_string()),
+    });
+    let verification = verify_swarm_handoff_capsule(&dirty_owned);
+    assert_eq!(
+        verification.decision,
+        SwarmHandoffDecision::NarrowRefreshRequired
+    );
+    assert!(
+        verification
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "dirty_owned_path")
+    );
+
+    let mut dirty_peer = fresh_handoff_capsule();
+    dirty_peer.dirty_paths.push(SwarmHandoffDirtyPath {
+        path: "src/atp/inbox/mod.rs".to_string(),
+        owner: SwarmHandoffDirtyOwner::PeerAgent,
+        owner_agent: Some("SunnyWillow".to_string()),
+    });
+    let verification = verify_swarm_handoff_capsule(&dirty_peer);
+    assert_eq!(verification.decision, SwarmHandoffDecision::CoordinateFirst);
+    assert!(
+        verification
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "dirty_peer_path")
+    );
+
+    let mut uncommented_commit = fresh_handoff_capsule();
+    uncommented_commit.pushed_commits[0].recorded_in_beads_comment = false;
+    let verification = verify_swarm_handoff_capsule(&uncommented_commit);
+    assert_eq!(verification.decision, SwarmHandoffDecision::CoordinateFirst);
+    assert!(
+        verification
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "pushed_commit_missing_comment")
+    );
+
+    let mut unresolved_ack = fresh_handoff_capsule();
+    unresolved_ack.inbox_acks[0].acknowledged = false;
+    let verification = verify_swarm_handoff_capsule(&unresolved_ack);
+    assert_eq!(verification.decision, SwarmHandoffDecision::CoordinateFirst);
+    assert!(
+        verification
+            .reasons
+            .iter()
+            .any(|reason| reason.code == "unresolved_inbox_ack")
+    );
+    assert!(
+        !verification.mutates_external_state,
+        "verifier must remain classification-only even on unsafe handoffs"
     );
 }
 

@@ -45,10 +45,10 @@ pub use replay::{
     AtpReplayCoordinator, AtpReplayResult, ReplayError, TraceMinimizer, TraceMinimizerConfig,
 };
 
+use crate::lab::oracle::OracleStats;
 use crate::lab::oracle::evidence::{
     BayesFactor, EvidenceEntry, EvidenceLine, EvidenceStrength, LogLikelihoodContributions,
 };
-use crate::lab::oracle::OracleStats;
 use crate::trace::{TraceBuffer, TraceData, TraceEvent, TraceEventKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

@@ -1,17 +1,511 @@
 //! ATP doctor reports.
 
+use crate::atp::path::{
+    PathAttemptState, PathBudget, PathCandidate, PathCandidateId, PathDiagnosticSnapshot,
+    PathFailureKind, PathFamily, PathKind, PathOutcome, PathOutcomeResult, PathRace,
+    PathSelectionReason, PathSuccessKind,
+};
 use crate::atp::platform::{
     CapabilityProbe, FilesystemCapabilityProfile, NetworkCapabilityProfile,
     PlatformCapabilityProvider, PlatformCapabilityReport, PlatformProbeFamily, ProbeSource,
     ServiceCapabilityProfile, build_atp_platform_capability_report,
     detect_atp_platform_capabilities,
 };
+use serde::{Deserialize, Serialize};
 
 /// Stable schema for ATP platform doctor output.
 pub const ATP_PLATFORM_DOCTOR_SCHEMA: &str = "asupersync.atp.doctor.platform.v1";
 
 /// Stable schema for one ATP platform probe log entry.
 pub const ATP_PLATFORM_PROBE_LOG_SCHEMA: &str = "asupersync.atp.doctor.platform.probe_log.v1";
+
+/// Stable schema for ATP path doctor output.
+pub const ATP_PATH_DOCTOR_SCHEMA: &str = "asupersync.atp.doctor.path.v1";
+
+/// Stable schema for one ATP path trace attempt log entry.
+pub const ATP_PATH_TRACE_ATTEMPT_SCHEMA: &str =
+    "asupersync.atp.doctor.path.trace_attempt.v1";
+
+/// ATP path doctor document for peer reachability diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AtpPathDoctorDocument {
+    /// Stable document schema.
+    pub schema_version: String,
+    /// Redaction-safe peer label supplied by the caller.
+    pub peer: String,
+    /// Stable summary of the path race.
+    pub summary: AtpPathDoctorSummary,
+    /// Selected path, when one candidate won.
+    pub selected_path: Option<AtpPathDoctorSelectedPath>,
+    /// Deterministic candidate table.
+    pub candidates: Vec<AtpPathDoctorCandidate>,
+    /// Structured path trace attempt rows.
+    pub trace: Vec<AtpPathTraceAttemptLogEntry>,
+    /// Concise operator recommendations.
+    pub recommendations: Vec<AtpPathDoctorRecommendation>,
+}
+
+/// Stable summary section for ATP path doctor output.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AtpPathDoctorSummary {
+    /// Overall health bucket for automation.
+    pub overall_health: String,
+    /// Machine-readable selection reason.
+    pub reason_code: String,
+    /// Selected path family, when a candidate won.
+    pub selected_family: Option<String>,
+    /// Total candidates in the race.
+    pub candidate_count: usize,
+    /// Candidates still actively racing.
+    pub racing_count: usize,
+    /// Candidates that succeeded.
+    pub success_count: usize,
+    /// Candidates that failed.
+    pub failure_count: usize,
+    /// Candidates cancelled without loser-drain classification.
+    pub cancelled_count: usize,
+    /// Candidates drained because a different path won.
+    pub drained_loser_count: usize,
+    /// Direct path candidates.
+    pub direct_count: usize,
+    /// Tailscale path candidates.
+    pub tailscale_count: usize,
+    /// Relay path candidates.
+    pub relay_count: usize,
+    /// Offline mailbox path candidates.
+    pub mailbox_count: usize,
+}
+
+/// Selected ATP path entry for path doctor output.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AtpPathDoctorSelectedPath {
+    /// Candidate id.
+    pub candidate_id: u64,
+    /// Candidate kind.
+    pub kind: String,
+    /// Candidate family.
+    pub family: String,
+    /// Path trace id for correlation with ATP logs.
+    pub trace_id: u64,
+    /// Observed RTT, when the selected path reported one.
+    pub observed_rtt_micros: Option<u64>,
+}
+
+/// Stable candidate row for ATP path doctor JSON.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AtpPathDoctorCandidate {
+    /// Candidate id.
+    pub candidate_id: u64,
+    /// Candidate kind.
+    pub kind: String,
+    /// Candidate family.
+    pub family: String,
+    /// Path trace id for correlation with ATP logs.
+    pub trace_id: u64,
+    /// Stable attempt state.
+    pub state: String,
+    /// Terminal outcome code, when any.
+    pub outcome: Option<String>,
+    /// Whether this is the selected path.
+    pub selected: bool,
+    /// Whether this candidate was drained after losing the race.
+    pub drained_loser: bool,
+    /// Winning candidate id when this candidate is a drained loser.
+    pub winner_candidate_id: Option<u64>,
+    /// Attempt budget snapshot.
+    pub budget: AtpPathDoctorBudget,
+    /// Security/privacy properties for this path.
+    pub security: AtpPathDoctorSecurity,
+    /// Monotonic completion timestamp in microseconds, when terminal.
+    pub completed_at_micros: Option<u64>,
+    /// Observed RTT, when available.
+    pub observed_rtt_micros: Option<u64>,
+    /// Probe/control bytes sent while establishing the path.
+    pub bytes_sent: u64,
+    /// Probe/control bytes received while establishing the path.
+    pub bytes_received: u64,
+}
+
+/// Attempt budget snapshot for path doctor output.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AtpPathDoctorBudget {
+    /// Maximum time spent establishing the path.
+    pub connect_timeout_micros: u64,
+    /// Maximum time spent draining a losing attempt after cancellation.
+    pub loser_drain_timeout_micros: u64,
+    /// Maximum probe bytes allowed before validation.
+    pub max_probe_bytes: u64,
+}
+
+/// Security/privacy properties for one path candidate.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AtpPathDoctorSecurity {
+    /// Whether the path requires authenticated ATP peer identity.
+    pub authenticated_peer: bool,
+    /// Whether ATP payload bytes remain encrypted end to end.
+    pub end_to_end_encrypted: bool,
+    /// Whether the remote peer can directly see the local public IP.
+    pub exposes_local_ip_to_peer: bool,
+    /// Whether a third-party relay sees peer metadata or timing.
+    pub relay_metadata_visible: bool,
+    /// Whether the path can complete while peers are not online together.
+    pub store_and_forward: bool,
+}
+
+/// Structured trace row for one ATP path attempt.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AtpPathTraceAttemptLogEntry {
+    /// Stable log-entry schema.
+    pub schema_version: String,
+    /// Candidate id.
+    pub candidate_id: u64,
+    /// Path trace id.
+    pub trace_id: u64,
+    /// Candidate kind.
+    pub kind: String,
+    /// Candidate family.
+    pub family: String,
+    /// Stable attempt state.
+    pub state: String,
+    /// Terminal outcome code, when any.
+    pub outcome: Option<String>,
+    /// Whether this is the selected path.
+    pub selected: bool,
+    /// Concise detail suitable for human and proof summaries.
+    pub detail: String,
+}
+
+/// Path doctor recommendation row.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AtpPathDoctorRecommendation {
+    /// Severity bucket.
+    pub severity: String,
+    /// Stable recommendation code.
+    pub code: String,
+    /// Operator-facing message.
+    pub message: String,
+}
+
+/// Builds an ATP path doctor document from a path race.
+#[must_use]
+pub fn build_path_doctor_document(
+    peer: impl Into<String>,
+    race: &PathRace,
+) -> AtpPathDoctorDocument {
+    let snapshot = race.diagnostic_snapshot();
+    let winner = race.winner();
+    let candidates = race
+        .candidates()
+        .map(|candidate| path_doctor_candidate(candidate, winner))
+        .collect::<Vec<_>>();
+    let trace = race
+        .candidates()
+        .map(|candidate| path_trace_entry(candidate, winner))
+        .collect::<Vec<_>>();
+    let selected_path = winner.and_then(|id| race.candidate(id).map(selected_path));
+    let recommendations = path_recommendations(&snapshot);
+
+    AtpPathDoctorDocument {
+        schema_version: ATP_PATH_DOCTOR_SCHEMA.to_string(),
+        peer: peer.into(),
+        summary: path_summary(&snapshot),
+        selected_path,
+        candidates,
+        trace,
+        recommendations,
+    }
+}
+
+/// Renders an ATP path doctor document for concise human CLI output.
+#[must_use]
+pub fn render_path_doctor_human(document: &AtpPathDoctorDocument) -> String {
+    let mut lines = vec![
+        format!("Schema: {}", document.schema_version),
+        format!("Peer: {}", document.peer),
+        format!(
+            "Overall: {} reason={}",
+            document.summary.overall_health, document.summary.reason_code
+        ),
+    ];
+
+    if let Some(selected) = &document.selected_path {
+        lines.push(format!(
+            "Selected: candidate={} kind={} family={} trace={}",
+            selected.candidate_id, selected.kind, selected.family, selected.trace_id
+        ));
+    } else {
+        lines.push("Selected: none".to_string());
+    }
+
+    lines.push(format!("Candidates: {}", document.candidates.len()));
+    for candidate in &document.candidates {
+        let outcome = candidate.outcome.as_deref().unwrap_or("none");
+        lines.push(format!(
+            "  - candidate={} kind={} state={} outcome={} trace={}",
+            candidate.candidate_id, candidate.kind, candidate.state, outcome, candidate.trace_id
+        ));
+    }
+
+    lines.push(format!("Recommendations: {}", document.recommendations.len()));
+    for recommendation in &document.recommendations {
+        lines.push(format!(
+            "  - {} {}: {}",
+            recommendation.severity, recommendation.code, recommendation.message
+        ));
+    }
+
+    lines.push(format!("Structured trace rows: {}", document.trace.len()));
+    lines.join("\n")
+}
+
+fn path_summary(snapshot: &PathDiagnosticSnapshot) -> AtpPathDoctorSummary {
+    AtpPathDoctorSummary {
+        overall_health: path_health(snapshot.reason).to_string(),
+        reason_code: snapshot.reason.code().to_string(),
+        selected_family: snapshot
+            .selected_family()
+            .map(|family| path_family_label(family).to_string()),
+        candidate_count: snapshot.candidate_count,
+        racing_count: snapshot.racing_count,
+        success_count: snapshot.success_count,
+        failure_count: snapshot.failure_count,
+        cancelled_count: snapshot.cancelled_count,
+        drained_loser_count: snapshot.drained_loser_count,
+        direct_count: snapshot.direct_count,
+        tailscale_count: snapshot.tailscale_count,
+        relay_count: snapshot.relay_count,
+        mailbox_count: snapshot.mailbox_count,
+    }
+}
+
+fn selected_path(candidate: &PathCandidate) -> AtpPathDoctorSelectedPath {
+    let observed_rtt_micros = terminal_outcome(candidate.state).and_then(|outcome| match outcome
+        .result
+    {
+        PathOutcomeResult::Success(_) => outcome.observed_rtt_micros,
+        PathOutcomeResult::Failure(_) | PathOutcomeResult::Cancelled(_) => None,
+    });
+
+    AtpPathDoctorSelectedPath {
+        candidate_id: candidate.id.get(),
+        kind: path_kind_label(candidate.kind).to_string(),
+        family: path_family_label(candidate.kind.family()).to_string(),
+        trace_id: candidate.trace_id.get(),
+        observed_rtt_micros,
+    }
+}
+
+fn path_doctor_candidate(candidate: &PathCandidate, winner: Option<PathCandidateId>) -> AtpPathDoctorCandidate {
+    let outcome = terminal_outcome(candidate.state);
+    let (drained_loser, winner_candidate_id) = match candidate.state {
+        PathAttemptState::DrainedLoser { winner, .. } => (true, Some(winner.get())),
+        _ => (false, None),
+    };
+
+    AtpPathDoctorCandidate {
+        candidate_id: candidate.id.get(),
+        kind: path_kind_label(candidate.kind).to_string(),
+        family: path_family_label(candidate.kind.family()).to_string(),
+        trace_id: candidate.trace_id.get(),
+        state: path_state_label(candidate.state).to_string(),
+        outcome: outcome.map(|outcome| path_outcome_label(outcome.result).to_string()),
+        selected: winner == Some(candidate.id),
+        drained_loser,
+        winner_candidate_id,
+        budget: path_budget(candidate.budget),
+        security: AtpPathDoctorSecurity {
+            authenticated_peer: candidate.security.authenticated_peer,
+            end_to_end_encrypted: candidate.security.end_to_end_encrypted,
+            exposes_local_ip_to_peer: candidate.security.exposes_local_ip_to_peer,
+            relay_metadata_visible: candidate.security.relay_metadata_visible,
+            store_and_forward: candidate.security.store_and_forward,
+        },
+        completed_at_micros: outcome.map(|outcome| outcome.completed_at_micros),
+        observed_rtt_micros: outcome.and_then(|outcome| outcome.observed_rtt_micros),
+        bytes_sent: outcome.map_or(0, |outcome| outcome.bytes_sent),
+        bytes_received: outcome.map_or(0, |outcome| outcome.bytes_received),
+    }
+}
+
+fn path_trace_entry(candidate: &PathCandidate, winner: Option<PathCandidateId>) -> AtpPathTraceAttemptLogEntry {
+    let outcome = terminal_outcome(candidate.state);
+    AtpPathTraceAttemptLogEntry {
+        schema_version: ATP_PATH_TRACE_ATTEMPT_SCHEMA.to_string(),
+        candidate_id: candidate.id.get(),
+        trace_id: candidate.trace_id.get(),
+        kind: path_kind_label(candidate.kind).to_string(),
+        family: path_family_label(candidate.kind.family()).to_string(),
+        state: path_state_label(candidate.state).to_string(),
+        outcome: outcome.map(|outcome| path_outcome_label(outcome.result).to_string()),
+        selected: winner == Some(candidate.id),
+        detail: path_attempt_detail(candidate.state),
+    }
+}
+
+const fn path_budget(budget: PathBudget) -> AtpPathDoctorBudget {
+    AtpPathDoctorBudget {
+        connect_timeout_micros: budget.connect_timeout_micros,
+        loser_drain_timeout_micros: budget.loser_drain_timeout_micros,
+        max_probe_bytes: budget.max_probe_bytes,
+    }
+}
+
+fn path_recommendations(snapshot: &PathDiagnosticSnapshot) -> Vec<AtpPathDoctorRecommendation> {
+    let (severity, code, message) = match snapshot.reason {
+        PathSelectionReason::DirectCandidateValidated => (
+            "info",
+            "direct_path_selected",
+            "Direct path is usable; relay is not required for this peer.",
+        ),
+        PathSelectionReason::TailscaleCandidateValidated => (
+            "info",
+            "tailscale_path_selected",
+            "Optional private-network path is usable; keep non-Tailscale fallback candidates visible.",
+        ),
+        PathSelectionReason::RelayFallbackValidated => (
+            "warning",
+            "relay_fallback_selected",
+            "Relay path won; inspect failed direct candidates before assuming peer-to-peer reachability.",
+        ),
+        PathSelectionReason::OfflineMailboxAccepted => (
+            "warning",
+            "offline_mailbox_selected",
+            "Store-and-forward path accepted the transfer; peer co-presence was not proven.",
+        ),
+        PathSelectionReason::RaceStillPending => (
+            "warning",
+            "path_race_pending",
+            "Path race is still pending; wait for terminal outcomes before presenting a reachability claim.",
+        ),
+        PathSelectionReason::NoSuccessfulCandidate => (
+            "error",
+            "no_successful_candidate",
+            "No candidate succeeded; check NAT, UDP reachability, relay availability, and policy denial logs.",
+        ),
+        PathSelectionReason::MissingWinnerCandidate => (
+            "critical",
+            "missing_winner_candidate",
+            "Path race winner metadata is inconsistent; preserve the trace bundle for debugging.",
+        ),
+    };
+
+    vec![AtpPathDoctorRecommendation {
+        severity: severity.to_string(),
+        code: code.to_string(),
+        message: message.to_string(),
+    }]
+}
+
+const fn path_health(reason: PathSelectionReason) -> &'static str {
+    match reason {
+        PathSelectionReason::DirectCandidateValidated
+        | PathSelectionReason::TailscaleCandidateValidated => "healthy",
+        PathSelectionReason::RelayFallbackValidated
+        | PathSelectionReason::OfflineMailboxAccepted
+        | PathSelectionReason::RaceStillPending => "degraded",
+        PathSelectionReason::NoSuccessfulCandidate => "unreachable",
+        PathSelectionReason::MissingWinnerCandidate => "critical",
+    }
+}
+
+fn path_attempt_detail(state: PathAttemptState) -> String {
+    match state {
+        PathAttemptState::Pending => "candidate has not started".to_string(),
+        PathAttemptState::Racing => "candidate is actively racing".to_string(),
+        PathAttemptState::Succeeded(outcome) => format!(
+            "{} at {}us",
+            path_outcome_label(outcome.result),
+            outcome.completed_at_micros
+        ),
+        PathAttemptState::Failed(outcome) => format!(
+            "{} at {}us",
+            path_outcome_label(outcome.result),
+            outcome.completed_at_micros
+        ),
+        PathAttemptState::Cancelled(outcome) => format!(
+            "{} at {}us",
+            path_outcome_label(outcome.result),
+            outcome.completed_at_micros
+        ),
+        PathAttemptState::DrainedLoser { winner, outcome } => format!(
+            "lost to candidate {} and drained as {} at {}us",
+            winner.get(),
+            path_outcome_label(outcome.result),
+            outcome.completed_at_micros
+        ),
+    }
+}
+
+const fn terminal_outcome(state: PathAttemptState) -> Option<PathOutcome> {
+    match state {
+        PathAttemptState::Succeeded(outcome)
+        | PathAttemptState::Failed(outcome)
+        | PathAttemptState::Cancelled(outcome)
+        | PathAttemptState::DrainedLoser { outcome, .. } => Some(outcome),
+        PathAttemptState::Pending | PathAttemptState::Racing => None,
+    }
+}
+
+const fn path_state_label(state: PathAttemptState) -> &'static str {
+    match state {
+        PathAttemptState::Pending => "pending",
+        PathAttemptState::Racing => "racing",
+        PathAttemptState::Succeeded(_) => "succeeded",
+        PathAttemptState::Failed(_) => "failed",
+        PathAttemptState::Cancelled(_) => "cancelled",
+        PathAttemptState::DrainedLoser { .. } => "drained_loser",
+    }
+}
+
+const fn path_outcome_label(result: PathOutcomeResult) -> &'static str {
+    match result {
+        PathOutcomeResult::Success(kind) => match kind {
+            PathSuccessKind::DirectValidated => "success_direct_validated",
+            PathSuccessKind::TailscaleSelected => "success_tailscale_selected",
+            PathSuccessKind::RelaySelected => "success_relay_selected",
+            PathSuccessKind::MailboxAccepted => "success_mailbox_accepted",
+        },
+        PathOutcomeResult::Failure(kind) => match kind {
+            PathFailureKind::Timeout => "failure_timeout",
+            PathFailureKind::HardNat => "failure_hard_nat",
+            PathFailureKind::UdpBlocked => "failure_udp_blocked",
+            PathFailureKind::AuthFailure => "failure_auth",
+            PathFailureKind::PolicyDenied => "failure_policy_denied",
+            PathFailureKind::RelayUnavailable => "failure_relay_unavailable",
+            PathFailureKind::UnsupportedPlatform => "failure_unsupported_platform",
+            PathFailureKind::ProtocolError => "failure_protocol",
+        },
+        PathOutcomeResult::Cancelled(reason) => match reason {
+            crate::atp::path::PathCancelReason::LoserOfRace => "cancelled_loser_of_race",
+            crate::atp::path::PathCancelReason::ParentCancelled => "cancelled_parent",
+            crate::atp::path::PathCancelReason::BudgetExceeded => "cancelled_budget_exceeded",
+        },
+    }
+}
+
+const fn path_kind_label(kind: PathKind) -> &'static str {
+    match kind {
+        PathKind::LanMulticast => "lan_multicast",
+        PathKind::ExplicitPublicUdp => "explicit_public_udp",
+        PathKind::PublicIpv6 => "public_ipv6",
+        PathKind::NatPunchedUdp => "nat_punched_udp",
+        PathKind::TailscaleIp => "tailscale_ip",
+        PathKind::AtpRelayUdp => "atp_relay_udp",
+        PathKind::AtpRelayTcpTls443 => "atp_relay_tcp_tls_443",
+        PathKind::MasqueConnectUdp => "masque_connect_udp",
+        PathKind::OfflineMailbox => "offline_mailbox",
+    }
+}
+
+fn path_family_label(family: PathFamily) -> String {
+    match family {
+        PathFamily::Direct => "direct",
+        PathFamily::Tailscale => "tailscale",
+        PathFamily::Relay => "relay",
+        PathFamily::OfflineMailbox => "offline_mailbox",
+    }
+    .to_string()
+}
 
 /// ATP doctor report for platform capability diagnostics.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
