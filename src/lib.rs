@@ -598,6 +598,8 @@ pub mod real_channel_oneshot_cancel_symbol_cancel_nested_scope_integration_e2e_t
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h3_server_h3_body_streaming_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_distributed_snapshot_trace_distributed_lattice_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_web_multipart_codec_raptorq_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_web_sse_broadcast_fanout_e2e_tests;
