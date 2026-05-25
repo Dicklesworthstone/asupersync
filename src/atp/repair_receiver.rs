@@ -1020,7 +1020,6 @@ mod tests {
     fn test_symbol_parameter_validation() {
         let (group_id, repair_group) = create_test_repair_group();
         let manifest_root = repair_group.manifest_root.clone();
-        let object_id = repair_group.object_id.clone();
 
         let mut repair_groups = BTreeMap::new();
         repair_groups.insert(group_id.clone(), repair_group);
