@@ -260,7 +260,10 @@ impl MultiPeerContract for CacheContract {
                 && (peer.capabilities.seeding_enabled || matches!(peer.role, PeerRole::Relay))
         });
 
-        if has_shared_cache_provider && !scenario.transfer.encrypted {
+        if has_shared_cache_provider
+            && !scenario.transfer.encrypted
+            && !has_explicit_public_cache_policy_marker(scenario)
+        {
             return Err(
                 "Shared cache providers require encrypted transfers until explicit public-data cache policy exists"
                     .to_string(),
@@ -315,6 +318,22 @@ impl MultiPeerContract for CacheContract {
 
         Ok(())
     }
+}
+
+fn has_explicit_public_cache_policy_marker(scenario: &MultiPeerScenario) -> bool {
+    scenario.expectations.log_events.iter().any(|event| {
+        matches!(
+            event.event_type.as_str(),
+            "cache_store" | "relay_cache_store"
+        ) && event
+            .required_fields
+            .iter()
+            .any(|field| field == "storage_class")
+            && event
+                .required_fields
+                .iter()
+                .any(|field| field == "public_policy_id")
+    })
 }
 
 /// Adversarial scenario contract

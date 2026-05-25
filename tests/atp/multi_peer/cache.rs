@@ -590,6 +590,22 @@ mod tests {
     }
 
     #[test]
+    fn test_shared_cache_accepts_plaintext_with_explicit_public_policy_marker() {
+        let mut scenario = CacheScenarios::relay_cache_handoff();
+        scenario.transfer.encrypted = false;
+        scenario.expectations.log_events.push(LogEventExpectation {
+            event_type: "cache_store".to_string(),
+            required_fields: vec!["storage_class".to_string(), "public_policy_id".to_string()],
+            count: None,
+        });
+
+        let contract = CacheContract;
+        contract
+            .validate_scenario(&scenario)
+            .expect("explicit public policy marker should allow shared plaintext cache");
+    }
+
+    #[test]
     fn test_seed_mode_requires_cache_authorization() {
         let mut scenario = CacheScenarios::seed_mode();
         let seed_peer = scenario
