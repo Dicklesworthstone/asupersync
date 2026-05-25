@@ -8,6 +8,8 @@
 
 pub mod actor;
 pub mod autotune;
+#[cfg(feature = "benchmark-adapters")]
+pub mod benchmark;
 pub mod diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;

@@ -122,6 +122,8 @@ loom-tests = ["dep:loom"]
 cancel-correctness-oracle = []
 # Enable stack trace capture for lab oracle violations.
 lab-stack-traces = ["dep:backtrace", "dep:rustc-demangle"]
+# Enable benchmark adapter framework for performance testing
+benchmark-adapters = ["dep:async-trait", "dep:tokio", "dep:num_cpus", "dep:whoami", "dep:chrono"]
 # Enable fuzzing support with arbitrary derive macros and OTLP request helpers.
 # This intentionally enables opentelemetry-proto's tonic-generated messages and
 # is outside the production no-Tokio guarantee.
@@ -191,6 +193,13 @@ visibility = { version = "0.1", optional = true }
 arbitrary = { version = "1", features = ["derive"], optional = true }
 # Tempfile helper for test-internals and test logging utilities.
 tempfile = "3.25"
+# Async trait support for benchmark adapters
+async-trait = { version = "0.1", optional = true }
+# Tokio async runtime for benchmark execution
+tokio = { version = "1.0", features = ["rt", "fs", "process"], optional = true }
+# System information for benchmark environment
+num_cpus = { version = "1.0", optional = true }
+whoami = { version = "1.6", optional = true }
 # TLS support via rustls
 rustls = { version = "0.23.39", default-features = false, features = ["std", "tls12"], optional = true }
 rustls-pki-types = { version = "1.14.1", optional = true }
