@@ -574,6 +574,64 @@ mod tests {
     }
 
     #[test]
+    fn test_shared_cache_rejects_plaintext_without_public_policy() {
+        let mut scenario = CacheScenarios::relay_cache_handoff();
+        scenario.transfer.encrypted = false;
+
+        let contract = CacheContract;
+        let error = contract
+            .validate_scenario(&scenario)
+            .expect_err("shared relay cache should reject plaintext transfers");
+
+        assert!(
+            error.contains("explicit public-data cache policy"),
+            "unexpected validation error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_seed_mode_requires_cache_authorization() {
+        let mut scenario = CacheScenarios::seed_mode();
+        let seed_peer = scenario
+            .peers
+            .iter_mut()
+            .find(|peer| matches!(peer.role, PeerRole::Seed))
+            .expect("seed peer");
+        seed_peer.capabilities.cache_enabled = false;
+
+        let contract = CacheContract;
+        let error = contract
+            .validate_scenario(&scenario)
+            .expect_err("seeding must require cache authorization");
+
+        assert!(
+            error.contains("must have cache enabled"),
+            "unexpected validation error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_cache_peer_requires_nonzero_storage_quota() {
+        let mut scenario = CacheScenarios::local_cache_hit_miss();
+        let receiver = scenario
+            .peers
+            .iter_mut()
+            .find(|peer| matches!(peer.role, PeerRole::Receiver))
+            .expect("receiver peer");
+        receiver.capabilities.storage_quota = Some(0);
+
+        let contract = CacheContract;
+        let error = contract
+            .validate_scenario(&scenario)
+            .expect_err("cache-enabled peer should require nonzero quota");
+
+        assert!(
+            error.contains("nonzero storage quota"),
+            "unexpected validation error: {error}"
+        );
+    }
+
+    #[test]
     fn test_seed_mode_scenario() {
         let scenario = CacheScenarios::seed_mode();
 

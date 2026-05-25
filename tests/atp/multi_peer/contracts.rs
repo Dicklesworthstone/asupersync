@@ -230,6 +230,43 @@ impl MultiPeerContract for CacheContract {
             return Err("Cache scenario requires at least one peer with cache enabled".to_string());
         }
 
+        for peer in &scenario.peers {
+            if peer.capabilities.cache_enabled {
+                let Some(quota) = peer.capabilities.storage_quota else {
+                    return Err(format!(
+                        "Cache-enabled peer {} must declare a storage quota",
+                        peer.peer_id
+                    ));
+                };
+
+                if quota == 0 {
+                    return Err(format!(
+                        "Cache-enabled peer {} must declare a nonzero storage quota",
+                        peer.peer_id
+                    ));
+                }
+            }
+
+            if peer.capabilities.seeding_enabled && !peer.capabilities.cache_enabled {
+                return Err(format!(
+                    "Seeding peer {} must have cache enabled so served chunks are indexed by policy",
+                    peer.peer_id
+                ));
+            }
+        }
+
+        let has_shared_cache_provider = scenario.peers.iter().any(|peer| {
+            peer.capabilities.cache_enabled
+                && (peer.capabilities.seeding_enabled || matches!(peer.role, PeerRole::Relay))
+        });
+
+        if has_shared_cache_provider && !scenario.transfer.encrypted {
+            return Err(
+                "Shared cache providers require encrypted transfers until explicit public-data cache policy exists"
+                    .to_string(),
+            );
+        }
+
         // Verify quota configurations for cache eviction tests
         if scenario.scenario_id.contains("eviction") {
             let has_quota = scenario
