@@ -4,9 +4,10 @@
 //! for deterministic NAT/path validation scenarios.
 
 use asupersync::atp::path::PathKind;
-use asupersync::lab::atp_path::{AtpPathLabHarness, AtpPathTestConfig};
+use asupersync::lab::atp_path::{AtpPathEventKind, AtpPathLabHarness, AtpPathTestConfig};
 use asupersync::lab::{AtpLabRegime, AtpLabScenario};
 use asupersync::net::atp::path::NatProfile;
+use std::collections::BTreeSet;
 
 #[tokio::test]
 async fn test_atp_path_lab_lan_ipv6_scenario() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,6 +15,7 @@ async fn test_atp_path_lab_lan_ipv6_scenario() -> Result<(), Box<dyn std::error:
     let mut harness = AtpPathLabHarness::new(AtpPathTestConfig::lan_ipv6());
 
     let scenario = AtpLabScenario::new("easy-nat-direct", 0xA7F0_0001)
+        .with_regime(AtpLabRegime::LanMulticast)
         .with_regime(AtpLabRegime::EasyNat)
         .with_regime(AtpLabRegime::Ipv6Direct);
 
@@ -27,7 +29,12 @@ async fn test_atp_path_lab_lan_ipv6_scenario() -> Result<(), Box<dyn std::error:
 
     assert!(
         result.path_validation.lan_multicast_succeeded,
-        "LAN multicast should succeed for EasyNat regime"
+        "LAN multicast should succeed for LanMulticast regime"
+    );
+
+    assert!(
+        result.path_validation.nat_punch_succeeded,
+        "NAT hole punching should succeed for EasyNat regime"
     );
 
     assert!(
@@ -60,8 +67,8 @@ async fn test_atp_path_lab_lan_ipv6_scenario() -> Result<(), Box<dyn std::error:
     );
 
     assert_eq!(
-        result.candidates_evaluated, 2,
-        "Should evaluate exactly 2 path candidates"
+        result.candidates_evaluated, 3,
+        "Should evaluate exactly 3 path candidates"
     );
 
     println!(
@@ -221,7 +228,7 @@ async fn test_atp_path_lab_migration_scenario() -> Result<(), Box<dyn std::error
         .iter()
         .filter(|event| {
             matches!(
-                event.event,
+                &event.event,
                 asupersync::lab::atp_path::AtpPathEventKind::MigrationTriggered { .. }
             )
         })
@@ -237,36 +244,60 @@ async fn test_atp_path_lab_migration_scenario() -> Result<(), Box<dyn std::error
 
 #[tokio::test]
 async fn test_atp_path_lab_coverage_matrix() -> Result<(), Box<dyn std::error::Error>> {
-    // Test that our harness can handle the key regimes from the required matrix
+    // Each PathKind should have at least one deterministic lab scenario.
     let harness_config = AtpPathTestConfig::lan_ipv6();
 
-    let test_regimes = [
-        AtpLabRegime::EasyNat,
-        AtpLabRegime::Ipv6Direct,
-        AtpLabRegime::UdpBlocked,
-        AtpLabRegime::RelayOnly,
-        AtpLabRegime::PathMigration,
+    let path_matrix = [
+        (AtpLabRegime::LanMulticast, PathKind::LanMulticast),
+        (AtpLabRegime::ExplicitPublicUdp, PathKind::ExplicitPublicUdp),
+        (AtpLabRegime::Ipv6Direct, PathKind::PublicIpv6),
+        (AtpLabRegime::EasyNat, PathKind::NatPunchedUdp),
+        (AtpLabRegime::TailscalePrivateRoute, PathKind::TailscaleIp),
+        (AtpLabRegime::RelayOnly, PathKind::AtpRelayUdp),
+        (AtpLabRegime::RelayTcpTls443, PathKind::AtpRelayTcpTls443),
+        (
+            AtpLabRegime::MasqueConnectUdpProxy,
+            PathKind::MasqueConnectUdp,
+        ),
+        (AtpLabRegime::OfflineMailbox, PathKind::OfflineMailbox),
     ];
 
-    for regime in test_regimes {
+    let mut covered = BTreeSet::new();
+    for (regime, expected_kind) in path_matrix {
         let mut harness = AtpPathLabHarness::new(harness_config.clone());
 
         let scenario = AtpLabScenario::new(&format!("test-{}", regime.label()), 0xA7F0_0000)
             .with_regime(regime);
 
-        // Each regime should execute without internal errors
-        let result = harness.execute_scenario(&scenario).await;
+        let result = harness.execute_scenario(&scenario).await?;
 
-        match result {
-            Ok(_) => {
-                println!("✅ Regime {:?} executed successfully", regime);
-            }
-            Err(e) => {
-                // Some regimes might be unsupported, which is expected
-                println!("⚠️  Regime {:?} unsupported: {}", regime, e);
-            }
-        }
+        assert!(
+            result.path_validation.transfer_succeeded(),
+            "Path regime {:?} should complete a transfer",
+            regime
+        );
+        assert_eq!(
+            result.path_validation.selected_path_kind,
+            Some(expected_kind),
+            "Path regime {:?} should select {:?}",
+            regime,
+            expected_kind
+        );
+        assert!(
+            result.trace_events.iter().any(|event| matches!(
+                &event.event,
+                AtpPathEventKind::ConnectionAttempt { path_kind, .. } if *path_kind == expected_kind
+            )),
+            "Path regime {:?} should trace a {:?} connection attempt",
+            regime,
+            expected_kind
+        );
+
+        covered.insert(expected_kind);
     }
+
+    let all_path_kinds = BTreeSet::from(PathKind::ALL);
+    assert_eq!(covered, all_path_kinds);
 
     Ok(())
 }

@@ -46,13 +46,17 @@ pub fn regime_to_nat_profile(regime: AtpLabRegime) -> Option<NatProfile> {
 #[must_use]
 pub fn regime_to_path_kind(regime: AtpLabRegime) -> Option<PathKind> {
     match regime {
-        AtpLabRegime::EasyNat => Some(PathKind::LanMulticast),
+        AtpLabRegime::LanMulticast => Some(PathKind::LanMulticast),
+        AtpLabRegime::EasyNat => Some(PathKind::NatPunchedUdp),
+        AtpLabRegime::ExplicitPublicUdp => Some(PathKind::ExplicitPublicUdp),
         AtpLabRegime::Ipv6Direct => Some(PathKind::PublicIpv6),
         AtpLabRegime::HardNat | AtpLabRegime::SymmetricNat => Some(PathKind::NatPunchedUdp),
         AtpLabRegime::UdpBlocked => None, // Forces relay/mailbox fallback
         AtpLabRegime::RelayOnly => Some(PathKind::AtpRelayUdp),
+        AtpLabRegime::RelayTcpTls443 => Some(PathKind::AtpRelayTcpTls443),
         AtpLabRegime::TailscalePrivateRoute => Some(PathKind::TailscaleIp),
         AtpLabRegime::MasqueConnectUdpProxy => Some(PathKind::MasqueConnectUdp),
+        AtpLabRegime::OfflineMailbox => Some(PathKind::OfflineMailbox),
         _ => None,
     }
 }
@@ -86,8 +90,16 @@ mod tests {
     fn regime_path_kind_mapping_covers_direct_paths() {
         // Test LAN+IPv6 specific mappings
         assert_eq!(
-            regime_to_path_kind(AtpLabRegime::EasyNat),
+            regime_to_path_kind(AtpLabRegime::LanMulticast),
             Some(PathKind::LanMulticast)
+        );
+        assert_eq!(
+            regime_to_path_kind(AtpLabRegime::EasyNat),
+            Some(PathKind::NatPunchedUdp)
+        );
+        assert_eq!(
+            regime_to_path_kind(AtpLabRegime::ExplicitPublicUdp),
+            Some(PathKind::ExplicitPublicUdp)
         );
         assert_eq!(
             regime_to_path_kind(AtpLabRegime::Ipv6Direct),
@@ -98,8 +110,16 @@ mod tests {
             Some(PathKind::AtpRelayUdp)
         );
         assert_eq!(
+            regime_to_path_kind(AtpLabRegime::RelayTcpTls443),
+            Some(PathKind::AtpRelayTcpTls443)
+        );
+        assert_eq!(
             regime_to_path_kind(AtpLabRegime::MasqueConnectUdpProxy),
             Some(PathKind::MasqueConnectUdp)
+        );
+        assert_eq!(
+            regime_to_path_kind(AtpLabRegime::OfflineMailbox),
+            Some(PathKind::OfflineMailbox)
         );
     }
 

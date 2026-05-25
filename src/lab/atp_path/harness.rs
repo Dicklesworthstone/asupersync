@@ -65,12 +65,20 @@ pub struct AtpPathValidation {
     pub ipv6_direct_succeeded: bool,
     /// LAN multicast discovery succeeded
     pub lan_multicast_succeeded: bool,
+    /// Explicit public UDP endpoint succeeded
+    pub explicit_public_udp_succeeded: bool,
     /// NAT hole punching was attempted and succeeded
     pub nat_punch_succeeded: bool,
     /// Relay path was used successfully
     pub relay_succeeded: bool,
+    /// Relay over TCP/TLS 443 was used successfully
+    pub relay_tcp_tls_443_succeeded: bool,
     /// MASQUE/CONNECT-UDP fake proxy path was used successfully
     pub masque_connect_udp_succeeded: bool,
+    /// Tailscale-like private route was used successfully
+    pub tailscale_private_route_succeeded: bool,
+    /// Offline mailbox store-and-forward path was used successfully
+    pub offline_mailbox_succeeded: bool,
     /// Path migration occurred and preserved transfer
     pub migration_preserved_transfer: bool,
     /// Final selected path kind
@@ -86,9 +94,13 @@ impl AtpPathValidation {
         Self {
             ipv6_direct_succeeded: false,
             lan_multicast_succeeded: false,
+            explicit_public_udp_succeeded: false,
             nat_punch_succeeded: false,
             relay_succeeded: false,
+            relay_tcp_tls_443_succeeded: false,
             masque_connect_udp_succeeded: false,
+            tailscale_private_route_succeeded: false,
+            offline_mailbox_succeeded: false,
             migration_preserved_transfer: false,
             selected_path_kind: None,
             detected_nat_profile: NatProfile::Unknown,
@@ -98,13 +110,20 @@ impl AtpPathValidation {
     /// Check if any direct path succeeded.
     #[must_use]
     pub fn has_direct_path(&self) -> bool {
-        self.ipv6_direct_succeeded || self.lan_multicast_succeeded || self.nat_punch_succeeded
+        self.ipv6_direct_succeeded
+            || self.lan_multicast_succeeded
+            || self.explicit_public_udp_succeeded
+            || self.nat_punch_succeeded
     }
 
     /// Check if the validation represents a successful transfer.
     #[must_use]
     pub fn transfer_succeeded(&self) -> bool {
-        self.selected_path_kind.is_some() && (self.has_direct_path() || self.relay_succeeded)
+        self.selected_path_kind.is_some()
+            && (self.has_direct_path()
+                || self.tailscale_private_route_succeeded
+                || self.relay_succeeded
+                || self.offline_mailbox_succeeded)
     }
 }
 
@@ -297,10 +316,25 @@ impl AtpPathLabHarness {
         let mut candidates_evaluated = 0;
 
         match regime {
+            AtpLabRegime::LanMulticast => {
+                candidates_evaluated += self
+                    .test_path_kind(PathKind::LanMulticast, trace_id, trace_events, validation)
+                    .await?;
+            }
             AtpLabRegime::EasyNat => {
                 validation.detected_nat_profile = NatProfile::LikelyEasyNat;
                 candidates_evaluated += self
-                    .test_path_kind(PathKind::LanMulticast, trace_id, trace_events, validation)
+                    .test_path_kind(PathKind::NatPunchedUdp, trace_id, trace_events, validation)
+                    .await?;
+            }
+            AtpLabRegime::ExplicitPublicUdp => {
+                candidates_evaluated += self
+                    .test_path_kind(
+                        PathKind::ExplicitPublicUdp,
+                        trace_id,
+                        trace_events,
+                        validation,
+                    )
                     .await?;
             }
             AtpLabRegime::Ipv6Direct => {
@@ -327,6 +361,16 @@ impl AtpPathLabHarness {
                     .test_path_kind(PathKind::AtpRelayUdp, trace_id, trace_events, validation)
                     .await?;
             }
+            AtpLabRegime::RelayTcpTls443 => {
+                candidates_evaluated += self
+                    .test_path_kind(
+                        PathKind::AtpRelayTcpTls443,
+                        trace_id,
+                        trace_events,
+                        validation,
+                    )
+                    .await?;
+            }
             AtpLabRegime::TailscalePrivateRoute => {
                 candidates_evaluated += self
                     .test_path_kind(PathKind::TailscaleIp, trace_id, trace_events, validation)
@@ -340,6 +384,11 @@ impl AtpPathLabHarness {
                         trace_events,
                         validation,
                     )
+                    .await?;
+            }
+            AtpLabRegime::OfflineMailbox => {
+                candidates_evaluated += self
+                    .test_path_kind(PathKind::OfflineMailbox, trace_id, trace_events, validation)
                     .await?;
             }
             AtpLabRegime::PathMigration => {
@@ -392,6 +441,10 @@ impl AtpPathLabHarness {
                 validation.lan_multicast_succeeded = true;
                 true
             }
+            PathKind::ExplicitPublicUdp => {
+                validation.explicit_public_udp_succeeded = true;
+                true
+            }
             PathKind::PublicIpv6 => {
                 validation.ipv6_direct_succeeded = true;
                 true
@@ -402,8 +455,13 @@ impl AtpPathLabHarness {
                 validation.nat_punch_succeeded = success;
                 success
             }
-            PathKind::AtpRelayUdp | PathKind::AtpRelayTcpTls443 => {
+            PathKind::AtpRelayUdp => {
                 validation.relay_succeeded = true;
+                true
+            }
+            PathKind::AtpRelayTcpTls443 => {
+                validation.relay_succeeded = true;
+                validation.relay_tcp_tls_443_succeeded = true;
                 true
             }
             PathKind::MasqueConnectUdp => {
@@ -411,8 +469,14 @@ impl AtpPathLabHarness {
                 validation.masque_connect_udp_succeeded = true;
                 true
             }
-            PathKind::TailscaleIp => true,
-            _ => false,
+            PathKind::TailscaleIp => {
+                validation.tailscale_private_route_succeeded = true;
+                true
+            }
+            PathKind::OfflineMailbox => {
+                validation.offline_mailbox_succeeded = true;
+                true
+            }
         };
 
         if success {
@@ -476,14 +540,22 @@ impl AtpPathLabHarness {
         // Prefer direct paths over relay paths
         if validation.ipv6_direct_succeeded {
             Some(PathKind::PublicIpv6)
+        } else if validation.explicit_public_udp_succeeded {
+            Some(PathKind::ExplicitPublicUdp)
         } else if validation.lan_multicast_succeeded {
             Some(PathKind::LanMulticast)
         } else if validation.nat_punch_succeeded {
             Some(PathKind::NatPunchedUdp)
+        } else if validation.tailscale_private_route_succeeded {
+            Some(PathKind::TailscaleIp)
         } else if validation.masque_connect_udp_succeeded {
             Some(PathKind::MasqueConnectUdp)
+        } else if validation.relay_tcp_tls_443_succeeded {
+            Some(PathKind::AtpRelayTcpTls443)
         } else if validation.relay_succeeded {
             Some(PathKind::AtpRelayUdp)
+        } else if validation.offline_mailbox_succeeded {
+            Some(PathKind::OfflineMailbox)
         } else {
             None
         }
@@ -508,6 +580,7 @@ mod tests {
         let mut harness = AtpPathLabHarness::new(AtpPathTestConfig::lan_ipv6());
 
         let scenario = AtpLabScenario::new("easy-nat-direct", 0xA7F0_0001)
+            .with_regime(AtpLabRegime::LanMulticast)
             .with_regime(AtpLabRegime::EasyNat)
             .with_regime(AtpLabRegime::Ipv6Direct);
 
@@ -515,8 +588,9 @@ mod tests {
 
         assert!(result.path_validation.transfer_succeeded());
         assert!(result.path_validation.lan_multicast_succeeded);
+        assert!(result.path_validation.nat_punch_succeeded);
         assert!(result.path_validation.ipv6_direct_succeeded);
-        assert_eq!(result.candidates_evaluated, 2);
+        assert_eq!(result.candidates_evaluated, 3);
     }
 
     #[tokio::test]

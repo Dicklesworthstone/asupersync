@@ -77,18 +77,24 @@ impl AtpLabScenario {
     pub fn required_matrix() -> Vec<Self> {
         vec![
             Self::new("easy-nat-direct", 0xA7F0_0001)
+                .with_regime(AtpLabRegime::LanMulticast)
                 .with_regime(AtpLabRegime::EasyNat)
+                .with_regime(AtpLabRegime::ExplicitPublicUdp)
                 .with_regime(AtpLabRegime::Ipv6Direct),
             Self::new("hard-nat-relay", 0xA7F0_0002)
                 .with_regime(AtpLabRegime::HardNat)
                 .with_regime(AtpLabRegime::SymmetricNat)
-                .with_regime(AtpLabRegime::RelayOnly),
+                .with_regime(AtpLabRegime::RelayOnly)
+                .with_regime(AtpLabRegime::RelayTcpTls443),
             Self::new("udp-blocked-private-route", 0xA7F0_0003)
                 .with_regime(AtpLabRegime::UdpBlocked)
                 .with_regime(AtpLabRegime::TailscalePrivateRoute),
             Self::new("enterprise-masque-connect-udp", 0xA7F0_0007)
                 .with_regime(AtpLabRegime::UdpBlocked)
                 .with_regime(AtpLabRegime::MasqueConnectUdpProxy),
+            Self::new("mailbox-only-store-forward", 0xA7F0_0008)
+                .with_regime(AtpLabRegime::UdpBlocked)
+                .with_regime(AtpLabRegime::OfflineMailbox),
             Self::new("path-migration-loss", 0xA7F0_0004)
                 .with_regime(AtpLabRegime::PathMigration)
                 .with_regime(AtpLabRegime::PacketDuplication)
@@ -205,8 +211,12 @@ impl AtpTransferLabPlan {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub enum AtpLabRegime {
+    /// LAN multicast or same-link local discovery is available.
+    LanMulticast,
     /// Easy endpoint-independent NAT.
     EasyNat,
+    /// Explicit user-provided public UDP endpoint is available.
+    ExplicitPublicUdp,
     /// Hard port-restricted NAT.
     HardNat,
     /// Symmetric NAT.
@@ -217,10 +227,14 @@ pub enum AtpLabRegime {
     Ipv6Direct,
     /// Relay is the only viable path.
     RelayOnly,
+    /// UDP-hostile network requires ATP relay over TCP/TLS 443.
+    RelayTcpTls443,
     /// Tailscale-like private route is available.
     TailscalePrivateRoute,
     /// MASQUE/CONNECT-UDP proxy is available for enterprise egress.
     MasqueConnectUdpProxy,
+    /// Store-and-forward encrypted mailbox is the only viable path.
+    OfflineMailbox,
     /// Active path migration occurs mid-transfer.
     PathMigration,
     /// Packets may be duplicated.
@@ -254,14 +268,18 @@ impl AtpLabRegime {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::LanMulticast => "lan_multicast",
             Self::EasyNat => "easy_nat",
+            Self::ExplicitPublicUdp => "explicit_public_udp",
             Self::HardNat => "hard_nat",
             Self::SymmetricNat => "symmetric_nat",
             Self::UdpBlocked => "udp_blocked",
             Self::Ipv6Direct => "ipv6_direct",
             Self::RelayOnly => "relay_only",
+            Self::RelayTcpTls443 => "relay_tcp_tls_443",
             Self::TailscalePrivateRoute => "tailscale_private_route",
             Self::MasqueConnectUdpProxy => "masque_connect_udp_proxy",
+            Self::OfflineMailbox => "offline_mailbox",
             Self::PathMigration => "path_migration",
             Self::PacketDuplication => "packet_duplication",
             Self::PacketTruncation => "packet_truncation",
@@ -284,14 +302,20 @@ impl AtpLabRegime {
 pub enum AtpLabFault {
     /// Direct path is allowed.
     DirectPath,
+    /// Explicit public UDP path is selected.
+    ExplicitPublicUdpPath,
     /// Direct path is denied.
     DirectPathBlocked,
     /// Relay path is selected.
     RelayPath,
+    /// Relay over TCP/TLS 443 is selected.
+    RelayTcpTls443Path,
     /// Private route is selected.
     PrivateRoute,
     /// MASQUE/CONNECT-UDP proxy path is selected.
     MasqueProxyPath,
+    /// Offline mailbox path is selected.
+    OfflineMailboxPath,
     /// Path migration is triggered.
     PathMigrated,
     /// Packet duplication occurs.
@@ -337,10 +361,13 @@ impl AtpLabFault {
     fn label(&self) -> &'static str {
         match self {
             Self::DirectPath => "direct_path",
+            Self::ExplicitPublicUdpPath => "explicit_public_udp_path",
             Self::DirectPathBlocked => "direct_path_blocked",
             Self::RelayPath => "relay_path",
+            Self::RelayTcpTls443Path => "relay_tcp_tls_443_path",
             Self::PrivateRoute => "private_route",
             Self::MasqueProxyPath => "masque_proxy_path",
+            Self::OfflineMailboxPath => "offline_mailbox_path",
             Self::PathMigrated => "path_migrated",
             Self::PacketDuplicated => "packet_duplicated",
             Self::PacketTruncated => "packet_truncated",
@@ -522,13 +549,18 @@ fn generate_events(scenario: &AtpLabScenario, transfer: &AtpLabTransferSpec) -> 
 
 fn fault_for_regime(regime: AtpLabRegime, rng: &mut DetRng) -> AtpLabFault {
     match regime {
-        AtpLabRegime::EasyNat | AtpLabRegime::Ipv6Direct => AtpLabFault::DirectPath,
+        AtpLabRegime::LanMulticast | AtpLabRegime::EasyNat | AtpLabRegime::Ipv6Direct => {
+            AtpLabFault::DirectPath
+        }
+        AtpLabRegime::ExplicitPublicUdp => AtpLabFault::ExplicitPublicUdpPath,
         AtpLabRegime::HardNat | AtpLabRegime::SymmetricNat | AtpLabRegime::UdpBlocked => {
             AtpLabFault::DirectPathBlocked
         }
         AtpLabRegime::RelayOnly => AtpLabFault::RelayPath,
+        AtpLabRegime::RelayTcpTls443 => AtpLabFault::RelayTcpTls443Path,
         AtpLabRegime::TailscalePrivateRoute => AtpLabFault::PrivateRoute,
         AtpLabRegime::MasqueConnectUdpProxy => AtpLabFault::MasqueProxyPath,
+        AtpLabRegime::OfflineMailbox => AtpLabFault::OfflineMailboxPath,
         AtpLabRegime::PathMigration => AtpLabFault::PathMigrated,
         AtpLabRegime::PacketDuplication => AtpLabFault::PacketDuplicated,
         AtpLabRegime::PacketTruncation => AtpLabFault::PacketTruncated,
@@ -593,14 +625,18 @@ mod tests {
             .flat_map(|scenario| scenario.regimes)
             .collect();
         let required = BTreeSet::from([
+            AtpLabRegime::LanMulticast,
             AtpLabRegime::EasyNat,
+            AtpLabRegime::ExplicitPublicUdp,
             AtpLabRegime::HardNat,
             AtpLabRegime::SymmetricNat,
             AtpLabRegime::UdpBlocked,
             AtpLabRegime::Ipv6Direct,
             AtpLabRegime::RelayOnly,
+            AtpLabRegime::RelayTcpTls443,
             AtpLabRegime::TailscalePrivateRoute,
             AtpLabRegime::MasqueConnectUdpProxy,
+            AtpLabRegime::OfflineMailbox,
             AtpLabRegime::PathMigration,
             AtpLabRegime::PacketDuplication,
             AtpLabRegime::PacketTruncation,
