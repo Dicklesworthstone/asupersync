@@ -596,6 +596,8 @@ pub mod real_time_intrusive_wheel_combinator_timeout_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_time_sleep_runtime_scheduler_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_time_sleep_runtime_deadline_monitor_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_time_wheel_runtime_timer_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_timer_e2e_tests;
