@@ -405,6 +405,8 @@ pub mod real_fs_vfs_obligation_recovery_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_grpc_bidirectional_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_grpc_codec_grpc_protobuf_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_grpc_server_database_postgres_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_grpc_server_grpc_health_integration_e2e_tests;
