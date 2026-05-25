@@ -58,6 +58,16 @@ pub use diagnostics::{
     AtpRuntimeEvidenceEnvelope, AtpRuntimeEvidenceSignal, AtpRuntimeSignalClass,
     AtpRuntimeSignalSource,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use doctor::{
+    ATP_PATH_DOCTOR_SCHEMA, ATP_PATH_TRACE_ATTEMPT_SCHEMA, ATP_PLATFORM_DOCTOR_SCHEMA,
+    ATP_PLATFORM_PROBE_LOG_SCHEMA, AtpPathDoctorBudget, AtpPathDoctorCandidate,
+    AtpPathDoctorDocument, AtpPathDoctorRecommendation, AtpPathDoctorSecurity,
+    AtpPathDoctorSelectedPath, AtpPathDoctorSummary, AtpPathTraceAttemptLogEntry,
+    AtpPlatformDoctorDocument, AtpPlatformProbeLogEntry, build_path_doctor_document,
+    build_platform_doctor_document, detect_platform_doctor_document, render_path_doctor_human,
+    render_platform_doctor_human,
+};
 pub use governance::{
     AtpGovernanceDecision, AtpGovernanceViolation, AtpGovernanceViolationKind, AtpResourceBudget,
     AtpResourceDemand, AtpResourceGovernor,
