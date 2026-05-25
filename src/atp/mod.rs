@@ -23,6 +23,7 @@ pub mod logging;
 pub mod manifest;
 pub mod object;
 pub mod path;
+pub mod planner;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod platform;
 pub mod policy;
@@ -30,6 +31,7 @@ pub mod profiles;
 pub mod proof;
 pub mod quota;
 pub mod repair_receiver;
+pub mod repair_roi;
 pub mod safety;
 #[path = "sdk.rs"]
 pub mod sdk;
@@ -88,6 +90,13 @@ pub use logging::{
     init_atp_logger,
 };
 pub use manifest::{ChunkStrategy, ProofStrength};
+pub use planner::{
+    ATP_PLAN_EXECUTION_REPORT_SCHEMA, ATP_TRANSFER_PLAN_SCHEMA, AtpTransferPlan,
+    AtpTransferPlanner, CacheAnalysis, ChunkingProfile, DiskAllocationPlan, ObjectGraphSummary,
+    PathCandidate, PlanDeviation, PlanExecutionReport, PlanExecutionTracker, PlanUncertainty,
+    PlannerConfig, PlannerError, PlannerOptions, ResourceGovernanceProfile, ResumeState,
+    TransferMode, TransferType,
+};
 pub use policy::{
     Capability, CapabilityAction, PolicyDecision, PolicyEnforcer, ResourceScope, TemporalScope,
 };
@@ -95,4 +104,8 @@ pub use profiles::{AtpPowerProfile, AtpResourceProfile};
 pub use quota::{
     QuotaAllocation, QuotaBucket, QuotaError, QuotaLedger, QuotaLimit, QuotaRow, QuotaUsage,
     RetentionClock, RetentionPolicy, RetentionRecord, RetentionRule,
+};
+pub use repair_roi::{
+    EfficiencyStats, NetworkRegime, PolicyAnalysis, RegimeStats, RepairRoiSimulationResult,
+    RepairRoiSimulator,
 };
