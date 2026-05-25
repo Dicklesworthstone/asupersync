@@ -270,6 +270,23 @@ impl ReceiveGrant {
             && self.scope.covers_cache(object_type, bytes)
             && self.quota.permits(bytes, items)
     }
+
+    /// Check a cache operation tied to one verified object graph root.
+    #[must_use]
+    pub fn allows_cache_entry(
+        &self,
+        action: AllowAction,
+        root: &ObjectDigest,
+        object_type: &str,
+        bytes: u64,
+        items: u64,
+        now_epoch_secs: u64,
+    ) -> bool {
+        self.is_active(now_epoch_secs)
+            && self.actions.contains(&action)
+            && (self.scope.covers_object(root) || self.scope.covers_cache(object_type, bytes))
+            && self.quota.permits(bytes, items)
+    }
 }
 
 /// Local inbox item lifecycle.
@@ -602,6 +619,29 @@ impl MailboxStorageRecord {
     }
 }
 
+/// Verified object graph indexed for local cache/seeding decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheIndexRecord {
+    /// Inbox item represented by this cache row.
+    pub item_id: String,
+    /// Object graph root committed by the manifest.
+    pub object_root: ObjectDigest,
+    /// Manifest generation verified before cache exposure.
+    pub manifest_epoch: u64,
+    /// Stable object type used by cache grants.
+    pub object_type: String,
+    /// Verified bytes indexed in the cache.
+    pub bytes: u64,
+    /// Grant used to authorize local cache custody.
+    pub cache_grant_id: String,
+    /// Grant used to authorize seeding, if seeding has started.
+    pub seed_grant_id: Option<String>,
+    /// Time this record entered local cache custody.
+    pub cached_at_epoch_secs: u64,
+    /// Time this record started seeding to authorized peers.
+    pub seeded_at_epoch_secs: Option<u64>,
+}
+
 /// Offline mailbox security validation failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MailboxSecurityError {
@@ -830,6 +870,7 @@ impl DaemonDiagnostics {
 pub struct LocalInbox {
     grants: BTreeMap<String, ReceiveGrant>,
     items: BTreeMap<String, InboxItem>,
+    cache_records: BTreeMap<String, CacheIndexRecord>,
     mailbox_records: BTreeMap<String, MailboxStorageRecord>,
     mailbox_last_seen_sequences: BTreeMap<String, u64>,
 }
@@ -841,6 +882,7 @@ impl LocalInbox {
         Self {
             grants: BTreeMap::new(),
             items: BTreeMap::new(),
+            cache_records: BTreeMap::new(),
             mailbox_records: BTreeMap::new(),
             mailbox_last_seen_sequences: BTreeMap::new(),
         }
@@ -1060,6 +1102,119 @@ impl LocalInbox {
         Ok(())
     }
 
+    /// Index a verified object graph in the local cache after grant enforcement.
+    pub fn cache_verified(
+        &mut self,
+        item_id: &str,
+        grant_id: &str,
+        object_type: impl Into<String>,
+        bytes: u64,
+        now_epoch_secs: u64,
+    ) -> Result<(), InboxError> {
+        if self.cache_records.contains_key(item_id) {
+            return Err(InboxError::DuplicateCacheRecord(item_id.to_string()));
+        }
+
+        let object_type = object_type.into();
+        let item = self
+            .items
+            .get(item_id)
+            .ok_or_else(|| InboxError::UnknownItem(item_id.to_string()))?;
+        ensure_transition(item.state, InboxState::Cached)?;
+
+        let grant = self
+            .grants
+            .get(grant_id)
+            .ok_or_else(|| InboxError::UnknownGrant(grant_id.to_string()))?;
+        if !grant.allows_cache_entry(
+            AllowAction::Cache,
+            &item.object_root,
+            &object_type,
+            bytes,
+            1,
+            now_epoch_secs,
+        ) {
+            return Err(InboxError::Unauthorized {
+                grant_id: grant_id.to_string(),
+                action: AllowAction::Cache,
+            });
+        }
+
+        let record = CacheIndexRecord {
+            item_id: item.item_id.clone(),
+            object_root: item.object_root.clone(),
+            manifest_epoch: item.manifest_epoch,
+            object_type,
+            bytes,
+            cache_grant_id: grant_id.to_string(),
+            seed_grant_id: None,
+            cached_at_epoch_secs: now_epoch_secs,
+            seeded_at_epoch_secs: None,
+        };
+
+        let item = self
+            .items
+            .get_mut(item_id)
+            .ok_or_else(|| InboxError::UnknownItem(item_id.to_string()))?;
+        item.state = InboxState::Cached;
+        item.grant_id = Some(grant_id.to_string());
+        item.updated_epoch_secs = now_epoch_secs;
+        self.cache_records.insert(item_id.to_string(), record);
+        Ok(())
+    }
+
+    /// Start seeding a cached object graph after grant enforcement.
+    pub fn seed_cached(
+        &mut self,
+        item_id: &str,
+        grant_id: &str,
+        now_epoch_secs: u64,
+    ) -> Result<(), InboxError> {
+        let item = self
+            .items
+            .get(item_id)
+            .ok_or_else(|| InboxError::UnknownItem(item_id.to_string()))?;
+        ensure_transition(item.state, InboxState::Seeded)?;
+
+        let record = self
+            .cache_records
+            .get(item_id)
+            .ok_or_else(|| InboxError::UnknownCacheRecord(item_id.to_string()))?;
+        let grant = self
+            .grants
+            .get(grant_id)
+            .ok_or_else(|| InboxError::UnknownGrant(grant_id.to_string()))?;
+        if !grant.allows_cache_entry(
+            AllowAction::Seed,
+            &record.object_root,
+            &record.object_type,
+            record.bytes,
+            1,
+            now_epoch_secs,
+        ) {
+            return Err(InboxError::Unauthorized {
+                grant_id: grant_id.to_string(),
+                action: AllowAction::Seed,
+            });
+        }
+
+        let item = self
+            .items
+            .get_mut(item_id)
+            .ok_or_else(|| InboxError::UnknownItem(item_id.to_string()))?;
+        item.state = InboxState::Seeded;
+        item.grant_id = Some(grant_id.to_string());
+        item.updated_epoch_secs = now_epoch_secs;
+
+        let record = self
+            .cache_records
+            .get_mut(item_id)
+            .ok_or_else(|| InboxError::UnknownCacheRecord(item_id.to_string()))?;
+        record.seed_grant_id = Some(grant_id.to_string());
+        record.seeded_at_epoch_secs = Some(now_epoch_secs);
+        Ok(())
+    }
+
     /// Move an item through its lifecycle.
     pub fn transition(
         &mut self,
@@ -1114,6 +1269,12 @@ impl LocalInbox {
     #[must_use]
     pub fn mailbox_records(&self) -> Vec<&MailboxStorageRecord> {
         self.mailbox_records.values().collect()
+    }
+
+    /// Return cached object records in stable item id order.
+    #[must_use]
+    pub fn cache_records(&self) -> Vec<&CacheIndexRecord> {
+        self.cache_records.values().collect()
     }
 
     /// Return stable JSON-compatible rows.
@@ -1192,10 +1353,14 @@ pub enum InboxError {
     UnknownGrant(String),
     /// The mailbox record id is unknown.
     UnknownMailboxRecord(String),
+    /// The cache record id is unknown.
+    UnknownCacheRecord(String),
     /// The item id already exists.
     DuplicateItem(String),
     /// The mailbox record id already exists.
     DuplicateMailboxRecord(String),
+    /// The cache record id already exists.
+    DuplicateCacheRecord(String),
     /// The grant does not authorize the operation.
     Unauthorized {
         /// Grant that failed authorization.
@@ -1224,9 +1389,13 @@ impl fmt::Display for InboxError {
             Self::UnknownMailboxRecord(mailbox_id) => {
                 write!(f, "unknown mailbox record `{mailbox_id}`")
             }
+            Self::UnknownCacheRecord(item_id) => write!(f, "unknown cache record `{item_id}`"),
             Self::DuplicateItem(item_id) => write!(f, "duplicate inbox item `{item_id}`"),
             Self::DuplicateMailboxRecord(mailbox_id) => {
                 write!(f, "duplicate mailbox record `{mailbox_id}`")
+            }
+            Self::DuplicateCacheRecord(item_id) => {
+                write!(f, "duplicate cache record `{item_id}`")
             }
             Self::Unauthorized { grant_id, action } => {
                 write!(
@@ -1328,6 +1497,14 @@ mod tests {
 
     fn receive_actions() -> BTreeSet<AllowAction> {
         [AllowAction::Receive].into_iter().collect()
+    }
+
+    fn cache_actions() -> BTreeSet<AllowAction> {
+        [AllowAction::Cache].into_iter().collect()
+    }
+
+    fn seed_actions() -> BTreeSet<AllowAction> {
+        [AllowAction::Seed].into_iter().collect()
     }
 
     fn offer(item_id: &str, path: &str, bytes_total: u64) -> InboxOffer {
@@ -1751,6 +1928,156 @@ mod tests {
                 action: AllowAction::Receive,
             }
         );
+    }
+
+    #[test]
+    fn cache_verified_records_manifest_root_and_authorizing_grant() {
+        let mut inbox = LocalInbox::new();
+        inbox
+            .offer(offer("in-1", "/data/inbox/project", 128))
+            .unwrap(); // ubs:ignore - test oracle
+        inbox.allow(ReceiveGrant::new(
+            "receive-grant",
+            "peer-a",
+            receive_actions(),
+            GrantScope::PathPrefix(PathBuf::from("/data/inbox")),
+        ));
+        inbox.allow(ReceiveGrant::new(
+            "cache-grant",
+            "peer-a",
+            cache_actions(),
+            GrantScope::ObjectGraph(digest(7)),
+        ));
+        inbox.start_receive("in-1", "receive-grant", 11).unwrap(); // ubs:ignore - test oracle
+
+        inbox
+            .cache_verified("in-1", "cache-grant", "artifact", 128, 12)
+            .unwrap(); // ubs:ignore - test oracle
+
+        let item = inbox.list()[0]; // ubs:ignore - test oracle
+        assert_eq!(item.state, InboxState::Cached);
+        assert_eq!(item.grant_id.as_deref(), Some("cache-grant"));
+
+        let record = inbox.cache_records()[0]; // ubs:ignore - test oracle
+        assert_eq!(record.item_id, "in-1");
+        assert_eq!(record.object_root, digest(7));
+        assert_eq!(record.manifest_epoch, 3);
+        assert_eq!(record.object_type, "artifact");
+        assert_eq!(record.bytes, 128);
+        assert_eq!(record.cache_grant_id, "cache-grant");
+        assert_eq!(record.seed_grant_id, None);
+        assert_eq!(record.cached_at_epoch_secs, 12);
+    }
+
+    #[test]
+    fn cache_verified_rejects_expired_or_mismatched_grants_without_state_change() {
+        let mut inbox = LocalInbox::new();
+        inbox
+            .offer(offer("in-1", "/data/inbox/project", 128))
+            .unwrap(); // ubs:ignore - test oracle
+        inbox.allow(ReceiveGrant::new(
+            "receive-grant",
+            "peer-a",
+            receive_actions(),
+            GrantScope::PathPrefix(PathBuf::from("/data/inbox")),
+        ));
+        inbox.allow(
+            ReceiveGrant::new(
+                "expired-cache-grant",
+                "peer-a",
+                cache_actions(),
+                GrantScope::Cache {
+                    object_types: ["artifact".to_string()].into_iter().collect(),
+                    max_bytes: Some(512),
+                },
+            )
+            .with_expiry(11),
+        );
+        inbox.start_receive("in-1", "receive-grant", 10).unwrap(); // ubs:ignore - test oracle
+
+        let err = inbox
+            .cache_verified("in-1", "expired-cache-grant", "artifact", 128, 12)
+            .unwrap_err(); // ubs:ignore - test oracle
+
+        assert_eq!(
+            err,
+            InboxError::Unauthorized {
+                grant_id: "expired-cache-grant".to_string(),
+                action: AllowAction::Cache,
+            }
+        );
+        let item = inbox.list()[0]; // ubs:ignore - test oracle
+        assert_eq!(item.state, InboxState::Active);
+        assert_eq!(item.grant_id.as_deref(), Some("receive-grant"));
+        assert!(inbox.cache_records().is_empty());
+    }
+
+    #[test]
+    fn seed_cached_requires_active_seed_grant() {
+        let mut inbox = LocalInbox::new();
+        inbox
+            .offer(offer("in-1", "/data/inbox/project", 128))
+            .unwrap(); // ubs:ignore - test oracle
+        inbox.allow(ReceiveGrant::new(
+            "receive-grant",
+            "peer-a",
+            receive_actions(),
+            GrantScope::PathPrefix(PathBuf::from("/data/inbox")),
+        ));
+        inbox.allow(ReceiveGrant::new(
+            "cache-grant",
+            "peer-a",
+            cache_actions(),
+            GrantScope::ObjectGraph(digest(7)),
+        ));
+        inbox.allow(
+            ReceiveGrant::new(
+                "expired-seed-grant",
+                "peer-a",
+                seed_actions(),
+                GrantScope::ObjectGraph(digest(7)),
+            )
+            .with_expiry(12),
+        );
+        inbox.allow(ReceiveGrant::new(
+            "seed-grant",
+            "peer-a",
+            seed_actions(),
+            GrantScope::ObjectGraph(digest(7)),
+        ));
+        inbox.start_receive("in-1", "receive-grant", 10).unwrap(); // ubs:ignore - test oracle
+        inbox
+            .cache_verified("in-1", "cache-grant", "artifact", 128, 11)
+            .unwrap(); // ubs:ignore - test oracle
+
+        let err = inbox.seed_cached("in-1", "cache-grant", 13).unwrap_err(); // ubs:ignore - test oracle
+        assert_eq!(
+            err,
+            InboxError::Unauthorized {
+                grant_id: "cache-grant".to_string(),
+                action: AllowAction::Seed,
+            }
+        );
+        let err = inbox
+            .seed_cached("in-1", "expired-seed-grant", 13)
+            .unwrap_err(); // ubs:ignore - test oracle
+        assert_eq!(
+            err,
+            InboxError::Unauthorized {
+                grant_id: "expired-seed-grant".to_string(),
+                action: AllowAction::Seed,
+            }
+        );
+
+        inbox.seed_cached("in-1", "seed-grant", 14).unwrap(); // ubs:ignore - test oracle
+
+        let item = inbox.list()[0]; // ubs:ignore - test oracle
+        assert_eq!(item.state, InboxState::Seeded);
+        assert_eq!(item.grant_id.as_deref(), Some("seed-grant"));
+        let record = inbox.cache_records()[0]; // ubs:ignore - test oracle
+        assert_eq!(record.cache_grant_id, "cache-grant");
+        assert_eq!(record.seed_grant_id.as_deref(), Some("seed-grant"));
+        assert_eq!(record.seeded_at_epoch_secs, Some(14));
     }
 
     #[test]

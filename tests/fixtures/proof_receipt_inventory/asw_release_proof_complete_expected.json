@@ -1,0 +1,150 @@
+{
+  "agent": "CoralGorge",
+  "asw_release_proof": {
+    "blocked_count": 0,
+    "first_blocker": null,
+    "human_summary": "ASW release proof ready: 1/1 packet(s) ready; 1 remote production proof(s); main mirror evidence present.",
+    "packet_count": 1,
+    "packets": [
+      {
+        "admission": {
+          "receipt_id": "admission-asw12",
+          "status": "admitted"
+        },
+        "agent": "GreenMountain",
+        "bead": {
+          "status": "closed",
+          "updated_at": "2026-05-25T08:20:00Z"
+        },
+        "bead_id": "asupersync-oxqrae.12",
+        "blockers": [],
+        "commits": [
+          {
+            "hash": "abcdef123456",
+            "main_mirror_pushed": true,
+            "main_ref_pushed": true,
+            "pushed": true,
+            "pushed_refs": [
+              "origin/main",
+              "main-mirror"
+            ]
+          }
+        ],
+        "dirty_peer_paths": [],
+        "evidence_counts": {
+          "commits": 1,
+          "dirty_peer_paths": 0,
+          "leases": 1,
+          "proof_classes": {
+            "narrow-supplemental": 1,
+            "production": 1
+          },
+          "remote_production_proofs": 1,
+          "reservations": 3,
+          "touched_paths": 3
+        },
+        "first_blocker": null,
+        "handoff": {
+          "capsule_id": "handoff-asw10",
+          "decision": "continue"
+        },
+        "leases": [
+          {
+            "lease_id": "reservation-24153",
+            "resource": "scripts/proof_receipt_inventory.py",
+            "status": "released"
+          }
+        ],
+        "mail": {
+          "closeout_sent": true,
+          "reservations_released": true,
+          "thread_id": "asupersync-oxqrae.12"
+        },
+        "rch_proofs": [
+          {
+            "cargo_command": true,
+            "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_p6 cargo test -p asupersync --test proof_receipt_inventory_contract asw_release_proof_complete_packet_is_ready",
+            "has_cargo_target_dir": true,
+            "local_fallback": false,
+            "output_excerpt": "remote worker vmi1227854: test result ok",
+            "proof_class": "production",
+            "remote": true,
+            "remote_required": true,
+            "routes_through_rch": true,
+            "status": "pass"
+          },
+          {
+            "cargo_command": true,
+            "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_p6 cargo test -p asupersync --test proof_receipt_inventory_contract asw_release_proof_summary_output_is_stable",
+            "has_cargo_target_dir": true,
+            "local_fallback": false,
+            "output_excerpt": "narrow supplemental proof",
+            "proof_class": "narrow-supplemental",
+            "remote": true,
+            "remote_required": true,
+            "routes_through_rch": true,
+            "status": "pass"
+          }
+        ],
+        "reservations": [
+          "scripts/proof_receipt_inventory.py",
+          "tests/fixtures/proof_receipt_inventory/asw_release_proof_*",
+          "tests/proof_receipt_inventory_contract.rs"
+        ],
+        "status": "ready",
+        "touched_paths": [
+          "scripts/proof_receipt_inventory.py",
+          "tests/fixtures/proof_receipt_inventory/asw_release_proof_complete.json",
+          "tests/proof_receipt_inventory_contract.rs"
+        ]
+      }
+    ],
+    "proof_class_counts": {
+      "narrow-supplemental": 1,
+      "production": 1
+    },
+    "ready_count": 1,
+    "release_status": "ready",
+    "remote_production_proofs": 1,
+    "schema_version": "asw-release-proof-v1"
+  },
+  "capabilities": [],
+  "classification_counts": {},
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:45:00Z",
+  "helpers": [],
+  "redaction_counts": {
+    "long_token": 0,
+    "secret": 0,
+    "token": 0,
+    "total": 0,
+    "url_query": 0
+  },
+  "repo_path": "/repo",
+  "review_cues": [],
+  "safety": {
+    "agent_mail_mutated": false,
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "files_deleted": false,
+    "git_mutated": false,
+    "live_probe_performed": false,
+    "non_mutating": true,
+    "reads_fixture_only": true
+  },
+  "safety_notes": [
+    "fixture mode reads only the supplied inventory JSON",
+    "receipt does not inspect live Agent Mail, Beads, git, rch, or cargo state",
+    "review cues are advisory and require human or agent coordination before action"
+  ],
+  "schema_version": "proof-receipt-inventory-v1",
+  "source_counts": {
+    "asw_release_packets": 1,
+    "capabilities": 0,
+    "duplicate_capabilities": 0,
+    "helpers": 0,
+    "review_cues": 0,
+    "superseded_helpers": 0
+  }
+}

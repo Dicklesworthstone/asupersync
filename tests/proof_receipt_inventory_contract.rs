@@ -25,6 +25,22 @@ fn run_receipt_with_repo_path(fixture: &str, repo_path: &str) -> Output {
 }
 
 fn run_receipt_path_with_repo_path(fixture_path: &Path, repo_path: &str) -> Output {
+    run_receipt_path_with_repo_path_and_output(fixture_path, repo_path, "json")
+}
+
+fn run_receipt_with_output(fixture: &str, output_mode: &str) -> Output {
+    run_receipt_path_with_repo_path_and_output(
+        &repo_root().join(FIXTURE_ROOT).join(fixture),
+        "/repo",
+        output_mode,
+    )
+}
+
+fn run_receipt_path_with_repo_path_and_output(
+    fixture_path: &Path,
+    repo_path: &str,
+    output_mode: &str,
+) -> Output {
     Command::new("python3")
         .arg(repo_root().join(SCRIPT_PATH))
         .arg("--fixture")
@@ -36,7 +52,7 @@ fn run_receipt_path_with_repo_path(fixture_path: &Path, repo_path: &str) -> Outp
         .arg("--generated-at")
         .arg(GENERATED_AT)
         .arg("--output")
-        .arg("json")
+        .arg(output_mode)
         .current_dir(repo_root())
         .output()
         .expect("run proof receipt inventory")
@@ -459,6 +475,113 @@ fn local_fallback_validation_commands_match_full_marker_set() {
             "missing fallback cue for validation command: {command}"
         );
     }
+}
+
+#[test]
+fn asw_release_proof_complete_packet_is_ready() {
+    let receipt = receipt_json("asw_release_proof_complete.json");
+    let release = &receipt["asw_release_proof"];
+    let packet = &release["packets"][0];
+
+    assert_eq!(
+        release["schema_version"].as_str(),
+        Some("asw-release-proof-v1")
+    );
+    assert_eq!(release["release_status"].as_str(), Some("ready"));
+    assert_eq!(release["remote_production_proofs"].as_u64(), Some(1));
+    assert_eq!(
+        release["proof_class_counts"]["production"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        release["proof_class_counts"]["narrow-supplemental"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(packet["status"].as_str(), Some("ready"));
+    assert!(packet["blockers"].as_array().expect("blockers").is_empty());
+    assert_eq!(
+        packet["evidence_counts"]["remote_production_proofs"].as_u64(),
+        Some(1)
+    );
+}
+
+#[test]
+fn asw_release_proof_blocked_packet_reports_first_blocker() {
+    let receipt = receipt_json("asw_release_proof_blocked.json");
+    let release = &receipt["asw_release_proof"];
+    let packet = &release["packets"][0];
+    let blockers = packet["blockers"].as_array().expect("blockers");
+    let blocker_kinds = blockers
+        .iter()
+        .filter_map(|blocker| blocker["kind"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(release["release_status"].as_str(), Some("blocked"));
+    assert_eq!(
+        release["first_blocker"]["kind"].as_str(),
+        Some("dirty-peer-file")
+    );
+    assert_eq!(
+        release["first_blocker"]["bead_id"].as_str(),
+        Some("asupersync-oxqrae.12")
+    );
+    for expected_kind in [
+        "dirty-peer-file",
+        "reservation-mismatch",
+        "stale-bead-status",
+        "missing-mail-closeout",
+        "lease-not-committed",
+        "admission-not-admitted",
+        "handoff-blocked",
+        "unpushed-commit",
+        "missing-main-mirror-sync",
+        "rch-local-fallback-proof",
+        "missing-remote-required-proof",
+        "missing-remote-rch-proof",
+    ] {
+        assert!(
+            blocker_kinds.contains(&expected_kind),
+            "missing blocker kind {expected_kind}; blockers: {blocker_kinds:?}"
+        );
+    }
+    assert_eq!(
+        packet["evidence_counts"]["remote_production_proofs"].as_u64(),
+        Some(0)
+    );
+}
+
+#[test]
+fn asw_release_proof_summary_output_is_stable() {
+    let output = run_receipt_with_output("asw_release_proof_complete.json", "summary");
+    assert!(
+        output.status.success(),
+        "summary output failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("summary stdout is utf-8"),
+        "ASW release proof ready: 1/1 packet(s) ready; 1 remote production proof(s); main mirror evidence present.\n"
+    );
+}
+
+#[test]
+fn asw_release_proof_complete_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "asw_release_proof_complete.json",
+        "asw_release_proof_complete_expected.json",
+        "ASW release-proof complete golden changed; update only after reviewing release-proof readiness semantics",
+    );
+}
+
+#[test]
+fn asw_release_proof_blocked_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "asw_release_proof_blocked.json",
+        "asw_release_proof_blocked_expected.json",
+        "ASW release-proof blocked golden changed; update only after reviewing fail-closed blocker ordering",
+    );
 }
 
 #[test]

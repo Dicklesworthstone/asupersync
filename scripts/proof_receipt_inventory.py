@@ -9,6 +9,7 @@ before agents spend time building overlapping proof artifacts.
 
 import argparse
 import datetime as dt
+import fnmatch
 import hashlib
 import json
 import re
@@ -19,9 +20,36 @@ from typing import Any
 
 
 SCHEMA_VERSION = "proof-receipt-inventory-v1"
+ASW_RELEASE_SCHEMA_VERSION = "asw-release-proof-v1"
 DRAFT_STATUSES = {"draft", "in_progress", "uncommitted", "wip"}
 SUPERSEDED_STATUSES = {"superseded", "retired", "replaced"}
 CURRENT_STATUSES = {"current", "shipped", "active", "landed"}
+ASW_READY_BEAD_STATUSES = {"closed", "done"}
+ASW_READY_LEASE_STATUSES = {"active", "committed", "released", "completed"}
+ASW_READY_ADMISSION_STATUSES = {"accepted", "admitted", "ready"}
+ASW_READY_HANDOFF_DECISIONS = {"continue", "ready"}
+ASW_PASS_STATUSES = {"green", "ok", "pass", "passed", "success", "succeeded"}
+ASW_BLOCKER_ORDER = {
+    "dirty-peer-file": 10,
+    "reservation-mismatch": 20,
+    "missing-reservation-evidence": 30,
+    "stale-bead-status": 40,
+    "missing-mail-closeout": 50,
+    "mail-reservations-not-released": 60,
+    "missing-lease-receipt": 70,
+    "lease-not-committed": 80,
+    "missing-admission-receipt": 90,
+    "admission-not-admitted": 100,
+    "missing-handoff-capsule": 110,
+    "handoff-blocked": 120,
+    "missing-commit-proof": 130,
+    "unpushed-commit": 140,
+    "missing-main-mirror-sync": 150,
+    "rch-local-fallback-proof": 160,
+    "missing-cargo-target-dir-proof": 170,
+    "missing-remote-required-proof": 180,
+    "missing-remote-rch-proof": 190,
+}
 TOKEN_RE = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{8,}")
 KEY_VALUE_SECRET_RE = re.compile(
     r"(?i)\b(token|secret|password|api[_-]?key|authorization)(\s*[:=]\s*)([^\s,;]+)"
@@ -115,6 +143,24 @@ def as_string(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
+def as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, int):
+        return value != 0
+    return default
+
+
 def as_string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -123,6 +169,19 @@ def as_string_list(value: Any) -> list[str]:
 
 def redacted_string_list(value: Any, counts: dict[str, int]) -> list[str]:
     return [redact_text(item, counts) for item in as_string_list(value)]
+
+
+def redacted_path_patterns(value: Any, counts: dict[str, int]) -> list[str]:
+    rows = value if isinstance(value, list) else []
+    paths: list[str] = []
+    for item in rows:
+        if isinstance(item, str) and item:
+            paths.append(redact_text(item, counts))
+        elif isinstance(item, dict):
+            path = as_string(item.get("path_pattern") or item.get("path") or item.get("glob"))
+            if path:
+                paths.append(redact_text(path, counts))
+    return sorted(dict.fromkeys(paths))
 
 
 def slug_from_path(path: str) -> str:
@@ -542,6 +601,320 @@ def review_cues(rows: list[dict[str, Any]], capabilities: list[dict[str, Any]]) 
     return sorted(cues, key=lambda cue: (cue["severity"], cue["kind"], cue["capability_id"], cue.get("helper_id", "")))
 
 
+def normalize_proof_class(value: Any) -> str:
+    proof_class = as_string(value).lower().replace("_", "-") or "production"
+    if proof_class in {"prod", "release", "required"}:
+        return "production"
+    if proof_class in {"narrow", "narrow-supplemental", "supplemental"}:
+        return "narrow-supplemental"
+    if proof_class in {"blocker", "external", "external-blocker"}:
+        return "external-blocker"
+    return proof_class
+
+
+def normalize_rch_proof(row: Any, counts: dict[str, int]) -> dict[str, Any]:
+    data = row if isinstance(row, dict) else {"command": as_string(row)}
+    raw_command = as_string(data.get("command"))
+    raw_excerpt = as_string(data.get("output_excerpt") or data.get("log_excerpt"))
+    status = as_string(data.get("status")).lower() or "unknown"
+    local_fallback = (
+        as_bool(data.get("local_fallback"))
+        or bool(RCH_LOCAL_FALLBACK_RE.search(raw_command))
+        or bool(RCH_LOCAL_FALLBACK_RE.search(raw_excerpt))
+    )
+    return {
+        "command": compact_text(raw_command, counts, limit=520),
+        "status": status,
+        "proof_class": normalize_proof_class(data.get("proof_class") or data.get("class") or data.get("kind")),
+        "remote": as_bool(data.get("remote")),
+        "local_fallback": local_fallback,
+        "cargo_command": command_mentions_cargo(raw_command),
+        "routes_through_rch": command_routes_cargo_through_rch(raw_command),
+        "has_cargo_target_dir": command_routes_cargo_with_target_dir(raw_command),
+        "remote_required": command_routes_cargo_with_remote_required(raw_command),
+        "output_excerpt": compact_text(raw_excerpt, counts, limit=260),
+    }
+
+
+def normalize_commit(row: Any, counts: dict[str, int]) -> dict[str, Any]:
+    data = row if isinstance(row, dict) else {"hash": as_string(row)}
+    pushed_refs = redacted_string_list(data.get("pushed_refs") or data.get("refs"), counts)
+    main_ref_pushed = as_bool(data.get("main_ref_pushed"))
+    pushed = as_bool(data.get("pushed"), default=main_ref_pushed)
+    return {
+        "hash": as_string(data.get("hash") or data.get("commit") or data.get("commit_hash"))[:12],
+        "pushed": pushed,
+        "main_ref_pushed": main_ref_pushed,
+        "main_mirror_pushed": as_bool(data.get("main_mirror_pushed")),
+        "pushed_refs": pushed_refs,
+    }
+
+
+def normalize_lease(row: Any, counts: dict[str, int]) -> dict[str, Any]:
+    data = row if isinstance(row, dict) else {"lease_id": as_string(row)}
+    return {
+        "lease_id": as_string(data.get("lease_id") or data.get("id")),
+        "resource": compact_text(as_string(data.get("resource") or data.get("path") or data.get("name")), counts, limit=160),
+        "status": as_string(data.get("status")).lower() or "unknown",
+    }
+
+
+def proof_is_remote_production_pass(proof: dict[str, Any]) -> bool:
+    return (
+        proof["proof_class"] == "production"
+        and proof["status"] in ASW_PASS_STATUSES
+        and proof["remote"]
+        and proof["cargo_command"]
+        and proof["routes_through_rch"]
+        and proof["has_cargo_target_dir"]
+        and proof["remote_required"]
+        and not proof["local_fallback"]
+    )
+
+
+def path_is_reserved(path: str, reservations: list[str]) -> bool:
+    return any(
+        path == pattern
+        or fnmatch.fnmatchcase(path, pattern)
+        or fnmatch.fnmatchcase(pattern, path)
+        for pattern in reservations
+    )
+
+
+def asw_blocker(kind: str, detail: str = "", **extra: str) -> dict[str, Any]:
+    row: dict[str, Any] = {"kind": kind, "severity": "high"}
+    if detail:
+        row["detail"] = detail
+    for key, value in extra.items():
+        if value:
+            row[key] = value
+    return row
+
+
+def sort_asw_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        blockers,
+        key=lambda blocker: (
+            ASW_BLOCKER_ORDER.get(blocker["kind"], 1000),
+            blocker["kind"],
+            blocker.get("path", ""),
+            blocker.get("command", ""),
+            blocker.get("detail", ""),
+        ),
+    )
+
+
+def normalize_asw_release_packet(row: dict[str, Any], counts: dict[str, int]) -> dict[str, Any]:
+    bead = as_dict(row.get("bead") or row.get("beads"))
+    mail = as_dict(row.get("mail") or row.get("agent_mail"))
+    admission = as_dict(row.get("admission") or row.get("admission_receipt"))
+    handoff = as_dict(row.get("handoff") or row.get("handoff_capsule"))
+    rch_proofs = [
+        normalize_rch_proof(proof, counts)
+        for proof in rows_from({"rows": row.get("rch_proofs") or row.get("rch") or []}, ("rows",))
+    ]
+    if not rch_proofs:
+        rch_proofs = [normalize_rch_proof(proof, counts) for proof in as_string_list(row.get("validation"))]
+    commits = [
+        normalize_commit(commit, counts)
+        for commit in rows_from({"rows": row.get("commits") or []}, ("rows",))
+    ]
+    leases = [
+        normalize_lease(lease, counts)
+        for lease in rows_from({"rows": row.get("leases") or row.get("lease_receipts") or []}, ("rows",))
+    ]
+    reservations = redacted_path_patterns(row.get("reservation_paths") or row.get("reservations"), counts)
+    touched_paths = redacted_path_patterns(row.get("touched_paths") or row.get("paths"), counts)
+    dirty_peer_paths = redacted_path_patterns(row.get("dirty_peer_paths"), counts)
+
+    bead_status = as_string(bead.get("status") or row.get("bead_status")).lower() or "unknown"
+    mail_closeout_sent = as_bool(mail.get("closeout_sent") or mail.get("closeout_message_sent"))
+    mail_reservations_released = as_bool(mail.get("reservations_released"))
+    admission_status = as_string(admission.get("status")).lower() or "unknown"
+    handoff_decision = as_string(handoff.get("decision") or handoff.get("status")).lower() or "unknown"
+
+    blockers: list[dict[str, Any]] = []
+    if dirty_peer_paths:
+        blockers.append(
+            asw_blocker(
+                "dirty-peer-file",
+                f"{len(dirty_peer_paths)} dirty peer-owned path(s) overlap proof scope",
+                path=dirty_peer_paths[0],
+            )
+        )
+    if touched_paths and not reservations:
+        blockers.append(asw_blocker("missing-reservation-evidence", "touched paths have no reservation evidence"))
+    for path in touched_paths:
+        if reservations and not path_is_reserved(path, reservations):
+            blockers.append(asw_blocker("reservation-mismatch", "touched path is not covered by reservations", path=path))
+    if bead_status not in ASW_READY_BEAD_STATUSES:
+        blockers.append(asw_blocker("stale-bead-status", f"bead status is {bead_status}"))
+    if not mail_closeout_sent:
+        blockers.append(asw_blocker("missing-mail-closeout", "Agent Mail closeout evidence is missing"))
+    if not mail_reservations_released:
+        blockers.append(asw_blocker("mail-reservations-not-released", "file reservations are not released"))
+    if not leases:
+        blockers.append(asw_blocker("missing-lease-receipt", "lease or admission obligation evidence is missing"))
+    for lease in leases:
+        if lease["status"] not in ASW_READY_LEASE_STATUSES:
+            blockers.append(
+                asw_blocker("lease-not-committed", f"lease {lease['lease_id'] or lease['resource']} is {lease['status']}")
+            )
+    if not admission:
+        blockers.append(asw_blocker("missing-admission-receipt", "admission receipt is missing"))
+    elif admission_status not in ASW_READY_ADMISSION_STATUSES:
+        blockers.append(asw_blocker("admission-not-admitted", f"admission status is {admission_status}"))
+    if not handoff:
+        blockers.append(asw_blocker("missing-handoff-capsule", "handoff capsule verifier evidence is missing"))
+    elif handoff_decision not in ASW_READY_HANDOFF_DECISIONS:
+        blockers.append(asw_blocker("handoff-blocked", f"handoff decision is {handoff_decision}"))
+    if not commits:
+        blockers.append(asw_blocker("missing-commit-proof", "commit evidence is missing"))
+    for commit in commits:
+        commit_id = commit["hash"] or "(unknown)"
+        if not commit["pushed"] or not commit["main_ref_pushed"]:
+            blockers.append(asw_blocker("unpushed-commit", f"commit {commit_id} is not pushed to main"))
+        if commit["main_ref_pushed"] and not commit["main_mirror_pushed"]:
+            blockers.append(asw_blocker("missing-main-mirror-sync", f"commit {commit_id} lacks main mirror evidence"))
+    for proof in rch_proofs:
+        if proof["local_fallback"]:
+            blockers.append(
+                asw_blocker(
+                    "rch-local-fallback-proof",
+                    "local fallback cannot satisfy release proof",
+                    command=proof["command"],
+                )
+            )
+        if proof["cargo_command"] and proof["routes_through_rch"] and not proof["has_cargo_target_dir"]:
+            blockers.append(
+                asw_blocker(
+                    "missing-cargo-target-dir-proof",
+                    "Cargo proof lacks explicit CARGO_TARGET_DIR",
+                    command=proof["command"],
+                )
+            )
+        if proof["cargo_command"] and proof["routes_through_rch"] and not proof["remote_required"]:
+            blockers.append(
+                asw_blocker(
+                    "missing-remote-required-proof",
+                    "Cargo proof lacks RCH_REQUIRE_REMOTE=1",
+                    command=proof["command"],
+                )
+            )
+
+    remote_production_passes = [proof for proof in rch_proofs if proof_is_remote_production_pass(proof)]
+    if not remote_production_passes:
+        blockers.append(asw_blocker("missing-remote-rch-proof", "no remote production Cargo proof passed"))
+
+    blockers = sort_asw_blockers(blockers)
+    proof_class_counts: dict[str, int] = {}
+    for proof in rch_proofs:
+        proof_class = proof["proof_class"]
+        proof_class_counts[proof_class] = proof_class_counts.get(proof_class, 0) + 1
+
+    packet = {
+        "bead_id": as_string(row.get("bead_id") or bead.get("id")),
+        "agent": as_string(row.get("agent") or row.get("owner")),
+        "status": "ready" if not blockers else "blocked",
+        "first_blocker": blockers[0] if blockers else None,
+        "blockers": blockers,
+        "reservations": reservations,
+        "touched_paths": touched_paths,
+        "dirty_peer_paths": dirty_peer_paths,
+        "bead": {
+            "status": bead_status,
+            "updated_at": as_string(bead.get("updated_at")),
+        },
+        "mail": {
+            "closeout_sent": mail_closeout_sent,
+            "reservations_released": mail_reservations_released,
+            "thread_id": as_string(mail.get("thread_id")),
+        },
+        "leases": leases,
+        "admission": {
+            "status": admission_status,
+            "receipt_id": as_string(admission.get("receipt_id") or admission.get("id")),
+        },
+        "handoff": {
+            "decision": handoff_decision,
+            "capsule_id": as_string(handoff.get("capsule_id") or handoff.get("id")),
+        },
+        "commits": commits,
+        "rch_proofs": rch_proofs,
+        "evidence_counts": {
+            "commits": len(commits),
+            "leases": len(leases),
+            "reservations": len(reservations),
+            "touched_paths": len(touched_paths),
+            "dirty_peer_paths": len(dirty_peer_paths),
+            "remote_production_proofs": len(remote_production_passes),
+            "proof_classes": proof_class_counts,
+        },
+    }
+    return packet
+
+
+def build_asw_release_proof(source: Any, counts: dict[str, int]) -> dict[str, Any] | None:
+    packets = [
+        normalize_asw_release_packet(row, counts)
+        for row in rows_from(source, ("asw_release_proofs", "release_proofs"))
+    ]
+    if not packets:
+        return None
+
+    packets = sorted(packets, key=lambda packet: (packet["bead_id"], packet["agent"]))
+    blocked_packets = [packet for packet in packets if packet["status"] == "blocked"]
+    ready_packets = [packet for packet in packets if packet["status"] == "ready"]
+    first_blocker = None
+    if blocked_packets:
+        first_packet = sorted(
+            blocked_packets,
+            key=lambda packet: (
+                ASW_BLOCKER_ORDER.get(packet["first_blocker"]["kind"], 1000),
+                packet["bead_id"],
+                packet["agent"],
+            ),
+        )[0]
+        first_blocker = {
+            "bead_id": first_packet["bead_id"],
+            "agent": first_packet["agent"],
+            **first_packet["first_blocker"],
+        }
+
+    proof_class_counts: dict[str, int] = {}
+    remote_production_proofs = 0
+    for packet in packets:
+        remote_production_proofs += packet["evidence_counts"]["remote_production_proofs"]
+        for proof_class, count in packet["evidence_counts"]["proof_classes"].items():
+            proof_class_counts[proof_class] = proof_class_counts.get(proof_class, 0) + count
+
+    release_status = "ready" if not blocked_packets else "blocked"
+    if first_blocker is None:
+        human_summary = (
+            f"ASW release proof ready: {len(ready_packets)}/{len(packets)} packet(s) ready; "
+            f"{remote_production_proofs} remote production proof(s); main mirror evidence present."
+        )
+    else:
+        human_summary = (
+            f"ASW release proof blocked: {len(blocked_packets)}/{len(packets)} packet(s) blocked; "
+            f"first blocker {first_blocker['kind']} for {first_blocker['bead_id']}; "
+            f"{remote_production_proofs} remote production proof(s)."
+        )
+
+    return {
+        "schema_version": ASW_RELEASE_SCHEMA_VERSION,
+        "release_status": release_status,
+        "packet_count": len(packets),
+        "ready_count": len(ready_packets),
+        "blocked_count": len(blocked_packets),
+        "first_blocker": first_blocker,
+        "proof_class_counts": proof_class_counts,
+        "remote_production_proofs": remote_production_proofs,
+        "human_summary": human_summary,
+        "packets": packets,
+    }
+
+
 def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
     source = load_json(Path(args.fixture))
     counts: dict[str, int] = {}
@@ -557,7 +930,7 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
         classification = row["classification"]
         classifications[classification] = classifications.get(classification, 0) + 1
 
-    return {
+    receipt = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at,
         "current_date": current_date(generated_at),
@@ -592,6 +965,21 @@ def build_receipt(args: argparse.Namespace) -> dict[str, Any]:
             "review cues are advisory and require human or agent coordination before action",
         ],
     }
+    asw_release_proof = build_asw_release_proof(source, counts)
+    if asw_release_proof is not None:
+        receipt["asw_release_proof"] = asw_release_proof
+        receipt["source_counts"]["asw_release_packets"] = asw_release_proof["packet_count"]
+    return receipt
+
+
+def render_summary(receipt: dict[str, Any]) -> str:
+    asw_release_proof = receipt.get("asw_release_proof")
+    if isinstance(asw_release_proof, dict):
+        return as_string(asw_release_proof.get("human_summary"))
+    return (
+        f"proof receipt inventory: {receipt['source_counts']['helpers']} helper(s), "
+        f"{receipt['source_counts']['review_cues']} review cue(s)"
+    )
 
 
 def main() -> int:
@@ -600,7 +988,7 @@ def main() -> int:
     parser.add_argument("--repo-path", default=".", help="Repository path recorded in the receipt")
     parser.add_argument("--agent", default="", help="Agent producing the inventory receipt")
     parser.add_argument("--generated-at", default="", help="UTC timestamp for deterministic receipts")
-    parser.add_argument("--output", choices=["json"], default="json")
+    parser.add_argument("--output", choices=["json", "summary"], default="json")
     args = parser.parse_args()
 
     try:
@@ -609,7 +997,10 @@ def main() -> int:
         print(json.dumps({"error": str(error)}, indent=2), file=sys.stderr)
         return 2
 
-    print(json.dumps(receipt, indent=2, sort_keys=True))
+    if args.output == "summary":
+        print(render_summary(receipt))
+    else:
+        print(json.dumps(receipt, indent=2, sort_keys=True))
     return 0
 
 

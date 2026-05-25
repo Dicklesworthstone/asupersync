@@ -5,10 +5,12 @@
 //! requirements as specified in ATP-G2.
 
 use crate::atp::manifest::{
-    AuthenticationAlgorithm, MerkleRoot, RaptorQSymbol, RepairGroup, RepairGroupId,
+    AuthenticationAlgorithm, AuthenticationDomain, MerkleRoot, RaptorQSymbol, RepairGroup,
+    RepairGroupId, TransformOrder,
 };
 use hmac::KeyInit;
 use sha2::Sha256;
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 /// Errors specific to repair symbol reception and validation.
@@ -113,6 +115,255 @@ impl std::fmt::Display for RepairReceiveError {
 }
 
 impl std::error::Error for RepairReceiveError {}
+
+/// Authentication admission state for a peer offering repair symbols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairPeerAuthState {
+    /// Peer identity and symbol authentication domain were admitted.
+    Authenticated,
+    /// Peer did not satisfy authentication admission.
+    Unauthenticated,
+}
+
+/// Freshness state for peer advertisements and repair-symbol offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairPeerFreshness {
+    /// Offer is current enough to schedule.
+    Current,
+    /// Offer is stale and must not be scheduled.
+    Stale,
+}
+
+/// Replay state for a symbol offered by a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairSymbolState {
+    /// Symbol was not already accepted for this repair session.
+    New,
+    /// Symbol duplicates work already accepted or in flight.
+    AlreadySeen,
+}
+
+/// Deterministic reason a repair-symbol peer candidate was not selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RepairPeerRejection {
+    /// Peer failed authentication admission.
+    Unauthenticated,
+    /// Peer offer is stale.
+    StalePeer,
+    /// Peer has no upload budget left.
+    UploadBudgetExhausted,
+    /// Symbol was already seen for this repair session.
+    DuplicateSymbol,
+    /// Peer is advertising a different manifest root.
+    ManifestMismatch,
+    /// Peer is advertising a different repair group.
+    RepairGroupMismatch,
+    /// Peer is advertising a different source symbol count K.
+    SourceSymbolsMismatch,
+    /// Peer is advertising a different extended source symbol count K-prime.
+    KPrimeMismatch,
+    /// Peer is advertising a different transform policy.
+    TransformPolicyMismatch,
+    /// Peer is advertising a different authentication domain.
+    AuthDomainMismatch,
+    /// Peer symbol has too little expected decode contribution.
+    LowDecodeUsefulness,
+}
+
+impl RepairPeerRejection {
+    /// Stable machine-readable rejection reason for proof artifacts and logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unauthenticated => "unauthenticated",
+            Self::StalePeer => "stale_peer",
+            Self::UploadBudgetExhausted => "upload_budget_exhausted",
+            Self::DuplicateSymbol => "duplicate_symbol",
+            Self::ManifestMismatch => "manifest_mismatch",
+            Self::RepairGroupMismatch => "repair_group_mismatch",
+            Self::SourceSymbolsMismatch => "source_symbols_mismatch",
+            Self::KPrimeMismatch => "k_prime_mismatch",
+            Self::TransformPolicyMismatch => "transform_policy_mismatch",
+            Self::AuthDomainMismatch => "auth_domain_mismatch",
+            Self::LowDecodeUsefulness => "low_decode_usefulness",
+        }
+    }
+}
+
+/// Score vector used to rank valid repair-symbol peer candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepairPeerScore {
+    /// Path quality; larger values are better.
+    pub path_quality: u16,
+    /// Remaining upload budget in bytes.
+    pub upload_budget_bytes: u64,
+    /// Rarity of the symbol in the current swarm; larger values are better.
+    pub rarity: u16,
+    /// Expected decode contribution; larger values are better.
+    pub decode_usefulness: u16,
+    /// Trust score from identity, proof history, and prior validation.
+    pub trust: u16,
+    /// Relay cost; smaller values are better.
+    pub relay_cost: u16,
+    /// Estimated churn risk; smaller values are better.
+    pub churn_risk: u16,
+}
+
+impl RepairPeerScore {
+    /// Deterministic ranking tuple. Higher tuples are better.
+    #[must_use]
+    pub fn rank_tuple(self) -> (u16, u16, u16, u16, u16, u16, u16) {
+        (
+            self.trust,
+            self.decode_usefulness,
+            self.rarity,
+            self.path_quality,
+            Self::upload_budget_rank(self.upload_budget_bytes),
+            u16::MAX.saturating_sub(self.relay_cost),
+            u16::MAX.saturating_sub(self.churn_risk),
+        )
+    }
+
+    fn upload_budget_rank(upload_budget_bytes: u64) -> u16 {
+        let kibibytes = upload_budget_bytes / 1024;
+        u16::try_from(kibibytes).unwrap_or(u16::MAX)
+    }
+}
+
+/// Peer candidate for a single repair-symbol request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairPeerCandidate {
+    /// Stable peer identifier used in proof artifacts.
+    pub peer_id: String,
+    /// Manifest root claimed by the peer.
+    pub manifest_root: MerkleRoot,
+    /// Repair group claimed by the peer.
+    pub repair_group_id: RepairGroupId,
+    /// Source symbol count K claimed by the peer.
+    pub source_symbols_k: u32,
+    /// Extended source symbol count K-prime claimed by the peer.
+    pub k_prime: u32,
+    /// Transform policy claimed by the peer.
+    pub transform_policy: Option<TransformOrder>,
+    /// Authentication domain claimed by the peer.
+    pub auth_domain: AuthenticationDomain,
+    /// Authentication admission state.
+    pub auth_state: RepairPeerAuthState,
+    /// Freshness admission state.
+    pub freshness: RepairPeerFreshness,
+    /// Replay state for this symbol.
+    pub symbol_state: RepairSymbolState,
+    /// Scheduling score vector.
+    pub score: RepairPeerScore,
+}
+
+/// Deterministic repair-peer scheduling decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairPeerSelection {
+    /// Selected peer, if any candidate survived admission.
+    pub selected_peer_id: Option<String>,
+    /// Score vector for the selected peer.
+    pub selected_score: Option<RepairPeerScore>,
+    /// Rejected peers and stable reasons.
+    pub rejected_peers: BTreeMap<String, RepairPeerRejection>,
+}
+
+/// Select one peer for a repair-symbol request after enforcing ATP-G4 domains.
+#[must_use]
+pub fn select_repair_symbol_peer(
+    repair_group: &RepairGroup,
+    candidates: &[RepairPeerCandidate],
+    min_decode_usefulness: u16,
+) -> RepairPeerSelection {
+    let mut selected: Option<&RepairPeerCandidate> = None;
+    let mut rejected_peers = BTreeMap::new();
+
+    for candidate in candidates {
+        if let Some(rejection) =
+            repair_peer_rejection(candidate, repair_group, min_decode_usefulness)
+        {
+            rejected_peers.insert(candidate.peer_id.clone(), rejection);
+            continue;
+        }
+
+        let should_replace = match selected {
+            Some(current) => compare_repair_peer_candidates(candidate, current).is_gt(),
+            None => true,
+        };
+
+        if should_replace {
+            selected = Some(candidate);
+        }
+    }
+
+    RepairPeerSelection {
+        selected_peer_id: selected.map(|candidate| candidate.peer_id.clone()),
+        selected_score: selected.map(|candidate| candidate.score),
+        rejected_peers,
+    }
+}
+
+fn repair_peer_rejection(
+    candidate: &RepairPeerCandidate,
+    repair_group: &RepairGroup,
+    min_decode_usefulness: u16,
+) -> Option<RepairPeerRejection> {
+    if candidate.auth_state == RepairPeerAuthState::Unauthenticated {
+        return Some(RepairPeerRejection::Unauthenticated);
+    }
+
+    if candidate.freshness == RepairPeerFreshness::Stale {
+        return Some(RepairPeerRejection::StalePeer);
+    }
+
+    if candidate.score.upload_budget_bytes == 0 {
+        return Some(RepairPeerRejection::UploadBudgetExhausted);
+    }
+
+    if candidate.symbol_state == RepairSymbolState::AlreadySeen {
+        return Some(RepairPeerRejection::DuplicateSymbol);
+    }
+
+    if candidate.manifest_root != repair_group.manifest_root {
+        return Some(RepairPeerRejection::ManifestMismatch);
+    }
+
+    if candidate.repair_group_id != repair_group.group_id {
+        return Some(RepairPeerRejection::RepairGroupMismatch);
+    }
+
+    if candidate.source_symbols_k != repair_group.source_symbols_k {
+        return Some(RepairPeerRejection::SourceSymbolsMismatch);
+    }
+
+    if candidate.k_prime != repair_group.k_prime {
+        return Some(RepairPeerRejection::KPrimeMismatch);
+    }
+
+    if candidate.transform_policy != repair_group.transform_policy {
+        return Some(RepairPeerRejection::TransformPolicyMismatch);
+    }
+
+    if candidate.auth_domain != repair_group.auth_domain {
+        return Some(RepairPeerRejection::AuthDomainMismatch);
+    }
+
+    if candidate.score.decode_usefulness < min_decode_usefulness {
+        return Some(RepairPeerRejection::LowDecodeUsefulness);
+    }
+
+    None
+}
+
+fn compare_repair_peer_candidates(
+    left: &RepairPeerCandidate,
+    right: &RepairPeerCandidate,
+) -> std::cmp::Ordering {
+    left.score
+        .rank_tuple()
+        .cmp(&right.score.rank_tuple())
+        .then_with(|| right.peer_id.cmp(&left.peer_id))
+}
 
 /// Session context for tracking received symbols and preventing replay attacks.
 #[derive(Debug, Clone)]
@@ -503,6 +754,233 @@ mod tests {
         };
 
         (group_id, repair_group)
+    }
+
+    fn baseline_repair_peer_score() -> RepairPeerScore {
+        RepairPeerScore {
+            path_quality: 80,
+            upload_budget_bytes: 256 * 1024,
+            rarity: 16,
+            decode_usefulness: 80,
+            trust: 80,
+            relay_cost: 8,
+            churn_risk: 4,
+        }
+    }
+
+    fn baseline_repair_peer_candidate(
+        peer_id: impl Into<String>,
+        repair_group: &RepairGroup,
+        score: RepairPeerScore,
+    ) -> RepairPeerCandidate {
+        RepairPeerCandidate {
+            peer_id: peer_id.into(),
+            manifest_root: repair_group.manifest_root.clone(),
+            repair_group_id: repair_group.group_id.clone(),
+            source_symbols_k: repair_group.source_symbols_k,
+            k_prime: repair_group.k_prime,
+            transform_policy: repair_group.transform_policy.clone(),
+            auth_domain: repair_group.auth_domain.clone(),
+            auth_state: RepairPeerAuthState::Authenticated,
+            freshness: RepairPeerFreshness::Current,
+            symbol_state: RepairSymbolState::New,
+            score,
+        }
+    }
+
+    fn mismatched_transform_policy() -> TransformOrder {
+        TransformOrder {
+            transforms: vec![TransformType::Encryption],
+            hash_point: HashPoint::Ciphertext,
+            verification_boundary: VerificationBoundary {
+                relay_verifiable: VerificationLevel::TransferIntegrity,
+                mailbox_verifiable: VerificationLevel::TransferIntegrity,
+                e2e_verification_required: true,
+                privacy_level: PrivacyLevel::FullPrivacy,
+            },
+        }
+    }
+
+    #[test]
+    fn test_select_repair_symbol_peer_scores_and_tie_breaks() {
+        let (_, repair_group) = create_test_repair_group();
+        let high_score = RepairPeerScore {
+            trust: 95,
+            decode_usefulness: 90,
+            rarity: 20,
+            path_quality: 90,
+            upload_budget_bytes: 512 * 1024,
+            relay_cost: 2,
+            churn_risk: 1,
+        };
+        let low_score = RepairPeerScore {
+            trust: 90,
+            decode_usefulness: 90,
+            rarity: 20,
+            path_quality: 90,
+            upload_budget_bytes: 512 * 1024,
+            relay_cost: 2,
+            churn_risk: 1,
+        };
+        let candidates = vec![
+            baseline_repair_peer_candidate("seed-z", &repair_group, low_score),
+            baseline_repair_peer_candidate("seed-b", &repair_group, high_score),
+            baseline_repair_peer_candidate("seed-a", &repair_group, high_score),
+        ];
+
+        let selection = select_repair_symbol_peer(&repair_group, &candidates, 10);
+
+        assert_eq!(selection.selected_peer_id.as_deref(), Some("seed-a"));
+        assert_eq!(selection.selected_score, Some(high_score));
+        assert!(selection.rejected_peers.is_empty());
+    }
+
+    #[test]
+    fn test_select_repair_symbol_peer_rejects_cross_domain_candidates() {
+        let (_, repair_group) = create_test_repair_group();
+        let mut wrong_auth_domain = repair_group.auth_domain.clone();
+        wrong_auth_domain.domain_id = "other-auth-domain".to_string();
+
+        let mut candidates = Vec::new();
+        candidates.push(baseline_repair_peer_candidate(
+            "valid",
+            &repair_group,
+            baseline_repair_peer_score(),
+        ));
+
+        let mut unauthenticated = baseline_repair_peer_candidate(
+            "unauthenticated",
+            &repair_group,
+            baseline_repair_peer_score(),
+        );
+        unauthenticated.auth_state = RepairPeerAuthState::Unauthenticated;
+        candidates.push(unauthenticated);
+
+        let mut stale =
+            baseline_repair_peer_candidate("stale", &repair_group, baseline_repair_peer_score());
+        stale.freshness = RepairPeerFreshness::Stale;
+        candidates.push(stale);
+
+        let mut no_budget = baseline_repair_peer_candidate(
+            "no-budget",
+            &repair_group,
+            baseline_repair_peer_score(),
+        );
+        no_budget.score.upload_budget_bytes = 0;
+        candidates.push(no_budget);
+
+        let mut duplicate = baseline_repair_peer_candidate(
+            "duplicate",
+            &repair_group,
+            baseline_repair_peer_score(),
+        );
+        duplicate.symbol_state = RepairSymbolState::AlreadySeen;
+        candidates.push(duplicate);
+
+        let mut wrong_manifest = baseline_repair_peer_candidate(
+            "wrong-manifest",
+            &repair_group,
+            baseline_repair_peer_score(),
+        );
+        wrong_manifest.manifest_root = MerkleRoot::new([1u8; 32]);
+        candidates.push(wrong_manifest);
+
+        let mut wrong_group = baseline_repair_peer_candidate(
+            "wrong-group",
+            &repair_group,
+            baseline_repair_peer_score(),
+        );
+        wrong_group.repair_group_id = RepairGroupId::new(&test_object_id(&[9, 9, 9, 9]), 9, 1024);
+        candidates.push(wrong_group);
+
+        let mut wrong_k =
+            baseline_repair_peer_candidate("wrong-k", &repair_group, baseline_repair_peer_score());
+        wrong_k.source_symbols_k -= 1;
+        candidates.push(wrong_k);
+
+        let mut wrong_k_prime = baseline_repair_peer_candidate(
+            "wrong-k-prime",
+            &repair_group,
+            baseline_repair_peer_score(),
+        );
+        wrong_k_prime.k_prime += 1;
+        candidates.push(wrong_k_prime);
+
+        let mut wrong_transform = baseline_repair_peer_candidate(
+            "wrong-transform",
+            &repair_group,
+            baseline_repair_peer_score(),
+        );
+        wrong_transform.transform_policy = Some(mismatched_transform_policy());
+        candidates.push(wrong_transform);
+
+        let mut wrong_auth = baseline_repair_peer_candidate(
+            "wrong-auth",
+            &repair_group,
+            baseline_repair_peer_score(),
+        );
+        wrong_auth.auth_domain = wrong_auth_domain;
+        candidates.push(wrong_auth);
+
+        let mut low_decode = baseline_repair_peer_candidate(
+            "low-decode",
+            &repair_group,
+            baseline_repair_peer_score(),
+        );
+        low_decode.score.decode_usefulness = 2;
+        candidates.push(low_decode);
+
+        let selection = select_repair_symbol_peer(&repair_group, &candidates, 10);
+
+        assert_eq!(selection.selected_peer_id.as_deref(), Some("valid"));
+        assert_eq!(
+            selection.rejected_peers.get("unauthenticated"),
+            Some(&RepairPeerRejection::Unauthenticated)
+        );
+        assert_eq!(
+            selection.rejected_peers.get("stale"),
+            Some(&RepairPeerRejection::StalePeer)
+        );
+        assert_eq!(
+            selection.rejected_peers.get("no-budget"),
+            Some(&RepairPeerRejection::UploadBudgetExhausted)
+        );
+        assert_eq!(
+            selection.rejected_peers.get("duplicate"),
+            Some(&RepairPeerRejection::DuplicateSymbol)
+        );
+        assert_eq!(
+            selection.rejected_peers.get("wrong-manifest"),
+            Some(&RepairPeerRejection::ManifestMismatch)
+        );
+        assert_eq!(
+            selection.rejected_peers.get("wrong-group"),
+            Some(&RepairPeerRejection::RepairGroupMismatch)
+        );
+        assert_eq!(
+            selection.rejected_peers.get("wrong-k"),
+            Some(&RepairPeerRejection::SourceSymbolsMismatch)
+        );
+        assert_eq!(
+            selection.rejected_peers.get("wrong-k-prime"),
+            Some(&RepairPeerRejection::KPrimeMismatch)
+        );
+        assert_eq!(
+            selection.rejected_peers.get("wrong-transform"),
+            Some(&RepairPeerRejection::TransformPolicyMismatch)
+        );
+        assert_eq!(
+            selection.rejected_peers.get("wrong-auth"),
+            Some(&RepairPeerRejection::AuthDomainMismatch)
+        );
+        assert_eq!(
+            selection.rejected_peers.get("low-decode"),
+            Some(&RepairPeerRejection::LowDecodeUsefulness)
+        );
+        assert_eq!(
+            RepairPeerRejection::SourceSymbolsMismatch.as_str(),
+            "source_symbols_mismatch"
+        );
     }
 
     #[test]
