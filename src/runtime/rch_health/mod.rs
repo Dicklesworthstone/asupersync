@@ -772,10 +772,12 @@ mod tests {
         assert_eq!(receipt.admissible_worker_count(), 2);
         assert_eq!(receipt.blocked_worker_count(), 1);
         assert_eq!(receipt.cache_warm_admissible_worker_count(), 1);
-        assert!(receipt
-            .candidates
-            .iter()
-            .all(|candidate| !candidate.worker_id.as_str().contains("vmi-")));
+        assert!(
+            receipt
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.worker_id.as_str().contains("vmi-"))
+        );
     }
 
     #[test]
@@ -840,11 +842,13 @@ mod tests {
         );
         assert_eq!(cargo_receipt.candidates[0].cache_warmth_bps, 100);
         assert_eq!(clippy_receipt.candidates[0].cache_warmth_bps, 95);
-        assert!(cargo_receipt
-            .candidates
-            .iter()
-            .chain(clippy_receipt.candidates.iter())
-            .all(|candidate| !candidate.worker_id.as_str().contains("vmi-")));
+        assert!(
+            cargo_receipt
+                .candidates
+                .iter()
+                .chain(clippy_receipt.candidates.iter())
+                .all(|candidate| !candidate.worker_id.as_str().contains("vmi-"))
+        );
     }
 
     #[test]
@@ -860,10 +864,12 @@ mod tests {
             Some(RchRefusalClass::LocalFallbackRefused)
         );
         assert!(!receipt.local_fallback_allowed);
-        assert!(receipt
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("local Cargo fallback")));
+        assert!(
+            receipt
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("local Cargo fallback"))
+        );
     }
 
     #[test]
@@ -956,10 +962,11 @@ mod tests {
         assert!(row.reason_codes.contains(&"remote_required"));
         assert!(row.reason_codes.contains(&"cache_warm_capacity_present"));
         assert!(!row.reason_codes.contains(&"local_fallback_refused"));
-        assert!(row
-            .selected_worker
-            .as_ref()
-            .is_some_and(|worker| !worker.as_str().contains("vmi-")));
+        assert!(
+            row.selected_worker
+                .as_ref()
+                .is_some_and(|worker| !worker.as_str().contains("vmi-"))
+        );
     }
 
     #[test]
