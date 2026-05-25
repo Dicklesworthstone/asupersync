@@ -5,21 +5,21 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod tests {
-    use crate::runtime::spawn_blocking::{spawn_blocking, BlockingHandle, BlockingTask};
-    use crate::fs::file::{File, OpenOptions, FileType};
-    use crate::fs::{create_dir_all, remove_file, remove_dir_all, metadata};
-    use crate::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt, SeekFrom};
+    use crate::cancel::{CancelReason, CancelToken};
     use crate::cx::{Cx, Scope};
+    use crate::error::AsupersyncError;
+    use crate::fs::file::{File, FileType, OpenOptions};
+    use crate::fs::{create_dir_all, metadata, remove_dir_all, remove_file};
+    use crate::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
+    use crate::runtime::spawn_blocking::{BlockingHandle, BlockingTask, spawn_blocking};
     use crate::runtime::{Runtime, RuntimeBuilder};
     use crate::time::{Duration, Instant, sleep};
-    use crate::types::{Budget, Outcome, TaskId, RegionId};
-    use crate::error::AsupersyncError;
-    use crate::cancel::{CancelToken, CancelReason};
+    use crate::types::{Budget, Outcome, RegionId, TaskId};
 
     use std::collections::{HashMap, VecDeque};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// Configuration for blocking file I/O coordination
     #[derive(Debug, Clone)]
@@ -218,25 +218,29 @@ mod tests {
             self.is_running.store(true, Ordering::SeqCst);
 
             // Start operation processor
-            let processor_handle = cx.spawn(|cx| async move {
-                self.run_operation_processor(cx).await
-            }).await?;
+            let processor_handle = cx
+                .spawn(|cx| async move { self.run_operation_processor(cx).await })
+                .await?;
 
             // Start coordination monitor
-            let monitor_handle = cx.spawn(|cx| async move {
-                self.run_coordination_monitor(cx).await
-            }).await?;
+            let monitor_handle = cx
+                .spawn(|cx| async move { self.run_coordination_monitor(cx).await })
+                .await?;
 
             // Start cleanup manager
-            let cleanup_handle = cx.spawn(|cx| async move {
-                self.run_cleanup_manager(cx).await
-            }).await?;
+            let cleanup_handle = cx
+                .spawn(|cx| async move { self.run_cleanup_manager(cx).await })
+                .await?;
 
             Ok(())
         }
 
         /// Submit file operation for processing
-        async fn submit_operation(&mut self, mut operation: FileOperation, cx: &Cx) -> Result<u64, AsupersyncError> {
+        async fn submit_operation(
+            &mut self,
+            mut operation: FileOperation,
+            cx: &Cx,
+        ) -> Result<u64, AsupersyncError> {
             operation.id = self.next_op_id.fetch_add(1, Ordering::SeqCst);
 
             // Determine coordination strategy
@@ -249,7 +253,10 @@ mod tests {
         }
 
         /// Determine if operation should use blocking context
-        async fn should_use_blocking(&self, operation: &FileOperation) -> Result<bool, AsupersyncError> {
+        async fn should_use_blocking(
+            &self,
+            operation: &FileOperation,
+        ) -> Result<bool, AsupersyncError> {
             match &self.coordination_strategy {
                 CoordinationStrategy::AllBlocking => Ok(true),
                 CoordinationStrategy::SizeBased { threshold } => {
@@ -275,42 +282,69 @@ mod tests {
         }
 
         /// Execute file operation
-        async fn execute_operation(&mut self, operation: FileOperation, cx: &Cx) -> Result<FileOperationResult, AsupersyncError> {
+        async fn execute_operation(
+            &mut self,
+            operation: FileOperation,
+            cx: &Cx,
+        ) -> Result<FileOperationResult, AsupersyncError> {
             let start_time = Instant::now();
 
             let result = if operation.requires_blocking {
-                self.execute_blocking_operation(operation.clone(), cx).await?
+                self.execute_blocking_operation(operation.clone(), cx)
+                    .await?
             } else {
                 self.execute_async_operation(operation.clone(), cx).await?
             };
 
-            self.completed_operations.insert(operation.id, result.clone());
-            self.stats.file_operations_executed.fetch_add(1, Ordering::SeqCst);
+            self.completed_operations
+                .insert(operation.id, result.clone());
+            self.stats
+                .file_operations_executed
+                .fetch_add(1, Ordering::SeqCst);
 
             Ok(result)
         }
 
         /// Execute operation in blocking context
-        async fn execute_blocking_operation(&mut self, operation: FileOperation, cx: &Cx) -> Result<FileOperationResult, AsupersyncError> {
-            self.stats.async_to_blocking_transitions.fetch_add(1, Ordering::SeqCst);
+        async fn execute_blocking_operation(
+            &mut self,
+            operation: FileOperation,
+            cx: &Cx,
+        ) -> Result<FileOperationResult, AsupersyncError> {
+            self.stats
+                .async_to_blocking_transitions
+                .fetch_add(1, Ordering::SeqCst);
 
             let operation_clone = operation.clone();
             let start_time = Instant::now();
 
-            let blocking_task = spawn_blocking(move || {
-                Self::perform_blocking_file_operation(operation_clone)
-            }, cx).await?;
+            let blocking_task = spawn_blocking(
+                move || Self::perform_blocking_file_operation(operation_clone),
+                cx,
+            )
+            .await?;
 
-            self.active_blocking_tasks.insert(operation.id, blocking_task);
-            self.stats.blocking_tasks_spawned.fetch_add(1, Ordering::SeqCst);
+            self.active_blocking_tasks
+                .insert(operation.id, blocking_task);
+            self.stats
+                .blocking_tasks_spawned
+                .fetch_add(1, Ordering::SeqCst);
 
             // Wait for blocking task completion
-            let blocking_handle = self.active_blocking_tasks.remove(&operation.id)
-                .ok_or_else(|| AsupersyncError::InvalidState("Blocking task not found".to_string()))?;
+            let blocking_handle = self
+                .active_blocking_tasks
+                .remove(&operation.id)
+                .ok_or_else(|| {
+                    AsupersyncError::InvalidState("Blocking task not found".to_string())
+                })?;
 
             let result = blocking_handle.await?;
-            self.stats.blocking_tasks_completed.fetch_add(1, Ordering::SeqCst);
-            self.stats.blocking_to_async_transitions.fetch_add(1, Ordering::SeqCst);
+            self.stats
+                .blocking_tasks_completed
+                .fetch_add(1, Ordering::SeqCst);
+            self.stats
+                .blocking_to_async_transitions
+                .fetch_add(1, Ordering::SeqCst);
 
             Ok(result)
         }
@@ -320,26 +354,22 @@ mod tests {
             let start_time = Instant::now();
 
             match Self::execute_file_op_sync(&operation) {
-                Ok(bytes_processed) => {
-                    FileOperationResult {
-                        operation_id: operation.id,
-                        success: true,
-                        bytes_processed,
-                        duration: start_time.elapsed(),
-                        error_message: None,
-                        file_metadata: Self::get_file_metadata_sync(&operation.file_path),
-                    }
-                }
-                Err(e) => {
-                    FileOperationResult {
-                        operation_id: operation.id,
-                        success: false,
-                        bytes_processed: 0,
-                        duration: start_time.elapsed(),
-                        error_message: Some(e.to_string()),
-                        file_metadata: None,
-                    }
-                }
+                Ok(bytes_processed) => FileOperationResult {
+                    operation_id: operation.id,
+                    success: true,
+                    bytes_processed,
+                    duration: start_time.elapsed(),
+                    error_message: None,
+                    file_metadata: Self::get_file_metadata_sync(&operation.file_path),
+                },
+                Err(e) => FileOperationResult {
+                    operation_id: operation.id,
+                    success: false,
+                    bytes_processed: 0,
+                    duration: start_time.elapsed(),
+                    error_message: Some(e.to_string()),
+                    file_metadata: None,
+                },
             }
         }
 
@@ -381,7 +411,7 @@ mod tests {
                     Ok(bytes_read)
                 }
                 FileOpType::BatchWrite { chunks } => {
-                    use std::io::{Write, Seek};
+                    use std::io::{Seek, Write};
                     let mut file = std::fs::OpenOptions::new()
                         .create(true)
                         .write(true)
@@ -403,7 +433,11 @@ mod tests {
             std::fs::metadata(path).ok().map(|metadata| {
                 FileMetadata {
                     size: metadata.len(),
-                    file_type: if metadata.is_file() { FileType::File } else { FileType::Directory },
+                    file_type: if metadata.is_file() {
+                        FileType::File
+                    } else {
+                        FileType::Directory
+                    },
                     modified_at: Instant::now(), // Simplified for testing
                     is_readonly: metadata.permissions().readonly(),
                 }
@@ -411,12 +445,17 @@ mod tests {
         }
 
         /// Execute operation in async context
-        async fn execute_async_operation(&mut self, operation: FileOperation, cx: &Cx) -> Result<FileOperationResult, AsupersyncError> {
+        async fn execute_async_operation(
+            &mut self,
+            operation: FileOperation,
+            cx: &Cx,
+        ) -> Result<FileOperationResult, AsupersyncError> {
             let start_time = Instant::now();
 
             match self.execute_file_op_async(&operation, cx).await {
                 Ok(bytes_processed) => {
-                    self.update_stats_for_operation(&operation, bytes_processed).await;
+                    self.update_stats_for_operation(&operation, bytes_processed)
+                        .await;
 
                     Ok(FileOperationResult {
                         operation_id: operation.id,
@@ -428,7 +467,9 @@ mod tests {
                     })
                 }
                 Err(e) => {
-                    self.stats.file_operations_failed.fetch_add(1, Ordering::SeqCst);
+                    self.stats
+                        .file_operations_failed
+                        .fetch_add(1, Ordering::SeqCst);
 
                     Ok(FileOperationResult {
                         operation_id: operation.id,
@@ -443,7 +484,11 @@ mod tests {
         }
 
         /// Execute asynchronous file operation
-        async fn execute_file_op_async(&mut self, operation: &FileOperation, cx: &Cx) -> Result<usize, AsupersyncError> {
+        async fn execute_file_op_async(
+            &mut self,
+            operation: &FileOperation,
+            cx: &Cx,
+        ) -> Result<usize, AsupersyncError> {
             match &operation.op_type {
                 FileOpType::Create => {
                     let mut file = File::create(&operation.file_path).await?;
@@ -501,13 +546,21 @@ mod tests {
         }
 
         /// Update statistics for completed operation
-        async fn update_stats_for_operation(&self, operation: &FileOperation, bytes_processed: usize) {
+        async fn update_stats_for_operation(
+            &self,
+            operation: &FileOperation,
+            bytes_processed: usize,
+        ) {
             match &operation.op_type {
                 FileOpType::Create | FileOpType::Append | FileOpType::BatchWrite { .. } => {
-                    self.stats.bytes_written.fetch_add(bytes_processed as u64, Ordering::SeqCst);
+                    self.stats
+                        .bytes_written
+                        .fetch_add(bytes_processed as u64, Ordering::SeqCst);
                 }
                 FileOpType::Read | FileOpType::SeekRead { .. } => {
-                    self.stats.bytes_read.fetch_add(bytes_processed as u64, Ordering::SeqCst);
+                    self.stats
+                        .bytes_read
+                        .fetch_add(bytes_processed as u64, Ordering::SeqCst);
                 }
                 _ => {}
             }
@@ -536,7 +589,9 @@ mod tests {
                                 // Operation completed successfully
                             }
                             Err(e) => {
-                                self.stats.coordination_errors.fetch_add(1, Ordering::SeqCst);
+                                self.stats
+                                    .coordination_errors
+                                    .fetch_add(1, Ordering::SeqCst);
                                 eprintln!("File operation error: {:?}", e);
                             }
                         }
@@ -573,15 +628,19 @@ mod tests {
                 // Clean up timed out tasks
                 for task_id in timed_out_tasks {
                     if let Some(_handle) = self.active_blocking_tasks.remove(&task_id) {
-                        self.stats.coordination_errors.fetch_add(1, Ordering::SeqCst);
+                        self.stats
+                            .coordination_errors
+                            .fetch_add(1, Ordering::SeqCst);
                     }
                 }
 
                 // Log coordination metrics
                 if self.active_blocking_tasks.len() > self.config.max_blocking_ops / 2 {
-                    eprintln!("High blocking task load: {}/{}",
+                    eprintln!(
+                        "High blocking task load: {}/{}",
                         self.active_blocking_tasks.len(),
-                        self.config.max_blocking_ops);
+                        self.config.max_blocking_ops
+                    );
                 }
 
                 sleep(self.config.coordination_interval, cx).await?;
@@ -595,9 +654,8 @@ mod tests {
             while self.is_running.load(Ordering::SeqCst) {
                 // Clean up completed operations
                 let completed_cutoff = Instant::now() - Duration::from_secs(60);
-                self.completed_operations.retain(|_, result| {
-                    result.duration.elapsed() < Duration::from_secs(60)
-                });
+                self.completed_operations
+                    .retain(|_, result| result.duration.elapsed() < Duration::from_secs(60));
 
                 // Clean up temporary files
                 self.cleanup_temp_files().await?;
@@ -709,7 +767,8 @@ mod tests {
             assert_eq!(stats.coordination_errors.load(Ordering::SeqCst), 0);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test size-based coordination strategy
@@ -769,7 +828,8 @@ mod tests {
             assert!(stats.async_to_blocking_transitions.load(Ordering::SeqCst) >= 1);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test adaptive coordination under load
@@ -783,8 +843,12 @@ mod tests {
                 max_blocking_ops: 3, // Limit to test load adaptation
                 ..BlockingFileConfig::default()
             };
-            let strategy = CoordinationStrategy::Adaptive { load_threshold: 0.5 };
-            let handle_mode = FileHandleMode::Adaptive { allocation_threshold: 0.6 };
+            let strategy = CoordinationStrategy::Adaptive {
+                load_threshold: 0.5,
+            };
+            let handle_mode = FileHandleMode::Adaptive {
+                allocation_threshold: 0.6,
+            };
             let mut system = BlockingFileSystem::new(config, strategy, handle_mode).await?;
 
             system.start(cx).await?;
@@ -829,6 +893,7 @@ mod tests {
             assert!(stats.coordination_errors.load(Ordering::SeqCst) <= 1);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 }

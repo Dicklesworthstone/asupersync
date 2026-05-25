@@ -3,17 +3,19 @@
 //! Defines TransferActor and ownership topology for transfer sessions,
 //! providing the actor model foundation for the data-aware transfer brain.
 
-use crate::atp::transfer_brain::{TransferBrain, TransferBrainConfig, ScheduledChunk, ChunkId, SystemPressure};
 use crate::atp::object::ObjectId;
+use crate::atp::transfer_brain::{
+    ChunkId, ScheduledChunk, SystemPressure, TransferBrain, TransferBrainConfig,
+};
+use crate::channel::{mpsc, oneshot};
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
-use crate::types::{Budget, TraceId, TaskId, RegionId};
+use crate::time::Sleep;
+use crate::types::{Budget, RegionId, TaskId, TraceId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use crate::channel::{mpsc, oneshot};
-use crate::time::Sleep;
 use tracing::{debug, error, info, warn};
 
 /// Configuration for transfer actor
@@ -146,7 +148,10 @@ impl TransferSession {
 
     /// Check if session is active
     pub fn is_active(&self) -> bool {
-        matches!(self.state, SessionState::Active | SessionState::Initializing)
+        matches!(
+            self.state,
+            SessionState::Active | SessionState::Initializing
+        )
     }
 
     /// Check if session has timed out
@@ -209,9 +214,7 @@ pub enum TransferMessage {
     },
 
     /// Update system pressure
-    UpdatePressure {
-        pressure: SystemPressure,
-    },
+    UpdatePressure { pressure: SystemPressure },
 
     /// Pause a transfer session
     PauseSession {
@@ -299,10 +302,7 @@ impl TransferActor {
             message_tx: message_tx.clone(),
         };
 
-        let handle = TransferActorHandle {
-            message_tx,
-            config,
-        };
+        let handle = TransferActorHandle { message_tx, config };
 
         (actor, handle)
     }
@@ -352,20 +352,40 @@ impl TransferActor {
 
     async fn handle_message(&mut self, message: TransferMessage) -> Result<()> {
         match message {
-            TransferMessage::StartSession { object_id, region_id, task_id, trace_id, response_tx } => {
-                let result = self.start_session(object_id, region_id, task_id, trace_id).await;
+            TransferMessage::StartSession {
+                object_id,
+                region_id,
+                task_id,
+                trace_id,
+                response_tx,
+            } => {
+                let result = self
+                    .start_session(object_id, region_id, task_id, trace_id)
+                    .await;
                 if let Err(_) = response_tx.send(result) {
                     debug!("Failed to send start session response");
                 }
             }
 
-            TransferMessage::ScheduleChunk { session_id, chunk, response_tx } => {
+            TransferMessage::ScheduleChunk {
+                session_id,
+                chunk,
+                response_tx,
+            } => {
                 let result = self.schedule_chunk(session_id, chunk).await;
                 let _ = response_tx.send(result);
             }
 
-            TransferMessage::CompleteChunk { session_id, chunk_id, success, bytes_transferred, response_tx } => {
-                let result = self.complete_chunk(session_id, chunk_id, success, bytes_transferred).await;
+            TransferMessage::CompleteChunk {
+                session_id,
+                chunk_id,
+                success,
+                bytes_transferred,
+                response_tx,
+            } => {
+                let result = self
+                    .complete_chunk(session_id, chunk_id, success, bytes_transferred)
+                    .await;
                 let _ = response_tx.send(result);
             }
 
@@ -373,22 +393,34 @@ impl TransferActor {
                 self.update_pressure(pressure).await;
             }
 
-            TransferMessage::PauseSession { session_id, response_tx } => {
+            TransferMessage::PauseSession {
+                session_id,
+                response_tx,
+            } => {
                 let result = self.pause_session(session_id).await;
                 let _ = response_tx.send(result);
             }
 
-            TransferMessage::ResumeSession { session_id, response_tx } => {
+            TransferMessage::ResumeSession {
+                session_id,
+                response_tx,
+            } => {
                 let result = self.resume_session(session_id).await;
                 let _ = response_tx.send(result);
             }
 
-            TransferMessage::CancelSession { session_id, response_tx } => {
+            TransferMessage::CancelSession {
+                session_id,
+                response_tx,
+            } => {
                 let result = self.cancel_session(session_id).await;
                 let _ = response_tx.send(result);
             }
 
-            TransferMessage::GetSessionStatus { session_id, response_tx } => {
+            TransferMessage::GetSessionStatus {
+                session_id,
+                response_tx,
+            } => {
                 let result = self.get_session_status(session_id).await;
                 let _ = response_tx.send(result);
             }
@@ -412,7 +444,13 @@ impl TransferActor {
         Ok(())
     }
 
-    async fn start_session(&mut self, object_id: ObjectId, region_id: RegionId, task_id: TaskId, trace_id: TraceId) -> Result<SessionId> {
+    async fn start_session(
+        &mut self,
+        object_id: ObjectId,
+        region_id: RegionId,
+        task_id: TaskId,
+        trace_id: TraceId,
+    ) -> Result<SessionId> {
         if self.sessions.len() >= self.config.max_concurrent_sessions {
             return Err(Error::new(ErrorKind::AdmissionDenied));
         }
@@ -436,7 +474,9 @@ impl TransferActor {
     }
 
     async fn schedule_chunk(&mut self, session_id: SessionId, chunk: ScheduledChunk) -> Result<()> {
-        let session = self.sessions.get_mut(&session_id)
+        let session = self
+            .sessions
+            .get_mut(&session_id)
             .ok_or_else(|| Error::new(ErrorKind::ObjectMismatch))?;
 
         if !session.is_active() {
@@ -453,8 +493,16 @@ impl TransferActor {
         Ok(())
     }
 
-    async fn complete_chunk(&mut self, session_id: SessionId, chunk_id: ChunkId, success: bool, bytes_transferred: u64) -> Result<()> {
-        let session = self.sessions.get_mut(&session_id)
+    async fn complete_chunk(
+        &mut self,
+        session_id: SessionId,
+        chunk_id: ChunkId,
+        success: bool,
+        bytes_transferred: u64,
+    ) -> Result<()> {
+        let session = self
+            .sessions
+            .get_mut(&session_id)
             .ok_or_else(|| Error::new(ErrorKind::ObjectMismatch))?;
 
         let actual_resources = crate::atp::transfer_brain::ResourceUsage {
@@ -465,7 +513,9 @@ impl TransferActor {
             duration: Duration::from_millis(100), // TODO: Measure actual duration
         };
 
-        session.brain.complete_chunk(&chunk_id, success, actual_resources)?;
+        session
+            .brain
+            .complete_chunk(&chunk_id, success, actual_resources)?;
         session.update_activity();
 
         if success {
@@ -505,7 +555,9 @@ impl TransferActor {
     }
 
     async fn pause_session(&mut self, session_id: SessionId) -> Result<()> {
-        let session = self.sessions.get_mut(&session_id)
+        let session = self
+            .sessions
+            .get_mut(&session_id)
             .ok_or_else(|| Error::new(ErrorKind::ObjectMismatch))?;
 
         if session.state == SessionState::Active {
@@ -517,7 +569,9 @@ impl TransferActor {
     }
 
     async fn resume_session(&mut self, session_id: SessionId) -> Result<()> {
-        let session = self.sessions.get_mut(&session_id)
+        let session = self
+            .sessions
+            .get_mut(&session_id)
             .ok_or_else(|| Error::new(ErrorKind::ObjectMismatch))?;
 
         if session.state == SessionState::Paused {
@@ -538,7 +592,9 @@ impl TransferActor {
     }
 
     async fn get_session_status(&self, session_id: SessionId) -> Result<TransferSessionStatus> {
-        let session = self.sessions.get(&session_id)
+        let session = self
+            .sessions
+            .get(&session_id)
             .ok_or_else(|| Error::new(ErrorKind::ObjectMismatch))?;
 
         Ok(TransferSessionStatus {
@@ -625,18 +681,28 @@ pub struct TransferActorHandle {
 
 impl TransferActorHandle {
     /// Start a new transfer session
-    pub async fn start_session(&self, object_id: ObjectId, region_id: RegionId, task_id: TaskId, trace_id: TraceId) -> Result<SessionId> {
+    pub async fn start_session(
+        &self,
+        object_id: ObjectId,
+        region_id: RegionId,
+        task_id: TaskId,
+        trace_id: TraceId,
+    ) -> Result<SessionId> {
         let (response_tx, response_rx) = oneshot::channel();
 
-        self.message_tx.send(TransferMessage::StartSession {
-            object_id,
-            region_id,
-            task_id,
-            trace_id,
-            response_tx,
-        }).await.map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
+        self.message_tx
+            .send(TransferMessage::StartSession {
+                object_id,
+                region_id,
+                task_id,
+                trace_id,
+                response_tx,
+            })
+            .await
+            .map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
 
-        response_rx.await
+        response_rx
+            .await
             .map_err(|_| Error::new(ErrorKind::ChannelClosed))?
     }
 
@@ -644,29 +710,43 @@ impl TransferActorHandle {
     pub async fn schedule_chunk(&self, session_id: SessionId, chunk: ScheduledChunk) -> Result<()> {
         let (response_tx, mut response_rx) = mpsc::unbounded_channel();
 
-        self.message_tx.send(TransferMessage::ScheduleChunk {
-            session_id,
-            chunk,
-            response_tx,
-        }).map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
+        self.message_tx
+            .send(TransferMessage::ScheduleChunk {
+                session_id,
+                chunk,
+                response_tx,
+            })
+            .map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
 
-        response_rx.recv().await
+        response_rx
+            .recv()
+            .await
             .ok_or_else(|| Error::new(ErrorKind::ChannelClosed))?
     }
 
     /// Complete a chunk transfer
-    pub async fn complete_chunk(&self, session_id: SessionId, chunk_id: ChunkId, success: bool, bytes_transferred: u64) -> Result<()> {
+    pub async fn complete_chunk(
+        &self,
+        session_id: SessionId,
+        chunk_id: ChunkId,
+        success: bool,
+        bytes_transferred: u64,
+    ) -> Result<()> {
         let (response_tx, mut response_rx) = mpsc::unbounded_channel();
 
-        self.message_tx.send(TransferMessage::CompleteChunk {
-            session_id,
-            chunk_id,
-            success,
-            bytes_transferred,
-            response_tx,
-        }).map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
+        self.message_tx
+            .send(TransferMessage::CompleteChunk {
+                session_id,
+                chunk_id,
+                success,
+                bytes_transferred,
+                response_tx,
+            })
+            .map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
 
-        response_rx.recv().await
+        response_rx
+            .recv()
+            .await
             .ok_or_else(|| Error::new(ErrorKind::ChannelClosed))?
     }
 
@@ -674,18 +754,23 @@ impl TransferActorHandle {
     pub async fn get_session_status(&self, session_id: SessionId) -> Result<TransferSessionStatus> {
         let (response_tx, mut response_rx) = mpsc::unbounded_channel();
 
-        self.message_tx.send(TransferMessage::GetSessionStatus {
-            session_id,
-            response_tx,
-        }).map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
+        self.message_tx
+            .send(TransferMessage::GetSessionStatus {
+                session_id,
+                response_tx,
+            })
+            .map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
 
-        response_rx.recv().await
+        response_rx
+            .recv()
+            .await
             .ok_or_else(|| Error::new(ErrorKind::ChannelClosed))?
     }
 
     /// Shutdown the transfer actor
     pub fn shutdown(&self) -> Result<()> {
-        self.message_tx.send(TransferMessage::Shutdown)
+        self.message_tx
+            .send(TransferMessage::Shutdown)
             .map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
         Ok(())
     }
@@ -694,7 +779,7 @@ impl TransferActorHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::transfer_brain::{TransferPriority, ScheduledChunk};
+    use crate::atp::transfer_brain::{ScheduledChunk, TransferPriority};
     // TODO: Reimplement tests with asupersync async primitives
 
     // TODO: Reimplement with asupersync async primitives

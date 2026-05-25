@@ -92,8 +92,9 @@ impl CacheStorage for FileStorage {
 
         // Create subdirectory if needed
         if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| CacheError::Storage(format!("Failed to create subdirectory: {}", e)))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                CacheError::Storage(format!("Failed to create subdirectory: {}", e))
+            })?;
         }
 
         // Compress content if enabled
@@ -124,12 +125,13 @@ impl CacheStorage for FileStorage {
 
                 Ok(decompressed)
             }
-            StorageLocation::Memory => {
-                Err(CacheError::Storage("Memory storage not supported by FileStorage".to_string()))
-            }
-            StorageLocation::External(url) => {
-                Err(CacheError::Storage(format!("External storage not supported: {}", url)))
-            }
+            StorageLocation::Memory => Err(CacheError::Storage(
+                "Memory storage not supported by FileStorage".to_string(),
+            )),
+            StorageLocation::External(url) => Err(CacheError::Storage(format!(
+                "External storage not supported: {}",
+                url
+            ))),
         }
     }
 
@@ -137,19 +139,21 @@ impl CacheStorage for FileStorage {
         match location {
             StorageLocation::File(path) => {
                 if path.exists() {
-                    std::fs::remove_file(path)
-                        .map_err(|e| CacheError::Storage(format!("Failed to remove file: {}", e)))?;
+                    std::fs::remove_file(path).map_err(|e| {
+                        CacheError::Storage(format!("Failed to remove file: {}", e))
+                    })?;
 
                     self.metrics.files_removed += 1;
                 }
                 Ok(())
             }
-            StorageLocation::Memory => {
-                Err(CacheError::Storage("Memory storage not supported by FileStorage".to_string()))
-            }
-            StorageLocation::External(url) => {
-                Err(CacheError::Storage(format!("External storage removal not supported: {}", url)))
-            }
+            StorageLocation::Memory => Err(CacheError::Storage(
+                "Memory storage not supported by FileStorage".to_string(),
+            )),
+            StorageLocation::External(url) => Err(CacheError::Storage(format!(
+                "External storage removal not supported: {}",
+                url
+            ))),
         }
     }
 
@@ -224,14 +228,18 @@ impl CacheStorage for MemoryStorage {
             StorageLocation::Memory => {
                 // For memory storage, we'd need the key to retrieve
                 // This is a limitation of the current design - would need to pass key
-                Err(CacheError::Storage("Memory retrieval requires key context".to_string()))
+                Err(CacheError::Storage(
+                    "Memory retrieval requires key context".to_string(),
+                ))
             }
-            StorageLocation::File(path) => {
-                Err(CacheError::Storage(format!("File storage not supported: {:?}", path)))
-            }
-            StorageLocation::External(url) => {
-                Err(CacheError::Storage(format!("External storage not supported: {}", url)))
-            }
+            StorageLocation::File(path) => Err(CacheError::Storage(format!(
+                "File storage not supported: {:?}",
+                path
+            ))),
+            StorageLocation::External(url) => Err(CacheError::Storage(format!(
+                "External storage not supported: {}",
+                url
+            ))),
         }
     }
 
@@ -239,14 +247,18 @@ impl CacheStorage for MemoryStorage {
         match location {
             StorageLocation::Memory => {
                 // Would need key to identify what to remove
-                Err(CacheError::Storage("Memory removal requires key context".to_string()))
+                Err(CacheError::Storage(
+                    "Memory removal requires key context".to_string(),
+                ))
             }
-            StorageLocation::File(path) => {
-                Err(CacheError::Storage(format!("File storage not supported: {:?}", path)))
-            }
-            StorageLocation::External(url) => {
-                Err(CacheError::Storage(format!("External storage not supported: {}", url)))
-            }
+            StorageLocation::File(path) => Err(CacheError::Storage(format!(
+                "File storage not supported: {:?}",
+                path
+            ))),
+            StorageLocation::External(url) => Err(CacheError::Storage(format!(
+                "External storage not supported: {}",
+                url
+            ))),
         }
     }
 
@@ -347,9 +359,9 @@ impl CacheStorage for HybridStorage {
         let result = match location {
             StorageLocation::Memory => self.memory_storage.retrieve(location),
             StorageLocation::File(_) => self.file_storage.retrieve(location),
-            StorageLocation::External(_) => {
-                Err(CacheError::Storage("External storage not supported".to_string()))
-            }
+            StorageLocation::External(_) => Err(CacheError::Storage(
+                "External storage not supported".to_string(),
+            )),
         };
 
         // Update metrics (would need mutable access in real implementation)
@@ -360,9 +372,9 @@ impl CacheStorage for HybridStorage {
         let result = match location {
             StorageLocation::Memory => self.memory_storage.remove(location),
             StorageLocation::File(_) => self.file_storage.remove(location),
-            StorageLocation::External(_) => {
-                Err(CacheError::Storage("External storage not supported".to_string()))
-            }
+            StorageLocation::External(_) => Err(CacheError::Storage(
+                "External storage not supported".to_string(),
+            )),
         };
 
         // Update combined metrics
@@ -409,11 +421,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let mut storage = FileStorage::new(temp_dir.path(), false).unwrap();
 
-        let key = CacheKey::new(
-            "manifest123".to_string(),
-            "content456".to_string(),
-            None,
-        );
+        let key = CacheKey::new("manifest123".to_string(), "content456".to_string(), None);
         let content = b"test content";
 
         // Store content

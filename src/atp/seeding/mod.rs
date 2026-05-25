@@ -133,10 +133,7 @@ impl ManifestAuthorization {
     /// Check if this authorization is still valid.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        self.active
-            && self
-                .expires_at
-                .map_or(true, |exp| exp > SystemTime::now())
+        self.active && self.expires_at.map_or(true, |exp| exp > SystemTime::now())
     }
 }
 
@@ -179,13 +176,20 @@ impl AtpSeedingService {
         }
 
         // Validate priority
-        if !self.config.priority_levels.iter().any(|p| p.name == priority) {
+        if !self
+            .config
+            .priority_levels
+            .iter()
+            .any(|p| p.name == priority)
+        {
             return Err(SeedingError::InvalidPriority(priority));
         }
 
-        let authorization = ManifestAuthorization::new(manifest_hash.clone(), grant_scope, priority);
+        let authorization =
+            ManifestAuthorization::new(manifest_hash.clone(), grant_scope, priority);
 
-        self.authorizations.insert(manifest_hash.clone(), authorization);
+        self.authorizations
+            .insert(manifest_hash.clone(), authorization);
         self.config.authorized_manifests.insert(manifest_hash);
 
         Ok(())
@@ -197,7 +201,8 @@ impl AtpSeedingService {
         self.config.authorized_manifests.remove(manifest_hash);
 
         // Stop any active sessions for this manifest
-        self.active_sessions.retain(|_, session| session.manifest_hash != manifest_hash);
+        self.active_sessions
+            .retain(|_, session| session.manifest_hash != manifest_hash);
 
         Ok(())
     }
@@ -220,11 +225,15 @@ impl AtpSeedingService {
         requester_grants: &[String],
     ) -> Result<Option<Vec<u8>>, SeedingError> {
         // Check if manifest is authorized
-        let auth = self.authorizations.get(manifest_hash)
+        let auth = self
+            .authorizations
+            .get(manifest_hash)
             .ok_or_else(|| SeedingError::UnauthorizedManifest(manifest_hash.to_string()))?;
 
         if !auth.is_valid() {
-            return Err(SeedingError::ExpiredAuthorization(manifest_hash.to_string()));
+            return Err(SeedingError::ExpiredAuthorization(
+                manifest_hash.to_string(),
+            ));
         }
 
         // Check if requester has appropriate grants
@@ -260,11 +269,15 @@ impl AtpSeedingService {
         content: &[u8],
     ) -> Result<(), SeedingError> {
         // Check if manifest is authorized
-        let auth = self.authorizations.get(manifest_hash)
+        let auth = self
+            .authorizations
+            .get(manifest_hash)
             .ok_or_else(|| SeedingError::UnauthorizedManifest(manifest_hash.to_string()))?;
 
         if !auth.is_valid() {
-            return Err(SeedingError::ExpiredAuthorization(manifest_hash.to_string()));
+            return Err(SeedingError::ExpiredAuthorization(
+                manifest_hash.to_string(),
+            ));
         }
 
         // Create cache key with grant scope
@@ -275,7 +288,8 @@ impl AtpSeedingService {
         );
 
         // Store in cache
-        self.cache.put(cache_key, content)
+        self.cache
+            .put(cache_key, content)
             .map_err(SeedingError::CacheError)?;
 
         // Update metrics
@@ -304,7 +318,9 @@ impl AtpSeedingService {
         }
 
         // Check authorization
-        let auth = self.authorizations.get(&manifest_hash)
+        let auth = self
+            .authorizations
+            .get(&manifest_hash)
             .ok_or_else(|| SeedingError::UnauthorizedManifest(manifest_hash.clone()))?;
 
         if !auth.is_valid() {
@@ -317,7 +333,14 @@ impl AtpSeedingService {
         }
 
         // Create session
-        let session_id = format!("seed_{}_{}", peer_id, SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs());
+        let session_id = format!(
+            "seed_{}_{}",
+            peer_id,
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
         let session = SeedingSession {
             session_id: session_id.clone(),
             peer_id,
@@ -527,18 +550,22 @@ mod tests {
         let mut service = AtpSeedingService::new(config, cache);
 
         // Authorize a manifest first
-        service.authorize_manifest(
-            "manifest123".to_string(),
-            "scope456".to_string(),
-            "high".to_string(),
-        ).unwrap();
+        service
+            .authorize_manifest(
+                "manifest123".to_string(),
+                "scope456".to_string(),
+                "high".to_string(),
+            )
+            .unwrap();
 
         // Start session
-        let session_id = service.start_session(
-            "peer1".to_string(),
-            "manifest123".to_string(),
-            vec!["scope456".to_string()],
-        ).unwrap();
+        let session_id = service
+            .start_session(
+                "peer1".to_string(),
+                "manifest123".to_string(),
+                vec!["scope456".to_string()],
+            )
+            .unwrap();
 
         assert!(service.active_sessions.contains_key(&session_id));
         assert_eq!(service.metrics().sessions_started, 1);

@@ -47,16 +47,17 @@ impl CachePolicyManager {
                 candidates.sort_by_key(|(_, entry)| entry.access_count);
             }
             EvictionPolicy::ShortestTtl => {
-                candidates.sort_by_key(|(_, entry)| {
-                    entry.created_at.elapsed().unwrap_or(Duration::ZERO)
-                });
+                candidates
+                    .sort_by_key(|(_, entry)| entry.created_at.elapsed().unwrap_or(Duration::ZERO));
             }
             EvictionPolicy::LargestFirst => {
                 candidates.sort_by_key(|(_, entry)| std::cmp::Reverse(entry.size_bytes));
             }
             EvictionPolicy::Hybrid => {
                 candidates.sort_by(|(_, a), (_, b)| {
-                    self.hybrid_score(a).partial_cmp(&self.hybrid_score(b)).unwrap()
+                    self.hybrid_score(a)
+                        .partial_cmp(&self.hybrid_score(b))
+                        .unwrap()
                 });
             }
         }
@@ -93,7 +94,9 @@ impl CachePolicyManager {
 
         // Don't evict recently verified content if configured
         if let Some(verified_at) = entry.verification.verified_at {
-            if verified_at.elapsed().unwrap_or(Duration::MAX) < self.proof_constraints.min_verification_age {
+            if verified_at.elapsed().unwrap_or(Duration::MAX)
+                < self.proof_constraints.min_verification_age
+            {
                 return false;
             }
         }
@@ -105,9 +108,12 @@ impl CachePolicyManager {
 
     /// Calculate hybrid score for multi-factor eviction policy.
     fn hybrid_score(&self, entry: &CacheEntry) -> f64 {
-        let age_hours = entry.last_accessed.elapsed()
+        let age_hours = entry
+            .last_accessed
+            .elapsed()
             .unwrap_or(Duration::ZERO)
-            .as_secs_f64() / 3600.0;
+            .as_secs_f64()
+            / 3600.0;
 
         let size_mb = entry.size_bytes as f64 / (1024.0 * 1024.0);
         let access_frequency = entry.access_count as f64;
@@ -151,7 +157,7 @@ impl Default for RetentionPolicy {
         Self {
             min_retention: Duration::from_secs(60 * 60), // 1 hour
             max_retention: Duration::from_secs(7 * 24 * 60 * 60), // 1 week
-            priority: 5, // Medium priority
+            priority: 5,                                 // Medium priority
             critical_for_proofs: false,
         }
     }

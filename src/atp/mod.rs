@@ -38,9 +38,9 @@ pub mod repair_receiver;
 pub mod repair_roi;
 pub mod repair_scheduler;
 pub mod safety;
-pub mod seeding;
 #[path = "sdk.rs"]
 pub mod sdk;
+pub mod seeding;
 pub mod stream_object;
 pub mod sync;
 pub mod transfer;

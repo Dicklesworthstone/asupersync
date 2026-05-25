@@ -269,7 +269,9 @@ impl AtpCache {
             }
             StorageLocation::External(_) => {
                 // External content would need network fetch
-                Err(CacheError::External("External content not yet supported".to_string()))
+                Err(CacheError::External(
+                    "External content not yet supported".to_string(),
+                ))
             }
         }
     }
@@ -282,7 +284,9 @@ impl AtpCache {
         // Verify content hash matches
         let actual_hash = self.compute_content_hash(content);
         if actual_hash != key.content_hash {
-            return Err(CacheError::VerificationFailed("Content hash mismatch".to_string()));
+            return Err(CacheError::VerificationFailed(
+                "Content hash mismatch".to_string(),
+            ));
         }
 
         let index_key = key.as_index_key();
@@ -301,13 +305,11 @@ impl AtpCache {
 
             // Create directory if needed
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| CacheError::Storage(e.to_string()))?;
+                std::fs::create_dir_all(parent).map_err(|e| CacheError::Storage(e.to_string()))?;
             }
 
             // Write content to file
-            std::fs::write(&path, content)
-                .map_err(|e| CacheError::Storage(e.to_string()))?;
+            std::fs::write(&path, content).map_err(|e| CacheError::Storage(e.to_string()))?;
 
             StorageLocation::File(path)
         };
@@ -453,11 +455,7 @@ mod tests {
         );
         assert_eq!(key.as_index_key(), "manifest123:content456:scope789");
 
-        let key_no_scope = CacheKey::new(
-            "manifest123".to_string(),
-            "content456".to_string(),
-            None,
-        );
+        let key_no_scope = CacheKey::new("manifest123".to_string(), "content456".to_string(), None);
         assert_eq!(key_no_scope.as_index_key(), "manifest123:content456");
     }
 

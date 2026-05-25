@@ -131,7 +131,12 @@ impl TrustPolicy {
     #[must_use]
     pub fn summary(&self) -> TrustPolicySummary {
         TrustPolicySummary {
-            cache_type: if self.is_shared_cache { "shared" } else { "local" }.to_string(),
+            cache_type: if self.is_shared_cache {
+                "shared"
+            } else {
+                "local"
+            }
+            .to_string(),
             encryption_required: self.require_encryption_for_shared,
             public_content_allowed: self.allow_public_content,
             authorized_scope_count: self.authorized_scopes.len(),
@@ -282,11 +287,7 @@ mod tests {
         let policy = TrustPolicy::local();
         let mut checker = TrustBoundaryChecker::new(policy);
 
-        let key = CacheKey::new(
-            "manifest".to_string(),
-            "content".to_string(),
-            None,
-        );
+        let key = CacheKey::new("manifest".to_string(), "content".to_string(), None);
 
         let result = checker.check_access(&key, "get");
         assert!(result.is_ok());

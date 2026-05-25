@@ -212,7 +212,11 @@ pub struct ChunkId {
 impl ChunkId {
     /// Create a new chunk ID
     pub fn new(object_id: ObjectId, offset: u64, size: usize) -> Self {
-        Self { object_id, offset, size }
+        Self {
+            object_id,
+            offset,
+            size,
+        }
     }
 
     /// Get string representation for logging
@@ -312,12 +316,18 @@ impl TransferBrain {
     /// Add a chunk to the scheduling queue
     pub fn schedule_chunk(&mut self, chunk: ScheduledChunk) -> Result<()> {
         if self.completed_chunks.contains(&chunk.chunk_id) {
-            debug!("Chunk {} already completed, skipping", chunk.chunk_id.as_string());
+            debug!(
+                "Chunk {} already completed, skipping",
+                chunk.chunk_id.as_string()
+            );
             return Ok(());
         }
 
         if self.in_flight_chunks.contains_key(&chunk.chunk_id) {
-            debug!("Chunk {} already in flight, skipping", chunk.chunk_id.as_string());
+            debug!(
+                "Chunk {} already in flight, skipping",
+                chunk.chunk_id.as_string()
+            );
             return Ok(());
         }
 
@@ -338,10 +348,17 @@ impl TransferBrain {
     }
 
     /// Get the next chunk to process based on current system state
-    pub fn next_chunk(&mut self, budget: &Budget, trace_id: TraceId) -> Result<Option<ScheduledChunk>> {
+    pub fn next_chunk(
+        &mut self,
+        budget: &Budget,
+        trace_id: TraceId,
+    ) -> Result<Option<ScheduledChunk>> {
         // Check if we can start new work based on current pressure and limits
         if self.in_flight_chunks.len() >= self.config.max_in_flight_chunks {
-            debug!("Max in-flight chunks reached ({})", self.config.max_in_flight_chunks);
+            debug!(
+                "Max in-flight chunks reached ({})",
+                self.config.max_in_flight_chunks
+            );
             return Ok(None);
         }
 
@@ -360,7 +377,9 @@ impl TransferBrain {
             chunks.sort_by(|a, b| {
                 let a_score = self.calculate_chunk_utility_score(a);
                 let b_score = self.calculate_chunk_utility_score(b);
-                b_score.partial_cmp(&a_score).unwrap_or(std::cmp::Ordering::Equal)
+                b_score
+                    .partial_cmp(&a_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
 
             // Try to find a chunk that fits within budget
@@ -377,7 +396,8 @@ impl TransferBrain {
                     );
 
                     self.record_decision(decision);
-                    self.in_flight_chunks.insert(chosen_chunk.chunk_id.clone(), chosen_chunk.clone());
+                    self.in_flight_chunks
+                        .insert(chosen_chunk.chunk_id.clone(), chosen_chunk.clone());
 
                     return Ok(Some(chosen_chunk));
                 }
@@ -389,8 +409,15 @@ impl TransferBrain {
     }
 
     /// Mark a chunk as completed
-    pub fn complete_chunk(&mut self, chunk_id: &ChunkId, success: bool, actual_resources: ResourceUsage) -> Result<()> {
-        let chunk = self.in_flight_chunks.remove(chunk_id)
+    pub fn complete_chunk(
+        &mut self,
+        chunk_id: &ChunkId,
+        success: bool,
+        actual_resources: ResourceUsage,
+    ) -> Result<()> {
+        let chunk = self
+            .in_flight_chunks
+            .remove(chunk_id)
             .ok_or_else(|| Error::new(ErrorKind::InternalError))?;
 
         if success {
@@ -414,13 +441,12 @@ impl TransferBrain {
         self.current_pressure = pressure;
 
         // Update peak pressure metrics
-        self.metrics.peak_disk_pressure = self.metrics.peak_disk_pressure.max(pressure.disk_pressure);
+        self.metrics.peak_disk_pressure =
+            self.metrics.peak_disk_pressure.max(pressure.disk_pressure);
 
         debug!(
             "Updated system pressure - CPU: {:.2}, Disk: {:.2}, Network: {:.2}",
-            pressure.cpu_utilization,
-            pressure.disk_pressure,
-            pressure.network_pressure
+            pressure.cpu_utilization, pressure.disk_pressure, pressure.network_pressure
         );
     }
 
@@ -437,7 +463,9 @@ impl TransferBrain {
     /// Get current scheduling state summary
     pub fn scheduling_state(&self) -> SchedulingState {
         SchedulingState {
-            pending_chunks_by_priority: self.pending_chunks.iter()
+            pending_chunks_by_priority: self
+                .pending_chunks
+                .iter()
                 .map(|(priority, chunks)| (*priority, chunks.len()))
                 .collect(),
             in_flight_count: self.in_flight_chunks.len(),
@@ -450,8 +478,8 @@ impl TransferBrain {
     // Private helper methods
 
     fn should_throttle_due_to_pressure(&self) -> bool {
-        self.current_pressure.cpu_utilization > self.config.cpu_pressure_threshold ||
-        self.current_pressure.disk_pressure > self.config.disk_pressure_threshold
+        self.current_pressure.cpu_utilization > self.config.cpu_pressure_threshold
+            || self.current_pressure.disk_pressure > self.config.disk_pressure_threshold
     }
 
     fn calculate_chunk_utility_score(&self, chunk: &ScheduledChunk) -> f64 {
@@ -472,7 +500,8 @@ impl TransferBrain {
 
         // Deadline urgency
         if let Some(deadline) = chunk.deadline {
-            let time_to_deadline = deadline.duration_since(SystemTime::now())
+            let time_to_deadline = deadline
+                .duration_since(SystemTime::now())
                 .unwrap_or(Duration::ZERO);
             if time_to_deadline < Duration::from_secs(60) {
                 score += 3.0; // Urgent deadline
@@ -494,11 +523,14 @@ impl TransferBrain {
 
     fn chunk_fits_budget(&self, chunk: &ScheduledChunk, budget: &Budget) -> bool {
         // Simple budget check - real implementation would be more sophisticated
-        budget.remaining_poll_operations() > 10 &&
-        chunk.size_bytes <= 10 * 1024 * 1024 // 10MB max chunk size
+        budget.remaining_poll_operations() > 10 && chunk.size_bytes <= 10 * 1024 * 1024 // 10MB max chunk size
     }
 
-    fn make_scheduling_decision(&self, chunk: &ScheduledChunk, trace_id: TraceId) -> SchedulingDecision {
+    fn make_scheduling_decision(
+        &self,
+        chunk: &ScheduledChunk,
+        trace_id: TraceId,
+    ) -> SchedulingDecision {
         let factors = DecisionFactors {
             early_usability_impact: chunk.early_usability_value,
             decode_usefulness: chunk.decode_usefulness,
@@ -543,11 +575,19 @@ impl TransferBrain {
                 debug!("Scheduling decision: {:?}", decision);
             }
             DecisionLoggingLevel::Verbose => {
-                info!("Scheduled {}: {}", decision.chunk_id.as_string(), decision.reasoning);
+                info!(
+                    "Scheduled {}: {}",
+                    decision.chunk_id.as_string(),
+                    decision.reasoning
+                );
             }
             DecisionLoggingLevel::Normal => {
                 if decision.priority <= TransferPriority::EarlyUsability {
-                    info!("Scheduled {}: {}", decision.chunk_id.as_string(), decision.reasoning);
+                    info!(
+                        "Scheduled {}: {}",
+                        decision.chunk_id.as_string(),
+                        decision.reasoning
+                    );
                 }
             }
             DecisionLoggingLevel::Minimal => {
@@ -563,12 +603,17 @@ impl TransferBrain {
         }
     }
 
-    fn update_metrics_on_completion(&mut self, chunk: &ScheduledChunk, actual_resources: &ResourceUsage) {
+    fn update_metrics_on_completion(
+        &mut self,
+        chunk: &ScheduledChunk,
+        actual_resources: &ResourceUsage,
+    ) {
         // Update CPU per GiB metric
         let gib = (chunk.size_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
         if gib > 0.0 {
             let current_cpu_gib = self.metrics.cpu_per_gib * (self.completed_chunks.len() as f64);
-            self.metrics.cpu_per_gib = (current_cpu_gib + actual_resources.cpu) / ((self.completed_chunks.len() + 1) as f64);
+            self.metrics.cpu_per_gib = (current_cpu_gib + actual_resources.cpu)
+                / ((self.completed_chunks.len() + 1) as f64);
         }
 
         // Update early usability metrics
@@ -579,8 +624,9 @@ impl TransferBrain {
                 self.metrics.time_to_first_usable_prefix = Some(elapsed);
             }
 
-            if chunk.priority == TransferPriority::EarlyUsability &&
-               self.metrics.time_to_first_verified_file.is_none() {
+            if chunk.priority == TransferPriority::EarlyUsability
+                && self.metrics.time_to_first_verified_file.is_none()
+            {
                 self.metrics.time_to_first_verified_file = Some(elapsed);
             }
         }
@@ -610,7 +656,11 @@ mod tests {
     use super::*;
     use crate::types::{Budget, TraceId};
 
-    fn create_test_chunk(object_id: &str, offset: u64, priority: TransferPriority) -> ScheduledChunk {
+    fn create_test_chunk(
+        object_id: &str,
+        offset: u64,
+        priority: TransferPriority,
+    ) -> ScheduledChunk {
         ScheduledChunk {
             chunk_id: ChunkId::new(ObjectId::from(object_id), offset, 1024),
             object_id: ObjectId::from(object_id),
@@ -620,7 +670,11 @@ mod tests {
             disk_cost: 0.1,
             network_cost: 0.1,
             deadline: None,
-            early_usability_value: if priority == TransferPriority::EarlyUsability { 1.0 } else { 0.0 },
+            early_usability_value: if priority == TransferPriority::EarlyUsability {
+                1.0
+            } else {
+                0.0
+            },
             decode_usefulness: 0.5,
             resume_value: 0,
             trace_id: TraceId::new(),
@@ -661,9 +715,18 @@ mod tests {
 
         let state = brain.scheduling_state();
         assert_eq!(state.pending_chunks_by_priority.len(), 3);
-        assert_eq!(state.pending_chunks_by_priority[&TransferPriority::Control], 1);
-        assert_eq!(state.pending_chunks_by_priority[&TransferPriority::Standard], 1);
-        assert_eq!(state.pending_chunks_by_priority[&TransferPriority::EarlyUsability], 1);
+        assert_eq!(
+            state.pending_chunks_by_priority[&TransferPriority::Control],
+            1
+        );
+        assert_eq!(
+            state.pending_chunks_by_priority[&TransferPriority::Standard],
+            1
+        );
+        assert_eq!(
+            state.pending_chunks_by_priority[&TransferPriority::EarlyUsability],
+            1
+        );
 
         Ok(())
     }
@@ -775,7 +838,9 @@ mod tests {
         };
 
         brain.update_pressure(high_pressure);
-        brain.schedule_chunk(create_test_chunk("obj1", 0, TransferPriority::Standard)).unwrap();
+        brain
+            .schedule_chunk(create_test_chunk("obj1", 0, TransferPriority::Standard))
+            .unwrap();
 
         // Should throttle due to high pressure
         let next = brain.next_chunk(&budget, TraceId::new()).unwrap();

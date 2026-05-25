@@ -5,18 +5,21 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod tests {
-    use crate::channel::mpsc::{channel as mpsc_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender, unbounded_channel};
-    use crate::combinator::select::{select, select_3, select_4, SelectOutcome, SelectBias};
+    use crate::cancel::{CancelReason, CancelToken};
+    use crate::channel::mpsc::{
+        Receiver, Sender, UnboundedReceiver, UnboundedSender, channel as mpsc_channel,
+        unbounded_channel,
+    };
+    use crate::combinator::select::{SelectBias, SelectOutcome, select, select_3, select_4};
     use crate::cx::{Cx, Scope};
+    use crate::error::AsupersyncError;
     use crate::runtime::{Runtime, RuntimeBuilder};
     use crate::time::{Duration, Instant, sleep, timeout};
-    use crate::types::{Budget, Outcome, TaskId, RegionId};
-    use crate::error::AsupersyncError;
-    use crate::cancel::{CancelToken, CancelReason};
+    use crate::types::{Budget, Outcome, RegionId, TaskId};
 
-    use std::collections::{HashMap, VecDeque, BTreeMap};
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     /// Configuration for MPSC select coordination
     #[derive(Debug, Clone)]
@@ -138,7 +141,10 @@ mod tests {
     struct ChannelGroup {
         id: u64,
         bounded_channels: Vec<(Sender<SelectMessage>, Receiver<SelectMessage>)>,
-        unbounded_channels: Vec<(UnboundedSender<SelectMessage>, UnboundedReceiver<SelectMessage>)>,
+        unbounded_channels: Vec<(
+            UnboundedSender<SelectMessage>,
+            UnboundedReceiver<SelectMessage>,
+        )>,
         producers: Vec<u64>,
         message_count: AtomicU64,
         last_selection: Option<Instant>,
@@ -212,25 +218,29 @@ mod tests {
             self.is_running.store(true, Ordering::SeqCst);
 
             // Start selection processor
-            let selection_handle = cx.spawn(|cx| async move {
-                self.run_selection_processor(cx).await
-            }).await?;
+            let selection_handle = cx
+                .spawn(|cx| async move { self.run_selection_processor(cx).await })
+                .await?;
 
             // Start coordination monitor
-            let monitor_handle = cx.spawn(|cx| async move {
-                self.run_coordination_monitor(cx).await
-            }).await?;
+            let monitor_handle = cx
+                .spawn(|cx| async move { self.run_coordination_monitor(cx).await })
+                .await?;
 
             // Start performance tracker
-            let performance_handle = cx.spawn(|cx| async move {
-                self.run_performance_tracker(cx).await
-            }).await?;
+            let performance_handle = cx
+                .spawn(|cx| async move { self.run_performance_tracker(cx).await })
+                .await?;
 
             Ok(())
         }
 
         /// Create new channel group
-        async fn create_channel_group(&mut self, bounded: bool, count: usize) -> Result<u64, AsupersyncError> {
+        async fn create_channel_group(
+            &mut self,
+            bounded: bool,
+            count: usize,
+        ) -> Result<u64, AsupersyncError> {
             let group_id = self.next_channel_id.fetch_add(1, Ordering::SeqCst);
 
             let mut bounded_channels = Vec::new();
@@ -259,7 +269,9 @@ mod tests {
             };
 
             self.channels.insert(group_id, group);
-            self.stats.channels_created.fetch_add(count as u64, Ordering::SeqCst);
+            self.stats
+                .channels_created
+                .fetch_add(count as u64, Ordering::SeqCst);
 
             Ok(group_id)
         }
@@ -286,18 +298,35 @@ mod tests {
             self.active_producers.insert(producer_id, producer_handle);
 
             // Get channel sender
-            let channel_group = self.channels.get_mut(&channel_id)
-                .ok_or_else(|| AsupersyncError::InvalidState("Channel group not found".to_string()))?;
+            let channel_group = self.channels.get_mut(&channel_id).ok_or_else(|| {
+                AsupersyncError::InvalidState("Channel group not found".to_string())
+            })?;
 
             channel_group.producers.push(producer_id);
 
             // Spawn producer task
             if !channel_group.bounded_channels.is_empty() {
                 let sender = channel_group.bounded_channels[0].0.clone();
-                self.spawn_bounded_producer(producer_id, sender, message_rate, message_count, cancel_token, cx).await?;
+                self.spawn_bounded_producer(
+                    producer_id,
+                    sender,
+                    message_rate,
+                    message_count,
+                    cancel_token,
+                    cx,
+                )
+                .await?;
             } else if !channel_group.unbounded_channels.is_empty() {
                 let sender = channel_group.unbounded_channels[0].0.clone();
-                self.spawn_unbounded_producer(producer_id, sender, message_rate, message_count, cancel_token, cx).await?;
+                self.spawn_unbounded_producer(
+                    producer_id,
+                    sender,
+                    message_rate,
+                    message_count,
+                    cancel_token,
+                    cx,
+                )
+                .await?;
             }
 
             self.stats.producers_spawned.fetch_add(1, Ordering::SeqCst);
@@ -347,7 +376,8 @@ mod tests {
                 }
 
                 Ok::<(), AsupersyncError>(())
-            }).await?;
+            })
+            .await?;
 
             Ok(())
         }
@@ -394,7 +424,8 @@ mod tests {
                 }
 
                 Ok::<(), AsupersyncError>(())
-            }).await?;
+            })
+            .await?;
 
             Ok(())
         }
@@ -422,10 +453,12 @@ mod tests {
                     self.perform_first_available_select(channel_ids, cx).await?
                 }
                 SelectionStrategy::Biased { channel_weights } => {
-                    self.perform_biased_select(channel_ids, channel_weights, cx).await?
+                    self.perform_biased_select(channel_ids, channel_weights, cx)
+                        .await?
                 }
                 SelectionStrategy::Adaptive { history_size } => {
-                    self.perform_adaptive_select(channel_ids, history_size, cx).await?
+                    self.perform_adaptive_select(channel_ids, history_size, cx)
+                        .await?
                 }
             };
 
@@ -440,7 +473,9 @@ mod tests {
 
             // Update statistics
             if selection_result.selected_message.is_some() {
-                self.stats.successful_selections.fetch_add(1, Ordering::SeqCst);
+                self.stats
+                    .successful_selections
+                    .fetch_add(1, Ordering::SeqCst);
                 self.stats.messages_received.fetch_add(1, Ordering::SeqCst);
             }
 
@@ -460,7 +495,8 @@ mod tests {
             cx: &Cx,
         ) -> Result<SelectionOutcome, AsupersyncError> {
             // Simple round-robin: start from different index each time
-            let start_index = self.stats.select_operations.load(Ordering::SeqCst) as usize % channel_ids.len();
+            let start_index =
+                self.stats.select_operations.load(Ordering::SeqCst) as usize % channel_ids.len();
 
             for i in 0..channel_ids.len() {
                 let channel_index = (start_index + i) % channel_ids.len();
@@ -492,7 +528,10 @@ mod tests {
 
             for &channel_id in &channel_ids {
                 if let Some(message) = self.peek_channel_message(channel_id).await? {
-                    if best_message.as_ref().map_or(true, |m| message.priority > m.priority) {
+                    if best_message
+                        .as_ref()
+                        .map_or(true, |m| message.priority > m.priority)
+                    {
                         best_message = Some(message);
                         best_channel = Some(channel_id);
                     }
@@ -544,11 +583,10 @@ mod tests {
             cx: &Cx,
         ) -> Result<SelectionOutcome, AsupersyncError> {
             // Weight-based selection (simplified implementation)
-            let mut weighted_channels: Vec<_> = channel_ids.iter()
-                .zip(weights.iter())
-                .collect();
+            let mut weighted_channels: Vec<_> = channel_ids.iter().zip(weights.iter()).collect();
 
-            weighted_channels.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+            weighted_channels
+                .sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             for (&channel_id, _weight) in weighted_channels {
                 if let Some(message) = self.try_receive_from_channel(channel_id).await? {
@@ -573,7 +611,9 @@ mod tests {
             cx: &Cx,
         ) -> Result<SelectionOutcome, AsupersyncError> {
             // Use recent selection history to guide selection
-            let recent_results: Vec<_> = self.selection_history.iter()
+            let recent_results: Vec<_> = self
+                .selection_history
+                .iter()
                 .rev()
                 .take(history_size)
                 .collect();
@@ -593,13 +633,17 @@ mod tests {
             // Sort channels by success rate
             let mut sorted_channels = channel_ids.clone();
             sorted_channels.sort_by(|a, b| {
-                let rate_a = channel_success_rates.get(a)
+                let rate_a = channel_success_rates
+                    .get(a)
                     .map(|(s, t)| *s as f64 / *t as f64)
                     .unwrap_or(0.5);
-                let rate_b = channel_success_rates.get(b)
+                let rate_b = channel_success_rates
+                    .get(b)
                     .map(|(s, t)| *s as f64 / *t as f64)
                     .unwrap_or(0.5);
-                rate_b.partial_cmp(&rate_a).unwrap_or(std::cmp::Ordering::Equal)
+                rate_b
+                    .partial_cmp(&rate_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
 
             // Try channels in success rate order
@@ -619,7 +663,10 @@ mod tests {
         }
 
         /// Try to receive message from specific channel
-        async fn try_receive_from_channel(&mut self, channel_id: u64) -> Result<Option<SelectMessage>, AsupersyncError> {
+        async fn try_receive_from_channel(
+            &mut self,
+            channel_id: u64,
+        ) -> Result<Option<SelectMessage>, AsupersyncError> {
             if let Some(channel_group) = self.channels.get_mut(&channel_id) {
                 // Try bounded channels first
                 if !channel_group.bounded_channels.is_empty() {
@@ -642,7 +689,10 @@ mod tests {
         }
 
         /// Peek at next message without removing it
-        async fn peek_channel_message(&self, channel_id: u64) -> Result<Option<SelectMessage>, AsupersyncError> {
+        async fn peek_channel_message(
+            &self,
+            channel_id: u64,
+        ) -> Result<Option<SelectMessage>, AsupersyncError> {
             // Simplified peek implementation - would need more sophisticated buffering in practice
             // For now, return None to indicate no peeking available
             Ok(None)
@@ -658,12 +708,17 @@ mod tests {
                         continue;
                     }
 
-                    match self.perform_select(request.channel_ids, Some(request.strategy), cx).await {
+                    match self
+                        .perform_select(request.channel_ids, Some(request.strategy), cx)
+                        .await
+                    {
                         Ok(_result) => {
                             // Selection completed
                         }
                         Err(e) => {
-                            self.stats.coordination_errors.fetch_add(1, Ordering::SeqCst);
+                            self.stats
+                                .coordination_errors
+                                .fetch_add(1, Ordering::SeqCst);
                             eprintln!("Selection error: {:?}", e);
                         }
                     }
@@ -691,13 +746,17 @@ mod tests {
                         }
                     }
 
-                    self.stats.coordination_events.fetch_add(1, Ordering::SeqCst);
+                    self.stats
+                        .coordination_events
+                        .fetch_add(1, Ordering::SeqCst);
                 }
 
                 // Clean up inactive producers
                 let now = Instant::now();
                 self.active_producers.retain(|_, producer| {
-                    producer.last_send.map_or(true, |last| now.duration_since(last) < Duration::from_secs(60))
+                    producer.last_send.map_or(true, |last| {
+                        now.duration_since(last) < Duration::from_secs(60)
+                    })
                 });
 
                 sleep(Duration::from_secs(1), cx).await?;
@@ -783,8 +842,12 @@ mod tests {
             let channel2 = system.create_channel_group(false, 1).await?; // Unbounded
 
             // Spawn producers
-            let producer1 = system.spawn_producer(channel1, Duration::from_millis(50), 5, cx).await?;
-            let producer2 = system.spawn_producer(channel2, Duration::from_millis(75), 5, cx).await?;
+            let producer1 = system
+                .spawn_producer(channel1, Duration::from_millis(50), 5, cx)
+                .await?;
+            let producer2 = system
+                .spawn_producer(channel2, Duration::from_millis(75), 5, cx)
+                .await?;
 
             // Perform selections
             let channel_ids = vec![channel1, channel2];
@@ -812,7 +875,8 @@ mod tests {
             assert_eq!(stats.coordination_errors.load(Ordering::SeqCst), 0);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test priority-based selection strategy
@@ -835,15 +899,27 @@ mod tests {
             let channel3 = system.create_channel_group(true, 1).await?;
 
             // Spawn producers with different message patterns
-            let producer1 = system.spawn_producer(channel1, Duration::from_millis(30), 8, cx).await?;
-            let producer2 = system.spawn_producer(channel2, Duration::from_millis(40), 6, cx).await?;
-            let producer3 = system.spawn_producer(channel3, Duration::from_millis(50), 4, cx).await?;
+            let producer1 = system
+                .spawn_producer(channel1, Duration::from_millis(30), 8, cx)
+                .await?;
+            let producer2 = system
+                .spawn_producer(channel2, Duration::from_millis(40), 6, cx)
+                .await?;
+            let producer3 = system
+                .spawn_producer(channel3, Duration::from_millis(50), 4, cx)
+                .await?;
 
             // Perform priority-based selections
             let channel_ids = vec![channel1, channel2, channel3];
 
             for _ in 0..12 {
-                let result = system.perform_select(channel_ids.clone(), Some(SelectionStrategy::PriorityBased), cx).await?;
+                let result = system
+                    .perform_select(
+                        channel_ids.clone(),
+                        Some(SelectionStrategy::PriorityBased),
+                        cx,
+                    )
+                    .await?;
                 if let Some(message) = result.selected_message {
                     // Higher priority messages should be selected preferentially
                     assert!(message.priority <= 2); // Most messages have priority 0, 1, or 2
@@ -862,7 +938,8 @@ mod tests {
             assert!(stats.successful_selections.load(Ordering::SeqCst) > 0);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test adaptive selection under varying load
@@ -877,7 +954,9 @@ mod tests {
                 ..MpscSelectConfig::default()
             };
             let strategy = SelectionStrategy::Adaptive { history_size: 20 };
-            let channel_mode = ChannelGroupMode::Dynamic { load_threshold: 0.7 };
+            let channel_mode = ChannelGroupMode::Dynamic {
+                load_threshold: 0.7,
+            };
             let mut system = MpscSelectSystem::new(config, strategy, channel_mode)?;
 
             system.start(cx).await?;
@@ -921,13 +1000,15 @@ mod tests {
             assert!(stats.successful_selections.load(Ordering::SeqCst) > 10);
 
             // Should maintain good performance under load
-            let success_rate = stats.successful_selections.load(Ordering::SeqCst) as f64 / stats.select_operations.load(Ordering::SeqCst) as f64;
+            let success_rate = stats.successful_selections.load(Ordering::SeqCst) as f64
+                / stats.select_operations.load(Ordering::SeqCst) as f64;
             assert!(success_rate > 0.4, "Success rate too low: {}", success_rate);
 
             // Should maintain low error rate
             assert!(stats.coordination_errors.load(Ordering::SeqCst) <= 2);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 }

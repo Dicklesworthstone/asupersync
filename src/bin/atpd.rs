@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing::{error, info, warn};
 use toml;
+use tracing::{error, info, warn};
 
 /// ATP Daemon - Always-on ATP transfer service
 #[derive(Parser)]
@@ -522,7 +522,7 @@ async fn run_daemon_service(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_nanos() as u64
+                .as_nanos() as u64,
         ),
         peer_directory: HashMap::new(),
         active_transfers: HashMap::new(),
@@ -543,8 +543,7 @@ async fn run_daemon_service(
     // - Metrics service
 
     // For now, just wait for shutdown signal
-    tokio::signal::ctrl_c()
-        .await?;
+    tokio::signal::ctrl_c().await?;
 
     info!("Received shutdown signal, stopping daemon...");
     Ok(())

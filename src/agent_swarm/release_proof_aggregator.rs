@@ -718,13 +718,7 @@ mod tests {
         };
 
         let status = aggregator
-            .determine_proof_status(
-                &commits,
-                &rch_commands,
-                None,
-                &handoff_status,
-                &pushed_refs,
-            )
+            .determine_proof_status(&commits, &rch_commands, None, &handoff_status, &pushed_refs)
             .unwrap();
 
         assert_eq!(status, ProofStatus::Complete);
