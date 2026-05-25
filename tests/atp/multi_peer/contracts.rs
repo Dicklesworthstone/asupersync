@@ -316,8 +316,55 @@ impl MultiPeerContract for CacheContract {
             }
         }
 
+        validate_cache_corruption_failures(result)?;
+
         Ok(())
     }
+}
+
+fn validate_cache_corruption_failures(result: &MultiPeerResult) -> Result<(), String> {
+    for failure in result
+        .verification_results
+        .failures
+        .iter()
+        .filter(|failure| failure.verification_type == "cache_integrity")
+    {
+        if result.success {
+            return Err(
+                "Cache corruption failure must not produce a successful cache result".to_string(),
+            );
+        }
+
+        for field in [
+            "cache_key",
+            "manifest_root",
+            "stored_digest",
+            "exposure_decision",
+        ] {
+            let Some(value) = failure.context.get(field) else {
+                return Err(format!(
+                    "Cache corruption failure must include `{field}` context"
+                ));
+            };
+            if value.trim().is_empty() {
+                return Err(format!(
+                    "Cache corruption failure context `{field}` must not be empty"
+                ));
+            }
+        }
+
+        if failure
+            .context
+            .get("exposure_decision")
+            .is_none_or(|decision| decision != "quarantined")
+        {
+            return Err(
+                "Cache corruption failure must mark exposure_decision=quarantined".to_string(),
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn has_explicit_public_cache_policy_marker(scenario: &MultiPeerScenario) -> bool {
@@ -465,6 +512,7 @@ impl SchemaValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::time::SystemTime;
 
     #[test]
@@ -631,5 +679,101 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         let validated = SchemaValidator::validate_result_schema(&json);
         assert!(validated.is_ok());
+    }
+
+    fn cache_result_with_integrity_failure(
+        success: bool,
+        failure_context: HashMap<String, String>,
+    ) -> MultiPeerResult {
+        let mut scenario = MultiPeerScenario::default();
+        scenario.scenario_type = ScenarioType::Cache;
+
+        MultiPeerResult {
+            schema_version: MULTI_PEER_REPORT_SCHEMA.to_string(),
+            scenario,
+            executed_at: SystemTime::now(),
+            success,
+            error: (!success).then(|| "cache integrity failure".to_string()),
+            duration: Duration::from_secs(30),
+            peer_results: HashMap::new(),
+            network_events: Vec::new(),
+            transfer_metrics: TransferMetrics {
+                total_bytes: 1024,
+                verified_bytes: 0,
+                chunks_transferred: 1,
+                repair_blocks_used: 0,
+                peer_rejections: 0,
+                source_selections: Vec::new(),
+            },
+            cache_metrics: [(
+                "relay-cache".to_string(),
+                CacheMetrics {
+                    hits: Some(0),
+                    misses: Some(1),
+                    evictions: Some(0),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            verification_results: VerificationResults {
+                crypto_verified: false,
+                manifest_verified: true,
+                proof_verified: true,
+                failures: vec![VerificationFailure {
+                    verification_type: "cache_integrity".to_string(),
+                    reason: "stored digest did not match manifest root".to_string(),
+                    context: failure_context,
+                }],
+            },
+            artifacts: ArtifactPaths {
+                report: "/tmp/report.json".into(),
+                logs: "/tmp/logs".into(),
+                traces: Vec::new(),
+                sources: Vec::new(),
+                destinations: Vec::new(),
+            },
+        }
+    }
+
+    fn cache_corruption_context() -> HashMap<String, String> {
+        [
+            ("cache_key", "cache:manifest-7"),
+            ("manifest_root", "sha256:070707070707"),
+            ("stored_digest", "sha256:abababababab"),
+            ("exposure_decision", "quarantined"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn cache_corruption_result_requires_quarantine_context() {
+        let contract = CacheContract;
+        let clean_failure = cache_result_with_integrity_failure(false, cache_corruption_context());
+        contract
+            .validate_result(&clean_failure)
+            .expect("cache corruption failure with quarantine context should validate");
+
+        let mut missing_context = cache_corruption_context();
+        missing_context.remove("stored_digest");
+        let missing_context_result = cache_result_with_integrity_failure(false, missing_context);
+        let error = contract
+            .validate_result(&missing_context_result)
+            .expect_err("cache corruption failure must include stored digest context");
+        assert!(
+            error.contains("stored_digest"),
+            "unexpected validation error: {error}"
+        );
+
+        let successful_corruption =
+            cache_result_with_integrity_failure(true, cache_corruption_context());
+        let error = contract
+            .validate_result(&successful_corruption)
+            .expect_err("cache corruption failure must fail closed");
+        assert!(
+            error.contains("successful cache result"),
+            "unexpected validation error: {error}"
+        );
     }
 }
