@@ -531,6 +531,8 @@ pub mod real_net_websocket_http_h1_upgrade_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_calm_obligation_eprocess_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_obligation_calm_distributed_distribution_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_choreography_pipeline_obligation_session_types_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_dialectica_trace_distributed_vclock_integration_e2e_tests;
