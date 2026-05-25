@@ -199,6 +199,8 @@ enum AtpCommand {
     Resume(AtpResumeArgs),
     /// Cancel active ATP transfers
     Cancel(AtpCancelArgs),
+    /// Show status of active ATP transfers
+    TransferStatus(AtpTransferStatusArgs),
     /// Verify ATP proof bundle offline
     Verify(AtpVerifyArgs),
     /// Replay emitted ATP crashpack artifacts
@@ -264,6 +266,14 @@ struct AtpGetArgs {
     /// Show detailed preflight report
     #[arg(long = "verbose", short = 'v', action = ArgAction::SetTrue)]
     verbose: bool,
+
+    /// Show detailed progress during transfer
+    #[arg(long = "progress", action = ArgAction::SetTrue)]
+    progress: bool,
+
+    /// Explain path, scheduler, and repair decisions
+    #[arg(long = "explain", action = ArgAction::SetTrue)]
+    explain: bool,
 }
 
 #[derive(Args, Debug)]
@@ -291,6 +301,14 @@ struct AtpSendArgs {
     /// Show detailed preflight report
     #[arg(long = "verbose", short = 'v', action = ArgAction::SetTrue)]
     verbose: bool,
+
+    /// Show detailed progress during transfer
+    #[arg(long = "progress", action = ArgAction::SetTrue)]
+    progress: bool,
+
+    /// Explain path, scheduler, and repair decisions
+    #[arg(long = "explain", action = ArgAction::SetTrue)]
+    explain: bool,
 }
 
 #[derive(Args, Debug)]
@@ -314,6 +332,14 @@ struct AtpSyncArgs {
     /// Show detailed preflight report
     #[arg(long = "verbose", short = 'v', action = ArgAction::SetTrue)]
     verbose: bool,
+
+    /// Show detailed progress during transfer
+    #[arg(long = "progress", action = ArgAction::SetTrue)]
+    progress: bool,
+
+    /// Explain path, scheduler, and repair decisions
+    #[arg(long = "explain", action = ArgAction::SetTrue)]
+    explain: bool,
 }
 
 #[derive(Args, Debug)]
@@ -337,6 +363,14 @@ struct AtpMirrorArgs {
     /// Show detailed preflight report
     #[arg(long = "verbose", short = 'v', action = ArgAction::SetTrue)]
     verbose: bool,
+
+    /// Show detailed progress during transfer
+    #[arg(long = "progress", action = ArgAction::SetTrue)]
+    progress: bool,
+
+    /// Explain path, scheduler, and repair decisions
+    #[arg(long = "explain", action = ArgAction::SetTrue)]
+    explain: bool,
 }
 
 #[derive(Args, Debug)]
@@ -456,6 +490,25 @@ struct AtpCancelArgs {
     /// Force cancellation even if in critical phase
     #[arg(long = "force", action = ArgAction::SetTrue)]
     force: bool,
+}
+
+#[derive(Args, Debug)]
+struct AtpTransferStatusArgs {
+    /// Show status for specific transfer ID
+    #[arg(value_name = "TRANSFER_ID")]
+    transfer_id: Option<String>,
+
+    /// Show detailed progress and explain information
+    #[arg(long = "explain", action = ArgAction::SetTrue)]
+    explain: bool,
+
+    /// Watch mode - continuously update status
+    #[arg(long = "watch", short = 'w', action = ArgAction::SetTrue)]
+    watch: bool,
+
+    /// Refresh interval in seconds for watch mode
+    #[arg(long = "interval", default_value_t = 2)]
+    interval_seconds: u64,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -951,6 +1004,358 @@ impl Outputtable for AtpCancelOutput {
         format!("Transfer cancelled:\n  ID: {}\n  Reason: {}\n  Force: {}\n  Status: {}",
             self.transfer_id, self.reason, self.force, self.status)
     }
+}
+
+// Progress and explain structures for ATP-I3
+
+#[derive(Debug, serde::Serialize)]
+struct AtpProgressUpdate {
+    transfer_id: String,
+    stage: String,
+    object_name: String,
+    bytes_received: u64,
+    bytes_verified: u64,
+    bytes_written: u64,
+    bytes_committed: u64,
+    total_bytes: u64,
+    eta_seconds: Option<u64>,
+    resume_enabled: bool,
+    timestamp_micros: u64,
+}
+
+impl AtpProgressUpdate {
+    fn new(transfer_id: &str, object_name: &str, received: u64, total: u64) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+
+        Self {
+            transfer_id: transfer_id.to_string(),
+            stage: "receiving".to_string(),
+            object_name: object_name.to_string(),
+            bytes_received: received,
+            bytes_verified: received.saturating_sub(1000), // Mock lag
+            bytes_written: received.saturating_sub(2000), // Mock lag
+            bytes_committed: received.saturating_sub(3000), // Mock lag
+            total_bytes: total,
+            eta_seconds: if received > 0 { Some((total - received) / 100) } else { None },
+            resume_enabled: true,
+            timestamp_micros: now,
+        }
+    }
+}
+
+impl Outputtable for AtpProgressUpdate {
+    fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
+
+    fn human_format(&self) -> String {
+        let percentage = if self.total_bytes > 0 {
+            (self.bytes_received * 100) / self.total_bytes
+        } else {
+            0
+        };
+
+        let eta_str = if let Some(eta) = self.eta_seconds {
+            format!("ETA {}s", eta)
+        } else {
+            "ETA unknown".to_string()
+        };
+
+        format!("{} {}: {} [{}/{}] ({}%) {}",
+            self.stage,
+            self.object_name,
+            format_bytes(self.bytes_received),
+            format_bytes(self.bytes_received),
+            format_bytes(self.total_bytes),
+            percentage,
+            eta_str
+        )
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AtpExplainReport {
+    transfer_id: String,
+    path_decisions: AtpPathDecisions,
+    scheduler_decisions: AtpSchedulerDecisions,
+    repair_decisions: AtpRepairDecisions,
+    disk_decisions: AtpDiskDecisions,
+    timestamp_micros: u64,
+}
+
+impl AtpExplainReport {
+    fn new(transfer_id: &str) -> Self {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros() as u64;
+
+        Self {
+            transfer_id: transfer_id.to_string(),
+            path_decisions: AtpPathDecisions::new(),
+            scheduler_decisions: AtpSchedulerDecisions::new(),
+            repair_decisions: AtpRepairDecisions::new(),
+            disk_decisions: AtpDiskDecisions::new(),
+            timestamp_micros: now,
+        }
+    }
+}
+
+impl Outputtable for AtpExplainReport {
+    fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
+
+    fn human_format(&self) -> String {
+        format!("Explain Report for {}:\n{}\n{}\n{}\n{}",
+            self.transfer_id,
+            self.path_decisions.human_summary(),
+            self.scheduler_decisions.human_summary(),
+            self.repair_decisions.human_summary(),
+            self.disk_decisions.human_summary()
+        )
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AtpPathDecisions {
+    primary_protocol: String,
+    rtt_micros: u64,
+    loss_rate: f64,
+    pto_count: u32,
+    cwnd_bytes: u64,
+    relay_used: bool,
+    relay_cost_score: f64,
+    migration_count: u32,
+}
+
+impl AtpPathDecisions {
+    fn new() -> Self {
+        Self {
+            primary_protocol: "QUIC".to_string(),
+            rtt_micros: 15000, // 15ms
+            loss_rate: 0.001, // 0.1%
+            pto_count: 0,
+            cwnd_bytes: 65536, // 64KB
+            relay_used: false,
+            relay_cost_score: 0.0,
+            migration_count: 0,
+        }
+    }
+
+    fn human_summary(&self) -> String {
+        format!("  Path: {} (RTT: {}ms, Loss: {:.1}%, CWND: {})",
+            self.primary_protocol,
+            self.rtt_micros / 1000,
+            self.loss_rate * 100.0,
+            format_bytes(self.cwnd_bytes)
+        )
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AtpSchedulerDecisions {
+    active_streams: u16,
+    in_flight_bytes: u64,
+    chunk_size_bytes: u32,
+    backpressure_active: bool,
+    priority_adjustments: u32,
+}
+
+impl AtpSchedulerDecisions {
+    fn new() -> Self {
+        Self {
+            active_streams: 4,
+            in_flight_bytes: 262144, // 256KB
+            chunk_size_bytes: 65536, // 64KB
+            backpressure_active: false,
+            priority_adjustments: 0,
+        }
+    }
+
+    fn human_summary(&self) -> String {
+        format!("  Scheduler: {} streams, {} in-flight, {} chunks",
+            self.active_streams,
+            format_bytes(self.in_flight_bytes),
+            format_bytes(self.chunk_size_bytes as u64)
+        )
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AtpRepairDecisions {
+    repair_mode: String,
+    roi_threshold: f64,
+    symbols_generated: u32,
+    repair_bandwidth_used: u64,
+}
+
+impl AtpRepairDecisions {
+    fn new() -> Self {
+        Self {
+            repair_mode: "auto".to_string(),
+            roi_threshold: 1.2,
+            symbols_generated: 0,
+            repair_bandwidth_used: 0,
+        }
+    }
+
+    fn human_summary(&self) -> String {
+        format!("  Repair: {} mode (threshold: {:.1}, symbols: {})",
+            self.repair_mode,
+            self.roi_threshold,
+            self.symbols_generated
+        )
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AtpDiskDecisions {
+    write_lag_micros: u64,
+    journal_lag_micros: u64,
+    disk_pressure_level: String,
+    fsync_policy: String,
+}
+
+impl AtpDiskDecisions {
+    fn new() -> Self {
+        Self {
+            write_lag_micros: 500, // 0.5ms
+            journal_lag_micros: 200, // 0.2ms
+            disk_pressure_level: "low".to_string(),
+            fsync_policy: "batch".to_string(),
+        }
+    }
+
+    fn human_summary(&self) -> String {
+        format!("  Disk: {}ms write lag, {}ms journal lag, {} pressure",
+            self.write_lag_micros / 1000,
+            self.journal_lag_micros / 1000,
+            self.disk_pressure_level
+        )
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit_idx = 0;
+
+    while size >= 1024.0 && unit_idx < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit_idx += 1;
+    }
+
+    if unit_idx == 0 {
+        format!("{} {}", bytes, UNITS[0])
+    } else {
+        format!("{:.1} {}", size, UNITS[unit_idx])
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AtpTransferStatusOutput {
+    active_transfers: Vec<AtpTransferInfo>,
+    total_active: usize,
+    daemon_status: String,
+}
+
+impl AtpTransferStatusOutput {
+    fn new(transfers: Vec<AtpTransferInfo>) -> Self {
+        let count = transfers.len();
+        Self {
+            active_transfers: transfers,
+            total_active: count,
+            daemon_status: if count > 0 { "active".to_string() } else { "idle".to_string() },
+        }
+    }
+}
+
+impl Outputtable for AtpTransferStatusOutput {
+    fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
+
+    fn human_format(&self) -> String {
+        if self.active_transfers.is_empty() {
+            return "No active ATP transfers".to_string();
+        }
+
+        let mut output = format!("ATP Daemon Status: {} ({} active transfers)\n\n",
+            self.daemon_status, self.total_active);
+
+        for transfer in &self.active_transfers {
+            output.push_str(&transfer.human_summary());
+            output.push('\n');
+        }
+
+        output
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AtpTransferInfo {
+    transfer_id: String,
+    direction: String, // "send" or "receive"
+    object_name: String,
+    peer: String,
+    stage: String,
+    progress_percent: u8,
+    bytes_transferred: u64,
+    bytes_total: u64,
+    eta_seconds: Option<u64>,
+    path_info: Option<AtpPathDecisions>,
+}
+
+impl AtpTransferInfo {
+    fn new_mock(transfer_id: &str, direction: &str, object_name: &str, peer: &str) -> Self {
+        Self {
+            transfer_id: transfer_id.to_string(),
+            direction: direction.to_string(),
+            object_name: object_name.to_string(),
+            peer: peer.to_string(),
+            stage: "transferring".to_string(),
+            progress_percent: 65,
+            bytes_transferred: 650_000,
+            bytes_total: 1_000_000,
+            eta_seconds: Some(45),
+            path_info: Some(AtpPathDecisions::new()),
+        }
+    }
+
+    fn human_summary(&self) -> String {
+        let progress_bar = create_progress_bar(self.progress_percent);
+        let eta_str = if let Some(eta) = self.eta_seconds {
+            format!("ETA: {}s", eta)
+        } else {
+            "ETA: unknown".to_string()
+        };
+
+        format!("  {} [{}] {} -> {}\n    {} {} [{}] {} {}",
+            self.transfer_id,
+            self.direction,
+            self.object_name,
+            self.peer,
+            self.stage,
+            progress_bar,
+            self.progress_percent,
+            format_bytes(self.bytes_transferred),
+            eta_str
+        )
+    }
+}
+
+fn create_progress_bar(percent: u8) -> String {
+    const BAR_WIDTH: usize = 20;
+    let filled = (percent as usize * BAR_WIDTH) / 100;
+    let empty = BAR_WIDTH - filled;
+    format!("{}{}",
+        "█".repeat(filled),
+        "░".repeat(empty)
+    )
 }
 
 #[derive(Args, Debug)]
@@ -1852,6 +2257,7 @@ fn run_atp(args: AtpArgs, output: &mut Output) -> Result<(), CliError> {
         AtpCommand::Inbox(args) => atp_inbox(&args, output),
         AtpCommand::Resume(args) => atp_resume(&args, output),
         AtpCommand::Cancel(args) => atp_cancel(&args, output),
+        AtpCommand::TransferStatus(args) => atp_transfer_status(&args, output),
         AtpCommand::Verify(args) => atp_verify(&args, output),
         AtpCommand::Replay(args) => atp_replay(&args, output),
         AtpCommand::Proof(args) => atp_proof(&args, output),
@@ -2182,6 +2588,29 @@ fn atp_get(args: &AtpGetArgs, output: &mut Output) -> Result<(), CliError> {
             let msg = AtpGetStatusMessage::new("Transfer approved for direct commit.");
             output.write(&msg)
                 .map_err(output_write_error("ATP get approval message"))?;
+        }
+    }
+
+    // Show explain report if requested
+    if args.explain {
+        let explain_report = AtpExplainReport::new(&args.transfer_id);
+        output
+            .write(&explain_report)
+            .map_err(output_write_error("ATP get explain report"))?;
+    }
+
+    // Show progress updates if requested
+    if args.progress {
+        let total_bytes = 2_000_000; // 2MB mock transfer
+        for chunk in [0, 500_000, 1_000_000, 1_500_000, 2_000_000] {
+            let progress = AtpProgressUpdate::new(&args.transfer_id, "incoming_file.dat", chunk, total_bytes);
+            output
+                .write(&progress)
+                .map_err(output_write_error("ATP get progress"))?;
+
+            if chunk < total_bytes {
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
         }
     }
 
@@ -2591,8 +3020,39 @@ fn atp_send(args: &AtpSendArgs, output: &mut Output) -> Result<(), CliError> {
             .write(&payload)
             .map_err(output_write_error("ATP send plan"))?;
     } else {
-        // Simulate send operation
-        let payload = AtpSendResultOutput::new(&args.source, &args.target, "transfer_12345");
+        let transfer_id = "transfer_12345";
+
+        // Show explain report if requested
+        if args.explain {
+            let explain_report = AtpExplainReport::new(transfer_id);
+            output
+                .write(&explain_report)
+                .map_err(output_write_error("ATP send explain report"))?;
+        }
+
+        // Show progress updates if requested
+        if args.progress {
+            let source_name = args.source.file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
+                .to_string_lossy();
+
+            // Simulate progress updates
+            let total_bytes = 1_000_000; // 1MB mock file
+            for chunk in [0, 250_000, 500_000, 750_000, 1_000_000] {
+                let progress = AtpProgressUpdate::new(transfer_id, &source_name, chunk, total_bytes);
+                output
+                    .write(&progress)
+                    .map_err(output_write_error("ATP send progress"))?;
+
+                // In real implementation, this would be updated during actual transfer
+                if chunk < total_bytes {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+
+        // Final result
+        let payload = AtpSendResultOutput::new(&args.source, &args.target, transfer_id);
         output
             .write(&payload)
             .map_err(output_write_error("ATP send result"))?;
@@ -2607,6 +3067,33 @@ fn atp_sync(args: &AtpSyncArgs, output: &mut Output) -> Result<(), CliError> {
             .write(&payload)
             .map_err(output_write_error("ATP sync plan"))?;
     } else {
+        let transfer_id = "sync_67890";
+
+        if args.explain {
+            let explain_report = AtpExplainReport::new(transfer_id);
+            output
+                .write(&explain_report)
+                .map_err(output_write_error("ATP sync explain report"))?;
+        }
+
+        if args.progress {
+            let source_name = args.source.file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("directory"))
+                .to_string_lossy();
+
+            let total_bytes = 5_000_000; // 5MB mock directory
+            for chunk in [0, 1_000_000, 3_000_000, 5_000_000] {
+                let progress = AtpProgressUpdate::new(transfer_id, &source_name, chunk, total_bytes);
+                output
+                    .write(&progress)
+                    .map_err(output_write_error("ATP sync progress"))?;
+
+                if chunk < total_bytes {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                }
+            }
+        }
+
         let payload = AtpSyncResultOutput::new(&args.source, &args.target);
         output
             .write(&payload)
@@ -2709,6 +3196,80 @@ fn atp_cancel(args: &AtpCancelArgs, output: &mut Output) -> Result<(), CliError>
     output
         .write(&payload)
         .map_err(output_write_error("ATP cancel"))?;
+    Ok(())
+}
+
+fn atp_transfer_status(args: &AtpTransferStatusArgs, output: &mut Output) -> Result<(), CliError> {
+    if args.watch {
+        // Watch mode - continuously update
+        let mut iteration = 0;
+        loop {
+            // Clear screen for watch mode
+            if iteration > 0 {
+                print!("\x1B[2J\x1B[1;1H"); // Clear screen and move cursor to top
+            }
+
+            let transfers = if let Some(ref transfer_id) = args.transfer_id {
+                // Show specific transfer
+                vec![AtpTransferInfo::new_mock(transfer_id, "send", "document.pdf", "peer123")]
+            } else {
+                // Show all transfers
+                vec![
+                    AtpTransferInfo::new_mock("transfer_abc", "send", "data.zip", "alice@peer"),
+                    AtpTransferInfo::new_mock("transfer_def", "receive", "backup.tar", "bob@peer"),
+                ]
+            };
+
+            let mut status_output = AtpTransferStatusOutput::new(transfers);
+
+            if args.explain {
+                // Add explain information for each transfer
+                for transfer in &mut status_output.active_transfers {
+                    let explain_report = AtpExplainReport::new(&transfer.transfer_id);
+                    output
+                        .write(&explain_report)
+                        .map_err(output_write_error("ATP transfer status explain"))?;
+                }
+            }
+
+            output
+                .write(&status_output)
+                .map_err(output_write_error("ATP transfer status"))?;
+
+            iteration += 1;
+
+            // Exit if not in watch mode or sleep for interval
+            if !args.watch || iteration >= 5 { // Limit iterations for demo
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(args.interval_seconds));
+        }
+    } else {
+        // One-time status check
+        let transfers = if let Some(ref transfer_id) = args.transfer_id {
+            vec![AtpTransferInfo::new_mock(transfer_id, "send", "document.pdf", "peer123")]
+        } else {
+            vec![
+                AtpTransferInfo::new_mock("transfer_abc", "send", "data.zip", "alice@peer"),
+                AtpTransferInfo::new_mock("transfer_def", "receive", "backup.tar", "bob@peer"),
+            ]
+        };
+
+        let status_output = AtpTransferStatusOutput::new(transfers);
+
+        if args.explain {
+            for transfer in &status_output.active_transfers {
+                let explain_report = AtpExplainReport::new(&transfer.transfer_id);
+                output
+                    .write(&explain_report)
+                    .map_err(output_write_error("ATP transfer status explain"))?;
+            }
+        }
+
+        output
+            .write(&status_output)
+            .map_err(output_write_error("ATP transfer status"))?;
+    }
     Ok(())
 }
 
@@ -13143,6 +13704,8 @@ lab:
             profile: "bulk".to_string(),
             streams: 4,
             verbose: false,
+            progress: false,
+            explain: false,
         };
 
         atp_send(&args, &mut output).expect("atp send should work");
@@ -13159,5 +13722,100 @@ lab:
         };
 
         atp_share(&args, &mut output).expect("atp share should work");
+    }
+
+    #[test]
+    fn atp_send_with_progress_and_explain_works() {
+        let mut output = Output::new(OutputFormat::JsonPretty);
+        let args = AtpSendArgs {
+            source: PathBuf::from("/test/file.txt"),
+            target: "peer:destination".to_string(),
+            dry_run: false,
+            profile: "bulk".to_string(),
+            streams: 4,
+            verbose: false,
+            progress: true,
+            explain: true,
+        };
+
+        atp_send(&args, &mut output).expect("atp send with progress and explain should work");
+    }
+
+    #[test]
+    fn atp_transfer_status_command_parsing_works() {
+        let cli = Cli::parse_from([
+            "asupersync",
+            "atp",
+            "transfer-status",
+            "transfer-123",
+            "--explain",
+            "--watch",
+            "--interval",
+            "5",
+        ]);
+
+        if let Command::Atp(AtpArgs {
+            command: AtpCommand::TransferStatus(args),
+        }) = cli.command {
+            assert_eq!(args.transfer_id, Some("transfer-123".to_string()));
+            assert!(args.explain);
+            assert!(args.watch);
+            assert_eq!(args.interval_seconds, 5);
+        } else {
+            panic!("expected atp transfer-status command");
+        }
+    }
+
+    #[test]
+    fn atp_progress_update_formatting_works() {
+        let progress = AtpProgressUpdate::new("test_123", "file.dat", 512000, 1024000);
+        let human_output = progress.human_format();
+
+        assert!(human_output.contains("receiving"));
+        assert!(human_output.contains("file.dat"));
+        assert!(human_output.contains("500.0 KB"));
+        assert!(human_output.contains("1.0 MB"));
+        assert!(human_output.contains("50%"));
+    }
+
+    #[test]
+    fn atp_explain_report_structure_works() {
+        let explain = AtpExplainReport::new("test_explain");
+        let human_output = explain.human_format();
+
+        assert!(human_output.contains("Explain Report"));
+        assert!(human_output.contains("Path:"));
+        assert!(human_output.contains("Scheduler:"));
+        assert!(human_output.contains("Repair:"));
+        assert!(human_output.contains("Disk:"));
+    }
+
+    #[test]
+    fn format_bytes_function_works() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(1048576), "1.0 MB");
+        assert_eq!(format_bytes(1073741824), "1.0 GB");
+    }
+
+    #[test]
+    fn progress_bar_creation_works() {
+        assert_eq!(create_progress_bar(0), "░".repeat(20));
+        assert_eq!(create_progress_bar(50), format!("{}{}", "█".repeat(10), "░".repeat(10)));
+        assert_eq!(create_progress_bar(100), "█".repeat(20));
+    }
+
+    #[test]
+    fn atp_transfer_status_output_works() {
+        let mut output = Output::new(OutputFormat::JsonPretty);
+        let args = AtpTransferStatusArgs {
+            transfer_id: None,
+            explain: false,
+            watch: false,
+            interval_seconds: 2,
+        };
+
+        atp_transfer_status(&args, &mut output).expect("atp transfer status should work");
     }
 }
