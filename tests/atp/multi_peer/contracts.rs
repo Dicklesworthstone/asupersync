@@ -317,6 +317,7 @@ impl MultiPeerContract for CacheContract {
         }
 
         validate_cache_corruption_failures(result)?;
+        validate_expired_cache_grant_failures(result)?;
 
         Ok(())
     }
@@ -365,6 +366,100 @@ fn validate_cache_corruption_failures(result: &MultiPeerResult) -> Result<(), St
     }
 
     Ok(())
+}
+
+fn validate_expired_cache_grant_failures(result: &MultiPeerResult) -> Result<(), String> {
+    for failure in result
+        .verification_results
+        .failures
+        .iter()
+        .filter(|failure| failure.verification_type == "cache_grant_expired")
+    {
+        if result.success {
+            return Err(
+                "Expired cache grant failure must not produce a successful cache result"
+                    .to_string(),
+            );
+        }
+
+        if result.transfer_metrics.verified_bytes != 0 {
+            return Err(
+                "Expired cache grant failure must not expose verified cache bytes".to_string(),
+            );
+        }
+
+        for field in [
+            "grant_id",
+            "peer_id",
+            "cache_key",
+            "manifest_root",
+            "grant_state",
+            "grant_expires_at_epoch_secs",
+            "checked_at_epoch_secs",
+            "exposure_decision",
+        ] {
+            require_failure_context(failure, field)?;
+        }
+
+        if failure
+            .context
+            .get("grant_state")
+            .is_none_or(|state| state != "expired")
+        {
+            return Err("Expired cache grant failure must mark grant_state=expired".to_string());
+        }
+
+        if failure
+            .context
+            .get("exposure_decision")
+            .is_none_or(|decision| decision != "denied")
+        {
+            return Err(
+                "Expired cache grant failure must mark exposure_decision=denied".to_string(),
+            );
+        }
+
+        let expires_at = parse_u64_failure_context(failure, "grant_expires_at_epoch_secs")?;
+        let checked_at = parse_u64_failure_context(failure, "checked_at_epoch_secs")?;
+        if checked_at <= expires_at {
+            return Err(
+                "Expired cache grant failure checked_at_epoch_secs must be after grant expiry"
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn require_failure_context(failure: &VerificationFailure, field: &str) -> Result<(), String> {
+    let Some(value) = failure.context.get(field) else {
+        return Err(format!(
+            "{} failure must include `{field}` context",
+            failure.verification_type
+        ));
+    };
+    if value.trim().is_empty() {
+        return Err(format!(
+            "{} failure context `{field}` must not be empty",
+            failure.verification_type
+        ));
+    }
+    Ok(())
+}
+
+fn parse_u64_failure_context(failure: &VerificationFailure, field: &str) -> Result<u64, String> {
+    failure
+        .context
+        .get(field)
+        .expect("required context checked before parsing")
+        .parse::<u64>()
+        .map_err(|_| {
+            format!(
+                "{} failure context `{field}` must be an unsigned integer",
+                failure.verification_type
+            )
+        })
 }
 
 fn has_explicit_public_cache_policy_marker(scenario: &MultiPeerScenario) -> bool {
@@ -773,6 +868,121 @@ mod tests {
             .expect_err("cache corruption failure must fail closed");
         assert!(
             error.contains("successful cache result"),
+            "unexpected validation error: {error}"
+        );
+    }
+
+    fn cache_result_with_expired_grant_failure(
+        success: bool,
+        verified_bytes: u64,
+        failure_context: HashMap<String, String>,
+    ) -> MultiPeerResult {
+        let mut scenario = MultiPeerScenario::default();
+        scenario.scenario_type = ScenarioType::Cache;
+
+        MultiPeerResult {
+            schema_version: MULTI_PEER_REPORT_SCHEMA.to_string(),
+            scenario,
+            executed_at: SystemTime::now(),
+            success,
+            error: (!success).then(|| "cache grant expired".to_string()),
+            duration: Duration::from_secs(5),
+            peer_results: HashMap::new(),
+            network_events: Vec::new(),
+            transfer_metrics: TransferMetrics {
+                total_bytes: 4096,
+                verified_bytes,
+                chunks_transferred: 0,
+                repair_blocks_used: 0,
+                peer_rejections: 1,
+                source_selections: Vec::new(),
+            },
+            cache_metrics: [(
+                "seed-cache".to_string(),
+                CacheMetrics {
+                    hits: Some(0),
+                    misses: Some(0),
+                    evictions: Some(0),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            verification_results: VerificationResults {
+                crypto_verified: false,
+                manifest_verified: true,
+                proof_verified: true,
+                failures: vec![VerificationFailure {
+                    verification_type: "cache_grant_expired".to_string(),
+                    reason: "cache grant expired before seed exposure".to_string(),
+                    context: failure_context,
+                }],
+            },
+            artifacts: ArtifactPaths {
+                report: "/tmp/report.json".into(),
+                logs: "/tmp/logs".into(),
+                traces: Vec::new(),
+                sources: Vec::new(),
+                destinations: Vec::new(),
+            },
+        }
+    }
+
+    fn expired_grant_context() -> HashMap<String, String> {
+        [
+            ("grant_id", "grant-cache-seed-7"),
+            ("peer_id", "seed-cache"),
+            ("cache_key", "cache:manifest-7"),
+            ("manifest_root", "sha256:070707070707"),
+            ("grant_state", "expired"),
+            ("grant_expires_at_epoch_secs", "1700000100"),
+            ("checked_at_epoch_secs", "1700000200"),
+            ("exposure_decision", "denied"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+    }
+
+    #[test]
+    fn expired_cache_grant_result_requires_fail_closed_context() {
+        let contract = CacheContract;
+        let denied_failure =
+            cache_result_with_expired_grant_failure(false, 0, expired_grant_context());
+        contract
+            .validate_result(&denied_failure)
+            .expect("expired cache grant with deny context should validate");
+
+        let mut stale_timing = expired_grant_context();
+        stale_timing.insert(
+            "checked_at_epoch_secs".to_string(),
+            "1700000100".to_string(),
+        );
+        let stale_timing_result = cache_result_with_expired_grant_failure(false, 0, stale_timing);
+        let error = contract
+            .validate_result(&stale_timing_result)
+            .expect_err("expired grant evidence must be checked after expiry");
+        assert!(
+            error.contains("checked_at_epoch_secs"),
+            "unexpected validation error: {error}"
+        );
+
+        let successful_expired_grant =
+            cache_result_with_expired_grant_failure(true, 0, expired_grant_context());
+        let error = contract
+            .validate_result(&successful_expired_grant)
+            .expect_err("expired grant failure must fail closed");
+        assert!(
+            error.contains("successful cache result"),
+            "unexpected validation error: {error}"
+        );
+
+        let exposed_bytes =
+            cache_result_with_expired_grant_failure(false, 256, expired_grant_context());
+        let error = contract
+            .validate_result(&exposed_bytes)
+            .expect_err("expired grant failure must not expose bytes");
+        assert!(
+            error.contains("verified cache bytes"),
             "unexpected validation error: {error}"
         );
     }
