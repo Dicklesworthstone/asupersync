@@ -5,8 +5,13 @@
 //! stable allow/reject decision that transfer, repair, disk, and relay code can
 //! consume without relying on ambient globals.
 
+pub mod config;
+#[cfg(test)]
+mod e2e_tests;
+
 use crate::atp::profiles::AtpResourceProfile;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Enforceable resource budget for one ATP scheduling decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,9 +236,280 @@ fn push_if_exceeded(
     }
 }
 
+/// Transfer identifier for fairness tracking.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AtpTransferId(pub String);
+
+impl From<String> for AtpTransferId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for AtpTransferId {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+/// Fair share allocation for one transfer among concurrent transfers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AtpFairShareAllocation {
+    /// Transfer receiving this allocation.
+    pub transfer_id: AtpTransferId,
+    /// Allocated bandwidth in bytes per second.
+    pub bandwidth_bytes_per_second: u64,
+    /// Allocated in-flight bytes.
+    pub in_flight_bytes: u64,
+    /// Allocated repair symbols per second.
+    pub repair_symbols_per_second: u32,
+    /// Allocated disk write concurrency.
+    pub disk_write_concurrency: u16,
+    /// Fair share ratio (0.0-1.0) of total resources.
+    pub share_ratio: f64,
+}
+
+/// Policy for distributing resources among concurrent transfers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtpFairnessPolicy {
+    /// Equal sharing among all concurrent transfers.
+    EqualShare,
+    /// Priority-based sharing with background transfers getting less.
+    PriorityWeighted,
+    /// First transfer gets full allocation, others get limited shares.
+    FirstComeFirstServed,
+    /// Proportional to transfer size (larger transfers get more).
+    SizeProportional,
+}
+
+impl Default for AtpFairnessPolicy {
+    fn default() -> Self {
+        Self::EqualShare
+    }
+}
+
+/// Fairness coordinator for distributing resources among concurrent transfers.
+#[derive(Debug, Clone)]
+pub struct AtpFairnessCoordinator {
+    /// Base budget to distribute among transfers.
+    budget: AtpResourceBudget,
+    /// Policy for fair sharing.
+    policy: AtpFairnessPolicy,
+    /// Currently tracked transfers and their demands.
+    active_transfers: BTreeMap<AtpTransferId, AtpResourceDemand>,
+}
+
+impl AtpFairnessCoordinator {
+    /// Create a new fairness coordinator with the given budget and policy.
+    #[must_use]
+    pub fn new(budget: AtpResourceBudget, policy: AtpFairnessPolicy) -> Self {
+        Self {
+            budget,
+            policy,
+            active_transfers: BTreeMap::new(),
+        }
+    }
+
+    /// Register a transfer with its resource demand.
+    pub fn register_transfer(&mut self, transfer_id: AtpTransferId, demand: AtpResourceDemand) {
+        self.active_transfers.insert(transfer_id, demand);
+    }
+
+    /// Unregister a completed or cancelled transfer.
+    pub fn unregister_transfer(&mut self, transfer_id: &AtpTransferId) {
+        self.active_transfers.remove(transfer_id);
+    }
+
+    /// Get current number of active transfers.
+    #[must_use]
+    pub fn active_transfer_count(&self) -> usize {
+        self.active_transfers.len()
+    }
+
+    /// Calculate fair share allocations for all active transfers.
+    #[must_use]
+    pub fn calculate_allocations(&self) -> Vec<AtpFairShareAllocation> {
+        if self.active_transfers.is_empty() {
+            return Vec::new();
+        }
+
+        let transfer_count = self.active_transfers.len();
+        let mut allocations = Vec::with_capacity(transfer_count);
+
+        match self.policy {
+            AtpFairnessPolicy::EqualShare => {
+                self.calculate_equal_share_allocations(&mut allocations, transfer_count)
+            }
+            AtpFairnessPolicy::PriorityWeighted => {
+                self.calculate_priority_weighted_allocations(&mut allocations)
+            }
+            AtpFairnessPolicy::FirstComeFirstServed => {
+                self.calculate_fcfs_allocations(&mut allocations)
+            }
+            AtpFairnessPolicy::SizeProportional => {
+                self.calculate_size_proportional_allocations(&mut allocations)
+            }
+        }
+
+        allocations
+    }
+
+    fn calculate_equal_share_allocations(
+        &self,
+        allocations: &mut Vec<AtpFairShareAllocation>,
+        transfer_count: usize,
+    ) {
+        let share_ratio = 1.0 / transfer_count as f64;
+
+        for (transfer_id, _demand) in &self.active_transfers {
+            allocations.push(AtpFairShareAllocation {
+                transfer_id: transfer_id.clone(),
+                bandwidth_bytes_per_second: self.budget.max_bandwidth_bytes_per_second
+                    .map(|b| b / transfer_count as u64)
+                    .unwrap_or(u64::MAX),
+                in_flight_bytes: self.budget.max_in_flight_bytes
+                    .map(|b| b / transfer_count as u64)
+                    .unwrap_or(u64::MAX),
+                repair_symbols_per_second: self.budget.max_repair_symbols_per_second
+                    .map(|r| r / transfer_count as u32)
+                    .unwrap_or(u32::MAX),
+                disk_write_concurrency: self.budget.max_disk_write_concurrency
+                    .map(|d| d.max(1) / transfer_count as u16)
+                    .unwrap_or(u16::MAX),
+                share_ratio,
+            });
+        }
+    }
+
+    fn calculate_priority_weighted_allocations(&self, allocations: &mut Vec<AtpFairShareAllocation>) {
+        // Background transfers get 0.25 weight, foreground get 1.0 weight
+        let total_weight: f64 = self.active_transfers
+            .values()
+            .map(|_demand| {
+                // For now, assume all transfers are foreground (weight = 1.0)
+                // TODO: Add priority field to AtpResourceDemand
+                1.0
+            })
+            .sum();
+
+        for (transfer_id, _demand) in &self.active_transfers {
+            let weight = 1.0; // TODO: Use actual priority
+            let share_ratio = weight / total_weight;
+
+            allocations.push(AtpFairShareAllocation {
+                transfer_id: transfer_id.clone(),
+                bandwidth_bytes_per_second: self.budget.max_bandwidth_bytes_per_second
+                    .map(|b| ((b as f64) * share_ratio) as u64)
+                    .unwrap_or(u64::MAX),
+                in_flight_bytes: self.budget.max_in_flight_bytes
+                    .map(|b| ((b as f64) * share_ratio) as u64)
+                    .unwrap_or(u64::MAX),
+                repair_symbols_per_second: self.budget.max_repair_symbols_per_second
+                    .map(|r| ((r as f64) * share_ratio) as u32)
+                    .unwrap_or(u32::MAX),
+                disk_write_concurrency: self.budget.max_disk_write_concurrency
+                    .map(|d| (((d as f64) * share_ratio) as u16).max(1))
+                    .unwrap_or(u16::MAX),
+                share_ratio,
+            });
+        }
+    }
+
+    fn calculate_fcfs_allocations(&self, allocations: &mut Vec<AtpFairShareAllocation>) {
+        // First transfer gets 70% of resources, others share the remaining 30%
+        let mut is_first = true;
+        let remaining_count = self.active_transfers.len().saturating_sub(1);
+
+        for (transfer_id, _demand) in &self.active_transfers {
+            let share_ratio = if is_first {
+                0.7
+            } else if remaining_count > 0 {
+                0.3 / remaining_count as f64
+            } else {
+                0.0
+            };
+
+            allocations.push(AtpFairShareAllocation {
+                transfer_id: transfer_id.clone(),
+                bandwidth_bytes_per_second: self.budget.max_bandwidth_bytes_per_second
+                    .map(|b| ((b as f64) * share_ratio) as u64)
+                    .unwrap_or(u64::MAX),
+                in_flight_bytes: self.budget.max_in_flight_bytes
+                    .map(|b| ((b as f64) * share_ratio) as u64)
+                    .unwrap_or(u64::MAX),
+                repair_symbols_per_second: self.budget.max_repair_symbols_per_second
+                    .map(|r| ((r as f64) * share_ratio) as u32)
+                    .unwrap_or(u32::MAX),
+                disk_write_concurrency: self.budget.max_disk_write_concurrency
+                    .map(|d| (((d as f64) * share_ratio) as u16).max(1))
+                    .unwrap_or(u16::MAX),
+                share_ratio,
+            });
+
+            is_first = false;
+        }
+    }
+
+    fn calculate_size_proportional_allocations(&self, allocations: &mut Vec<AtpFairShareAllocation>) {
+        // Use in_flight_bytes as a proxy for transfer size
+        let total_size: u64 = self.active_transfers
+            .values()
+            .map(|demand| demand.in_flight_bytes.max(1))
+            .sum();
+
+        for (transfer_id, demand) in &self.active_transfers {
+            let transfer_size = demand.in_flight_bytes.max(1);
+            let share_ratio = transfer_size as f64 / total_size as f64;
+
+            allocations.push(AtpFairShareAllocation {
+                transfer_id: transfer_id.clone(),
+                bandwidth_bytes_per_second: self.budget.max_bandwidth_bytes_per_second
+                    .map(|b| ((b as f64) * share_ratio) as u64)
+                    .unwrap_or(u64::MAX),
+                in_flight_bytes: self.budget.max_in_flight_bytes
+                    .map(|b| ((b as f64) * share_ratio) as u64)
+                    .unwrap_or(u64::MAX),
+                repair_symbols_per_second: self.budget.max_repair_symbols_per_second
+                    .map(|r| ((r as f64) * share_ratio) as u32)
+                    .unwrap_or(u32::MAX),
+                disk_write_concurrency: self.budget.max_disk_write_concurrency
+                    .map(|d| (((d as f64) * share_ratio) as u16).max(1))
+                    .unwrap_or(u16::MAX),
+                share_ratio,
+            });
+        }
+    }
+
+    /// Get the base budget being distributed.
+    #[must_use]
+    pub const fn budget(&self) -> &AtpResourceBudget {
+        &self.budget
+    }
+
+    /// Get the fairness policy being used.
+    #[must_use]
+    pub const fn policy(&self) -> AtpFairnessPolicy {
+        self.policy
+    }
+
+    /// Update the base budget (typically from config changes).
+    pub fn update_budget(&mut self, budget: AtpResourceBudget) {
+        self.budget = budget;
+    }
+
+    /// Update the fairness policy.
+    pub fn update_policy(&mut self, policy: AtpFairnessPolicy) {
+        self.policy = policy;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AtpGovernanceViolationKind, AtpResourceDemand, AtpResourceGovernor};
+    use super::{
+        AtpFairnessCoordinator, AtpFairnessPolicy, AtpGovernanceViolationKind, AtpResourceBudget,
+        AtpResourceDemand, AtpResourceGovernor, AtpTransferId,
+    };
     use crate::atp::profiles::{AtpPowerProfile, AtpResourceProfile};
 
     #[test]
@@ -298,5 +574,155 @@ mod tests {
 
         assert!(decision.allowed);
         assert!(decision.violations.is_empty());
+    }
+
+    #[test]
+    fn fairness_coordinator_equal_share_distributes_resources() {
+        let budget = AtpResourceBudget::from_profile(AtpResourceProfile::for_power_profile(
+            AtpPowerProfile::Balanced,
+        ));
+        let mut coordinator = AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::EqualShare);
+
+        // Register two transfers
+        coordinator.register_transfer(
+            "transfer1".into(),
+            AtpResourceDemand {
+                bandwidth_bytes_per_second: 64 * 1_048_576,
+                in_flight_bytes: 32 * 1_048_576,
+                repair_symbols_per_second: 1_024,
+                disk_write_concurrency: 2,
+                relay_cost_micros_per_mib: None,
+            },
+        );
+        coordinator.register_transfer(
+            "transfer2".into(),
+            AtpResourceDemand {
+                bandwidth_bytes_per_second: 32 * 1_048_576,
+                in_flight_bytes: 16 * 1_048_576,
+                repair_symbols_per_second: 512,
+                disk_write_concurrency: 1,
+                relay_cost_micros_per_mib: None,
+            },
+        );
+
+        let allocations = coordinator.calculate_allocations();
+        assert_eq!(allocations.len(), 2);
+
+        // Each should get 50% of resources
+        for allocation in &allocations {
+            assert!((allocation.share_ratio - 0.5).abs() < 0.01);
+            assert_eq!(allocation.bandwidth_bytes_per_second, 64 * 1_048_576); // 128/2
+            assert_eq!(allocation.in_flight_bytes, 32 * 1_048_576); // 64/2
+            assert_eq!(allocation.repair_symbols_per_second, 1_024); // 2048/2
+            assert_eq!(allocation.disk_write_concurrency, 2); // 4/2
+        }
+    }
+
+    #[test]
+    fn fairness_coordinator_fcfs_gives_priority_to_first_transfer() {
+        let budget = AtpResourceBudget::from_profile(AtpResourceProfile::for_power_profile(
+            AtpPowerProfile::Balanced,
+        ));
+        let mut coordinator = AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::FirstComeFirstServed);
+
+        // Register transfers in order
+        coordinator.register_transfer("first".into(), AtpResourceDemand::default());
+        coordinator.register_transfer("second".into(), AtpResourceDemand::default());
+        coordinator.register_transfer("third".into(), AtpResourceDemand::default());
+
+        let allocations = coordinator.calculate_allocations();
+        assert_eq!(allocations.len(), 3);
+
+        // First transfer should get 70% of resources
+        assert!((allocations[0].share_ratio - 0.7).abs() < 0.01);
+        assert_eq!(allocations[0].transfer_id.0, "first");
+
+        // Others should share the remaining 30% (15% each)
+        for allocation in &allocations[1..] {
+            assert!((allocation.share_ratio - 0.15).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn fairness_coordinator_size_proportional_allocates_by_transfer_size() {
+        let budget = AtpResourceBudget::from_profile(AtpResourceProfile::for_power_profile(
+            AtpPowerProfile::Balanced,
+        ));
+        let mut coordinator = AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::SizeProportional);
+
+        // Small transfer: 1 MiB
+        coordinator.register_transfer(
+            "small".into(),
+            AtpResourceDemand {
+                in_flight_bytes: 1_048_576,
+                ..AtpResourceDemand::default()
+            },
+        );
+
+        // Large transfer: 9 MiB
+        coordinator.register_transfer(
+            "large".into(),
+            AtpResourceDemand {
+                in_flight_bytes: 9 * 1_048_576,
+                ..AtpResourceDemand::default()
+            },
+        );
+
+        let allocations = coordinator.calculate_allocations();
+        assert_eq!(allocations.len(), 2);
+
+        // Small transfer should get ~10% (1/10)
+        let small_alloc = allocations.iter().find(|a| a.transfer_id.0 == "small").unwrap();
+        assert!((small_alloc.share_ratio - 0.1).abs() < 0.01);
+
+        // Large transfer should get ~90% (9/10)
+        let large_alloc = allocations.iter().find(|a| a.transfer_id.0 == "large").unwrap();
+        assert!((large_alloc.share_ratio - 0.9).abs() < 0.01);
+    }
+
+    #[test]
+    fn fairness_coordinator_unregister_transfer_removes_from_tracking() {
+        let budget = AtpResourceBudget::default();
+        let mut coordinator = AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::EqualShare);
+
+        let transfer_id: AtpTransferId = "test_transfer".into();
+        coordinator.register_transfer(transfer_id.clone(), AtpResourceDemand::default());
+        assert_eq!(coordinator.active_transfer_count(), 1);
+
+        coordinator.unregister_transfer(&transfer_id);
+        assert_eq!(coordinator.active_transfer_count(), 0);
+        assert!(coordinator.calculate_allocations().is_empty());
+    }
+
+    #[test]
+    fn fairness_coordinator_budget_and_policy_updates() {
+        let initial_budget = AtpResourceBudget::default();
+        let mut coordinator = AtpFairnessCoordinator::new(initial_budget, AtpFairnessPolicy::EqualShare);
+
+        assert_eq!(coordinator.policy(), AtpFairnessPolicy::EqualShare);
+
+        // Update policy
+        coordinator.update_policy(AtpFairnessPolicy::FirstComeFirstServed);
+        assert_eq!(coordinator.policy(), AtpFairnessPolicy::FirstComeFirstServed);
+
+        // Update budget
+        let new_budget = AtpResourceBudget::from_profile(AtpResourceProfile::for_power_profile(
+            AtpPowerProfile::MaxSpeed,
+        ));
+        coordinator.update_budget(new_budget);
+        assert_eq!(*coordinator.budget(), new_budget);
+    }
+
+    #[test]
+    fn fairness_policy_default_is_equal_share() {
+        assert_eq!(AtpFairnessPolicy::default(), AtpFairnessPolicy::EqualShare);
+    }
+
+    #[test]
+    fn transfer_id_conversions_work() {
+        let id1: AtpTransferId = "test".into();
+        let id2: AtpTransferId = String::from("test").into();
+        assert_eq!(id1, id2);
+        assert_eq!(id1.0, "test");
     }
 }

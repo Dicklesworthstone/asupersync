@@ -34,6 +34,7 @@ pub mod proof;
 pub mod quota;
 pub mod repair_receiver;
 pub mod repair_roi;
+pub mod repair_scheduler;
 pub mod safety;
 #[path = "sdk.rs"]
 pub mod sdk;
@@ -76,6 +77,8 @@ pub use doctor::{
     render_platform_doctor_human,
 };
 pub use governance::{
+    config::{AtpGovernanceConfig, AtpGovernanceCliArgs, AtpGovernanceMetadata, AtpCustomLimits},
+    AtpFairnessCoordinator, AtpFairnessPolicy, AtpFairShareAllocation, AtpTransferId,
     AtpGovernanceDecision, AtpGovernanceViolation, AtpGovernanceViolationKind, AtpResourceBudget,
     AtpResourceDemand, AtpResourceGovernor,
 };
@@ -110,4 +113,8 @@ pub use quota::{
 pub use repair_roi::{
     EfficiencyStats, NetworkRegime, PolicyAnalysis, RegimeStats, RepairRoiSimulationResult,
     RepairRoiSimulator,
+};
+pub use repair_scheduler::{
+    DecodeMatrix, MultiSourceRepairScheduler, PeerScoringWeights, RejectionReason,
+    RepairSymbolRequest, SymbolProcessResult,
 };
