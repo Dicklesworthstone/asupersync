@@ -463,6 +463,8 @@ pub mod real_lab_replay_trace_recorder_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_lab_scenario_runner_explorer_deterministic_replay_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_lab_scenario_runner_trace_recorder_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_messaging_jetstream_obligation_dialectica_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_dns_e2e_tests;
