@@ -274,6 +274,36 @@ fn asw_handoff_verifier_local_fallback_output_matches_reviewed_golden() {
 }
 
 #[test]
+fn asw_handoff_verifier_pushed_uncommented_commit_requires_closeout() {
+    let receipt = verifier_receipt_json("asw_handoff_verifier_pushed_uncommented.json");
+    assert_eq!(
+        receipt["handoff_verifier"]["decision"].as_str(),
+        Some("narrow_refresh_required")
+    );
+    assert!(
+        receipt["handoff_verifier"]["required_refreshes"]
+            .as_array()
+            .expect("required_refreshes must be array")
+            .iter()
+            .any(|value| value.as_str() == Some("record-pushed-commit-closeout")),
+        "pushed commits without Beads or Agent Mail closeout must require refresh"
+    );
+    assert_eq!(
+        receipt["handoff_verifier"]["evidence"]["pushed_uncommented_commit_count"].as_u64(),
+        Some(1)
+    );
+}
+
+#[test]
+fn asw_handoff_verifier_pushed_uncommented_output_matches_reviewed_golden() {
+    assert_verifier_output_matches_golden(
+        "asw_handoff_verifier_pushed_uncommented.json",
+        "asw_handoff_verifier_pushed_uncommented_expected.json",
+        "ASW handoff verifier pushed-uncommented receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
 fn dirty_peer_owned_tree_recommends_avoiding_surface() {
     let receipt = receipt_json("dirty_peer_owned_tree.json");
     assert_eq!(next_action_category(&receipt), "avoid-peer-owned-surface");

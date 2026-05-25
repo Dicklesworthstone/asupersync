@@ -501,6 +501,41 @@ def proof_remote_required(proof: dict[str, Any]) -> bool:
     )
 
 
+def commit_pushed(commit: dict[str, Any]) -> bool:
+    return (
+        bool(commit.get("pushed"))
+        or bool(commit.get("pushed_to_main"))
+        or str(commit.get("push_status") or "") == "pushed"
+    )
+
+
+def commit_closeout_recorded(commit: dict[str, Any]) -> bool:
+    return any(
+        bool(commit.get(field))
+        for field in (
+            "agent_mail_summary",
+            "beads_comment",
+            "closeout_comment",
+            "close_reason",
+            "mail_closeout",
+        )
+    )
+
+
+def pushed_uncommented_commits(capsule: dict[str, Any]) -> list[str]:
+    commits = capsule.get("commits", [])
+    if not isinstance(commits, list):
+        return []
+
+    missing = []
+    for commit in commits:
+        if not isinstance(commit, dict):
+            continue
+        if commit_pushed(commit) and not commit_closeout_recorded(commit):
+            missing.append(str(commit.get("sha") or commit.get("id") or "unknown"))
+    return missing
+
+
 def verify_handoff_capsule(
     *,
     source: dict[str, Any],
@@ -585,6 +620,10 @@ def verify_handoff_capsule(
     if str(capsule.get("repo_head") or "") != str(capsule.get("observed_head") or ""):
         required_refreshes.append("refresh-repo-head")
 
+    pushed_without_closeout = pushed_uncommented_commits(capsule)
+    if pushed_without_closeout:
+        required_refreshes.append("record-pushed-commit-closeout")
+
     unresolved_acks = int(capsule.get("unresolved_ack_count") or 0)
     if unresolved_acks > 0:
         coordinate_with.append("ack-required-inbox")
@@ -649,6 +688,11 @@ def verify_handoff_capsule(
             "remote_proof_count": len(remote_proofs),
             "latest_proof_at": latest_proof_at,
             "unresolved_ack_count": unresolved_acks,
+            **(
+                {"pushed_uncommented_commit_count": len(pushed_without_closeout)}
+                if pushed_without_closeout
+                else {}
+            ),
         },
     }
 
