@@ -34,6 +34,7 @@ pub mod policy;
 pub mod profiles;
 pub mod proof;
 pub mod quota;
+pub mod repair_coordinator;
 pub mod repair_receiver;
 pub mod repair_roi;
 pub mod repair_scheduler;
@@ -44,6 +45,7 @@ pub mod seeding;
 pub mod stream_object;
 pub mod sync;
 pub mod transfer;
+#[cfg(feature = "tokio-compat")]
 pub mod transfer_actor;
 pub mod transfer_brain;
 pub mod verifier;
@@ -115,6 +117,10 @@ pub use quota::{
     QuotaAllocation, QuotaBucket, QuotaError, QuotaLedger, QuotaLimit, QuotaRow, QuotaUsage,
     RetentionClock, RetentionPolicy, RetentionRecord, RetentionRule,
 };
+pub use repair_coordinator::{
+    PathCharacteristics, RepairCoordinator, RepairCoordinatorConfig, RepairDecision,
+    RepairDecisionFactors, RepairMode, RepairRoi, RepairTelemetry, TransferState,
+};
 pub use repair_roi::{
     EfficiencyStats, NetworkRegime, PolicyAnalysis, RegimeStats, RepairRoiSimulationResult,
     RepairRoiSimulator,
@@ -127,6 +133,7 @@ pub use seeding::{
     AtpSeedingService, ManifestAuthorization, SeedingConfig, SeedingError, SeedingMetrics,
     SeedingPriority, SeedingSession,
 };
+#[cfg(feature = "tokio-compat")]
 pub use transfer_actor::{
     SessionId, SessionState, TransferActor, TransferActorConfig, TransferActorHandle,
     TransferMessage, TransferSession, TransferSessionStatus,
