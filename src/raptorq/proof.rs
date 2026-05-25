@@ -3480,4 +3480,386 @@ mod tests {
             "Different empty payloads should produce different hashes"
         );
     }
+
+    // ============================================================================
+    // ATP-N15: Comprehensive RaptorQ repair proof unit test harness
+    // ============================================================================
+
+    /// Generate deterministic test data for a given size.
+    fn generate_atp_test_data(size: usize, offset: u8) -> Vec<u8> {
+        (0..size).map(|i| ((i + offset as usize) % 256) as u8).collect()
+    }
+
+    /// Create test received symbols with deterministic ESIs.
+    fn create_atp_test_received_symbols(k: usize, repair_count: usize) -> Vec<(u32, bool)> {
+        let mut symbols = Vec::new();
+
+        // Add source symbols
+        for i in 0..k {
+            symbols.push((i as u32, true));
+        }
+
+        // Add repair symbols starting from K
+        for i in 0..repair_count {
+            symbols.push(((k + i) as u32, false));
+        }
+
+        symbols
+    }
+
+    #[test]
+    fn test_atp_received_summary_truncation_boundary() {
+        let large_symbol_count = MAX_RECEIVED_SYMBOLS + 100;
+        let symbols: Vec<(u32, bool)> = (0..large_symbol_count)
+            .map(|i| (i as u32, i < large_symbol_count / 2))
+            .collect();
+
+        let summary = ReceivedSummary::from_received(symbols.into_iter());
+
+        assert_eq!(summary.total, large_symbol_count);
+        assert_eq!(summary.esis.len(), MAX_RECEIVED_SYMBOLS);
+        assert!(summary.truncated);
+
+        // Should keep the smallest ESIs due to sorting
+        for i in 0..MAX_RECEIVED_SYMBOLS {
+            assert_eq!(summary.esis[i], i as u32);
+        }
+    }
+
+    #[test]
+    fn test_atp_received_summary_duplicate_tracking() {
+        let symbols = vec![
+            (0, true),
+            (1, true),
+            (1, true), // Duplicate
+            (2, false),
+            (2, false), // Duplicate
+        ];
+
+        let summary = ReceivedSummary::from_received(symbols.into_iter());
+
+        assert_eq!(summary.total, 5); // Includes duplicates in count
+        assert_eq!(summary.source_count, 3); // 2 unique + 1 duplicate
+        assert_eq!(summary.repair_count, 2); // 1 unique + 1 duplicate
+        assert_eq!(summary.esis, vec![0, 1, 1, 2, 2]); // Preserves duplicates
+    }
+
+    #[test]
+    fn test_atp_received_summary_esi_multiset_hash_stability() {
+        let symbols1 = vec![(0, true), (1, true), (2, false)];
+        let symbols2 = vec![(0, true), (1, true), (2, false)];
+        let symbols3 = vec![(0, true), (2, false), (1, true)]; // Different order
+
+        let summary1 = ReceivedSummary::from_received(symbols1.into_iter());
+        let summary2 = ReceivedSummary::from_received(symbols2.into_iter());
+        let summary3 = ReceivedSummary::from_received(symbols3.into_iter());
+
+        // Same symbols should produce same hash
+        assert_eq!(summary1.esi_multiset_hash, summary2.esi_multiset_hash);
+        // Same symbols in different order should produce same hash
+        assert_eq!(summary1.esi_multiset_hash, summary3.esi_multiset_hash);
+    }
+
+    #[test]
+    fn test_atp_proof_hash_hex_roundtrip() {
+        let test_bytes = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
+                          0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
+                          0x0f, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78,
+                          0x87, 0x96, 0xa5, 0xb4, 0xc3, 0xd2, 0xe1, 0xf0];
+        let hash = ProofHash(test_bytes);
+
+        let hex = hash.to_hex();
+        assert_eq!(hex.len(), 64);
+        assert_eq!(&hex[..16], "0123456789abcdef");
+
+        #[cfg(test)]
+        {
+            let recovered = ProofHash::from_hex(&hex).expect("should parse valid hex");
+            assert_eq!(recovered, hash);
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn test_atp_proof_hash_hex_validation_boundary() {
+        // Valid hex
+        let valid_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(ProofHash::from_hex(valid_hex).is_some());
+
+        // Wrong length
+        assert!(ProofHash::from_hex("0123456789abcdef").is_none());
+        assert!(ProofHash::from_hex(&format!("{valid_hex}00")).is_none());
+
+        // Invalid hex characters
+        assert!(ProofHash::from_hex("g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").is_none());
+    }
+
+    #[test]
+    fn test_atp_decode_proof_content_hash_determinism() {
+        let config = make_test_config();
+        let symbols = create_atp_test_received_symbols(8, 2);
+        let recovered_data = generate_atp_test_data(8 * config.symbol_size, 0);
+
+        let mut builder1 = DecodeProof::builder(config.clone());
+        builder1.set_received(ReceivedSummary::from_received(symbols.clone().into_iter()));
+        builder1.set_success(&[recovered_data.clone()]);
+        let proof1 = builder1.build();
+
+        let mut builder2 = DecodeProof::builder(config);
+        builder2.set_received(ReceivedSummary::from_received(symbols.into_iter()));
+        builder2.set_success(&[recovered_data]);
+        let proof2 = builder2.build();
+
+        let hash1 = proof1.content_hash();
+        let hash2 = proof2.content_hash();
+
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_atp_decode_proof_content_hash_sensitivity() {
+        let config = make_test_config();
+        let symbols = create_atp_test_received_symbols(8, 2);
+        let recovered_data1 = generate_atp_test_data(8 * config.symbol_size, 0);
+        let recovered_data2 = generate_atp_test_data(8 * config.symbol_size, 1); // Different data
+
+        let mut builder1 = DecodeProof::builder(config.clone());
+        builder1.set_received(ReceivedSummary::from_received(symbols.clone().into_iter()));
+        builder1.set_success(&[recovered_data1]);
+        let proof1 = builder1.build();
+
+        let mut builder2 = DecodeProof::builder(config);
+        builder2.set_received(ReceivedSummary::from_received(symbols.into_iter()));
+        builder2.set_success(&[recovered_data2]);
+        let proof2 = builder2.build();
+
+        let hash1 = proof1.content_hash();
+        let hash2 = proof2.content_hash();
+
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_atp_proof_artifact_manifest_hash_validation_cycle() {
+        let test_object_id = ObjectId::new(0x1234, 0x5678);
+        let manifest = ProofArtifactManifest {
+            version: PROOF_ARTIFACT_DISTRIBUTION_SCHEMA_VERSION,
+            object_id: test_object_id,
+            sbn: 42,
+            artifact_len: 1024,
+            symbol_size: 64,
+            source_symbols: 16,
+            repair_symbols: 4,
+            k_prime: 20,
+            l: 24,
+            seed: 0xdeadbeef,
+            source_payload_hash: ProofHash([0; 32]),
+            manifest_hash: ProofHash([0; 32]), // Will be wrong
+        };
+
+        // Hash should not validate with zero manifest_hash
+        assert!(!manifest.hash_is_valid());
+
+        // Recompute and verify
+        let correct_hash = manifest.recompute_hash();
+        let corrected_manifest = ProofArtifactManifest {
+            manifest_hash: correct_hash,
+            ..manifest
+        };
+
+        assert!(corrected_manifest.hash_is_valid());
+    }
+
+    #[test]
+    fn test_atp_elimination_trace_pivot_truncation() {
+        let config = make_test_config();
+        let symbols = create_atp_test_received_symbols(8, 2);
+
+        let mut builder = DecodeProof::builder(config);
+        builder.set_received(ReceivedSummary::from_received(symbols.into_iter()));
+
+        // Add many pivot events to test truncation
+        for i in 0..(MAX_PIVOT_EVENTS + 50) {
+            builder.elimination_mut().record_pivot(i % 100, i % 50); // Arbitrary col, row
+        }
+
+        builder.set_success(&[generate_atp_test_data(8 * 64, 0)]);
+        let proof = builder.build();
+
+        assert_eq!(proof.elimination.pivot_events.len(), MAX_PIVOT_EVENTS);
+        assert!(proof.elimination.pivot_events_truncated);
+    }
+
+    #[test]
+    fn test_atp_peeling_trace_bounds_checking() {
+        let config = make_test_config();
+        let symbols = create_atp_test_received_symbols(8, 0);
+
+        let mut builder = DecodeProof::builder(config);
+        builder.set_received(ReceivedSummary::from_received(symbols.into_iter()));
+
+        // Add solved indices within bounds
+        for i in 0..8 {
+            builder.peeling_mut().record_solved(i);
+        }
+
+        builder.set_success(&[generate_atp_test_data(8 * 64, 0)]);
+        let proof = builder.build();
+
+        assert_eq!(proof.peeling.solved, 8);
+        assert_eq!(proof.peeling.solved_indices.len(), 8);
+        assert!(!proof.peeling.truncated);
+    }
+
+    #[test]
+    fn test_atp_proof_distribution_error_coverage() {
+        let errors = vec![
+            ProofArtifactDistributionError::EmptyArtifact,
+            ProofArtifactDistributionError::InvalidSymbolSize,
+            ProofArtifactDistributionError::UnsupportedSourceBlock {
+                requested: 100000,
+                max_supported: 56403,
+            },
+            ProofArtifactDistributionError::EncoderUnavailable,
+            ProofArtifactDistributionError::ManifestHashMismatch {
+                expected: ProofHash([1; 32]),
+                actual: ProofHash([2; 32]),
+            },
+            ProofArtifactDistributionError::ManifestParameterMismatch {
+                field: "k_prime",
+                expected: 20,
+                actual: 24,
+            },
+            ProofArtifactDistributionError::ShardSizeMismatch {
+                esi: 42,
+                expected: 64,
+                actual: 32,
+            },
+            ProofArtifactDistributionError::ShardAuthenticationFailed { esi: 99 },
+        ];
+
+        for error in errors {
+            let display = format!("{error}");
+            assert!(!display.is_empty());
+            assert!(!display.contains("Debug")); // Should use Display, not Debug
+        }
+    }
+
+    /// Integration test for ATP gates conformance validation.
+    #[test]
+    fn test_atp_raptorq_conformance_integration() {
+        let config = make_test_config();
+        let symbols = create_atp_test_received_symbols(16, 4);
+        let recovered_data = generate_atp_test_data(16 * 64, 0);
+
+        let mut builder = DecodeProof::builder(config.clone());
+        builder.set_received(ReceivedSummary::from_received(symbols.into_iter()));
+        builder.set_success(&[recovered_data]);
+
+        let proof = builder.build();
+        let hash = proof.content_hash();
+
+        // Verify proof structure for ATP integration
+        assert_eq!(proof.config.k, config.k);
+        assert!(matches!(proof.outcome, ProofOutcome::Success { .. }));
+        assert!(!hash.to_hex().is_empty());
+
+        // Verify hash determinism for ATP replay
+        let hash2 = proof.content_hash();
+        assert_eq!(hash, hash2);
+    }
+
+    /// Hard-regime telemetry integration test for ATP gates.
+    #[test]
+    fn test_atp_hard_regime_telemetry_integration() {
+        let config = make_test_config();
+        let symbols = create_atp_test_received_symbols(12, 6); // High repair overhead
+
+        let mut builder = DecodeProof::builder(config);
+        builder.set_received(ReceivedSummary::from_received(symbols.into_iter()));
+        builder.set_success(&[generate_atp_test_data(12 * 64, 0)]);
+        let proof = builder.build();
+
+        // Verify telemetry data is captured in proof
+        assert_eq!(proof.received.repair_count, 6);
+        assert!(proof.received.repair_count > proof.config.k / 2); // High overhead condition
+
+        // Proof should be valid for ATP integration
+        let hash = proof.content_hash();
+        assert_eq!(hash.to_hex().len(), 64);
+    }
+
+    /// Boundary condition testing for ATP gate integration.
+    #[test]
+    fn test_atp_boundary_conditions_for_gates() {
+        // Test edge cases that ATP gates need to handle
+
+        // Zero source symbols (minimal config)
+        let minimal_config = DecodeConfig {
+            object_id: ObjectId::new(0x1234, 0x5678),
+            sbn: 0,
+            k: 1, // Minimal valid K
+            s: 0,
+            h: 0,
+            l: 1,
+            symbol_size: 64,
+            seed: 0xdeadbeef,
+        };
+
+        let mut builder = DecodeProof::builder(minimal_config);
+        builder.set_received(ReceivedSummary::from_received(
+            vec![(0, true)].into_iter()
+        ));
+        builder.set_success(&[generate_atp_test_data(64, 0)]);
+        let proof = builder.build();
+
+        assert!(matches!(proof.outcome, ProofOutcome::Success { .. }));
+
+        // Large symbols (boundary testing)
+        let large_config = make_test_config(); // Use existing test config
+        let large_symbols = create_atp_test_received_symbols(large_config.k, large_config.k / 4);
+
+        let mut large_builder = DecodeProof::builder(large_config.clone());
+        large_builder.set_received(ReceivedSummary::from_received(large_symbols.into_iter()));
+        large_builder.set_success(&[generate_atp_test_data(large_config.k * 64, 0)]);
+        let large_proof = large_builder.build();
+
+        assert!(matches!(large_proof.outcome, ProofOutcome::Success { .. }));
+        assert_eq!(large_proof.config.k, large_config.k);
+    }
+
+    #[test]
+    fn test_atp_proof_replay_consistency() {
+        // Test that proofs maintain consistency across rebuilds for ATP replay
+        let config = make_test_config();
+        let symbols = create_atp_test_received_symbols(config.k, 2);
+        let recovered = make_test_recovered(&config);
+
+        let proof1 = {
+            let mut builder = DecodeProof::builder(config.clone());
+            builder.set_received(ReceivedSummary::from_received(symbols.clone().into_iter()));
+            builder.peeling_mut().record_solved(0);
+            builder.peeling_mut().record_solved(4);
+            builder.elimination_mut().record_pivot(8, 3);
+            builder.elimination_mut().record_pivot(9, 7);
+            builder.set_success(&recovered);
+            builder.build()
+        };
+
+        let proof2 = {
+            let mut builder = DecodeProof::builder(config);
+            builder.set_received(ReceivedSummary::from_received(symbols.into_iter()));
+            builder.peeling_mut().record_solved(0);
+            builder.peeling_mut().record_solved(4);
+            builder.elimination_mut().record_pivot(8, 3);
+            builder.elimination_mut().record_pivot(9, 7);
+            builder.set_success(&recovered);
+            builder.build()
+        };
+
+        // Proofs should be identical for ATP replay consistency
+        assert_eq!(proof1.content_hash(), proof2.content_hash());
+        assert_eq!(proof1.peeling, proof2.peeling);
+        assert_eq!(proof1.elimination.pivots, proof2.elimination.pivots);
+    }
 }
