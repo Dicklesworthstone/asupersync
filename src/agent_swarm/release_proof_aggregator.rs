@@ -5,9 +5,8 @@
 
 use crate::observability::metrics::{Counter, Gauge, Histogram};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 /// Custom serde module for SystemTime serialization.
 mod system_time_serde {
@@ -80,7 +79,7 @@ pub struct FileReservation {
     #[serde(with = "system_time_serde")]
     pub acquired_at: SystemTime,
     /// When reservation was released
-    #[serde(with = "system_time_serde")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_at: Option<SystemTime>,
 }
 
