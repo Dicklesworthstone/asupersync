@@ -2,6 +2,7 @@
   "schema_id": "atp-native-quic-endpoint-contract.v1",
   "contract_version": 1,
   "bead_id": "asupersync-l6f1ja",
+  "parent_bead_id": "asupersync-zquziu",
   "title": "ATP-A1 native QUIC RFC gap matrix and ATP minimum endpoint contract",
   "north_star": "ATP must deliver the Carmack-style write(really_big_buffer) experience through a self-contained Asupersync data movement layer: native QUIC endpoint machinery, verified object transfer, deterministic replay, path establishment, and adaptive repair without relying on an external QUIC crate.",
   "scope_statement": "This artifact is the stable handoff from plan space into implementation space for ATP-A. It does not claim that native QUIC is complete today. It records the exact RFC features ATP needs, what the current code already provides, the gaps that remain, the implementation beads that own those gaps, and the validation expectations future maintainers should preserve.",
@@ -59,6 +60,10 @@
     {
       "path": "src/net/quic_native/forensic_log.rs",
       "role": "Structured QUIC/H3 forensic event and manifest surface that ATP should generalize into qlog-ish transfer crashpacks."
+    },
+    {
+      "path": "src/net/quic_native/endpoint.rs",
+      "role": "Native QUIC UDP endpoint loop surface: Cx-aware bind, batched receive/send, socket capability reporting, buffer tuning, endpoint metrics, and graceful shutdown hooks."
     },
     {
       "path": "src/net/udp.rs",
@@ -578,12 +583,33 @@
       "rfc_refs": [
         "RFC 9000 Sections 5, 8, 9, 10, 12, 14"
       ],
-      "current_status": "missing_followup",
+      "current_status": "partial_state_machine",
       "source_files": [
+        "src/net/quic_native/endpoint.rs",
         "src/net/udp.rs",
         "src/net/quic_native/connection.rs"
       ],
       "source_markers": [
+        {
+          "file": "src/net/quic_native/endpoint.rs",
+          "marker": "pub struct QuicUdpEndpoint"
+        },
+        {
+          "file": "src/net/quic_native/endpoint.rs",
+          "marker": "pub async fn bind"
+        },
+        {
+          "file": "src/net/quic_native/endpoint.rs",
+          "marker": "pub async fn receive_batch"
+        },
+        {
+          "file": "src/net/quic_native/endpoint.rs",
+          "marker": "pub async fn send_batch"
+        },
+        {
+          "file": "src/net/quic_native/endpoint.rs",
+          "marker": "pub async fn shutdown"
+        },
         {
           "file": "src/net/udp.rs",
           "marker": "pub struct UdpSocket"
@@ -601,8 +627,8 @@
           "marker": "pub struct NativeQuicConnection"
         }
       ],
-      "gap": "UDP primitives exist, but no native QUIC endpoint owns packet loops, connection tables, timers, path state, batching, qlog, or Cx region shutdown yet.",
-      "atp_dependency_impact": "ATP CLI/daemon implementation should not begin real network transfer until A2/A11 produce an endpoint API that enforces structured concurrency.",
+      "gap": "QuicUdpEndpoint now owns Cx-aware bind, batched UDP receive/send, buffer tuning, socket capability reporting, metrics, and shutdown hooks. Remaining endpoint gaps are connection-ID routing tables, timer scheduling, path state ownership, qlog/crashpack wiring, and proof that endpoint shutdown closes every region-owned packet task to quiescence.",
+      "atp_dependency_impact": "ATP CLI/daemon implementation can target the native endpoint loop surface for packet I/O experiments, but public internet transfer still waits for connection table routing, timers, path state, protected packet integration, and replayable close/drain evidence.",
       "followup_beads": [
         "asupersync-rvryit",
         "asupersync-crscmn",

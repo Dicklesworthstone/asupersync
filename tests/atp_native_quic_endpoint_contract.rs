@@ -62,6 +62,13 @@ fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn matrix_row<'a>(contract: &'a Value, id: &str) -> &'a Value {
+    nonempty_array(contract, "minimum_endpoint_contract")
+        .iter()
+        .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
+        .unwrap_or_else(|| panic!("missing endpoint matrix row {id}"))
+}
+
 #[test]
 fn contract_is_complete_and_self_documenting() {
     let contract = load_contract();
@@ -71,6 +78,10 @@ fn contract_is_complete_and_self_documenting() {
     );
     assert_eq!(contract["contract_version"], 1);
     assert_eq!(nonempty_str(&contract, "bead_id"), "asupersync-l6f1ja");
+    assert_eq!(
+        nonempty_str(&contract, "parent_bead_id"),
+        "asupersync-zquziu"
+    );
     nonempty_str(&contract, "north_star");
     nonempty_str(&contract, "scope_statement");
     nonempty_array(&contract, "non_negotiables");
@@ -211,6 +222,10 @@ fn source_inventory_and_markers_exist() {
         "contract must cover native connection state"
     );
     assert!(
+        referenced_files.contains("src/net/quic_native/endpoint.rs"),
+        "contract must cover the native UDP endpoint loop"
+    );
+    assert!(
         referenced_files.contains("src/net/quic_core/mod.rs"),
         "contract must cover core QUIC codecs"
     );
@@ -321,6 +336,47 @@ fn forensic_schema_documents_qlog_artifact_and_release_proof_lanes() {
         );
         nonempty_array(command, "covers");
     }
+}
+
+#[test]
+fn parent_epic_sync_tracks_live_endpoint_loop_without_claiming_endpoint_completion() {
+    let contract = load_contract();
+    assert_eq!(
+        nonempty_str(&contract, "parent_bead_id"),
+        "asupersync-zquziu"
+    );
+
+    let endpoint_row = matrix_row(&contract, "socket_endpoint_packet_io_under_cx");
+    assert_eq!(
+        nonempty_str(endpoint_row, "current_status"),
+        "partial_state_machine",
+        "ATP-A parent sync should reflect the live endpoint loop without claiming full endpoint completion"
+    );
+
+    let source_files = string_set(endpoint_row, "source_files");
+    assert!(
+        source_files.contains("src/net/quic_native/endpoint.rs"),
+        "socket endpoint row must point at the live QuicUdpEndpoint surface"
+    );
+
+    let gap = nonempty_str(endpoint_row, "gap");
+    for remaining_gap in [
+        "connection-ID routing tables",
+        "timer scheduling",
+        "qlog/crashpack wiring",
+        "quiescence",
+    ] {
+        assert!(
+            gap.contains(remaining_gap),
+            "endpoint gap text must keep {remaining_gap:?} visible"
+        );
+    }
+
+    let impact = nonempty_str(endpoint_row, "atp_dependency_impact");
+    assert!(
+        impact.contains("public internet transfer still waits"),
+        "parent epic sync must not overclaim deployable public-internet ATP"
+    );
 }
 
 #[test]
