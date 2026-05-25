@@ -351,6 +351,8 @@ pub mod real_channel_supervision_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_watch_obligation_ledger_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_channel_watch_service_discover_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cli_doctor_trace_divergence_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cli_output_trace_streaming_integration_e2e_tests;
