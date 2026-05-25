@@ -30,11 +30,15 @@
 //! - Non-monotone operations properly trigger coordination requirements
 //! - Martingale invariants preserved across distributed obligation tracking
 
-use crate::obligation::calm::{CalmClassification, Monotonicity, classifications, coordination_free, coordination_points};
+use crate::obligation::calm::{
+    CalmClassification, Monotonicity, classifications, coordination_free, coordination_points,
+};
+use crate::obligation::eprocess::conformance::{
+    ConformanceResult, EProcessConformanceHarness, RequirementLevel, TestStatus,
+};
 use crate::obligation::eprocess::{LeakMonitor, MonitorConfig};
-use crate::obligation::eprocess::conformance::{EProcessConformanceHarness, ConformanceResult, RequirementLevel, TestStatus};
 use crate::types::{ObligationId, Time};
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -93,9 +97,7 @@ impl DistributedEProcessState {
 
         // For monotone operations, we can apply coordination-free
         match operation.classification.monotonicity {
-            Monotonicity::Monotone => {
-                self.apply_monotone_operation(operation, timestamp)
-            }
+            Monotonicity::Monotone => self.apply_monotone_operation(operation, timestamp),
             Monotonicity::NonMonotone => {
                 // Non-monotone operations require coordination - simulate by requiring
                 // all other nodes to be synchronized (simplified for testing)
@@ -104,7 +106,11 @@ impl DistributedEProcessState {
         }
     }
 
-    fn apply_monotone_operation(&mut self, operation: CalmOperation, timestamp: Time) -> Result<(), String> {
+    fn apply_monotone_operation(
+        &mut self,
+        operation: CalmOperation,
+        timestamp: Time,
+    ) -> Result<(), String> {
         match operation.operation_type {
             CalmOperationType::Reserve { obligation_id } => {
                 // Reserve is monotone - pure insertion into obligation set
@@ -135,7 +141,10 @@ impl DistributedEProcessState {
                 self.observations += 1;
             }
             _ => {
-                return Err(format!("Non-monotone operation {:?} cannot be applied coordination-free", operation.operation_type));
+                return Err(format!(
+                    "Non-monotone operation {:?} cannot be applied coordination-free",
+                    operation.operation_type
+                ));
             }
         }
 
@@ -143,7 +152,11 @@ impl DistributedEProcessState {
         Ok(())
     }
 
-    fn apply_coordinated_operation(&mut self, operation: CalmOperation, timestamp: Time) -> Result<(), String> {
+    fn apply_coordinated_operation(
+        &mut self,
+        operation: CalmOperation,
+        timestamp: Time,
+    ) -> Result<(), String> {
         // Non-monotone operations require coordination
         match operation.operation_type {
             CalmOperationType::Commit { obligation_id } => {
@@ -172,7 +185,10 @@ impl DistributedEProcessState {
                 }
             }
             _ => {
-                return Err(format!("Coordination not implemented for {:?}", operation.operation_type));
+                return Err(format!(
+                    "Coordination not implemented for {:?}",
+                    operation.operation_type
+                ));
             }
         }
 
@@ -217,14 +233,21 @@ impl DistributedEProcessState {
 
     /// Distributed merge with another node's state.
     /// Returns a new merged state that preserves CALM properties.
-    fn distributed_merge(self, other: DistributedEProcessState) -> Result<DistributedEProcessState, String> {
+    fn distributed_merge(
+        self,
+        other: DistributedEProcessState,
+    ) -> Result<DistributedEProcessState, String> {
         // Verify that only monotone operations were used for coordination-free merge
-        let has_non_monotone = self.operations_applied.iter()
+        let has_non_monotone = self
+            .operations_applied
+            .iter()
             .chain(other.operations_applied.iter())
             .any(|op| op.classification.monotonicity == Monotonicity::NonMonotone);
 
         if has_non_monotone {
-            return Err("Cannot perform coordination-free merge with non-monotone operations".to_string());
+            return Err(
+                "Cannot perform coordination-free merge with non-monotone operations".to_string(),
+            );
         }
 
         let mut merged = DistributedEProcessState::new(self.node_id.min(other.node_id));
@@ -269,7 +292,10 @@ impl DistributedEProcessState {
 
         // Peak should be >= current
         if self.peak_e_value < self.e_value {
-            return Err(format!("Peak e-value {} < current e-value {}", self.peak_e_value, self.e_value));
+            return Err(format!(
+                "Peak e-value {} < current e-value {}",
+                self.peak_e_value, self.e_value
+            ));
         }
 
         Ok(())
@@ -343,16 +369,21 @@ impl CalmEProcessTestEnvironment {
     }
 
     fn add_node(&mut self, node_id: u32) {
-        self.nodes.insert(node_id, DistributedEProcessState::new(node_id));
+        self.nodes
+            .insert(node_id, DistributedEProcessState::new(node_id));
     }
 
     fn advance_time(&mut self, duration: Duration) {
-        self.current_time = self.current_time.saturating_add_nanos(
-            duration.as_nanos().min(u128::from(u64::MAX)) as u64
-        );
+        self.current_time = self
+            .current_time
+            .saturating_add_nanos(duration.as_nanos().min(u128::from(u64::MAX)) as u64);
     }
 
-    fn apply_operation_to_node(&mut self, node_id: u32, operation: CalmOperation) -> Result<(), String> {
+    fn apply_operation_to_node(
+        &mut self,
+        node_id: u32,
+        operation: CalmOperation,
+    ) -> Result<(), String> {
         if let Some(node) = self.nodes.get_mut(&node_id) {
             node.apply_operation(operation, self.current_time)
         } else {
@@ -360,7 +391,11 @@ impl CalmEProcessTestEnvironment {
         }
     }
 
-    fn create_calm_operation(&mut self, classification_name: &str, params: CalmOperationType) -> Result<CalmOperation, String> {
+    fn create_calm_operation(
+        &mut self,
+        classification_name: &str,
+        params: CalmOperationType,
+    ) -> Result<CalmOperation, String> {
         let classification = classifications()
             .iter()
             .find(|c| c.operation == classification_name)
@@ -375,9 +410,13 @@ impl CalmEProcessTestEnvironment {
     }
 
     fn perform_distributed_merge(&mut self, node1_id: u32, node2_id: u32) -> Result<u32, String> {
-        let node1 = self.nodes.remove(&node1_id)
+        let node1 = self
+            .nodes
+            .remove(&node1_id)
             .ok_or_else(|| format!("Node {} not found", node1_id))?;
-        let node2 = self.nodes.remove(&node2_id)
+        let node2 = self
+            .nodes
+            .remove(&node2_id)
             .ok_or_else(|| format!("Node {} not found", node2_id))?;
 
         let merged = node1.distributed_merge(node2)?;
@@ -402,30 +441,43 @@ mod tests {
         env.add_node(1);
 
         // Apply monotone operations only
-        let reserve_op = env.create_calm_operation("Reserve", CalmOperationType::Reserve {
-            obligation_id: ObligationId::from_u64(1),
-        }).unwrap();
+        let reserve_op = env
+            .create_calm_operation(
+                "Reserve",
+                CalmOperationType::Reserve {
+                    obligation_id: ObligationId::from_u64(1),
+                },
+            )
+            .unwrap();
 
-        let send_op = env.create_calm_operation("Send", CalmOperationType::Send {
-            message_size: 1024,
-        }).unwrap();
+        let send_op = env
+            .create_calm_operation("Send", CalmOperationType::Send { message_size: 1024 })
+            .unwrap();
 
-        let delegate_op = env.create_calm_operation("Delegate", CalmOperationType::Delegate {
-            target_node: 2,
-        }).unwrap();
+        let delegate_op = env
+            .create_calm_operation("Delegate", CalmOperationType::Delegate { target_node: 2 })
+            .unwrap();
 
         // Apply operations and verify monotonicity is preserved
         env.apply_operation_to_node(1, reserve_op).unwrap();
         env.advance_time(Duration::from_millis(1));
 
         let node1_state_after_reserve = env.nodes[&1].clone();
-        assert!(node1_state_after_reserve.verify_martingale_invariants().is_ok());
+        assert!(
+            node1_state_after_reserve
+                .verify_martingale_invariants()
+                .is_ok()
+        );
 
         env.apply_operation_to_node(1, send_op).unwrap();
         env.advance_time(Duration::from_millis(1));
 
         let node1_state_after_send = env.nodes[&1].clone();
-        assert!(node1_state_after_send.verify_martingale_invariants().is_ok());
+        assert!(
+            node1_state_after_send
+                .verify_martingale_invariants()
+                .is_ok()
+        );
 
         env.apply_operation_to_node(1, delegate_op).unwrap();
         env.advance_time(Duration::from_millis(1));
@@ -434,8 +486,14 @@ mod tests {
         assert!(final_state.verify_martingale_invariants().is_ok());
 
         // Verify monotonicity: e-value should not decrease (supermartingale property)
-        assert!(final_state.e_value >= 1.0, "E-value decreased below initial value");
-        assert!(final_state.peak_e_value >= final_state.e_value, "Peak tracking incorrect");
+        assert!(
+            final_state.e_value >= 1.0,
+            "E-value decreased below initial value"
+        );
+        assert!(
+            final_state.peak_e_value >= final_state.e_value,
+            "Peak tracking incorrect"
+        );
 
         println!("✓ CALM-monotone operations preserve e-process monotonicity");
     }
@@ -449,9 +507,14 @@ mod tests {
 
         // Apply monotone operations to both nodes
         for &node_id in &[1, 2] {
-            let reserve_op = env.create_calm_operation("Reserve", CalmOperationType::Reserve {
-                obligation_id: ObligationId::from_u64(node_id as u64),
-            }).unwrap();
+            let reserve_op = env
+                .create_calm_operation(
+                    "Reserve",
+                    CalmOperationType::Reserve {
+                        obligation_id: ObligationId::from_u64(node_id as u64),
+                    },
+                )
+                .unwrap();
 
             env.apply_operation_to_node(node_id, reserve_op).unwrap();
         }
@@ -470,7 +533,10 @@ mod tests {
         assert!(merged_state.verify_martingale_invariants().is_ok());
 
         // Merged state should reflect both nodes' contributions
-        assert_eq!(merged_state.observations, 2, "Merged observations incorrect");
+        assert_eq!(
+            merged_state.observations, 2,
+            "Merged observations incorrect"
+        );
         assert!(merged_state.e_value >= 1.0, "Merged e-value invalid");
 
         println!("✓ Distributed e-process merge maintains martingale properties");
@@ -486,9 +552,19 @@ mod tests {
 
         // Apply the same sequence of monotone operations to all nodes
         let operations = [
-            ("Reserve", CalmOperationType::Reserve { obligation_id: ObligationId::from_u64(100) }),
+            (
+                "Reserve",
+                CalmOperationType::Reserve {
+                    obligation_id: ObligationId::from_u64(100),
+                },
+            ),
             ("Send", CalmOperationType::Send { message_size: 512 }),
-            ("CancelRequest", CalmOperationType::CancelRequest { obligation_id: ObligationId::from_u64(100) }),
+            (
+                "CancelRequest",
+                CalmOperationType::CancelRequest {
+                    obligation_id: ObligationId::from_u64(100),
+                },
+            ),
         ];
 
         for (op_name, op_type) in &operations {
@@ -530,29 +606,45 @@ mod tests {
         env.add_node(2);
 
         // Apply monotone operation first
-        let reserve_op = env.create_calm_operation("Reserve", CalmOperationType::Reserve {
-            obligation_id: ObligationId::from_u64(1),
-        }).unwrap();
+        let reserve_op = env
+            .create_calm_operation(
+                "Reserve",
+                CalmOperationType::Reserve {
+                    obligation_id: ObligationId::from_u64(1),
+                },
+            )
+            .unwrap();
         env.apply_operation_to_node(1, reserve_op).unwrap();
 
         // Attempt non-monotone operation
-        let commit_op = env.create_calm_operation("Commit", CalmOperationType::Commit {
-            obligation_id: ObligationId::from_u64(1),
-        }).unwrap();
+        let commit_op = env
+            .create_calm_operation(
+                "Commit",
+                CalmOperationType::Commit {
+                    obligation_id: ObligationId::from_u64(1),
+                },
+            )
+            .unwrap();
         env.apply_operation_to_node(1, commit_op).unwrap(); // This should work with coordination
 
         // Now try to merge states with non-monotone operations
-        let recv_op = env.create_calm_operation("Recv", CalmOperationType::Recv {
-            channel_id: 42,
-        }).unwrap();
+        let recv_op = env
+            .create_calm_operation("Recv", CalmOperationType::Recv { channel_id: 42 })
+            .unwrap();
         env.apply_operation_to_node(2, recv_op).unwrap();
 
         // Merging should fail because non-monotone operations were used
         let merge_result = env.perform_distributed_merge(1, 2);
-        assert!(merge_result.is_err(), "Merge should fail with non-monotone operations");
+        assert!(
+            merge_result.is_err(),
+            "Merge should fail with non-monotone operations"
+        );
 
         let error_msg = merge_result.unwrap_err();
-        assert!(error_msg.contains("non-monotone"), "Error should mention non-monotone operations");
+        assert!(
+            error_msg.contains("non-monotone"),
+            "Error should mention non-monotone operations"
+        );
 
         println!("✓ Non-monotone operations properly require coordination");
     }
@@ -570,13 +662,23 @@ mod tests {
 
         // Apply different monotone operations to each node
         for i in 1..=NUM_NODES {
-            let reserve_op = env.create_calm_operation("Reserve", CalmOperationType::Reserve {
-                obligation_id: ObligationId::from_u64(i as u64),
-            }).unwrap();
+            let reserve_op = env
+                .create_calm_operation(
+                    "Reserve",
+                    CalmOperationType::Reserve {
+                        obligation_id: ObligationId::from_u64(i as u64),
+                    },
+                )
+                .unwrap();
 
-            let send_op = env.create_calm_operation("Send", CalmOperationType::Send {
-                message_size: (i * 256) as usize,
-            }).unwrap();
+            let send_op = env
+                .create_calm_operation(
+                    "Send",
+                    CalmOperationType::Send {
+                        message_size: (i * 256) as usize,
+                    },
+                )
+                .unwrap();
 
             env.apply_operation_to_node(i, reserve_op).unwrap();
             env.advance_time(Duration::from_millis(1));
@@ -614,10 +716,17 @@ mod tests {
         assert!(final_state.verify_martingale_invariants().is_ok());
 
         // Should reflect all original operations
-        assert_eq!(final_state.observations, NUM_NODES as u64 * 2, "Incorrect observation count after merge");
+        assert_eq!(
+            final_state.observations,
+            NUM_NODES as u64 * 2,
+            "Incorrect observation count after merge"
+        );
         assert!(final_state.e_value >= 1.0, "Invalid final e-value");
 
-        println!("✓ Large-scale distributed merge maintains e-process properties across {} nodes", NUM_NODES);
+        println!(
+            "✓ Large-scale distributed merge maintains e-process properties across {} nodes",
+            NUM_NODES
+        );
     }
 
     #[tokio::test]
@@ -636,12 +745,20 @@ mod tests {
         // Test monotone operations preserve e-process properties
         for classification in &monotone_ops {
             let operation_type = match classification.operation {
-                "Reserve" => CalmOperationType::Reserve { obligation_id: ObligationId::from_u64(1) },
+                "Reserve" => CalmOperationType::Reserve {
+                    obligation_id: ObligationId::from_u64(1),
+                },
                 "Send" => CalmOperationType::Send { message_size: 1024 },
-                "Acquire" => CalmOperationType::Acquire { resource_id: ObligationId::from_u64(2) },
-                "Renew" => CalmOperationType::Renew { resource_id: ObligationId::from_u64(2) },
+                "Acquire" => CalmOperationType::Acquire {
+                    resource_id: ObligationId::from_u64(2),
+                },
+                "Renew" => CalmOperationType::Renew {
+                    resource_id: ObligationId::from_u64(2),
+                },
                 "Delegate" => CalmOperationType::Delegate { target_node: 2 },
-                "CancelRequest" => CalmOperationType::CancelRequest { obligation_id: ObligationId::from_u64(1) },
+                "CancelRequest" => CalmOperationType::CancelRequest {
+                    obligation_id: ObligationId::from_u64(1),
+                },
                 _ => continue, // Skip operations without test implementation
             };
 
@@ -655,24 +772,36 @@ mod tests {
             env.advance_time(Duration::from_millis(1));
 
             // Verify e-process properties are maintained
-            assert!(env.nodes[&1].verify_martingale_invariants().is_ok(),
-                "Monotone operation {} violated martingale invariants", classification.operation);
+            assert!(
+                env.nodes[&1].verify_martingale_invariants().is_ok(),
+                "Monotone operation {} violated martingale invariants",
+                classification.operation
+            );
         }
 
         // Test non-monotone operations require coordination
         for classification in &non_monotone_ops {
             if classification.operation == "Commit" {
                 // Set up state for commit (requires reserved obligation)
-                let reserve = env.create_calm_operation("Reserve", CalmOperationType::Reserve {
-                    obligation_id: ObligationId::from_u64(100),
-                }).unwrap();
+                let reserve = env
+                    .create_calm_operation(
+                        "Reserve",
+                        CalmOperationType::Reserve {
+                            obligation_id: ObligationId::from_u64(100),
+                        },
+                    )
+                    .unwrap();
                 env.apply_operation_to_node(1, reserve).unwrap();
             }
 
             let operation_type = match classification.operation {
-                "Commit" => CalmOperationType::Commit { obligation_id: ObligationId::from_u64(100) },
+                "Commit" => CalmOperationType::Commit {
+                    obligation_id: ObligationId::from_u64(100),
+                },
                 "Recv" => CalmOperationType::Recv { channel_id: 1 },
-                "Release" => CalmOperationType::Release { resource_id: ObligationId::from_u64(100) },
+                "Release" => CalmOperationType::Release {
+                    resource_id: ObligationId::from_u64(100),
+                },
                 _ => continue, // Skip operations without test implementation
             };
 
@@ -692,6 +821,9 @@ mod tests {
 
         println!("✓ CALM conformance matrix integration test completed");
         println!("  Monotone operations: {} tested", monotone_ops.len());
-        println!("  Non-monotone operations: {} tested", non_monotone_ops.len());
+        println!(
+            "  Non-monotone operations: {} tested",
+            non_monotone_ops.len()
+        );
     }
 }

@@ -1,7 +1,7 @@
 //! Benchmark suite orchestration for comprehensive performance testing.
 
 use crate::atp::benchmark::{
-    BaselineAdapter, BenchmarkConfig, BenchmarkError, BenchmarkReport, BenchmarkResult, AtpProfile,
+    AtpProfile, BaselineAdapter, BenchmarkConfig, BenchmarkError, BenchmarkReport, BenchmarkResult,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -61,7 +61,10 @@ impl BenchmarkSuite {
         // Run baseline tools
         let mut baseline_results = BTreeMap::new();
         for adapter in &self.baseline_adapters {
-            match self.run_baseline_benchmark(adapter.as_ref(), config, &source_path, &dest_base).await {
+            match self
+                .run_baseline_benchmark(adapter.as_ref(), config, &source_path, &dest_base)
+                .await
+            {
                 Ok(result) => {
                     baseline_results.insert(adapter.tool_name().to_string(), result);
                 }
@@ -75,12 +78,12 @@ impl BenchmarkSuite {
         // Run ATP profiles
         let mut atp_results = BTreeMap::new();
         for profile in &self.atp_profiles {
-            match self.run_atp_benchmark(profile, config, &source_path, &dest_base).await {
+            match self
+                .run_atp_benchmark(profile, config, &source_path, &dest_base)
+                .await
+            {
                 Ok(result) => {
-                    atp_results.insert(
-                        format!("atp-{}", profile.kind.label()),
-                        result
-                    );
+                    atp_results.insert(format!("atp-{}", profile.kind.label()), result);
                 }
                 Err(e) => {
                     // Log error but continue with other profiles

@@ -29,8 +29,10 @@
 //! - All oneshot resources are properly cleaned up during nested cancellation
 //! - Nested scope cancellation maintains proper isolation boundaries
 
-use crate::cancel::symbol_cancel::{SymbolCancelToken, CancelListener, CancelBroadcaster, CleanupCoordinator};
-use crate::channel::oneshot::{self, Sender, Receiver, SendError, RecvError, SendPermit};
+use crate::cancel::symbol_cancel::{
+    CancelBroadcaster, CancelListener, CleanupCoordinator, SymbolCancelToken,
+};
+use crate::channel::oneshot::{self, Receiver, RecvError, SendError, SendPermit, Sender};
 use crate::cx::{Cx, CxBuilder, Scope};
 use crate::types::{Budget, CancelKind, CancelReason, ObjectId, Time};
 use crate::util::DetRng;
@@ -182,7 +184,9 @@ impl NestedScopeTestFramework {
         };
 
         // Insert root scope
-        scope_hierarchy.scopes.insert(ScopeId(0), scope_hierarchy.root_scope.clone());
+        scope_hierarchy
+            .scopes
+            .insert(ScopeId(0), scope_hierarchy.root_scope.clone());
 
         Self {
             root_token,
@@ -196,7 +200,10 @@ impl NestedScopeTestFramework {
 
     /// Create a child scope under the specified parent
     fn create_child_scope(&mut self, parent_id: ScopeId) -> Result<ScopeId, String> {
-        let parent_scope = self.scope_hierarchy.scopes.get(&parent_id)
+        let parent_scope = self
+            .scope_hierarchy
+            .scopes
+            .get(&parent_id)
             .ok_or_else(|| format!("Parent scope {:?} not found", parent_id))?;
 
         let child_id = ScopeId(self.scope_hierarchy.next_scope_id);
@@ -213,7 +220,8 @@ impl NestedScopeTestFramework {
         };
 
         self.scope_hierarchy.scopes.insert(child_id, child_scope);
-        self.scope_hierarchy.parent_child_map
+        self.scope_hierarchy
+            .parent_child_map
             .entry(parent_id)
             .or_insert_with(Vec::new)
             .push(child_id);
@@ -223,7 +231,10 @@ impl NestedScopeTestFramework {
 
     /// Create an oneshot channel in the specified scope
     fn create_oneshot_channel(&mut self, scope_id: ScopeId) -> Result<u64, String> {
-        let _scope = self.scope_hierarchy.scopes.get(&scope_id)
+        let _scope = self
+            .scope_hierarchy
+            .scopes
+            .get(&scope_id)
             .ok_or_else(|| format!("Scope {:?} not found", scope_id))?;
 
         let (sender, receiver) = oneshot::channel::<TestMessage>();
@@ -244,17 +255,32 @@ impl NestedScopeTestFramework {
             .push(handle);
 
         // Track resources
-        self.resource_tracker.active_senders.fetch_add(1, Ordering::Relaxed);
-        self.resource_tracker.active_receivers.fetch_add(1, Ordering::Relaxed);
-        self.resource_tracker.total_senders_created.fetch_add(1, Ordering::Relaxed);
-        self.resource_tracker.total_receivers_created.fetch_add(1, Ordering::Relaxed);
+        self.resource_tracker
+            .active_senders
+            .fetch_add(1, Ordering::Relaxed);
+        self.resource_tracker
+            .active_receivers
+            .fetch_add(1, Ordering::Relaxed);
+        self.resource_tracker
+            .total_senders_created
+            .fetch_add(1, Ordering::Relaxed);
+        self.resource_tracker
+            .total_receivers_created
+            .fetch_add(1, Ordering::Relaxed);
 
         Ok(channel_id)
     }
 
     /// Cancel a specific scope and verify clean oneshot triggering
-    fn cancel_scope(&mut self, scope_id: ScopeId, reason: CancelReason) -> Result<CancellationResult, String> {
-        let scope = self.scope_hierarchy.scopes.get_mut(&scope_id)
+    fn cancel_scope(
+        &mut self,
+        scope_id: ScopeId,
+        reason: CancelReason,
+    ) -> Result<CancellationResult, String> {
+        let scope = self
+            .scope_hierarchy
+            .scopes
+            .get_mut(&scope_id)
             .ok_or_else(|| format!("Scope {:?} not found", scope_id))?;
 
         // Mark scope as cancelled
@@ -263,7 +289,9 @@ impl NestedScopeTestFramework {
         // Record cancellation event
         self.record_event(CancellationEvent {
             timestamp: Time::from_unix_nanos(1_000_000_000), // Mock time
-            event_type: CancellationEventType::ScopeCancel { reason: reason.clone() },
+            event_type: CancellationEventType::ScopeCancel {
+                reason: reason.clone(),
+            },
             scope_id,
             channel_id: None,
         });
@@ -283,7 +311,7 @@ impl NestedScopeTestFramework {
                         self.record_event(CancellationEvent {
                             timestamp: Time::from_unix_nanos(1_000_000_000),
                             event_type: CancellationEventType::SenderCancel {
-                                channel_id: channel.channel_id
+                                channel_id: channel.channel_id,
                             },
                             scope_id,
                             channel_id: Some(channel.channel_id),
@@ -291,7 +319,9 @@ impl NestedScopeTestFramework {
 
                         // Clean up sender
                         channel.sender.take();
-                        self.resource_tracker.active_senders.fetch_sub(1, Ordering::Relaxed);
+                        self.resource_tracker
+                            .active_senders
+                            .fetch_sub(1, Ordering::Relaxed);
                         resources_cleaned += 1;
                     }
 
@@ -299,7 +329,7 @@ impl NestedScopeTestFramework {
                         self.record_event(CancellationEvent {
                             timestamp: Time::from_unix_nanos(1_000_000_000),
                             event_type: CancellationEventType::ReceiverCancel {
-                                channel_id: channel.channel_id
+                                channel_id: channel.channel_id,
                             },
                             scope_id,
                             channel_id: Some(channel.channel_id),
@@ -307,19 +337,28 @@ impl NestedScopeTestFramework {
 
                         // Clean up receiver
                         channel.receiver.take();
-                        self.resource_tracker.active_receivers.fetch_sub(1, Ordering::Relaxed);
+                        self.resource_tracker
+                            .active_receivers
+                            .fetch_sub(1, Ordering::Relaxed);
                         resources_cleaned += 1;
                     }
 
                     channel.cleaned_up.store(true, Ordering::Relaxed);
-                    self.resource_tracker.total_cleanups.fetch_add(1, Ordering::Relaxed);
+                    self.resource_tracker
+                        .total_cleanups
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
 
         // Recursively cancel child scopes
         let mut child_scopes_cancelled = 0;
-        if let Some(children) = self.scope_hierarchy.parent_child_map.get(&scope_id).cloned() {
+        if let Some(children) = self
+            .scope_hierarchy
+            .parent_child_map
+            .get(&scope_id)
+            .cloned()
+        {
             for child_id in children {
                 let child_result = self.cancel_scope(child_id, reason.clone())?;
                 child_scopes_cancelled += 1 + child_result.child_scopes_cancelled;
@@ -346,11 +385,20 @@ impl NestedScopeTestFramework {
     /// Verify that all resources were properly cleaned up
     fn verify_resource_cleanup(&self) -> ResourceVerificationResult {
         let active_senders = self.resource_tracker.active_senders.load(Ordering::Relaxed);
-        let active_receivers = self.resource_tracker.active_receivers.load(Ordering::Relaxed);
+        let active_receivers = self
+            .resource_tracker
+            .active_receivers
+            .load(Ordering::Relaxed);
         let active_permits = self.resource_tracker.active_permits.load(Ordering::Relaxed);
 
-        let total_created = self.resource_tracker.total_senders_created.load(Ordering::Relaxed) +
-                           self.resource_tracker.total_receivers_created.load(Ordering::Relaxed);
+        let total_created = self
+            .resource_tracker
+            .total_senders_created
+            .load(Ordering::Relaxed)
+            + self
+                .resource_tracker
+                .total_receivers_created
+                .load(Ordering::Relaxed);
         let total_cleanups = self.resource_tracker.total_cleanups.load(Ordering::Relaxed);
 
         ResourceVerificationResult {
@@ -373,19 +421,23 @@ impl NestedScopeTestFramework {
         let log = self.cancellation_log.lock().unwrap();
         let total_events = log.len();
 
-        let scope_cancels = log.iter()
+        let scope_cancels = log
+            .iter()
             .filter(|e| matches!(e.event_type, CancellationEventType::ScopeCancel { .. }))
             .count();
 
-        let sender_cancels = log.iter()
+        let sender_cancels = log
+            .iter()
             .filter(|e| matches!(e.event_type, CancellationEventType::SenderCancel { .. }))
             .count();
 
-        let receiver_cancels = log.iter()
+        let receiver_cancels = log
+            .iter()
             .filter(|e| matches!(e.event_type, CancellationEventType::ReceiverCancel { .. }))
             .count();
 
-        let resource_cleanups = log.iter()
+        let resource_cleanups = log
+            .iter()
             .filter(|e| matches!(e.event_type, CancellationEventType::ResourceCleanup { .. }))
             .count();
 
@@ -458,18 +510,39 @@ mod tests {
         // Verify clean cancellation
         assert!(result.clean_cancellation, "Cancellation should be clean");
         assert_eq!(result.channels_cancelled, 1, "Should cancel 1 channel");
-        assert_eq!(result.child_scopes_cancelled, 0, "No child scopes to cancel");
-        assert_eq!(result.resources_cleaned, 2, "Should clean sender + receiver");
+        assert_eq!(
+            result.child_scopes_cancelled, 0,
+            "No child scopes to cancel"
+        );
+        assert_eq!(
+            result.resources_cleaned, 2,
+            "Should clean sender + receiver"
+        );
 
         // Verify no resource leaks
         let verification = framework.verify_resource_cleanup();
-        assert!(verification.no_resource_leaks, "Should have no resource leaks");
-        assert_eq!(verification.active_senders, 0, "No active senders should remain");
-        assert_eq!(verification.active_receivers, 0, "No active receivers should remain");
+        assert!(
+            verification.no_resource_leaks,
+            "Should have no resource leaks"
+        );
+        assert_eq!(
+            verification.active_senders, 0,
+            "No active senders should remain"
+        );
+        assert_eq!(
+            verification.active_receivers, 0,
+            "No active receivers should remain"
+        );
 
         let stats = framework.get_test_statistics();
-        assert_eq!(stats.sender_cancellations, 1, "Should have 1 sender cancellation");
-        assert_eq!(stats.receiver_cancellations, 1, "Should have 1 receiver cancellation");
+        assert_eq!(
+            stats.sender_cancellations, 1,
+            "Should have 1 sender cancellation"
+        );
+        assert_eq!(
+            stats.receiver_cancellations, 1,
+            "Should have 1 receiver cancellation"
+        );
 
         println!("✓ Basic nested scope cancel - child scope oneshot triggered cleanly");
         println!("  Channels cancelled: {}", result.channels_cancelled);
@@ -497,24 +570,42 @@ mod tests {
         let result = framework.cancel_scope(level1_id, reason).unwrap();
 
         // Verify cascading cancellation
-        assert!(result.clean_cancellation, "Multi-level cancellation should be clean");
+        assert!(
+            result.clean_cancellation,
+            "Multi-level cancellation should be clean"
+        );
         assert_eq!(result.channels_cancelled, 3, "Should cancel all 3 channels");
-        assert_eq!(result.child_scopes_cancelled, 2, "Should cancel 2 child scopes");
-        assert_eq!(result.resources_cleaned, 6, "Should clean 3 channels × 2 resources each");
+        assert_eq!(
+            result.child_scopes_cancelled, 2,
+            "Should cancel 2 child scopes"
+        );
+        assert_eq!(
+            result.resources_cleaned, 6,
+            "Should clean 3 channels × 2 resources each"
+        );
 
         // Verify no resource leaks
         let verification = framework.verify_resource_cleanup();
-        assert!(verification.no_resource_leaks, "Multi-level cancellation should not leak resources");
+        assert!(
+            verification.no_resource_leaks,
+            "Multi-level cancellation should not leak resources"
+        );
 
         let stats = framework.get_test_statistics();
-        assert_eq!(stats.scope_cancellations, 3, "Should cancel 3 scopes (level1 + children)");
+        assert_eq!(
+            stats.scope_cancellations, 3,
+            "Should cancel 3 scopes (level1 + children)"
+        );
         assert_eq!(stats.sender_cancellations, 3, "Should cancel 3 senders");
         assert_eq!(stats.receiver_cancellations, 3, "Should cancel 3 receivers");
 
         println!("✓ Multi-level nested cancellation - 3-level hierarchy cancelled cleanly");
         println!("  Total scopes: {}", stats.total_scopes);
         println!("  Channels cancelled: {}", result.channels_cancelled);
-        println!("  Child scopes cancelled: {}", result.child_scopes_cancelled);
+        println!(
+            "  Child scopes cancelled: {}",
+            result.child_scopes_cancelled
+        );
         println!("  Resources cleaned: {}", result.resources_cleaned);
     }
 
@@ -536,14 +627,26 @@ mod tests {
         let result = framework.cancel_scope(sibling1_id, reason).unwrap();
 
         // Verify only sibling1 was cancelled
-        assert!(result.clean_cancellation, "Sibling cancellation should be clean");
+        assert!(
+            result.clean_cancellation,
+            "Sibling cancellation should be clean"
+        );
         assert_eq!(result.channels_cancelled, 1, "Should cancel only 1 channel");
-        assert_eq!(result.child_scopes_cancelled, 0, "No child scopes in sibling1");
+        assert_eq!(
+            result.child_scopes_cancelled, 0,
+            "No child scopes in sibling1"
+        );
 
         // Verify sibling2 resources are still active
         let verification = framework.verify_resource_cleanup();
-        assert_eq!(verification.active_senders, 1, "Sibling2 sender should remain active");
-        assert_eq!(verification.active_receivers, 1, "Sibling2 receiver should remain active");
+        assert_eq!(
+            verification.active_senders, 1,
+            "Sibling2 sender should remain active"
+        );
+        assert_eq!(
+            verification.active_receivers, 1,
+            "Sibling2 receiver should remain active"
+        );
 
         let stats = framework.get_test_statistics();
         assert_eq!(stats.scope_cancellations, 1, "Should cancel only 1 scope");
@@ -551,8 +654,14 @@ mod tests {
 
         println!("✓ Peer scope isolation - sibling cancellation properly isolated");
         println!("  Cancelled scope channels: {}", result.channels_cancelled);
-        println!("  Remaining active senders: {}", verification.active_senders);
-        println!("  Remaining active receivers: {}", verification.active_receivers);
+        println!(
+            "  Remaining active senders: {}",
+            verification.active_senders
+        );
+        println!(
+            "  Remaining active receivers: {}",
+            verification.active_receivers
+        );
     }
 
     #[tokio::test]
@@ -573,30 +682,63 @@ mod tests {
 
         // Verify initial resource state
         let initial_verification = framework.verify_resource_cleanup();
-        assert_eq!(initial_verification.active_senders, 4, "Should have 4 active senders");
-        assert_eq!(initial_verification.active_receivers, 4, "Should have 4 active receivers");
-        assert_eq!(initial_verification.total_resources_created, 8, "Should have created 8 resources total");
+        assert_eq!(
+            initial_verification.active_senders, 4,
+            "Should have 4 active senders"
+        );
+        assert_eq!(
+            initial_verification.active_receivers, 4,
+            "Should have 4 active receivers"
+        );
+        assert_eq!(
+            initial_verification.total_resources_created, 8,
+            "Should have created 8 resources total"
+        );
 
         // Cancel root of subtree
         let reason = CancelReason::user("Resource cleanup verification");
         let result = framework.cancel_scope(level1_id, reason).unwrap();
 
         // Verify complete cleanup
-        assert!(result.clean_cancellation, "Resource cleanup should be clean");
+        assert!(
+            result.clean_cancellation,
+            "Resource cleanup should be clean"
+        );
         assert_eq!(result.channels_cancelled, 4, "Should cancel all 4 channels");
         assert_eq!(result.resources_cleaned, 8, "Should clean all 8 resources");
 
         let final_verification = framework.verify_resource_cleanup();
-        assert!(final_verification.no_resource_leaks, "Should have no resource leaks after cleanup");
-        assert_eq!(final_verification.active_senders, 0, "All senders should be cleaned up");
-        assert_eq!(final_verification.active_receivers, 0, "All receivers should be cleaned up");
-        assert_eq!(final_verification.cleanup_ratio, 1.0, "100% cleanup ratio expected");
+        assert!(
+            final_verification.no_resource_leaks,
+            "Should have no resource leaks after cleanup"
+        );
+        assert_eq!(
+            final_verification.active_senders, 0,
+            "All senders should be cleaned up"
+        );
+        assert_eq!(
+            final_verification.active_receivers, 0,
+            "All receivers should be cleaned up"
+        );
+        assert_eq!(
+            final_verification.cleanup_ratio, 1.0,
+            "100% cleanup ratio expected"
+        );
 
         println!("✓ Resource cleanup verification - all resources cleaned up properly");
-        println!("  Total resources created: {}", final_verification.total_resources_created);
-        println!("  Total cleanups performed: {}", final_verification.total_cleanups_performed);
+        println!(
+            "  Total resources created: {}",
+            final_verification.total_resources_created
+        );
+        println!(
+            "  Total cleanups performed: {}",
+            final_verification.total_cleanups_performed
+        );
         println!("  Cleanup ratio: {:.2}", final_verification.cleanup_ratio);
-        println!("  No resource leaks: {}", final_verification.no_resource_leaks);
+        println!(
+            "  No resource leaks: {}",
+            final_verification.no_resource_leaks
+        );
     }
 
     #[tokio::test]
@@ -625,10 +767,16 @@ mod tests {
         let expected_channels = branch_count * depth;
 
         let initial_verification = framework.verify_resource_cleanup();
-        assert_eq!(initial_verification.active_senders, expected_channels,
-                   "Should have {} active senders", expected_channels);
-        assert_eq!(initial_verification.active_receivers, expected_channels,
-                   "Should have {} active receivers", expected_channels);
+        assert_eq!(
+            initial_verification.active_senders, expected_channels,
+            "Should have {} active senders",
+            expected_channels
+        );
+        assert_eq!(
+            initial_verification.active_receivers, expected_channels,
+            "Should have {} active receivers",
+            expected_channels
+        );
 
         // Cancel all branches concurrently (simulate by cancelling their roots)
         let mut total_cancelled = 0;
@@ -645,21 +793,44 @@ mod tests {
         }
 
         // Verify all operations cancelled correctly
-        assert_eq!(total_cancelled, expected_channels, "Should cancel all {} channels", expected_channels);
-        assert_eq!(total_cleaned, expected_channels * 2, "Should clean all {} resources", expected_channels * 2);
+        assert_eq!(
+            total_cancelled, expected_channels,
+            "Should cancel all {} channels",
+            expected_channels
+        );
+        assert_eq!(
+            total_cleaned,
+            expected_channels * 2,
+            "Should clean all {} resources",
+            expected_channels * 2
+        );
 
         let final_verification = framework.verify_resource_cleanup();
-        assert!(final_verification.no_resource_leaks, "Concurrent operations should not cause resource leaks");
+        assert!(
+            final_verification.no_resource_leaks,
+            "Concurrent operations should not cause resource leaks"
+        );
 
         let final_stats = framework.get_test_statistics();
-        assert!(final_stats.sender_cancellations > 0, "Should have sender cancellations");
-        assert!(final_stats.receiver_cancellations > 0, "Should have receiver cancellations");
+        assert!(
+            final_stats.sender_cancellations > 0,
+            "Should have sender cancellations"
+        );
+        assert!(
+            final_stats.receiver_cancellations > 0,
+            "Should have receiver cancellations"
+        );
 
-        println!("✓ Concurrent nested operations - {} branches × {} levels cancelled cleanly",
-                 branch_count, depth);
+        println!(
+            "✓ Concurrent nested operations - {} branches × {} levels cancelled cleanly",
+            branch_count, depth
+        );
         println!("  Total channels cancelled: {}", total_cancelled);
         println!("  Total resources cleaned: {}", total_cleaned);
-        println!("  Final verification: no leaks = {}", final_verification.no_resource_leaks);
+        println!(
+            "  Final verification: no leaks = {}",
+            final_verification.no_resource_leaks
+        );
     }
 
     #[tokio::test]
@@ -690,22 +861,43 @@ mod tests {
         assert_eq!(initial_stats.total_scopes, 6, "Should have 6 scopes total"); // root + 5 children
 
         let initial_verification = framework.verify_resource_cleanup();
-        assert_eq!(initial_verification.active_senders, 7, "Should have 7 active senders");
-        assert_eq!(initial_verification.active_receivers, 7, "Should have 7 active receivers");
+        assert_eq!(
+            initial_verification.active_senders, 7,
+            "Should have 7 active senders"
+        );
+        assert_eq!(
+            initial_verification.active_receivers, 7,
+            "Should have 7 active receivers"
+        );
 
         // Test partial cancellation (level1 branch only)
         let reason = CancelReason::user("Comprehensive integration test");
         let result1 = framework.cancel_scope(level1_id, reason.clone()).unwrap();
 
         // Verify partial cancellation
-        assert!(result1.clean_cancellation, "Partial cancellation should be clean");
-        assert_eq!(result1.channels_cancelled, 4, "Should cancel 4 channels (level1 subtree)");
-        assert_eq!(result1.child_scopes_cancelled, 2, "Should cancel 2 child scopes");
+        assert!(
+            result1.clean_cancellation,
+            "Partial cancellation should be clean"
+        );
+        assert_eq!(
+            result1.channels_cancelled, 4,
+            "Should cancel 4 channels (level1 subtree)"
+        );
+        assert_eq!(
+            result1.child_scopes_cancelled, 2,
+            "Should cancel 2 child scopes"
+        );
 
         // Verify isolation (level1b branch should be unaffected)
         let partial_verification = framework.verify_resource_cleanup();
-        assert_eq!(partial_verification.active_senders, 3, "Should have 3 active senders remaining");
-        assert_eq!(partial_verification.active_receivers, 3, "Should have 3 active receivers remaining");
+        assert_eq!(
+            partial_verification.active_senders, 3,
+            "Should have 3 active senders remaining"
+        );
+        assert_eq!(
+            partial_verification.active_receivers, 3,
+            "Should have 3 active receivers remaining"
+        );
 
         // Cancel remaining branches
         let result2 = framework.cancel_scope(level1b_id, reason.clone()).unwrap();
@@ -713,8 +905,14 @@ mod tests {
 
         // Verify complete cleanup
         let final_verification = framework.verify_resource_cleanup();
-        assert!(final_verification.no_resource_leaks, "Final state should have no resource leaks");
-        assert_eq!(final_verification.cleanup_ratio, 1.0, "Should achieve 100% cleanup ratio");
+        assert!(
+            final_verification.no_resource_leaks,
+            "Final state should have no resource leaks"
+        );
+        assert_eq!(
+            final_verification.cleanup_ratio, 1.0,
+            "Should achieve 100% cleanup ratio"
+        );
 
         let final_stats = framework.get_test_statistics();
 
@@ -722,10 +920,22 @@ mod tests {
         println!("  Total scopes in hierarchy: {}", final_stats.total_scopes);
         println!("  Total cancellation events: {}", final_stats.total_events);
         println!("  Scope cancellations: {}", final_stats.scope_cancellations);
-        println!("  Sender cancellations: {}", final_stats.sender_cancellations);
-        println!("  Receiver cancellations: {}", final_stats.receiver_cancellations);
-        println!("  Resource cleanup ratio: {:.2}", final_verification.cleanup_ratio);
-        println!("  No resource leaks: {}", final_verification.no_resource_leaks);
+        println!(
+            "  Sender cancellations: {}",
+            final_stats.sender_cancellations
+        );
+        println!(
+            "  Receiver cancellations: {}",
+            final_stats.receiver_cancellations
+        );
+        println!(
+            "  Resource cleanup ratio: {:.2}",
+            final_verification.cleanup_ratio
+        );
+        println!(
+            "  No resource leaks: {}",
+            final_verification.no_resource_leaks
+        );
         println!("  ✓ Symbol cancel triggers oneshot sender cleanly under nested scopes");
     }
 }

@@ -1,13 +1,13 @@
 //! Baseline tool adapters for benchmark comparison.
 
 use crate::atp::benchmark::{BenchmarkConfig, BenchmarkError, BenchmarkMetrics, BenchmarkResult};
+use crate::fs;
+use crate::io::AsyncWriteExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use crate::fs;
-use crate::io::AsyncWriteExt;
 
 /// Tool availability status for baseline adapters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,11 +138,7 @@ impl ScpAdapter {
         Self { ssh_options }
     }
 
-    async fn create_test_file(
-        &self,
-        path: &Path,
-        size: u64,
-    ) -> Result<(), BenchmarkError> {
+    async fn create_test_file(&self, path: &Path, size: u64) -> Result<(), BenchmarkError> {
         let mut file = fs::File::create(path).await?;
 
         // Write test data in chunks to avoid memory issues
@@ -159,11 +155,7 @@ impl ScpAdapter {
         Ok(())
     }
 
-    fn build_scp_command(
-        &self,
-        source: &Path,
-        dest: &Path,
-    ) -> Command {
+    fn build_scp_command(&self, source: &Path, dest: &Path) -> Command {
         let mut cmd = Command::new("scp");
 
         // Add SSH options
@@ -179,8 +171,7 @@ impl ScpAdapter {
         cmd.arg(source.to_string_lossy().to_string());
         cmd.arg(format!("localhost:{}", dest.to_string_lossy()));
 
-        cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         cmd
     }
@@ -289,7 +280,11 @@ impl BaselineAdapter for ScpAdapter {
         })
     }
 
-    fn parse_output(&self, _stdout: &str, _stderr: &str) -> Result<BenchmarkMetrics, BenchmarkError> {
+    fn parse_output(
+        &self,
+        _stdout: &str,
+        _stderr: &str,
+    ) -> Result<BenchmarkMetrics, BenchmarkError> {
         // SCP doesn't provide detailed metrics by default
         // We collect what we can measure externally
         Ok(BenchmarkMetrics {
@@ -307,8 +302,10 @@ impl BaselineAdapter for ScpAdapter {
 
     fn get_env_vars(&self) -> BTreeMap<String, String> {
         let mut env = BTreeMap::new();
-        env.insert("SSH_AUTH_SOCK".to_string(),
-                   std::env::var("SSH_AUTH_SOCK").unwrap_or_default());
+        env.insert(
+            "SSH_AUTH_SOCK".to_string(),
+            std::env::var("SSH_AUTH_SOCK").unwrap_or_default(),
+        );
         env
     }
 }
@@ -370,7 +367,10 @@ mod tests {
     #[test]
     fn version_number_parsing_handles_various_formats() {
         assert_eq!(parse_version_numbers("8.2.1"), (Some(8), Some(2), Some(1)));
-        assert_eq!(parse_version_numbers("OpenSSH_8.2p1"), (Some(8), Some(2), None));
+        assert_eq!(
+            parse_version_numbers("OpenSSH_8.2p1"),
+            (Some(8), Some(2), None)
+        );
         assert_eq!(parse_version_numbers("7.4"), (Some(7), Some(4), None));
         assert_eq!(parse_version_numbers("no version"), (None, None, None));
     }

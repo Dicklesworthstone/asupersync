@@ -16,29 +16,26 @@
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod tests {
     use crate::{
-        net::tcp::{TcpStream, TcpListener},
+        bytes::{Buf, BufMut, Bytes, BytesMut},
+        channel::{mpsc, oneshot},
         codec::{
-            framed::{Framed, FramedRead, FramedWrite},
             Decoder, Encoder, LengthDelimitedCodec,
+            framed::{Framed, FramedRead, FramedWrite},
         },
-        bytes::{Bytes, BytesMut, Buf, BufMut},
-        types::{Budget, Outcome, TaskId},
         cx::Cx,
         error::{Error, ErrorKind},
-        time::{Duration, Sleep, Instant},
-        sync::{Mutex, AtomicU64, AtomicBool, AtomicU32},
-        channel::{mpsc, oneshot},
+        io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+        net::tcp::{TcpListener, TcpStream},
         runtime::Runtime,
-        test_utils::{init_test_runtime, TestTracer, find_available_port},
-        io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt},
-    };
-    use std::sync::{
-        atomic::Ordering,
-        Arc,
+        sync::{AtomicBool, AtomicU32, AtomicU64, Mutex},
+        test_utils::{TestTracer, find_available_port, init_test_runtime},
+        time::{Duration, Instant, Sleep},
+        types::{Budget, Outcome, TaskId},
     };
     use std::collections::{HashMap, VecDeque};
-    use std::net::{SocketAddr, Ipv4Addr};
     use std::io;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::{Arc, atomic::Ordering};
 
     /// Test framework for TCP stream-framed codec integration scenarios
     struct TcpFramedTestFramework {
@@ -305,12 +302,9 @@ mod tests {
             let state_monitor = Arc::new(CodecStateMonitor::new());
 
             // Connect client and send messages with fragmentation
-            let client_results = self.run_fragmented_client(
-                cx,
-                test_messages,
-                &fragmentation_tracker,
-                &state_monitor,
-            ).await?;
+            let client_results = self
+                .run_fragmented_client(cx, test_messages, &fragmentation_tracker, &state_monitor)
+                .await?;
 
             // Stop server
             server_handle.stop().await;
@@ -328,7 +322,10 @@ mod tests {
                 fragments_received: self.stats.fragments_received.load(Ordering::Relaxed),
                 partial_reads: self.stats.partial_reads.load(Ordering::Relaxed),
                 reassembly_operations: self.stats.reassembly_operations.load(Ordering::Relaxed),
-                segment_boundary_crosses: self.stats.segment_boundary_crosses.load(Ordering::Relaxed),
+                segment_boundary_crosses: self
+                    .stats
+                    .segment_boundary_crosses
+                    .load(Ordering::Relaxed),
                 decode_errors: self.stats.decode_errors.load(Ordering::Relaxed),
                 client_results,
                 fragmentation_results,
@@ -420,17 +417,21 @@ mod tests {
             // Send messages with controlled fragmentation
             for message in messages {
                 // Send message with potential fragmentation
-                let sent_fragments = self.send_message_with_fragmentation(
-                    cx,
-                    &mut framed,
-                    &message,
-                    &simulator,
-                    tracker,
-                    monitor,
-                ).await?;
+                let sent_fragments = self
+                    .send_message_with_fragmentation(
+                        cx,
+                        &mut framed,
+                        &message,
+                        &simulator,
+                        tracker,
+                        monitor,
+                    )
+                    .await?;
 
                 self.stats.messages_sent.fetch_add(1, Ordering::Relaxed);
-                self.stats.fragments_sent.fetch_add(sent_fragments as u64, Ordering::Relaxed);
+                self.stats
+                    .fragments_sent
+                    .fetch_add(sent_fragments as u64, Ordering::Relaxed);
                 sent_messages += 1;
 
                 // Try to receive echo response
@@ -444,7 +445,7 @@ mod tests {
                             if received_message == message {
                                 tracker.record_successful_reassembly(message.id).await;
                             }
-                        },
+                        }
                         Err(_) => {
                             self.stats.decode_errors.fetch_add(1, Ordering::Relaxed);
                         }
@@ -480,7 +481,9 @@ mod tests {
 
             // Fragment message according to configured sizes
             let fragments = self.create_message_fragments(message).await?;
-            tracker.track_message_fragmentation(message.id, &fragments).await;
+            tracker
+                .track_message_fragmentation(message.id, &fragments)
+                .await;
 
             let mut sent_fragments = 0u32;
 
@@ -489,18 +492,22 @@ mod tests {
                 let partial_write_size = simulator.calculate_write_size(&fragment.data).await;
 
                 // Send fragment with potential partial writes
-                let chunk_results = self.send_fragment_with_partial_writes(
-                    cx,
-                    framed,
-                    &fragment,
-                    partial_write_size,
-                    monitor,
-                ).await?;
+                let chunk_results = self
+                    .send_fragment_with_partial_writes(
+                        cx,
+                        framed,
+                        &fragment,
+                        partial_write_size,
+                        monitor,
+                    )
+                    .await?;
 
                 sent_fragments += 1;
 
                 if chunk_results.crossed_segment_boundary {
-                    self.stats.segment_boundary_crosses.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .segment_boundary_crosses
+                        .fetch_add(1, Ordering::Relaxed);
                 }
 
                 // Brief delay to simulate network latency
@@ -511,7 +518,10 @@ mod tests {
         }
 
         /// Create fragments from message
-        async fn create_message_fragments(&self, message: &TestMessage) -> Result<Vec<Fragment>, Error> {
+        async fn create_message_fragments(
+            &self,
+            message: &TestMessage,
+        ) -> Result<Vec<Fragment>, Error> {
             let mut fragments = Vec::new();
             let data = &message.payload;
 
@@ -654,7 +664,10 @@ mod tests {
     }
 
     impl TestDecoder {
-        fn decode_length_prefixed(&mut self, src: &mut BytesMut) -> Result<Option<TestMessage>, io::Error> {
+        fn decode_length_prefixed(
+            &mut self,
+            src: &mut BytesMut,
+        ) -> Result<Option<TestMessage>, io::Error> {
             loop {
                 if self.expected_length.is_none() {
                     if src.len() < 4 {
@@ -690,7 +703,10 @@ mod tests {
             }
         }
 
-        fn decode_delimiter_based(&mut self, src: &mut BytesMut) -> Result<Option<TestMessage>, io::Error> {
+        fn decode_delimiter_based(
+            &mut self,
+            src: &mut BytesMut,
+        ) -> Result<Option<TestMessage>, io::Error> {
             if let Some(pos) = src.iter().position(|&b| b == self.delimiter) {
                 let payload = src.split_to(pos).freeze();
                 src.advance(1); // Skip delimiter
@@ -710,7 +726,10 @@ mod tests {
             }
         }
 
-        fn decode_fixed_size(&mut self, src: &mut BytesMut) -> Result<Option<TestMessage>, io::Error> {
+        fn decode_fixed_size(
+            &mut self,
+            src: &mut BytesMut,
+        ) -> Result<Option<TestMessage>, io::Error> {
             if src.len() >= self.fixed_size {
                 let payload = src.split_to(self.fixed_size).freeze();
                 self.stats.complete_decodes.fetch_add(1, Ordering::Relaxed);
@@ -729,7 +748,10 @@ mod tests {
             }
         }
 
-        fn decode_variable_length(&mut self, src: &mut BytesMut) -> Result<Option<TestMessage>, io::Error> {
+        fn decode_variable_length(
+            &mut self,
+            src: &mut BytesMut,
+        ) -> Result<Option<TestMessage>, io::Error> {
             // Simple variable length: read until we have enough data
             if src.len() >= 1 {
                 let length = src[0] as usize;
@@ -779,27 +801,29 @@ mod tests {
                     dst.extend_from_slice(&len.to_be_bytes());
                     dst.extend_from_slice(&item.payload);
                     self.stats.frame_overhead.fetch_add(4, Ordering::Relaxed);
-                },
+                }
                 CustomCodecType::DelimiterBased => {
                     dst.extend_from_slice(&item.payload);
                     dst.put_u8(b'\n');
                     self.stats.frame_overhead.fetch_add(1, Ordering::Relaxed);
-                },
+                }
                 CustomCodecType::FixedSize => {
                     dst.extend_from_slice(&item.payload);
                     // Pad to fixed size if necessary
                     while dst.len() < 1024 {
                         dst.put_u8(0);
                     }
-                },
+                }
                 CustomCodecType::VariableLength => {
                     dst.put_u8(item.payload.len() as u8);
                     dst.extend_from_slice(&item.payload);
                     self.stats.frame_overhead.fetch_add(1, Ordering::Relaxed);
-                },
+                }
             }
 
-            self.stats.bytes_encoded.fetch_add(item.payload.len() as u64, Ordering::Relaxed);
+            self.stats
+                .bytes_encoded
+                .fetch_add(item.payload.len() as u64, Ordering::Relaxed);
             Ok(())
         }
     }
@@ -822,19 +846,27 @@ mod tests {
             let mut active = self.active_messages.lock().await;
 
             let total_size = fragments.iter().map(|f| f.data.len()).sum();
-            let boundary_crossings = fragments.iter().filter(|f| f.tcp_segment_boundary).count() as u32;
+            let boundary_crossings =
+                fragments.iter().filter(|f| f.tcp_segment_boundary).count() as u32;
 
-            active.insert(message_id, MessageFragments {
+            active.insert(
                 message_id,
-                expected_size: total_size,
-                received_fragments: fragments.to_vec(),
-                total_bytes_received: total_size,
-                first_fragment_time: Instant::now(),
-                last_fragment_time: Some(Instant::now()),
-            });
+                MessageFragments {
+                    message_id,
+                    expected_size: total_size,
+                    received_fragments: fragments.to_vec(),
+                    total_bytes_received: total_size,
+                    first_fragment_time: Instant::now(),
+                    last_fragment_time: Some(Instant::now()),
+                },
+            );
 
-            self.fragmentation_stats.messages_fragmented.fetch_add(1, Ordering::Relaxed);
-            self.fragmentation_stats.segment_boundary_crossings.fetch_add(boundary_crossings as u64, Ordering::Relaxed);
+            self.fragmentation_stats
+                .messages_fragmented
+                .fetch_add(1, Ordering::Relaxed);
+            self.fragmentation_stats
+                .segment_boundary_crossings
+                .fetch_add(boundary_crossings as u64, Ordering::Relaxed);
         }
 
         async fn record_successful_reassembly(&self, message_id: u64) {
@@ -851,8 +883,11 @@ mod tests {
                     },
                     fragment_count: fragments.received_fragments.len() as u32,
                     reassembly_time,
-                    segment_boundaries_crossed: fragments.received_fragments.iter()
-                        .filter(|f| f.tcp_segment_boundary).count() as u32,
+                    segment_boundaries_crossed: fragments
+                        .received_fragments
+                        .iter()
+                        .filter(|f| f.tcp_segment_boundary)
+                        .count() as u32,
                 };
 
                 let mut completed = self.completed_messages.lock().await;
@@ -860,9 +895,14 @@ mod tests {
 
                 // Update max reassembly time
                 let reassembly_ms = reassembly_time.as_millis() as u64;
-                let current_max = self.fragmentation_stats.max_reassembly_time_ms.load(Ordering::Relaxed);
+                let current_max = self
+                    .fragmentation_stats
+                    .max_reassembly_time_ms
+                    .load(Ordering::Relaxed);
                 if reassembly_ms > current_max {
-                    self.fragmentation_stats.max_reassembly_time_ms.store(reassembly_ms, Ordering::Relaxed);
+                    self.fragmentation_stats
+                        .max_reassembly_time_ms
+                        .store(reassembly_ms, Ordering::Relaxed);
                 }
             }
         }
@@ -872,14 +912,18 @@ mod tests {
 
             Ok(FragmentationResults {
                 total_messages: completed.len(),
-                average_fragments_per_message: completed.iter()
+                average_fragments_per_message: completed
+                    .iter()
                     .map(|m| m.fragment_count as f64)
-                    .sum::<f64>() / completed.len().max(1) as f64,
-                max_reassembly_time: completed.iter()
+                    .sum::<f64>()
+                    / completed.len().max(1) as f64,
+                max_reassembly_time: completed
+                    .iter()
                     .map(|m| m.reassembly_time)
                     .max()
                     .unwrap_or(Duration::ZERO),
-                total_boundary_crossings: completed.iter()
+                total_boundary_crossings: completed
+                    .iter()
                     .map(|m| m.segment_boundaries_crossed as u64)
                     .sum(),
             })
@@ -909,15 +953,13 @@ mod tests {
                 ReadPattern::RandomSizes(sizes) => {
                     let pos = self.current_position.fetch_add(1, Ordering::Relaxed) as usize;
                     sizes[pos % sizes.len()]
-                },
+                }
                 ReadPattern::FixedSize(size) => *size,
                 ReadPattern::Progressive(start, increment) => {
                     let pos = self.current_position.load(Ordering::Relaxed) as usize;
                     start + (pos * increment)
-                },
-                ReadPattern::Realistic(pattern) => {
-                    std::cmp::min(pattern.mtu_size, data.len())
-                },
+                }
+                ReadPattern::Realistic(pattern) => std::cmp::min(pattern.mtu_size, data.len()),
             }
         }
     }
@@ -1055,34 +1097,61 @@ mod tests {
             custom_codec: CustomCodecType::LengthPrefixed,
         };
 
-        let framework = TcpFramedTestFramework::new(&cx, config.clone()).await.unwrap();
+        let framework = TcpFramedTestFramework::new(&cx, config.clone())
+            .await
+            .unwrap();
 
         // Create test messages
-        let test_messages = config.message_sizes.iter().enumerate().map(|(i, &size)| {
-            TestMessage {
+        let test_messages = config
+            .message_sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &size)| TestMessage {
                 id: i as u64,
                 payload: Bytes::from(vec![i as u8; size]),
                 timestamp: Instant::now(),
                 expected_fragments: None,
-            }
-        }).collect();
+            })
+            .collect();
 
-        let results = framework.execute_framed_communication_with_partial_reads(&cx, test_messages).await.unwrap();
+        let results = framework
+            .execute_framed_communication_with_partial_reads(&cx, test_messages)
+            .await
+            .unwrap();
 
         // Verify partial read handling
         assert!(results.partial_reads > 0, "Should handle partial reads");
-        assert!(results.segment_boundary_crosses > 0, "Should cross TCP segment boundaries");
-        assert!(results.reassembly_operations > 0, "Should perform message reassembly");
+        assert!(
+            results.segment_boundary_crosses > 0,
+            "Should cross TCP segment boundaries"
+        );
+        assert!(
+            results.reassembly_operations > 0,
+            "Should perform message reassembly"
+        );
 
         // Verify message integrity
-        assert_eq!(results.messages_sent, results.messages_received, "All messages should be reassembled correctly");
-        assert_eq!(results.decode_errors, 0, "No decode errors should occur during reassembly");
+        assert_eq!(
+            results.messages_sent, results.messages_received,
+            "All messages should be reassembled correctly"
+        );
+        assert_eq!(
+            results.decode_errors, 0,
+            "No decode errors should occur during reassembly"
+        );
 
         // Verify fragmentation handling
-        assert!(results.fragmentation_results.average_fragments_per_message > 1.0, "Messages should be fragmented");
-        assert!(results.fragmentation_results.total_boundary_crossings > 0, "Should cross segment boundaries");
+        assert!(
+            results.fragmentation_results.average_fragments_per_message > 1.0,
+            "Messages should be fragmented"
+        );
+        assert!(
+            results.fragmentation_results.total_boundary_crossings > 0,
+            "Should cross segment boundaries"
+        );
 
-        cx.trace("Framed read correctly handles partial TCP segments").await;
+        cx.trace("Framed read correctly handles partial TCP segments")
+            .await;
     }
 
     #[tokio::test]
@@ -1093,14 +1162,16 @@ mod tests {
         let config = IntegrationConfig {
             server_port: find_available_port(),
             message_sizes: vec![1500, 3000, 4500], // Larger than typical MTU
-            fragment_sizes: vec![500, 750, 1000], // Various fragment sizes
+            fragment_sizes: vec![500, 750, 1000],  // Various fragment sizes
             send_delay: Duration::from_millis(5),
             receive_buffer_size: 8192,
             enable_fragmentation: true,
             custom_codec: CustomCodecType::DelimiterBased,
         };
 
-        let framework = TcpFramedTestFramework::new(&cx, config.clone()).await.unwrap();
+        let framework = TcpFramedTestFramework::new(&cx, config.clone())
+            .await
+            .unwrap();
 
         let test_messages = vec![
             TestMessage {
@@ -1117,20 +1188,35 @@ mod tests {
             },
         ];
 
-        let results = framework.execute_framed_communication_with_partial_reads(&cx, test_messages).await.unwrap();
+        let results = framework
+            .execute_framed_communication_with_partial_reads(&cx, test_messages)
+            .await
+            .unwrap();
 
         // Verify custom decoder performance
-        assert!(results.fragments_sent > results.messages_sent, "Should send multiple fragments per message");
-        assert_eq!(results.messages_sent, results.messages_received, "Custom decoder should reassemble all messages");
+        assert!(
+            results.fragments_sent > results.messages_sent,
+            "Should send multiple fragments per message"
+        );
+        assert_eq!(
+            results.messages_sent, results.messages_received,
+            "Custom decoder should reassemble all messages"
+        );
 
         // Verify reassembly timing
-        assert!(results.fragmentation_results.max_reassembly_time < Duration::from_millis(100),
-               "Reassembly should be fast");
+        assert!(
+            results.fragmentation_results.max_reassembly_time < Duration::from_millis(100),
+            "Reassembly should be fast"
+        );
 
         // Verify state consistency
-        assert!(results.state_validation.validation_passed, "Codec state should remain consistent");
+        assert!(
+            results.state_validation.validation_passed,
+            "Codec state should remain consistent"
+        );
 
-        cx.trace("Custom decoder correctly reassembles fragmented messages").await;
+        cx.trace("Custom decoder correctly reassembles fragmented messages")
+            .await;
     }
 
     #[tokio::test]
@@ -1148,31 +1234,52 @@ mod tests {
             custom_codec: CustomCodecType::FixedSize,
         };
 
-        let framework = TcpFramedTestFramework::new(&cx, config.clone()).await.unwrap();
+        let framework = TcpFramedTestFramework::new(&cx, config.clone())
+            .await
+            .unwrap();
 
-        let test_messages = (0..10).map(|i| {
-            TestMessage {
+        let test_messages = (0..10)
+            .map(|i| TestMessage {
                 id: i,
                 payload: Bytes::from(vec![i as u8; 100]),
                 timestamp: Instant::now(),
                 expected_fragments: None,
-            }
-        }).collect();
+            })
+            .collect();
 
-        let results = framework.execute_framed_communication_with_partial_reads(&cx, test_messages).await.unwrap();
+        let results = framework
+            .execute_framed_communication_with_partial_reads(&cx, test_messages)
+            .await
+            .unwrap();
 
         // Verify high partial read activity
-        assert!(results.partial_reads > 20, "Should have many partial reads with small fragments");
+        assert!(
+            results.partial_reads > 20,
+            "Should have many partial reads with small fragments"
+        );
 
         // Verify state consistency
-        assert!(results.state_validation.validation_passed, "Codec state should remain consistent");
-        assert!(results.state_validation.total_snapshots > 10, "Should capture multiple state snapshots");
+        assert!(
+            results.state_validation.validation_passed,
+            "Codec state should remain consistent"
+        );
+        assert!(
+            results.state_validation.total_snapshots > 10,
+            "Should capture multiple state snapshots"
+        );
 
         // Verify no message loss during partial reads
-        assert_eq!(results.messages_sent, results.messages_received, "No messages should be lost");
-        assert_eq!(results.decode_errors, 0, "Partial reads should not cause decode errors");
+        assert_eq!(
+            results.messages_sent, results.messages_received,
+            "No messages should be lost"
+        );
+        assert_eq!(
+            results.decode_errors, 0,
+            "Partial reads should not cause decode errors"
+        );
 
-        cx.trace("Codec state remains consistent across partial reads").await;
+        cx.trace("Codec state remains consistent across partial reads")
+            .await;
     }
 
     #[tokio::test]
@@ -1183,34 +1290,52 @@ mod tests {
         let config = IntegrationConfig {
             server_port: find_available_port(),
             message_sizes: vec![50, 100, 150, 200, 250], // Variable sizes
-            fragment_sizes: vec![30, 60, 90], // Crossing variable boundaries
+            fragment_sizes: vec![30, 60, 90],            // Crossing variable boundaries
             send_delay: Duration::from_millis(2),
             receive_buffer_size: 2048,
             enable_fragmentation: true,
             custom_codec: CustomCodecType::VariableLength,
         };
 
-        let framework = TcpFramedTestFramework::new(&cx, config.clone()).await.unwrap();
+        let framework = TcpFramedTestFramework::new(&cx, config.clone())
+            .await
+            .unwrap();
 
-        let test_messages = config.message_sizes.iter().enumerate().map(|(i, &size)| {
-            TestMessage {
+        let test_messages = config
+            .message_sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &size)| TestMessage {
                 id: i as u64,
                 payload: Bytes::from((0..size).map(|j| (i + j) as u8).collect::<Vec<_>>()),
                 timestamp: Instant::now(),
                 expected_fragments: None,
-            }
-        }).collect();
+            })
+            .collect();
 
-        let results = framework.execute_framed_communication_with_partial_reads(&cx, test_messages).await.unwrap();
+        let results = framework
+            .execute_framed_communication_with_partial_reads(&cx, test_messages)
+            .await
+            .unwrap();
 
         // Verify variable length handling
-        assert!(results.segment_boundary_crosses > 0, "Should cross segment boundaries");
-        assert_eq!(results.messages_sent, results.messages_received, "Variable length codec should handle all messages");
+        assert!(
+            results.segment_boundary_crosses > 0,
+            "Should cross segment boundaries"
+        );
+        assert_eq!(
+            results.messages_sent, results.messages_received,
+            "Variable length codec should handle all messages"
+        );
 
         // Verify boundary crossing doesn't affect message integrity
-        assert_eq!(results.decode_errors, 0, "Segment boundary crossings should not cause decode errors");
+        assert_eq!(
+            results.decode_errors, 0,
+            "Segment boundary crossings should not cause decode errors"
+        );
 
-        cx.trace("Variable length codec correctly handles segment boundaries").await;
+        cx.trace("Variable length codec correctly handles segment boundaries")
+            .await;
     }
 
     #[tokio::test]
@@ -1220,7 +1345,7 @@ mod tests {
 
         let config = IntegrationConfig {
             server_port: find_available_port(),
-            message_sizes: vec![8192, 16384], // Large messages
+            message_sizes: vec![8192, 16384],     // Large messages
             fragment_sizes: vec![512, 768, 1024], // Multiple fragments needed
             send_delay: Duration::from_millis(1),
             receive_buffer_size: 32768,
@@ -1228,29 +1353,44 @@ mod tests {
             custom_codec: CustomCodecType::LengthPrefixed,
         };
 
-        let framework = TcpFramedTestFramework::new(&cx, config.clone()).await.unwrap();
+        let framework = TcpFramedTestFramework::new(&cx, config.clone())
+            .await
+            .unwrap();
 
-        let test_messages = vec![
-            TestMessage {
-                id: 1,
-                payload: Bytes::from((0..8192).map(|i| (i % 256) as u8).collect::<Vec<_>>()),
-                timestamp: Instant::now(),
-                expected_fragments: Some(16), // Approximate
-            },
-        ];
+        let test_messages = vec![TestMessage {
+            id: 1,
+            payload: Bytes::from((0..8192).map(|i| (i % 256) as u8).collect::<Vec<_>>()),
+            timestamp: Instant::now(),
+            expected_fragments: Some(16), // Approximate
+        }];
 
-        let results = framework.execute_framed_communication_with_partial_reads(&cx, test_messages).await.unwrap();
+        let results = framework
+            .execute_framed_communication_with_partial_reads(&cx, test_messages)
+            .await
+            .unwrap();
 
         // Verify large message handling
-        assert!(results.fragments_sent > 10, "Large message should generate many fragments");
-        assert!(results.segment_boundary_crosses > 5, "Should cross multiple segment boundaries");
+        assert!(
+            results.fragments_sent > 10,
+            "Large message should generate many fragments"
+        );
+        assert!(
+            results.segment_boundary_crosses > 5,
+            "Should cross multiple segment boundaries"
+        );
 
         // Verify successful reassembly
-        assert_eq!(results.messages_sent, results.messages_received, "Large message should be reassembled correctly");
-        assert!(results.fragmentation_results.max_reassembly_time < Duration::from_millis(500),
-               "Large message reassembly should complete in reasonable time");
+        assert_eq!(
+            results.messages_sent, results.messages_received,
+            "Large message should be reassembled correctly"
+        );
+        assert!(
+            results.fragmentation_results.max_reassembly_time < Duration::from_millis(500),
+            "Large message reassembly should complete in reasonable time"
+        );
 
-        cx.trace("Large messages correctly fragmented and reassembled across segments").await;
+        cx.trace("Large messages correctly fragmented and reassembled across segments")
+            .await;
     }
 
     #[tokio::test]
@@ -1268,29 +1408,49 @@ mod tests {
             custom_codec: CustomCodecType::DelimiterBased,
         };
 
-        let framework = TcpFramedTestFramework::new(&cx, config.clone()).await.unwrap();
+        let framework = TcpFramedTestFramework::new(&cx, config.clone())
+            .await
+            .unwrap();
 
-        let test_messages = (0..20).map(|i| {
-            TestMessage {
+        let test_messages = (0..20)
+            .map(|i| TestMessage {
                 id: i,
-                payload: Bytes::from(format!("Message {} with variable content length", i).repeat(2)),
+                payload: Bytes::from(
+                    format!("Message {} with variable content length", i).repeat(2),
+                ),
                 timestamp: Instant::now(),
                 expected_fragments: None,
-            }
-        }).collect();
+            })
+            .collect();
 
-        let results = framework.execute_framed_communication_with_partial_reads(&cx, test_messages).await.unwrap();
+        let results = framework
+            .execute_framed_communication_with_partial_reads(&cx, test_messages)
+            .await
+            .unwrap();
 
         // Verify extensive partial read activity
-        assert!(results.partial_reads > 50, "Should have extensive partial read activity");
+        assert!(
+            results.partial_reads > 50,
+            "Should have extensive partial read activity"
+        );
 
         // Verify buffer management doesn't cause issues
-        assert_eq!(results.decode_errors, 0, "Buffer management should not cause decode errors");
-        assert_eq!(results.messages_sent, results.messages_received, "Buffer operations should not lose messages");
+        assert_eq!(
+            results.decode_errors, 0,
+            "Buffer management should not cause decode errors"
+        );
+        assert_eq!(
+            results.messages_sent, results.messages_received,
+            "Buffer operations should not lose messages"
+        );
 
         // Verify state consistency under stress
-        assert!(results.state_validation.validation_passed, "Codec state should remain consistent under buffer stress");
+        assert!(
+            results.state_validation.validation_passed,
+            "Codec state should remain consistent under buffer stress"
+        );
 
-        cx.trace("Codec buffer management handles partial reads correctly").await;
+        cx.trace("Codec buffer management handles partial reads correctly")
+            .await;
     }
 }

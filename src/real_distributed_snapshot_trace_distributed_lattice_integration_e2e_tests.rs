@@ -6,14 +6,18 @@
 
 use crate::bytes::Bytes;
 use crate::cx::Cx;
-use crate::distributed::snapshot::{RegionSnapshot, BudgetSnapshot, TaskSnapshot, TaskState, SnapshotError};
+use crate::distributed::snapshot::{
+    BudgetSnapshot, RegionSnapshot, SnapshotError, TaskSnapshot, TaskState,
+};
 use crate::error::AsupersyncError;
 use crate::remote::NodeId;
-use crate::runtime::{region, spawn, RuntimeBuilder};
-use crate::time::{sleep, Duration};
+use crate::runtime::{RuntimeBuilder, region, spawn};
+use crate::time::{Duration, sleep};
 use crate::trace::distributed::lattice::{LatticeState, ObligationLattice};
-use crate::trace::distributed::vclock::{VectorClock, CausalOrder, LogicalClock, HybridClock, CausalEvent};
-use crate::types::{Budget, Outcome, RegionId, ObligationId, TaskId};
+use crate::trace::distributed::vclock::{
+    CausalEvent, CausalOrder, HybridClock, LogicalClock, VectorClock,
+};
+use crate::types::{Budget, ObligationId, Outcome, RegionId, TaskId};
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -80,27 +84,27 @@ impl SnapshotLatticeTestFramework {
         // Take distributed snapshot for each region
         let mut snapshots = HashMap::new();
         for region_id in self.region_generators.keys() {
-            let region_events: Vec<_> = test_events.iter()
+            let region_events: Vec<_> = test_events
+                .iter()
                 .filter(|e| e.region_id == *region_id)
                 .cloned()
                 .collect();
 
-            let snapshot = self.snapshot_coordinator.take_distributed_snapshot(
-                cx, *region_id, &region_events
-            ).await?;
+            let snapshot = self
+                .snapshot_coordinator
+                .take_distributed_snapshot(cx, *region_id, &region_events)
+                .await?;
 
             snapshots.insert(*region_id, snapshot);
         }
 
         // Verify lattice merge semantics are preserved
-        let lattice_verification = self.verify_lattice_merge_semantics(
-            cx, &test_events
-        ).await?;
+        let lattice_verification = self
+            .verify_lattice_merge_semantics(cx, &test_events)
+            .await?;
 
         // Check causal frontier properties using vector clocks
-        let frontier_properties = self.analyze_causal_frontier_with_vclocks(
-            &test_events
-        )?;
+        let frontier_properties = self.analyze_causal_frontier_with_vclocks(&test_events)?;
 
         Outcome::Ok(CausalFrontierResult {
             total_events: test_events.len(),
@@ -180,9 +184,10 @@ impl SnapshotLatticeTestFramework {
                     // Even tasks perform snapshot operations
                     let events = framework.generate_causal_events(&task_cx).await?;
                     let snapshot_id = SnapshotId::new();
-                    let snapshot = framework.snapshot_coordinator.take_distributed_snapshot(
-                        &task_cx, snapshot_id, &events
-                    ).await?;
+                    let snapshot = framework
+                        .snapshot_coordinator
+                        .take_distributed_snapshot(&task_cx, snapshot_id, &events)
+                        .await?;
 
                     ConcurrentOpResult::Snapshot {
                         snapshot_id,
@@ -218,13 +223,20 @@ impl SnapshotLatticeTestFramework {
             }
 
             Outcome::Ok(results)
-        }).await?;
+        })
+        .await?;
 
         let elapsed = start_time.elapsed();
 
         // Analyze results for consistency
-        let snapshot_count = results.iter().filter(|r| matches!(r, ConcurrentOpResult::Snapshot { .. })).count();
-        let lattice_count = results.iter().filter(|r| matches!(r, ConcurrentOpResult::Lattice { .. })).count();
+        let snapshot_count = results
+            .iter()
+            .filter(|r| matches!(r, ConcurrentOpResult::Snapshot { .. }))
+            .count();
+        let lattice_count = results
+            .iter()
+            .filter(|r| matches!(r, ConcurrentOpResult::Lattice { .. }))
+            .count();
 
         Outcome::Ok(ConcurrentOpsResult {
             total_operations: results.len(),
@@ -236,10 +248,7 @@ impl SnapshotLatticeTestFramework {
     }
 
     /// Generates test events across regions with realistic dependencies.
-    async fn generate_test_events(
-        &self,
-        cx: &Cx,
-    ) -> Outcome<Vec<TestEvent>, SnapshotLatticeError> {
+    async fn generate_test_events(&self, cx: &Cx) -> Outcome<Vec<TestEvent>, SnapshotLatticeError> {
         let mut events = Vec::new();
         let mut region_clocks = HashMap::new();
 
@@ -260,12 +269,14 @@ impl SnapshotLatticeTestFramework {
                 // Introduce causal dependencies with probability
                 let depends_on = if round > 0 && events.len() > 3 && (round % 3 == 0) {
                     // Create dependency on previous event from different region
-                    let candidates: Vec<_> = events.iter()
+                    let candidates: Vec<_> = events
+                        .iter()
                         .filter(|e| e.region_id != *region_id)
                         .collect();
 
                     if !candidates.is_empty() {
-                        let dependency_idx = (round * region_id.as_u64() as usize) % candidates.len();
+                        let dependency_idx =
+                            (round * region_id.as_u64() as usize) % candidates.len();
                         Some(candidates[dependency_idx].task_id)
                     } else {
                         None
@@ -275,9 +286,9 @@ impl SnapshotLatticeTestFramework {
                 };
 
                 // Simulate clock skew
-                let skewed_timestamp = self.clock_skew_simulator.apply_skew(
-                    *region_id, std::time::SystemTime::now()
-                )?;
+                let skewed_timestamp = self
+                    .clock_skew_simulator
+                    .apply_skew(*region_id, std::time::SystemTime::now())?;
 
                 let event = TestEvent {
                     task_id: TaskId::new(),
@@ -373,7 +384,8 @@ impl SnapshotLatticeTestFramework {
         let mut node_clocks: HashMap<NodeId, VectorClock> = HashMap::new();
 
         for event in events {
-            let clock = node_clocks.entry(event.node_id.clone())
+            let clock = node_clocks
+                .entry(event.node_id.clone())
                 .or_insert_with(VectorClock::new);
 
             // Increment the clock for this node
@@ -455,7 +467,8 @@ impl SnapshotLatticeTestFramework {
             }
 
             // Check transitive dependency
-            if let Some(dependency_event) = all_events.iter().find(|e| e.event_id == dependency_id) {
+            if let Some(dependency_event) = all_events.iter().find(|e| e.event_id == dependency_id)
+            {
                 if self.has_causal_path(from, dependency_event, all_events, visited)? {
                     return Ok(true);
                 }
@@ -491,8 +504,9 @@ impl SnapshotLatticeTestFramework {
                     joined_elements.push(joined);
 
                     // Verify join properties
-                    if !lattice.is_upper_bound(&joined, element_a) ||
-                       !lattice.is_upper_bound(&joined, element_b) {
+                    if !lattice.is_upper_bound(&joined, element_a)
+                        || !lattice.is_upper_bound(&joined, element_b)
+                    {
                         join_valid = false;
                     }
                 }
@@ -537,16 +551,16 @@ impl SnapshotLatticeTestFramework {
                 operations.push(LatticeOperationResult {
                     operation_type: "join".to_string(),
                     elements_count: 2,
-                    result_valid: lattice.is_upper_bound(&joined, element_a) &&
-                                  lattice.is_upper_bound(&joined, element_b),
+                    result_valid: lattice.is_upper_bound(&joined, element_a)
+                        && lattice.is_upper_bound(&joined, element_b),
                 });
 
                 if let Some(meet) = meet_result {
                     operations.push(LatticeOperationResult {
                         operation_type: "meet".to_string(),
                         elements_count: 2,
-                        result_valid: lattice.is_lower_bound(&meet, element_a) &&
-                                      lattice.is_lower_bound(&meet, element_b),
+                        result_valid: lattice.is_lower_bound(&meet, element_a)
+                            && lattice.is_lower_bound(&meet, element_b),
                     });
                 }
 
@@ -583,9 +597,10 @@ impl SnapshotLatticeTestFramework {
                         if let Some(dep_id) = event_b.depends_on {
                             if event_a.event_id == dep_id {
                                 // event_a should be included if event_b is included in any snapshot
-                                if snapshot_b.contains_event(&event_b.event_id)? &&
-                                   !snapshot_a.contains_event(&event_a.event_id)? &&
-                                   !snapshot_b.contains_event(&event_a.event_id)? {
+                                if snapshot_b.contains_event(&event_b.event_id)?
+                                    && !snapshot_a.contains_event(&event_a.event_id)?
+                                    && !snapshot_b.contains_event(&event_a.event_id)?
+                                {
                                     return Ok(false);
                                 }
                             }
@@ -671,8 +686,12 @@ impl RegionEventGenerator {
         let mut counter = self.event_counter.lock().unwrap();
         *counter += 1;
 
-        let payload = format!("region-{}-event-{}-round-{}",
-                            self.region_id.as_u64(), *counter, round);
+        let payload = format!(
+            "region-{}-event-{}-round-{}",
+            self.region_id.as_u64(),
+            *counter,
+            round
+        );
         Bytes::from(payload.into_bytes())
     }
 }
@@ -757,12 +776,18 @@ impl DistributedSnapshot {
         Ok(self.event_ids.contains(event_id))
     }
 
-    fn should_include_lattice_element(&self, element: &LatticeElement) -> Result<bool, SnapshotLatticeError> {
+    fn should_include_lattice_element(
+        &self,
+        element: &LatticeElement,
+    ) -> Result<bool, SnapshotLatticeError> {
         // Simplified logic - in practice this would check causal constraints
         Ok(element.clock_value <= self.metadata.logical_time_bound)
     }
 
-    fn contains_lattice_element(&self, element: &LatticeElement) -> Result<bool, SnapshotLatticeError> {
+    fn contains_lattice_element(
+        &self,
+        element: &LatticeElement,
+    ) -> Result<bool, SnapshotLatticeError> {
         // Simplified check - in practice would verify element is represented in snapshot
         Ok(self.event_ids.len() > element.clock_value as usize)
     }
@@ -871,11 +896,19 @@ pub enum SnapshotLatticeError {
 impl std::fmt::Display for SnapshotLatticeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SnapshotLatticeError::CausalConsistencyViolation(msg) => write!(f, "Causal consistency violation: {}", msg),
-            SnapshotLatticeError::LatticeOperationFailed(msg) => write!(f, "Lattice operation failed: {}", msg),
-            SnapshotLatticeError::SnapshotOperationFailed(msg) => write!(f, "Snapshot operation failed: {}", msg),
+            SnapshotLatticeError::CausalConsistencyViolation(msg) => {
+                write!(f, "Causal consistency violation: {}", msg)
+            }
+            SnapshotLatticeError::LatticeOperationFailed(msg) => {
+                write!(f, "Lattice operation failed: {}", msg)
+            }
+            SnapshotLatticeError::SnapshotOperationFailed(msg) => {
+                write!(f, "Snapshot operation failed: {}", msg)
+            }
             SnapshotLatticeError::ClockSkewError(msg) => write!(f, "Clock skew error: {}", msg),
-            SnapshotLatticeError::RegionCoordinationError(msg) => write!(f, "Region coordination error: {}", msg),
+            SnapshotLatticeError::RegionCoordinationError(msg) => {
+                write!(f, "Region coordination error: {}", msg)
+            }
             SnapshotLatticeError::Io(e) => write!(f, "I/O error: {}", e),
             SnapshotLatticeError::Timeout => write!(f, "Operation timed out"),
         }
@@ -897,13 +930,17 @@ mod snapshot_causal_frontier_tests {
 
     #[test]
     fn test_basic_causal_frontier_properties() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let mut framework = SnapshotLatticeTestFramework::new();
 
-                let result = framework.test_snapshot_causal_frontier(&cx).await
+                let result = framework
+                    .test_snapshot_causal_frontier(&cx)
+                    .await
                     .expect("Failed to test causal frontier");
 
                 assert!(result.total_events > 0);
@@ -913,39 +950,50 @@ mod snapshot_causal_frontier_tests {
                 assert!(result.causal_closure_preserved);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_multi_region_causal_dependencies() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let mut framework = SnapshotLatticeTestFramework::new();
 
                 // Generate events with cross-region dependencies
-                let events = framework.generate_causal_events(&cx).await
+                let events = framework
+                    .generate_causal_events(&cx)
+                    .await
                     .expect("Failed to generate causal events");
 
                 // Verify cross-region dependencies exist
                 let has_cross_region_deps = events.iter().any(|event| {
                     if let Some(dep_id) = event.depends_on {
-                        events.iter().any(|other|
+                        events.iter().any(|other| {
                             other.event_id == dep_id && other.region_id != event.region_id
-                        )
+                        })
                     } else {
                         false
                     }
                 });
 
-                assert!(has_cross_region_deps, "Should have cross-region dependencies");
+                assert!(
+                    has_cross_region_deps,
+                    "Should have cross-region dependencies"
+                );
                 assert!(events.len() >= REGION_COUNT * EVENTS_PER_REGION);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 }
 
@@ -956,13 +1004,17 @@ mod lattice_join_tests {
 
     #[test]
     fn test_lattice_join_operations() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let mut framework = SnapshotLatticeTestFramework::new();
 
-                let result = framework.test_lattice_join_operations(&cx).await
+                let result = framework
+                    .test_lattice_join_operations(&cx)
+                    .await
                     .expect("Failed to test lattice joins");
 
                 assert!(result.snapshots_created > 0);
@@ -972,42 +1024,57 @@ mod lattice_join_tests {
                 assert!(result.total_events_processed > 0);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_join_operation_properties() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let mut framework = SnapshotLatticeTestFramework::new();
 
                 // Create two snapshots with overlapping events
-                let events_a = framework.generate_causal_events(&cx).await
+                let events_a = framework
+                    .generate_causal_events(&cx)
+                    .await
                     .expect("Failed to generate events A");
-                let events_b = framework.generate_causal_events(&cx).await
+                let events_b = framework
+                    .generate_causal_events(&cx)
+                    .await
                     .expect("Failed to generate events B");
 
-                let snapshot_a = framework.snapshot_coordinator.take_distributed_snapshot(
-                    &cx, SnapshotId::new(), &events_a
-                ).await.expect("Failed to create snapshot A");
+                let snapshot_a = framework
+                    .snapshot_coordinator
+                    .take_distributed_snapshot(&cx, SnapshotId::new(), &events_a)
+                    .await
+                    .expect("Failed to create snapshot A");
 
-                let snapshot_b = framework.snapshot_coordinator.take_distributed_snapshot(
-                    &cx, SnapshotId::new(), &events_b
-                ).await.expect("Failed to create snapshot B");
+                let snapshot_b = framework
+                    .snapshot_coordinator
+                    .take_distributed_snapshot(&cx, SnapshotId::new(), &events_b)
+                    .await
+                    .expect("Failed to create snapshot B");
 
-                let join_result = framework.perform_lattice_join(
-                    &cx, &snapshot_a, &snapshot_b, &events_a, &events_b
-                ).await.expect("Failed to perform lattice join");
+                let join_result = framework
+                    .perform_lattice_join(&cx, &snapshot_a, &snapshot_b, &events_a, &events_b)
+                    .await
+                    .expect("Failed to perform lattice join");
 
                 assert!(join_result.join_valid);
                 assert!(join_result.joined_elements_count > 0);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 }
 
@@ -1018,13 +1085,17 @@ mod concurrent_operations_tests {
 
     #[test]
     fn test_concurrent_snapshot_and_lattice_ops() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let mut framework = SnapshotLatticeTestFramework::new();
 
-                let result = framework.test_concurrent_snapshot_lattice_ops(&cx).await
+                let result = framework
+                    .test_concurrent_snapshot_lattice_ops(&cx)
+                    .await
                     .expect("Failed to test concurrent operations");
 
                 assert!(result.total_operations > 0);
@@ -1034,13 +1105,17 @@ mod concurrent_operations_tests {
                 assert!(result.elapsed_time.as_millis() > 0);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_operation_isolation() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -1048,16 +1123,23 @@ mod concurrent_operations_tests {
 
                 // Run multiple concurrent test rounds
                 for round in 0..3 {
-                    let result = framework.test_concurrent_snapshot_lattice_ops(&cx).await
+                    let result = framework
+                        .test_concurrent_snapshot_lattice_ops(&cx)
+                        .await
                         .expect("Failed to test concurrent operations");
 
-                    assert!(result.all_operations_completed,
-                        "Round {} operations should complete", round);
+                    assert!(
+                        result.all_operations_completed,
+                        "Round {} operations should complete",
+                        round
+                    );
                 }
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 }
 
@@ -1068,7 +1150,9 @@ mod edge_case_tests {
 
     #[test]
     fn test_empty_snapshot_lattice_operations() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -1076,24 +1160,31 @@ mod edge_case_tests {
 
                 // Create empty snapshot
                 let empty_events = Vec::new();
-                let empty_snapshot = framework.snapshot_coordinator.take_distributed_snapshot(
-                    &cx, SnapshotId::new(), &empty_events
-                ).await.expect("Failed to create empty snapshot");
+                let empty_snapshot = framework
+                    .snapshot_coordinator
+                    .take_distributed_snapshot(&cx, SnapshotId::new(), &empty_events)
+                    .await
+                    .expect("Failed to create empty snapshot");
 
-                let frontier = empty_snapshot.get_causal_frontier()
+                let frontier = empty_snapshot
+                    .get_causal_frontier()
                     .expect("Failed to get frontier");
 
                 assert_eq!(frontier.len(), 0);
                 assert_eq!(empty_snapshot.event_ids.len(), 0);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_single_region_causal_frontier() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -1104,14 +1195,16 @@ mod edge_case_tests {
 
                 let framework = SnapshotLatticeTestFramework {
                     causal_lattice: Arc::new(Mutex::new(
-                        CausalLattice::new().expect("Failed to create lattice")
+                        CausalLattice::new().expect("Failed to create lattice"),
                     )),
                     snapshot_coordinator: DistributedSnapshotCoordinator::new(),
                     region_generators,
                     clock_skew_simulator: ClockSkewSimulator::new(0), // No skew
                 };
 
-                let events = framework.generate_causal_events(&cx).await
+                let events = framework
+                    .generate_causal_events(&cx)
+                    .await
                     .expect("Failed to generate single-region events");
 
                 // All events should be from the same region
@@ -1119,13 +1212,15 @@ mod edge_case_tests {
 
                 // Events should have monotonic logical clocks
                 for i in 1..events.len() {
-                    if events[i].region_id == events[i-1].region_id {
-                        assert!(events[i].logical_clock > events[i-1].logical_clock);
+                    if events[i].region_id == events[i - 1].region_id {
+                        assert!(events[i].logical_clock > events[i - 1].logical_clock);
                     }
                 }
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 }

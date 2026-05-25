@@ -29,17 +29,19 @@
 //! - Schedule hashes reflect identical task scheduling across runs
 //! - Fingerprints remain stable for equivalent execution traces
 
-use crate::lab::scenario_runner::{ScenarioRunner, ScenarioRunResult, ScenarioRunnerError, TraceCertificateSnapshot};
-use crate::lab::scenario::{
-    Scenario, LabSection, ChaosSection, NetworkSection, MinimizationSection,
-    FaultEvent, FaultAction, ValidationError
-};
-use crate::trace::recorder::{TraceRecorder, RecorderConfig, LimitAction};
-use crate::trace::replay::{ReplayTrace, TraceMetadata, ReplayEvent};
-use crate::lab::runtime::{LabRuntime, LabConfig, LabRunReport};
 use crate::lab::config::LabConfig as LabRuntimeConfig;
+use crate::lab::runtime::{LabConfig, LabRunReport, LabRuntime};
+use crate::lab::scenario::{
+    ChaosSection, FaultAction, FaultEvent, LabSection, MinimizationSection, NetworkSection,
+    Scenario, ValidationError,
+};
+use crate::lab::scenario_runner::{
+    ScenarioRunResult, ScenarioRunner, ScenarioRunnerError, TraceCertificateSnapshot,
+};
+use crate::trace::recorder::{LimitAction, RecorderConfig, TraceRecorder};
+use crate::trace::replay::{ReplayEvent, ReplayTrace, TraceMetadata};
 use crate::types::Time;
-use std::collections::{HashMap, BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 // ────────────────────────────────────────────────────────────────────────────────
@@ -171,7 +173,8 @@ impl ScenarioReplayTester {
                     } else {
                         failed_tests.push(scenario.id.clone());
                     }
-                    self.validation_results.insert(scenario.id.clone(), validation_result);
+                    self.validation_results
+                        .insert(scenario.id.clone(), validation_result);
                 }
                 Err(e) => {
                     failed_tests.push(scenario.id.clone());
@@ -183,7 +186,8 @@ impl ScenarioReplayTester {
                         trace_comparison: TraceComparison::empty(),
                         error_message: Some(e),
                     };
-                    self.validation_results.insert(scenario.id.clone(), validation_result);
+                    self.validation_results
+                        .insert(scenario.id.clone(), validation_result);
                 }
             }
         }
@@ -197,8 +201,12 @@ impl ScenarioReplayTester {
     }
 
     /// Test replay consistency for a specific scenario
-    async fn test_scenario_replay(&mut self, scenario_id: &str) -> Result<ReplayValidationResult, String> {
-        let scenario = self.test_scenarios
+    async fn test_scenario_replay(
+        &mut self,
+        scenario_id: &str,
+    ) -> Result<ReplayValidationResult, String> {
+        let scenario = self
+            .test_scenarios
             .iter()
             .find(|s| s.id == scenario_id)
             .ok_or_else(|| format!("Scenario {} not found", scenario_id))?;
@@ -211,7 +219,8 @@ impl ScenarioReplayTester {
             .map_err(|e| format!("Second run failed: {:?}", e))?;
 
         // Store run results
-        self.run_results.entry(scenario_id.to_string())
+        self.run_results
+            .entry(scenario_id.to_string())
             .or_insert_with(Vec::new)
             .extend(vec![first_result.clone(), second_result.clone()]);
 
@@ -244,7 +253,9 @@ impl ScenarioReplayTester {
             error_message: if passed {
                 None
             } else {
-                Some("Replay validation failed - certificates or properties don't match".to_string())
+                Some(
+                    "Replay validation failed - certificates or properties don't match".to_string(),
+                )
             },
         })
     }
@@ -258,9 +269,7 @@ impl ScenarioReplayTester {
         second_trace: Option<&ReplayTrace>,
     ) -> TraceComparison {
         let event_comparison = match (first_trace, second_trace) {
-            (Some(first), Some(second)) => {
-                self.compare_events(&first.events, &second.events)
-            }
+            (Some(first), Some(second)) => self.compare_events(&first.events, &second.events),
             _ => EventComparisonResult {
                 first_event_count: 0,
                 second_event_count: 0,
@@ -282,7 +291,11 @@ impl ScenarioReplayTester {
     }
 
     /// Compare individual events between traces
-    fn compare_events(&self, first_events: &[ReplayEvent], second_events: &[ReplayEvent]) -> EventComparisonResult {
+    fn compare_events(
+        &self,
+        first_events: &[ReplayEvent],
+        second_events: &[ReplayEvent],
+    ) -> EventComparisonResult {
         let first_count = first_events.len();
         let second_count = second_events.len();
 
@@ -294,16 +307,14 @@ impl ScenarioReplayTester {
             .count();
 
         // Check event type distribution
-        let first_types: HashMap<std::mem::Discriminant<&ReplayEvent>, usize> = first_events
-            .iter()
-            .fold(HashMap::new(), |mut acc, event| {
+        let first_types: HashMap<std::mem::Discriminant<&ReplayEvent>, usize> =
+            first_events.iter().fold(HashMap::new(), |mut acc, event| {
                 *acc.entry(std::mem::discriminant(event)).or_insert(0) += 1;
                 acc
             });
 
-        let second_types: HashMap<std::mem::Discriminant<&ReplayEvent>, usize> = second_events
-            .iter()
-            .fold(HashMap::new(), |mut acc, event| {
+        let second_types: HashMap<std::mem::Discriminant<&ReplayEvent>, usize> =
+            second_events.iter().fold(HashMap::new(), |mut acc, event| {
                 *acc.entry(std::mem::discriminant(event)).or_insert(0) += 1;
                 acc
             });
@@ -375,13 +386,11 @@ impl ScenarioReplayTester {
 
     /// Create a scenario with fault injection
     fn create_fault_scenario(id: &str, description: &str) -> TestScenario {
-        let fault_events = vec![
-            FaultEvent {
-                tick: 100,
-                action: FaultAction::DelayTask { delay_ms: 50 },
-                target: "task_main".to_string(),
-            }
-        ];
+        let fault_events = vec![FaultEvent {
+            tick: 100,
+            action: FaultAction::DelayTask { delay_ms: 50 },
+            target: "task_main".to_string(),
+        }];
 
         let scenario = Scenario {
             schema_version: 1,
@@ -475,28 +484,55 @@ mod tests {
 
         let scenario = ScenarioReplayTester::create_simple_scenario(
             "basic_replay_test",
-            "Simple scenario for testing basic replay consistency"
+            "Simple scenario for testing basic replay consistency",
         );
 
         tester.add_test_scenario(scenario);
 
-        let result = tester.test_scenario_replay("basic_replay_test").await.unwrap();
+        let result = tester
+            .test_scenario_replay("basic_replay_test")
+            .await
+            .unwrap();
 
         assert!(result.passed, "Basic replay should pass");
         assert!(result.certificates_matched, "Certificates should match");
         assert_eq!(result.runs_performed, 2, "Should have performed 2 runs");
 
         // Verify trace comparison details
-        assert!(result.trace_comparison.event_hashes_match, "Event hashes should match");
-        assert!(result.trace_comparison.schedule_hashes_match, "Schedule hashes should match");
-        assert!(result.trace_comparison.step_counts_match, "Step counts should match");
-        assert!(result.trace_comparison.fingerprints_match, "Fingerprints should match");
+        assert!(
+            result.trace_comparison.event_hashes_match,
+            "Event hashes should match"
+        );
+        assert!(
+            result.trace_comparison.schedule_hashes_match,
+            "Schedule hashes should match"
+        );
+        assert!(
+            result.trace_comparison.step_counts_match,
+            "Step counts should match"
+        );
+        assert!(
+            result.trace_comparison.fingerprints_match,
+            "Fingerprints should match"
+        );
 
         println!("✓ Basic replay consistency - certificates match across runs");
-        println!("  Event hash: {:016x}", result.trace_comparison.first_certificate.event_hash);
-        println!("  Schedule hash: {:016x}", result.trace_comparison.first_certificate.schedule_hash);
-        println!("  Steps: {}", result.trace_comparison.first_certificate.steps);
-        println!("  Fingerprint: {:016x}", result.trace_comparison.first_certificate.trace_fingerprint);
+        println!(
+            "  Event hash: {:016x}",
+            result.trace_comparison.first_certificate.event_hash
+        );
+        println!(
+            "  Schedule hash: {:016x}",
+            result.trace_comparison.first_certificate.schedule_hash
+        );
+        println!(
+            "  Steps: {}",
+            result.trace_comparison.first_certificate.steps
+        );
+        println!(
+            "  Fingerprint: {:016x}",
+            result.trace_comparison.first_certificate.trace_fingerprint
+        );
     }
 
     #[tokio::test]
@@ -506,15 +542,21 @@ mod tests {
 
         let scenario = ScenarioReplayTester::create_fault_scenario(
             "fault_replay_test",
-            "Scenario with fault injection for testing replay determinism"
+            "Scenario with fault injection for testing replay determinism",
         );
 
         tester.add_test_scenario(scenario);
 
-        let result = tester.test_scenario_replay("fault_replay_test").await.unwrap();
+        let result = tester
+            .test_scenario_replay("fault_replay_test")
+            .await
+            .unwrap();
 
         assert!(result.passed, "Fault injection replay should pass");
-        assert!(result.certificates_matched, "Certificates should match despite faults");
+        assert!(
+            result.certificates_matched,
+            "Certificates should match despite faults"
+        );
 
         // Fault injection should produce more events
         assert!(
@@ -523,8 +565,14 @@ mod tests {
         );
 
         println!("✓ Fault injection replay - deterministic behavior with injected faults");
-        println!("  Steps with faults: {}", result.trace_comparison.first_certificate.steps);
-        println!("  Event hash: {:016x}", result.trace_comparison.first_certificate.event_hash);
+        println!(
+            "  Steps with faults: {}",
+            result.trace_comparison.first_certificate.steps
+        );
+        println!(
+            "  Event hash: {:016x}",
+            result.trace_comparison.first_certificate.event_hash
+        );
     }
 
     #[tokio::test]
@@ -552,10 +600,20 @@ mod tests {
                 println!("✓ validate_replay API - scenario passed replay validation");
                 println!("  Scenario ID: {}", run_result.scenario_id);
                 println!("  Steps: {}", run_result.certificate.steps);
-                println!("  Fingerprint: {:016x}", run_result.certificate.trace_fingerprint);
+                println!(
+                    "  Fingerprint: {:016x}",
+                    run_result.certificate.trace_fingerprint
+                );
             }
-            Err(ScenarioRunnerError::ReplayDivergence { seed, first, second }) => {
-                panic!("Replay divergence detected for seed {}: {:?} vs {:?}", seed, first, second);
+            Err(ScenarioRunnerError::ReplayDivergence {
+                seed,
+                first,
+                second,
+            }) => {
+                panic!(
+                    "Replay divergence detected for seed {}: {:?} vs {:?}",
+                    seed, first, second
+                );
             }
             Err(e) => {
                 panic!("Unexpected error in validate_replay: {:?}", e);
@@ -570,13 +628,16 @@ mod tests {
 
         // Add multiple test scenarios
         tester.add_test_scenario(ScenarioReplayTester::create_simple_scenario(
-            "multi_test_1", "First multi-scenario test"
+            "multi_test_1",
+            "First multi-scenario test",
         ));
         tester.add_test_scenario(ScenarioReplayTester::create_simple_scenario(
-            "multi_test_2", "Second multi-scenario test"
+            "multi_test_2",
+            "Second multi-scenario test",
         ));
         tester.add_test_scenario(ScenarioReplayTester::create_fault_scenario(
-            "multi_test_3", "Third multi-scenario test with faults"
+            "multi_test_3",
+            "Third multi-scenario test with faults",
         ));
 
         let summary = tester.run_all_tests().await.unwrap();
@@ -586,8 +647,10 @@ mod tests {
         assert!(summary.failed_tests.is_empty(), "No tests should fail");
         assert_eq!(summary.success_rate(), 1.0, "100% success rate expected");
 
-        println!("✓ Multiple scenarios consistency - {}/{} tests passed",
-            summary.passed_tests, summary.total_tests);
+        println!(
+            "✓ Multiple scenarios consistency - {}/{} tests passed",
+            summary.passed_tests, summary.total_tests
+        );
         println!("  Success rate: {:.1}%", summary.success_rate() * 100.0);
 
         // Verify each scenario individually
@@ -604,12 +667,15 @@ mod tests {
 
         let scenario = ScenarioReplayTester::create_simple_scenario(
             "certificate_components_test",
-            "Test for examining trace certificate components"
+            "Test for examining trace certificate components",
         );
 
         tester.add_test_scenario(scenario);
 
-        let result = tester.test_scenario_replay("certificate_components_test").await.unwrap();
+        let result = tester
+            .test_scenario_replay("certificate_components_test")
+            .await
+            .unwrap();
 
         assert!(result.passed, "Certificate components test should pass");
 
@@ -622,10 +688,22 @@ mod tests {
 
         // Verify exact equality in second run
         let second_cert = result.trace_comparison.second_certificate;
-        assert_eq!(cert.event_hash, second_cert.event_hash, "Event hashes must be identical");
-        assert_eq!(cert.schedule_hash, second_cert.schedule_hash, "Schedule hashes must be identical");
-        assert_eq!(cert.steps, second_cert.steps, "Step counts must be identical");
-        assert_eq!(cert.trace_fingerprint, second_cert.trace_fingerprint, "Fingerprints must be identical");
+        assert_eq!(
+            cert.event_hash, second_cert.event_hash,
+            "Event hashes must be identical"
+        );
+        assert_eq!(
+            cert.schedule_hash, second_cert.schedule_hash,
+            "Schedule hashes must be identical"
+        );
+        assert_eq!(
+            cert.steps, second_cert.steps,
+            "Step counts must be identical"
+        );
+        assert_eq!(
+            cert.trace_fingerprint, second_cert.trace_fingerprint,
+            "Fingerprints must be identical"
+        );
 
         println!("✓ Trace certificate components - all components match exactly");
         println!("  Event hash: {:016x} ✓", cert.event_hash);
@@ -660,8 +738,11 @@ mod tests {
 
             assert_eq!(result1.seed, seed, "Result should have requested seed");
             assert_eq!(result2.seed, seed, "Result should have requested seed");
-            assert_eq!(result1.certificate, result2.certificate,
-                "Certificates should match for same seed {}", seed);
+            assert_eq!(
+                result1.certificate, result2.certificate,
+                "Certificates should match for same seed {}",
+                seed
+            );
 
             println!("✓ Seed {} - deterministic replay verified", seed);
         }
@@ -695,16 +776,43 @@ mod tests {
         // Comprehensive validation
         assert_eq!(summary.total_tests, 3, "Should test all scenarios");
         assert_eq!(summary.passed_tests, 3, "All integration tests should pass");
-        assert!(summary.failed_tests.is_empty(), "No integration tests should fail");
+        assert!(
+            summary.failed_tests.is_empty(),
+            "No integration tests should fail"
+        );
 
         // Verify integration properties across all scenarios
         for (scenario_id, result) in &summary.validation_results {
-            assert!(result.passed, "Scenario {} integration should pass", scenario_id);
-            assert!(result.certificates_matched, "Certificates should match for {}", scenario_id);
-            assert!(result.trace_comparison.event_hashes_match, "Event hashes should match for {}", scenario_id);
-            assert!(result.trace_comparison.schedule_hashes_match, "Schedule hashes should match for {}", scenario_id);
-            assert!(result.trace_comparison.step_counts_match, "Step counts should match for {}", scenario_id);
-            assert!(result.trace_comparison.fingerprints_match, "Fingerprints should match for {}", scenario_id);
+            assert!(
+                result.passed,
+                "Scenario {} integration should pass",
+                scenario_id
+            );
+            assert!(
+                result.certificates_matched,
+                "Certificates should match for {}",
+                scenario_id
+            );
+            assert!(
+                result.trace_comparison.event_hashes_match,
+                "Event hashes should match for {}",
+                scenario_id
+            );
+            assert!(
+                result.trace_comparison.schedule_hashes_match,
+                "Schedule hashes should match for {}",
+                scenario_id
+            );
+            assert!(
+                result.trace_comparison.step_counts_match,
+                "Step counts should match for {}",
+                scenario_id
+            );
+            assert!(
+                result.trace_comparison.fingerprints_match,
+                "Fingerprints should match for {}",
+                scenario_id
+            );
         }
 
         println!("✓ Comprehensive integration test completed:");

@@ -16,23 +16,20 @@
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod tests {
     use crate::{
-        database::postgres::{PostgresPool, PostgresConnection, PostgresTransaction, PgRow},
-        obligation::ledger::{ObligationLedger, LedgerEntry, LedgerGeneration, LedgerGuard},
-        obligation::{Obligation, ObligationId, CommitProof, AbortProof},
-        types::{Budget, Outcome, TaskId, RegionId},
-        cx::Cx,
-        error::{Error, ErrorKind},
-        time::{Duration, Sleep, Instant},
-        sync::{Mutex, AtomicU64, AtomicBool},
         channel::{mpsc, oneshot},
+        cx::Cx,
+        database::postgres::{PgRow, PostgresConnection, PostgresPool, PostgresTransaction},
+        error::{Error, ErrorKind},
+        obligation::ledger::{LedgerEntry, LedgerGeneration, LedgerGuard, ObligationLedger},
+        obligation::{AbortProof, CommitProof, Obligation, ObligationId},
         runtime::Runtime,
-        test_utils::{init_test_runtime, TestTracer},
-    };
-    use std::sync::{
-        atomic::Ordering,
-        Arc,
+        sync::{AtomicBool, AtomicU64, Mutex},
+        test_utils::{TestTracer, init_test_runtime},
+        time::{Duration, Instant, Sleep},
+        types::{Budget, Outcome, RegionId, TaskId},
     };
     use std::collections::{HashMap, VecDeque};
+    use std::sync::{Arc, atomic::Ordering};
 
     /// Test framework for postgres-ledger integration scenarios
     struct PostgresLedgerTestFramework {
@@ -233,7 +230,8 @@ mod tests {
             let tracer = TestTracer::new();
 
             // Initialize postgres pool
-            let postgres_pool = PostgresPool::new(&config.postgres_url, config.max_connections).await?;
+            let postgres_pool =
+                PostgresPool::new(&config.postgres_url, config.max_connections).await?;
 
             // Initialize obligation ledger
             let ledger = Arc::new(ObligationLedger::new(config.ledger_capacity)?);
@@ -268,16 +266,21 @@ mod tests {
             let conn = pool.get().await?;
 
             // Create test tables
-            conn.execute("
+            conn.execute(
+                "
                 CREATE TABLE IF NOT EXISTS test_accounts (
                     id SERIAL PRIMARY KEY,
                     name VARCHAR(255) NOT NULL,
                     balance DECIMAL(10,2) NOT NULL DEFAULT 0.00,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            ", &[]).await?;
+            ",
+                &[],
+            )
+            .await?;
 
-            conn.execute("
+            conn.execute(
+                "
                 CREATE TABLE IF NOT EXISTS test_transactions (
                     id SERIAL PRIMARY KEY,
                     from_account_id INT REFERENCES test_accounts(id),
@@ -285,7 +288,10 @@ mod tests {
                     amount DECIMAL(10,2) NOT NULL,
                     transaction_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            ", &[]).await?;
+            ",
+                &[],
+            )
+            .await?;
 
             Ok(())
         }
@@ -300,29 +306,32 @@ mod tests {
             let coordinator = Arc::new(TransactionCoordinator::new());
 
             // Start ledger-guarded transaction
-            let guarded_tx = self.start_ledger_guarded_transaction(cx, &coordinator).await?;
+            let guarded_tx = self
+                .start_ledger_guarded_transaction(cx, &coordinator)
+                .await?;
 
             // Track initial generation
-            generation_tracker.record_transaction_start(
-                guarded_tx.transaction_id,
-                guarded_tx.start_generation.clone(),
-            ).await;
+            generation_tracker
+                .record_transaction_start(
+                    guarded_tx.transaction_id,
+                    guarded_tx.start_generation.clone(),
+                )
+                .await;
 
             // Execute postgres writes within ledger guard
-            let write_results = self.execute_postgres_writes_with_ledger_tracking(
-                cx,
-                guarded_tx,
-                write_operations,
-                &generation_tracker,
-            ).await?;
+            let write_results = self
+                .execute_postgres_writes_with_ledger_tracking(
+                    cx,
+                    guarded_tx,
+                    write_operations,
+                    &generation_tracker,
+                )
+                .await?;
 
             // Test rollback scenarios
             let rollback_results = if self.config.enable_rollback_testing {
-                self.test_rollback_generation_behavior(
-                    cx,
-                    &coordinator,
-                    &generation_tracker,
-                ).await?
+                self.test_rollback_generation_behavior(cx, &coordinator, &generation_tracker)
+                    .await?
             } else {
                 RollbackTestResults::default()
             };
@@ -333,7 +342,10 @@ mod tests {
             Ok(LedgerGuardedResults {
                 transactions_executed: write_results.transactions_completed,
                 postgres_writes_completed: write_results.total_writes,
-                ledger_generations_incremented: self.stats.ledger_generations_incremented.load(Ordering::Relaxed),
+                ledger_generations_incremented: self
+                    .stats
+                    .ledger_generations_incremented
+                    .load(Ordering::Relaxed),
                 rollback_test_results: rollback_results,
                 generation_consistency: consistency_results,
                 final_ledger_generation: self.ledger.current_generation(),
@@ -346,17 +358,24 @@ mod tests {
             cx: &Cx,
             coordinator: &Arc<TransactionCoordinator>,
         ) -> Result<LedgerGuardedTransaction, Error> {
-            let transaction_id = coordinator.transaction_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            let transaction_id = coordinator
+                .transaction_counter
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
 
             // Acquire ledger guard
             let ledger_guard = self.ledger.acquire_guard(cx).await?;
-            self.stats.ledger_guards_acquired.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .ledger_guards_acquired
+                .fetch_add(1, Ordering::Relaxed);
 
             let start_generation = self.ledger.current_generation();
 
             // Start postgres transaction
             let postgres_tx = self.postgres_pool.begin_transaction().await?;
-            self.stats.transactions_started.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .transactions_started
+                .fetch_add(1, Ordering::Relaxed);
 
             let guarded_tx = LedgerGuardedTransaction {
                 transaction_id,
@@ -373,11 +392,20 @@ mod tests {
                 let mut active = coordinator.active_transactions.lock().await;
                 active.insert(transaction_id, guarded_tx.clone());
                 let concurrent_count = active.len() as u64;
-                coordinator.coordinator_stats.concurrent_transactions.store(concurrent_count, Ordering::Relaxed);
+                coordinator
+                    .coordinator_stats
+                    .concurrent_transactions
+                    .store(concurrent_count, Ordering::Relaxed);
 
-                let max_concurrent = coordinator.coordinator_stats.max_concurrent_transactions.load(Ordering::Relaxed);
+                let max_concurrent = coordinator
+                    .coordinator_stats
+                    .max_concurrent_transactions
+                    .load(Ordering::Relaxed);
                 if concurrent_count > max_concurrent {
-                    coordinator.coordinator_stats.max_concurrent_transactions.store(concurrent_count, Ordering::Relaxed);
+                    coordinator
+                        .coordinator_stats
+                        .max_concurrent_transactions
+                        .store(concurrent_count, Ordering::Relaxed);
                 }
             }
 
@@ -400,47 +428,53 @@ mod tests {
                 let generation_before_write = self.ledger.current_generation();
 
                 // Execute postgres write
-                let write_result = self.execute_single_postgres_write(
-                    cx,
-                    &mut guarded_tx,
-                    &operation,
-                ).await;
+                let write_result = self
+                    .execute_single_postgres_write(cx, &mut guarded_tx, &operation)
+                    .await;
 
                 match write_result {
                     Ok(postgres_write) => {
                         // Increment ledger generation after successful write
                         self.ledger.increment_generation();
-                        self.stats.ledger_generations_incremented.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .ledger_generations_incremented
+                            .fetch_add(1, Ordering::Relaxed);
 
                         let generation_after_write = self.ledger.current_generation();
                         guarded_tx.current_generation = generation_after_write.clone();
 
                         // Track generation event
-                        tracker.record_postgres_write(
-                            guarded_tx.transaction_id,
-                            postgres_write,
-                            generation_before_write,
-                            generation_after_write,
-                        ).await;
+                        tracker
+                            .record_postgres_write(
+                                guarded_tx.transaction_id,
+                                postgres_write,
+                                generation_before_write,
+                                generation_after_write,
+                            )
+                            .await;
 
                         completed_writes += 1;
                         self.stats.postgres_writes.fetch_add(1, Ordering::Relaxed);
-                    },
+                    }
                     Err(_) => {
                         failed_writes += 1;
-                    },
+                    }
                 }
             }
 
             // Commit or rollback transaction based on results
             if failed_writes == 0 {
                 guarded_tx.postgres_tx.commit().await?;
-                self.stats.transactions_committed.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .transactions_committed
+                    .fetch_add(1, Ordering::Relaxed);
 
-                tracker.record_transaction_commit(
-                    guarded_tx.transaction_id,
-                    guarded_tx.current_generation.clone(),
-                ).await;
+                tracker
+                    .record_transaction_commit(
+                        guarded_tx.transaction_id,
+                        guarded_tx.current_generation.clone(),
+                    )
+                    .await;
             } else {
                 // Test rollback with ledger generation increment
                 let generation_before_rollback = self.ledger.current_generation();
@@ -448,23 +482,31 @@ mod tests {
 
                 // Increment generation even on rollback (key test property)
                 self.ledger.increment_generation();
-                self.stats.rollback_generation_updates.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .rollback_generation_updates
+                    .fetch_add(1, Ordering::Relaxed);
 
                 let generation_after_rollback = self.ledger.current_generation();
 
-                tracker.record_transaction_rollback(
-                    guarded_tx.transaction_id,
-                    generation_before_rollback,
-                    generation_after_rollback,
-                    RollbackReason::ConstraintViolation,
-                ).await;
+                tracker
+                    .record_transaction_rollback(
+                        guarded_tx.transaction_id,
+                        generation_before_rollback,
+                        generation_after_rollback,
+                        RollbackReason::ConstraintViolation,
+                    )
+                    .await;
 
-                self.stats.transactions_rolled_back.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .transactions_rolled_back
+                    .fetch_add(1, Ordering::Relaxed);
             }
 
             // Release ledger guard
             drop(guarded_tx.ledger_guard);
-            self.stats.ledger_guards_released.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .ledger_guards_released
+                .fetch_add(1, Ordering::Relaxed);
 
             Ok(PostgresWriteResults {
                 transactions_completed: 1,
@@ -485,10 +527,13 @@ mod tests {
 
             let postgres_write = match operation.operation_type {
                 WriteOperationType::Insert => {
-                    guarded_tx.postgres_tx.execute(
-                        "INSERT INTO test_accounts (name, balance) VALUES ($1, $2)",
-                        &[&operation.data["name"], &operation.data["balance"]]
-                    ).await?;
+                    guarded_tx
+                        .postgres_tx
+                        .execute(
+                            "INSERT INTO test_accounts (name, balance) VALUES ($1, $2)",
+                            &[&operation.data["name"], &operation.data["balance"]],
+                        )
+                        .await?;
 
                     PostgresWrite {
                         write_id,
@@ -498,12 +543,15 @@ mod tests {
                         generation_at_write,
                         rollback_safe: true,
                     }
-                },
+                }
                 WriteOperationType::Update => {
-                    guarded_tx.postgres_tx.execute(
-                        "UPDATE test_accounts SET balance = $1 WHERE id = $2",
-                        &[&operation.data["balance"], &operation.data["id"]]
-                    ).await?;
+                    guarded_tx
+                        .postgres_tx
+                        .execute(
+                            "UPDATE test_accounts SET balance = $1 WHERE id = $2",
+                            &[&operation.data["balance"], &operation.data["id"]],
+                        )
+                        .await?;
 
                     PostgresWrite {
                         write_id,
@@ -513,12 +561,15 @@ mod tests {
                         generation_at_write,
                         rollback_safe: true,
                     }
-                },
+                }
                 WriteOperationType::Delete => {
-                    guarded_tx.postgres_tx.execute(
-                        "DELETE FROM test_accounts WHERE id = $1",
-                        &[&operation.data["id"]]
-                    ).await?;
+                    guarded_tx
+                        .postgres_tx
+                        .execute(
+                            "DELETE FROM test_accounts WHERE id = $1",
+                            &[&operation.data["id"]],
+                        )
+                        .await?;
 
                     PostgresWrite {
                         write_id,
@@ -528,13 +579,16 @@ mod tests {
                         generation_at_write,
                         rollback_safe: true,
                     }
-                },
+                }
                 WriteOperationType::Upsert => {
-                    guarded_tx.postgres_tx.execute(
-                        "INSERT INTO test_accounts (name, balance) VALUES ($1, $2)
+                    guarded_tx
+                        .postgres_tx
+                        .execute(
+                            "INSERT INTO test_accounts (name, balance) VALUES ($1, $2)
                          ON CONFLICT (name) DO UPDATE SET balance = EXCLUDED.balance",
-                        &[&operation.data["name"], &operation.data["balance"]]
-                    ).await?;
+                            &[&operation.data["name"], &operation.data["balance"]],
+                        )
+                        .await?;
 
                     PostgresWrite {
                         write_id,
@@ -544,7 +598,7 @@ mod tests {
                         generation_at_write,
                         rollback_safe: true,
                     }
-                },
+                }
             };
 
             guarded_tx.writes_performed.push(postgres_write.clone());
@@ -559,17 +613,24 @@ mod tests {
             tracker: &Arc<LedgerGenerationTracker>,
         ) -> Result<RollbackTestResults, Error> {
             // Test intentional rollback with generation increment
-            let rollback_tx = self.start_ledger_guarded_transaction(cx, coordinator).await?;
+            let rollback_tx = self
+                .start_ledger_guarded_transaction(cx, coordinator)
+                .await?;
             let generation_before = self.ledger.current_generation();
 
             // Perform some writes
             let test_operation = TestWriteOperation {
                 operation_type: WriteOperationType::Insert,
-                data: [("name".to_string(), "rollback_test".to_string()), ("balance".to_string(), "100.00".to_string())].into(),
+                data: [
+                    ("name".to_string(), "rollback_test".to_string()),
+                    ("balance".to_string(), "100.00".to_string()),
+                ]
+                .into(),
                 expected_success: true,
             };
 
-            self.execute_single_postgres_write(cx, &mut rollback_tx.clone(), &test_operation).await?;
+            self.execute_single_postgres_write(cx, &mut rollback_tx.clone(), &test_operation)
+                .await?;
 
             // Intentionally rollback
             rollback_tx.postgres_tx.rollback().await?;
@@ -578,17 +639,21 @@ mod tests {
             self.ledger.increment_generation();
             let generation_after = self.ledger.current_generation();
 
-            tracker.record_transaction_rollback(
-                rollback_tx.transaction_id,
-                generation_before,
-                generation_after.clone(),
-                RollbackReason::TestSimulated,
-            ).await;
+            tracker
+                .record_transaction_rollback(
+                    rollback_tx.transaction_id,
+                    generation_before,
+                    generation_after.clone(),
+                    RollbackReason::TestSimulated,
+                )
+                .await;
 
             // Test multiple rollbacks
             let mut rollback_events = Vec::new();
             for i in 0..3 {
-                let tx = self.start_ledger_guarded_transaction(cx, coordinator).await?;
+                let tx = self
+                    .start_ledger_guarded_transaction(cx, coordinator)
+                    .await?;
                 let gen_before = self.ledger.current_generation();
 
                 tx.postgres_tx.rollback().await?;
@@ -623,7 +688,11 @@ mod tests {
             }
         }
 
-        async fn record_transaction_start(&self, transaction_id: u64, start_generation: LedgerGeneration) {
+        async fn record_transaction_start(
+            &self,
+            transaction_id: u64,
+            start_generation: LedgerGeneration,
+        ) {
             let event = GenerationEvent {
                 timestamp: Instant::now(),
                 transaction_id,
@@ -637,14 +706,17 @@ mod tests {
             history.push_back(event);
 
             let mut active = self.active_transactions.lock().await;
-            active.insert(transaction_id, TransactionGenerationState {
+            active.insert(
                 transaction_id,
-                start_generation,
-                current_generation: start_generation,
-                writes_count: 0,
-                rollback_count: 0,
-                isolation_level: TransactionIsolationLevel::ReadCommitted,
-            });
+                TransactionGenerationState {
+                    transaction_id,
+                    start_generation,
+                    current_generation: start_generation,
+                    writes_count: 0,
+                    rollback_count: 0,
+                    isolation_level: TransactionIsolationLevel::ReadCommitted,
+                },
+            );
         }
 
         async fn record_postgres_write(
@@ -674,7 +746,11 @@ mod tests {
             }
         }
 
-        async fn record_transaction_commit(&self, transaction_id: u64, final_generation: LedgerGeneration) {
+        async fn record_transaction_commit(
+            &self,
+            transaction_id: u64,
+            final_generation: LedgerGeneration,
+        ) {
             let event = GenerationEvent {
                 timestamp: Instant::now(),
                 transaction_id,
@@ -728,7 +804,9 @@ mod tests {
             active.remove(&transaction_id);
         }
 
-        async fn validate_generation_consistency(&self) -> Result<GenerationConsistencyResults, Error> {
+        async fn validate_generation_consistency(
+            &self,
+        ) -> Result<GenerationConsistencyResults, Error> {
             let history = self.generation_history.lock().await;
 
             let mut monotonic_violations = 0;
@@ -885,27 +963,51 @@ mod tests {
         let write_operations = vec![
             TestWriteOperation {
                 operation_type: WriteOperationType::Insert,
-                data: [("name".to_string(), "Alice".to_string()), ("balance".to_string(), "100.00".to_string())].into(),
+                data: [
+                    ("name".to_string(), "Alice".to_string()),
+                    ("balance".to_string(), "100.00".to_string()),
+                ]
+                .into(),
                 expected_success: true,
             },
             TestWriteOperation {
                 operation_type: WriteOperationType::Update,
-                data: [("id".to_string(), "1".to_string()), ("balance".to_string(), "150.00".to_string())].into(),
+                data: [
+                    ("id".to_string(), "1".to_string()),
+                    ("balance".to_string(), "150.00".to_string()),
+                ]
+                .into(),
                 expected_success: true,
             },
         ];
 
-        let results = framework.execute_ledger_guarded_transaction_with_rollback(&cx, write_operations).await.unwrap();
+        let results = framework
+            .execute_ledger_guarded_transaction_with_rollback(&cx, write_operations)
+            .await
+            .unwrap();
 
         // Verify postgres writes increment ledger generation
-        assert!(results.ledger_generations_incremented > 0, "Ledger generation should be incremented by postgres writes");
-        assert_eq!(results.postgres_writes_completed, 2, "Should complete all postgres writes");
+        assert!(
+            results.ledger_generations_incremented > 0,
+            "Ledger generation should be incremented by postgres writes"
+        );
+        assert_eq!(
+            results.postgres_writes_completed, 2,
+            "Should complete all postgres writes"
+        );
 
         // Verify generation consistency
-        assert!(results.generation_consistency.overall_consistency, "Generation should be consistent");
-        assert_eq!(results.generation_consistency.monotonic_violations, 0, "No monotonic violations");
+        assert!(
+            results.generation_consistency.overall_consistency,
+            "Generation should be consistent"
+        );
+        assert_eq!(
+            results.generation_consistency.monotonic_violations, 0,
+            "No monotonic violations"
+        );
 
-        cx.trace("Postgres writes correctly increment ledger generation").await;
+        cx.trace("Postgres writes correctly increment ledger generation")
+            .await;
     }
 
     #[tokio::test]
@@ -925,27 +1027,46 @@ mod tests {
         let framework = PostgresLedgerTestFramework::new(&cx, config).await.unwrap();
 
         // Create operations that will cause rollback
-        let write_operations = vec![
-            TestWriteOperation {
-                operation_type: WriteOperationType::Insert,
-                data: [("name".to_string(), "Bob".to_string()), ("balance".to_string(), "200.00".to_string())].into(),
-                expected_success: true,
-            },
-        ];
+        let write_operations = vec![TestWriteOperation {
+            operation_type: WriteOperationType::Insert,
+            data: [
+                ("name".to_string(), "Bob".to_string()),
+                ("balance".to_string(), "200.00".to_string()),
+            ]
+            .into(),
+            expected_success: true,
+        }];
 
-        let results = framework.execute_ledger_guarded_transaction_with_rollback(&cx, write_operations).await.unwrap();
+        let results = framework
+            .execute_ledger_guarded_transaction_with_rollback(&cx, write_operations)
+            .await
+            .unwrap();
 
         // Verify rollback increments generation
-        assert!(results.rollback_test_results.rollback_events_tested > 0, "Should test rollback scenarios");
-        assert_eq!(results.rollback_test_results.generation_increments_on_rollback,
-                  results.rollback_test_results.rollback_events_tested,
-                  "All rollbacks should increment generation");
+        assert!(
+            results.rollback_test_results.rollback_events_tested > 0,
+            "Should test rollback scenarios"
+        );
+        assert_eq!(
+            results
+                .rollback_test_results
+                .generation_increments_on_rollback,
+            results.rollback_test_results.rollback_events_tested,
+            "All rollbacks should increment generation"
+        );
 
         // Verify consistency maintained during rollback
-        assert!(results.rollback_test_results.consistency_maintained, "Consistency should be maintained during rollback");
-        assert_eq!(results.generation_consistency.rollback_violations, 0, "No rollback violations");
+        assert!(
+            results.rollback_test_results.consistency_maintained,
+            "Consistency should be maintained during rollback"
+        );
+        assert_eq!(
+            results.generation_consistency.rollback_violations, 0,
+            "No rollback violations"
+        );
 
-        cx.trace("Rollback correctly increments ledger generation").await;
+        cx.trace("Rollback correctly increments ledger generation")
+            .await;
     }
 
     #[tokio::test]
@@ -966,22 +1087,31 @@ mod tests {
 
         // Execute multiple transactions to test ordering
         for i in 0..5 {
-            let write_operations = vec![
-                TestWriteOperation {
-                    operation_type: WriteOperationType::Insert,
-                    data: [("name".to_string(), format!("User{}", i)), ("balance".to_string(), format!("{}.00", i * 100))].into(),
-                    expected_success: true,
-                },
-            ];
+            let write_operations = vec![TestWriteOperation {
+                operation_type: WriteOperationType::Insert,
+                data: [
+                    ("name".to_string(), format!("User{}", i)),
+                    ("balance".to_string(), format!("{}.00", i * 100)),
+                ]
+                .into(),
+                expected_success: true,
+            }];
 
-            let results = framework.execute_ledger_guarded_transaction_with_rollback(&cx, write_operations).await.unwrap();
+            let results = framework
+                .execute_ledger_guarded_transaction_with_rollback(&cx, write_operations)
+                .await
+                .unwrap();
 
             // Verify each transaction increments generation
-            assert!(results.ledger_generations_incremented > 0, "Each transaction should increment generation");
+            assert!(
+                results.ledger_generations_incremented > 0,
+                "Each transaction should increment generation"
+            );
         }
 
         // Final validation would check that generations are monotonically increasing
-        cx.trace("Ledger generation ordering maintained across transactions").await;
+        cx.trace("Ledger generation ordering maintained across transactions")
+            .await;
     }
 
     #[tokio::test]
@@ -1006,17 +1136,24 @@ mod tests {
             let framework_ref = framework.clone();
             let cx_ref = cx.clone();
 
-            let handle = cx.spawn(async move {
-                let write_operations = vec![
-                    TestWriteOperation {
+            let handle = cx
+                .spawn(async move {
+                    let write_operations = vec![TestWriteOperation {
                         operation_type: WriteOperationType::Insert,
-                        data: [("name".to_string(), format!("Concurrent{}", i)), ("balance".to_string(), "50.00".to_string())].into(),
+                        data: [
+                            ("name".to_string(), format!("Concurrent{}", i)),
+                            ("balance".to_string(), "50.00".to_string()),
+                        ]
+                        .into(),
                         expected_success: true,
-                    },
-                ];
+                    }];
 
-                framework_ref.execute_ledger_guarded_transaction_with_rollback(&cx_ref, write_operations).await
-            }).await.unwrap();
+                    framework_ref
+                        .execute_ledger_guarded_transaction_with_rollback(&cx_ref, write_operations)
+                        .await
+                })
+                .await
+                .unwrap();
 
             handles.push(handle);
         }
@@ -1029,9 +1166,13 @@ mod tests {
         }
 
         // Verify concurrent transactions maintain generation consistency
-        assert!(total_generations_incremented >= 10, "Concurrent transactions should increment generations");
+        assert!(
+            total_generations_incremented >= 10,
+            "Concurrent transactions should increment generations"
+        );
 
-        cx.trace("Concurrent transactions maintain generation isolation").await;
+        cx.trace("Concurrent transactions maintain generation isolation")
+            .await;
     }
 
     #[tokio::test]
@@ -1056,15 +1197,20 @@ mod tests {
         let mut rolled_back_transactions = 0;
 
         for i in 0..6 {
-            let write_operations = vec![
-                TestWriteOperation {
-                    operation_type: WriteOperationType::Insert,
-                    data: [("name".to_string(), format!("Mixed{}", i)), ("balance".to_string(), format!("{}.00", i * 25))].into(),
-                    expected_success: i % 2 == 0, // Alternate success/failure
-                },
-            ];
+            let write_operations = vec![TestWriteOperation {
+                operation_type: WriteOperationType::Insert,
+                data: [
+                    ("name".to_string(), format!("Mixed{}", i)),
+                    ("balance".to_string(), format!("{}.00", i * 25)),
+                ]
+                .into(),
+                expected_success: i % 2 == 0, // Alternate success/failure
+            }];
 
-            let results = framework.execute_ledger_guarded_transaction_with_rollback(&cx, write_operations).await.unwrap();
+            let results = framework
+                .execute_ledger_guarded_transaction_with_rollback(&cx, write_operations)
+                .await
+                .unwrap();
             total_generations += results.ledger_generations_incremented;
 
             if results.postgres_writes_completed > 0 {
@@ -1075,11 +1221,21 @@ mod tests {
         }
 
         // Verify both commits and rollbacks increment generation
-        assert!(total_generations > 0, "Both commits and rollbacks should increment generation");
-        assert!(successful_transactions > 0, "Some transactions should succeed");
-        assert!(rolled_back_transactions > 0, "Some transactions should be rolled back");
+        assert!(
+            total_generations > 0,
+            "Both commits and rollbacks should increment generation"
+        );
+        assert!(
+            successful_transactions > 0,
+            "Some transactions should succeed"
+        );
+        assert!(
+            rolled_back_transactions > 0,
+            "Some transactions should be rolled back"
+        );
 
-        cx.trace("Mixed commit/rollback scenarios correctly handle generation").await;
+        cx.trace("Mixed commit/rollback scenarios correctly handle generation")
+            .await;
     }
 
     #[tokio::test]
@@ -1099,27 +1255,44 @@ mod tests {
         let framework = PostgresLedgerTestFramework::new(&cx, config).await.unwrap();
 
         // Test different isolation levels
-        for isolation_level in [TransactionIsolationLevel::ReadCommitted, TransactionIsolationLevel::Serializable] {
+        for isolation_level in [
+            TransactionIsolationLevel::ReadCommitted,
+            TransactionIsolationLevel::Serializable,
+        ] {
             let mut isolation_config = config.clone();
             isolation_config.isolation_level = isolation_level;
 
-            let isolation_framework = PostgresLedgerTestFramework::new(&cx, isolation_config).await.unwrap();
+            let isolation_framework = PostgresLedgerTestFramework::new(&cx, isolation_config)
+                .await
+                .unwrap();
 
-            let write_operations = vec![
-                TestWriteOperation {
-                    operation_type: WriteOperationType::Update,
-                    data: [("id".to_string(), "1".to_string()), ("balance".to_string(), "500.00".to_string())].into(),
-                    expected_success: true,
-                },
-            ];
+            let write_operations = vec![TestWriteOperation {
+                operation_type: WriteOperationType::Update,
+                data: [
+                    ("id".to_string(), "1".to_string()),
+                    ("balance".to_string(), "500.00".to_string()),
+                ]
+                .into(),
+                expected_success: true,
+            }];
 
-            let results = isolation_framework.execute_ledger_guarded_transaction_with_rollback(&cx, write_operations).await.unwrap();
+            let results = isolation_framework
+                .execute_ledger_guarded_transaction_with_rollback(&cx, write_operations)
+                .await
+                .unwrap();
 
             // Verify isolation preserves generation ordering
-            assert!(results.generation_consistency.overall_consistency, "Isolation should preserve generation consistency");
-            assert_eq!(results.generation_consistency.isolation_violations, 0, "No isolation violations");
+            assert!(
+                results.generation_consistency.overall_consistency,
+                "Isolation should preserve generation consistency"
+            );
+            assert_eq!(
+                results.generation_consistency.isolation_violations, 0,
+                "No isolation violations"
+            );
         }
 
-        cx.trace("Transaction isolation preserves generation ordering").await;
+        cx.trace("Transaction isolation preserves generation ordering")
+            .await;
     }
 }

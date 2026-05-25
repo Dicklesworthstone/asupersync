@@ -495,6 +495,142 @@ impl RouterAssistCandidateSet {
     }
 }
 
+/// Stable path-doctor recommendation for NAT traversal and fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PathDoctorRecommendation {
+    /// Public IPv6 should be used directly.
+    UseIpv6Direct,
+    /// UDP hole punching is expected to be viable.
+    TryNatPunchedUdp,
+    /// Router assist may help, but relay remains the fallback.
+    TryRouterAssistThenRelay,
+    /// Hard NAT should fall back to relay or an explicitly configured path provider.
+    UseRelayOrTailscale,
+    /// UDP is blocked; use stream-friendly fallback transport.
+    UseRelayOrTcpTlsFallback,
+    /// Evidence is insufficient for a deterministic recommendation.
+    GatherMoreEvidence,
+}
+
+impl PathDoctorRecommendation {
+    /// Stable recommendation code for CLI output and proof logs.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::UseIpv6Direct => "use_ipv6_direct",
+            Self::TryNatPunchedUdp => "try_nat_punched_udp",
+            Self::TryRouterAssistThenRelay => "try_router_assist_then_relay",
+            Self::UseRelayOrTailscale => "use_relay_or_tailscale",
+            Self::UseRelayOrTcpTlsFallback => "use_relay_or_tcp_tls_fallback",
+            Self::GatherMoreEvidence => "gather_more_evidence",
+        }
+    }
+}
+
+/// Whether path selection could mutate router state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RouterAssistMutationStatus {
+    /// Router assist is disabled by policy.
+    Disabled,
+    /// Router assist was enabled but mapping mutation authority was not granted.
+    BlockedWithoutCapability,
+    /// Router assist policy was malformed.
+    InvalidLifetimePolicy,
+    /// Provider failure was surfaced as a non-fatal diagnostic.
+    ProviderFailedNonfatal,
+    /// Providers returned no policy-approved mapping.
+    NoPolicyApprovedCandidate,
+    /// A provider candidate was selected under explicit mapping authority.
+    ExplicitlyAuthorizedCandidate,
+}
+
+impl RouterAssistMutationStatus {
+    /// Stable mutation-status code for CLI output and proof logs.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Disabled => "router_assist_disabled",
+            Self::BlockedWithoutCapability => "router_assist_blocked_without_capability",
+            Self::InvalidLifetimePolicy => "router_assist_invalid_lifetime_policy",
+            Self::ProviderFailedNonfatal => "router_assist_provider_failed_nonfatal",
+            Self::NoPolicyApprovedCandidate => "router_assist_no_policy_approved_candidate",
+            Self::ExplicitlyAuthorizedCandidate => "router_assist_explicitly_authorized_candidate",
+        }
+    }
+}
+
+/// Deterministic path-doctor report for NAT and router-assist decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouterAssistPathDoctorReport {
+    nat_profile: NatProfile,
+    nat_confidence: NatConfidence,
+    hairpin: HairpinBehavior,
+    nat_caveat: &'static str,
+    router_assist_caveat: &'static str,
+    router_assist_protocol: Option<RouterAssistProtocol>,
+    recommendation: PathDoctorRecommendation,
+    mutation_status: RouterAssistMutationStatus,
+}
+
+impl RouterAssistPathDoctorReport {
+    /// NAT profile inferred from rendezvous observations.
+    #[must_use]
+    pub const fn nat_profile(&self) -> NatProfile {
+        self.nat_profile
+    }
+
+    /// NAT classification confidence.
+    #[must_use]
+    pub const fn nat_confidence(&self) -> NatConfidence {
+        self.nat_confidence
+    }
+
+    /// Hairpin measurement carried into path-doctor output.
+    #[must_use]
+    pub const fn hairpin(&self) -> HairpinBehavior {
+        self.hairpin
+    }
+
+    /// Stable NAT caveat code.
+    #[must_use]
+    pub const fn nat_caveat(&self) -> &'static str {
+        self.nat_caveat
+    }
+
+    /// Stable router-assist caveat code.
+    #[must_use]
+    pub const fn router_assist_caveat(&self) -> &'static str {
+        self.router_assist_caveat
+    }
+
+    /// Selected router-assist protocol, if one was authorized.
+    #[must_use]
+    pub const fn router_assist_protocol(&self) -> Option<RouterAssistProtocol> {
+        self.router_assist_protocol
+    }
+
+    /// Deterministic path-doctor recommendation.
+    #[must_use]
+    pub const fn recommendation(&self) -> PathDoctorRecommendation {
+        self.recommendation
+    }
+
+    /// Router-assist mutation status.
+    #[must_use]
+    pub const fn mutation_status(&self) -> RouterAssistMutationStatus {
+        self.mutation_status
+    }
+
+    /// Whether this report authorizes a router mapping mutation.
+    #[must_use]
+    pub const fn router_state_change_authorized(&self) -> bool {
+        matches!(
+            self.mutation_status,
+            RouterAssistMutationStatus::ExplicitlyAuthorizedCandidate
+        )
+    }
+}
+
 /// Validation errors for Tailscale candidate input.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TailscaleCandidateError {
@@ -1222,6 +1358,64 @@ pub fn select_router_assist_candidates(
     }
 }
 
+/// Build deterministic path-doctor output for NAT and router-assist evidence.
+#[must_use]
+pub fn build_router_assist_path_doctor_report(
+    classification: NatClassification,
+    router_assist: &RouterAssistCandidateSet,
+) -> RouterAssistPathDoctorReport {
+    let router_assist_protocol = router_assist
+        .selected()
+        .map(RouterAssistProviderCandidate::protocol);
+    let mutation_status = router_assist_mutation_status(router_assist);
+    let recommendation = match classification.profile {
+        NatProfile::Ipv6Direct => PathDoctorRecommendation::UseIpv6Direct,
+        NatProfile::LikelyEasyNat => PathDoctorRecommendation::TryNatPunchedUdp,
+        NatProfile::HardSymmetricNat if router_assist_protocol.is_some() => {
+            PathDoctorRecommendation::TryRouterAssistThenRelay
+        }
+        NatProfile::HardSymmetricNat => PathDoctorRecommendation::UseRelayOrTailscale,
+        NatProfile::UdpBlocked => PathDoctorRecommendation::UseRelayOrTcpTlsFallback,
+        NatProfile::Unknown => PathDoctorRecommendation::GatherMoreEvidence,
+    };
+
+    RouterAssistPathDoctorReport {
+        nat_profile: classification.profile,
+        nat_confidence: classification.confidence,
+        hairpin: classification.hairpin,
+        nat_caveat: classification.caveat,
+        router_assist_caveat: router_assist.caveat(),
+        router_assist_protocol,
+        recommendation,
+        mutation_status,
+    }
+}
+
+fn router_assist_mutation_status(
+    router_assist: &RouterAssistCandidateSet,
+) -> RouterAssistMutationStatus {
+    if router_assist.selected().is_some() {
+        return RouterAssistMutationStatus::ExplicitlyAuthorizedCandidate;
+    }
+
+    match router_assist.caveat() {
+        "router_assist_disabled" => RouterAssistMutationStatus::Disabled,
+        "router_assist_mapping_capability_denied" => {
+            RouterAssistMutationStatus::BlockedWithoutCapability
+        }
+        "router_assist_invalid_lifetime_policy" => {
+            RouterAssistMutationStatus::InvalidLifetimePolicy
+        }
+        "router_assist_provider_failed_nonfatal" => {
+            RouterAssistMutationStatus::ProviderFailedNonfatal
+        }
+        "router_assist_no_policy_approved_candidates" => {
+            RouterAssistMutationStatus::NoPolicyApprovedCandidate
+        }
+        _ => RouterAssistMutationStatus::NoPolicyApprovedCandidate,
+    }
+}
+
 const fn router_assist_protocol_rank(protocol: RouterAssistProtocol, prefer_pcp: bool) -> u8 {
     match (prefer_pcp, protocol) {
         (true, RouterAssistProtocol::Pcp) | (false, RouterAssistProtocol::NatPmp) => 0,
@@ -1504,6 +1698,77 @@ mod tests {
         assert_eq!(selected.protocol(), RouterAssistProtocol::Pcp);
         assert_eq!(selected.protocol().code(), "pcp");
         assert_eq!(selected.external_endpoint().port(), 49_154);
+    }
+
+    #[test]
+    fn path_doctor_reports_hard_nat_fallback_without_router_mutation() {
+        let local = endpoint("10.0.0.2", 40_000);
+        let observed_a = endpoint("198.51.100.10", 50_000);
+        let observed_b = endpoint("198.51.100.10", 51_000);
+        let evidence = NatEvidence::new(
+            local.clone(),
+            vec![
+                observation(local.clone(), observed_a, 1),
+                observation(local, observed_b, 2),
+            ],
+            UdpProbe::Succeeded,
+            HairpinBehavior::NotSupported,
+        );
+        let router_assist =
+            select_router_assist_candidates(RouterAssistPolicy::DISABLED, Ok(Vec::new()));
+
+        let report =
+            build_router_assist_path_doctor_report(classify_nat(&evidence), &router_assist);
+
+        assert_eq!(report.nat_profile(), NatProfile::HardSymmetricNat);
+        assert_eq!(report.nat_confidence(), NatConfidence::High);
+        assert_eq!(report.hairpin(), HairpinBehavior::NotSupported);
+        assert_eq!(report.nat_caveat(), "incompatible_observed_mappings");
+        assert_eq!(report.router_assist_caveat(), "router_assist_disabled");
+        assert_eq!(report.router_assist_protocol(), None);
+        assert_eq!(report.recommendation().code(), "use_relay_or_tailscale");
+        assert_eq!(
+            report.mutation_status(),
+            RouterAssistMutationStatus::Disabled
+        );
+        assert!(!report.router_state_change_authorized());
+    }
+
+    #[test]
+    fn path_doctor_marks_router_assist_as_explicitly_authorized() {
+        let local = endpoint("10.0.0.2", 40_000);
+        let observed_a = endpoint("198.51.100.10", 50_000);
+        let observed_b = endpoint("198.51.100.10", 51_000);
+        let evidence = NatEvidence::new(
+            local.clone(),
+            vec![
+                observation(local.clone(), observed_a, 1),
+                observation(local, observed_b, 2),
+            ],
+            UdpProbe::Succeeded,
+            HairpinBehavior::NotSupported,
+        );
+        let policy = RouterAssistPolicy::new(true, 60_000_000);
+        let candidate =
+            router_assist_candidate("pcp", RouterAssistProtocol::Pcp, 49_154, 30_000_000, 3);
+        let router_assist = select_router_assist_candidates(policy, Ok(vec![candidate]));
+
+        let report =
+            build_router_assist_path_doctor_report(classify_nat(&evidence), &router_assist);
+
+        assert_eq!(
+            report.recommendation().code(),
+            "try_router_assist_then_relay"
+        );
+        assert_eq!(
+            report.router_assist_protocol(),
+            Some(RouterAssistProtocol::Pcp)
+        );
+        assert_eq!(
+            report.mutation_status().code(),
+            "router_assist_explicitly_authorized_candidate"
+        );
+        assert!(report.router_state_change_authorized());
     }
 
     #[test]

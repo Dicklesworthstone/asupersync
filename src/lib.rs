@@ -337,6 +337,8 @@ pub mod real_channel_mpsc_sync_semaphore_backpressure_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_oneshot_cancel_symbol_cancel_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_channel_oneshot_cancel_symbol_cancel_nested_scope_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_oneshot_cx_scope_cancellation_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_partition_distributed_distribution_integration_e2e_tests;
@@ -361,15 +363,15 @@ pub mod real_combinator_race_bracket_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_combinator_race_obligation_lyapunov_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_combinator_supervision_failure_propagation_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_combinator_retry_service_timeout_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_combinator_supervision_failure_propagation_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cx_macaroon_obligation_marking_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_cx_macaroon_obligation_recovery_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cx_macaroon_obligation_no_aliasing_proof_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_cx_macaroon_obligation_recovery_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cx_registry_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
@@ -377,9 +379,9 @@ pub mod real_cx_registry_trace_distributed_commit_permit_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_database_mysql_transport_aggregator_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_database_postgres_tls_connector_renegotiation_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_database_postgres_obligation_ledger_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_database_postgres_tls_connector_renegotiation_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_database_sqlite_obligation_dialectica_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
@@ -396,6 +398,8 @@ pub mod real_distributed_obligation_e2e_tests;
 pub mod real_distributed_snapshot_distributed_bridge_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_distributed_snapshot_raptorq_encoder_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_distributed_snapshot_trace_distributed_lattice_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_e2e_hardening_consolidation;
 #[cfg(all(test, feature = "real-service-e2e"))]
@@ -447,6 +451,8 @@ pub mod real_http_h2_server_messaging_kafka_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h3_native_net_quic_native_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_http_h3_server_h3_body_streaming_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h3_server_websocket_upgrade_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_pool_service_discover_integration_e2e_tests;
@@ -479,9 +485,9 @@ pub mod real_net_dns_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_dns_resolver_happy_eyeballs_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_net_quic_native_streams_net_quic_native_tls_integration_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_quic_core_session_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_net_quic_native_streams_net_quic_native_tls_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_tcp_listener_server_connection_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
@@ -505,9 +511,9 @@ pub mod real_obligation_choreography_pipeline_obligation_session_types_integrati
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_obligation_eprocess_lab_oracle_eprocess_integration_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_eprocess_calm_distributed_merge_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_obligation_eprocess_lab_oracle_eprocess_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_graded_obligation_no_aliasing_proof_nested_capability_e2e_tests;
 #[cfg(any(
@@ -607,12 +613,6 @@ pub mod real_trace_distributed_vclock_distributed_snapshot_integration_e2e_tests
 pub mod real_transport_security_authenticated_routing_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_types_budget_combinator_rate_limit_integration_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_channel_oneshot_cancel_symbol_cancel_nested_scope_integration_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_http_h3_server_h3_body_streaming_integration_e2e_tests;
-#[cfg(all(test, feature = "real-service-e2e"))]
-pub mod real_distributed_snapshot_trace_distributed_lattice_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_web_multipart_codec_raptorq_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]

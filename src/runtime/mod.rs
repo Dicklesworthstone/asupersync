@@ -139,9 +139,9 @@ pub mod io_op;
 pub mod kernel;
 pub mod obligation_table;
 pub mod panic_isolation;
+pub mod rch_health;
 pub mod reactor;
 pub mod region_heap;
-pub mod rch_health;
 #[cfg(test)]
 mod region_heap_metamorphic_tests;
 pub mod region_table;

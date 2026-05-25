@@ -28,16 +28,21 @@
 //! - Datagram acceptance maintains session protocol compliance
 //! - Error conditions properly cascade through integration layers
 
-use crate::net::quic_core::{QuicCoreError, QUIC_VARINT_MAX};
-use crate::net::quic::{QuicEndpoint, QuicConnection, QuicError};
-use crate::channel::session::{TrackedSender, TrackedPermit, TrackedOneshotSender, SessionTelemetrySnapshot};
-use crate::channel::{mpsc, oneshot, BoundedError};
+use crate::channel::session::{
+    SessionTelemetrySnapshot, TrackedOneshotSender, TrackedPermit, TrackedSender,
+};
+use crate::channel::{BoundedError, mpsc, oneshot};
 use crate::cx::Cx;
+use crate::net::quic::{QuicConnection, QuicEndpoint, QuicError};
+use crate::net::quic_core::{QUIC_VARINT_MAX, QuicCoreError};
+use crate::obligation::graded::{AbortedProof, CommittedProof, ObligationToken, SendPermit};
 use crate::types::{Outcome, Time};
-use crate::obligation::graded::{SendPermit, CommittedProof, AbortedProof, ObligationToken};
 use std::collections::{HashMap, VecDeque};
-use std::net::{SocketAddr, IpAddr, Ipv4Addr};
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicBool, Ordering}};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 // ────────────────────────────────────────────────────────────────────────────────
@@ -201,7 +206,7 @@ impl QuicSessionIntegrator {
     async fn handle_handshake_complete(
         &self,
         cx: &Cx,
-        connection_id: u64
+        connection_id: u64,
     ) -> Result<CommittedProof<SendPermit>, QuicError> {
         // Update connection state
         {
@@ -213,13 +218,18 @@ impl QuicSessionIntegrator {
         self.record_event(EventType::HandshakeCompleted, connection_id);
 
         // Send control message through session channel
-        let permit = self.control_sender.reserve(cx).await
-            .map_err(|e| QuicError::Internal(format!("Failed to reserve control channel: {:?}", e)))?;
+        let permit = self.control_sender.reserve(cx).await.map_err(|e| {
+            QuicError::Internal(format!("Failed to reserve control channel: {:?}", e))
+        })?;
 
         let proof = permit.send(ControlMessage::HandshakeComplete { connection_id });
 
-        self.operation_counters.control_messages_sent.fetch_add(1, Ordering::Relaxed);
-        self.operation_counters.operations_completed.fetch_add(1, Ordering::Relaxed);
+        self.operation_counters
+            .control_messages_sent
+            .fetch_add(1, Ordering::Relaxed);
+        self.operation_counters
+            .operations_completed
+            .fetch_add(1, Ordering::Relaxed);
 
         Ok(proof)
     }
@@ -235,10 +245,12 @@ impl QuicSessionIntegrator {
         {
             let state = self.connection_state.lock().unwrap();
             match *state {
-                QuicConnectionState::Connected => {},
+                QuicConnectionState::Connected => {}
                 QuicConnectionState::Closing => return Err(QuicError::ConnectionLost),
                 QuicConnectionState::Closed => return Err(QuicError::ConnectionLost),
-                QuicConnectionState::Failed(ref reason) => return Err(QuicError::Internal(reason.clone())),
+                QuicConnectionState::Failed(ref reason) => {
+                    return Err(QuicError::Internal(reason.clone()));
+                }
                 _ => return Err(QuicError::Internal("Not connected".to_string())),
             }
         }
@@ -252,16 +264,27 @@ impl QuicSessionIntegrator {
         }
 
         // Record event
-        self.record_event(EventType::DatagramReceived { size: payload.len() }, connection_id);
+        self.record_event(
+            EventType::DatagramReceived {
+                size: payload.len(),
+            },
+            connection_id,
+        );
 
         // Send data message through session channel
-        let permit = self.data_sender.reserve(cx).await
-            .map_err(|e| QuicError::Internal(format!("Failed to reserve data channel: {:?}", e)))?;
+        let permit =
+            self.data_sender.reserve(cx).await.map_err(|e| {
+                QuicError::Internal(format!("Failed to reserve data channel: {:?}", e))
+            })?;
 
         let proof = permit.send(DataMessage::Datagram { payload });
 
-        self.operation_counters.data_messages_sent.fetch_add(1, Ordering::Relaxed);
-        self.operation_counters.operations_completed.fetch_add(1, Ordering::Relaxed);
+        self.operation_counters
+            .data_messages_sent
+            .fetch_add(1, Ordering::Relaxed);
+        self.operation_counters
+            .operations_completed
+            .fetch_add(1, Ordering::Relaxed);
 
         Ok(proof)
     }
@@ -286,9 +309,13 @@ impl QuicSessionIntegrator {
 
         // Record event
         let event_type = if graceful {
-            EventType::ConnectionClosing { reason: reason.clone() }
+            EventType::ConnectionClosing {
+                reason: reason.clone(),
+            }
         } else {
-            EventType::ConnectionClosed { reason: reason.clone() }
+            EventType::ConnectionClosed {
+                reason: reason.clone(),
+            }
         };
         self.record_event(event_type, connection_id);
 
@@ -296,8 +323,10 @@ impl QuicSessionIntegrator {
         self.close_all_sessions();
 
         // Send control message
-        let permit = self.control_sender.reserve(cx).await
-            .map_err(|e| QuicError::Internal(format!("Failed to reserve for close: {:?}", e)))?;
+        let permit =
+            self.control_sender.reserve(cx).await.map_err(|e| {
+                QuicError::Internal(format!("Failed to reserve for close: {:?}", e))
+            })?;
 
         let message = if graceful {
             ControlMessage::Closing { reason }
@@ -307,7 +336,9 @@ impl QuicSessionIntegrator {
 
         let proof = permit.send(message);
 
-        self.operation_counters.control_messages_sent.fetch_add(1, Ordering::Relaxed);
+        self.operation_counters
+            .control_messages_sent
+            .fetch_add(1, Ordering::Relaxed);
 
         // Update connection state to closed if it was closing
         if graceful {
@@ -322,12 +353,16 @@ impl QuicSessionIntegrator {
     fn create_session(&self, connection_id: u64) -> Result<u64, String> {
         let state = self.connection_state.lock().unwrap();
         match *state {
-            QuicConnectionState::Connected => {},
+            QuicConnectionState::Connected => {}
             _ => return Err("Cannot create session - connection not ready".to_string()),
         }
         drop(state);
 
-        let session_id = self.operation_counters.sessions_created.fetch_add(1, Ordering::Relaxed) + 1;
+        let session_id = self
+            .operation_counters
+            .sessions_created
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
         let handle = SessionHandle {
             session_id,
             connection_id,
@@ -353,7 +388,9 @@ impl QuicSessionIntegrator {
         let count = sessions.len() as u64;
         sessions.clear();
 
-        self.operation_counters.sessions_closed.fetch_add(count, Ordering::Relaxed);
+        self.operation_counters
+            .sessions_closed
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     /// Record a connection event for lifecycle tracking.
@@ -380,11 +417,26 @@ impl QuicSessionIntegrator {
             active_sessions: active_session_count,
             total_events: event_count,
             datagram_stats,
-            control_messages_sent: self.operation_counters.control_messages_sent.load(Ordering::Relaxed),
-            data_messages_sent: self.operation_counters.data_messages_sent.load(Ordering::Relaxed),
-            sessions_created: self.operation_counters.sessions_created.load(Ordering::Relaxed),
-            sessions_closed: self.operation_counters.sessions_closed.load(Ordering::Relaxed),
-            operations_completed: self.operation_counters.operations_completed.load(Ordering::Relaxed),
+            control_messages_sent: self
+                .operation_counters
+                .control_messages_sent
+                .load(Ordering::Relaxed),
+            data_messages_sent: self
+                .operation_counters
+                .data_messages_sent
+                .load(Ordering::Relaxed),
+            sessions_created: self
+                .operation_counters
+                .sessions_created
+                .load(Ordering::Relaxed),
+            sessions_closed: self
+                .operation_counters
+                .sessions_closed
+                .load(Ordering::Relaxed),
+            operations_completed: self
+                .operation_counters
+                .operations_completed
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -423,7 +475,10 @@ mod tests {
         assert_eq!(initial_stats.connection_state, QuicConnectionState::Initial);
 
         // Simulate handshake completion
-        let proof = integrator.handle_handshake_complete(&cx, connection_id).await.unwrap();
+        let proof = integrator
+            .handle_handshake_complete(&cx, connection_id)
+            .await
+            .unwrap();
 
         // Verify session operations are now possible
         let session_id = integrator.create_session(connection_id).unwrap();
@@ -434,8 +489,10 @@ mod tests {
         assert_eq!(stats.control_messages_sent, 1);
         assert_eq!(stats.sessions_created, 1);
 
-        println!("✓ Handshake drives session creation - session {} created after connection {}",
-            session_id, connection_id);
+        println!(
+            "✓ Handshake drives session creation - session {} created after connection {}",
+            session_id, connection_id
+        );
     }
 
     #[tokio::test]
@@ -446,7 +503,10 @@ mod tests {
         let connection_id = 23456;
 
         // Setup connected state
-        integrator.handle_handshake_complete(&cx, connection_id).await.unwrap();
+        integrator
+            .handle_handshake_complete(&cx, connection_id)
+            .await
+            .unwrap();
         let _session_id = integrator.create_session(connection_id).unwrap();
 
         // Process multiple datagrams
@@ -457,7 +517,10 @@ mod tests {
         ];
 
         for (i, payload) in test_payloads.iter().enumerate() {
-            let proof = integrator.process_datagram(&cx, payload.clone(), connection_id).await.unwrap();
+            let proof = integrator
+                .process_datagram(&cx, payload.clone(), connection_id)
+                .await
+                .unwrap();
             println!("Processed datagram {}: {} bytes", i + 1, payload.len());
         }
 
@@ -467,8 +530,10 @@ mod tests {
         assert_eq!(stats.data_messages_sent, 3);
         assert_eq!(stats.operations_completed, 4); // 1 handshake + 3 datagrams
 
-        println!("✓ Datagram processing pipeline - {} datagrams processed, {} session ops triggered",
-            stats.datagram_stats.total_received, stats.datagram_stats.session_operations_triggered);
+        println!(
+            "✓ Datagram processing pipeline - {} datagrams processed, {} session ops triggered",
+            stats.datagram_stats.total_received, stats.datagram_stats.session_operations_triggered
+        );
     }
 
     #[tokio::test]
@@ -479,30 +544,36 @@ mod tests {
         let connection_id = 34567;
 
         // Setup connected state with active session
-        integrator.handle_handshake_complete(&cx, connection_id).await.unwrap();
+        integrator
+            .handle_handshake_complete(&cx, connection_id)
+            .await
+            .unwrap();
         let _session_id = integrator.create_session(connection_id).unwrap();
 
         // Process some data
-        integrator.process_datagram(&cx, b"test data".to_vec(), connection_id).await.unwrap();
+        integrator
+            .process_datagram(&cx, b"test data".to_vec(), connection_id)
+            .await
+            .unwrap();
 
         let before_close = integrator.get_stats();
         assert_eq!(before_close.active_sessions, 1);
 
         // Graceful close
-        let proof = integrator.handle_connection_close(
-            &cx,
-            connection_id,
-            "Normal close".to_string(),
-            true
-        ).await.unwrap();
+        let proof = integrator
+            .handle_connection_close(&cx, connection_id, "Normal close".to_string(), true)
+            .await
+            .unwrap();
 
         let after_close = integrator.get_stats();
         assert_eq!(after_close.connection_state, QuicConnectionState::Closed);
         assert_eq!(after_close.active_sessions, 0);
         assert_eq!(after_close.sessions_closed, 1);
 
-        println!("✓ Graceful close propagation - connection closed gracefully, {} sessions cleaned up",
-            after_close.sessions_closed);
+        println!(
+            "✓ Graceful close propagation - connection closed gracefully, {} sessions cleaned up",
+            after_close.sessions_closed
+        );
     }
 
     #[tokio::test]
@@ -513,7 +584,10 @@ mod tests {
         let connection_id = 45678;
 
         // Setup connected state with multiple sessions
-        integrator.handle_handshake_complete(&cx, connection_id).await.unwrap();
+        integrator
+            .handle_handshake_complete(&cx, connection_id)
+            .await
+            .unwrap();
         let _session1 = integrator.create_session(connection_id).unwrap();
         let _session2 = integrator.create_session(connection_id).unwrap();
 
@@ -521,20 +595,20 @@ mod tests {
         assert_eq!(before_failure.active_sessions, 2);
 
         // Abrupt connection loss
-        let proof = integrator.handle_connection_close(
-            &cx,
-            connection_id,
-            "Connection lost".to_string(),
-            false
-        ).await.unwrap();
+        let proof = integrator
+            .handle_connection_close(&cx, connection_id, "Connection lost".to_string(), false)
+            .await
+            .unwrap();
 
         let after_failure = integrator.get_stats();
         assert_eq!(after_failure.connection_state, QuicConnectionState::Closed);
         assert_eq!(after_failure.active_sessions, 0);
         assert_eq!(after_failure.sessions_closed, 2);
 
-        println!("✓ Abrupt close handling - connection lost abruptly, {} sessions cleaned up",
-            after_failure.sessions_closed);
+        println!(
+            "✓ Abrupt close handling - connection lost abruptly, {} sessions cleaned up",
+            after_failure.sessions_closed
+        );
     }
 
     #[tokio::test]
@@ -548,14 +622,23 @@ mod tests {
 
         // Initial state - should fail
         let result = integrator.create_session(connection_id);
-        assert!(result.is_err(), "Session creation should fail in initial state");
+        assert!(
+            result.is_err(),
+            "Session creation should fail in initial state"
+        );
 
         // After handshake - should succeed
-        integrator.handle_handshake_complete(&cx, connection_id).await.unwrap();
+        integrator
+            .handle_handshake_complete(&cx, connection_id)
+            .await
+            .unwrap();
         let session_id = integrator.create_session(connection_id).unwrap();
 
         // After close - should fail
-        integrator.handle_connection_close(&cx, connection_id, "Test close".to_string(), true).await.unwrap();
+        integrator
+            .handle_connection_close(&cx, connection_id, "Test close".to_string(), true)
+            .await
+            .unwrap();
         let result2 = integrator.create_session(connection_id);
         assert!(result2.is_err(), "Session creation should fail after close");
 
@@ -575,18 +658,31 @@ mod tests {
         let connection_id = 67890;
 
         // Setup connected state
-        integrator.handle_handshake_complete(&cx, connection_id).await.unwrap();
+        integrator
+            .handle_handshake_complete(&cx, connection_id)
+            .await
+            .unwrap();
 
         // Simulate transport error by trying to process datagram after close
-        integrator.handle_connection_close(&cx, connection_id, "Transport error".to_string(), false).await.unwrap();
+        integrator
+            .handle_connection_close(&cx, connection_id, "Transport error".to_string(), false)
+            .await
+            .unwrap();
 
         // Try to process datagram - should fail
-        let result = integrator.process_datagram(&cx, b"test".to_vec(), connection_id).await;
-        assert!(result.is_err(), "Datagram processing should fail after connection close");
+        let result = integrator
+            .process_datagram(&cx, b"test".to_vec(), connection_id)
+            .await;
+        assert!(
+            result.is_err(),
+            "Datagram processing should fail after connection close"
+        );
 
         match result {
             Err(QuicError::ConnectionLost) => {
-                println!("✓ Error propagation - transport error correctly propagated to session layer");
+                println!(
+                    "✓ Error propagation - transport error correctly propagated to session layer"
+                );
             }
             _ => panic!("Unexpected error type"),
         }
@@ -603,7 +699,10 @@ mod tests {
         let connection_id = 78901;
 
         // 1. Handshake
-        integrator.handle_handshake_complete(&cx, connection_id).await.unwrap();
+        integrator
+            .handle_handshake_complete(&cx, connection_id)
+            .await
+            .unwrap();
 
         // 2. Create sessions
         let session1 = integrator.create_session(connection_id).unwrap();
@@ -612,11 +711,17 @@ mod tests {
         // 3. Process data
         for i in 0..5 {
             let payload = format!("Message {}", i).into_bytes();
-            integrator.process_datagram(&cx, payload, connection_id).await.unwrap();
+            integrator
+                .process_datagram(&cx, payload, connection_id)
+                .await
+                .unwrap();
         }
 
         // 4. Graceful close
-        integrator.handle_connection_close(&cx, connection_id, "Normal shutdown".to_string(), true).await.unwrap();
+        integrator
+            .handle_connection_close(&cx, connection_id, "Normal shutdown".to_string(), true)
+            .await
+            .unwrap();
 
         let final_stats = integrator.get_stats();
 
@@ -630,10 +735,22 @@ mod tests {
         assert!(final_stats.total_events >= 7); // handshake + 5 datagrams + close
 
         println!("✓ Comprehensive lifecycle integration completed:");
-        println!("  Sessions: {} created, {} closed", final_stats.sessions_created, final_stats.sessions_closed);
-        println!("  Messages: {} control, {} data", final_stats.control_messages_sent, final_stats.data_messages_sent);
-        println!("  Datagrams: {} processed", final_stats.datagram_stats.total_received);
+        println!(
+            "  Sessions: {} created, {} closed",
+            final_stats.sessions_created, final_stats.sessions_closed
+        );
+        println!(
+            "  Messages: {} control, {} data",
+            final_stats.control_messages_sent, final_stats.data_messages_sent
+        );
+        println!(
+            "  Datagrams: {} processed",
+            final_stats.datagram_stats.total_received
+        );
         println!("  Events: {} recorded", final_stats.total_events);
-        println!("  Operations: {} completed", final_stats.operations_completed);
+        println!(
+            "  Operations: {} completed",
+            final_stats.operations_completed
+        );
     }
 }

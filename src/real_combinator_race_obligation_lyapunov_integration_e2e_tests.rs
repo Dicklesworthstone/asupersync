@@ -10,12 +10,15 @@ use crate::cx::Cx;
 use crate::error::AsupersyncError;
 use crate::obligation::lyapunov::{LyapunovFunction, LyapunovPotential, StabilityAnalyzer};
 use crate::obligation::{Obligation, ObligationLedger, ObligationState};
-use crate::runtime::{region, spawn, RuntimeBuilder};
-use crate::time::{sleep, Duration};
-use crate::types::{Budget, Outcome, ObligationId, TaskId};
+use crate::runtime::{RuntimeBuilder, region, spawn};
+use crate::time::{Duration, sleep};
+use crate::types::{Budget, ObligationId, Outcome, TaskId};
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicUsize, Ordering}};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, AtomicUsize, Ordering},
+};
 
 /// Number of race participants for stress testing.
 const RACE_PARTICIPANTS: usize = 8;
@@ -74,9 +77,9 @@ impl RaceLyapunovTestFramework {
         let race_result = self.execute_race_with_tracking(cx, participants).await?;
 
         // Verify loser obligations are cleaned up
-        let cleanup_verification = self.verify_loser_obligation_cleanup(
-            &race_result.losers
-        ).await?;
+        let cleanup_verification = self
+            .verify_loser_obligation_cleanup(&race_result.losers)
+            .await?;
 
         // Calculate final Lyapunov potential
         let final_potential = self.calculate_system_potential().await?;
@@ -119,8 +122,12 @@ impl RaceLyapunovTestFramework {
             let race_cx = cx.clone();
 
             let race_task = async move {
-                let participants = framework.create_race_participants_with_obligations(&race_cx).await?;
-                framework.execute_race_with_tracking(&race_cx, participants).await
+                let participants = framework
+                    .create_race_participants_with_obligations(&race_cx)
+                    .await?;
+                framework
+                    .execute_race_with_tracking(&race_cx, participants)
+                    .await
             };
 
             race_tasks.push(race_task);
@@ -141,14 +148,15 @@ impl RaceLyapunovTestFramework {
             }
 
             Outcome::Ok(results)
-        }).await?;
+        })
+        .await?;
 
         // Analyze post-race stability
         let post_race_stability = self.analyze_system_stability().await?;
 
         // Verify stability maintained or improved
-        let stability_maintained = post_race_stability.stability_metric >=
-                                 baseline_stability.stability_metric - STABILITY_THRESHOLD;
+        let stability_maintained = post_race_stability.stability_metric
+            >= baseline_stability.stability_metric - STABILITY_THRESHOLD;
 
         // Check obligation cleanup across all races
         let total_participants = race_results.iter().map(|r| r.losers.len() + 1).sum();
@@ -174,16 +182,18 @@ impl RaceLyapunovTestFramework {
         cx: &Cx,
     ) -> Outcome<TimeoutSafetyResult, RaceLyapunovError> {
         // Create race with intentionally slow participants
-        let slow_participants = self.create_slow_race_participants_with_obligations(cx).await?;
+        let slow_participants = self
+            .create_slow_race_participants_with_obligations(cx)
+            .await?;
 
         // Record pre-race obligation count
         let pre_race_obligations = self.count_active_obligations().await?;
 
         // Execute race with timeout
         let timeout_duration = Duration::from_millis(MAX_RACE_DURATION_MS / 2);
-        let race_result = self.execute_race_with_timeout(
-            cx, slow_participants, timeout_duration
-        ).await?;
+        let race_result = self
+            .execute_race_with_timeout(cx, slow_participants, timeout_duration)
+            .await?;
 
         // Verify all obligations cleaned up despite timeout
         sleep(cx, Duration::from_millis(100)).await?; // Allow cleanup time
@@ -290,7 +300,9 @@ impl RaceLyapunovTestFramework {
                 sleep(&cx, participant_clone.estimated_duration).await?;
 
                 // Update Lyapunov potential during work
-                framework.update_potential_during_work(&participant_clone).await?;
+                framework
+                    .update_potential_during_work(&participant_clone)
+                    .await?;
 
                 // Return participant for winner identification
                 Outcome::Ok(participant_clone.task_id)
@@ -300,19 +312,23 @@ impl RaceLyapunovTestFramework {
         }
 
         // Execute race using combinator
-        let winner = race(race_tasks).await
+        let winner = race(race_tasks)
+            .await
             .map_err(|e| RaceLyapunovError::RaceExecution(format!("Race failed: {:?}", e)))?;
 
         let execution_time = start_time.elapsed();
 
         // Identify losers
-        let losers: Vec<_> = participants.iter()
+        let losers: Vec<_> = participants
+            .iter()
             .filter(|p| p.task_id != winner)
             .map(|p| p.task_id)
             .collect();
 
         // Record race completion
-        self.race_tracker.record_race_completion(winner, &losers).await;
+        self.race_tracker
+            .record_race_completion(winner, &losers)
+            .await;
 
         Ok(RaceExecutionResult {
             winner,
@@ -367,7 +383,7 @@ impl RaceLyapunovTestFramework {
                 // Cleanup timed out participants
                 self.cleanup_timed_out_participants(&participants).await?;
                 (TaskId::new(), true) // Dummy winner for timeout case
-            },
+            }
             Err(e) => return Err(e),
         };
 
@@ -377,7 +393,8 @@ impl RaceLyapunovTestFramework {
         let losers: Vec<_> = if timed_out {
             participants.iter().map(|p| p.task_id).collect()
         } else {
-            participants.iter()
+            participants
+                .iter()
                 .filter(|p| p.task_id != winner)
                 .map(|p| p.task_id)
                 .collect()
@@ -418,7 +435,9 @@ impl RaceLyapunovTestFramework {
         &self,
         participant: &RaceParticipant,
     ) -> Result<(), RaceLyapunovError> {
-        let potential_delta = self.potential_calculator.calculate_work_potential(participant)?;
+        let potential_delta = self
+            .potential_calculator
+            .calculate_work_potential(participant)?;
 
         let mut analyzer = self.stability_analyzer.lock().unwrap();
         analyzer.update_potential(potential_delta)?;
@@ -462,10 +481,10 @@ impl RaceLyapunovTestFramework {
                 match ledger.get_obligation_state(obligation_id)? {
                     ObligationState::Aborted | ObligationState::Committed => {
                         cleaned_obligations += 1;
-                    },
+                    }
                     ObligationState::Reserved => {
                         leaked_obligations += 1;
-                    },
+                    }
                 }
             }
         }
@@ -478,7 +497,9 @@ impl RaceLyapunovTestFramework {
     }
 
     /// Verifies global obligation cleanup across all races.
-    async fn verify_global_obligation_cleanup(&self) -> Result<GlobalCleanupVerification, RaceLyapunovError> {
+    async fn verify_global_obligation_cleanup(
+        &self,
+    ) -> Result<GlobalCleanupVerification, RaceLyapunovError> {
         let ledger = self.obligation_ledger.lock().unwrap();
         let all_obligations_resolved = ledger.all_obligations_resolved();
         let total_active_obligations = ledger.count_active_obligations();
@@ -505,10 +526,7 @@ impl RaceLyapunovTestFramework {
         for participant in participants {
             for obligation in &participant.obligations {
                 // Abort obligations for timed-out participants
-                ledger.update_obligation_state(
-                    obligation.id(),
-                    ObligationState::Aborted
-                )?;
+                ledger.update_obligation_state(obligation.id(), ObligationState::Aborted)?;
             }
         }
 
@@ -579,7 +597,10 @@ impl PotentialCalculator {
         }
     }
 
-    fn calculate_work_potential(&self, participant: &RaceParticipant) -> Result<f64, RaceLyapunovError> {
+    fn calculate_work_potential(
+        &self,
+        participant: &RaceParticipant,
+    ) -> Result<f64, RaceLyapunovError> {
         // Calculate potential based on participant work
         let work_factor = participant.estimated_duration.as_millis() as f64 / 1000.0;
         let obligation_factor = participant.obligations.len() as f64;
@@ -709,8 +730,12 @@ impl std::fmt::Display for RaceLyapunovError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RaceLyapunovError::RaceExecution(msg) => write!(f, "Race execution error: {}", msg),
-            RaceLyapunovError::ObligationManagement(msg) => write!(f, "Obligation management error: {}", msg),
-            RaceLyapunovError::LyapunovAnalysis(msg) => write!(f, "Lyapunov analysis error: {}", msg),
+            RaceLyapunovError::ObligationManagement(msg) => {
+                write!(f, "Obligation management error: {}", msg)
+            }
+            RaceLyapunovError::LyapunovAnalysis(msg) => {
+                write!(f, "Lyapunov analysis error: {}", msg)
+            }
             RaceLyapunovError::ResourceLeak(msg) => write!(f, "Resource leak: {}", msg),
             RaceLyapunovError::StabilityViolation(msg) => write!(f, "Stability violation: {}", msg),
             RaceLyapunovError::Timeout => write!(f, "Operation timed out"),
@@ -734,13 +759,17 @@ mod race_loser_cleanup_tests {
 
     #[test]
     fn test_race_loser_obligation_cleanup() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let framework = RaceLyapunovTestFramework::new();
 
-                let result = framework.test_race_loser_obligation_cleanup(&cx).await
+                let result = framework
+                    .test_race_loser_obligation_cleanup(&cx)
+                    .await
                     .expect("Failed to test race loser cleanup");
 
                 assert!(result.potential_decremented);
@@ -751,19 +780,25 @@ mod race_loser_cleanup_tests {
                 assert!(result.no_resource_leaks);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_race_with_multiple_participants() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let framework = RaceLyapunovTestFramework::new();
 
-                let result = framework.test_race_loser_obligation_cleanup(&cx).await
+                let result = framework
+                    .test_race_loser_obligation_cleanup(&cx)
+                    .await
                     .expect("Failed to test multi-participant race");
 
                 // Should have exactly one winner and (RACE_PARTICIPANTS - 1) losers
@@ -774,8 +809,10 @@ mod race_loser_cleanup_tests {
                 assert_eq!(result.obligations_cleaned, expected_loser_obligations);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 }
 
@@ -786,13 +823,17 @@ mod stability_analysis_tests {
 
     #[test]
     fn test_concurrent_races_stability() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let framework = RaceLyapunovTestFramework::new();
 
-                let result = framework.test_concurrent_races_stability(&cx).await
+                let result = framework
+                    .test_concurrent_races_stability(&cx)
+                    .await
                     .expect("Failed to test concurrent races");
 
                 assert!(result.concurrent_races_completed > 0);
@@ -801,13 +842,17 @@ mod stability_analysis_tests {
                 assert!(result.lyapunov_convergence_verified);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_lyapunov_potential_consistency() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -817,7 +862,9 @@ mod stability_analysis_tests {
                 let mut total_potential_delta = 0.0;
 
                 for _ in 0..3 {
-                    let result = framework.test_race_loser_obligation_cleanup(&cx).await
+                    let result = framework
+                        .test_race_loser_obligation_cleanup(&cx)
+                        .await
                         .expect("Failed to test race cleanup");
 
                     total_potential_delta += result.potential_delta;
@@ -828,8 +875,10 @@ mod stability_analysis_tests {
                 assert!(total_potential_delta > 0.0);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 }
 
@@ -840,13 +889,17 @@ mod timeout_safety_tests {
 
     #[test]
     fn test_race_timeout_obligation_safety() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let framework = RaceLyapunovTestFramework::new();
 
-                let result = framework.test_race_timeout_obligation_safety(&cx).await
+                let result = framework
+                    .test_race_timeout_obligation_safety(&cx)
+                    .await
                     .expect("Failed to test timeout safety");
 
                 assert!(result.race_timed_out);
@@ -855,31 +908,41 @@ mod timeout_safety_tests {
                 assert!(result.cleanup_duration_ms > 0);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_timeout_cleanup_completeness() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let framework = RaceLyapunovTestFramework::new();
 
                 // Record initial obligation count
-                let initial_count = framework.count_active_obligations().await
+                let initial_count = framework
+                    .count_active_obligations()
+                    .await
                     .expect("Failed to count initial obligations");
 
-                let result = framework.test_race_timeout_obligation_safety(&cx).await
+                let result = framework
+                    .test_race_timeout_obligation_safety(&cx)
+                    .await
                     .expect("Failed to test timeout cleanup");
 
                 // Should return to baseline or lower obligation count
                 assert!(result.post_race_obligations <= initial_count);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 }
 
@@ -890,7 +953,9 @@ mod edge_case_tests {
 
     #[test]
     fn test_empty_race_handling() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -898,19 +963,25 @@ mod edge_case_tests {
 
                 // Test with minimal participants
                 let empty_participants = Vec::new();
-                let result = framework.execute_race_with_tracking(&cx, empty_participants).await;
+                let result = framework
+                    .execute_race_with_tracking(&cx, empty_participants)
+                    .await;
 
                 // Should handle empty race gracefully
                 assert!(result.is_err() || result.unwrap().losers.is_empty());
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_single_participant_race() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -925,14 +996,18 @@ mod edge_case_tests {
                     work_payload: Bytes::from("single"),
                 }];
 
-                let result = framework.execute_race_with_tracking(&cx, single_participant).await
+                let result = framework
+                    .execute_race_with_tracking(&cx, single_participant)
+                    .await
                     .expect("Failed to execute single participant race");
 
                 // Should have winner and no losers
                 assert_eq!(result.losers.len(), 0);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 }

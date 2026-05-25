@@ -27,12 +27,12 @@
 //! - Clean cancellation during both sleep and operation phases
 //! - Time source consistency prevents spurious timeouts
 
-use crate::combinator::retry::{retry, RetryPolicy};
+use crate::combinator::retry::{RetryPolicy, retry};
+use crate::cx::Cx;
 use crate::service::timeout::{Timeout, TimeoutLayer};
 use crate::service::{Layer, Service, ServiceBuilder, ServiceExt};
 use crate::time::{Elapsed, Sleep};
 use crate::types::{Outcome, Time};
-use crate::cx::Cx;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -121,7 +121,11 @@ struct ServiceError {
 
 impl std::fmt::Display for ServiceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Service error on attempt {}: {}", self.attempt, self.message)
+        write!(
+            f,
+            "Service error on attempt {}: {}",
+            self.attempt, self.message
+        )
     }
 }
 
@@ -189,8 +193,11 @@ impl Future for ServiceFuture {
                 // Update the call record with completion time
                 {
                     let mut state = self.state.lock().unwrap();
-                    if let Some(record) = state.call_timeline.iter_mut()
-                        .find(|r| r.call_id == self.call_id) {
+                    if let Some(record) = state
+                        .call_timeline
+                        .iter_mut()
+                        .find(|r| r.call_id == self.call_id)
+                    {
                         record.end_time = Some((state.time_source)());
                     }
                 }
@@ -229,9 +236,7 @@ impl TestEnvironment {
         let current_time = Arc::new(Mutex::new(start_time));
         let current_time_clone = Arc::clone(&current_time);
 
-        let time_source = move || {
-            *current_time_clone.lock().unwrap()
-        };
+        let time_source = move || *current_time_clone.lock().unwrap();
 
         Self {
             current_time,
@@ -241,9 +246,7 @@ impl TestEnvironment {
 
     fn advance_time(&self, duration: Duration) {
         let mut time = self.current_time.lock().unwrap();
-        *time = time.saturating_add_nanos(
-            duration.as_nanos().min(u128::from(u64::MAX)) as u64
-        );
+        *time = time.saturating_add_nanos(duration.as_nanos().min(u128::from(u64::MAX)) as u64);
     }
 
     fn now(&self) -> Time {
@@ -276,20 +279,21 @@ mod tests {
             .with_jitter(0.0); // No jitter for deterministic testing
 
         // Timeout: 500ms (should allow first attempt + one retry)
-        let timeout_service = Timeout::with_time_getter(
-            service.clone(),
-            Duration::from_millis(500),
-            env.time_source
-        );
+        let timeout_service =
+            Timeout::with_time_getter(service.clone(), Duration::from_millis(500), env.time_source);
 
         // Create retry operation
-        let retry_operation = retry(retry_policy, |_: &ServiceError| true, || async {
-            let mut svc = timeout_service.clone();
-            match svc.call(TestRequest { id: 1 }).await {
-                Ok(resp) => Outcome::Ok(resp),
-                Err(err) => Outcome::Err(err),
-            }
-        });
+        let retry_operation = retry(
+            retry_policy,
+            |_: &ServiceError| true,
+            || async {
+                let mut svc = timeout_service.clone();
+                match svc.call(TestRequest { id: 1 }).await {
+                    Ok(resp) => Outcome::Ok(resp),
+                    Err(err) => Outcome::Err(err),
+                }
+            },
+        );
 
         // Execute the retry operation
         let result = retry_operation.await;
@@ -301,7 +305,11 @@ mod tests {
         let (call_count, timeline) = service.get_call_info();
 
         // Should have at most 2 calls (initial + one retry) before timeout
-        assert!(call_count <= 2, "Expected at most 2 calls, got {}", call_count);
+        assert!(
+            call_count <= 2,
+            "Expected at most 2 calls, got {}",
+            call_count
+        );
 
         // Verify no calls started after timeout expiry
         let timeout_deadline = start_time.saturating_add_nanos(500_000_000);
@@ -315,7 +323,10 @@ mod tests {
             );
         }
 
-        println!("✓ Basic timeout boundary test passed - {} calls made", call_count);
+        println!(
+            "✓ Basic timeout boundary test passed - {} calls made",
+            call_count
+        );
     }
 
     #[tokio::test]
@@ -335,19 +346,20 @@ mod tests {
             .with_jitter(0.0);
 
         // Timeout: 200ms (shorter than first retry delay)
-        let timeout_service = Timeout::with_time_getter(
-            service.clone(),
-            Duration::from_millis(200),
-            env.time_source
-        );
+        let timeout_service =
+            Timeout::with_time_getter(service.clone(), Duration::from_millis(200), env.time_source);
 
-        let retry_operation = retry(retry_policy, |_: &ServiceError| true, || async {
-            let mut svc = timeout_service.clone();
-            match svc.call(TestRequest { id: 2 }).await {
-                Ok(resp) => Outcome::Ok(resp),
-                Err(err) => Outcome::Err(err),
-            }
-        });
+        let retry_operation = retry(
+            retry_policy,
+            |_: &ServiceError| true,
+            || async {
+                let mut svc = timeout_service.clone();
+                match svc.call(TestRequest { id: 2 }).await {
+                    Ok(resp) => Outcome::Ok(resp),
+                    Err(err) => Outcome::Err(err),
+                }
+            },
+        );
 
         let result = retry_operation.await;
 
@@ -357,7 +369,11 @@ mod tests {
         let (call_count, timeline) = service.get_call_info();
 
         // Should have only made 1 call (initial attempt), no retries due to timeout
-        assert_eq!(call_count, 1, "Expected exactly 1 call (timeout during sleep), got {}", call_count);
+        assert_eq!(
+            call_count, 1,
+            "Expected exactly 1 call (timeout during sleep), got {}",
+            call_count
+        );
 
         // Verify timing constraints
         let timeout_deadline = start_time.saturating_add_nanos(200_000_000);
@@ -368,7 +384,10 @@ mod tests {
             );
         }
 
-        println!("✓ Sleep phase cancellation test passed - {} calls made", call_count);
+        println!(
+            "✓ Sleep phase cancellation test passed - {} calls made",
+            call_count
+        );
     }
 
     #[tokio::test]
@@ -388,19 +407,20 @@ mod tests {
             .with_jitter(0.0);
 
         // Timeout: 300ms (shorter than single service call duration)
-        let timeout_service = Timeout::with_time_getter(
-            service.clone(),
-            Duration::from_millis(300),
-            env.time_source
-        );
+        let timeout_service =
+            Timeout::with_time_getter(service.clone(), Duration::from_millis(300), env.time_source);
 
-        let retry_operation = retry(retry_policy, |_: &ServiceError| true, || async {
-            let mut svc = timeout_service.clone();
-            match svc.call(TestRequest { id: 3 }).await {
-                Ok(resp) => Outcome::Ok(resp),
-                Err(err) => Outcome::Err(err),
-            }
-        });
+        let retry_operation = retry(
+            retry_policy,
+            |_: &ServiceError| true,
+            || async {
+                let mut svc = timeout_service.clone();
+                match svc.call(TestRequest { id: 3 }).await {
+                    Ok(resp) => Outcome::Ok(resp),
+                    Err(err) => Outcome::Err(err),
+                }
+            },
+        );
 
         let result = retry_operation.await;
 
@@ -410,9 +430,16 @@ mod tests {
         let (call_count, timeline) = service.get_call_info();
 
         // Should have made exactly 1 call that was cancelled
-        assert_eq!(call_count, 1, "Expected exactly 1 call (timeout during attempt), got {}", call_count);
+        assert_eq!(
+            call_count, 1,
+            "Expected exactly 1 call (timeout during attempt), got {}",
+            call_count
+        );
 
-        println!("✓ Attempt phase cancellation test passed - {} calls made", call_count);
+        println!(
+            "✓ Attempt phase cancellation test passed - {} calls made",
+            call_count
+        );
     }
 
     #[tokio::test]
@@ -432,19 +459,20 @@ mod tests {
             .with_jitter(0.0);
 
         // Timeout: 10ms (very rapid - should kill first attempt quickly)
-        let timeout_service = Timeout::with_time_getter(
-            service.clone(),
-            Duration::from_millis(10),
-            env.time_source
-        );
+        let timeout_service =
+            Timeout::with_time_getter(service.clone(), Duration::from_millis(10), env.time_source);
 
-        let retry_operation = retry(retry_policy, |_: &ServiceError| true, || async {
-            let mut svc = timeout_service.clone();
-            match svc.call(TestRequest { id: 4 }).await {
-                Ok(resp) => Outcome::Ok(resp),
-                Err(err) => Outcome::Err(err),
-            }
-        });
+        let retry_operation = retry(
+            retry_policy,
+            |_: &ServiceError| true,
+            || async {
+                let mut svc = timeout_service.clone();
+                match svc.call(TestRequest { id: 4 }).await {
+                    Ok(resp) => Outcome::Ok(resp),
+                    Err(err) => Outcome::Err(err),
+                }
+            },
+        );
 
         let result = retry_operation.await;
 
@@ -454,11 +482,18 @@ mod tests {
         let (call_count, timeline) = service.get_call_info();
 
         // Should have made at most 1 call before rapid timeout
-        assert!(call_count <= 1, "Expected at most 1 call (rapid timeout), got {}", call_count);
+        assert!(
+            call_count <= 1,
+            "Expected at most 1 call (rapid timeout), got {}",
+            call_count
+        );
 
         // Verify no calls completed successfully
         for record in &timeline {
-            assert!(!record.succeeded, "No calls should have succeeded with rapid timeout");
+            assert!(
+                !record.succeeded,
+                "No calls should have succeeded with rapid timeout"
+            );
         }
 
         println!("✓ Rapid timeout test passed - {} calls made", call_count);
@@ -482,19 +517,20 @@ mod tests {
             .with_jitter(0.0);
 
         // Timeout: exactly 300ms (should allow first attempt + first retry)
-        let timeout_service = Timeout::with_time_getter(
-            service.clone(),
-            Duration::from_millis(300),
-            env.time_source
-        );
+        let timeout_service =
+            Timeout::with_time_getter(service.clone(), Duration::from_millis(300), env.time_source);
 
-        let retry_operation = retry(retry_policy, |_: &ServiceError| true, || async {
-            let mut svc = timeout_service.clone();
-            match svc.call(TestRequest { id: 5 }).await {
-                Ok(resp) => Outcome::Ok(resp),
-                Err(err) => Outcome::Err(err),
-            }
-        });
+        let retry_operation = retry(
+            retry_policy,
+            |_: &ServiceError| true,
+            || async {
+                let mut svc = timeout_service.clone();
+                match svc.call(TestRequest { id: 5 }).await {
+                    Ok(resp) => Outcome::Ok(resp),
+                    Err(err) => Outcome::Err(err),
+                }
+            },
+        );
 
         let result = retry_operation.await;
 
@@ -502,7 +538,11 @@ mod tests {
         let (call_count, timeline) = service.get_call_info();
 
         // Should have made at most 2 calls within the 300ms timeout
-        assert!(call_count <= 2, "Expected at most 2 calls (border case), got {}", call_count);
+        assert!(
+            call_count <= 2,
+            "Expected at most 2 calls (border case), got {}",
+            call_count
+        );
 
         // Verify timing precision
         let timeout_deadline = start_time.saturating_add_nanos(300_000_000);
@@ -518,7 +558,10 @@ mod tests {
             }
         }
 
-        println!("✓ Border case timing test passed - {} calls made", call_count);
+        println!(
+            "✓ Border case timing test passed - {} calls made",
+            call_count
+        );
     }
 
     #[tokio::test]
@@ -538,19 +581,20 @@ mod tests {
             .with_jitter(0.0);
 
         // Timeout: 500ms (generous - should allow success)
-        let timeout_service = Timeout::with_time_getter(
-            service.clone(),
-            Duration::from_millis(500),
-            env.time_source
-        );
+        let timeout_service =
+            Timeout::with_time_getter(service.clone(), Duration::from_millis(500), env.time_source);
 
-        let retry_operation = retry(retry_policy, |_: &ServiceError| true, || async {
-            let mut svc = timeout_service.clone();
-            match svc.call(TestRequest { id: 6 }).await {
-                Ok(resp) => Outcome::Ok(resp),
-                Err(err) => Outcome::Err(err),
-            }
-        });
+        let retry_operation = retry(
+            retry_policy,
+            |_: &ServiceError| true,
+            || async {
+                let mut svc = timeout_service.clone();
+                match svc.call(TestRequest { id: 6 }).await {
+                    Ok(resp) => Outcome::Ok(resp),
+                    Err(err) => Outcome::Err(err),
+                }
+            },
+        );
 
         let result = retry_operation.await;
 
@@ -560,13 +604,20 @@ mod tests {
         let (call_count, timeline) = service.get_call_info();
 
         // Should have made exactly 2 calls (fail, then succeed)
-        assert_eq!(call_count, 2, "Expected exactly 2 calls (fail -> succeed), got {}", call_count);
+        assert_eq!(
+            call_count, 2,
+            "Expected exactly 2 calls (fail -> succeed), got {}",
+            call_count
+        );
 
         // Verify success timing
         assert!(timeline.len() >= 2, "Expected at least 2 call records");
         assert!(!timeline[0].succeeded, "First call should have failed");
         assert!(timeline[1].succeeded, "Second call should have succeeded");
 
-        println!("✓ Success case timing test passed - {} calls made", call_count);
+        println!(
+            "✓ Success case timing test passed - {} calls made",
+            call_count
+        );
     }
 }

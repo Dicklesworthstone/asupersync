@@ -163,8 +163,13 @@ fn collect_relevant_env_vars() -> BTreeMap<String, String> {
     let mut env_vars = BTreeMap::new();
 
     let relevant_vars = [
-        "PATH", "HOME", "TMPDIR", "RUST_LOG", "CARGO_TARGET_DIR",
-        "SSH_AUTH_SOCK", "XDG_RUNTIME_DIR"
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "RUST_LOG",
+        "CARGO_TARGET_DIR",
+        "SSH_AUTH_SOCK",
+        "XDG_RUNTIME_DIR",
     ];
 
     for var in relevant_vars {

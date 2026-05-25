@@ -17,21 +17,18 @@
 mod tests {
     use crate::{
         channel::broadcast::{Receiver as BroadcastReceiver, Sender as BroadcastSender, broadcast},
-        sync::notify::Notify,
-        types::{Budget, Outcome, TaskId},
+        channel::{mpsc, oneshot},
         cx::Cx,
         error::{Error, ErrorKind},
-        time::{Duration, Sleep, Instant},
-        sync::{Mutex, AtomicU64, AtomicBool, AtomicU32},
-        channel::{mpsc, oneshot},
         runtime::Runtime,
-        test_utils::{init_test_runtime, TestTracer},
+        sync::notify::Notify,
+        sync::{AtomicBool, AtomicU32, AtomicU64, Mutex},
+        test_utils::{TestTracer, init_test_runtime},
+        time::{Duration, Instant, Sleep},
+        types::{Budget, Outcome, TaskId},
     };
-    use std::sync::{
-        atomic::Ordering,
-        Arc,
-    };
-    use std::collections::{HashMap, VecDeque, BTreeMap};
+    use std::collections::{BTreeMap, HashMap, VecDeque};
+    use std::sync::{Arc, atomic::Ordering};
 
     /// Test framework for broadcast-notify integration scenarios
     struct BroadcastNotifyTestFramework {
@@ -218,29 +215,37 @@ mod tests {
             // Create multiple receivers with notification tracking
             let mut receivers = Vec::new();
             for i in 0..self.config.num_receivers {
-                let receiver = self.create_notified_receiver(
-                    cx,
-                    i as u64,
-                    sender.subscribe(),
-                    &sequence_tracker,
-                    &drop_notifier,
-                ).await?;
+                let receiver = self
+                    .create_notified_receiver(
+                        cx,
+                        i as u64,
+                        sender.subscribe(),
+                        &sequence_tracker,
+                        &drop_notifier,
+                    )
+                    .await?;
                 receivers.push(receiver);
             }
 
             // Start receiver monitoring
             let monitor = Arc::new(ReceiverMonitor::new());
-            let receiver_handles = self.start_receiver_monitoring(cx, receivers, &monitor).await?;
+            let receiver_handles = self
+                .start_receiver_monitoring(cx, receivers, &monitor)
+                .await?;
 
             // Create sender coordinator
-            let sender_coordinator = Arc::new(SenderCoordinator::new(sender, 1, &drop_notifier).await?);
+            let sender_coordinator =
+                Arc::new(SenderCoordinator::new(sender, 1, &drop_notifier).await?);
 
             // Send messages
-            self.send_messages_with_coordination(cx, &sender_coordinator).await?;
+            self.send_messages_with_coordination(cx, &sender_coordinator)
+                .await?;
 
             // Drop sender after delay and notify receivers
             Sleep::new(self.config.sender_drop_delay).await;
-            let drop_event = self.drop_sender_with_notification(cx, sender_coordinator, &monitor).await?;
+            let drop_event = self
+                .drop_sender_with_notification(cx, sender_coordinator, &monitor)
+                .await?;
 
             // Wait for all receivers to process drop
             Sleep::new(Duration::from_millis(500)).await;
@@ -297,7 +302,9 @@ mod tests {
             let mut handles = Vec::new();
 
             for receiver in receivers {
-                let handle = self.start_single_receiver_monitor(cx, receiver, monitor).await?;
+                let handle = self
+                    .start_single_receiver_monitor(cx, receiver, monitor)
+                    .await?;
                 handles.push(handle);
             }
 
@@ -417,7 +424,7 @@ mod tests {
                     match sender.send(message) {
                         Ok(_) => {
                             self.stats.messages_sent.fetch_add(1, Ordering::Relaxed);
-                        },
+                        }
                         Err(_) => {
                             break; // Receiver(s) may have dropped
                         }
@@ -458,7 +465,9 @@ mod tests {
 
             // Send explicit notifications to all receivers
             coordinator.notify_on_drop.notify_waiters();
-            self.stats.notifications_sent.fetch_add(active_receivers as u64, Ordering::Relaxed);
+            self.stats
+                .notifications_sent
+                .fetch_add(active_receivers as u64, Ordering::Relaxed);
 
             Ok(drop_event)
         }
@@ -514,11 +523,16 @@ mod tests {
                         has_duplicates: Self::has_duplicates(sequences),
                     };
 
-                    if result.expected_count != result.actual_count || result.has_gaps || result.has_duplicates {
+                    if result.expected_count != result.actual_count
+                        || result.has_gaps
+                        || result.has_duplicates
+                    {
                         validation_results.global_consistency = false;
                     }
 
-                    validation_results.per_receiver_results.insert(receiver_id, result);
+                    validation_results
+                        .per_receiver_results
+                        .insert(receiver_id, result);
                 }
             }
 
@@ -534,7 +548,7 @@ mod tests {
             sorted_sequences.sort_unstable();
 
             for i in 1..sorted_sequences.len() {
-                if sorted_sequences[i] != sorted_sequences[i-1] + 1 {
+                if sorted_sequences[i] != sorted_sequences[i - 1] + 1 {
                     return false;
                 }
             }
@@ -546,7 +560,7 @@ mod tests {
             sorted_sequences.sort_unstable();
 
             for i in 1..sorted_sequences.len() {
-                if sorted_sequences[i] == sorted_sequences[i-1] {
+                if sorted_sequences[i] == sorted_sequences[i - 1] {
                     return true;
                 }
             }
@@ -601,7 +615,11 @@ mod tests {
     }
 
     impl SenderCoordinator {
-        async fn new(sender: BroadcastSender<TestMessage>, sender_id: u32, drop_notifier: &Arc<DropNotifier>) -> Result<Self, Error> {
+        async fn new(
+            sender: BroadcastSender<TestMessage>,
+            sender_id: u32,
+            drop_notifier: &Arc<DropNotifier>,
+        ) -> Result<Self, Error> {
             Ok(Self {
                 sender: Some(sender),
                 sender_id,
@@ -685,26 +703,56 @@ mod tests {
             enable_sequence_tracking: true,
         };
 
-        let framework = BroadcastNotifyTestFramework::new(&cx, config).await.unwrap();
-        let results = framework.execute_broadcast_with_sender_drop(&cx).await.unwrap();
+        let framework = BroadcastNotifyTestFramework::new(&cx, config)
+            .await
+            .unwrap();
+        let results = framework
+            .execute_broadcast_with_sender_drop(&cx)
+            .await
+            .unwrap();
 
         // Verify sender drop behavior
-        assert_eq!(results.sender_drops, 1, "Should have exactly one sender drop");
-        assert!(results.close_notifications > 0, "Should notify receivers of channel close");
+        assert_eq!(
+            results.sender_drops, 1,
+            "Should have exactly one sender drop"
+        );
+        assert!(
+            results.close_notifications > 0,
+            "Should notify receivers of channel close"
+        );
 
         // Verify all receivers got messages
-        assert!(results.messages_received > 0, "Receivers should have received messages");
-        assert!(results.messages_sent > 0, "Sender should have sent messages");
+        assert!(
+            results.messages_received > 0,
+            "Receivers should have received messages"
+        );
+        assert!(
+            results.messages_sent > 0,
+            "Sender should have sent messages"
+        );
 
         // Verify sequence integrity
-        assert_eq!(results.sequence_errors, 0, "No sequence errors should occur");
-        assert!(results.validation_results.global_consistency, "Sequence should be globally consistent");
+        assert_eq!(
+            results.sequence_errors, 0,
+            "No sequence errors should occur"
+        );
+        assert!(
+            results.validation_results.global_consistency,
+            "Sequence should be globally consistent"
+        );
 
         // Verify notifications
-        assert!(results.notifications_sent > 0, "Should send explicit notifications");
-        assert!(results.notifications_received >= 0, "Receivers should get notifications");
+        assert!(
+            results.notifications_sent > 0,
+            "Should send explicit notifications"
+        );
+        assert!(
+            results.notifications_received >= 0,
+            "Receivers should get notifications"
+        );
 
-        cx.trace("Broadcast sender drop correctly notifies all receivers").await;
+        cx.trace("Broadcast sender drop correctly notifies all receivers")
+            .await;
     }
 
     #[tokio::test]
@@ -721,26 +769,51 @@ mod tests {
             enable_sequence_tracking: true,
         };
 
-        let framework = BroadcastNotifyTestFramework::new(&cx, config).await.unwrap();
-        let results = framework.execute_broadcast_with_sender_drop(&cx).await.unwrap();
+        let framework = BroadcastNotifyTestFramework::new(&cx, config)
+            .await
+            .unwrap();
+        let results = framework
+            .execute_broadcast_with_sender_drop(&cx)
+            .await
+            .unwrap();
 
         // Verify sequence preservation
-        assert!(results.validation_results.global_consistency, "Sequence numbers should be preserved");
+        assert!(
+            results.validation_results.global_consistency,
+            "Sequence numbers should be preserved"
+        );
 
         // Check per-receiver sequence integrity
         for (&receiver_id, result) in &results.validation_results.per_receiver_results {
-            assert!(!result.has_gaps, "Receiver {} should not have sequence gaps", receiver_id);
-            assert!(!result.has_duplicates, "Receiver {} should not have duplicates", receiver_id);
-            assert_eq!(result.expected_count, result.actual_count,
-                      "Receiver {} should receive all expected messages", receiver_id);
+            assert!(
+                !result.has_gaps,
+                "Receiver {} should not have sequence gaps",
+                receiver_id
+            );
+            assert!(
+                !result.has_duplicates,
+                "Receiver {} should not have duplicates",
+                receiver_id
+            );
+            assert_eq!(
+                result.expected_count, result.actual_count,
+                "Receiver {} should receive all expected messages",
+                receiver_id
+            );
         }
 
         // Verify drop event contains correct sequence info
-        assert!(results.drop_event.final_sequence > 0, "Drop event should have valid final sequence");
-        assert_eq!(results.drop_event.active_receivers, config.num_receivers as u32,
-                  "Drop event should track correct number of active receivers");
+        assert!(
+            results.drop_event.final_sequence > 0,
+            "Drop event should have valid final sequence"
+        );
+        assert_eq!(
+            results.drop_event.active_receivers, config.num_receivers as u32,
+            "Drop event should track correct number of active receivers"
+        );
 
-        cx.trace("Sequence numbers preserved correctly across sender drop").await;
+        cx.trace("Sequence numbers preserved correctly across sender drop")
+            .await;
     }
 
     #[tokio::test]
@@ -757,26 +830,45 @@ mod tests {
             enable_sequence_tracking: true,
         };
 
-        let framework = BroadcastNotifyTestFramework::new(&cx, config).await.unwrap();
-        let results = framework.execute_broadcast_with_sender_drop(&cx).await.unwrap();
+        let framework = BroadcastNotifyTestFramework::new(&cx, config)
+            .await
+            .unwrap();
+        let results = framework
+            .execute_broadcast_with_sender_drop(&cx)
+            .await
+            .unwrap();
 
         // Verify all receivers are notified
-        assert_eq!(results.drop_event.active_receivers, config.num_receivers as u32,
-                  "All receivers should be active at drop time");
+        assert_eq!(
+            results.drop_event.active_receivers, config.num_receivers as u32,
+            "All receivers should be active at drop time"
+        );
 
         // Verify consistent notification delivery
         let total_expected_notifications = config.num_receivers as u64;
-        assert!(results.close_notifications > 0, "Should have close notifications");
+        assert!(
+            results.close_notifications > 0,
+            "Should have close notifications"
+        );
 
         // Verify sequence consistency across all receivers
-        assert!(results.validation_results.global_consistency, "All receivers should see consistent sequences");
-        assert_eq!(results.validation_results.total_receivers, config.num_receivers,
-                  "Should track all receivers");
+        assert!(
+            results.validation_results.global_consistency,
+            "All receivers should see consistent sequences"
+        );
+        assert_eq!(
+            results.validation_results.total_receivers, config.num_receivers,
+            "Should track all receivers"
+        );
 
         // Verify no sequence errors during concurrent access
-        assert_eq!(results.sequence_errors, 0, "Concurrent receivers should not cause sequence errors");
+        assert_eq!(
+            results.sequence_errors, 0,
+            "Concurrent receivers should not cause sequence errors"
+        );
 
-        cx.trace("Concurrent receivers get consistent notifications").await;
+        cx.trace("Concurrent receivers get consistent notifications")
+            .await;
     }
 
     #[tokio::test]
@@ -787,25 +879,41 @@ mod tests {
         let config = IntegrationConfig {
             channel_capacity: 4,
             num_receivers: 4,
-            messages_per_sender: 5, // Few messages
+            messages_per_sender: 5,                       // Few messages
             sender_drop_delay: Duration::from_millis(10), // Very quick drop
             receiver_processing_delay: Duration::from_millis(0),
             enable_sequence_tracking: true,
         };
 
-        let framework = BroadcastNotifyTestFramework::new(&cx, config).await.unwrap();
-        let results = framework.execute_broadcast_with_sender_drop(&cx).await.unwrap();
+        let framework = BroadcastNotifyTestFramework::new(&cx, config)
+            .await
+            .unwrap();
+        let results = framework
+            .execute_broadcast_with_sender_drop(&cx)
+            .await
+            .unwrap();
 
         // Verify immediate drop handling
-        assert_eq!(results.sender_drops, 1, "Should handle immediate sender drop");
-        assert!(results.close_notifications > 0, "Should notify on immediate drop");
+        assert_eq!(
+            results.sender_drops, 1,
+            "Should handle immediate sender drop"
+        );
+        assert!(
+            results.close_notifications > 0,
+            "Should notify on immediate drop"
+        );
 
         // Verify receivers still get some messages before drop
-        assert!(results.messages_received > 0, "Should receive at least some messages before drop");
+        assert!(
+            results.messages_received > 0,
+            "Should receive at least some messages before drop"
+        );
 
         // Verify no lost notifications during immediate drop
-        assert!(results.drop_event.final_sequence <= config.messages_per_sender as u64,
-               "Drop sequence should not exceed sent messages");
+        assert!(
+            results.drop_event.final_sequence <= config.messages_per_sender as u64,
+            "Drop sequence should not exceed sent messages"
+        );
 
         cx.trace("Immediate sender drop handled correctly").await;
     }
@@ -824,20 +932,35 @@ mod tests {
             enable_sequence_tracking: true,
         };
 
-        let framework = BroadcastNotifyTestFramework::new(&cx, config).await.unwrap();
-        let results = framework.execute_broadcast_with_sender_drop(&cx).await.unwrap();
+        let framework = BroadcastNotifyTestFramework::new(&cx, config)
+            .await
+            .unwrap();
+        let results = framework
+            .execute_broadcast_with_sender_drop(&cx)
+            .await
+            .unwrap();
 
         // Verify slow receivers still get proper notifications
-        assert!(results.close_notifications > 0, "Slow receivers should get close notifications");
+        assert!(
+            results.close_notifications > 0,
+            "Slow receivers should get close notifications"
+        );
 
         // Verify no message loss due to slow processing
         let per_receiver_avg = results.messages_received / config.num_receivers as u64;
-        assert!(per_receiver_avg > 0, "Slow receivers should still process messages");
+        assert!(
+            per_receiver_avg > 0,
+            "Slow receivers should still process messages"
+        );
 
         // Verify sequence consistency despite slow processing
-        assert!(results.validation_results.global_consistency, "Slow processing should not affect consistency");
+        assert!(
+            results.validation_results.global_consistency,
+            "Slow processing should not affect consistency"
+        );
 
-        cx.trace("Slow receivers handled correctly during sender drop").await;
+        cx.trace("Slow receivers handled correctly during sender drop")
+            .await;
     }
 
     #[tokio::test]
@@ -855,8 +978,13 @@ mod tests {
             enable_sequence_tracking: true,
         };
 
-        let small_framework = BroadcastNotifyTestFramework::new(&cx, small_config).await.unwrap();
-        let small_results = small_framework.execute_broadcast_with_sender_drop(&cx).await.unwrap();
+        let small_framework = BroadcastNotifyTestFramework::new(&cx, small_config)
+            .await
+            .unwrap();
+        let small_results = small_framework
+            .execute_broadcast_with_sender_drop(&cx)
+            .await
+            .unwrap();
 
         // Test with large capacity
         let large_config = IntegrationConfig {
@@ -864,21 +992,42 @@ mod tests {
             ..small_config
         };
 
-        let large_framework = BroadcastNotifyTestFramework::new(&cx, large_config).await.unwrap();
-        let large_results = large_framework.execute_broadcast_with_sender_drop(&cx).await.unwrap();
+        let large_framework = BroadcastNotifyTestFramework::new(&cx, large_config)
+            .await
+            .unwrap();
+        let large_results = large_framework
+            .execute_broadcast_with_sender_drop(&cx)
+            .await
+            .unwrap();
 
         // Compare results
-        assert_eq!(small_results.sender_drops, 1, "Small capacity should still handle drop");
-        assert_eq!(large_results.sender_drops, 1, "Large capacity should handle drop");
+        assert_eq!(
+            small_results.sender_drops, 1,
+            "Small capacity should still handle drop"
+        );
+        assert_eq!(
+            large_results.sender_drops, 1,
+            "Large capacity should handle drop"
+        );
 
         // Both should notify receivers
-        assert!(small_results.close_notifications > 0, "Small capacity should notify");
-        assert!(large_results.close_notifications > 0, "Large capacity should notify");
+        assert!(
+            small_results.close_notifications > 0,
+            "Small capacity should notify"
+        );
+        assert!(
+            large_results.close_notifications > 0,
+            "Large capacity should notify"
+        );
 
         // Large capacity should generally have better sequence consistency
-        assert!(large_results.validation_results.global_consistency || small_results.validation_results.global_consistency,
-               "At least one configuration should maintain consistency");
+        assert!(
+            large_results.validation_results.global_consistency
+                || small_results.validation_results.global_consistency,
+            "At least one configuration should maintain consistency"
+        );
 
-        cx.trace("Channel capacity handled correctly for notifications").await;
+        cx.trace("Channel capacity handled correctly for notifications")
+            .await;
     }
 }

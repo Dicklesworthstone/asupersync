@@ -1,10 +1,10 @@
 //! ATP benchmark profiles for performance testing and comparison.
 
 use crate::atp::benchmark::{BenchmarkConfig, BenchmarkError, BenchmarkMetrics, BenchmarkResult};
+use crate::io::{AsyncSeekExt, AsyncWriteExt};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{Duration, Instant};
-use crate::io::{AsyncSeekExt, AsyncWriteExt};
 
 /// ATP profile kinds for different network and workload scenarios.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,12 +190,9 @@ impl AtpProfile {
         let mut iterations = Vec::new();
 
         for iteration in 0..config.iterations {
-            let metrics = self.execute_atp_transfer(
-                config,
-                source_path,
-                dest_path,
-                iteration,
-            ).await?;
+            let metrics = self
+                .execute_atp_transfer(config, source_path, dest_path, iteration)
+                .await?;
 
             iterations.push(metrics);
         }
@@ -225,11 +222,9 @@ impl AtpProfile {
         let start_time = Instant::now();
 
         // For now, simulate ATP transfer by copying file with simulated network conditions
-        let transfer_result = self.simulate_atp_transfer(
-            source_path,
-            &iteration_dest,
-            config,
-        ).await;
+        let transfer_result = self
+            .simulate_atp_transfer(source_path, &iteration_dest, config)
+            .await;
 
         let wall_time = start_time.elapsed();
 
@@ -251,19 +246,17 @@ impl AtpProfile {
                     failure_mode: None,
                 })
             }
-            Err(e) => {
-                Ok(BenchmarkMetrics {
-                    wall_time,
-                    cpu_time: None,
-                    memory_peak: None,
-                    bytes_transferred: 0,
-                    bytes_on_wire: None,
-                    verified_completion: false,
-                    first_usable_output: None,
-                    resume_time: None,
-                    failure_mode: Some(e),
-                })
-            }
+            Err(e) => Ok(BenchmarkMetrics {
+                wall_time,
+                cpu_time: None,
+                memory_peak: None,
+                bytes_transferred: 0,
+                bytes_on_wire: None,
+                verified_completion: false,
+                first_usable_output: None,
+                resume_time: None,
+                failure_mode: Some(e),
+            }),
         }
     }
 
@@ -297,10 +290,8 @@ impl AtpProfile {
                     if written < size {
                         // Skip ahead to create a hole
                         let skip = std::cmp::min(hole_size as u64, size - written);
-                        AsyncSeekExt::seek(
-                            &mut file,
-                            std::io::SeekFrom::Current(skip as i64),
-                        ).await?;
+                        AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Current(skip as i64))
+                            .await?;
                         written += skip;
                     }
                 }
@@ -339,14 +330,15 @@ impl AtpProfile {
         let base_delay = self.network_conditions.latency;
         let size_factor = config.data_size as f64 / (1024.0 * 1024.0); // Size in MB
         let bandwidth_delay = Duration::from_secs_f64(
-            size_factor / self.network_conditions.bandwidth_mbps as f64 * 8.0
+            size_factor / self.network_conditions.bandwidth_mbps as f64 * 8.0,
         );
 
         let total_delay = base_delay + bandwidth_delay;
         crate::time::sleep(total_delay).await;
 
         // Copy file to simulate transfer
-        crate::fs::copy(source, dest).await
+        crate::fs::copy(source, dest)
+            .await
             .map_err(|e| format!("Transfer failed: {e}"))?;
 
         // Calculate simulated metrics
@@ -450,7 +442,10 @@ mod tests {
         for kind in AtpProfileKind::all() {
             if kind.is_smoke_test_suitable() {
                 // Smoke test profiles should be relatively fast
-                assert!(matches!(kind, AtpProfileKind::CleanLan | AtpProfileKind::Wan | AtpProfileKind::Stream));
+                assert!(matches!(
+                    kind,
+                    AtpProfileKind::CleanLan | AtpProfileKind::Wan | AtpProfileKind::Stream
+                ));
             }
         }
     }

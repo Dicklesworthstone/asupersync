@@ -16,24 +16,24 @@
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod tests {
     use crate::{
-        obligation::saga::{Saga, SagaStep, SagaState, SagaStepError, CompensationResult},
-        trace::recorder::{TraceRecorder, TraceEvent, EventOrder, CausalOrder},
-        trace::distributed::vclock::VectorClock,
-        types::{Budget, Outcome, TaskId, RegionId},
+        channel::{mpsc, oneshot},
         cx::Cx,
         error::{Error, ErrorKind},
-        time::{Duration, Sleep},
-        sync::{Mutex, AtomicU64},
-        channel::{mpsc, oneshot},
+        lab::{CrashInjector, LabRuntime},
+        obligation::saga::{CompensationResult, Saga, SagaState, SagaStep, SagaStepError},
         runtime::Runtime,
-        test_utils::{init_test_runtime, TestTracer},
-        lab::{LabRuntime, CrashInjector},
+        sync::{AtomicU64, Mutex},
+        test_utils::{TestTracer, init_test_runtime},
+        time::{Duration, Sleep},
+        trace::distributed::vclock::VectorClock,
+        trace::recorder::{CausalOrder, EventOrder, TraceEvent, TraceRecorder},
+        types::{Budget, Outcome, RegionId, TaskId},
     };
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
     };
-    use std::collections::{HashMap, VecDeque, BTreeMap};
     use std::time::Instant;
 
     /// Test framework for saga-trace integration scenarios
@@ -188,10 +188,13 @@ mod tests {
             let recorder = Arc::new(TraceRecorder::new(cx, config.trace_buffer_size).await?);
 
             // Initialize crash injector for deterministic crashes
-            let crash_injector = Arc::new(CrashInjector::new(
-                config.crash_probability,
-                config.crash_injection_points.clone(),
-            ).await?);
+            let crash_injector = Arc::new(
+                CrashInjector::new(
+                    config.crash_probability,
+                    config.crash_injection_points.clone(),
+                )
+                .await?,
+            );
 
             let stats = Arc::new(IntegrationStats {
                 saga_steps_executed: AtomicU64::new(0),
@@ -239,7 +242,9 @@ mod tests {
                 // Check for crash injection
                 if self.crash_injector.should_inject_crash(step_index).await {
                     crashed_at = Some(step.id);
-                    self.stats.crash_events_injected.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .crash_events_injected
+                        .fetch_add(1, Ordering::Relaxed);
                     break;
                 }
 
@@ -251,17 +256,16 @@ mod tests {
                     compensation_chain.push_front(step.id);
                 }
 
-                self.stats.saga_steps_executed.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .saga_steps_executed
+                    .fetch_add(1, Ordering::Relaxed);
             }
 
             // Handle crash and recovery if needed
             if let Some(crash_step) = crashed_at {
-                let recovery_result = self.handle_crash_and_recovery(
-                    cx,
-                    crash_step,
-                    &tracker,
-                    &recovery_coordinator,
-                ).await?;
+                let recovery_result = self
+                    .handle_crash_and_recovery(cx, crash_step, &tracker, &recovery_coordinator)
+                    .await?;
 
                 return Ok(SagaExecutionResult {
                     completed_steps: recovery_result.recovered_steps.len() as u64,
@@ -300,7 +304,9 @@ mod tests {
                 step.causal_dependencies.clone(),
             );
             self.recorder.record_event(cx, start_event).await?;
-            self.stats.trace_events_recorded.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .trace_events_recorded
+                .fetch_add(1, Ordering::Relaxed);
 
             // Update vector clock
             {
@@ -320,12 +326,14 @@ mod tests {
             Sleep::new(execution_duration).await;
 
             // Record step completion event
-            let completion_event = TraceEvent::new(
-                format!("saga_step_complete:{}", step.id),
-                vec![step.id],
-            );
-            self.recorder.record_event(cx, completion_event.clone()).await?;
-            self.stats.trace_events_recorded.fetch_add(1, Ordering::Relaxed);
+            let completion_event =
+                TraceEvent::new(format!("saga_step_complete:{}", step.id), vec![step.id]);
+            self.recorder
+                .record_event(cx, completion_event.clone())
+                .await?;
+            self.stats
+                .trace_events_recorded
+                .fetch_add(1, Ordering::Relaxed);
 
             // Update tracking state
             {
@@ -333,7 +341,9 @@ mod tests {
                 executed.insert(step.id, step.clone());
 
                 let mut correlations = tracker.trace_correlation.lock().await;
-                correlations.entry(step.id).or_insert_with(Vec::new)
+                correlations
+                    .entry(step.id)
+                    .or_insert_with(Vec::new)
                     .push(completion_event);
             }
 
@@ -363,24 +373,23 @@ mod tests {
             self.recorder.record_event(cx, crash_event).await?;
 
             // Initiate compensation sequence from trace events
-            let compensation_result = coordinator.initiate_compensation_from_traces(
-                cx,
-                &self.recorder,
-                crash_step,
-            ).await?;
+            let compensation_result = coordinator
+                .initiate_compensation_from_traces(cx, &self.recorder, crash_step)
+                .await?;
 
             // Verify causal ordering of compensation events
-            let ordering_check = self.verify_compensation_ordering(
-                &compensation_result.compensation_events
-            ).await?;
+            let ordering_check = self
+                .verify_compensation_ordering(&compensation_result.compensation_events)
+                .await?;
 
             if ordering_check.has_violations {
-                self.stats.ordering_violations.fetch_add(
-                    ordering_check.violations.len() as u64,
-                    Ordering::Relaxed
-                );
+                self.stats
+                    .ordering_violations
+                    .fetch_add(ordering_check.violations.len() as u64, Ordering::Relaxed);
             } else {
-                self.stats.successful_recoveries.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .successful_recoveries
+                    .fetch_add(1, Ordering::Relaxed);
             }
 
             Ok(RecoveryResult {
@@ -395,20 +404,20 @@ mod tests {
         /// Verify causal ordering of compensation events
         async fn verify_compensation_ordering(
             &self,
-            events: &[TraceEvent]
+            events: &[TraceEvent],
         ) -> Result<OrderingCheckResult, Error> {
-            self.stats.causal_consistency_checks.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .causal_consistency_checks
+                .fetch_add(1, Ordering::Relaxed);
 
             let validator = CausalOrderValidator::new();
 
             // Define ordering constraints for compensation
-            let constraints = vec![
-                OrderingConstraint {
-                    before_event: 0, // Will be populated dynamically
-                    after_event: 0,
-                    constraint_type: ConstraintType::CompensationOrder,
-                },
-            ];
+            let constraints = vec![OrderingConstraint {
+                before_event: 0, // Will be populated dynamically
+                after_event: 0,
+                constraint_type: ConstraintType::CompensationOrder,
+            }];
 
             let violations = validator.validate_ordering(events, &constraints).await?;
 
@@ -425,21 +434,26 @@ mod tests {
             let recorder_ref = Arc::clone(&self.recorder);
             let stats_ref = Arc::clone(&self.stats);
 
-            let recording_task = cx.spawn(async move {
-                let mut recording_active = true;
-                while recording_active {
-                    // Process pending trace events
-                    let events_processed = recorder_ref.process_pending_events().await.unwrap_or(0);
-                    stats_ref.trace_events_recorded.fetch_add(events_processed, Ordering::Relaxed);
+            let recording_task = cx
+                .spawn(async move {
+                    let mut recording_active = true;
+                    while recording_active {
+                        // Process pending trace events
+                        let events_processed =
+                            recorder_ref.process_pending_events().await.unwrap_or(0);
+                        stats_ref
+                            .trace_events_recorded
+                            .fetch_add(events_processed, Ordering::Relaxed);
 
-                    // Check for stop signal
-                    if stop_rx.try_recv().is_ok() {
-                        recording_active = false;
+                        // Check for stop signal
+                        if stop_rx.try_recv().is_ok() {
+                            recording_active = false;
+                        }
+
+                        Sleep::new(Duration::from_millis(10)).await;
                     }
-
-                    Sleep::new(Duration::from_millis(10)).await;
-                }
-            }).await?;
+                })
+                .await?;
 
             Ok(RecordingHandle {
                 stop_sender: stop_tx,
@@ -469,10 +483,9 @@ mod tests {
             let reconstructed_state = self.state_reconstructor.reconstruct_state(events).await?;
 
             // Determine compensation sequence
-            let compensation_steps = self.calculate_compensation_sequence(
-                &reconstructed_state,
-                crash_point
-            ).await?;
+            let compensation_steps = self
+                .calculate_compensation_sequence(&reconstructed_state, crash_point)
+                .await?;
 
             // Execute compensations with trace recording
             let mut compensation_events = Vec::new();
@@ -484,7 +497,9 @@ mod tests {
                     vec![step_id, crash_point],
                 );
 
-                recorder.record_event(cx, compensation_event.clone()).await?;
+                recorder
+                    .record_event(cx, compensation_event.clone())
+                    .await?;
                 compensation_events.push(compensation_event);
                 compensated_steps.push(step_id);
 
@@ -509,9 +524,8 @@ mod tests {
             compensation_sequence.reverse();
 
             // Filter out steps that don't need compensation
-            compensation_sequence.retain(|&step_id| {
-                step_id < crash_point && self.requires_compensation(step_id)
-            });
+            compensation_sequence
+                .retain(|&step_id| step_id < crash_point && self.requires_compensation(step_id));
 
             Ok(compensation_sequence)
         }
@@ -546,7 +560,8 @@ mod tests {
 
             for event in events {
                 if event.event_type.contains("saga_step_complete:") {
-                    if let Some(step_id_str) = event.event_type.strip_prefix("saga_step_complete:") {
+                    if let Some(step_id_str) = event.event_type.strip_prefix("saga_step_complete:")
+                    {
                         if let Ok(step_id) = step_id_str.parse::<u64>() {
                             completed_steps.push(step_id);
                             vector_clock.increment_local();
@@ -589,7 +604,11 @@ mod tests {
                         violations.push(OrderingViolation {
                             violating_event: i as u64,
                             expected_predecessor: (i - 1) as u64,
-                            actual_order: events.iter().enumerate().map(|(idx, _)| idx as u64).collect(),
+                            actual_order: events
+                                .iter()
+                                .enumerate()
+                                .map(|(idx, _)| idx as u64)
+                                .collect(),
                             violation_type: ConstraintType::HappensBefore,
                             detected_at: Instant::now(),
                         });
@@ -738,19 +757,32 @@ mod tests {
             },
         ];
 
-        let result = framework.execute_saga_with_crash_injection(&cx, saga_steps).await.unwrap();
+        let result = framework
+            .execute_saga_with_crash_injection(&cx, saga_steps)
+            .await
+            .unwrap();
 
         // Verify crash handling and compensation ordering
         assert_eq!(result.crashed_at, Some(3), "Should crash at step 3");
         assert!(result.recovery_successful, "Recovery should succeed");
-        assert!(result.compensated_steps > 0, "Should have compensated steps");
-        assert_eq!(result.ordering_violations, 0, "No trace ordering violations");
+        assert!(
+            result.compensated_steps > 0,
+            "Should have compensated steps"
+        );
+        assert_eq!(
+            result.ordering_violations, 0,
+            "No trace ordering violations"
+        );
 
         // Verify compensation order (reverse of execution)
-        assert!(result.trace_events.iter().any(|e|
-            e.event_type.contains("saga_compensation:2") ||
-            e.event_type.contains("saga_compensation:1")
-        ), "Compensation events should be recorded");
+        assert!(
+            result
+                .trace_events
+                .iter()
+                .any(|e| e.event_type.contains("saga_compensation:2")
+                    || e.event_type.contains("saga_compensation:1")),
+            "Compensation events should be recorded"
+        );
 
         cx.trace("Saga compensation trace ordering verified").await;
     }
@@ -772,38 +804,53 @@ mod tests {
         let framework = SagaTraceTestFramework::new(&cx, config).await.unwrap();
 
         // Create complex saga with multiple step types
-        let saga_steps = (1..=7).map(|i| {
-            let step_type = match i % 4 {
-                1 => SagaStepType::BusinessLogic,
-                2 => SagaStepType::DatabaseTransaction,
-                3 => SagaStepType::ExternalService,
-                _ => SagaStepType::ResourceAllocation,
-            };
+        let saga_steps = (1..=7)
+            .map(|i| {
+                let step_type = match i % 4 {
+                    1 => SagaStepType::BusinessLogic,
+                    2 => SagaStepType::DatabaseTransaction,
+                    3 => SagaStepType::ExternalService,
+                    _ => SagaStepType::ResourceAllocation,
+                };
 
-            TracedSagaStep {
-                id: i,
-                name: format!("step_{}", i),
-                step_type,
-                compensation_fn: format!("compensate_step_{}", i),
-                execution_order: i as u32,
-                causal_dependencies: if i > 1 { vec![i - 1] } else { vec![] },
-                expected_duration: Duration::from_millis(75 + (i % 3) * 25),
-            }
-        }).collect();
+                TracedSagaStep {
+                    id: i,
+                    name: format!("step_{}", i),
+                    step_type,
+                    compensation_fn: format!("compensate_step_{}", i),
+                    execution_order: i as u32,
+                    causal_dependencies: if i > 1 { vec![i - 1] } else { vec![] },
+                    expected_duration: Duration::from_millis(75 + (i % 3) * 25),
+                }
+            })
+            .collect();
 
-        let result = framework.execute_saga_with_crash_injection(&cx, saga_steps).await.unwrap();
+        let result = framework
+            .execute_saga_with_crash_injection(&cx, saga_steps)
+            .await
+            .unwrap();
 
         // Verify crash injection and recovery behavior
         assert!(result.crashed_at.is_some(), "Should inject crash mid-flow");
 
         if let Some(crash_step) = result.crashed_at {
-            assert!(crash_step >= 2 && crash_step <= 6, "Crash should occur at configured points");
-            assert!(result.completed_steps < 7, "Not all steps should complete due to crash");
+            assert!(
+                crash_step >= 2 && crash_step <= 6,
+                "Crash should occur at configured points"
+            );
+            assert!(
+                result.completed_steps < 7,
+                "Not all steps should complete due to crash"
+            );
         }
 
-        assert!(result.recovery_successful, "Recovery from mid-flow crash should succeed");
+        assert!(
+            result.recovery_successful,
+            "Recovery from mid-flow crash should succeed"
+        );
 
-        cx.trace("Mid-flow crash injection and recovery validated").await;
+        cx.trace("Mid-flow crash injection and recovery validated")
+            .await;
     }
 
     #[tokio::test]
@@ -862,24 +909,37 @@ mod tests {
             },
         ];
 
-        let result = framework.execute_saga_with_crash_injection(&cx, saga_steps).await.unwrap();
+        let result = framework
+            .execute_saga_with_crash_injection(&cx, saga_steps)
+            .await
+            .unwrap();
 
         // Verify causal consistency of trace events
-        assert_eq!(result.ordering_violations, 0, "Trace events should maintain causal consistency");
+        assert_eq!(
+            result.ordering_violations, 0,
+            "Trace events should maintain causal consistency"
+        );
 
         // Check that compensation events respect causal order
-        let compensation_events: Vec<_> = result.trace_events.iter()
+        let compensation_events: Vec<_> = result
+            .trace_events
+            .iter()
             .filter(|e| e.event_type.contains("saga_compensation:"))
             .collect();
 
-        assert!(!compensation_events.is_empty(), "Should have compensation events");
+        assert!(
+            !compensation_events.is_empty(),
+            "Should have compensation events"
+        );
 
         // Verify that compensation events follow reverse dependency order
         for (i, event) in compensation_events.iter().enumerate() {
             if i > 0 {
                 // Each compensation should happen after its dependencies are compensated
-                assert!(event.timestamp >= compensation_events[i-1].timestamp,
-                    "Compensation events should maintain temporal order");
+                assert!(
+                    event.timestamp >= compensation_events[i - 1].timestamp,
+                    "Compensation events should maintain temporal order"
+                );
             }
         }
 
@@ -902,8 +962,8 @@ mod tests {
 
         let framework = SagaTraceTestFramework::new(&cx, config).await.unwrap();
 
-        let saga_steps = (1..=4).map(|i| {
-            TracedSagaStep {
+        let saga_steps = (1..=4)
+            .map(|i| TracedSagaStep {
                 id: i,
                 name: format!("deterministic_step_{}", i),
                 step_type: SagaStepType::BusinessLogic,
@@ -911,21 +971,42 @@ mod tests {
                 execution_order: i as u32,
                 causal_dependencies: if i > 1 { vec![i - 1] } else { vec![] },
                 expected_duration: Duration::from_millis(100),
-            }
-        }).collect();
+            })
+            .collect();
 
         // Run the same scenario multiple times
         for run in 1..=3 {
-            let result = framework.execute_saga_with_crash_injection(&cx, saga_steps.clone()).await.unwrap();
+            let result = framework
+                .execute_saga_with_crash_injection(&cx, saga_steps.clone())
+                .await
+                .unwrap();
 
             // Verify deterministic behavior across runs
-            assert_eq!(result.crashed_at, Some(3), "Should crash deterministically at step 3 in run {}", run);
-            assert!(result.recovery_successful, "Recovery should succeed deterministically in run {}", run);
-            assert_eq!(result.completed_steps, 2, "Should complete exactly 2 steps before crash in run {}", run);
-            assert_eq!(result.ordering_violations, 0, "No ordering violations in run {}", run);
+            assert_eq!(
+                result.crashed_at,
+                Some(3),
+                "Should crash deterministically at step 3 in run {}",
+                run
+            );
+            assert!(
+                result.recovery_successful,
+                "Recovery should succeed deterministically in run {}",
+                run
+            );
+            assert_eq!(
+                result.completed_steps, 2,
+                "Should complete exactly 2 steps before crash in run {}",
+                run
+            );
+            assert_eq!(
+                result.ordering_violations, 0,
+                "No ordering violations in run {}",
+                run
+            );
         }
 
-        cx.trace("Deterministic crash recovery replay validated").await;
+        cx.trace("Deterministic crash recovery replay validated")
+            .await;
     }
 
     #[tokio::test]
@@ -947,47 +1028,108 @@ mod tests {
         // Create saga with complex dependency graph
         let saga_steps = vec![
             // Level 1: Independent steps
-            TracedSagaStep { id: 1, name: "setup_a".to_string(), step_type: SagaStepType::ResourceAllocation,
-                compensation_fn: "cleanup_a".to_string(), execution_order: 1, causal_dependencies: vec![], expected_duration: Duration::from_millis(50) },
-            TracedSagaStep { id: 2, name: "setup_b".to_string(), step_type: SagaStepType::ResourceAllocation,
-                compensation_fn: "cleanup_b".to_string(), execution_order: 2, causal_dependencies: vec![], expected_duration: Duration::from_millis(50) },
-
+            TracedSagaStep {
+                id: 1,
+                name: "setup_a".to_string(),
+                step_type: SagaStepType::ResourceAllocation,
+                compensation_fn: "cleanup_a".to_string(),
+                execution_order: 1,
+                causal_dependencies: vec![],
+                expected_duration: Duration::from_millis(50),
+            },
+            TracedSagaStep {
+                id: 2,
+                name: "setup_b".to_string(),
+                step_type: SagaStepType::ResourceAllocation,
+                compensation_fn: "cleanup_b".to_string(),
+                execution_order: 2,
+                causal_dependencies: vec![],
+                expected_duration: Duration::from_millis(50),
+            },
             // Level 2: Depends on level 1
-            TracedSagaStep { id: 3, name: "process_a".to_string(), step_type: SagaStepType::BusinessLogic,
-                compensation_fn: "revert_a".to_string(), execution_order: 3, causal_dependencies: vec![1], expected_duration: Duration::from_millis(75) },
-            TracedSagaStep { id: 4, name: "process_b".to_string(), step_type: SagaStepType::BusinessLogic,
-                compensation_fn: "revert_b".to_string(), execution_order: 4, causal_dependencies: vec![2], expected_duration: Duration::from_millis(75) },
-
+            TracedSagaStep {
+                id: 3,
+                name: "process_a".to_string(),
+                step_type: SagaStepType::BusinessLogic,
+                compensation_fn: "revert_a".to_string(),
+                execution_order: 3,
+                causal_dependencies: vec![1],
+                expected_duration: Duration::from_millis(75),
+            },
+            TracedSagaStep {
+                id: 4,
+                name: "process_b".to_string(),
+                step_type: SagaStepType::BusinessLogic,
+                compensation_fn: "revert_b".to_string(),
+                execution_order: 4,
+                causal_dependencies: vec![2],
+                expected_duration: Duration::from_millis(75),
+            },
             // Level 3: Depends on level 2
-            TracedSagaStep { id: 5, name: "combine_results".to_string(), step_type: SagaStepType::DatabaseTransaction,
-                compensation_fn: "split_results".to_string(), execution_order: 5, causal_dependencies: vec![3, 4], expected_duration: Duration::from_millis(100) },
-
+            TracedSagaStep {
+                id: 5,
+                name: "combine_results".to_string(),
+                step_type: SagaStepType::DatabaseTransaction,
+                compensation_fn: "split_results".to_string(),
+                execution_order: 5,
+                causal_dependencies: vec![3, 4],
+                expected_duration: Duration::from_millis(100),
+            },
             // Level 4: Final step
-            TracedSagaStep { id: 6, name: "finalize".to_string(), step_type: SagaStepType::ExternalService,
-                compensation_fn: "cancel_finalization".to_string(), execution_order: 6, causal_dependencies: vec![5], expected_duration: Duration::from_millis(150) },
+            TracedSagaStep {
+                id: 6,
+                name: "finalize".to_string(),
+                step_type: SagaStepType::ExternalService,
+                compensation_fn: "cancel_finalization".to_string(),
+                execution_order: 6,
+                causal_dependencies: vec![5],
+                expected_duration: Duration::from_millis(150),
+            },
         ];
 
-        let result = framework.execute_saga_with_crash_injection(&cx, saga_steps).await.unwrap();
+        let result = framework
+            .execute_saga_with_crash_injection(&cx, saga_steps)
+            .await
+            .unwrap();
 
         // Verify complex compensation graph ordering
         assert_eq!(result.crashed_at, Some(6), "Should crash at final step");
-        assert!(result.recovery_successful, "Complex compensation should succeed");
-        assert!(result.compensated_steps >= 4, "Should compensate multiple dependent steps");
-        assert_eq!(result.ordering_violations, 0, "Complex dependency graph should maintain ordering");
+        assert!(
+            result.recovery_successful,
+            "Complex compensation should succeed"
+        );
+        assert!(
+            result.compensated_steps >= 4,
+            "Should compensate multiple dependent steps"
+        );
+        assert_eq!(
+            result.ordering_violations, 0,
+            "Complex dependency graph should maintain ordering"
+        );
 
         // Verify that compensation follows reverse dependency order
-        let compensation_events: Vec<_> = result.trace_events.iter()
+        let compensation_events: Vec<_> = result
+            .trace_events
+            .iter()
             .filter(|e| e.event_type.contains("saga_compensation:"))
             .collect();
 
         // Should compensate in reverse order: 5 -> (4,3) -> (2,1)
-        let step_5_comp = compensation_events.iter().find(|e| e.event_type.contains("saga_compensation:5"));
-        let step_1_comp = compensation_events.iter().find(|e| e.event_type.contains("saga_compensation:1"));
+        let step_5_comp = compensation_events
+            .iter()
+            .find(|e| e.event_type.contains("saga_compensation:5"));
+        let step_1_comp = compensation_events
+            .iter()
+            .find(|e| e.event_type.contains("saga_compensation:1"));
 
         if let (Some(comp_5), Some(comp_1)) = (step_5_comp, step_1_comp) {
-            assert!(comp_5.timestamp <= comp_1.timestamp, "Step 5 should be compensated before step 1");
+            assert!(
+                comp_5.timestamp <= comp_1.timestamp,
+                "Step 5 should be compensated before step 1"
+            );
         }
 
-        cx.trace("Complex compensation graph ordering validated").await;
+        cx.trace("Complex compensation graph ordering validated")
+            .await;
     }
 }

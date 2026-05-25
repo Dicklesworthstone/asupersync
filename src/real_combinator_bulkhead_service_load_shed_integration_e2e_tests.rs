@@ -16,22 +16,22 @@
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod tests {
     use crate::{
+        channel::{mpsc, oneshot},
         combinator::bulkhead::{Bulkhead, BulkheadConfig, BulkheadStats, ResourceToken},
-        service::load_shed::{LoadShedConfig, LoadShedPolicy, LoadShedding, ShedDecision},
-        types::{Budget, Outcome, TaskId},
         cx::Cx,
         error::{Error, ErrorKind},
-        time::{Duration, Sleep},
-        sync::{Mutex, Semaphore},
-        channel::{mpsc, oneshot},
         runtime::Runtime,
-        test_utils::{init_test_runtime, TestTracer},
-    };
-    use std::sync::{
-        atomic::{AtomicU64, AtomicBool, Ordering},
-        Arc,
+        service::load_shed::{LoadShedConfig, LoadShedPolicy, LoadShedding, ShedDecision},
+        sync::{Mutex, Semaphore},
+        test_utils::{TestTracer, init_test_runtime},
+        time::{Duration, Sleep},
+        types::{Budget, Outcome, TaskId},
     };
     use std::collections::{HashMap, VecDeque};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    };
     use std::time::Instant;
 
     /// Test framework for bulkhead-load_shed integration scenarios
@@ -157,11 +157,15 @@ mod tests {
             });
 
             // Start monitoring loop for bulkhead-load_shed coordination
-            let monitor_handle = self.start_coordination_monitor(cx, &policy_controller).await?;
+            let monitor_handle = self
+                .start_coordination_monitor(cx, &policy_controller)
+                .await?;
 
             // Process requests through bulkhead and load_shed
             for request in request_pattern {
-                let should_shed = self.evaluate_load_shedding(cx, &request, &policy_controller).await?;
+                let should_shed = self
+                    .evaluate_load_shedding(cx, &request, &policy_controller)
+                    .await?;
 
                 if should_shed {
                     self.stats.requests_shed.fetch_add(1, Ordering::Relaxed);
@@ -197,16 +201,21 @@ mod tests {
 
                             stats_ref.requests_completed.fetch_add(1, Ordering::Relaxed);
                             drop(token); // Release bulkhead token
-                        }).await?;
-                    },
+                        })
+                        .await?;
+                    }
                     Err(_) => {
                         // Bulkhead full - trigger saturation monitoring
                         self.stats.saturation_events.fetch_add(1, Ordering::Relaxed);
-                        policy_controller.saturation_monitor.store(true, Ordering::Relaxed);
-                    },
+                        policy_controller
+                            .saturation_monitor
+                            .store(true, Ordering::Relaxed);
+                    }
                 }
 
-                self.stats.requests_submitted.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .requests_submitted
+                    .fetch_add(1, Ordering::Relaxed);
             }
 
             // Wait for completion and collect results
@@ -236,10 +245,17 @@ mod tests {
             let current_utilization = bulkhead_stats.utilization_ratio();
 
             // Check if saturation threshold is exceeded
-            let threshold = policy_controller.threshold_calculator.calculate_threshold(current_utilization).await;
+            let threshold = policy_controller
+                .threshold_calculator
+                .calculate_threshold(current_utilization)
+                .await;
             if current_utilization > threshold {
-                policy_controller.saturation_monitor.store(true, Ordering::Relaxed);
-                self.stats.load_shed_activations.fetch_add(1, Ordering::Relaxed);
+                policy_controller
+                    .saturation_monitor
+                    .store(true, Ordering::Relaxed);
+                self.stats
+                    .load_shed_activations
+                    .fetch_add(1, Ordering::Relaxed);
             }
 
             // Apply load shedding policy
@@ -252,15 +268,15 @@ mod tests {
                 LoadShedPolicy::Probabilistic => {
                     let shed_probability = (current_utilization - threshold).max(0.0) * 2.0;
                     Ok(fastrand::f64() < shed_probability)
-                },
+                }
                 LoadShedPolicy::Priority => {
                     let priority_threshold = (threshold * 255.0) as u8;
                     Ok(request.priority < priority_threshold)
-                },
+                }
                 LoadShedPolicy::ResourceCost => {
                     let cost_threshold = (threshold * 1000.0) as u32;
                     Ok(request.resource_cost > cost_threshold)
-                },
+                }
                 _ => Ok(false),
             }
         }
@@ -305,7 +321,8 @@ mod tests {
                         break;
                     }
                 }
-            }).await?;
+            })
+            .await?;
 
             Ok(cancel_rx)
         }
@@ -338,11 +355,18 @@ mod tests {
 
             // Calculate adaptive factor based on recent history
             if history.len() > 5 {
-                let avg_utilization: f64 = history.iter().map(|(_, u)| u).sum::<f64>() / history.len() as f64;
-                let stability = 1.0 - (history.iter().map(|(_, u)| (u - avg_utilization).abs()).sum::<f64>() / history.len() as f64);
+                let avg_utilization: f64 =
+                    history.iter().map(|(_, u)| u).sum::<f64>() / history.len() as f64;
+                let stability = 1.0
+                    - (history
+                        .iter()
+                        .map(|(_, u)| (u - avg_utilization).abs())
+                        .sum::<f64>()
+                        / history.len() as f64);
 
                 let adaptive_factor = 1.0 + (stability - 0.5) * 0.2; // Adjust threshold based on stability
-                self.adaptive_factor.store((adaptive_factor * 1000.0) as u64, Ordering::Relaxed);
+                self.adaptive_factor
+                    .store((adaptive_factor * 1000.0) as u64, Ordering::Relaxed);
             }
 
             let factor = self.adaptive_factor.load(Ordering::Relaxed) as f64 / 1000.0;
@@ -376,7 +400,9 @@ mod tests {
             ramp_rate: Duration::from_millis(10),
         };
 
-        let framework = BulkheadLoadShedTestFramework::new(&cx, config).await.unwrap();
+        let framework = BulkheadLoadShedTestFramework::new(&cx, config)
+            .await
+            .unwrap();
 
         // Generate request pattern that will saturate bulkhead
         let mut requests = Vec::new();
@@ -390,18 +416,37 @@ mod tests {
             });
         }
 
-        let results = framework.execute_integration_test(&cx, requests).await.unwrap();
+        let results = framework
+            .execute_integration_test(&cx, requests)
+            .await
+            .unwrap();
 
         // Verify bulkhead saturation triggered load shedding
-        assert!(results.saturation_events > 0, "Bulkhead should have experienced saturation");
-        assert!(results.load_shed_activations > 0, "Load shedding should have been activated");
-        assert!(results.total_shed > 0, "Some requests should have been shed");
-        assert!(results.total_accepted <= 10, "Accepted requests should not exceed bulkhead capacity");
+        assert!(
+            results.saturation_events > 0,
+            "Bulkhead should have experienced saturation"
+        );
+        assert!(
+            results.load_shed_activations > 0,
+            "Load shedding should have been activated"
+        );
+        assert!(
+            results.total_shed > 0,
+            "Some requests should have been shed"
+        );
+        assert!(
+            results.total_accepted <= 10,
+            "Accepted requests should not exceed bulkhead capacity"
+        );
 
         // Verify in-flight requests were preserved
-        assert_eq!(results.total_accepted, results.total_completed, "All accepted requests should complete");
+        assert_eq!(
+            results.total_accepted, results.total_completed,
+            "All accepted requests should complete"
+        );
 
-        cx.trace("Bulkhead saturation correctly triggered load shedding").await;
+        cx.trace("Bulkhead saturation correctly triggered load shedding")
+            .await;
     }
 
     #[tokio::test]
@@ -417,7 +462,9 @@ mod tests {
             ramp_rate: Duration::from_millis(20),
         };
 
-        let framework = BulkheadLoadShedTestFramework::new(&cx, config).await.unwrap();
+        let framework = BulkheadLoadShedTestFramework::new(&cx, config)
+            .await
+            .unwrap();
 
         // Submit initial requests to fill bulkhead
         let mut requests = Vec::new();
@@ -442,15 +489,31 @@ mod tests {
             });
         }
 
-        let results = framework.execute_integration_test(&cx, requests).await.unwrap();
+        let results = framework
+            .execute_integration_test(&cx, requests)
+            .await
+            .unwrap();
 
         // Verify behavior
-        assert_eq!(results.total_accepted, 5, "Only bulkhead capacity should be accepted");
-        assert_eq!(results.total_completed, 5, "All in-flight requests should complete");
-        assert!(results.total_shed >= 5, "Low priority requests should be shed");
-        assert_eq!(results.in_flight_preserved, results.total_completed, "In-flight requests preserved");
+        assert_eq!(
+            results.total_accepted, 5,
+            "Only bulkhead capacity should be accepted"
+        );
+        assert_eq!(
+            results.total_completed, 5,
+            "All in-flight requests should complete"
+        );
+        assert!(
+            results.total_shed >= 5,
+            "Low priority requests should be shed"
+        );
+        assert_eq!(
+            results.in_flight_preserved, results.total_completed,
+            "In-flight requests preserved"
+        );
 
-        cx.trace("In-flight requests preserved during load shedding transition").await;
+        cx.trace("In-flight requests preserved during load shedding transition")
+            .await;
     }
 
     #[tokio::test]
@@ -466,7 +529,9 @@ mod tests {
             ramp_rate: Duration::from_millis(15),
         };
 
-        let framework = BulkheadLoadShedTestFramework::new(&cx, config).await.unwrap();
+        let framework = BulkheadLoadShedTestFramework::new(&cx, config)
+            .await
+            .unwrap();
 
         // Generate pattern with increasing load
         let mut requests = Vec::new();
@@ -481,18 +546,34 @@ mod tests {
             });
         }
 
-        let results = framework.execute_integration_test(&cx, requests).await.unwrap();
+        let results = framework
+            .execute_integration_test(&cx, requests)
+            .await
+            .unwrap();
 
         // Verify adaptive policy transitions occurred
-        assert!(results.policy_transitions > 0, "Policy should have adapted to increasing load");
-        assert!(results.saturation_events > 0, "Should have detected saturation");
-        assert!(results.load_shed_activations > 0, "Load shedding should have activated");
+        assert!(
+            results.policy_transitions > 0,
+            "Policy should have adapted to increasing load"
+        );
+        assert!(
+            results.saturation_events > 0,
+            "Should have detected saturation"
+        );
+        assert!(
+            results.load_shed_activations > 0,
+            "Load shedding should have activated"
+        );
 
         // Verify system stability
         let acceptance_rate = results.total_accepted as f64 / results.total_submitted as f64;
-        assert!(acceptance_rate > 0.2 && acceptance_rate < 1.0, "System should maintain controlled acceptance rate");
+        assert!(
+            acceptance_rate > 0.2 && acceptance_rate < 1.0,
+            "System should maintain controlled acceptance rate"
+        );
 
-        cx.trace("Dynamic policy adaptation maintained system stability").await;
+        cx.trace("Dynamic policy adaptation maintained system stability")
+            .await;
     }
 
     #[tokio::test]
@@ -508,7 +589,9 @@ mod tests {
             ramp_rate: Duration::from_millis(5),
         };
 
-        let framework = BulkheadLoadShedTestFramework::new(&cx, config).await.unwrap();
+        let framework = BulkheadLoadShedTestFramework::new(&cx, config)
+            .await
+            .unwrap();
 
         // Test edge cases: rapid saturation/desaturation cycles
         let mut requests = Vec::new();
@@ -534,14 +617,24 @@ mod tests {
             });
         }
 
-        let results = framework.execute_integration_test(&cx, requests).await.unwrap();
+        let results = framework
+            .execute_integration_test(&cx, requests)
+            .await
+            .unwrap();
 
         // Verify edge case handling
-        assert!(results.saturation_events >= 5, "Should handle multiple saturation cycles");
+        assert!(
+            results.saturation_events >= 5,
+            "Should handle multiple saturation cycles"
+        );
         assert!(results.total_shed > 0, "High-cost requests should be shed");
-        assert_eq!(results.total_accepted, results.total_completed, "No request drops during transitions");
+        assert_eq!(
+            results.total_accepted, results.total_completed,
+            "No request drops during transitions"
+        );
 
-        cx.trace("Threshold coordination handled edge cases correctly").await;
+        cx.trace("Threshold coordination handled edge cases correctly")
+            .await;
     }
 
     #[tokio::test]
@@ -557,7 +650,9 @@ mod tests {
             ramp_rate: Duration::from_millis(8),
         };
 
-        let framework = BulkheadLoadShedTestFramework::new(&cx, config).await.unwrap();
+        let framework = BulkheadLoadShedTestFramework::new(&cx, config)
+            .await
+            .unwrap();
 
         // Generate requests with varied resource requirements
         let mut requests = Vec::new();
@@ -565,10 +660,10 @@ mod tests {
 
         for i in 0..30 {
             let resource_cost = match i % 4 {
-                0 => 50,   // Light requests
-                1 => 100,  // Medium requests
-                2 => 200,  // Heavy requests
-                _ => 500,  // Very heavy requests
+                0 => 50,  // Light requests
+                1 => 100, // Medium requests
+                2 => 200, // Heavy requests
+                _ => 500, // Very heavy requests
             };
 
             expected_total_cost += resource_cost as u64;
@@ -582,16 +677,29 @@ mod tests {
             });
         }
 
-        let results = framework.execute_integration_test(&cx, requests).await.unwrap();
+        let results = framework
+            .execute_integration_test(&cx, requests)
+            .await
+            .unwrap();
 
         // Verify resource accounting consistency
         let total_processed = results.total_accepted + results.total_shed;
-        assert_eq!(total_processed, results.total_submitted, "All requests should be accounted for");
-        assert_eq!(results.total_accepted, results.total_completed, "Resource accounting consistent");
+        assert_eq!(
+            total_processed, results.total_submitted,
+            "All requests should be accounted for"
+        );
+        assert_eq!(
+            results.total_accepted, results.total_completed,
+            "Resource accounting consistent"
+        );
 
         // Verify load shedding preserved system capacity
-        assert!(results.total_accepted <= config.bulkhead_capacity as u64, "Capacity respected");
+        assert!(
+            results.total_accepted <= config.bulkhead_capacity as u64,
+            "Capacity respected"
+        );
 
-        cx.trace("Resource accounting remained consistent across subsystems").await;
+        cx.trace("Resource accounting remained consistent across subsystems")
+            .await;
     }
 }

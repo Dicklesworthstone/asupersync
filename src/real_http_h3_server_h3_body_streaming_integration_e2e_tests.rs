@@ -9,9 +9,9 @@ use crate::cx::Cx;
 use crate::error::AsupersyncError;
 use crate::http::h3::{H3Error, qpack_decode_field_section, qpack_encode_field_section};
 use crate::io::{AsyncRead, AsyncWrite};
-use crate::net::quic::{QuicConnection, SendStream, RecvStream};
-use crate::runtime::{region, spawn, RuntimeBuilder};
-use crate::time::{sleep, Duration};
+use crate::net::quic::{QuicConnection, RecvStream, SendStream};
+use crate::runtime::{RuntimeBuilder, region, spawn};
+use crate::time::{Duration, sleep};
 use crate::types::{Budget, Outcome};
 
 use std::collections::HashMap;
@@ -66,8 +66,9 @@ impl H3StreamingTestFramework {
 
         // Compress headers using QPACK
         let header_fields: Vec<(String, String)> = headers.into_iter().collect();
-        let compressed_headers = qpack_encode_field_section(&header_fields)
-            .map_err(|e| H3StreamingError::QpackEncoding(format!("QPACK encoding failed: {:?}", e)))?;
+        let compressed_headers = qpack_encode_field_section(&header_fields).map_err(|e| {
+            H3StreamingError::QpackEncoding(format!("QPACK encoding failed: {:?}", e))
+        })?;
 
         // Fragment body across MTU-sized packets
         let packet_fragments = self.packet_fragmenter.fragment_body(&body_content);
@@ -95,7 +96,9 @@ impl H3StreamingTestFramework {
 
         // Decompress headers first
         let header_fields = qpack_decode_field_section(&server_response.compressed_headers)
-            .map_err(|e| H3StreamingError::QpackDecoding(format!("QPACK decoding failed: {:?}", e)))?;
+            .map_err(|e| {
+                H3StreamingError::QpackDecoding(format!("QPACK decoding failed: {:?}", e))
+            })?;
         let headers: HashMap<String, String> = header_fields.into_iter().collect();
 
         // Read body in chunks across packet fragments
@@ -117,7 +120,9 @@ impl H3StreamingTestFramework {
         }
 
         // Verify body integrity
-        let expected_body = self.body_generator.generate_body(server_response.total_body_size);
+        let expected_body = self
+            .body_generator
+            .generate_body(server_response.total_body_size);
         let body_matches = reassembled_body.freeze() == expected_body;
 
         Outcome::Ok(PartialReadResult {
@@ -151,16 +156,21 @@ impl H3StreamingTestFramework {
                 let task = spawn(&region_cx, async move {
                     // Create unique headers for each stream
                     let mut headers = HashMap::new();
-                    headers.insert("content-type".to_string(), "application/octet-stream".to_string());
+                    headers.insert(
+                        "content-type".to_string(),
+                        "application/octet-stream".to_string(),
+                    );
                     headers.insert("x-stream-id".to_string(), stream_id.to_string());
                     headers.insert("content-length".to_string(), LARGE_BODY_SIZE.to_string());
 
                     // Serve and read body for this stream
-                    let response = framework.serve_large_body_with_qpack(
-                        &region_cx, headers, LARGE_BODY_SIZE
-                    ).await?;
+                    let response = framework
+                        .serve_large_body_with_qpack(&region_cx, headers, LARGE_BODY_SIZE)
+                        .await?;
 
-                    framework.test_partial_body_reads(&region_cx, response).await
+                    framework
+                        .test_partial_body_reads(&region_cx, response)
+                        .await
                 })?;
 
                 tasks.push(task);
@@ -173,7 +183,8 @@ impl H3StreamingTestFramework {
             }
 
             Outcome::Ok(())
-        }).await?;
+        })
+        .await?;
 
         let duration = start_time.elapsed();
 
@@ -210,7 +221,9 @@ struct BodyGenerator {
 
 impl BodyGenerator {
     fn new() -> Self {
-        Self { seed: 0x1234567890abcdef }
+        Self {
+            seed: 0x1234567890abcdef,
+        }
     }
 
     /// Generates deterministic body content of specified size.
@@ -324,9 +337,13 @@ impl std::fmt::Display for H3StreamingError {
         match self {
             H3StreamingError::QpackEncoding(msg) => write!(f, "QPACK encoding error: {}", msg),
             H3StreamingError::QpackDecoding(msg) => write!(f, "QPACK decoding error: {}", msg),
-            H3StreamingError::PacketFragmentation(msg) => write!(f, "Packet fragmentation error: {}", msg),
+            H3StreamingError::PacketFragmentation(msg) => {
+                write!(f, "Packet fragmentation error: {}", msg)
+            }
             H3StreamingError::BodyStreaming(msg) => write!(f, "Body streaming error: {}", msg),
-            H3StreamingError::ConcurrentStreaming(msg) => write!(f, "Concurrent streaming error: {}", msg),
+            H3StreamingError::ConcurrentStreaming(msg) => {
+                write!(f, "Concurrent streaming error: {}", msg)
+            }
             H3StreamingError::Io(e) => write!(f, "I/O error: {}", e),
             H3StreamingError::Timeout => write!(f, "Operation timed out"),
         }
@@ -348,7 +365,9 @@ mod basic_h3_streaming_tests {
 
     #[test]
     fn test_qpack_header_compression_decompression() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -359,43 +378,59 @@ mod basic_h3_streaming_tests {
                 headers.insert("content-length".to_string(), "1024".to_string());
                 headers.insert("x-custom-header".to_string(), "test-value".to_string());
 
-                let response = framework.serve_large_body_with_qpack(
-                    &cx, headers.clone(), 1024
-                ).await.expect("Failed to serve body with QPACK");
+                let response = framework
+                    .serve_large_body_with_qpack(&cx, headers.clone(), 1024)
+                    .await
+                    .expect("Failed to serve body with QPACK");
 
-                let result = framework.test_partial_body_reads(&cx, response).await
+                let result = framework
+                    .test_partial_body_reads(&cx, response)
+                    .await
                     .expect("Failed to read body");
 
                 assert_eq!(result.total_bytes_read, 1024);
                 assert!(result.body_integrity_verified);
-                assert_eq!(result.headers.get("content-type").unwrap(), "application/json");
+                assert_eq!(
+                    result.headers.get("content-type").unwrap(),
+                    "application/json"
+                );
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_mtu_fragmented_body_streaming() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let framework = H3StreamingTestFramework::new();
 
                 let mut headers = HashMap::new();
-                headers.insert("content-type".to_string(), "application/octet-stream".to_string());
+                headers.insert(
+                    "content-type".to_string(),
+                    "application/octet-stream".to_string(),
+                );
                 headers.insert("content-length".to_string(), LARGE_BODY_SIZE.to_string());
 
-                let response = framework.serve_large_body_with_qpack(
-                    &cx, headers, LARGE_BODY_SIZE
-                ).await.expect("Failed to serve large body");
+                let response = framework
+                    .serve_large_body_with_qpack(&cx, headers, LARGE_BODY_SIZE)
+                    .await
+                    .expect("Failed to serve large body");
 
                 // Verify body was fragmented across multiple packets
                 assert!(response.fragment_count > 1);
                 assert_eq!(response.total_body_size, LARGE_BODY_SIZE);
 
-                let result = framework.test_partial_body_reads(&cx, response).await
+                let result = framework
+                    .test_partial_body_reads(&cx, response)
+                    .await
                     .expect("Failed to read fragmented body");
 
                 assert_eq!(result.total_bytes_read, LARGE_BODY_SIZE);
@@ -404,8 +439,10 @@ mod basic_h3_streaming_tests {
                 assert!(result.body_integrity_verified);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 }
 
@@ -416,7 +453,9 @@ mod partial_body_reading_tests {
 
     #[test]
     fn test_chunk_aligned_partial_reads() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -428,11 +467,14 @@ mod partial_body_reading_tests {
                 let mut headers = HashMap::new();
                 headers.insert("content-length".to_string(), aligned_size.to_string());
 
-                let response = framework.serve_large_body_with_qpack(
-                    &cx, headers, aligned_size
-                ).await.expect("Failed to serve aligned body");
+                let response = framework
+                    .serve_large_body_with_qpack(&cx, headers, aligned_size)
+                    .await
+                    .expect("Failed to serve aligned body");
 
-                let result = framework.test_partial_body_reads(&cx, response).await
+                let result = framework
+                    .test_partial_body_reads(&cx, response)
+                    .await
                     .expect("Failed to read aligned body");
 
                 assert_eq!(result.total_bytes_read, aligned_size);
@@ -440,13 +482,17 @@ mod partial_body_reading_tests {
                 assert!(result.body_integrity_verified);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_misaligned_partial_reads() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -458,11 +504,14 @@ mod partial_body_reading_tests {
                 let mut headers = HashMap::new();
                 headers.insert("content-length".to_string(), misaligned_size.to_string());
 
-                let response = framework.serve_large_body_with_qpack(
-                    &cx, headers, misaligned_size
-                ).await.expect("Failed to serve misaligned body");
+                let response = framework
+                    .serve_large_body_with_qpack(&cx, headers, misaligned_size)
+                    .await
+                    .expect("Failed to serve misaligned body");
 
-                let result = framework.test_partial_body_reads(&cx, response).await
+                let result = framework
+                    .test_partial_body_reads(&cx, response)
+                    .await
                     .expect("Failed to read misaligned body");
 
                 assert_eq!(result.total_bytes_read, misaligned_size);
@@ -470,13 +519,17 @@ mod partial_body_reading_tests {
                 assert!(result.body_integrity_verified);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_single_byte_partial_reads() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -490,19 +543,24 @@ mod partial_body_reading_tests {
                 let mut headers = HashMap::new();
                 headers.insert("content-length".to_string(), small_body_size.to_string());
 
-                let response = framework.serve_large_body_with_qpack(
-                    &cx, headers, small_body_size
-                ).await.expect("Failed to serve small body");
+                let response = framework
+                    .serve_large_body_with_qpack(&cx, headers, small_body_size)
+                    .await
+                    .expect("Failed to serve small body");
 
-                let result = framework.test_partial_body_reads(&cx, response).await
+                let result = framework
+                    .test_partial_body_reads(&cx, response)
+                    .await
                     .expect("Failed to read with single bytes");
 
                 assert_eq!(result.total_bytes_read, small_body_size);
                 assert!(result.body_integrity_verified);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 }
 
@@ -513,13 +571,17 @@ mod concurrent_streaming_tests {
 
     #[test]
     fn test_dual_stream_concurrent_reads() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let framework = H3StreamingTestFramework::new();
 
-                let result = framework.test_concurrent_streaming(&cx, 2).await
+                let result = framework
+                    .test_concurrent_streaming(&cx, 2)
+                    .await
                     .expect("Failed to test concurrent streams");
 
                 assert_eq!(result.stream_count, 2);
@@ -528,30 +590,41 @@ mod concurrent_streaming_tests {
                 assert!(result.total_chunks_read > 2);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_high_concurrency_streaming() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
                 let framework = H3StreamingTestFramework::new();
 
                 let stream_count = 8;
-                let result = framework.test_concurrent_streaming(&cx, stream_count).await
+                let result = framework
+                    .test_concurrent_streaming(&cx, stream_count)
+                    .await
                     .expect("Failed to test high concurrency streams");
 
                 assert_eq!(result.stream_count, stream_count);
-                assert_eq!(result.total_bytes_transferred, LARGE_BODY_SIZE * stream_count);
+                assert_eq!(
+                    result.total_bytes_transferred,
+                    LARGE_BODY_SIZE * stream_count
+                );
                 assert!(result.all_streams_verified);
                 assert!(result.elapsed_duration.as_millis() > 0);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 }
 
@@ -562,7 +635,9 @@ mod edge_case_tests {
 
     #[test]
     fn test_empty_body_streaming() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -571,14 +646,17 @@ mod edge_case_tests {
                 let mut headers = HashMap::new();
                 headers.insert("content-length".to_string(), "0".to_string());
 
-                let response = framework.serve_large_body_with_qpack(
-                    &cx, headers, 0
-                ).await.expect("Failed to serve empty body");
+                let response = framework
+                    .serve_large_body_with_qpack(&cx, headers, 0)
+                    .await
+                    .expect("Failed to serve empty body");
 
                 assert_eq!(response.total_body_size, 0);
                 assert_eq!(response.fragment_count, 0);
 
-                let result = framework.test_partial_body_reads(&cx, response).await
+                let result = framework
+                    .test_partial_body_reads(&cx, response)
+                    .await
                     .expect("Failed to read empty body");
 
                 assert_eq!(result.total_bytes_read, 0);
@@ -586,13 +664,17 @@ mod edge_case_tests {
                 assert!(result.body_integrity_verified);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_large_header_set_compression() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -606,15 +688,18 @@ mod edge_case_tests {
                 for i in 0..50 {
                     headers.insert(
                         format!("x-custom-header-{}", i),
-                        format!("custom-value-{}-with-long-content", i)
+                        format!("custom-value-{}-with-long-content", i),
                     );
                 }
 
-                let response = framework.serve_large_body_with_qpack(
-                    &cx, headers.clone(), 1024
-                ).await.expect("Failed to serve body with large headers");
+                let response = framework
+                    .serve_large_body_with_qpack(&cx, headers.clone(), 1024)
+                    .await
+                    .expect("Failed to serve body with large headers");
 
-                let result = framework.test_partial_body_reads(&cx, response).await
+                let result = framework
+                    .test_partial_body_reads(&cx, response)
+                    .await
                     .expect("Failed to read body with large headers");
 
                 assert_eq!(result.total_bytes_read, 1024);
@@ -622,13 +707,17 @@ mod edge_case_tests {
                 assert_eq!(result.headers.len(), headers.len());
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 
     #[test]
     fn test_maximum_mtu_sized_body() {
-        let rt = RuntimeBuilder::new().build().expect("Failed to create runtime");
+        let rt = RuntimeBuilder::new()
+            .build()
+            .expect("Failed to create runtime");
 
         rt.block_on(async move {
             region(Budget::default(), |cx| async move {
@@ -640,20 +729,25 @@ mod edge_case_tests {
                 let mut headers = HashMap::new();
                 headers.insert("content-length".to_string(), mtu_body_size.to_string());
 
-                let response = framework.serve_large_body_with_qpack(
-                    &cx, headers, mtu_body_size
-                ).await.expect("Failed to serve MTU-sized body");
+                let response = framework
+                    .serve_large_body_with_qpack(&cx, headers, mtu_body_size)
+                    .await
+                    .expect("Failed to serve MTU-sized body");
 
                 assert_eq!(response.fragment_count, 1); // Should fit in one packet
 
-                let result = framework.test_partial_body_reads(&cx, response).await
+                let result = framework
+                    .test_partial_body_reads(&cx, response)
+                    .await
                     .expect("Failed to read MTU-sized body");
 
                 assert_eq!(result.total_bytes_read, mtu_body_size);
                 assert!(result.body_integrity_verified);
 
                 Outcome::Ok(())
-            }).await
-        }).expect("Runtime execution failed");
+            })
+            .await
+        })
+        .expect("Runtime execution failed");
     }
 }

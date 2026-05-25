@@ -28,12 +28,16 @@
 //! - Temporal bounds maintain proof validity over time
 //! - Resource patterns ensure proper capability isolation
 
-use crate::cx::macaroon::{MacaroonToken, CaveatPredicate, VerificationContext, VerificationResult, BindError};
-use crate::obligation::no_aliasing_proof::{NoAliasingProver, ProofStep, Lemma, VerificationFailure};
+use crate::cx::macaroon::{
+    BindError, CaveatPredicate, MacaroonToken, VerificationContext, VerificationResult,
+};
+use crate::obligation::no_aliasing_proof::{
+    Lemma, NoAliasingProver, ProofStep, VerificationFailure,
+};
 use crate::obligation::{ObligationId, ObligationKind};
 use crate::security::key::AuthKey;
-use crate::types::{TaskId, RegionId, Time};
-use std::collections::{HashMap, BTreeMap, BTreeSet};
+use crate::types::{RegionId, TaskId, Time};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -93,26 +97,20 @@ impl CapabilityScope {
         let attenuated_token = self.capability_token.clone().add_caveat(attenuation);
 
         // Verify the attenuation is valid
-        if !attenuated_token.is_direct_attenuation_of(&self.capability_token, |pred| {
-            match pred {
-                CaveatPredicate::RegionScope(_) => true,
-                CaveatPredicate::TaskScope(_) => true,
-                CaveatPredicate::TimeBefore(_) => true,
-                CaveatPredicate::TimeAfter(_) => true,
-                CaveatPredicate::MaxUses(_) => true,
-                CaveatPredicate::ResourceScope(_) => true,
-                _ => false,
-            }
+        if !attenuated_token.is_direct_attenuation_of(&self.capability_token, |pred| match pred {
+            CaveatPredicate::RegionScope(_) => true,
+            CaveatPredicate::TaskScope(_) => true,
+            CaveatPredicate::TimeBefore(_) => true,
+            CaveatPredicate::TimeAfter(_) => true,
+            CaveatPredicate::MaxUses(_) => true,
+            CaveatPredicate::ResourceScope(_) => true,
+            _ => false,
         }) {
             return Err("Invalid macaroon attenuation".to_string());
         }
 
-        let child_scope = CapabilityScope::new(
-            child_scope_id,
-            self.region_id,
-            child_task,
-            attenuated_token,
-        );
+        let child_scope =
+            CapabilityScope::new(child_scope_id, self.region_id, child_task, attenuated_token);
 
         Ok(child_scope)
     }
@@ -140,12 +138,21 @@ impl CapabilityScope {
             obligation: obligation_id,
             time: timestamp,
             verified: true,
-            description: format!("Reserved SendPermit {} in scope {} by task {}",
-                obligation_id.as_u64(), self.scope_id, self.owner_task.as_u64()),
+            description: format!(
+                "Reserved SendPermit {} in scope {} by task {}",
+                obligation_id.as_u64(),
+                self.scope_id,
+                self.owner_task.as_u64()
+            ),
         };
 
         // Update no-aliasing prover
-        self.aliasing_prover.check_reserve(obligation_id, self.owner_task, self.region_id, timestamp)?;
+        self.aliasing_prover.check_reserve(
+            obligation_id,
+            self.owner_task,
+            self.region_id,
+            timestamp,
+        )?;
         self.proof_steps.push(proof_step);
 
         Ok(())
@@ -161,7 +168,7 @@ impl CapabilityScope {
         // Check that we own this obligation
         if !self.active_obligations.contains(&obligation_id) {
             return Err(VerificationFailure::NotFound {
-                obligation: obligation_id
+                obligation: obligation_id,
             });
         }
 
@@ -186,13 +193,26 @@ impl CapabilityScope {
             obligation: obligation_id,
             time: timestamp,
             verified: true,
-            description: format!("Transferred SendPermit {} from scope {} to scope {}",
-                obligation_id.as_u64(), self.scope_id, target_child_scope.scope_id),
+            description: format!(
+                "Transferred SendPermit {} from scope {} to scope {}",
+                obligation_id.as_u64(),
+                self.scope_id,
+                target_child_scope.scope_id
+            ),
         };
 
         // Update no-aliasing provers
-        self.aliasing_prover.check_transfer(obligation_id, target_child_scope.owner_task, timestamp)?;
-        target_child_scope.aliasing_prover.check_reserve(obligation_id, target_child_scope.owner_task, target_child_scope.region_id, timestamp)?;
+        self.aliasing_prover.check_transfer(
+            obligation_id,
+            target_child_scope.owner_task,
+            timestamp,
+        )?;
+        target_child_scope.aliasing_prover.check_reserve(
+            obligation_id,
+            target_child_scope.owner_task,
+            target_child_scope.region_id,
+            timestamp,
+        )?;
 
         self.proof_steps.push(proof_step.clone());
         target_child_scope.proof_steps.push(proof_step);
@@ -210,7 +230,7 @@ impl CapabilityScope {
         // Check that we own this obligation
         if !self.active_obligations.remove(&obligation_id) {
             return Err(VerificationFailure::NotFound {
-                obligation: obligation_id
+                obligation: obligation_id,
             });
         }
 
@@ -220,13 +240,17 @@ impl CapabilityScope {
             obligation: obligation_id,
             time: timestamp,
             verified: true,
-            description: format!("{} SendPermit {} in scope {}",
+            description: format!(
+                "{} SendPermit {} in scope {}",
                 if committed { "Committed" } else { "Aborted" },
-                obligation_id.as_u64(), self.scope_id),
+                obligation_id.as_u64(),
+                self.scope_id
+            ),
         };
 
         // Update no-aliasing prover
-        self.aliasing_prover.check_resolve(obligation_id, committed, timestamp)?;
+        self.aliasing_prover
+            .check_resolve(obligation_id, committed, timestamp)?;
         self.proof_steps.push(proof_step);
 
         Ok(())
@@ -237,7 +261,10 @@ impl CapabilityScope {
         let verification_result = self.aliasing_prover.verify();
         match verification_result {
             Ok(_) => Ok(()),
-            Err(failure) => Err(format!("No-aliasing proof failed in scope {}: {:?}", self.scope_id, failure)),
+            Err(failure) => Err(format!(
+                "No-aliasing proof failed in scope {}: {:?}",
+                self.scope_id, failure
+            )),
         }
     }
 
@@ -275,17 +302,9 @@ struct MacaroonNoAliasingIntegrator {
 impl MacaroonNoAliasingIntegrator {
     fn new() -> Self {
         let root_auth_key = AuthKey::generate();
-        let root_macaroon = MacaroonToken::mint(
-            &root_auth_key,
-            "root_capability",
-            "cx/scheduler"
-        );
-        let root_scope = CapabilityScope::new(
-            1,
-            RegionId::from_u32(1),
-            TaskId::from_u64(1),
-            root_macaroon,
-        );
+        let root_macaroon = MacaroonToken::mint(&root_auth_key, "root_capability", "cx/scheduler");
+        let root_scope =
+            CapabilityScope::new(1, RegionId::from_u32(1), TaskId::from_u64(1), root_macaroon);
 
         Self {
             root_auth_key,
@@ -298,9 +317,9 @@ impl MacaroonNoAliasingIntegrator {
     }
 
     fn advance_time(&mut self, duration: Duration) {
-        self.current_time = self.current_time.saturating_add_nanos(
-            duration.as_nanos().min(u128::from(u64::MAX)) as u64
-        );
+        self.current_time = self
+            .current_time
+            .saturating_add_nanos(duration.as_nanos().min(u128::from(u64::MAX)) as u64);
     }
 
     fn next_obligation_id(&mut self) -> ObligationId {
@@ -329,11 +348,9 @@ impl MacaroonNoAliasingIntegrator {
         let child_scope_id = self.next_scope_id();
         let child_task = self.next_task_id();
 
-        let child_scope = self.root_scope.create_attenuated_scope(
-            child_scope_id,
-            child_task,
-            attenuation,
-        )?;
+        let child_scope =
+            self.root_scope
+                .create_attenuated_scope(child_scope_id, child_task, attenuation)?;
 
         self.root_scope.child_scopes.push(child_scope);
         Ok(child_scope_id)
@@ -361,7 +378,8 @@ impl MacaroonNoAliasingIntegrator {
         let timestamp = self.current_time;
 
         if let Some(scope) = self.get_scope_mut(scope_id) {
-            scope.reserve_send_permit(obligation_id, timestamp)
+            scope
+                .reserve_send_permit(obligation_id, timestamp)
                 .map_err(|e| format!("Failed to reserve in scope {}: {:?}", scope_id, e))?;
             Ok(obligation_id)
         } else {
@@ -382,14 +400,20 @@ impl MacaroonNoAliasingIntegrator {
         // we'd use more sophisticated data structures
         if from_scope_id == self.root_scope.scope_id {
             // Find target child scope
-            let child_index = self.root_scope.child_scopes
+            let child_index = self
+                .root_scope
+                .child_scopes
                 .iter()
                 .position(|c| c.scope_id == to_scope_id)
                 .ok_or_else(|| format!("Target scope {} not found", to_scope_id))?;
 
             let mut target_child = self.root_scope.child_scopes.remove(child_index);
-            let result = self.root_scope.transfer_to_child(obligation_id, &mut target_child, timestamp);
-            self.root_scope.child_scopes.insert(child_index, target_child);
+            let result =
+                self.root_scope
+                    .transfer_to_child(obligation_id, &mut target_child, timestamp);
+            self.root_scope
+                .child_scopes
+                .insert(child_index, target_child);
 
             result.map_err(|e| format!("Transfer failed: {:?}", e))
         } else {
@@ -407,7 +431,8 @@ impl MacaroonNoAliasingIntegrator {
         let timestamp = self.current_time;
 
         if let Some(scope) = self.get_scope_mut(scope_id) {
-            scope.resolve_send_permit(obligation_id, committed, timestamp)
+            scope
+                .resolve_send_permit(obligation_id, committed, timestamp)
                 .map_err(|e| format!("Failed to resolve in scope {}: {:?}", scope_id, e))
         } else {
             Err(format!("Scope {} not found", scope_id))
@@ -427,17 +452,31 @@ impl MacaroonNoAliasingIntegrator {
     fn get_stats(&self) -> IntegrationStats {
         let all_steps = self.root_scope.collect_all_proof_steps();
         let total_scopes = 1 + self.root_scope.child_scopes.len();
-        let total_active_obligations = self.root_scope.active_obligations.len() +
-            self.root_scope.child_scopes.iter().map(|c| c.active_obligations.len()).sum::<usize>();
+        let total_active_obligations = self.root_scope.active_obligations.len()
+            + self
+                .root_scope
+                .child_scopes
+                .iter()
+                .map(|c| c.active_obligations.len())
+                .sum::<usize>();
 
         IntegrationStats {
             total_scopes,
             total_active_obligations,
             total_proof_steps: all_steps.len(),
             verified_steps: all_steps.iter().filter(|s| s.verified).count(),
-            allocation_steps: all_steps.iter().filter(|s| s.lemma == Lemma::AllocationFreshness).count(),
-            transfer_steps: all_steps.iter().filter(|s| s.lemma == Lemma::TransferExclusivity).count(),
-            resolution_steps: all_steps.iter().filter(|s| s.lemma == Lemma::ReleaseConsumption).count(),
+            allocation_steps: all_steps
+                .iter()
+                .filter(|s| s.lemma == Lemma::AllocationFreshness)
+                .count(),
+            transfer_steps: all_steps
+                .iter()
+                .filter(|s| s.lemma == Lemma::TransferExclusivity)
+                .count(),
+            resolution_steps: all_steps
+                .iter()
+                .filter(|s| s.lemma == Lemma::ReleaseConsumption)
+                .count(),
         }
     }
 }
@@ -467,9 +506,9 @@ mod tests {
         let mut integrator = MacaroonNoAliasingIntegrator::new();
 
         // Create an attenuated child scope restricted to a specific region
-        let child_scope_id = integrator.create_attenuated_child_scope(
-            CaveatPredicate::RegionScope(RegionId::from_u32(1))
-        ).unwrap();
+        let child_scope_id = integrator
+            .create_attenuated_child_scope(CaveatPredicate::RegionScope(RegionId::from_u32(1)))
+            .unwrap();
 
         // Reserve obligations in both scopes
         let root_obligation = integrator.reserve_in_scope(1).unwrap();
@@ -482,19 +521,31 @@ mod tests {
         integrator.verify_all_proofs().unwrap();
 
         // Resolve obligations
-        integrator.resolve_in_scope(1, root_obligation, true).unwrap();
-        integrator.resolve_in_scope(child_scope_id, child_obligation, true).unwrap();
+        integrator
+            .resolve_in_scope(1, root_obligation, true)
+            .unwrap();
+        integrator
+            .resolve_in_scope(child_scope_id, child_obligation, true)
+            .unwrap();
 
         // Final verification
         integrator.verify_all_proofs().unwrap();
 
         let stats = integrator.get_stats();
         assert_eq!(stats.total_scopes, 2, "Should have root + child scope");
-        assert_eq!(stats.total_active_obligations, 0, "All obligations should be resolved");
-        assert_eq!(stats.verified_steps, stats.total_proof_steps, "All proof steps should be verified");
+        assert_eq!(
+            stats.total_active_obligations, 0,
+            "All obligations should be resolved"
+        );
+        assert_eq!(
+            stats.verified_steps, stats.total_proof_steps,
+            "All proof steps should be verified"
+        );
 
-        println!("✓ Basic attenuation proof test passed - {} scopes, {} proof steps",
-            stats.total_scopes, stats.total_proof_steps);
+        println!(
+            "✓ Basic attenuation proof test passed - {} scopes, {} proof steps",
+            stats.total_scopes, stats.total_proof_steps
+        );
     }
 
     #[tokio::test]
@@ -503,21 +554,23 @@ mod tests {
         let mut integrator = MacaroonNoAliasingIntegrator::new();
 
         // Create multiple levels of attenuated scopes
-        let level1_scope = integrator.create_attenuated_child_scope(
-            CaveatPredicate::RegionScope(RegionId::from_u32(1))
-        ).unwrap();
+        let level1_scope = integrator
+            .create_attenuated_child_scope(CaveatPredicate::RegionScope(RegionId::from_u32(1)))
+            .unwrap();
 
         // Create a time-bounded scope
         let future_time = integrator.current_time.saturating_add_nanos(60_000_000_000); // +60s
-        let level2_scope = integrator.create_attenuated_child_scope(
-            CaveatPredicate::TimeBefore(future_time.as_nanos())
-        ).unwrap();
+        let level2_scope = integrator
+            .create_attenuated_child_scope(CaveatPredicate::TimeBefore(future_time.as_nanos()))
+            .unwrap();
 
         // Reserve an obligation in the root scope
         let obligation = integrator.reserve_in_scope(1).unwrap();
 
         // Transfer through the delegation chain: root -> level1 -> level2
-        integrator.transfer_between_scopes(1, level1_scope, obligation).unwrap();
+        integrator
+            .transfer_between_scopes(1, level1_scope, obligation)
+            .unwrap();
 
         integrator.advance_time(Duration::from_millis(5));
 
@@ -525,15 +578,19 @@ mod tests {
         integrator.verify_all_proofs().unwrap();
 
         // Resolve in the final scope
-        integrator.resolve_in_scope(level1_scope, obligation, true).unwrap();
+        integrator
+            .resolve_in_scope(level1_scope, obligation, true)
+            .unwrap();
 
         let stats = integrator.get_stats();
         assert_eq!(stats.transfer_steps, 1, "Should have one transfer step");
         assert_eq!(stats.resolution_steps, 1, "Should have one resolution step");
         assert!(stats.verified_steps > 0, "Should have verified proof steps");
 
-        println!("✓ Nested capability delegation test passed - {} transfer steps, {} total steps",
-            stats.transfer_steps, stats.total_proof_steps);
+        println!(
+            "✓ Nested capability delegation test passed - {} transfer steps, {} total steps",
+            stats.transfer_steps, stats.total_proof_steps
+        );
     }
 
     #[tokio::test]
@@ -542,13 +599,13 @@ mod tests {
         let mut integrator = MacaroonNoAliasingIntegrator::new();
 
         // Create scopes with different task restrictions
-        let task_scope_1 = integrator.create_attenuated_child_scope(
-            CaveatPredicate::TaskScope(TaskId::from_u64(100))
-        ).unwrap();
+        let task_scope_1 = integrator
+            .create_attenuated_child_scope(CaveatPredicate::TaskScope(TaskId::from_u64(100)))
+            .unwrap();
 
-        let task_scope_2 = integrator.create_attenuated_child_scope(
-            CaveatPredicate::TaskScope(TaskId::from_u64(200))
-        ).unwrap();
+        let task_scope_2 = integrator
+            .create_attenuated_child_scope(CaveatPredicate::TaskScope(TaskId::from_u64(200)))
+            .unwrap();
 
         // Reserve obligations in each scope
         let obligation_1 = integrator.reserve_in_scope(task_scope_1).unwrap();
@@ -559,17 +616,26 @@ mod tests {
 
         // Each obligation should be uniquely owned by its scope's task
         let stats = integrator.get_stats();
-        assert_eq!(stats.total_active_obligations, 2, "Should have 2 active obligations");
+        assert_eq!(
+            stats.total_active_obligations, 2,
+            "Should have 2 active obligations"
+        );
         assert_eq!(stats.allocation_steps, 2, "Should have 2 allocation steps");
 
         // Clean up
-        integrator.resolve_in_scope(task_scope_1, obligation_1, true).unwrap();
-        integrator.resolve_in_scope(task_scope_2, obligation_2, false).unwrap();
+        integrator
+            .resolve_in_scope(task_scope_1, obligation_1, true)
+            .unwrap();
+        integrator
+            .resolve_in_scope(task_scope_2, obligation_2, false)
+            .unwrap();
 
         integrator.verify_all_proofs().unwrap();
 
-        println!("✓ Scope-restricted transfers test passed - {} scopes with isolated obligations",
-            stats.total_scopes);
+        println!(
+            "✓ Scope-restricted transfers test passed - {} scopes with isolated obligations",
+            stats.total_scopes
+        );
     }
 
     #[tokio::test]
@@ -579,9 +645,9 @@ mod tests {
 
         // Create a scope with a near-term expiration
         let expiration_time = integrator.current_time.saturating_add_nanos(100_000_000); // +100ms
-        let time_bounded_scope = integrator.create_attenuated_child_scope(
-            CaveatPredicate::TimeBefore(expiration_time.as_nanos())
-        ).unwrap();
+        let time_bounded_scope = integrator
+            .create_attenuated_child_scope(CaveatPredicate::TimeBefore(expiration_time.as_nanos()))
+            .unwrap();
 
         // Reserve an obligation before expiration
         let obligation = integrator.reserve_in_scope(time_bounded_scope).unwrap();
@@ -593,15 +659,22 @@ mod tests {
         integrator.verify_all_proofs().unwrap();
 
         // Resolve before expiration
-        integrator.resolve_in_scope(time_bounded_scope, obligation, true).unwrap();
+        integrator
+            .resolve_in_scope(time_bounded_scope, obligation, true)
+            .unwrap();
 
         // Final verification
         integrator.verify_all_proofs().unwrap();
 
         let stats = integrator.get_stats();
-        assert_eq!(stats.verified_steps, stats.total_proof_steps, "All steps should verify within time bounds");
+        assert_eq!(
+            stats.verified_steps, stats.total_proof_steps,
+            "All steps should verify within time bounds"
+        );
 
-        println!("✓ Time-bounded capabilities test passed - obligation completed within time bounds");
+        println!(
+            "✓ Time-bounded capabilities test passed - obligation completed within time bounds"
+        );
     }
 
     #[tokio::test]
@@ -610,13 +683,17 @@ mod tests {
         let mut integrator = MacaroonNoAliasingIntegrator::new();
 
         // Create scopes with different resource patterns
-        let send_pattern_scope = integrator.create_attenuated_child_scope(
-            CaveatPredicate::ResourceScope("send_permit:channel_*".to_string())
-        ).unwrap();
+        let send_pattern_scope = integrator
+            .create_attenuated_child_scope(CaveatPredicate::ResourceScope(
+                "send_permit:channel_*".to_string(),
+            ))
+            .unwrap();
 
-        let recv_pattern_scope = integrator.create_attenuated_child_scope(
-            CaveatPredicate::ResourceScope("recv_permit:channel_*".to_string())
-        ).unwrap();
+        let recv_pattern_scope = integrator
+            .create_attenuated_child_scope(CaveatPredicate::ResourceScope(
+                "recv_permit:channel_*".to_string(),
+            ))
+            .unwrap();
 
         // Reserve obligations in pattern-restricted scopes
         let send_obligation = integrator.reserve_in_scope(send_pattern_scope).unwrap();
@@ -630,14 +707,23 @@ mod tests {
         integrator.verify_all_proofs().unwrap();
 
         // Clean up obligations
-        integrator.resolve_in_scope(send_pattern_scope, send_obligation, true).unwrap();
-        integrator.resolve_in_scope(recv_pattern_scope, recv_obligation, true).unwrap();
+        integrator
+            .resolve_in_scope(send_pattern_scope, send_obligation, true)
+            .unwrap();
+        integrator
+            .resolve_in_scope(recv_pattern_scope, recv_obligation, true)
+            .unwrap();
 
         let stats = integrator.get_stats();
-        assert_eq!(stats.resolution_steps, 2, "Should have resolved both pattern-scoped obligations");
+        assert_eq!(
+            stats.resolution_steps, 2,
+            "Should have resolved both pattern-scoped obligations"
+        );
 
-        println!("✓ Resource pattern matching test passed - {} pattern-scoped obligations",
-            stats.resolution_steps);
+        println!(
+            "✓ Resource pattern matching test passed - {} pattern-scoped obligations",
+            stats.resolution_steps
+        );
     }
 
     #[tokio::test]
@@ -646,43 +732,60 @@ mod tests {
         let mut integrator = MacaroonNoAliasingIntegrator::new();
 
         // Create a complex chain: region -> task -> time -> resource pattern
-        let region_scope = integrator.create_attenuated_child_scope(
-            CaveatPredicate::RegionScope(RegionId::from_u32(42))
-        ).unwrap();
+        let region_scope = integrator
+            .create_attenuated_child_scope(CaveatPredicate::RegionScope(RegionId::from_u32(42)))
+            .unwrap();
 
-        let task_scope = integrator.create_attenuated_child_scope(
-            CaveatPredicate::TaskScope(TaskId::from_u64(1001))
-        ).unwrap();
+        let task_scope = integrator
+            .create_attenuated_child_scope(CaveatPredicate::TaskScope(TaskId::from_u64(1001)))
+            .unwrap();
 
         let future_time = integrator.current_time.saturating_add_nanos(1_000_000_000); // +1s
-        let time_scope = integrator.create_attenuated_child_scope(
-            CaveatPredicate::TimeBefore(future_time.as_nanos())
-        ).unwrap();
+        let time_scope = integrator
+            .create_attenuated_child_scope(CaveatPredicate::TimeBefore(future_time.as_nanos()))
+            .unwrap();
 
-        let resource_scope = integrator.create_attenuated_child_scope(
-            CaveatPredicate::ResourceScope("complex_resource:*".to_string())
-        ).unwrap();
+        let resource_scope = integrator
+            .create_attenuated_child_scope(CaveatPredicate::ResourceScope(
+                "complex_resource:*".to_string(),
+            ))
+            .unwrap();
 
         // Reserve and transfer through the entire chain
         let obligation = integrator.reserve_in_scope(1).unwrap();
 
         // Perform a series of transfers to exercise the chain
-        integrator.transfer_between_scopes(1, region_scope, obligation).unwrap();
+        integrator
+            .transfer_between_scopes(1, region_scope, obligation)
+            .unwrap();
         integrator.advance_time(Duration::from_millis(100));
 
         // Verify proofs hold throughout the complex chain
         integrator.verify_all_proofs().unwrap();
 
         // Resolve the obligation
-        integrator.resolve_in_scope(region_scope, obligation, true).unwrap();
+        integrator
+            .resolve_in_scope(region_scope, obligation, true)
+            .unwrap();
 
         let stats = integrator.get_stats();
-        assert!(stats.total_scopes >= 5, "Should have root + 4 attenuated scopes");
-        assert_eq!(stats.transfer_steps, 1, "Should have transfer through chain");
-        assert_eq!(stats.verified_steps, stats.total_proof_steps, "All proof steps should verify");
+        assert!(
+            stats.total_scopes >= 5,
+            "Should have root + 4 attenuated scopes"
+        );
+        assert_eq!(
+            stats.transfer_steps, 1,
+            "Should have transfer through chain"
+        );
+        assert_eq!(
+            stats.verified_steps, stats.total_proof_steps,
+            "All proof steps should verify"
+        );
 
-        println!("✓ Complex nested attenuation chain test passed - {} scopes, {} proof steps",
-            stats.total_scopes, stats.total_proof_steps);
+        println!(
+            "✓ Complex nested attenuation chain test passed - {} scopes, {} proof steps",
+            stats.total_scopes, stats.total_proof_steps
+        );
     }
 
     #[tokio::test]
@@ -691,9 +794,9 @@ mod tests {
         let mut integrator = MacaroonNoAliasingIntegrator::new();
 
         // Create a scope
-        let child_scope = integrator.create_attenuated_child_scope(
-            CaveatPredicate::RegionScope(RegionId::from_u32(1))
-        ).unwrap();
+        let child_scope = integrator
+            .create_attenuated_child_scope(CaveatPredicate::RegionScope(RegionId::from_u32(1)))
+            .unwrap();
 
         // Reserve an obligation
         let obligation = integrator.reserve_in_scope(1).unwrap();
@@ -708,7 +811,10 @@ mod tests {
             let verification_result = integrator.verify_all_proofs();
             // We expect this to either succeed (if the system correctly handles it)
             // or fail with a clear aliasing violation
-            println!("Duplicate obligation handling result: {:?}", verification_result);
+            println!(
+                "Duplicate obligation handling result: {:?}",
+                verification_result
+            );
         }
 
         // Clean up the valid obligation

@@ -42,9 +42,8 @@ impl BenchmarkMetrics {
     /// Calculate compression ratio if available.
     #[must_use]
     pub fn compression_ratio(&self) -> Option<f64> {
-        self.bytes_on_wire.map(|on_wire| {
-            self.bytes_transferred as f64 / on_wire as f64
-        })
+        self.bytes_on_wire
+            .map(|on_wire| self.bytes_transferred as f64 / on_wire as f64)
     }
 
     /// Calculate CPU efficiency (bytes per CPU second).
@@ -85,10 +84,7 @@ impl BenchmarkResult {
             return AggregateStats::failed();
         }
 
-        let wall_times: Vec<Duration> = successful_iterations
-            .iter()
-            .map(|m| m.wall_time)
-            .collect();
+        let wall_times: Vec<Duration> = successful_iterations.iter().map(|m| m.wall_time).collect();
 
         let throughputs: Vec<f64> = successful_iterations
             .iter()
@@ -103,22 +99,24 @@ impl BenchmarkResult {
             mean_throughput: mean(&throughputs),
             median_throughput: median(&throughputs),
             std_dev_throughput: std_dev(&throughputs),
-            mean_cpu_efficiency: mean(&successful_iterations
-                .iter()
-                .filter_map(|m| m.cpu_efficiency())
-                .collect::<Vec<_>>()),
+            mean_cpu_efficiency: mean(
+                &successful_iterations
+                    .iter()
+                    .filter_map(|m| m.cpu_efficiency())
+                    .collect::<Vec<_>>(),
+            ),
             mean_memory_peak: successful_iterations
                 .iter()
                 .filter_map(|m| m.memory_peak)
-                .sum::<u64>() as f64 / successful_iterations.len().max(1) as f64,
+                .sum::<u64>() as f64
+                / successful_iterations.len().max(1) as f64,
         }
     }
 
     /// Check if this result represents a successful benchmark.
     #[must_use]
     pub fn is_successful(&self) -> bool {
-        !self.iterations.is_empty() &&
-        self.iterations.iter().any(|m| m.verified_completion)
+        !self.iterations.is_empty() && self.iterations.iter().any(|m| m.verified_completion)
     }
 }
 
@@ -290,7 +288,11 @@ impl ComparisonReport {
                     success_rate: stats.success_rate,
                 }
             })
-            .max_by(|a, b| a.throughput.partial_cmp(&b.throughput).unwrap_or(std::cmp::Ordering::Equal));
+            .max_by(|a, b| {
+                a.throughput
+                    .partial_cmp(&b.throughput)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
         let best_atp = atp_results
             .iter()
@@ -304,7 +306,11 @@ impl ComparisonReport {
                     success_rate: stats.success_rate,
                 }
             })
-            .max_by(|a, b| a.throughput.partial_cmp(&b.throughput).unwrap_or(std::cmp::Ordering::Equal));
+            .max_by(|a, b| {
+                a.throughput
+                    .partial_cmp(&b.throughput)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
         let performance_ratios = Self::calculate_ratios(baseline_results, atp_results);
         let assessment = Self::generate_assessment(&best_baseline, &best_atp, &performance_ratios);
@@ -344,7 +350,8 @@ impl ComparisonReport {
                 };
 
                 let time_ratio = if baseline_stats.mean_wall_time.as_secs_f64() > 0.0 {
-                    atp_stats.mean_wall_time.as_secs_f64() / baseline_stats.mean_wall_time.as_secs_f64()
+                    atp_stats.mean_wall_time.as_secs_f64()
+                        / baseline_stats.mean_wall_time.as_secs_f64()
                 } else {
                     0.0
                 };
@@ -440,10 +447,8 @@ fn std_dev(values: &[f64]) -> f64 {
     }
 
     let mean_val = mean(values);
-    let variance = values
-        .iter()
-        .map(|x| (x - mean_val).powi(2))
-        .sum::<f64>() / (values.len() - 1) as f64;
+    let variance =
+        values.iter().map(|x| (x - mean_val).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
 
     variance.sqrt()
 }
@@ -480,7 +485,8 @@ fn std_dev_duration(durations: &[Duration]) -> Duration {
     let variance = durations
         .iter()
         .map(|d| (d.as_nanos() as f64 - mean_nanos).powi(2))
-        .sum::<f64>() / (durations.len() - 1) as f64;
+        .sum::<f64>()
+        / (durations.len() - 1) as f64;
 
     Duration::from_nanos(variance.sqrt() as u64)
 }

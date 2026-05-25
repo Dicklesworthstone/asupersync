@@ -16,24 +16,24 @@
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod tests {
     use crate::{
-        net::tcp::{TcpListener, TcpStream, TcpSocketAddr},
-        service::concurrency_limit::{ConcurrencyLimiter, ConcurrencyLimitConfig, LimitExceeded},
-        service::{Service, ServiceExt},
-        types::{Budget, Outcome, TaskId},
+        channel::{broadcast, mpsc, oneshot},
         cx::Cx,
         error::{Error, ErrorKind},
-        time::{Duration, Sleep, Instant},
-        sync::{Mutex, Semaphore, AtomicU64, AtomicBool},
-        channel::{mpsc, oneshot, broadcast},
+        net::tcp::{TcpListener, TcpSocketAddr, TcpStream},
         runtime::Runtime,
-        test_utils::{init_test_runtime, TestTracer, find_available_port},
-    };
-    use std::sync::{
-        atomic::{AtomicU32, Ordering},
-        Arc,
+        service::concurrency_limit::{ConcurrencyLimitConfig, ConcurrencyLimiter, LimitExceeded},
+        service::{Service, ServiceExt},
+        sync::{AtomicBool, AtomicU64, Mutex, Semaphore},
+        test_utils::{TestTracer, find_available_port, init_test_runtime},
+        time::{Duration, Instant, Sleep},
+        types::{Budget, Outcome, TaskId},
     };
     use std::collections::{HashMap, VecDeque};
-    use std::net::{SocketAddr, Ipv4Addr};
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
 
     /// Test framework for TCP listener-concurrency limit integration scenarios
     struct TcpConcurrencyTestFramework {
@@ -161,10 +161,7 @@ mod tests {
             let tracer = TestTracer::new();
 
             // Create TCP listener on configured port
-            let listener_addr = SocketAddr::new(
-                Ipv4Addr::LOCALHOST.into(),
-                config.listener_port,
-            );
+            let listener_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), config.listener_port);
             let listener = TcpListener::bind(cx, listener_addr).await?;
 
             // Configure concurrency limiter
@@ -248,90 +245,105 @@ mod tests {
             let monitor_ref = Arc::clone(monitor);
             let config = self.config.clone();
 
-            let accept_task = cx.spawn(async move {
-                let mut connection_counter = 0u64;
+            let accept_task = cx
+                .spawn(async move {
+                    let mut connection_counter = 0u64;
 
-                loop {
-                    // Check for cancellation
-                    if cancel_rx.try_recv().is_ok() {
-                        break;
-                    }
+                    loop {
+                        // Check for cancellation
+                        if cancel_rx.try_recv().is_ok() {
+                            break;
+                        }
 
-                    let accept_start = Instant::now();
+                        let accept_start = Instant::now();
 
-                    // Try to acquire concurrency limit before accepting
-                    match limiter_ref.try_acquire().await {
-                        Ok(permit) => {
-                            // Accept connection with permit
-                            match listener_ref.accept().await {
-                                Ok((stream, addr)) => {
-                                    connection_counter += 1;
-                                    stats_ref.connections_attempted.fetch_add(1, Ordering::Relaxed);
-                                    stats_ref.connections_accepted.fetch_add(1, Ordering::Relaxed);
+                        // Try to acquire concurrency limit before accepting
+                        match limiter_ref.try_acquire().await {
+                            Ok(permit) => {
+                                // Accept connection with permit
+                                match listener_ref.accept().await {
+                                    Ok((stream, addr)) => {
+                                        connection_counter += 1;
+                                        stats_ref
+                                            .connections_attempted
+                                            .fetch_add(1, Ordering::Relaxed);
+                                        stats_ref
+                                            .connections_accepted
+                                            .fetch_add(1, Ordering::Relaxed);
 
-                                    let connection = TrackedConnection {
-                                        id: connection_counter,
-                                        stream,
-                                        accepted_at: Instant::now(),
-                                        client_addr: addr,
-                                        concurrency_token: Some(ConcurrencyToken {
+                                        let connection = TrackedConnection {
                                             id: connection_counter,
-                                            allocated_at: accept_start,
-                                            release_callback: None,
-                                        }),
-                                    };
+                                            stream,
+                                            accepted_at: Instant::now(),
+                                            client_addr: addr,
+                                            concurrency_token: Some(ConcurrencyToken {
+                                                id: connection_counter,
+                                                allocated_at: accept_start,
+                                                release_callback: None,
+                                            }),
+                                        };
 
-                                    // Record accept time
-                                    {
-                                        let mut accept_times = monitor_ref.accept_times.lock().await;
-                                        accept_times.push_back((accept_start, true));
-                                        // Keep only recent records
-                                        while accept_times.len() > 1000 {
-                                            accept_times.pop_front();
+                                        // Record accept time
+                                        {
+                                            let mut accept_times =
+                                                monitor_ref.accept_times.lock().await;
+                                            accept_times.push_back((accept_start, true));
+                                            // Keep only recent records
+                                            while accept_times.len() > 1000 {
+                                                accept_times.pop_front();
+                                            }
                                         }
+
+                                        // Handle connection in background
+                                        let stats_ref_inner = Arc::clone(&stats_ref);
+                                        let config_inner = config.clone();
+                                        cx.spawn(async move {
+                                            // Simulate connection processing
+                                            Sleep::new(config_inner.connection_duration).await;
+
+                                            drop(permit); // Release concurrency limit
+                                            stats_ref_inner
+                                                .connections_completed
+                                                .fetch_add(1, Ordering::Relaxed);
+                                        })
+                                        .await
+                                        .ok();
                                     }
-
-                                    // Handle connection in background
-                                    let stats_ref_inner = Arc::clone(&stats_ref);
-                                    let config_inner = config.clone();
-                                    cx.spawn(async move {
-                                        // Simulate connection processing
-                                        Sleep::new(config_inner.connection_duration).await;
-
-                                        drop(permit); // Release concurrency limit
-                                        stats_ref_inner.connections_completed.fetch_add(1, Ordering::Relaxed);
-                                    }).await.ok();
-                                },
-                                Err(_) => {
-                                    // Accept failed - might be due to back-pressure
-                                    stats_ref.accept_loop_blocks.fetch_add(1, Ordering::Relaxed);
-                                },
-                            }
-                        },
-                        Err(LimitExceeded) => {
-                            // Concurrency limit reached - back-pressure the accept loop
-                            stats_ref.back_pressure_events.fetch_add(1, Ordering::Relaxed);
-                            stats_ref.saturation_events.fetch_add(1, Ordering::Relaxed);
-
-                            // Record back-pressure event
-                            monitor_ref.back_pressure_detector.record_rejection().await;
-                            monitor_ref.saturation_tracker.record_saturation().await;
-
-                            // Record failed accept
-                            {
-                                let mut accept_times = monitor_ref.accept_times.lock().await;
-                                accept_times.push_back((accept_start, false));
-                                while accept_times.len() > 1000 {
-                                    accept_times.pop_front();
+                                    Err(_) => {
+                                        // Accept failed - might be due to back-pressure
+                                        stats_ref
+                                            .accept_loop_blocks
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    }
                                 }
                             }
+                            Err(LimitExceeded) => {
+                                // Concurrency limit reached - back-pressure the accept loop
+                                stats_ref
+                                    .back_pressure_events
+                                    .fetch_add(1, Ordering::Relaxed);
+                                stats_ref.saturation_events.fetch_add(1, Ordering::Relaxed);
 
-                            // Back off to prevent CPU spinning
-                            Sleep::new(Duration::from_millis(10)).await;
-                        },
+                                // Record back-pressure event
+                                monitor_ref.back_pressure_detector.record_rejection().await;
+                                monitor_ref.saturation_tracker.record_saturation().await;
+
+                                // Record failed accept
+                                {
+                                    let mut accept_times = monitor_ref.accept_times.lock().await;
+                                    accept_times.push_back((accept_start, false));
+                                    while accept_times.len() > 1000 {
+                                        accept_times.pop_front();
+                                    }
+                                }
+
+                                // Back off to prevent CPU spinning
+                                Sleep::new(Duration::from_millis(10)).await;
+                            }
+                        }
                     }
-                }
-            }).await?;
+                })
+                .await?;
 
             Ok(AcceptHandle {
                 cancel_sender: cancel_tx,
@@ -346,40 +358,49 @@ mod tests {
             let config = self.config.clone();
             let listener_addr = self.listener.local_addr()?;
 
-            let client_task = cx.spawn(async move {
-                let mut client_counter = 0u32;
+            let client_task = cx
+                .spawn(async move {
+                    let mut client_counter = 0u32;
 
-                loop {
-                    // Check for cancellation
-                    if cancel_rx.try_recv().is_ok() {
-                        break;
-                    }
+                    loop {
+                        // Check for cancellation
+                        if cancel_rx.try_recv().is_ok() {
+                            break;
+                        }
 
-                    // Launch concurrent clients
-                    let mut client_handles = Vec::new();
-                    for _ in 0..config.concurrent_clients {
-                        client_counter += 1;
-                        let simulator = ConnectionSimulator::new(client_counter, config.connection_duration);
-                        let handle = simulator.connect_and_process(cx, listener_addr).await;
-                        client_handles.push(handle);
-                    }
+                        // Launch concurrent clients
+                        let mut client_handles = Vec::new();
+                        for _ in 0..config.concurrent_clients {
+                            client_counter += 1;
+                            let simulator = ConnectionSimulator::new(
+                                client_counter,
+                                config.connection_duration,
+                            );
+                            let handle = simulator.connect_and_process(cx, listener_addr).await;
+                            client_handles.push(handle);
+                        }
 
-                    // Wait for clients to complete
-                    for handle in client_handles {
-                        if let Ok(result) = handle.await {
-                            stats_ref.connections_attempted.fetch_add(1, Ordering::Relaxed);
-                            if result.success {
-                                // Connection was successful - stats already updated by accept loop
-                            } else {
-                                stats_ref.connections_rejected.fetch_add(1, Ordering::Relaxed);
+                        // Wait for clients to complete
+                        for handle in client_handles {
+                            if let Ok(result) = handle.await {
+                                stats_ref
+                                    .connections_attempted
+                                    .fetch_add(1, Ordering::Relaxed);
+                                if result.success {
+                                    // Connection was successful - stats already updated by accept loop
+                                } else {
+                                    stats_ref
+                                        .connections_rejected
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                         }
-                    }
 
-                    // Brief pause between rounds
-                    Sleep::new(Duration::from_millis(100)).await;
-                }
-            }).await?;
+                        // Brief pause between rounds
+                        Sleep::new(Duration::from_millis(100)).await;
+                    }
+                })
+                .await?;
 
             Ok(ClientHandle {
                 cancel_sender: cancel_tx,
@@ -457,7 +478,8 @@ mod tests {
                 if let Some(current_period) = periods.last_mut() {
                     let now = Instant::now();
                     current_period.end_time = Some(now);
-                    current_period.recovery_duration = Some(now.duration_since(current_period.start_time));
+                    current_period.recovery_duration =
+                        Some(now.duration_since(current_period.start_time));
                 }
 
                 self.recovery_monitor.record_recovery_event().await;
@@ -526,13 +548,13 @@ mod tests {
                         // Simulate data exchange
                         Sleep::new(duration).await;
                         drop(stream);
-                    },
+                    }
                     Err(e) => {
                         rejection_reason = Some(format!("Connection failed: {}", e));
                         // Check if error indicates back-pressure
-                        back_pressure_detected = e.to_string().contains("Connection refused") ||
-                                               e.to_string().contains("timeout");
-                    },
+                        back_pressure_detected = e.to_string().contains("Connection refused")
+                            || e.to_string().contains("timeout");
+                    }
                 }
 
                 let result = ConnectionResult {
@@ -544,7 +566,9 @@ mod tests {
                 };
 
                 let _ = result_tx.send(result);
-            }).await.ok();
+            })
+            .await
+            .ok();
 
             result_rx
         }
@@ -619,21 +643,39 @@ mod tests {
         let framework = TcpConcurrencyTestFramework::new(&cx, config).await.unwrap();
         let test_duration = Duration::from_secs(3);
 
-        let results = framework.execute_accept_loop_with_concurrency_limit(&cx, test_duration).await.unwrap();
+        let results = framework
+            .execute_accept_loop_with_concurrency_limit(&cx, test_duration)
+            .await
+            .unwrap();
 
         // Verify back-pressure behavior
-        assert!(results.back_pressure_events > 0, "Should detect back-pressure events");
-        assert!(results.saturation_events > 0, "Should detect saturation events");
-        assert!(results.total_rejected > 0, "Some connections should be rejected due to concurrency limit");
+        assert!(
+            results.back_pressure_events > 0,
+            "Should detect back-pressure events"
+        );
+        assert!(
+            results.saturation_events > 0,
+            "Should detect saturation events"
+        );
+        assert!(
+            results.total_rejected > 0,
+            "Some connections should be rejected due to concurrency limit"
+        );
 
         // Verify concurrency limit enforcement
-        assert!(results.total_accepted <= (config.concurrency_limit as u64) * 10,
-               "Accepted connections should respect concurrency limit over time");
+        assert!(
+            results.total_accepted <= (config.concurrency_limit as u64) * 10,
+            "Accepted connections should respect concurrency limit over time"
+        );
 
         // Verify accept loop blocks when saturated
-        assert!(results.accept_loop_blocks > 0, "Accept loop should block when concurrency limit reached");
+        assert!(
+            results.accept_loop_blocks > 0,
+            "Accept loop should block when concurrency limit reached"
+        );
 
-        cx.trace("Concurrency limit correctly back-pressures accept loop").await;
+        cx.trace("Concurrency limit correctly back-pressures accept loop")
+            .await;
     }
 
     #[tokio::test]
@@ -653,18 +695,34 @@ mod tests {
         let framework = TcpConcurrencyTestFramework::new(&cx, config).await.unwrap();
         let test_duration = Duration::from_secs(4);
 
-        let results = framework.execute_accept_loop_with_concurrency_limit(&cx, test_duration).await.unwrap();
+        let results = framework
+            .execute_accept_loop_with_concurrency_limit(&cx, test_duration)
+            .await
+            .unwrap();
 
         // Verify saturation and recovery cycle
-        assert!(results.saturation_events > 0, "Should experience saturation");
-        assert!(results.recovery_events > 0, "Should recover from saturation");
-        assert!(results.total_completed > 0, "Some connections should complete");
+        assert!(
+            results.saturation_events > 0,
+            "Should experience saturation"
+        );
+        assert!(
+            results.recovery_events > 0,
+            "Should recover from saturation"
+        );
+        assert!(
+            results.total_completed > 0,
+            "Some connections should complete"
+        );
 
         // Verify accept loop continues functioning after recovery
         let acceptance_rate = results.total_accepted as f64 / results.total_attempted as f64;
-        assert!(acceptance_rate > 0.1, "Should maintain some acceptance rate after recovery");
+        assert!(
+            acceptance_rate > 0.1,
+            "Should maintain some acceptance rate after recovery"
+        );
 
-        cx.trace("Accept loop recovers correctly after saturation").await;
+        cx.trace("Accept loop recovers correctly after saturation")
+            .await;
     }
 
     #[tokio::test]
@@ -684,26 +742,43 @@ mod tests {
         let framework = TcpConcurrencyTestFramework::new(&cx, config).await.unwrap();
 
         // Test gradual load increase
-        let phase1_results = framework.execute_accept_loop_with_concurrency_limit(&cx, Duration::from_secs(2)).await.unwrap();
+        let phase1_results = framework
+            .execute_accept_loop_with_concurrency_limit(&cx, Duration::from_secs(2))
+            .await
+            .unwrap();
 
         // Phase 1: Low load - should accept most connections
-        assert!(phase1_results.back_pressure_events < 5, "Low back-pressure in phase 1");
+        assert!(
+            phase1_results.back_pressure_events < 5,
+            "Low back-pressure in phase 1"
+        );
 
         // Increase concurrent clients for phase 2
         let high_load_config = IntegrationConfig {
             concurrent_clients: 25, // High load
             ..config
         };
-        let high_load_framework = TcpConcurrencyTestFramework::new(&cx, high_load_config).await.unwrap();
+        let high_load_framework = TcpConcurrencyTestFramework::new(&cx, high_load_config)
+            .await
+            .unwrap();
 
-        let phase2_results = high_load_framework.execute_accept_loop_with_concurrency_limit(&cx, Duration::from_secs(2)).await.unwrap();
+        let phase2_results = high_load_framework
+            .execute_accept_loop_with_concurrency_limit(&cx, Duration::from_secs(2))
+            .await
+            .unwrap();
 
         // Phase 2: High load - should trigger back-pressure
-        assert!(phase2_results.back_pressure_events > phase1_results.back_pressure_events,
-               "Higher load should trigger more back-pressure");
-        assert!(phase2_results.saturation_events > 0, "High load should cause saturation");
+        assert!(
+            phase2_results.back_pressure_events > phase1_results.back_pressure_events,
+            "Higher load should trigger more back-pressure"
+        );
+        assert!(
+            phase2_results.saturation_events > 0,
+            "High load should cause saturation"
+        );
 
-        cx.trace("Gradual load increase correctly triggers back-pressure").await;
+        cx.trace("Gradual load increase correctly triggers back-pressure")
+            .await;
     }
 
     #[tokio::test]
@@ -723,22 +798,40 @@ mod tests {
         let framework = TcpConcurrencyTestFramework::new(&cx, config).await.unwrap();
         let test_duration = Duration::from_secs(2);
 
-        let results = framework.execute_accept_loop_with_concurrency_limit(&cx, test_duration).await.unwrap();
+        let results = framework
+            .execute_accept_loop_with_concurrency_limit(&cx, test_duration)
+            .await
+            .unwrap();
 
         // Verify burst load handling
-        assert!(results.saturation_events >= 10, "Burst load should cause immediate saturation");
-        assert!(results.back_pressure_events >= 20, "Should generate significant back-pressure");
+        assert!(
+            results.saturation_events >= 10,
+            "Burst load should cause immediate saturation"
+        );
+        assert!(
+            results.back_pressure_events >= 20,
+            "Should generate significant back-pressure"
+        );
 
         // Verify system stability under burst
-        assert!(results.total_accepted <= config.concurrency_limit as u64 * 10,
-               "System should maintain concurrency limit under burst");
-        assert!(results.accept_loop_blocks > 0, "Accept loop should block frequently under burst");
+        assert!(
+            results.total_accepted <= config.concurrency_limit as u64 * 10,
+            "System should maintain concurrency limit under burst"
+        );
+        assert!(
+            results.accept_loop_blocks > 0,
+            "Accept loop should block frequently under burst"
+        );
 
         // Verify graceful degradation
         let rejection_rate = results.total_rejected as f64 / results.total_attempted as f64;
-        assert!(rejection_rate > 0.5, "Should reject majority of connections under burst load");
+        assert!(
+            rejection_rate > 0.5,
+            "Should reject majority of connections under burst load"
+        );
 
-        cx.trace("System handles burst load with proper back-pressure").await;
+        cx.trace("System handles burst load with proper back-pressure")
+            .await;
     }
 
     #[tokio::test]
@@ -756,8 +849,13 @@ mod tests {
             enable_monitoring: true,
         };
 
-        let short_framework = TcpConcurrencyTestFramework::new(&cx, short_config).await.unwrap();
-        let short_results = short_framework.execute_accept_loop_with_concurrency_limit(&cx, Duration::from_secs(2)).await.unwrap();
+        let short_framework = TcpConcurrencyTestFramework::new(&cx, short_config)
+            .await
+            .unwrap();
+        let short_results = short_framework
+            .execute_accept_loop_with_concurrency_limit(&cx, Duration::from_secs(2))
+            .await
+            .unwrap();
 
         // Test with long connection duration
         let long_config = IntegrationConfig {
@@ -766,18 +864,30 @@ mod tests {
             ..short_config
         };
 
-        let long_framework = TcpConcurrencyTestFramework::new(&cx, long_config).await.unwrap();
-        let long_results = long_framework.execute_accept_loop_with_concurrency_limit(&cx, Duration::from_secs(2)).await.unwrap();
+        let long_framework = TcpConcurrencyTestFramework::new(&cx, long_config)
+            .await
+            .unwrap();
+        let long_results = long_framework
+            .execute_accept_loop_with_concurrency_limit(&cx, Duration::from_secs(2))
+            .await
+            .unwrap();
 
         // Compare results
-        assert!(long_results.back_pressure_events > short_results.back_pressure_events,
-               "Longer connections should cause more back-pressure");
-        assert!(long_results.saturation_events > short_results.saturation_events,
-               "Longer connections should cause more saturation");
-        assert!(short_results.total_completed > long_results.total_completed,
-               "Shorter connections should complete more frequently");
+        assert!(
+            long_results.back_pressure_events > short_results.back_pressure_events,
+            "Longer connections should cause more back-pressure"
+        );
+        assert!(
+            long_results.saturation_events > short_results.saturation_events,
+            "Longer connections should cause more saturation"
+        );
+        assert!(
+            short_results.total_completed > long_results.total_completed,
+            "Shorter connections should complete more frequently"
+        );
 
-        cx.trace("Connection duration correctly impacts back-pressure patterns").await;
+        cx.trace("Connection duration correctly impacts back-pressure patterns")
+            .await;
     }
 
     #[tokio::test]
@@ -797,20 +907,39 @@ mod tests {
         let framework = TcpConcurrencyTestFramework::new(&cx, config).await.unwrap();
         let test_duration = Duration::from_secs(3);
 
-        let results = framework.execute_accept_loop_with_concurrency_limit(&cx, test_duration).await.unwrap();
+        let results = framework
+            .execute_accept_loop_with_concurrency_limit(&cx, test_duration)
+            .await
+            .unwrap();
 
         // Verify edge case handling with restrictive limit
-        assert!(results.back_pressure_events >= 15, "Very restrictive limit should cause frequent back-pressure");
-        assert!(results.total_accepted <= 30, "Should accept very few connections with limit of 1");
-        assert!(results.accept_loop_blocks >= 10, "Accept loop should block frequently");
+        assert!(
+            results.back_pressure_events >= 15,
+            "Very restrictive limit should cause frequent back-pressure"
+        );
+        assert!(
+            results.total_accepted <= 30,
+            "Should accept very few connections with limit of 1"
+        );
+        assert!(
+            results.accept_loop_blocks >= 10,
+            "Accept loop should block frequently"
+        );
 
         // Verify system doesn't deadlock or crash
-        assert!(results.total_completed > 0, "Should still complete some connections despite restrictions");
+        assert!(
+            results.total_completed > 0,
+            "Should still complete some connections despite restrictions"
+        );
 
         // Verify back-pressure is effective
         let effective_concurrency = results.total_accepted - results.total_completed;
-        assert!(effective_concurrency <= 2, "Effective concurrency should be near the limit");
+        assert!(
+            effective_concurrency <= 2,
+            "Effective concurrency should be near the limit"
+        );
 
-        cx.trace("Edge case with restrictive concurrency limit handled correctly").await;
+        cx.trace("Edge case with restrictive concurrency limit handled correctly")
+            .await;
     }
 }

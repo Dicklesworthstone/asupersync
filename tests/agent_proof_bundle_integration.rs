@@ -100,10 +100,12 @@ fn replay_instructions_categorize_commands_by_safety() {
         ReplaySafetyLevel::Safe
     );
     assert_eq!(bundle.replay_instructions.safe_commands.len(), 2);
-    assert!(bundle
-        .replay_instructions
-        .safe_commands
-        .contains(&"cargo test".to_string()));
+    assert!(
+        bundle
+            .replay_instructions
+            .safe_commands
+            .contains(&"cargo test".to_string())
+    );
 }
 
 #[test]

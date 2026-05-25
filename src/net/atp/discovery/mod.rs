@@ -25,6 +25,10 @@ pub struct PathDiscoveryPolicy {
     pub explicit_direct_enabled: bool,
     /// Whether public IPv6 endpoints may become direct candidates.
     pub public_ipv6_enabled: bool,
+    /// Optional Tailscale/private-route candidate policy.
+    pub tailscale_policy: TailscalePathPolicy,
+    /// Maximum age for a Tailscale observation before it is rejected.
+    pub tailscale_max_staleness_micros: u64,
     /// Whether public IPv6 ranks ahead of explicit public UDP candidates.
     pub prefer_public_ipv6: bool,
 }
@@ -35,6 +39,8 @@ impl Default for PathDiscoveryPolicy {
             lan_discovery_enabled: false,
             explicit_direct_enabled: true,
             public_ipv6_enabled: true,
+            tailscale_policy: TailscalePathPolicy::Allow,
+            tailscale_max_staleness_micros: 30_000_000,
             prefer_public_ipv6: true,
         }
     }
@@ -48,6 +54,8 @@ impl PathDiscoveryPolicy {
             lan_discovery_enabled: false,
             explicit_direct_enabled: true,
             public_ipv6_enabled: true,
+            tailscale_policy: TailscalePathPolicy::Allow,
+            tailscale_max_staleness_micros: 30_000_000,
             prefer_public_ipv6: true,
         }
     }
@@ -59,6 +67,8 @@ impl PathDiscoveryPolicy {
             lan_discovery_enabled: false,
             explicit_direct_enabled: false,
             public_ipv6_enabled: false,
+            tailscale_policy: TailscalePathPolicy::Disabled,
+            tailscale_max_staleness_micros: 30_000_000,
             prefer_public_ipv6: false,
         }
     }
@@ -68,6 +78,46 @@ impl PathDiscoveryPolicy {
     pub const fn with_lan_discovery(mut self, enabled: bool) -> Self {
         self.lan_discovery_enabled = enabled;
         self
+    }
+
+    /// Set optional Tailscale candidate handling.
+    #[must_use]
+    pub const fn with_tailscale_policy(mut self, tailscale_policy: TailscalePathPolicy) -> Self {
+        self.tailscale_policy = tailscale_policy;
+        self
+    }
+
+    /// Set the maximum allowed age for Tailscale observations.
+    #[must_use]
+    pub const fn with_tailscale_max_staleness_micros(mut self, staleness_micros: u64) -> Self {
+        self.tailscale_max_staleness_micros = staleness_micros;
+        self
+    }
+}
+
+/// Policy mode for optional Tailscale/private-route candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TailscalePathPolicy {
+    /// Do not run Tailscale discovery from configuration.
+    Disabled,
+    /// Admit Tailscale candidates when a provider reports them.
+    Allow,
+    /// Rank Tailscale candidates ahead of native direct candidates.
+    Prefer,
+    /// Reject Tailscale candidates even if a provider reports them.
+    Forbid,
+}
+
+impl TailscalePathPolicy {
+    /// Stable policy code for diagnostics.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Allow => "allow",
+            Self::Prefer => "prefer",
+            Self::Forbid => "forbid",
+        }
     }
 }
 
@@ -80,6 +130,8 @@ pub enum DirectCandidateSource {
     ExplicitDirectUdp,
     /// Public IPv6 local endpoint.
     PublicIpv6,
+    /// Optional Tailscale/private-route provider.
+    TailscaleProvider,
 }
 
 impl DirectCandidateSource {
@@ -90,6 +142,7 @@ impl DirectCandidateSource {
             Self::LanDiscovery => "lan_discovery",
             Self::ExplicitDirectUdp => "explicit_direct_udp",
             Self::PublicIpv6 => "public_ipv6",
+            Self::TailscaleProvider => "tailscale_provider",
         }
     }
 
@@ -98,6 +151,7 @@ impl DirectCandidateSource {
             Self::LanDiscovery => PathKind::LanMulticast,
             Self::ExplicitDirectUdp => PathKind::ExplicitPublicUdp,
             Self::PublicIpv6 => PathKind::PublicIpv6,
+            Self::TailscaleProvider => PathKind::TailscaleIp,
         }
     }
 }
@@ -107,8 +161,14 @@ impl DirectCandidateSource {
 pub enum DirectCandidateRejection {
     /// The source is disabled by policy.
     PolicyDisabled,
+    /// A stricter policy forbids this optional source.
+    PolicyForbidden,
     /// IPv6 is unavailable on this platform/profile.
     Ipv6Unavailable,
+    /// Tailscale was allowed but no local provider candidate was present.
+    TailscaleNotPresent,
+    /// Tailscale candidate data was too old to trust.
+    StaleCandidate,
     /// Endpoint string was empty.
     EmptyEndpoint,
     /// Endpoint string could not be parsed as `host:port`.
@@ -125,6 +185,8 @@ pub enum DirectCandidateRejection {
     NotLanAddress,
     /// Public IPv6 discovery input was not a usable public IPv6 address.
     NotPublicIpv6,
+    /// Tailscale discovery input was not a usable Tailscale address.
+    NotTailscaleAddress,
     /// LAN advertisement repeated an already-seen peer/endpoint tuple.
     DuplicateAdvertisement,
     /// Peer label was empty.
@@ -137,7 +199,10 @@ impl DirectCandidateRejection {
     pub const fn code(self) -> &'static str {
         match self {
             Self::PolicyDisabled => "policy_disabled",
+            Self::PolicyForbidden => "policy_forbidden",
             Self::Ipv6Unavailable => "ipv6_unavailable",
+            Self::TailscaleNotPresent => "tailscale_not_present",
+            Self::StaleCandidate => "stale_candidate",
             Self::EmptyEndpoint => "empty_endpoint",
             Self::InvalidEndpoint => "invalid_endpoint",
             Self::ZeroPort => "zero_port",
@@ -146,6 +211,7 @@ impl DirectCandidateRejection {
             Self::LoopbackAddress => "loopback_address",
             Self::NotLanAddress => "not_lan_address",
             Self::NotPublicIpv6 => "not_public_ipv6",
+            Self::NotTailscaleAddress => "not_tailscale_address",
             Self::DuplicateAdvertisement => "duplicate_advertisement",
             Self::EmptyPeerLabel => "empty_peer_label",
         }
@@ -282,6 +348,79 @@ impl LanPeerAdvertisement {
     }
 }
 
+/// Provider source for an optional Tailscale/private-route candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TailscaleDetectionSource {
+    /// Deterministic fake provider used by lab/e2e tests.
+    FakeProvider,
+    /// Host interface inventory observed a Tailscale address.
+    LocalInterface,
+    /// `tailscale status`-style host integration reported a candidate.
+    StatusCommand,
+}
+
+impl TailscaleDetectionSource {
+    /// Stable source code for redaction-safe diagnostics.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::FakeProvider => "fake_provider",
+            Self::LocalInterface => "local_interface",
+            Self::StatusCommand => "status_command",
+        }
+    }
+
+    const fn evidence_code(self) -> &'static str {
+        match self {
+            Self::FakeProvider => "tailscale_fake_provider_candidate_validated",
+            Self::LocalInterface => "tailscale_local_interface_candidate_validated",
+            Self::StatusCommand => "tailscale_status_command_candidate_validated",
+        }
+    }
+}
+
+/// One optional Tailscale/private-route candidate observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailscaleCandidateObservation {
+    endpoint: SocketAddr,
+    detection_source: TailscaleDetectionSource,
+    observed_at_micros: u64,
+}
+
+impl TailscaleCandidateObservation {
+    /// Build an observation from a deterministic or host-backed provider.
+    #[must_use]
+    pub const fn new(
+        endpoint: SocketAddr,
+        detection_source: TailscaleDetectionSource,
+        observed_at_micros: u64,
+    ) -> Self {
+        Self {
+            endpoint,
+            detection_source,
+            observed_at_micros,
+        }
+    }
+
+    /// Candidate endpoint.
+    #[must_use]
+    pub const fn endpoint(&self) -> SocketAddr {
+        self.endpoint
+    }
+
+    /// Provider source.
+    #[must_use]
+    pub const fn detection_source(&self) -> TailscaleDetectionSource {
+        self.detection_source
+    }
+
+    /// Caller-supplied observation timestamp.
+    #[must_use]
+    pub const fn observed_at_micros(&self) -> u64 {
+        self.observed_at_micros
+    }
+}
+
 /// Direct path candidate with ranking and redaction-safe evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectPathCandidate {
@@ -341,8 +480,12 @@ pub struct PathDiscoveryInputs {
     pub explicit_direct_endpoint: Option<String>,
     /// Local UDP endpoints discovered by platform/network code.
     pub local_udp_endpoints: Vec<SocketAddr>,
+    /// Optional Tailscale/private-route observations from deterministic or host providers.
+    pub tailscale_candidates: Vec<TailscaleCandidateObservation>,
     /// Whether platform probing says IPv6 can be attempted.
     pub platform_ipv6_available: bool,
+    /// Caller-supplied monotonic timestamp for stale-provider decisions.
+    pub now_micros: u64,
 }
 
 /// Deterministic path discovery output.
@@ -457,6 +600,7 @@ pub fn discover_direct_paths(
     collect_lan_candidates(policy, &inputs, &mut candidates, &mut rejections, &mut logs);
     collect_explicit_candidate(policy, &inputs, &mut candidates, &mut rejections, &mut logs);
     collect_public_ipv6_candidates(policy, &inputs, &mut candidates, &mut rejections, &mut logs);
+    collect_tailscale_candidates(policy, &inputs, &mut candidates, &mut rejections, &mut logs);
 
     candidates.sort_by_key(|candidate| (candidate.metrics.preference_rank, candidate.id.get()));
     let selected = candidates.first().map(|candidate| candidate.id);
@@ -682,6 +826,144 @@ fn public_ipv6_candidate(
     ))
 }
 
+fn collect_tailscale_candidates(
+    policy: PathDiscoveryPolicy,
+    inputs: &PathDiscoveryInputs,
+    candidates: &mut Vec<DirectPathCandidate>,
+    rejections: &mut Vec<DirectPathRejection>,
+    logs: &mut Vec<PathDiscoveryLogEntry>,
+) {
+    match policy.tailscale_policy {
+        TailscalePathPolicy::Disabled => {
+            rejections.push(DirectPathRejection::new(
+                DirectCandidateSource::TailscaleProvider,
+                DirectCandidateRejection::PolicyDisabled,
+                "tailscale disabled by configuration",
+            ));
+            logs.push(rejection_log(
+                DirectCandidateSource::TailscaleProvider,
+                DirectCandidateRejection::PolicyDisabled,
+                None,
+            ));
+            return;
+        }
+        TailscalePathPolicy::Forbid => {
+            rejections.push(DirectPathRejection::new(
+                DirectCandidateSource::TailscaleProvider,
+                DirectCandidateRejection::PolicyForbidden,
+                "tailscale forbidden by policy; provider candidates ignored",
+            ));
+            logs.push(rejection_log(
+                DirectCandidateSource::TailscaleProvider,
+                DirectCandidateRejection::PolicyForbidden,
+                None,
+            ));
+            return;
+        }
+        TailscalePathPolicy::Allow | TailscalePathPolicy::Prefer => {}
+    }
+
+    if inputs.tailscale_candidates.is_empty() {
+        rejections.push(DirectPathRejection::new(
+            DirectCandidateSource::TailscaleProvider,
+            DirectCandidateRejection::TailscaleNotPresent,
+            "tailscale provider supplied no candidates",
+        ));
+        logs.push(rejection_log(
+            DirectCandidateSource::TailscaleProvider,
+            DirectCandidateRejection::TailscaleNotPresent,
+            None,
+        ));
+        return;
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut accepted = 0u64;
+    for observation in &inputs.tailscale_candidates {
+        if !seen.insert(observation.endpoint()) {
+            rejections.push(DirectPathRejection::new(
+                DirectCandidateSource::TailscaleProvider,
+                DirectCandidateRejection::DuplicateAdvertisement,
+                endpoint_scope(observation.endpoint()),
+            ));
+            logs.push(rejection_log(
+                DirectCandidateSource::TailscaleProvider,
+                DirectCandidateRejection::DuplicateAdvertisement,
+                Some(endpoint_scope(observation.endpoint())),
+            ));
+            continue;
+        }
+
+        match tailscale_candidate(policy, inputs.now_micros, observation, accepted) {
+            Ok(candidate) => {
+                accepted += 1;
+                logs.push(candidate_log(&candidate));
+                candidates.push(candidate);
+            }
+            Err(err) => {
+                rejections.push(err.rejection());
+                logs.push(rejection_log(
+                    err.candidate_source,
+                    err.reason,
+                    Some(err.detail),
+                ));
+            }
+        }
+    }
+}
+
+fn tailscale_candidate(
+    policy: PathDiscoveryPolicy,
+    now_micros: u64,
+    observation: &TailscaleCandidateObservation,
+    offset: u64,
+) -> Result<DirectPathCandidate, DirectDiscoveryError> {
+    let endpoint = observation.endpoint();
+    validate_endpoint_basics(DirectCandidateSource::TailscaleProvider, endpoint)?;
+    if !is_tailscale_address(endpoint.ip()) {
+        return Err(DirectDiscoveryError::new(
+            DirectCandidateSource::TailscaleProvider,
+            DirectCandidateRejection::NotTailscaleAddress,
+            endpoint_scope(endpoint),
+        ));
+    }
+
+    if now_micros
+        > observation
+            .observed_at_micros()
+            .saturating_add(policy.tailscale_max_staleness_micros)
+    {
+        return Err(DirectDiscoveryError::new(
+            DirectCandidateSource::TailscaleProvider,
+            DirectCandidateRejection::StaleCandidate,
+            format!(
+                "policy={} source={} scope={}",
+                policy.tailscale_policy.code(),
+                observation.detection_source().code(),
+                endpoint_scope(endpoint)
+            ),
+        ));
+    }
+
+    let rank = match policy.tailscale_policy {
+        TailscalePathPolicy::Prefer => 3,
+        TailscalePathPolicy::Allow => 15,
+        TailscalePathPolicy::Disabled | TailscalePathPolicy::Forbid => unreachable!(
+            "disabled and forbidden Tailscale policies are handled before candidate validation"
+        ),
+    };
+
+    Ok(candidate(
+        PathCandidateId::new(4_000 + offset),
+        PathTraceId::new(14_000 + offset),
+        DirectCandidateSource::TailscaleProvider,
+        endpoint,
+        rank,
+        observation.detection_source().evidence_code(),
+        Some(8_000),
+    ))
+}
+
 fn candidate(
     id: PathCandidateId,
     trace_id: PathTraceId,
@@ -749,6 +1031,23 @@ fn is_lan_address(address: IpAddr) -> bool {
     }
 }
 
+fn is_tailscale_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => is_tailscale_ipv4(address),
+        IpAddr::V6(address) => is_tailscale_ipv6(address),
+    }
+}
+
+fn is_tailscale_ipv4(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    octets[0] == 100 && (64..=127).contains(&octets[1])
+}
+
+fn is_tailscale_ipv6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
+}
+
 fn is_public_ipv6(address: Ipv6Addr) -> bool {
     !(address.is_unspecified()
         || address.is_loopback()
@@ -780,6 +1079,9 @@ fn is_documentation_ipv6(address: Ipv6Addr) -> bool {
 
 fn endpoint_scope(endpoint: SocketAddr) -> String {
     match endpoint.ip() {
+        IpAddr::V4(address) if is_tailscale_ipv4(address) => {
+            format!("tailscale-ipv4:{}", endpoint.port())
+        }
         IpAddr::V4(address) if address.is_private() || address.is_link_local() => {
             format!("private-ipv4:{}", endpoint.port())
         }
@@ -801,6 +1103,9 @@ fn endpoint_scope(endpoint: SocketAddr) -> String {
         }
         IpAddr::V6(address) if address.is_multicast() => {
             format!("multicast-ipv6:{}", endpoint.port())
+        }
+        IpAddr::V6(address) if is_tailscale_ipv6(address) => {
+            format!("tailscale-ipv6:{}", endpoint.port())
         }
         IpAddr::V6(address)
             if is_unique_local_ipv6(address) || is_unicast_link_local_ipv6(address) =>
@@ -853,6 +1158,10 @@ fn guidance_for(
                 "attempt_public_ipv6_candidate_first",
                 "keep_ipv4_or_relay_fallback_for_ipv6_unavailable_peers",
             ],
+            DirectCandidateSource::TailscaleProvider => vec![
+                "attempt_tailscale_candidate_when_policy_allows",
+                "keep_native_direct_or_atp_relay_fallback_because_tailscale_is_optional",
+            ],
         };
     }
 
@@ -863,7 +1172,7 @@ fn guidance_for(
     {
         return vec!["enable_at_least_one_direct_path_policy_or_configure_relay"];
     }
-    vec!["configure_explicit_endpoint_or_enable_lan_ipv6_or_relay_fallback"]
+    vec!["configure_explicit_endpoint_enable_lan_ipv6_tailscale_or_relay_fallback"]
 }
 
 /// Deterministic local/e2e scenario catalog for ATP-F2.
@@ -875,6 +1184,8 @@ pub enum PathDiscoveryScenario {
     ExplicitDirect,
     /// Platform has a public IPv6 endpoint.
     Ipv6Available,
+    /// Deterministic fake Tailscale provider reported one candidate.
+    TailscaleFakeProvider,
     /// Platform has no IPv6 support.
     Ipv6Unavailable,
     /// Direct discovery is denied by policy.
@@ -887,6 +1198,7 @@ impl fmt::Display for PathDiscoveryScenario {
             Self::LanDiscovery => "lan_discovery",
             Self::ExplicitDirect => "explicit_direct",
             Self::Ipv6Available => "ipv6_available",
+            Self::TailscaleFakeProvider => "tailscale_fake_provider",
             Self::Ipv6Unavailable => "ipv6_unavailable",
             Self::PolicyDenied => "policy_denied",
         })
@@ -903,6 +1215,7 @@ pub fn run_discovery_scenario(scenario: PathDiscoveryScenario) -> AtpPathDoctorR
         PathDiscoveryScenario::PolicyDenied => PathDiscoveryPolicy::disabled(),
         PathDiscoveryScenario::ExplicitDirect
         | PathDiscoveryScenario::Ipv6Available
+        | PathDiscoveryScenario::TailscaleFakeProvider
         | PathDiscoveryScenario::Ipv6Unavailable => PathDiscoveryPolicy::safe_default(),
     };
 
@@ -932,6 +1245,15 @@ pub fn run_discovery_scenario(scenario: PathDiscoveryScenario) -> AtpPathDoctorR
         _ => Vec::new(),
     };
     let platform_ipv6_available = matches!(scenario, PathDiscoveryScenario::Ipv6Available);
+    let tailscale_candidates = if matches!(scenario, PathDiscoveryScenario::TailscaleFakeProvider) {
+        vec![TailscaleCandidateObservation::new(
+            "100.100.10.20:41641".parse().expect("scenario tailscale"),
+            TailscaleDetectionSource::FakeProvider,
+            1_000,
+        )]
+    } else {
+        Vec::new()
+    };
 
     discover_direct_paths(
         policy,
@@ -939,7 +1261,9 @@ pub fn run_discovery_scenario(scenario: PathDiscoveryScenario) -> AtpPathDoctorR
             lan_advertisements,
             explicit_direct_endpoint,
             local_udp_endpoints,
+            tailscale_candidates,
             platform_ipv6_available,
+            now_micros: 2_000,
         },
     )
     .doctor_report()
@@ -1079,6 +1403,193 @@ mod tests {
     }
 
     #[test]
+    fn tailscale_provider_is_optional_and_reports_absence_without_network_dependency() {
+        let report = discover_direct_paths(
+            PathDiscoveryPolicy::safe_default(),
+            PathDiscoveryInputs::default(),
+        );
+
+        assert!(report.candidates.is_empty());
+        assert!(report.rejections.iter().any(|rejection| {
+            rejection.source == DirectCandidateSource::TailscaleProvider
+                && rejection.reason == DirectCandidateRejection::TailscaleNotPresent
+        }));
+        assert!(report.logs.iter().any(|log| {
+            log.source == DirectCandidateSource::TailscaleProvider
+                && log.event == "candidate_rejected"
+                && log.rejection == Some(DirectCandidateRejection::TailscaleNotPresent)
+        }));
+    }
+
+    #[test]
+    fn tailscale_policy_distinguishes_disabled_forbidden_allowed_and_preferred() {
+        let tailscale = TailscaleCandidateObservation::new(
+            socket("100.100.10.20:41641"),
+            TailscaleDetectionSource::FakeProvider,
+            1_000,
+        );
+        let public_ipv6 = socket("[2606:4700:4700::1111]:41641");
+
+        let disabled = discover_direct_paths(
+            PathDiscoveryPolicy::safe_default()
+                .with_tailscale_policy(TailscalePathPolicy::Disabled),
+            PathDiscoveryInputs {
+                tailscale_candidates: vec![tailscale.clone()],
+                now_micros: 2_000,
+                ..PathDiscoveryInputs::default()
+            },
+        );
+        assert!(disabled.candidates.is_empty());
+        assert!(disabled.rejections.iter().any(|rejection| {
+            rejection.source == DirectCandidateSource::TailscaleProvider
+                && rejection.reason == DirectCandidateRejection::PolicyDisabled
+        }));
+
+        let forbidden = discover_direct_paths(
+            PathDiscoveryPolicy::safe_default().with_tailscale_policy(TailscalePathPolicy::Forbid),
+            PathDiscoveryInputs {
+                tailscale_candidates: vec![tailscale.clone()],
+                now_micros: 2_000,
+                ..PathDiscoveryInputs::default()
+            },
+        );
+        assert!(forbidden.candidates.is_empty());
+        assert!(forbidden.rejections.iter().any(|rejection| {
+            rejection.source == DirectCandidateSource::TailscaleProvider
+                && rejection.reason == DirectCandidateRejection::PolicyForbidden
+        }));
+
+        let allowed = discover_direct_paths(
+            PathDiscoveryPolicy::safe_default().with_tailscale_policy(TailscalePathPolicy::Allow),
+            PathDiscoveryInputs {
+                local_udp_endpoints: vec![public_ipv6],
+                tailscale_candidates: vec![tailscale.clone()],
+                platform_ipv6_available: true,
+                now_micros: 2_000,
+                ..PathDiscoveryInputs::default()
+            },
+        );
+        assert_eq!(
+            allowed.selected.and_then(|id| {
+                allowed
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.id == id)
+                    .map(|candidate| candidate.source)
+            }),
+            Some(DirectCandidateSource::PublicIpv6)
+        );
+
+        let preferred = discover_direct_paths(
+            PathDiscoveryPolicy::safe_default().with_tailscale_policy(TailscalePathPolicy::Prefer),
+            PathDiscoveryInputs {
+                local_udp_endpoints: vec![public_ipv6],
+                tailscale_candidates: vec![tailscale],
+                platform_ipv6_available: true,
+                now_micros: 2_000,
+                ..PathDiscoveryInputs::default()
+            },
+        );
+        assert_eq!(
+            preferred.selected.and_then(|id| {
+                preferred
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.id == id)
+                    .map(|candidate| candidate.source)
+            }),
+            Some(DirectCandidateSource::TailscaleProvider)
+        );
+    }
+
+    #[test]
+    fn tailscale_candidates_are_redacted_validated_and_stale_checked() {
+        let report = discover_direct_paths(
+            PathDiscoveryPolicy::safe_default().with_tailscale_policy(TailscalePathPolicy::Prefer),
+            PathDiscoveryInputs {
+                explicit_direct_endpoint: Some("198.51.100.20:41641".to_string()),
+                tailscale_candidates: vec![TailscaleCandidateObservation::new(
+                    socket("100.100.10.20:41641"),
+                    TailscaleDetectionSource::FakeProvider,
+                    1_000,
+                )],
+                now_micros: 2_000,
+                ..PathDiscoveryInputs::default()
+            },
+        );
+
+        assert_eq!(
+            report
+                .selected
+                .and_then(|id| report
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.id == id))
+                .map(|candidate| candidate.source),
+            Some(DirectCandidateSource::TailscaleProvider)
+        );
+        let doctor = report.doctor_report();
+        let selected = doctor.selected.as_ref().expect("selected Tailscale");
+        assert_eq!(selected.kind, PathKind::TailscaleIp);
+        assert_eq!(selected.endpoint_scope, "tailscale-ipv4:41641");
+        assert_eq!(
+            selected.evidence,
+            "tailscale_fake_provider_candidate_validated"
+        );
+        assert!(
+            doctor.guidance.contains(
+                &"keep_native_direct_or_atp_relay_fallback_because_tailscale_is_optional"
+            )
+        );
+        assert!(
+            doctor
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.endpoint_scope.contains("100.100.10.20"))
+        );
+
+        let stale = discover_direct_paths(
+            PathDiscoveryPolicy::safe_default()
+                .with_tailscale_policy(TailscalePathPolicy::Allow)
+                .with_tailscale_max_staleness_micros(10),
+            PathDiscoveryInputs {
+                tailscale_candidates: vec![TailscaleCandidateObservation::new(
+                    socket("100.100.10.20:41641"),
+                    TailscaleDetectionSource::StatusCommand,
+                    1_000,
+                )],
+                now_micros: 1_011,
+                ..PathDiscoveryInputs::default()
+            },
+        );
+        assert!(stale.candidates.is_empty());
+        assert!(stale.rejections.iter().any(|rejection| {
+            rejection.source == DirectCandidateSource::TailscaleProvider
+                && rejection.reason == DirectCandidateRejection::StaleCandidate
+                && rejection.detail.contains("source=status_command")
+                && !rejection.detail.contains("100.100.10.20")
+        }));
+
+        let wrong_network = discover_direct_paths(
+            PathDiscoveryPolicy::safe_default().with_tailscale_policy(TailscalePathPolicy::Allow),
+            PathDiscoveryInputs {
+                tailscale_candidates: vec![TailscaleCandidateObservation::new(
+                    socket("10.0.0.2:41641"),
+                    TailscaleDetectionSource::LocalInterface,
+                    1_000,
+                )],
+                now_micros: 2_000,
+                ..PathDiscoveryInputs::default()
+            },
+        );
+        assert!(wrong_network.rejections.iter().any(|rejection| {
+            rejection.source == DirectCandidateSource::TailscaleProvider
+                && rejection.reason == DirectCandidateRejection::NotTailscaleAddress
+                && rejection.detail == "private-ipv4:41641"
+        }));
+    }
+
+    #[test]
     fn path_doctor_reports_availability_rejections_and_guidance_without_endpoint_leaks() {
         let report = run_discovery_scenario(PathDiscoveryScenario::Ipv6Available);
 
@@ -1102,6 +1613,7 @@ mod tests {
             PathDiscoveryScenario::LanDiscovery,
             PathDiscoveryScenario::ExplicitDirect,
             PathDiscoveryScenario::Ipv6Available,
+            PathDiscoveryScenario::TailscaleFakeProvider,
             PathDiscoveryScenario::Ipv6Unavailable,
             PathDiscoveryScenario::PolicyDenied,
         ];
@@ -1131,10 +1643,33 @@ mod tests {
                 .map(|candidate| candidate.source),
             Some(DirectCandidateSource::PublicIpv6)
         );
-        assert!(reports[3].selected.is_none());
         assert_eq!(
-            reports[4].guidance,
+            reports[3]
+                .selected
+                .as_ref()
+                .map(|candidate| candidate.source),
+            Some(DirectCandidateSource::TailscaleProvider)
+        );
+        assert!(reports[4].selected.is_none());
+        assert_eq!(
+            reports[5].guidance,
             vec!["enable_at_least_one_direct_path_policy_or_configure_relay"]
+        );
+    }
+
+    #[test]
+    fn tailscale_fake_provider_scenario_is_redaction_safe() {
+        let report = run_discovery_scenario(PathDiscoveryScenario::TailscaleFakeProvider);
+
+        assert_eq!(
+            report.selected.as_ref().map(|candidate| candidate.source),
+            Some(DirectCandidateSource::TailscaleProvider)
+        );
+        let candidate = report.selected.as_ref().expect("candidate");
+        assert_eq!(candidate.endpoint_scope, "tailscale-ipv4:41641");
+        assert_eq!(
+            candidate.evidence,
+            "tailscale_fake_provider_candidate_validated"
         );
     }
 }
