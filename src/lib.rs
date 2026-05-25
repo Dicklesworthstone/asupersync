@@ -699,6 +699,8 @@ pub mod real_lab_oracle_plan_certificate_integration_e2e_tests;
 pub mod real_messaging_kafka_trace_event_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_sync_semaphore_combinator_rate_limit_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_security_authenticated_types_cancel_integration_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
