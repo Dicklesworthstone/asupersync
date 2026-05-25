@@ -594,6 +594,8 @@ pub mod real_transport_security_authenticated_routing_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_types_budget_combinator_rate_limit_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_channel_oneshot_cancel_symbol_cancel_nested_scope_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_web_multipart_codec_raptorq_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_web_sse_broadcast_fanout_e2e_tests;
