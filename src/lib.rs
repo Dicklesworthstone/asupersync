@@ -536,6 +536,8 @@ pub mod real_obligation_eprocess_calm_distributed_merge_integration_e2e_tests;
 pub mod real_obligation_eprocess_lab_oracle_eprocess_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_graded_obligation_no_aliasing_proof_nested_capability_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_obligation_no_aliasing_proof_cx_macaroon_integration_e2e_tests;
 #[cfg(any(
     all(test, feature = "real-service-e2e"),
     feature = "obligation-cleanup-e2e"
