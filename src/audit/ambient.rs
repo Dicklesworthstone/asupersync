@@ -177,6 +177,9 @@ pub const GREP_PATTERNS: &[(&str, AmbientCategory)] = &[
 ];
 
 #[cfg(test)]
+pub use tests::scan_categories_for_contract_fixture;
+
+#[cfg(test)]
 mod tests {
     #![allow(
         clippy::pedantic,
@@ -563,6 +566,14 @@ mod tests {
         }
 
         violations
+    }
+
+    #[must_use]
+    pub fn scan_categories_for_contract_fixture(rel: &str, content: &str) -> Vec<AmbientCategory> {
+        scan_source(rel, content)
+            .into_iter()
+            .map(|violation| violation.category)
+            .collect()
     }
 
     fn scan_directory(dir: &Path, root: &Path) -> Vec<Violation> {
