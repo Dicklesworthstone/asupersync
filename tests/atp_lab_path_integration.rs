@@ -3,9 +3,9 @@
 //! Tests the ATP path lab harness against the required coverage matrix
 //! for deterministic NAT/path validation scenarios.
 
-use asupersync::atp::lab::{AtpLabRegime, AtpLabScenario};
 use asupersync::atp::path::PathKind;
 use asupersync::lab::atp_path::{AtpPathLabHarness, AtpPathTestConfig};
+use asupersync::lab::{AtpLabRegime, AtpLabScenario};
 use asupersync::net::atp::path::NatProfile;
 
 #[tokio::test]

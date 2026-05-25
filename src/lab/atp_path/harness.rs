@@ -1,8 +1,10 @@
 //! ATP path lab harness implementation for deterministic network testing.
 
-use crate::atp::lab::{AtpLabRegime, AtpLabScenario, AtpLabTransferSpec, AtpTransferLabPlan};
 use crate::atp::path::{PathKind, PathTraceId};
-use crate::lab::network::{NetworkConfig, SimulatedNetwork};
+use crate::lab::{
+    AtpLabRegime, AtpLabScenario, AtpLabTransferSpec, AtpTransferLabPlan, NetworkConfig,
+    SimulatedNetwork,
+};
 use crate::net::atp::path::NatProfile;
 use crate::types::Time;
 use std::time::Duration;
@@ -179,8 +181,6 @@ pub enum AtpPathLabError {
 /// ATP path lab harness for executing path-related scenarios.
 #[derive(Debug)]
 pub struct AtpPathLabHarness {
-    #[allow(dead_code)] // TODO: Use config for timeout/tracing settings
-    config: AtpPathTestConfig,
     network: SimulatedNetwork,
     /// Deterministic timestamp counter for trace events
     timestamp_counter: u64,
@@ -192,7 +192,6 @@ impl AtpPathLabHarness {
     pub fn new(config: AtpPathTestConfig) -> Self {
         let network = SimulatedNetwork::new(config.network.clone());
         Self {
-            config,
             network,
             timestamp_counter: 0,
         }
@@ -248,8 +247,8 @@ impl AtpPathLabHarness {
         let mut scenario_matched_expected = true;
 
         // Set up simulated endpoints
-        let _client_host = self.network.add_host("client");
-        let _server_host = self.network.add_host("server");
+        self.network.add_host("client");
+        self.network.add_host("server");
 
         // Process each regime in the scenario
         for regime in &plan.scenario.regimes {
@@ -474,7 +473,7 @@ impl AtpPathLabHarness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::lab::AtpLabScenario;
+    use crate::lab::AtpLabScenario;
 
     #[tokio::test]
     async fn test_lan_ipv6_harness_basic_execution() {
@@ -496,9 +495,10 @@ mod tests {
     async fn test_path_validation_has_direct_path() {
         let mut validation = AtpPathValidation::failed();
         validation.ipv6_direct_succeeded = true;
+        validation.selected_path_kind = Some(PathKind::PublicIpv6);
 
         assert!(validation.has_direct_path());
-        assert!(validation.transfer_succeeded()); // Will be true once selected_path_kind is set
+        assert!(validation.transfer_succeeded());
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@
 //!
 //! ```ignore
 //! use asupersync::lab::atp_path::{AtpPathLabHarness, AtpPathTestConfig};
-//! use asupersync::atp::lab::AtpLabScenario;
+//! use asupersync::lab::AtpLabScenario;
 //!
 //! let harness = AtpPathLabHarness::new(AtpPathTestConfig::lan_ipv6());
 //! let scenario = AtpLabScenario::new("easy-nat-direct", 0xA7F0_0001)
@@ -21,11 +21,12 @@
 pub mod harness;
 
 pub use harness::{
-    AtpPathExecutionResult, AtpPathLabHarness, AtpPathTestConfig, AtpPathValidation,
+    AtpPathEventKind, AtpPathExecutionResult, AtpPathLabError, AtpPathLabHarness,
+    AtpPathTestConfig, AtpPathTraceEvent, AtpPathValidation,
 };
 
-use crate::atp::lab::AtpLabRegime;
 use crate::atp::path::PathKind;
+use crate::lab::AtpLabRegime;
 use crate::net::atp::path::NatProfile;
 
 /// Maps ATP lab regimes to concrete NAT profiles for path testing.
