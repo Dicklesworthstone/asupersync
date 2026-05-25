@@ -518,6 +518,8 @@ pub mod real_raptorq_linalg_raptorq_systematic_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_proof_raptorq_regression_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_raptorq_roundtrip_deterministic_seed_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_scheduler_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_systematic_e2e_tests;
