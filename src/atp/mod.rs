@@ -44,6 +44,8 @@ pub mod sdk;
 pub mod stream_object;
 pub mod sync;
 pub mod transfer;
+pub mod transfer_actor;
+pub mod transfer_brain;
 pub mod verifier;
 pub mod verify;
 pub mod writer;
@@ -124,4 +126,12 @@ pub use repair_scheduler::{
 pub use seeding::{
     AtpSeedingService, ManifestAuthorization, SeedingConfig, SeedingError, SeedingMetrics,
     SeedingPriority, SeedingSession,
+};
+pub use transfer_actor::{
+    SessionId, SessionState, TransferActor, TransferActorConfig, TransferActorHandle,
+    TransferMessage, TransferSession, TransferSessionStatus,
+};
+pub use transfer_brain::{
+    ChunkId, DecisionFactors, ResourceUsage, ScheduledChunk, SchedulingDecision, SchedulingState,
+    SystemPressure, TransferBrain, TransferBrainConfig, TransferMetrics, TransferPriority,
 };

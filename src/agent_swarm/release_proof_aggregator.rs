@@ -345,7 +345,7 @@ impl ReleaseProofAggregator {
         let status = self.determine_proof_status(
             &commits,
             &rch_commands,
-            &first_blocker,
+            first_blocker.as_ref(),
             &handoff_status,
             &pushed_refs,
         )?;
@@ -553,7 +553,7 @@ impl ReleaseProofAggregator {
         &self,
         commits: &[CommitRecord],
         rch_commands: &[RchCommandRecord],
-        first_blocker: &Option<BlockerRecord>,
+        first_blocker: Option<&BlockerRecord>,
         _handoff_status: &HandoffStatus,
         pushed_refs: &[GitRef],
     ) -> Result<ProofStatus, AggregatorError> {
@@ -721,7 +721,7 @@ mod tests {
             .determine_proof_status(
                 &commits,
                 &rch_commands,
-                &None,
+                None,
                 &handoff_status,
                 &pushed_refs,
             )
@@ -754,7 +754,7 @@ mod tests {
         };
 
         let status = aggregator
-            .determine_proof_status(&commits, &rch_commands, &None, &handoff_status, &[])
+            .determine_proof_status(&commits, &rch_commands, None, &handoff_status, &[])
             .unwrap();
 
         assert_eq!(status, ProofStatus::LocalFallback);
@@ -779,7 +779,7 @@ mod tests {
         };
 
         let status = aggregator
-            .determine_proof_status(&[], &[], &blocker, &handoff_status, &[])
+            .determine_proof_status(&[], &[], blocker.as_ref(), &handoff_status, &[])
             .unwrap();
 
         assert_eq!(status, ProofStatus::Blocked);
@@ -809,7 +809,7 @@ mod tests {
         };
 
         let status = aggregator
-            .determine_proof_status(&commits, &[], &None, &handoff_status, &[])
+            .determine_proof_status(&commits, &[], None, &handoff_status, &[])
             .unwrap();
 
         assert_eq!(status, ProofStatus::Stale);

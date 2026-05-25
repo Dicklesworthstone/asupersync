@@ -213,7 +213,7 @@ impl CacheMaintenanceScheduler {
     pub fn run_maintenance(
         &mut self,
         entries: &mut BTreeMap<String, CacheEntry>,
-        policy: &CachePolicyManager,
+        _policy: &CachePolicyManager,
     ) -> MaintenanceMetrics {
         let start_time = SystemTime::now();
         let mut metrics = MaintenanceMetrics::default();

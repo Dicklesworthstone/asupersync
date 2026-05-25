@@ -9,7 +9,7 @@
 //! - Service lifecycle management
 //! - Diagnostics and monitoring
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use asupersync::atp::identity::PeerId;
 use asupersync::cx::Cx;
 use asupersync::runtime::{RuntimeBuilder, RuntimeConfig};
@@ -22,6 +22,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{error, info, warn};
+use toml;
 
 /// ATP Daemon - Always-on ATP transfer service
 #[derive(Parser)]
@@ -439,7 +440,7 @@ fn main() -> Result<()> {
 fn init_logging(level: &str) -> Result<()> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-    let level = level.parse().context("Invalid log level")?;
+    let level = level.parse()?;
 
     tracing_subscriber::registry()
         .with(
@@ -475,26 +476,14 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
     config.network.enable_mailbox = args.enable_mailbox;
 
     // Create data directory if it doesn't exist
-    std::fs::create_dir_all(&config.storage.data_dir).with_context(|| {
-        format!(
-            "Failed to create data directory: {}",
-            config.storage.data_dir.display()
-        )
-    })?;
-    std::fs::create_dir_all(&config.storage.cache_dir).with_context(|| {
-        format!(
-            "Failed to create cache directory: {}",
-            config.storage.cache_dir.display()
-        )
-    })?;
+    std::fs::create_dir_all(&config.storage.data_dir)?;
+    std::fs::create_dir_all(&config.storage.cache_dir)?;
 
     // Initialize runtime
-    let runtime_config = RuntimeConfig::builder()
-        .with_name("atpd")
-        .with_worker_threads(4)
-        .build();
-
-    let runtime = RuntimeBuilder::new(runtime_config).build()?;
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(4)
+        .thread_name_prefix("atpd-worker".to_string())
+        .build()?;
     let runtime_handle = runtime.handle().clone();
 
     info!("ATP daemon started on {}", config.network.bind_addr);
@@ -529,7 +518,12 @@ async fn run_daemon_service(
         config: config.clone(),
         supervisor: _supervisor,
         runtime_handle,
-        start_time: Time::now(),
+        start_time: Time::from_nanos(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64
+        ),
         peer_directory: HashMap::new(),
         active_transfers: HashMap::new(),
         inbox_messages: Vec::new(),
@@ -550,8 +544,7 @@ async fn run_daemon_service(
 
     // For now, just wait for shutdown signal
     tokio::signal::ctrl_c()
-        .await
-        .context("Failed to wait for shutdown signal")?;
+        .await?;
 
     info!("Received shutdown signal, stopping daemon...");
     Ok(())
@@ -658,11 +651,9 @@ fn manage_identity(_cli: AtpdCli, args: IdentityArgs) -> Result<()> {
 }
 
 fn load_config(path: &std::path::Path) -> Result<AtpdConfig> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read config file: {}", path.display()))?;
+    let content = std::fs::read_to_string(path)?;
 
-    let config: AtpdConfig = toml::from_str(&content)
-        .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+    let config: AtpdConfig = toml::from_str(&content)?;
 
     Ok(config)
 }

@@ -55,9 +55,13 @@ pub struct SessionMetadata {
 /// Type of agent session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionType {
+    /// Interactive session with human oversight
     Interactive,
+    /// Automated session following predefined workflow
     Automated,
+    /// Background maintenance or monitoring session
     Background,
+    /// Emergency response or recovery session
     Emergency,
 }
 
@@ -118,9 +122,13 @@ pub struct MessageRef {
 /// Message priority levels.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MessagePriority {
+    /// Low priority, non-urgent messages
     Low,
+    /// Normal priority, standard workflow messages
     Normal,
+    /// High priority, requires prompt attention
     High,
+    /// Critical priority, immediate action required
     Critical,
 }
 
@@ -157,9 +165,13 @@ pub struct BeadClaim {
 /// Bead status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BeadStatus {
+    /// Bead is available for work
     Open,
+    /// Bead is actively being worked on
     InProgress,
+    /// Bead is blocked by dependencies or issues
     Blocked,
+    /// Bead is completed
     Closed,
 }
 
@@ -188,9 +200,13 @@ pub struct ConflictInfo {
 /// Conflict severity levels.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConflictSeverity {
+    /// Minor conflict, can likely be resolved automatically
     Low,
+    /// Moderate conflict, requires careful review
     Medium,
+    /// Serious conflict, may require coordination between agents
     High,
+    /// Critical conflict, requires immediate attention
     Critical,
 }
 
@@ -212,11 +228,17 @@ pub struct ProofCommand {
 /// Type of proof command.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProofCommandType {
+    /// Compilation check (cargo check/build)
     Compile,
+    /// Test execution (cargo test)
     Test,
+    /// Linting analysis (cargo clippy)
     Lint,
+    /// Code formatting (cargo fmt)
     Format,
+    /// Performance benchmarking (cargo bench)
     Benchmark,
+    /// Other custom command type
     Other(String),
 }
 
@@ -236,12 +258,19 @@ pub struct BlockerInfo {
 /// Types of blocking issues.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BlockerType {
+    /// Git merge conflict or repository state issue
     GitConflict,
+    /// File reservation conflict with another agent
     FileReservation,
+    /// Waiting for dependency bead completion
     BeadDependency,
+    /// Proof command (test/lint/build) failure
     ProofFailure,
+    /// Network connectivity or resource access issue
     NetworkIssue,
+    /// Resource contention (CPU, memory, disk)
     ResourceContention,
+    /// Other unclassified blocking issue
     Other(String),
 }
 
@@ -276,21 +305,32 @@ pub struct RiskAssessment {
 /// Categories of continuation risks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RiskCategory {
+    /// Documentation may be outdated or stale
     StaleDocumentation,
+    /// Unread or unacknowledged messages exist
     UnacknowledgedMessages,
+    /// Potential file conflicts with other agents
     FileConflicts,
+    /// Dependencies or external state has changed
     DependencyChanges,
+    /// Proof commands have failed or are invalid
     ProofCommandFailure,
+    /// Resources or reservations may expire
     ResourceExpiration,
+    /// Other unclassified risk category
     Other(String),
 }
 
 /// Risk severity levels.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RiskLevel {
+    /// Low risk, can proceed with minor precautions
     Low,
+    /// Medium risk, requires careful monitoring
     Medium,
+    /// High risk, requires significant mitigation
     High,
+    /// Critical risk, strongly consider restart
     Critical,
 }
 
@@ -319,11 +359,17 @@ pub enum HandoffDecision {
 /// Specific area requiring refresh.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RefreshTarget {
+    /// Re-read AGENTS.md and other key documentation
     Documentation,
+    /// Check agent mail inbox for new messages
     InboxMessages,
+    /// Verify current file reservations status
     FileReservations,
+    /// Update knowledge of bead status changes
     BeadStatus,
+    /// Refresh git repository state and branches
     GitState,
+    /// Check status of running proof commands
     ProofCommands,
 }
 
@@ -341,9 +387,13 @@ pub struct CoordinationRequirement {
 /// Types of coordination needed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CoordinationType {
+    /// Transfer file reservation to another agent
     FileReservationHandoff,
+    /// Transfer bead ownership to another agent
     BeadTransfer,
+    /// Resolve merge or editing conflicts
     ConflictResolution,
+    /// Synchronize proof command status with other agents
     ProofCommandSync,
 }
 
@@ -361,11 +411,17 @@ pub struct SafetyViolation {
 /// Categories of safety violations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ViolationCategory {
+    /// Git repository state is too stale to continue safely
     StaleGitState,
+    /// File reservations have expired
     ExpiredReservations,
+    /// Merge conflicts remain unresolved
     UnresolvedConflicts,
+    /// Critical messages require immediate attention
     CriticalUnacknowledgedMessages,
+    /// Essential proof commands have failed
     FailedProofCommands,
+    /// Capsule integrity verification failed
     IntegrityCheckFailure,
 }
 
