@@ -1,0 +1,54 @@
+{
+  "agent_mail": {
+    "available": true,
+    "reservations": [],
+    "status": "ok"
+  },
+  "beads": {
+    "in_progress": [],
+    "ready": [
+      {
+        "id": "asupersync-oxqrae.10",
+        "title": "ASW-10 handoff verifier"
+      }
+    ],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": []
+  },
+  "git": {
+    "ahead": 0,
+    "behind": 0,
+    "branch": "main",
+    "upstream": "origin/main"
+  },
+  "handoff_capsule": {
+    "docs_read": true,
+    "observed_head": "091926251",
+    "proof_commands": [
+      {
+        "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_p6 cargo test -p asupersync --test rch_health_receipt_contract",
+        "executed_at": "2026-05-07T04:25:00Z",
+        "lane": "rch-health-contract",
+        "remote": true,
+        "status": "passed",
+        "target_dir": "${TMPDIR:-/tmp}/rch_target_p6"
+      }
+    ],
+    "pushed_refs": {
+      "main": "091926251",
+      "master": "091926251"
+    },
+    "repo_head": "091926251",
+    "unresolved_ack_count": 0
+  },
+  "proof_runner": {
+    "status": "ok",
+    "suggested_lanes": []
+  },
+  "rch": {
+    "available": true,
+    "queue_summary": "queued=0 running=0"
+  }
+}

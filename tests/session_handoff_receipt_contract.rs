@@ -30,8 +30,39 @@ fn run_receipt(fixture: &str) -> Output {
         .expect("run session handoff receipt script")
 }
 
+fn run_receipt_with_verifier(fixture: &str) -> Output {
+    Command::new("python3")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--fixture")
+        .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .arg("--repo-path")
+        .arg(repo_root())
+        .arg("--agent")
+        .arg("CopperSpring")
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--include-verifier")
+        .current_dir(repo_root())
+        .output()
+        .expect("run session handoff receipt script with verifier")
+}
+
 fn receipt_json(fixture: &str) -> Value {
     let output = run_receipt(fixture);
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("receipt output not JSON: {error}\noutput: {stdout}"))
+}
+
+fn verifier_receipt_json(fixture: &str) -> Value {
+    let output = run_receipt_with_verifier(fixture);
     assert!(
         output.status.success(),
         "receipt helper failed: {}\nstdout: {}\nstderr: {}",
@@ -47,6 +78,32 @@ fn receipt_json(fixture: &str) -> Value {
 fn fixture_text(fixture: &str) -> String {
     std::fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
         .unwrap_or_else(|error| panic!("read golden fixture {fixture}: {error}"))
+}
+
+fn assert_verifier_output_matches_golden(
+    input_fixture: &str,
+    expected_fixture: &str,
+    drift_message: &str,
+) {
+    let output = run_receipt_with_verifier(input_fixture);
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = String::from_utf8(output.stdout).expect("receipt stdout is utf-8");
+    let expected = fixture_text(expected_fixture);
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed verifier receipt JSON drifted for {input_fixture} -> {expected_fixture}"
+    );
+    assert_eq!(actual, expected, "{drift_message}");
 }
 
 fn assert_receipt_output_matches_golden(
@@ -120,6 +177,65 @@ fn clean_tree_output_matches_full_reviewed_golden() {
         "clean_tree.json",
         "clean_tree_expected.json",
         "clean_tree receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
+fn asw_handoff_verifier_allows_complete_capsule_to_continue() {
+    let receipt = verifier_receipt_json("asw_handoff_verifier_complete.json");
+    assert_eq!(
+        receipt["handoff_verifier"]["schema_version"].as_str(),
+        Some("asw-handoff-verifier-v1")
+    );
+    assert_eq!(
+        receipt["handoff_verifier"]["decision"].as_str(),
+        Some("continue")
+    );
+    assert_eq!(
+        receipt["handoff_verifier"]["evidence"]["remote_proof_count"].as_u64(),
+        Some(1)
+    );
+    assert!(
+        receipt["handoff_verifier"]["required_refreshes"]
+            .as_array()
+            .expect("required_refreshes must be array")
+            .is_empty(),
+        "complete capsule must not request a refresh"
+    );
+}
+
+#[test]
+fn asw_handoff_verifier_complete_output_matches_reviewed_golden() {
+    assert_verifier_output_matches_golden(
+        "asw_handoff_verifier_complete.json",
+        "asw_handoff_verifier_complete_expected.json",
+        "ASW handoff verifier complete receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
+fn asw_handoff_verifier_stale_proof_requires_narrow_refresh() {
+    let receipt = verifier_receipt_json("asw_handoff_verifier_stale_proof.json");
+    assert_eq!(
+        receipt["handoff_verifier"]["decision"].as_str(),
+        Some("narrow_refresh_required")
+    );
+    assert_eq!(
+        receipt["handoff_verifier"]["required_refreshes"][0].as_str(),
+        Some("rerun-stale-rch-proof")
+    );
+    assert_eq!(
+        receipt["handoff_verifier"]["evidence"]["latest_proof_at"].as_str(),
+        Some("2026-05-07T04:25:00Z")
+    );
+}
+
+#[test]
+fn asw_handoff_verifier_stale_proof_output_matches_reviewed_golden() {
+    assert_verifier_output_matches_golden(
+        "asw_handoff_verifier_stale_proof.json",
+        "asw_handoff_verifier_stale_proof_expected.json",
+        "ASW handoff verifier stale-proof receipt drifted from the reviewed golden",
     );
 }
 

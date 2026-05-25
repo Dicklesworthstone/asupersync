@@ -19,6 +19,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = "session-handoff-receipt-v1"
+ASW_VERIFIER_SCHEMA_VERSION = "asw-handoff-verifier-v1"
 NEXT_ACTIONS = {
     "claim-ready-bead",
     "avoid-peer-owned-surface",
@@ -26,6 +27,12 @@ NEXT_ACTIONS = {
     "proof-only",
     "reopen-stale-bead",
     "blocked",
+}
+ASW_HANDOFF_DECISIONS = {
+    "continue",
+    "narrow_refresh_required",
+    "coordinate_first",
+    "unsafe_to_continue",
 }
 TRACKER_PATHS = {".beads/issues.jsonl", ".beads/beads.db"}
 TRACKER_DIRS = {".beads"}
@@ -455,6 +462,169 @@ def parse_timestamp(value: Any) -> dt.datetime | None:
     return parsed.astimezone(dt.timezone.utc)
 
 
+def proof_stale(executed_at: Any, generated_at: str, stale_after_hours: int) -> bool:
+    proof_ts = parse_timestamp(executed_at)
+    generated_ts = parse_timestamp(generated_at)
+    if not proof_ts or not generated_ts:
+        return True
+    age_hours = (generated_ts - proof_ts).total_seconds() / 3600
+    return age_hours >= stale_after_hours
+
+
+def proof_remote_required(proof: dict[str, Any]) -> bool:
+    command = str(proof.get("command") or "")
+    target_dir = str(proof.get("target_dir") or "")
+    return (
+        bool(proof.get("remote", False))
+        and command.startswith("rch exec --")
+        and "CARGO_TARGET_DIR" in command
+        and "rch_target_p6" in (command + target_dir)
+    )
+
+
+def verify_handoff_capsule(
+    *,
+    source: dict[str, Any],
+    receipt: dict[str, Any],
+    generated_at: str,
+    stale_after_hours: int,
+) -> dict[str, Any]:
+    capsule = source.get("handoff_capsule")
+    if not isinstance(capsule, dict):
+        return {
+            "schema_version": ASW_VERIFIER_SCHEMA_VERSION,
+            "decision": "unsafe_to_continue",
+            "reason": "handoff capsule is missing; fail closed before resuming compacted context",
+            "required_refreshes": ["emit-handoff-capsule"],
+            "coordinate_with": [],
+            "blocking_paths": [],
+            "evidence": {
+                "remote_proof_count": 0,
+                "latest_proof_at": "",
+                "unresolved_ack_count": 0,
+            },
+        }
+
+    required_refreshes = []
+    coordinate_with = []
+    blocking_paths = []
+    unsafe_reasons = []
+
+    if not receipt["branch"]["is_main"]:
+        unsafe_reasons.append("current branch is not main")
+    tracker_sync = receipt.get("tracker_sync", {})
+    if tracker_sync.get("blocked"):
+        unsafe_reasons.append("beads tracker sync is dirty or stale")
+    if receipt.get("tracker_write_lock", {}).get("exists"):
+        unsafe_reasons.append("beads write lock is present")
+
+    pushed_refs = capsule.get("pushed_refs", {})
+    if isinstance(pushed_refs, dict):
+        main_ref = str(pushed_refs.get("main") or "")
+        master_ref = str(pushed_refs.get("master") or "")
+        if main_ref and master_ref and main_ref != master_ref:
+            unsafe_reasons.append("main and master pushed refs disagree")
+
+    proofs = [
+        proof
+        for proof in capsule.get("proof_commands", [])
+        if isinstance(proof, dict)
+    ]
+    remote_proofs = [
+        proof
+        for proof in proofs
+        if str(proof.get("status") or "") == "passed" and proof_remote_required(proof)
+    ]
+    stale_remote_proofs = [
+        proof
+        for proof in remote_proofs
+        if proof_stale(proof.get("executed_at"), generated_at, stale_after_hours)
+    ]
+    local_or_unsafe_proofs = [
+        proof
+        for proof in proofs
+        if str(proof.get("status") or "") == "passed" and not proof_remote_required(proof)
+    ]
+    if local_or_unsafe_proofs:
+        unsafe_reasons.append("proof evidence includes local-only or malformed RCH command")
+    if not remote_proofs:
+        required_refreshes.append("rerun-remote-rch-proof")
+    elif len(stale_remote_proofs) == len(remote_proofs):
+        required_refreshes.append("rerun-stale-rch-proof")
+
+    if not capsule.get("docs_read", False):
+        required_refreshes.append("refresh-docs-read-receipt")
+    if str(capsule.get("repo_head") or "") != str(capsule.get("observed_head") or ""):
+        required_refreshes.append("refresh-repo-head")
+
+    unresolved_acks = int(capsule.get("unresolved_ack_count") or 0)
+    if unresolved_acks > 0:
+        coordinate_with.append("ack-required-inbox")
+
+    for conflict in receipt.get("reservation_conflicts", []):
+        if not isinstance(conflict, dict):
+            continue
+        blocking_paths.append(str(conflict.get("path_pattern") or ""))
+        holder = str(conflict.get("holder") or "")
+        if holder:
+            coordinate_with.append(holder)
+
+    for cluster in receipt.get("dirty_clusters", []):
+        if not isinstance(cluster, dict):
+            continue
+        if str(cluster.get("cluster") or "") == "beads-tracker-state":
+            continue
+        paths = cluster.get("paths", [])
+        for path in paths if isinstance(paths, list) else []:
+            blocking_paths.append(str(path))
+        owner = str(cluster.get("cluster") or "")
+        if owner:
+            coordinate_with.append(owner)
+
+    latest_proof_at = ""
+    proof_times = [
+        str(proof.get("executed_at") or "")
+        for proof in remote_proofs
+        if proof.get("executed_at")
+    ]
+    if proof_times:
+        latest_proof_at = max(proof_times)
+
+    coordinate_with = sorted({item for item in coordinate_with if item})
+    blocking_paths = sorted({item for item in blocking_paths if item})
+    required_refreshes = sorted({item for item in required_refreshes if item})
+
+    if unsafe_reasons:
+        decision = "unsafe_to_continue"
+        reason = unsafe_reasons[0]
+    elif coordinate_with or blocking_paths:
+        decision = "coordinate_first"
+        reason = "handoff capsule conflicts with active peer-owned work or unresolved mail"
+    elif required_refreshes:
+        decision = "narrow_refresh_required"
+        reason = "handoff capsule is structurally valid but needs fresh local evidence"
+    else:
+        decision = "continue"
+        reason = "handoff capsule has current repo, proof, mail, reservation, and pushed-ref evidence"
+
+    if decision not in ASW_HANDOFF_DECISIONS:
+        raise ValueError(f"invalid ASW handoff decision: {decision}")
+
+    return {
+        "schema_version": ASW_VERIFIER_SCHEMA_VERSION,
+        "decision": decision,
+        "reason": reason,
+        "required_refreshes": required_refreshes,
+        "coordinate_with": coordinate_with,
+        "blocking_paths": blocking_paths,
+        "evidence": {
+            "remote_proof_count": len(remote_proofs),
+            "latest_proof_at": latest_proof_at,
+            "unresolved_ack_count": unresolved_acks,
+        },
+    }
+
+
 def classify_reservations(agent: str, snapshot: dict[str, Any], now: str) -> list[dict[str, Any]]:
     now_ts = parse_timestamp(now) or dt.datetime.now(dt.timezone.utc)
     reservations = snapshot.get("reservations", [])
@@ -691,6 +861,7 @@ def build_receipt(
     agent: str,
     generated_at: str,
     stale_after_hours: int,
+    include_verifier: bool = False,
 ) -> dict[str, Any]:
     git = source.get("git", {})
     dirty_source = source.get("dirty_tree") or source.get("dirty_classifier") or {}
@@ -785,6 +956,13 @@ def build_receipt(
             for key, value in tracker_sync.items()
             if key != "present"
         }
+    if include_verifier:
+        receipt["handoff_verifier"] = verify_handoff_capsule(
+            source=source,
+            receipt=receipt,
+            generated_at=generated_at,
+            stale_after_hours=stale_after_hours,
+        )
     return receipt
 
 
@@ -803,6 +981,11 @@ def main() -> int:
         default=12,
         help="Age threshold for stale in-progress candidates",
     )
+    parser.add_argument(
+        "--include-verifier",
+        action="store_true",
+        help="Include the ASW compaction-safe handoff verifier decision",
+    )
     args = parser.parse_args()
 
     repo_path = Path(args.repo_path).resolve()
@@ -818,6 +1001,7 @@ def main() -> int:
         agent=args.agent,
         generated_at=generated_at,
         stale_after_hours=args.stale_after_hours,
+        include_verifier=args.include_verifier,
     )
     json.dump(receipt, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
