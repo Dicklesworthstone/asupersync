@@ -959,7 +959,7 @@ impl StreamManifest {
     }
 
     /// Mark stream as cancelled with reason.
-    pub fn mark_cancelled(&mut self, reason: &str) {
+    pub fn mark_cancelled(&mut self, _reason: &str) {
         // Add cancellation marker epoch
         let cancellation_epoch = StreamEpoch::new(
             self.epochs.len() as u64 + 1,
@@ -976,7 +976,7 @@ impl StreamManifest {
     }
 
     /// Invalidate content from a given offset due to verification failure.
-    pub fn invalidate_from_offset(&mut self, offset: u64, reason: &str) {
+    pub fn invalidate_from_offset(&mut self, offset: u64, _reason: &str) {
         // Remove or mark invalid any epochs that start at or after the offset
         self.epochs.retain(|epoch| epoch.byte_range.start < offset);
 

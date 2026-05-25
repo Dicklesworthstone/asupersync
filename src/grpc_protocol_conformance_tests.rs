@@ -37,7 +37,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 #[cfg(test)]
 use proptest::prelude::*;

@@ -302,7 +302,7 @@ impl MultiSourceRepairScheduler {
 
     /// Remove a peer from the scheduler
     pub fn unregister_peer(&mut self, peer_id: &PeerId) {
-        if let Some(peer_info) = self.peers.remove(peer_id) {
+        if let Some(_peer_info) = self.peers.remove(peer_id) {
             info!("Unregistering peer {}", peer_id.as_string());
 
             // Cancel any pending requests from this peer

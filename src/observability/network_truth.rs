@@ -10,7 +10,7 @@ use crate::observability::metrics::{Counter, Gauge, Histogram};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 /// Custom serde module for SystemTime serialization.
 mod system_time_serde {

@@ -10,6 +10,7 @@ pub mod actor;
 pub mod autotune;
 #[cfg(feature = "benchmark-adapters")]
 pub mod benchmark;
+pub mod cache;
 pub mod diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
@@ -36,6 +37,7 @@ pub mod repair_receiver;
 pub mod repair_roi;
 pub mod repair_scheduler;
 pub mod safety;
+pub mod seeding;
 #[path = "sdk.rs"]
 pub mod sdk;
 pub mod stream_object;
@@ -58,6 +60,10 @@ pub use autotune::{
     AtpRepairCoordinatorPolicy, AtpRepairDecisionFactor, AtpRepairDecisionFactorEffect,
     AtpRepairDecisionFactorKind, AtpRepairMode, AtpRepairPathMode, AtpRepairRoiInputs,
     AtpTransferPressureSnapshot,
+};
+pub use cache::{
+    AtpCache, CacheConfig, CacheEntry, CacheError, CacheKey, CacheMetrics, EvictionPolicy,
+    StorageLocation, VerificationMetadata,
 };
 pub use diagnostics::{
     ATP_RUNTIME_EVIDENCE_DIAGNOSTIC_SCHEMA, ATP_RUNTIME_EVIDENCE_EXPLANATION_SCHEMA,
@@ -117,4 +123,8 @@ pub use repair_roi::{
 pub use repair_scheduler::{
     DecodeMatrix, MultiSourceRepairScheduler, PeerScoringWeights, RejectionReason,
     RepairSymbolRequest, SymbolProcessResult,
+};
+pub use seeding::{
+    AtpSeedingService, ManifestAuthorization, SeedingConfig, SeedingError, SeedingMetrics,
+    SeedingPriority, SeedingSession,
 };
