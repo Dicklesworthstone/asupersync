@@ -371,6 +371,8 @@ pub mod real_combinator_retry_service_timeout_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_combinator_supervision_failure_propagation_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_combinator_timeout_obligation_recovery_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cx_cx_obligation_marking_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_cx_macaroon_obligation_marking_integration_e2e_tests;
