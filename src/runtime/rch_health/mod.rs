@@ -701,6 +701,51 @@ mod tests {
     }
 
     #[test]
+    fn lane_specific_cache_warmth_preserves_fairness_between_proof_lanes() {
+        let mut cargo_hot = healthy_worker("vmi-cargo-hot.internal");
+        cargo_hot.cache_warmth = vec![
+            RchCacheWarmthHint::new(Some("cargo-test-admission"), RchTargetDirClass::Warm, 100),
+            RchCacheWarmthHint::new(Some("cargo-clippy-admission"), RchTargetDirClass::Warm, 20),
+        ];
+        let mut clippy_hot = healthy_worker("vmi-clippy-hot.internal");
+        clippy_hot.cache_warmth = vec![
+            RchCacheWarmthHint::new(Some("cargo-test-admission"), RchTargetDirClass::Warm, 30),
+            RchCacheWarmthHint::new(Some("cargo-clippy-admission"), RchTargetDirClass::Warm, 95),
+        ];
+        let clippy_request = RchProofLaneRequest::new(
+            "cargo-clippy-admission",
+            RchTargetDirClass::Warm,
+            true,
+            RchProofPriority::Foreground,
+        );
+
+        let cargo_receipt = admit(&[clippy_hot.clone(), cargo_hot.clone()]);
+        let clippy_receipt = admit_rch_worker(
+            &clippy_request,
+            &[clippy_hot.clone(), cargo_hot.clone()],
+            &RchWorkerAdmissionPolicy::default(),
+        );
+
+        assert_eq!(
+            cargo_receipt.selected_worker,
+            Some(cargo_hot.worker_id.clone())
+        );
+        assert_eq!(
+            clippy_receipt.selected_worker,
+            Some(clippy_hot.worker_id.clone())
+        );
+        assert_eq!(cargo_receipt.candidates[0].cache_warmth_bps, 100);
+        assert_eq!(clippy_receipt.candidates[0].cache_warmth_bps, 95);
+        assert!(
+            cargo_receipt
+                .candidates
+                .iter()
+                .chain(clippy_receipt.candidates.iter())
+                .all(|candidate| !candidate.worker_id.as_str().contains("vmi-"))
+        );
+    }
+
+    #[test]
     fn active_project_exclusion_refuses_remote_required_without_local_fallback() {
         let mut excluded = healthy_worker("vmi-excluded");
         excluded.active_project_exclusion = true;
