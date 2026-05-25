@@ -1,10 +1,10 @@
 //! E2e scenarios for ATP receive-side safety preflight and destination policy.
 
-use asupersync::atp::object::{Object, ObjectGraph, ObjectEdge, ObjectId};
+use asupersync::atp::object::{Object, ObjectEdge, ObjectGraph, ObjectId};
 use asupersync::atp::safety::{
-    DestinationPolicy, ReceiveConsentSource, ReceiveMetadataPolicy, ReceivePreflightInput,
-    RollbackResumePolicy, StorageEvidence, build_receive_plan, consent_token, ReceiveDecision,
-    ReceiveRejectReason,
+    DestinationPolicy, ReceiveConsentSource, ReceiveDecision, ReceiveMetadataPolicy,
+    ReceivePreflightInput, ReceiveRejectReason, RollbackResumePolicy, StorageEvidence,
+    build_receive_plan, consent_token,
 };
 use std::collections::BTreeSet;
 use std::fs;
@@ -101,8 +101,14 @@ mod tests {
         assert_eq!(plan.object_graph_summary.expected_bytes, 13); // "Hello, world!".len()
 
         // Verify proof artifacts are recorded
-        assert_eq!(plan.trace_id, Some("e2e-interactive-consent-123".to_string()));
-        assert_eq!(plan.replay_pointer, Some("proof://e2e-consent-bundle".to_string()));
+        assert_eq!(
+            plan.trace_id,
+            Some("e2e-interactive-consent-123".to_string())
+        );
+        assert_eq!(
+            plan.replay_pointer,
+            Some("proof://e2e-consent-bundle".to_string())
+        );
     }
 
     /// E2e scenario: Daemon allow rule permits authorized transfers without interaction.
@@ -150,9 +156,12 @@ mod tests {
         assert_eq!(plan.decision, ReceiveDecision::AllowFinalCommit);
         assert!(plan.rejected_reasons.is_empty());
         assert!(plan.quarantine.required);
-        assert_eq!(plan.consent_source, ReceiveConsentSource::DaemonAllowRule {
-            rule_id: "workspace-auto-allow-rule".to_string(),
-        });
+        assert_eq!(
+            plan.consent_source,
+            ReceiveConsentSource::DaemonAllowRule {
+                rule_id: "workspace-auto-allow-rule".to_string(),
+            }
+        );
     }
 
     /// E2e scenario: Malicious transfer is denied by path traversal detection.
@@ -194,9 +203,11 @@ mod tests {
 
         // Verify attack is blocked
         assert_eq!(plan.decision, ReceiveDecision::Deny);
-        assert!(plan.rejected_reasons.iter().any(|r| matches!(r,
-            ReceiveRejectReason::UnsafeDestinationPath(_)
-        )));
+        assert!(
+            plan.rejected_reasons
+                .iter()
+                .any(|r| matches!(r, ReceiveRejectReason::UnsafeDestinationPath(_)))
+        );
 
         // Verify attack details are recorded for audit
         assert_eq!(plan.sender_identity, "suspicious-peer");
@@ -246,14 +257,21 @@ mod tests {
 
         // Verify executable is denied due to policy
         assert_eq!(plan.decision, ReceiveDecision::Deny);
-        assert!(plan.rejected_reasons.iter().any(|r| matches!(r,
-            ReceiveRejectReason::ExecutableDenied(_)
-        )));
+        assert!(
+            plan.rejected_reasons
+                .iter()
+                .any(|r| matches!(r, ReceiveRejectReason::ExecutableDenied(_)))
+        );
         assert_eq!(plan.object_graph_summary.executable_count, 1);
 
         // Verify quarantine path is prepared for manual review
         assert!(plan.quarantine.required);
-        assert!(plan.quarantine.path.to_string_lossy().contains("quarantine"));
+        assert!(
+            plan.quarantine
+                .path
+                .to_string_lossy()
+                .contains("quarantine")
+        );
     }
 
     /// E2e scenario: Disk full condition prevents transfer with clear error.
@@ -282,7 +300,7 @@ mod tests {
             destination_relative_path: PathBuf::from("large-backup.tar"),
             existing_destination_paths: BTreeSet::new(),
             storage_evidence: StorageEvidence {
-                available_bytes: Some(1_000), // Only 1KB available
+                available_bytes: Some(1_000),     // Only 1KB available
                 quota_remaining_bytes: Some(500), // Only 500 bytes quota
                 safety_margin_bytes: 100,
             },
@@ -299,9 +317,11 @@ mod tests {
 
         // Verify disk full blocks transfer
         assert_eq!(plan.decision, ReceiveDecision::Deny);
-        assert!(plan.rejected_reasons.iter().any(|r| matches!(r,
-            ReceiveRejectReason::StorageDenied(_)
-        )));
+        assert!(
+            plan.rejected_reasons
+                .iter()
+                .any(|r| matches!(r, ReceiveRejectReason::StorageDenied(_)))
+        );
 
         // Verify storage arithmetic details are recorded
         assert_eq!(plan.storage.expected_bytes, 1_048_576); // 1MB
@@ -347,12 +367,18 @@ mod tests {
         assert_eq!(plan.decision, ReceiveDecision::QuarantineOnly);
         assert!(plan.rejected_reasons.is_empty());
         assert!(plan.quarantine.required);
-        assert_eq!(plan.quarantine.path, temp.path().join(".mailbox-quarantine").join("pending"));
+        assert_eq!(
+            plan.quarantine.path,
+            temp.path().join(".mailbox-quarantine").join("pending")
+        );
 
         // Verify mailbox consent is recorded
-        assert_eq!(plan.consent_source, ReceiveConsentSource::MailboxPolicy {
-            policy_id: "auto-quarantine-mobile".to_string(),
-        });
+        assert_eq!(
+            plan.consent_source,
+            ReceiveConsentSource::MailboxPolicy {
+                policy_id: "auto-quarantine-mobile".to_string(),
+            }
+        );
     }
 
     // Helper functions for creating test object graphs
@@ -391,7 +417,9 @@ mod tests {
         let directory = Object::directory(vec![ObjectEdge::new(exec_id, "script.sh".to_string())]);
         let root = directory.id.clone();
         let mut graph = ObjectGraph::new();
-        graph.add_object(executable).expect("executable object inserts");
+        graph
+            .add_object(executable)
+            .expect("executable object inserts");
         graph.add_root(directory).expect("directory root inserts");
         (graph, root)
     }

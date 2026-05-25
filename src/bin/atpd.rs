@@ -374,7 +374,7 @@ impl Default for AtpdConfig {
                 data_dir: PathBuf::from("/var/lib/atpd"),
                 cache_dir: PathBuf::from("/var/lib/atpd/cache"),
                 max_cache_size: 10 * 1024 * 1024 * 1024, // 10GB
-                cache_retention_secs: 30 * 24 * 3600,      // 30 days
+                cache_retention_secs: 30 * 24 * 3600,    // 30 days
                 journal: JournalConfig {
                     enable: true,
                     journal_path: PathBuf::from("/var/lib/atpd/journal"),
@@ -384,7 +384,7 @@ impl Default for AtpdConfig {
             },
             transfers: TransferConfig {
                 max_concurrent: 16,
-                default_timeout_secs: 3600, // 1 hour
+                default_timeout_secs: 3600,                  // 1 hour
                 max_transfer_size: 100 * 1024 * 1024 * 1024, // 100GB
                 enable_bandwidth_limit: false,
                 bandwidth_limit_bps: None,
@@ -460,7 +460,10 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
 
     // Load configuration
     let mut config = load_config(&cli.config).unwrap_or_else(|_| {
-        warn!("Failed to load config from {}, using defaults", cli.config.display());
+        warn!(
+            "Failed to load config from {}, using defaults",
+            cli.config.display()
+        );
         AtpdConfig::default()
     });
 
@@ -472,10 +475,18 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
     config.network.enable_mailbox = args.enable_mailbox;
 
     // Create data directory if it doesn't exist
-    std::fs::create_dir_all(&config.storage.data_dir)
-        .with_context(|| format!("Failed to create data directory: {}", config.storage.data_dir.display()))?;
-    std::fs::create_dir_all(&config.storage.cache_dir)
-        .with_context(|| format!("Failed to create cache directory: {}", config.storage.cache_dir.display()))?;
+    std::fs::create_dir_all(&config.storage.data_dir).with_context(|| {
+        format!(
+            "Failed to create data directory: {}",
+            config.storage.data_dir.display()
+        )
+    })?;
+    std::fs::create_dir_all(&config.storage.cache_dir).with_context(|| {
+        format!(
+            "Failed to create cache directory: {}",
+            config.storage.cache_dir.display()
+        )
+    })?;
 
     // Initialize runtime
     let runtime_config = RuntimeConfig::builder()
@@ -489,18 +500,22 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
     info!("ATP daemon started on {}", config.network.bind_addr);
     info!("Data directory: {}", config.storage.data_dir.display());
     info!("Cache directory: {}", config.storage.cache_dir.display());
-    info!("Max concurrent transfers: {}", config.transfers.max_concurrent);
+    info!(
+        "Max concurrent transfers: {}",
+        config.transfers.max_concurrent
+    );
 
     // Enter the runtime and run the daemon
-    runtime.block_on(async {
-        run_daemon_service(config, runtime_handle).await
-    })?;
+    runtime.block_on(async { run_daemon_service(config, runtime_handle).await })?;
 
     info!("ATP daemon stopped");
     Ok(())
 }
 
-async fn run_daemon_service(config: AtpdConfig, runtime_handle: asupersync::runtime::RuntimeHandle) -> Result<()> {
+async fn run_daemon_service(
+    config: AtpdConfig,
+    runtime_handle: asupersync::runtime::RuntimeHandle,
+) -> Result<()> {
     // Create supervisor tree for daemon components
     let supervisor_config = SupervisorConfig::builder()
         .with_name("atpd-supervisor")
@@ -534,7 +549,9 @@ async fn run_daemon_service(config: AtpdConfig, runtime_handle: asupersync::runt
     // - Metrics service
 
     // For now, just wait for shutdown signal
-    tokio::signal::ctrl_c().await.context("Failed to wait for shutdown signal")?;
+    tokio::signal::ctrl_c()
+        .await
+        .context("Failed to wait for shutdown signal")?;
 
     info!("Received shutdown signal, stopping daemon...");
     Ok(())
@@ -578,7 +595,10 @@ fn init_daemon(_cli: AtpdCli, args: InitArgs) -> Result<()> {
     std::fs::create_dir_all(args.data_dir.join("inbox"))?;
     std::fs::create_dir_all(args.data_dir.join("journal"))?;
 
-    info!("Created data directory structure at {}", args.data_dir.display());
+    info!(
+        "Created data directory structure at {}",
+        args.data_dir.display()
+    );
 
     if args.new_identity {
         info!("Generating new daemon identity...");

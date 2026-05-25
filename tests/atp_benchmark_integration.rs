@@ -305,7 +305,10 @@ async fn test_curl_http3_adapter_availability_check() {
 
     match availability {
         ToolAvailability::Available(version) => {
-            println!("✅ Curl with HTTP/3 is available: {}", version.version_string);
+            println!(
+                "✅ Curl with HTTP/3 is available: {}",
+                version.version_string
+            );
             assert_eq!(adapter.tool_name(), "curl-http3");
         }
         ToolAvailability::NotFound => {
@@ -315,7 +318,10 @@ async fn test_curl_http3_adapter_availability_check() {
             println!("⚠️  Curl version detection failed: {}", reason);
         }
         ToolAvailability::IncompatibleVersion(version) => {
-            println!("⚠️  Curl without HTTP/3 support: {}", version.version_string);
+            println!(
+                "⚠️  Curl without HTTP/3 support: {}",
+                version.version_string
+            );
         }
     }
 
@@ -355,9 +361,15 @@ async fn test_multi_adapter_benchmark_smoke() -> Result<(), Box<dyn std::error::
             ToolAvailability::Available(_) => {
                 println!("Testing {} adapter...", adapter.tool_name());
 
-                match adapter.run_benchmark(&config, &source_path, &dest_path).await {
+                match adapter
+                    .run_benchmark(&config, &source_path, &dest_path)
+                    .await
+                {
                     Ok(result) => {
-                        println!("✅ {} benchmark completed successfully", adapter.tool_name());
+                        println!(
+                            "✅ {} benchmark completed successfully",
+                            adapter.tool_name()
+                        );
                         let stats = result.aggregate_stats();
                         println!("  Throughput: {:.2} KB/s", stats.mean_throughput / 1024.0);
                         println!("  Success rate: {:.1}%", stats.success_rate * 100.0);
@@ -380,11 +392,17 @@ async fn test_multi_adapter_benchmark_smoke() -> Result<(), Box<dyn std::error::
 
     // Test ATP profiles for comparison
     let atp_profile = AtpProfile::clean_lan();
-    match atp_profile.run_benchmark(&config, &source_path, &dest_path).await {
+    match atp_profile
+        .run_benchmark(&config, &source_path, &dest_path)
+        .await
+    {
         Ok(result) => {
             println!("✅ ATP profile benchmark completed successfully");
             let stats = result.aggregate_stats();
-            println!("  ATP Throughput: {:.2} KB/s", stats.mean_throughput / 1024.0);
+            println!(
+                "  ATP Throughput: {:.2} KB/s",
+                stats.mean_throughput / 1024.0
+            );
             results.push((atp_profile.kind.label().to_string(), result));
         }
         Err(e) => {
@@ -392,10 +410,16 @@ async fn test_multi_adapter_benchmark_smoke() -> Result<(), Box<dyn std::error::
         }
     }
 
-    println!("✅ Multi-adapter smoke test completed with {} results", results.len());
+    println!(
+        "✅ Multi-adapter smoke test completed with {} results",
+        results.len()
+    );
 
     // Should have at least ATP profile working
-    assert!(!results.is_empty(), "Should have at least one working benchmark");
+    assert!(
+        !results.is_empty(),
+        "Should have at least one working benchmark"
+    );
 
     Ok(())
 }

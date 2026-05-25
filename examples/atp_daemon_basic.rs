@@ -105,7 +105,10 @@ impl SimpleAtpdService {
         info!("Device name: {}", self.config.device_name);
         info!("Bind address: {}", self.config.bind_addr);
         info!("Data directory: {}", self.config.data_dir.display());
-        info!("Max concurrent transfers: {}", self.config.max_concurrent_transfers);
+        info!(
+            "Max concurrent transfers: {}",
+            self.config.max_concurrent_transfers
+        );
         info!("Relay enabled: {}", self.config.enable_relay);
         info!("Mailbox enabled: {}", self.config.enable_mailbox);
 
@@ -175,7 +178,10 @@ impl SimpleAtpdService {
 
     async fn initialize_transfer_service(&self) -> Result<()> {
         info!("Initializing transfer service...");
-        info!("Max concurrent transfers: {}", self.config.max_concurrent_transfers);
+        info!(
+            "Max concurrent transfers: {}",
+            self.config.max_concurrent_transfers
+        );
 
         // Create transfer queue directory
         let queue_dir = self.config.data_dir.join("transfers").join("queue");
@@ -389,7 +395,11 @@ impl SimpleAtpdService {
             if let Ok(modified) = metadata.modified() {
                 if modified < cutoff_time {
                     if let Err(e) = tokio::fs::remove_file(entry.path()).await {
-                        warn!("Failed to remove cache file {}: {}", entry.path().display(), e);
+                        warn!(
+                            "Failed to remove cache file {}: {}",
+                            entry.path().display(),
+                            e
+                        );
                     } else {
                         cleaned_count += 1;
                     }
@@ -511,8 +521,7 @@ mod tests {
     async fn test_daemon_initialization() {
         let temp_dir = TempDir::new().unwrap();
 
-        let config = SimpleAtpdConfig::new()
-            .with_data_dir(temp_dir.path().to_path_buf());
+        let config = SimpleAtpdConfig::new().with_data_dir(temp_dir.path().to_path_buf());
 
         let mut daemon = SimpleAtpdService::new(config);
         assert!(daemon.start().await.is_ok());

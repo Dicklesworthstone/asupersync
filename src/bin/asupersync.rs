@@ -18,6 +18,12 @@ use asupersync::atp::doctor::{
 use asupersync::atp::identity::directory::{
     DirectorySubject, PeerDirectory, peer_id_from_hex, peer_id_to_hex,
 };
+use asupersync::atp::object::{ObjectGraph, ObjectId};
+use asupersync::atp::safety::{
+    DestinationPolicy, ReceiveConsentSource, ReceiveMetadataPolicy, ReceivePlan,
+    ReceivePreflightInput, RollbackResumePolicy, StorageEvidence, build_receive_plan,
+    consent_token,
+};
 use asupersync::atp::sdk::StreamEarlyUsabilityReport;
 use asupersync::atp::stream_object::ByteRange;
 use asupersync::atp::sync::DirectoryEarlyUsabilityReport;
@@ -25,11 +31,6 @@ use asupersync::atp::{
     ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision, AtpAutotuneDecisionReceipt, AtpAutotunePolicy,
     AtpAutotuneSettings, AtpAutotuneTelemetry, AtpAutotuneTelemetryReport, AtpRepairCoordinator,
     AtpRepairCoordinatorDecision, AtpRepairRoiInputs,
-};
-use asupersync::atp::object::{ObjectGraph, ObjectId};
-use asupersync::atp::safety::{
-    DestinationPolicy, ReceiveConsentSource, ReceiveMetadataPolicy, ReceivePreflightInput,
-    RollbackResumePolicy, StorageEvidence, build_receive_plan, consent_token, ReceivePlan,
 };
 use asupersync::cli::doctor::{
     AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
@@ -765,7 +766,9 @@ struct AtpGetStatusMessage {
 
 impl AtpGetStatusMessage {
     fn new(message: &str) -> Self {
-        Self { message: message.to_string() }
+        Self {
+            message: message.to_string(),
+        }
     }
 }
 
@@ -797,7 +800,7 @@ impl AtpSendPlanOutput {
             target: target.to_string(),
             profile: profile.to_string(),
             estimated_bytes: 1_000_000, // Mock value
-            estimated_objects: 10, // Mock value
+            estimated_objects: 10,      // Mock value
         }
     }
 }
@@ -808,8 +811,10 @@ impl Outputtable for AtpSendPlanOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("Send Plan:\n  Source: {}\n  Target: {}\n  Profile: {}\n  Estimated bytes: {}\n  Estimated objects: {}",
-            self.source, self.target, self.profile, self.estimated_bytes, self.estimated_objects)
+        format!(
+            "Send Plan:\n  Source: {}\n  Target: {}\n  Profile: {}\n  Estimated bytes: {}\n  Estimated objects: {}",
+            self.source, self.target, self.profile, self.estimated_bytes, self.estimated_objects
+        )
     }
 }
 
@@ -838,8 +843,10 @@ impl Outputtable for AtpSendResultOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("Transfer completed:\n  Source: {}\n  Target: {}\n  Transfer ID: {}\n  Status: {}",
-            self.source, self.target, self.transfer_id, self.status)
+        format!(
+            "Transfer completed:\n  Source: {}\n  Target: {}\n  Transfer ID: {}\n  Status: {}",
+            self.source, self.target, self.transfer_id, self.status
+        )
     }
 }
 
@@ -868,8 +875,13 @@ impl Outputtable for AtpSyncPlanOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("Sync Plan:\n  Source: {}\n  Target: {}\n  Allow updates: {}\n  Changes: {}",
-            self.source, self.target, self.allow_updates, self.changes.join(", "))
+        format!(
+            "Sync Plan:\n  Source: {}\n  Target: {}\n  Allow updates: {}\n  Changes: {}",
+            self.source,
+            self.target,
+            self.allow_updates,
+            self.changes.join(", ")
+        )
     }
 }
 
@@ -898,8 +910,10 @@ impl Outputtable for AtpSyncResultOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("Sync completed:\n  Source: {}\n  Target: {}\n  Status: {}\n  Files synced: {}",
-            self.source, self.target, self.status, self.files_synced)
+        format!(
+            "Sync completed:\n  Source: {}\n  Target: {}\n  Status: {}\n  Files synced: {}",
+            self.source, self.target, self.status, self.files_synced
+        )
     }
 }
 
@@ -928,8 +942,13 @@ impl Outputtable for AtpMirrorPlanOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("Mirror Plan:\n  Source: {}\n  Target: {}\n  Allow deletes: {}\n  Operations: {}",
-            self.source, self.target, self.allow_deletes, self.operations.join(", "))
+        format!(
+            "Mirror Plan:\n  Source: {}\n  Target: {}\n  Allow deletes: {}\n  Operations: {}",
+            self.source,
+            self.target,
+            self.allow_deletes,
+            self.operations.join(", ")
+        )
     }
 }
 
@@ -958,8 +977,10 @@ impl Outputtable for AtpMirrorResultOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("Mirror completed:\n  Source: {}\n  Target: {}\n  Status: {}\n  Files mirrored: {}",
-            self.source, self.target, self.status, self.files_mirrored)
+        format!(
+            "Mirror completed:\n  Source: {}\n  Target: {}\n  Status: {}\n  Files mirrored: {}",
+            self.source, self.target, self.status, self.files_mirrored
+        )
     }
 }
 
@@ -1017,7 +1038,12 @@ struct AtpPairOutput {
 }
 
 impl AtpPairOutput {
-    fn initiate(session_id: String, pairing_token: String, confirmation_phrase: String, expires_seconds: u64) -> Self {
+    fn initiate(
+        session_id: String,
+        pairing_token: String,
+        confirmation_phrase: String,
+        expires_seconds: u64,
+    ) -> Self {
         Self {
             command: "initiate".to_string(),
             session_id: Some(session_id),
@@ -1095,13 +1121,14 @@ impl AtpSeedOutput {
         hasher.update(args.source.to_string_lossy().as_bytes());
         hasher.update(args.policy.as_bytes());
         let hash = hasher.finalize();
-        let seed_id = format!("seed_{:x}", u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]));
+        let seed_id = format!(
+            "seed_{:x}",
+            u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
+        );
 
         // Mock cache usage and peer estimation
         let cache_usage = if args.source.exists() {
-            args.source.metadata()
-                .map(|m| m.len())
-                .unwrap_or(0)
+            args.source.metadata().map(|m| m.len()).unwrap_or(0)
         } else {
             0
         };
@@ -1144,20 +1171,21 @@ impl Outputtable for AtpSeedOutput {
             TTL: {}s\n\
             Priority: {}\n\
             Status: {}",
-            self.source,
-            self.seed_id,
-            self.policy,
-            self.ttl_seconds,
-            self.priority,
-            self.status
+            self.source, self.seed_id, self.policy, self.ttl_seconds, self.priority, self.status
         );
 
         if self.max_size_bytes > 0 {
-            output.push_str(&format!("\nMax Size: {}", format_bytes(self.max_size_bytes)));
+            output.push_str(&format!(
+                "\nMax Size: {}",
+                format_bytes(self.max_size_bytes)
+            ));
         }
 
         if self.cache_usage > 0 {
-            output.push_str(&format!("\nCache Usage: {}", format_bytes(self.cache_usage)));
+            output.push_str(&format!(
+                "\nCache Usage: {}",
+                format_bytes(self.cache_usage)
+            ));
         }
 
         if self.relay_enabled {
@@ -1183,8 +1211,10 @@ impl Outputtable for AtpShareOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("Share code generated:\n  Source: {}\n  Code: {}\n  Expires in: {} seconds",
-            self.source, self.share_code, self.expires_seconds)
+        format!(
+            "Share code generated:\n  Source: {}\n  Code: {}\n  Expires in: {} seconds",
+            self.source, self.share_code, self.expires_seconds
+        )
     }
 }
 
@@ -1276,7 +1306,7 @@ impl Outputtable for AtpPairOutput {
                     self.pairing_token.as_deref().unwrap_or("unknown"),
                     self.confirmation_phrase.as_deref().unwrap_or("unknown")
                 )
-            },
+            }
             "confirm" => {
                 format!(
                     "ATP Pairing Confirmed\n\
@@ -1287,7 +1317,7 @@ impl Outputtable for AtpPairOutput {
                     self.peer_id.as_deref().unwrap_or("unknown"),
                     self.status
                 )
-            },
+            }
             "cancel" => {
                 format!(
                     "ATP Pairing Cancelled\n\
@@ -1296,15 +1326,15 @@ impl Outputtable for AtpPairOutput {
                     self.session_id.as_deref().unwrap_or("unknown"),
                     self.status
                 )
-            },
+            }
             "list" => {
                 format!(
                     "ATP Pairing Sessions\n\
                     Status: {}",
                     self.status
                 )
-            },
-            _ => format!("Unknown pairing command: {}", self.command)
+            }
+            _ => format!("Unknown pairing command: {}", self.command),
         }
     }
 }
@@ -1315,8 +1345,10 @@ impl Outputtable for AtpWatchOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("Watching directory:\n  Source: {}\n  Target: {}\n  Debounce: {} seconds\n  Status: {}",
-            self.source, self.target, self.debounce_seconds, self.status)
+        format!(
+            "Watching directory:\n  Source: {}\n  Target: {}\n  Debounce: {} seconds\n  Status: {}",
+            self.source, self.target, self.debounce_seconds, self.status
+        )
     }
 }
 
@@ -1341,7 +1373,10 @@ impl Outputtable for AtpServeOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("ATP daemon {}\n  Listening on: {}", self.message, self.listen_address)
+        format!(
+            "ATP daemon {}\n  Listening on: {}",
+            self.message, self.listen_address
+        )
     }
 }
 
@@ -1367,7 +1402,11 @@ impl Outputtable for AtpInboxListOutput {
         if self.count == 0 {
             "No pending transfers in inbox".to_string()
         } else {
-            format!("Inbox ({} transfers):\n  {}", self.count, self.transfers.join("\n  "))
+            format!(
+                "Inbox ({} transfers):\n  {}",
+                self.count,
+                self.transfers.join("\n  ")
+            )
         }
     }
 }
@@ -1395,8 +1434,10 @@ impl Outputtable for AtpInboxAcceptOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("Transfer accepted:\n  ID: {}\n  Destination: {}\n  Status: {}",
-            self.transfer_id, self.destination, self.status)
+        format!(
+            "Transfer accepted:\n  ID: {}\n  Destination: {}\n  Status: {}",
+            self.transfer_id, self.destination, self.status
+        )
     }
 }
 
@@ -1423,8 +1464,10 @@ impl Outputtable for AtpInboxRejectOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("Transfer rejected:\n  ID: {}\n  Reason: {}\n  Status: {}",
-            self.transfer_id, self.reason, self.status)
+        format!(
+            "Transfer rejected:\n  ID: {}\n  Reason: {}\n  Status: {}",
+            self.transfer_id, self.reason, self.status
+        )
     }
 }
 
@@ -1472,8 +1515,10 @@ impl Outputtable for AtpResumeOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("Transfer resumed:\n  ID: {}\n  Force: {}\n  Status: {}",
-            self.transfer_id, self.force, self.status)
+        format!(
+            "Transfer resumed:\n  ID: {}\n  Force: {}\n  Status: {}",
+            self.transfer_id, self.force, self.status
+        )
     }
 }
 
@@ -1502,8 +1547,10 @@ impl Outputtable for AtpCancelOutput {
     }
 
     fn human_format(&self) -> String {
-        format!("Transfer cancelled:\n  ID: {}\n  Reason: {}\n  Force: {}\n  Status: {}",
-            self.transfer_id, self.reason, self.force, self.status)
+        format!(
+            "Transfer cancelled:\n  ID: {}\n  Reason: {}\n  Force: {}\n  Status: {}",
+            self.transfer_id, self.reason, self.force, self.status
+        )
     }
 }
 
@@ -1537,10 +1584,14 @@ impl AtpProgressUpdate {
             object_name: object_name.to_string(),
             bytes_received: received,
             bytes_verified: received.saturating_sub(1000), // Mock lag
-            bytes_written: received.saturating_sub(2000), // Mock lag
+            bytes_written: received.saturating_sub(2000),  // Mock lag
             bytes_committed: received.saturating_sub(3000), // Mock lag
             total_bytes: total,
-            eta_seconds: if received > 0 { Some((total - received) / 100) } else { None },
+            eta_seconds: if received > 0 {
+                Some((total - received) / 100)
+            } else {
+                None
+            },
             resume_enabled: true,
             timestamp_micros: now,
         }
@@ -1565,7 +1616,8 @@ impl Outputtable for AtpProgressUpdate {
             "ETA unknown".to_string()
         };
 
-        format!("{} {}: {} [{}/{}] ({}%) {}",
+        format!(
+            "{} {}: {} [{}/{}] ({}%) {}",
             self.stage,
             self.object_name,
             format_bytes(self.bytes_received),
@@ -1611,7 +1663,8 @@ impl Outputtable for AtpExplainReport {
     }
 
     fn human_format(&self) -> String {
-        format!("Explain Report for {}:\n{}\n{}\n{}\n{}",
+        format!(
+            "Explain Report for {}:\n{}\n{}\n{}\n{}",
             self.transfer_id,
             self.path_decisions.human_summary(),
             self.scheduler_decisions.human_summary(),
@@ -1638,7 +1691,7 @@ impl AtpPathDecisions {
         Self {
             primary_protocol: "QUIC".to_string(),
             rtt_micros: 15000, // 15ms
-            loss_rate: 0.001, // 0.1%
+            loss_rate: 0.001,  // 0.1%
             pto_count: 0,
             cwnd_bytes: 65536, // 64KB
             relay_used: false,
@@ -1648,7 +1701,8 @@ impl AtpPathDecisions {
     }
 
     fn human_summary(&self) -> String {
-        format!("  Path: {} (RTT: {}ms, Loss: {:.1}%, CWND: {})",
+        format!(
+            "  Path: {} (RTT: {}ms, Loss: {:.1}%, CWND: {})",
             self.primary_protocol,
             self.rtt_micros / 1000,
             self.loss_rate * 100.0,
@@ -1678,7 +1732,8 @@ impl AtpSchedulerDecisions {
     }
 
     fn human_summary(&self) -> String {
-        format!("  Scheduler: {} streams, {} in-flight, {} chunks",
+        format!(
+            "  Scheduler: {} streams, {} in-flight, {} chunks",
             self.active_streams,
             format_bytes(self.in_flight_bytes),
             format_bytes(self.chunk_size_bytes as u64)
@@ -1705,10 +1760,9 @@ impl AtpRepairDecisions {
     }
 
     fn human_summary(&self) -> String {
-        format!("  Repair: {} mode (threshold: {:.1}, symbols: {})",
-            self.repair_mode,
-            self.roi_threshold,
-            self.symbols_generated
+        format!(
+            "  Repair: {} mode (threshold: {:.1}, symbols: {})",
+            self.repair_mode, self.roi_threshold, self.symbols_generated
         )
     }
 }
@@ -1724,7 +1778,7 @@ struct AtpDiskDecisions {
 impl AtpDiskDecisions {
     fn new() -> Self {
         Self {
-            write_lag_micros: 500, // 0.5ms
+            write_lag_micros: 500,   // 0.5ms
             journal_lag_micros: 200, // 0.2ms
             disk_pressure_level: "low".to_string(),
             fsync_policy: "batch".to_string(),
@@ -1732,7 +1786,8 @@ impl AtpDiskDecisions {
     }
 
     fn human_summary(&self) -> String {
-        format!("  Disk: {}ms write lag, {}ms journal lag, {} pressure",
+        format!(
+            "  Disk: {}ms write lag, {}ms journal lag, {} pressure",
             self.write_lag_micros / 1000,
             self.journal_lag_micros / 1000,
             self.disk_pressure_level
@@ -1770,7 +1825,11 @@ impl AtpTransferStatusOutput {
         Self {
             active_transfers: transfers,
             total_active: count,
-            daemon_status: if count > 0 { "active".to_string() } else { "idle".to_string() },
+            daemon_status: if count > 0 {
+                "active".to_string()
+            } else {
+                "idle".to_string()
+            },
         }
     }
 }
@@ -1785,8 +1844,10 @@ impl Outputtable for AtpTransferStatusOutput {
             return "No active ATP transfers".to_string();
         }
 
-        let mut output = format!("ATP Daemon Status: {} ({} active transfers)\n\n",
-            self.daemon_status, self.total_active);
+        let mut output = format!(
+            "ATP Daemon Status: {} ({} active transfers)\n\n",
+            self.daemon_status, self.total_active
+        );
 
         for transfer in &self.active_transfers {
             output.push_str(&transfer.human_summary());
@@ -1835,7 +1896,8 @@ impl AtpTransferInfo {
             "ETA: unknown".to_string()
         };
 
-        format!("  {} [{}] {} -> {}\n    {} {} [{}] {} {}",
+        format!(
+            "  {} [{}] {} -> {}\n    {} {} [{}] {} {}",
             self.transfer_id,
             self.direction,
             self.object_name,
@@ -1853,10 +1915,7 @@ fn create_progress_bar(percent: u8) -> String {
     const BAR_WIDTH: usize = 20;
     let filled = (percent as usize * BAR_WIDTH) / 100;
     let empty = BAR_WIDTH - filled;
-    format!("{}{}",
-        "█".repeat(filled),
-        "░".repeat(empty)
-    )
+    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
 }
 
 // Output structures for ATP-I4 commands
@@ -1887,7 +1946,11 @@ impl AtpBenchResults {
             p95_latency_ms: 25.7,
             p99_latency_ms: 45.2,
             error_rate: 0.001, // 0.1%
-            detailed_metrics: if detailed { Some(AtpBenchDetailedMetrics::new_mock()) } else { None },
+            detailed_metrics: if detailed {
+                Some(AtpBenchDetailedMetrics::new_mock())
+            } else {
+                None
+            },
         }
     }
 
@@ -1917,7 +1980,7 @@ impl AtpBenchResults {
             duration_seconds: duration,
             total_transfers: transfers,
             total_bytes: transfers * 4096, // Small 4KB transfers for latency testing
-            throughput_mbps: 25.6, // Lower throughput due to small transfers
+            throughput_mbps: 25.6,         // Lower throughput due to small transfers
             avg_latency_ms: 3.1,
             p95_latency_ms: 6.8,
             p99_latency_ms: 12.4,
@@ -2068,10 +2131,15 @@ impl AtpTraceAnalysis {
             ],
             bottlenecks: if detailed {
                 vec![
-                    AtpTraceBottleneck::new_mock("repair", "Repair symbols generated at 150% of optimal rate"),
+                    AtpTraceBottleneck::new_mock(
+                        "repair",
+                        "Repair symbols generated at 150% of optimal rate",
+                    ),
                     AtpTraceBottleneck::new_mock("path", "RTT variance exceeded 50ms threshold"),
                 ]
-            } else { vec![] },
+            } else {
+                vec![]
+            },
         }
     }
 }
@@ -2100,7 +2168,8 @@ impl Outputtable for AtpTraceAnalysis {
         if !self.bottlenecks.is_empty() {
             output.push_str("\nBottlenecks:\n");
             for bottleneck in &self.bottlenecks {
-                output.push_str(&format!("  {} {}: {}\n",
+                output.push_str(&format!(
+                    "  {} {}: {}\n",
                     match bottleneck.severity.as_str() {
                         "warning" => "⚠️",
                         "error" => "❌",
@@ -3345,7 +3414,10 @@ fn atp_get(args: &AtpGetArgs, output: &mut Output) -> Result<(), CliError> {
     let destination_policy = parse_destination_policy(args)?;
 
     // Get destination root path
-    let destination_root = args.destination.clone().unwrap_or_else(|| PathBuf::from("."));
+    let destination_root = args
+        .destination
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("."));
 
     // For this demo implementation, create a mock object graph
     // In a real implementation, this would come from the transfer negotiation
@@ -3370,9 +3442,9 @@ fn atp_get(args: &AtpGetArgs, output: &mut Output) -> Result<(), CliError> {
         replay_pointer: None,
     };
 
-    let plan = build_receive_plan(input)
-        .map_err(|err| CliError::new("receive_plan_error", "Failed to build receive plan")
-            .detail(err.to_string()))?;
+    let plan = build_receive_plan(input).map_err(|err| {
+        CliError::new("receive_plan_error", "Failed to build receive plan").detail(err.to_string())
+    })?;
 
     if args.dry_run || args.verbose {
         if output.format() == OutputFormat::Json {
@@ -3398,12 +3470,14 @@ fn atp_get(args: &AtpGetArgs, output: &mut Output) -> Result<(), CliError> {
         }
         asupersync::atp::safety::ReceiveDecision::QuarantineOnly => {
             let msg = AtpGetStatusMessage::new("Transfer will be quarantined for manual review.");
-            output.write(&msg)
+            output
+                .write(&msg)
                 .map_err(output_write_error("ATP get quarantine message"))?;
         }
         asupersync::atp::safety::ReceiveDecision::AllowFinalCommit => {
             let msg = AtpGetStatusMessage::new("Transfer approved for direct commit.");
-            output.write(&msg)
+            output
+                .write(&msg)
                 .map_err(output_write_error("ATP get approval message"))?;
         }
     }
@@ -3420,7 +3494,8 @@ fn atp_get(args: &AtpGetArgs, output: &mut Output) -> Result<(), CliError> {
     if args.progress {
         let total_bytes = 2_000_000; // 2MB mock transfer
         for chunk in [0, 500_000, 1_000_000, 1_500_000, 2_000_000] {
-            let progress = AtpProgressUpdate::new(&args.transfer_id, "incoming_file.dat", chunk, total_bytes);
+            let progress =
+                AtpProgressUpdate::new(&args.transfer_id, "incoming_file.dat", chunk, total_bytes);
             output
                 .write(&progress)
                 .map_err(output_write_error("ATP get progress"))?;
@@ -3432,9 +3507,13 @@ fn atp_get(args: &AtpGetArgs, output: &mut Output) -> Result<(), CliError> {
     }
 
     // In a real implementation, execute the actual transfer here
-    let msg = AtpGetStatusMessage::new(&format!("Would execute transfer {} to {}",
-        args.transfer_id, destination_root.display()));
-    output.write(&msg)
+    let msg = AtpGetStatusMessage::new(&format!(
+        "Would execute transfer {} to {}",
+        args.transfer_id,
+        destination_root.display()
+    ));
+    output
+        .write(&msg)
         .map_err(output_write_error("ATP get execution message"))?;
 
     Ok(())
@@ -3444,15 +3523,24 @@ fn parse_destination_policy(args: &AtpGetArgs) -> Result<DestinationPolicy, CliE
     match args.policy.as_str() {
         "deny" => Ok(DestinationPolicy::conservative_default()),
         "inbox-only" => {
-            let inbox_root = args.destination.clone().unwrap_or_else(|| PathBuf::from(".atp-inbox"));
+            let inbox_root = args
+                .destination
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(".atp-inbox"));
             Ok(DestinationPolicy::InboxOnly { inbox_root })
         }
         "quarantine-only" => {
-            let quarantine_root = args.destination.clone().unwrap_or_else(|| PathBuf::from(".atp-quarantine"));
+            let quarantine_root = args
+                .destination
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(".atp-quarantine"));
             Ok(DestinationPolicy::QuarantineOnly { quarantine_root })
         }
         "allow-listed" => {
-            let destination_root = args.destination.clone().unwrap_or_else(|| PathBuf::from("."));
+            let destination_root = args
+                .destination
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("."));
             Ok(DestinationPolicy::AllowListed {
                 allowed_roots: std::iter::once(destination_root).collect(),
                 require_quarantine: false,
@@ -3464,9 +3552,12 @@ fn parse_destination_policy(args: &AtpGetArgs) -> Result<DestinationPolicy, CliE
                 max_bytes: args.max_bytes,
             })
         }
-        other => Err(CliError::new("invalid_policy", "Invalid destination policy")
-            .detail(format!("Unknown policy: {}. Valid values: deny, inbox-only, quarantine-only, allow-listed", other))
-        )
+        other => Err(
+            CliError::new("invalid_policy", "Invalid destination policy").detail(format!(
+                "Unknown policy: {}. Valid values: deny, inbox-only, quarantine-only, allow-listed",
+                other
+            )),
+        ),
     }
 }
 
@@ -3499,9 +3590,9 @@ fn scan_existing_paths(root: &Path) -> Result<BTreeSet<PathBuf>, CliError> {
 fn get_storage_evidence(_root: &Path) -> Result<StorageEvidence, CliError> {
     // Simplified storage evidence - real implementation would check filesystem
     Ok(StorageEvidence {
-        available_bytes: Some(1_000_000_000), // 1GB available
+        available_bytes: Some(1_000_000_000),     // 1GB available
         quota_remaining_bytes: Some(500_000_000), // 500MB quota
-        safety_margin_bytes: 10_000_000, // 10MB safety margin
+        safety_margin_bytes: 10_000_000,          // 10MB safety margin
     })
 }
 
@@ -3849,14 +3940,17 @@ fn atp_send(args: &AtpSendArgs, output: &mut Output) -> Result<(), CliError> {
 
         // Show progress updates if requested
         if args.progress {
-            let source_name = args.source.file_name()
+            let source_name = args
+                .source
+                .file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
                 .to_string_lossy();
 
             // Simulate progress updates
             let total_bytes = 1_000_000; // 1MB mock file
             for chunk in [0, 250_000, 500_000, 750_000, 1_000_000] {
-                let progress = AtpProgressUpdate::new(transfer_id, &source_name, chunk, total_bytes);
+                let progress =
+                    AtpProgressUpdate::new(transfer_id, &source_name, chunk, total_bytes);
                 output
                     .write(&progress)
                     .map_err(output_write_error("ATP send progress"))?;
@@ -3894,13 +3988,16 @@ fn atp_sync(args: &AtpSyncArgs, output: &mut Output) -> Result<(), CliError> {
         }
 
         if args.progress {
-            let source_name = args.source.file_name()
+            let source_name = args
+                .source
+                .file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("directory"))
                 .to_string_lossy();
 
             let total_bytes = 5_000_000; // 5MB mock directory
             for chunk in [0, 1_000_000, 3_000_000, 5_000_000] {
-                let progress = AtpProgressUpdate::new(transfer_id, &source_name, chunk, total_bytes);
+                let progress =
+                    AtpProgressUpdate::new(transfer_id, &source_name, chunk, total_bytes);
                 output
                     .write(&progress)
                     .map_err(output_write_error("ATP sync progress"))?;
@@ -3939,23 +4036,22 @@ fn atp_share(args: &AtpShareArgs, output: &mut Output) -> Result<(), CliError> {
 
     // Validate source path exists
     if !args.source.exists() {
-        return Err(CliError::new(
-            "file_not_found",
-            "Source path does not exist"
-        )
-        .detail(format!("Path: {}", args.source.display()))
-        .exit_code(ExitCode::USER_ERROR));
+        return Err(
+            CliError::new("file_not_found", "Source path does not exist")
+                .detail(format!("Path: {}", args.source.display()))
+                .exit_code(ExitCode::USER_ERROR),
+        );
     }
 
     // Validate capabilities
     for capability in &args.capabilities {
         if !["read", "write", "receive", "relay", "mailbox"].contains(&capability.as_str()) {
-            return Err(CliError::new(
-                "invalid_argument",
-                "Invalid capability"
-            )
-            .detail(format!("Capability '{}' not supported. Use: read, write, receive, relay, mailbox", capability))
-            .exit_code(ExitCode::USER_ERROR));
+            return Err(CliError::new("invalid_argument", "Invalid capability")
+                .detail(format!(
+                    "Capability '{}' not supported. Use: read, write, receive, relay, mailbox",
+                    capability
+                ))
+                .exit_code(ExitCode::USER_ERROR));
         }
     }
 
@@ -3969,7 +4065,9 @@ fn atp_share(args: &AtpShareArgs, output: &mut Output) -> Result<(), CliError> {
     let capability_flags = args.capabilities.join(",");
     let share_code = format!(
         "atp://share/{:x}/caps:{}/exp:{}/pol:{}",
-        u64::from_be_bytes([hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]]),
+        u64::from_be_bytes([
+            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]
+        ]),
         capability_flags,
         args.expires_seconds,
         args.policy
@@ -3984,62 +4082,88 @@ fn atp_share(args: &AtpShareArgs, output: &mut Output) -> Result<(), CliError> {
 
 fn atp_pair(args: &AtpPairArgs, output: &mut Output) -> Result<(), CliError> {
     match &args.command {
-        AtpPairCommand::Initiate { peer_hint, confirmation_method, timeout_seconds } => {
+        AtpPairCommand::Initiate {
+            peer_hint,
+            confirmation_method,
+            timeout_seconds,
+        } => {
             use sha2::{Digest, Sha256};
 
             // Validate confirmation method
             if !["visual", "audio", "manual"].contains(&confirmation_method.as_str()) {
-                return Err(CliError::new(
-                    "invalid_argument",
-                    "Invalid confirmation method"
-                )
-                .detail(format!("Method '{}' not supported. Use: visual, audio, manual", confirmation_method))
-                .exit_code(ExitCode::USER_ERROR));
+                return Err(
+                    CliError::new("invalid_argument", "Invalid confirmation method")
+                        .detail(format!(
+                            "Method '{}' not supported. Use: visual, audio, manual",
+                            confirmation_method
+                        ))
+                        .exit_code(ExitCode::USER_ERROR),
+                );
             }
 
             // Generate session ID
             let mut hasher = Sha256::new();
-            hasher.update(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-                .to_be_bytes());
+            hasher.update(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+                    .to_be_bytes(),
+            );
             if let Some(hint) = peer_hint {
                 hasher.update(hint.as_bytes());
             }
             let hash = hasher.finalize();
-            let session_id = format!("pair_{:x}", u64::from_be_bytes([
-                hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]
-            ]));
+            let session_id = format!(
+                "pair_{:x}",
+                u64::from_be_bytes([
+                    hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]
+                ])
+            );
 
             // Generate pairing token
-            let pairing_token = format!("atp://pair/{}/method:{}/timeout:{}",
-                session_id, confirmation_method, timeout_seconds);
+            let pairing_token = format!(
+                "atp://pair/{}/method:{}/timeout:{}",
+                session_id, confirmation_method, timeout_seconds
+            );
 
             // Generate human-readable confirmation phrase
             let confirmation_phrases = [
-                "Ocean Blue Mountain", "Forest Green Valley", "Desert Red Sunset",
-                "Arctic White Snow", "Tropical Gold Beach", "Urban Silver Skyline",
-                "Rural Purple Meadow", "Cosmic Black Void", "Rainbow Crystal Cave"
+                "Ocean Blue Mountain",
+                "Forest Green Valley",
+                "Desert Red Sunset",
+                "Arctic White Snow",
+                "Tropical Gold Beach",
+                "Urban Silver Skyline",
+                "Rural Purple Meadow",
+                "Cosmic Black Void",
+                "Rainbow Crystal Cave",
             ];
             let phrase_index = (hash[8] as usize) % confirmation_phrases.len();
             let confirmation_phrase = confirmation_phrases[phrase_index].to_string();
 
-            let payload = AtpPairOutput::initiate(session_id, pairing_token, confirmation_phrase, *timeout_seconds);
+            let payload = AtpPairOutput::initiate(
+                session_id,
+                pairing_token,
+                confirmation_phrase,
+                *timeout_seconds,
+            );
             output
                 .write(&payload)
                 .map_err(output_write_error("ATP pairing initiation"))?;
-        },
+        }
 
-        AtpPairCommand::Confirm { pairing_token, confirmation_phrase } => {
+        AtpPairCommand::Confirm {
+            pairing_token,
+            confirmation_phrase,
+        } => {
             // Validate pairing token format
             if !pairing_token.starts_with("atp://pair/") {
-                return Err(CliError::new(
-                    "invalid_argument",
-                    "Invalid pairing token format"
-                )
-                .detail("Token must start with 'atp://pair/'")
-                .exit_code(ExitCode::USER_ERROR));
+                return Err(
+                    CliError::new("invalid_argument", "Invalid pairing token format")
+                        .detail("Token must start with 'atp://pair/'")
+                        .exit_code(ExitCode::USER_ERROR),
+                );
             }
 
             // Extract session ID from token
@@ -4052,7 +4176,7 @@ fn atp_pair(args: &AtpPairArgs, output: &mut Output) -> Result<(), CliError> {
             if confirmation_phrase.split_whitespace().count() != 3 {
                 return Err(CliError::new(
                     "invalid_argument",
-                    "Invalid confirmation phrase format"
+                    "Invalid confirmation phrase format",
                 )
                 .detail("Confirmation phrase must be three words")
                 .exit_code(ExitCode::USER_ERROR));
@@ -4064,30 +4188,32 @@ fn atp_pair(args: &AtpPairArgs, output: &mut Output) -> Result<(), CliError> {
             hasher.update(session_id.as_bytes());
             hasher.update(confirmation_phrase.as_bytes());
             let hash = hasher.finalize();
-            let peer_id = format!("peer_{:x}", u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]));
+            let peer_id = format!(
+                "peer_{:x}",
+                u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
+            );
 
             let payload = AtpPairOutput::confirm(peer_id);
             output
                 .write(&payload)
                 .map_err(output_write_error("ATP pairing confirmation"))?;
-        },
+        }
 
         AtpPairCommand::Cancel { session_id } => {
             // Validate session ID format
             if !session_id.starts_with("pair_") {
-                return Err(CliError::new(
-                    "invalid_argument",
-                    "Invalid session ID format"
-                )
-                .detail("Session ID must start with 'pair_'")
-                .exit_code(ExitCode::USER_ERROR));
+                return Err(
+                    CliError::new("invalid_argument", "Invalid session ID format")
+                        .detail("Session ID must start with 'pair_'")
+                        .exit_code(ExitCode::USER_ERROR),
+                );
             }
 
             let payload = AtpPairOutput::cancel(session_id.clone());
             output
                 .write(&payload)
                 .map_err(output_write_error("ATP pairing cancellation"))?;
-        },
+        }
 
         AtpPairCommand::List { detailed: _ } => {
             // Mock active sessions for demonstration
@@ -4109,32 +4235,31 @@ fn atp_pair(args: &AtpPairArgs, output: &mut Output) -> Result<(), CliError> {
 fn atp_seed(args: &AtpSeedArgs, output: &mut Output) -> Result<(), CliError> {
     // Validate source path exists
     if !args.source.exists() {
-        return Err(CliError::new(
-            "file_not_found",
-            "Source path does not exist"
-        )
-        .detail(format!("Path: {}", args.source.display()))
-        .exit_code(ExitCode::USER_ERROR));
+        return Err(
+            CliError::new("file_not_found", "Source path does not exist")
+                .detail(format!("Path: {}", args.source.display()))
+                .exit_code(ExitCode::USER_ERROR),
+        );
     }
 
     // Validate policy
     if !["public", "team-only", "peers-only", "private"].contains(&args.policy.as_str()) {
-        return Err(CliError::new(
-            "invalid_argument",
-            "Invalid seeding policy"
-        )
-        .detail(format!("Policy '{}' not supported. Use: public, team-only, peers-only, private", args.policy))
-        .exit_code(ExitCode::USER_ERROR));
+        return Err(CliError::new("invalid_argument", "Invalid seeding policy")
+            .detail(format!(
+                "Policy '{}' not supported. Use: public, team-only, peers-only, private",
+                args.policy
+            ))
+            .exit_code(ExitCode::USER_ERROR));
     }
 
     // Validate priority
     if !["low", "normal", "high", "critical"].contains(&args.priority.as_str()) {
-        return Err(CliError::new(
-            "invalid_argument",
-            "Invalid priority level"
-        )
-        .detail(format!("Priority '{}' not supported. Use: low, normal, high, critical", args.priority))
-        .exit_code(ExitCode::USER_ERROR));
+        return Err(CliError::new("invalid_argument", "Invalid priority level")
+            .detail(format!(
+                "Priority '{}' not supported. Use: low, normal, high, critical",
+                args.priority
+            ))
+            .exit_code(ExitCode::USER_ERROR));
     }
 
     // Verify integrity if requested
@@ -4156,21 +4281,22 @@ fn atp_seed(args: &AtpSeedArgs, output: &mut Output) -> Result<(), CliError> {
     // Check size limits
     if args.max_size_bytes > 0 {
         let actual_size = if args.source.is_file() {
-            args.source.metadata()
-                .map(|m| m.len())
-                .unwrap_or(0)
+            args.source.metadata().map(|m| m.len()).unwrap_or(0)
         } else {
             // For directories, this would calculate total size
             0
         };
 
         if actual_size > args.max_size_bytes {
-            return Err(CliError::new(
-                "size_limit_exceeded",
-                "Source exceeds maximum size limit"
-            )
-            .detail(format!("Source: {}, Limit: {}", format_bytes(actual_size), format_bytes(args.max_size_bytes)))
-            .exit_code(ExitCode::USER_ERROR));
+            return Err(
+                CliError::new("size_limit_exceeded", "Source exceeds maximum size limit")
+                    .detail(format!(
+                        "Source: {}, Limit: {}",
+                        format_bytes(actual_size),
+                        format_bytes(args.max_size_bytes)
+                    ))
+                    .exit_code(ExitCode::USER_ERROR),
+            );
         }
     }
 
@@ -4206,8 +4332,12 @@ fn atp_inbox(args: &AtpInboxArgs, output: &mut Output) -> Result<(), CliError> {
                 .write(&payload)
                 .map_err(output_write_error("ATP inbox list"))?;
         }
-        AtpInboxCommand::Accept { transfer_id, destination } => {
-            let dest_path = destination.as_ref()
+        AtpInboxCommand::Accept {
+            transfer_id,
+            destination,
+        } => {
+            let dest_path = destination
+                .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| ".".to_string());
             let payload = AtpInboxAcceptOutput::new(transfer_id, &dest_path);
@@ -4215,7 +4345,10 @@ fn atp_inbox(args: &AtpInboxArgs, output: &mut Output) -> Result<(), CliError> {
                 .write(&payload)
                 .map_err(output_write_error("ATP inbox accept"))?;
         }
-        AtpInboxCommand::Reject { transfer_id, reason } => {
+        AtpInboxCommand::Reject {
+            transfer_id,
+            reason,
+        } => {
             let reject_reason = reason.as_deref().unwrap_or("rejected by user");
             let payload = AtpInboxRejectOutput::new(transfer_id, reject_reason);
             output
@@ -4260,7 +4393,12 @@ fn atp_transfer_status(args: &AtpTransferStatusArgs, output: &mut Output) -> Res
 
             let transfers = if let Some(ref transfer_id) = args.transfer_id {
                 // Show specific transfer
-                vec![AtpTransferInfo::new_mock(transfer_id, "send", "document.pdf", "peer123")]
+                vec![AtpTransferInfo::new_mock(
+                    transfer_id,
+                    "send",
+                    "document.pdf",
+                    "peer123",
+                )]
             } else {
                 // Show all transfers
                 vec![
@@ -4288,7 +4426,8 @@ fn atp_transfer_status(args: &AtpTransferStatusArgs, output: &mut Output) -> Res
             iteration += 1;
 
             // Exit if not in watch mode or sleep for interval
-            if !args.watch || iteration >= 5 { // Limit iterations for demo
+            if !args.watch || iteration >= 5 {
+                // Limit iterations for demo
                 break;
             }
             std::thread::sleep(std::time::Duration::from_secs(args.interval_seconds));
@@ -4296,7 +4435,12 @@ fn atp_transfer_status(args: &AtpTransferStatusArgs, output: &mut Output) -> Res
     } else {
         // One-time status check
         let transfers = if let Some(ref transfer_id) = args.transfer_id {
-            vec![AtpTransferInfo::new_mock(transfer_id, "send", "document.pdf", "peer123")]
+            vec![AtpTransferInfo::new_mock(
+                transfer_id,
+                "send",
+                "document.pdf",
+                "peer123",
+            )]
         } else {
             vec![
                 AtpTransferInfo::new_mock("transfer_abc", "send", "data.zip", "alice@peer"),
@@ -4325,13 +4469,15 @@ fn atp_transfer_status(args: &AtpTransferStatusArgs, output: &mut Output) -> Res
 fn atp_bench(args: &AtpBenchArgs, output: &mut Output) -> Result<(), CliError> {
     // Create output directory if it doesn't exist
     if !args.output_dir.exists() {
-        std::fs::create_dir_all(&args.output_dir)
-            .map_err(|err| CliError::new(
-                "io_error",
-                "Failed to create benchmark output directory"
-            )
-            .detail(format!("Path: {}, Error: {}", args.output_dir.display(), err))
-            .exit_code(ExitCode::RUNTIME_ERROR))?;
+        std::fs::create_dir_all(&args.output_dir).map_err(|err| {
+            CliError::new("io_error", "Failed to create benchmark output directory")
+                .detail(format!(
+                    "Path: {}, Error: {}",
+                    args.output_dir.display(),
+                    err
+                ))
+                .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
     }
 
     // Generate benchmark results based on profile
@@ -4341,22 +4487,23 @@ fn atp_bench(args: &AtpBenchArgs, output: &mut Output) -> Result<(), CliError> {
     let final_results = results;
 
     // Write to output directory
-    let result_file = args.output_dir.join(format!("atp_bench_{}.json", args.profile));
-    let json_content = serde_json::to_string_pretty(&final_results)
-        .map_err(|err| CliError::new(
+    let result_file = args
+        .output_dir
+        .join(format!("atp_bench_{}.json", args.profile));
+    let json_content = serde_json::to_string_pretty(&final_results).map_err(|err| {
+        CliError::new(
             "serialization_error",
-            "Failed to serialize benchmark results"
+            "Failed to serialize benchmark results",
         )
         .detail(format!("Error: {}", err))
-        .exit_code(ExitCode::RUNTIME_ERROR))?;
+        .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
 
-    std::fs::write(&result_file, json_content)
-        .map_err(|err| CliError::new(
-            "io_error",
-            "Failed to write benchmark results"
-        )
-        .detail(format!("Path: {}, Error: {}", result_file.display(), err))
-        .exit_code(ExitCode::RUNTIME_ERROR))?;
+    std::fs::write(&result_file, json_content).map_err(|err| {
+        CliError::new("io_error", "Failed to write benchmark results")
+            .detail(format!("Path: {}, Error: {}", result_file.display(), err))
+            .exit_code(ExitCode::RUNTIME_ERROR)
+    })?;
 
     // Output results
     output
@@ -4368,15 +4515,15 @@ fn atp_bench(args: &AtpBenchArgs, output: &mut Output) -> Result<(), CliError> {
 
 fn atp_trace(args: &AtpTraceArgs, output: &mut Output) -> Result<(), CliError> {
     match &args.command {
-        AtpTraceCommand::Analyze { trace_file, detailed } => {
+        AtpTraceCommand::Analyze {
+            trace_file,
+            detailed,
+        } => {
             // Verify trace file exists
             if !trace_file.exists() {
-                return Err(CliError::new(
-                    "file_not_found",
-                    "Trace file does not exist"
-                )
-                .detail(format!("Path: {}", trace_file.display()))
-                .exit_code(ExitCode::USER_ERROR));
+                return Err(CliError::new("file_not_found", "Trace file does not exist")
+                    .detail(format!("Path: {}", trace_file.display()))
+                    .exit_code(ExitCode::USER_ERROR));
             }
 
             // Generate analysis
@@ -4385,83 +4532,94 @@ fn atp_trace(args: &AtpTraceArgs, output: &mut Output) -> Result<(), CliError> {
             output
                 .write(&analysis)
                 .map_err(output_write_error("ATP trace analysis"))?;
-        },
+        }
 
-        AtpTraceCommand::Extract { trace_file, event_types, format } => {
+        AtpTraceCommand::Extract {
+            trace_file,
+            event_types,
+            format,
+        } => {
             // Verify trace file exists
             if !trace_file.exists() {
-                return Err(CliError::new(
-                    "file_not_found",
-                    "Trace file does not exist"
-                )
-                .detail(format!("Path: {}", trace_file.display()))
-                .exit_code(ExitCode::USER_ERROR));
+                return Err(CliError::new("file_not_found", "Trace file does not exist")
+                    .detail(format!("Path: {}", trace_file.display()))
+                    .exit_code(ExitCode::USER_ERROR));
             }
 
             // Validate format
             if !["json", "csv", "ndjson"].contains(&format.as_str()) {
-                return Err(CliError::new(
-                    "invalid_argument",
-                    "Unsupported extract format"
-                )
-                .detail(format!("Format '{}' not supported. Use: json, csv, ndjson", format))
-                .exit_code(ExitCode::USER_ERROR));
+                return Err(
+                    CliError::new("invalid_argument", "Unsupported extract format")
+                        .detail(format!(
+                            "Format '{}' not supported. Use: json, csv, ndjson",
+                            format
+                        ))
+                        .exit_code(ExitCode::USER_ERROR),
+                );
             }
 
             // Mock extracted events for specified types
-            let extracted_events: Vec<serde_json::Value> = event_types.iter().map(|event_type| {
-                serde_json::json!({
-                    "event_type": event_type,
-                    "timestamp": "2026-05-25T13:30:00Z",
-                    "data": format!("Mock data for {}", event_type)
+            let extracted_events: Vec<serde_json::Value> = event_types
+                .iter()
+                .map(|event_type| {
+                    serde_json::json!({
+                        "event_type": event_type,
+                        "timestamp": "2026-05-25T13:30:00Z",
+                        "data": format!("Mock data for {}", event_type)
+                    })
                 })
-            }).collect();
+                .collect();
 
             // Format output based on requested format
             match format.as_str() {
                 "json" => {
-                    let formatted = serde_json::to_string_pretty(&extracted_events)
-                        .map_err(|err| CliError::new(
-                            "serialization_error",
-                            "Failed to serialize extracted events"
-                        )
-                        .detail(format!("Error: {}", err))
-                        .exit_code(ExitCode::RUNTIME_ERROR))?;
-                    println!("{}", formatted);
-                },
-                "ndjson" => {
-                    for event in &extracted_events {
-                        let line = serde_json::to_string(event)
-                            .map_err(|err| CliError::new(
+                    let formatted =
+                        serde_json::to_string_pretty(&extracted_events).map_err(|err| {
+                            CliError::new(
                                 "serialization_error",
-                                "Failed to serialize event"
+                                "Failed to serialize extracted events",
                             )
                             .detail(format!("Error: {}", err))
-                            .exit_code(ExitCode::RUNTIME_ERROR))?;
+                            .exit_code(ExitCode::RUNTIME_ERROR)
+                        })?;
+                    println!("{}", formatted);
+                }
+                "ndjson" => {
+                    for event in &extracted_events {
+                        let line = serde_json::to_string(event).map_err(|err| {
+                            CliError::new("serialization_error", "Failed to serialize event")
+                                .detail(format!("Error: {}", err))
+                                .exit_code(ExitCode::RUNTIME_ERROR)
+                        })?;
                         println!("{}", line);
                     }
-                },
+                }
                 "csv" => {
                     println!("event_type,timestamp,data");
                     for event in &extracted_events {
-                        println!("{},{},{}",
+                        println!(
+                            "{},{},{}",
                             event["event_type"].as_str().unwrap_or("unknown"),
                             event["timestamp"].as_str().unwrap_or("unknown"),
                             event["data"].as_str().unwrap_or("unknown")
                         );
                     }
-                },
-                _ => unreachable!()
+                }
+                _ => unreachable!(),
             }
-        },
+        }
 
-        AtpTraceCommand::Compare { trace_a, trace_b, metrics } => {
+        AtpTraceCommand::Compare {
+            trace_a,
+            trace_b,
+            metrics,
+        } => {
             // Verify both trace files exist
             for (file, name) in [(trace_a, "trace_a"), (trace_b, "trace_b")] {
                 if !file.exists() {
                     return Err(CliError::new(
                         "file_not_found",
-                        format!("Trace file {} does not exist", name)
+                        format!("Trace file {} does not exist", name),
                     )
                     .detail(format!("Path: {}", file.display()))
                     .exit_code(ExitCode::USER_ERROR));
@@ -4485,35 +4643,39 @@ fn atp_trace(args: &AtpTraceArgs, output: &mut Output) -> Result<(), CliError> {
                 }).collect::<Vec<_>>()
             });
 
-            let formatted = serde_json::to_string_pretty(&comparison)
-                .map_err(|err| CliError::new(
+            let formatted = serde_json::to_string_pretty(&comparison).map_err(|err| {
+                CliError::new(
                     "serialization_error",
-                    "Failed to serialize comparison results"
+                    "Failed to serialize comparison results",
                 )
                 .detail(format!("Error: {}", err))
-                .exit_code(ExitCode::RUNTIME_ERROR))?;
+                .exit_code(ExitCode::RUNTIME_ERROR)
+            })?;
             println!("{}", formatted);
-        },
+        }
 
-        AtpTraceCommand::Timeline { trace_file, format, time_window } => {
+        AtpTraceCommand::Timeline {
+            trace_file,
+            format,
+            time_window,
+        } => {
             // Verify trace file exists
             if !trace_file.exists() {
-                return Err(CliError::new(
-                    "file_not_found",
-                    "Trace file does not exist"
-                )
-                .detail(format!("Path: {}", trace_file.display()))
-                .exit_code(ExitCode::USER_ERROR));
+                return Err(CliError::new("file_not_found", "Trace file does not exist")
+                    .detail(format!("Path: {}", trace_file.display()))
+                    .exit_code(ExitCode::USER_ERROR));
             }
 
             // Validate format
             if !["json", "text", "svg"].contains(&format.as_str()) {
-                return Err(CliError::new(
-                    "invalid_argument",
-                    "Unsupported timeline format"
-                )
-                .detail(format!("Format '{}' not supported. Use: json, text, svg", format))
-                .exit_code(ExitCode::USER_ERROR));
+                return Err(
+                    CliError::new("invalid_argument", "Unsupported timeline format")
+                        .detail(format!(
+                            "Format '{}' not supported. Use: json, text, svg",
+                            format
+                        ))
+                        .exit_code(ExitCode::USER_ERROR),
+                );
             }
 
             // Generate timeline based on format
@@ -4538,7 +4700,7 @@ fn atp_trace(args: &AtpTraceArgs, output: &mut Output) -> Result<(), CliError> {
                         }
                     });
                     println!("{}", serde_json::to_string_pretty(&timeline).unwrap());
-                },
+                }
                 "text" => {
                     println!("ATP Trace Timeline");
                     println!("=================");
@@ -4547,19 +4709,29 @@ fn atp_trace(args: &AtpTraceArgs, output: &mut Output) -> Result<(), CliError> {
                     println!();
                     println!("13:30:00 | transfer_start  | Mock timeline event 1");
                     println!("13:30:15 | chunk_encoded   | Mock timeline event 2");
-                },
+                }
                 "svg" => {
                     println!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-                    println!("<svg width=\"800\" height=\"200\" xmlns=\"http://www.w3.org/2000/svg\">");
-                    println!("  <text x=\"10\" y=\"30\" font-family=\"monospace\" font-size=\"14\">ATP Trace Timeline</text>");
-                    println!("  <line x1=\"50\" y1=\"50\" x2=\"750\" y2=\"50\" stroke=\"black\" stroke-width=\"2\"/>");
+                    println!(
+                        "<svg width=\"800\" height=\"200\" xmlns=\"http://www.w3.org/2000/svg\">"
+                    );
+                    println!(
+                        "  <text x=\"10\" y=\"30\" font-family=\"monospace\" font-size=\"14\">ATP Trace Timeline</text>"
+                    );
+                    println!(
+                        "  <line x1=\"50\" y1=\"50\" x2=\"750\" y2=\"50\" stroke=\"black\" stroke-width=\"2\"/>"
+                    );
                     println!("  <circle cx=\"100\" cy=\"50\" r=\"5\" fill=\"blue\"/>");
-                    println!("  <text x=\"80\" y=\"75\" font-family=\"monospace\" font-size=\"10\">start</text>");
+                    println!(
+                        "  <text x=\"80\" y=\"75\" font-family=\"monospace\" font-size=\"10\">start</text>"
+                    );
                     println!("  <circle cx=\"200\" cy=\"50\" r=\"5\" fill=\"green\"/>");
-                    println!("  <text x=\"180\" y=\"75\" font-family=\"monospace\" font-size=\"10\">encoded</text>");
+                    println!(
+                        "  <text x=\"180\" y=\"75\" font-family=\"monospace\" font-size=\"10\">encoded</text>"
+                    );
                     println!("</svg>");
-                },
-                _ => unreachable!()
+                }
+                _ => unreachable!(),
             }
         }
     }
@@ -14605,9 +14777,15 @@ lab:
         assert!(result.is_ok(), "atp get dry-run should succeed");
 
         let output_str = String::from_utf8(output.into_writer().unwrap()).unwrap();
-        assert!(output_str.contains("Receive Plan:"), "should contain receive plan");
+        assert!(
+            output_str.contains("Receive Plan:"),
+            "should contain receive plan"
+        );
         assert!(output_str.contains("decision"), "should show decision");
-        assert!(output_str.contains("expected_bytes"), "should show expected bytes");
+        assert!(
+            output_str.contains("expected_bytes"),
+            "should show expected bytes"
+        );
     }
 
     #[test]
@@ -14658,15 +14836,33 @@ lab:
 
         let output_bytes = output.into_writer().unwrap();
         let output_str = String::from_utf8(output_bytes).unwrap();
-        let json: serde_json::Value = serde_json::from_str(&output_str)
-            .expect("output should be valid JSON");
+        let json: serde_json::Value =
+            serde_json::from_str(&output_str).expect("output should be valid JSON");
 
-        assert!(json.get("decision").is_some(), "should contain decision field");
-        assert!(json.get("sender_identity").is_some(), "should contain sender identity");
-        assert!(json.get("object_graph_summary").is_some(), "should contain object graph");
-        assert!(json.get("destination").is_some(), "should contain destination plan");
-        assert!(json.get("storage").is_some(), "should contain storage preflight");
-        assert!(json.get("plan_digest").is_some(), "should contain plan digest");
+        assert!(
+            json.get("decision").is_some(),
+            "should contain decision field"
+        );
+        assert!(
+            json.get("sender_identity").is_some(),
+            "should contain sender identity"
+        );
+        assert!(
+            json.get("object_graph_summary").is_some(),
+            "should contain object graph"
+        );
+        assert!(
+            json.get("destination").is_some(),
+            "should contain destination plan"
+        );
+        assert!(
+            json.get("storage").is_some(),
+            "should contain storage preflight"
+        );
+        assert!(
+            json.get("plan_digest").is_some(),
+            "should contain plan digest"
+        );
     }
 
     #[test]
@@ -14691,7 +14887,10 @@ lab:
         assert!(result.is_ok(), "quarantine policy should succeed");
 
         let output_str = String::from_utf8(output.into_writer().unwrap()).unwrap();
-        assert!(output_str.contains("quarantined"), "should mention quarantine");
+        assert!(
+            output_str.contains("quarantined"),
+            "should mention quarantine"
+        );
     }
 
     #[test]
@@ -14727,14 +14926,16 @@ lab:
             accept: false,
             verbose: false,
         };
-        let policy = parse_destination_policy(&allow_args).expect("allow-listed policy should parse");
+        let policy =
+            parse_destination_policy(&allow_args).expect("allow-listed policy should parse");
         if let DestinationPolicy::AllowListed {
             allow_overwrite,
             allow_symlinks,
             allow_executables,
             max_bytes,
             ..
-        } = policy {
+        } = policy
+        {
             assert!(allow_overwrite, "should allow overwrite");
             assert!(allow_symlinks, "should allow symlinks");
             assert!(allow_executables, "should allow executables");
@@ -14777,11 +14978,13 @@ lab:
             "--max-bytes=500000",
             "--accept",
             "--verbose",
-        ]).expect("valid args should parse");
+        ])
+        .expect("valid args should parse");
 
         if let Command::Atp(AtpArgs {
             command: AtpCommand::Get(args),
-        }) = cli.command {
+        }) = cli.command
+        {
             assert_eq!(args.transfer_id, "transfer-123");
             assert_eq!(args.destination, Some(PathBuf::from("/dest/path")));
             assert!(args.dry_run);
@@ -14814,7 +15017,8 @@ lab:
 
         if let Command::Atp(AtpArgs {
             command: AtpCommand::Send(args),
-        }) = cli.command {
+        }) = cli.command
+        {
             assert_eq!(args.source, PathBuf::from("/source/path"));
             assert_eq!(args.target, "peer:dest");
             assert!(args.dry_run);
@@ -14840,7 +15044,8 @@ lab:
 
         if let Command::Atp(AtpArgs {
             command: AtpCommand::Sync(args),
-        }) = cli.command {
+        }) = cli.command
+        {
             assert_eq!(args.source, PathBuf::from("/source/dir"));
             assert_eq!(args.target, "peer:/target/dir");
             assert!(args.allow_updates);
@@ -14863,7 +15068,8 @@ lab:
 
         if let Command::Atp(AtpArgs {
             command: AtpCommand::Mirror(args),
-        }) = cli.command {
+        }) = cli.command
+        {
             assert_eq!(args.source, PathBuf::from("/source/dir"));
             assert_eq!(args.target, "peer:/target/dir");
             assert!(args.allow_deletes);
@@ -14890,7 +15096,8 @@ lab:
 
         if let Command::Atp(AtpArgs {
             command: AtpCommand::Share(args),
-        }) = cli.command {
+        }) = cli.command
+        {
             assert_eq!(args.source, PathBuf::from("/file/to/share"));
             assert_eq!(args.expires_seconds, 7200);
             assert_eq!(args.max_downloads, 5);
@@ -14902,16 +15109,12 @@ lab:
 
     #[test]
     fn atp_inbox_list_parsing_works() {
-        let cli = Cli::parse_from([
-            "asupersync",
-            "atp",
-            "inbox",
-            "list",
-        ]);
+        let cli = Cli::parse_from(["asupersync", "atp", "inbox", "list"]);
 
         if let Command::Atp(AtpArgs {
             command: AtpCommand::Inbox(args),
-        }) = cli.command {
+        }) = cli.command
+        {
             assert!(matches!(args.command, AtpInboxCommand::List));
         } else {
             panic!("expected atp inbox list command");
@@ -14931,8 +15134,13 @@ lab:
 
         if let Command::Atp(AtpArgs {
             command: AtpCommand::Inbox(args),
-        }) = cli.command {
-            if let AtpInboxCommand::Accept { transfer_id, destination } = args.command {
+        }) = cli.command
+        {
+            if let AtpInboxCommand::Accept {
+                transfer_id,
+                destination,
+            } = args.command
+            {
                 assert_eq!(transfer_id, "transfer-456");
                 assert_eq!(destination, Some(PathBuf::from("/destination/path")));
             } else {
@@ -14956,7 +15164,8 @@ lab:
 
         if let Command::Atp(AtpArgs {
             command: AtpCommand::Resume(args),
-        }) = cli.command {
+        }) = cli.command
+        {
             assert_eq!(args.transfer_id, "transfer-789");
             assert!(args.force);
             assert!(args.verbose);
@@ -14979,7 +15188,8 @@ lab:
 
         if let Command::Atp(AtpArgs {
             command: AtpCommand::Cancel(args),
-        }) = cli.command {
+        }) = cli.command
+        {
             assert_eq!(args.transfer_id, "transfer-abc");
             assert_eq!(args.reason, "user_cancellation");
             assert!(args.force);
@@ -15052,7 +15262,8 @@ lab:
         let mut output = Output::new(OutputFormat::JsonPretty);
         let args = AtpPairArgs {
             command: AtpPairCommand::Confirm {
-                pairing_token: "atp://pair/pair_1234567890abcdef/method:visual/timeout:300".to_string(),
+                pairing_token: "atp://pair/pair_1234567890abcdef/method:visual/timeout:300"
+                    .to_string(),
                 confirmation_phrase: "Ocean Blue Mountain".to_string(),
             },
         };
@@ -15064,9 +15275,7 @@ lab:
     fn atp_pair_list_works() {
         let mut output = Output::new(OutputFormat::JsonPretty);
         let args = AtpPairArgs {
-            command: AtpPairCommand::List {
-                detailed: false,
-            },
+            command: AtpPairCommand::List { detailed: false },
         };
 
         atp_pair(&args, &mut output).expect("atp pair list should work");
@@ -15130,7 +15339,8 @@ lab:
 
         if let Command::Atp(AtpArgs {
             command: AtpCommand::TransferStatus(args),
-        }) = cli.command {
+        }) = cli.command
+        {
             assert_eq!(args.transfer_id, Some("transfer-123".to_string()));
             assert!(args.explain);
             assert!(args.watch);
@@ -15176,7 +15386,10 @@ lab:
     #[test]
     fn progress_bar_creation_works() {
         assert_eq!(create_progress_bar(0), "░".repeat(20));
-        assert_eq!(create_progress_bar(50), format!("{}{}", "█".repeat(10), "░".repeat(10)));
+        assert_eq!(
+            create_progress_bar(50),
+            format!("{}{}", "█".repeat(10), "░".repeat(10))
+        );
         assert_eq!(create_progress_bar(100), "█".repeat(20));
     }
 
