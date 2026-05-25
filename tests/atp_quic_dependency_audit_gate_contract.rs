@@ -269,8 +269,6 @@ fn audit_contract_exists() {
 
 #[cfg(test)]
 mod integration {
-    use super::*;
-
     #[test]
     fn proof_lane_manifest_includes_audit_gate() {
         // Verify that the proof lane manifest includes the new audit gate
