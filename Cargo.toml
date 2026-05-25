@@ -482,6 +482,10 @@ harness = false
 name = "atp_autotune_safety_regression"
 path = "tests/atp/autotune_regression/safety.rs"
 
+[[test]]
+name = "atp_per_module_logging_redaction_contract"
+path = "tests/atp/per_module/logging_redaction_contract.rs"
+
 [[example]]
 name = "spork_minimal_supervised_app"
 required-features = ["test-internals"]
