@@ -28,21 +28,27 @@
 //! }
 //! ```
 
+pub mod agent_proof;
 pub mod evidence_ledger;
 pub mod oracle;
 pub mod replay;
 
 // Re-export key types for convenience
+pub use agent_proof::{
+    AgentProofError, AgentTaskProofBundle, AgentTaskProofBundleBuilder, BlockerRecord,
+    CommandRecord, CommitRecord, FileReservationRecord, RchRecord, ReplayInstructions,
+    ReplaySafetyLevel, ValidationFrontierRecord,
+};
 pub use evidence_ledger::{AtpEvidenceEntry, AtpEvidenceLedger, EvidenceSummary};
 pub use oracle::{AtpOracleChecks, AtpOracleResult, AtpTransferOracle, AtpTransferState};
 pub use replay::{
     AtpReplayCoordinator, AtpReplayResult, ReplayError, TraceMinimizer, TraceMinimizerConfig,
 };
 
-use crate::lab::oracle::OracleStats;
 use crate::lab::oracle::evidence::{
     BayesFactor, EvidenceEntry, EvidenceLine, EvidenceStrength, LogLikelihoodContributions,
 };
+use crate::lab::oracle::OracleStats;
 use crate::trace::{TraceBuffer, TraceData, TraceEvent, TraceEventKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
