@@ -439,6 +439,8 @@ pub mod real_obligation_dialectica_trace_distributed_vclock_integration_e2e_test
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_http_h3_client_net_quic_native_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_lab_oracle_quiescence_obligation_leak_check_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_grpc_streaming_service_hedge_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_grpc_web_grpc_interceptor_integration_e2e_tests;
