@@ -348,6 +348,35 @@ pub struct RchWorkerAdmissionReceipt {
     pub reasons: Vec<String>,
 }
 
+impl RchWorkerAdmissionReceipt {
+    /// Counts workers that can accept this proof lane.
+    #[must_use]
+    pub fn admissible_worker_count(&self) -> usize {
+        self.candidates
+            .iter()
+            .filter(|candidate| candidate.admissible)
+            .count()
+    }
+
+    /// Counts workers that were present but blocked by policy or health signals.
+    #[must_use]
+    pub fn blocked_worker_count(&self) -> usize {
+        self.candidates
+            .iter()
+            .filter(|candidate| !candidate.admissible)
+            .count()
+    }
+
+    /// Counts admissible workers with any cache-warmth signal for this lane.
+    #[must_use]
+    pub fn cache_warm_admissible_worker_count(&self) -> usize {
+        self.candidates
+            .iter()
+            .filter(|candidate| candidate.admissible && candidate.cache_warmth_bps > 0)
+            .count()
+    }
+}
+
 /// Evaluates worker snapshots for a proof-lane request.
 #[must_use]
 pub fn admit_rch_worker(
@@ -622,6 +651,27 @@ mod tests {
         assert_eq!(receipt.decision, RchAdmissionDecision::Admit);
         assert_eq!(receipt.selected_worker, Some(hot.worker_id));
         assert_eq!(receipt.candidates[0].cache_warmth_bps, 100);
+    }
+
+    #[test]
+    fn receipt_counts_cache_warm_capacity_without_leaking_worker_names() {
+        let mut cold = healthy_worker("vmi-cold.internal");
+        cold.cache_warmth.clear();
+        let mut blocked = healthy_worker("vmi-blocked.internal");
+        blocked.queue_state = RchQueueState::Saturated;
+        let hot = healthy_worker("vmi-hot.internal");
+
+        let receipt = admit(&[blocked, cold, hot]);
+
+        assert_eq!(receipt.admissible_worker_count(), 2);
+        assert_eq!(receipt.blocked_worker_count(), 1);
+        assert_eq!(receipt.cache_warm_admissible_worker_count(), 1);
+        assert!(
+            receipt
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.worker_id.as_str().contains("vmi-"))
+        );
     }
 
     #[test]
