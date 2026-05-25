@@ -640,6 +640,8 @@ pub mod real_runtime_scheduler_priority_trace_event_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_runtime_scheduler_time_wheel_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_runtime_spawn_blocking_fs_file_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_scheduler_priority_promotion_starvation_cancel_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_scheduler_three_lane_obligation_leak_check_e2e_tests;
