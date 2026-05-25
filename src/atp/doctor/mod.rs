@@ -371,8 +371,16 @@ fn path_recommendations(snapshot: &PathDiagnosticSnapshot) -> Vec<AtpPathDoctorR
         ),
         PathSelectionReason::RelayFallbackValidated => (
             "warning",
-            "relay_fallback_selected",
-            "Relay path won; inspect failed direct candidates before assuming peer-to-peer reachability.",
+            if snapshot.selected_kind == Some(PathKind::AtpRelayTcpTls443) {
+                "tcp_tls_443_fallback_selected"
+            } else {
+                "relay_fallback_selected"
+            },
+            if snapshot.selected_kind == Some(PathKind::AtpRelayTcpTls443) {
+                "TCP/TLS 443 fallback won; expect head-of-line blocking and nested retransmission penalties while UDP remains blocked."
+            } else {
+                "Relay path won; inspect failed direct candidates before assuming peer-to-peer reachability."
+            },
         ),
         PathSelectionReason::OfflineMailboxAccepted => (
             "warning",

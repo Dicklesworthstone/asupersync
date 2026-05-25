@@ -43,6 +43,30 @@ fn relay_fallback_race() -> PathRace {
     race
 }
 
+fn udp_blocked_tcp_tls_fallback_race() -> PathRace {
+    let direct = PathCandidateId::new(10);
+    let relay = PathCandidateId::new(11);
+    let mut race = PathRace::new();
+    race.add_candidate(path_candidate(direct.get(), PathKind::NatPunchedUdp))
+        .unwrap();
+    race.add_candidate(path_candidate(relay.get(), PathKind::AtpRelayTcpTls443))
+        .unwrap();
+
+    race.start_all().unwrap();
+    race.record_outcome(
+        direct,
+        PathOutcome::failure(PathFailureKind::UdpBlocked, 3_000).with_bytes(256, 0),
+    )
+    .unwrap();
+    race.record_outcome(
+        relay,
+        PathOutcome::success(PathSuccessKind::RelaySelected, 9_000, Some(55_000))
+            .with_bytes(1_800, 1_600),
+    )
+    .unwrap();
+    race
+}
+
 #[test]
 fn path_doctor_document_has_stable_json_and_trace_contract() {
     let race = relay_fallback_race();
@@ -79,4 +103,31 @@ fn path_doctor_document_has_stable_json_and_trace_contract() {
     assert!(human.contains("Overall: degraded reason=relay_fallback_validated"));
     assert!(human.contains("Selected: candidate=2 kind=atp_relay_tcp_tls_443 family=relay"));
     assert!(human.contains("Structured trace rows: 3"));
+}
+
+#[test]
+fn path_doctor_identifies_udp_blocked_tcp_tls_443_fallback() {
+    let race = udp_blocked_tcp_tls_fallback_race();
+    let document = build_path_doctor_document("peer-redacted", &race);
+    let json = serde_json::to_value(&document).unwrap();
+
+    assert_eq!(json["summary"]["overall_health"], "degraded");
+    assert_eq!(json["summary"]["reason_code"], "relay_fallback_validated");
+    assert_eq!(json["summary"]["failure_count"], 1);
+    assert_eq!(json["selected_path"]["kind"], "atp_relay_tcp_tls_443");
+    assert_eq!(json["trace"][0]["outcome"], "failure_udp_blocked");
+
+    let recommendation = &json["recommendations"][0];
+    assert_eq!(recommendation["severity"], "warning");
+    assert_eq!(recommendation["code"], "tcp_tls_443_fallback_selected");
+    assert!(
+        recommendation["message"]
+            .as_str()
+            .unwrap()
+            .contains("head-of-line blocking")
+    );
+
+    let human = render_path_doctor_human(&document);
+    assert!(human.contains("warning tcp_tls_443_fallback_selected"));
+    assert!(human.contains("kind=atp_relay_tcp_tls_443"));
 }
