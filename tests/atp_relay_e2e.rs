@@ -14,7 +14,13 @@ use asupersync::net::atp::relay::{
     RelayServiceConfig, RelaySocketIoError, RelaySocketLoop, RelayTcpTlsStreamBuffer,
     RelayTcpTlsStreamId, RelayTransport, RelayWireFrame,
 };
-use asupersync::net::atp::rendezvous::{CandidateSignature, PeerId, TransferNonce};
+use asupersync::net::atp::rendezvous::{
+    Candidate, CandidateNonce, CandidateSignature, CandidateTransport, Error as RendezvousError,
+    PeerId, Quotas as RendezvousQuotas, Service as RendezvousService,
+    ServiceConfig as RendezvousServiceConfig, ServiceEvent, ServiceEventKind, Session,
+    SignedCandidate, TransferNonce,
+};
+use asupersync::net::atp::stun::{EndpointFamily, ObservedEndpoint};
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::time::Duration;
@@ -34,6 +40,10 @@ fn peer(seed: u8) -> PeerId {
 
 fn nonce(raw: u128) -> TransferNonce {
     TransferNonce::new(raw).expect("transfer nonce")
+}
+
+fn candidate_nonce(raw: u128) -> CandidateNonce {
+    CandidateNonce::new(raw).expect("candidate nonce")
 }
 
 fn reservation_id(raw: u128) -> RelayReservationId {
@@ -56,6 +66,25 @@ fn grant(expires_at_micros: u64, quota: RelayQuota) -> RelayReservationGrant {
     .expect("relay grant")
 }
 
+fn observed_endpoint(port: u16) -> ObservedEndpoint {
+    ObservedEndpoint::new(EndpointFamily::Ipv4, "198.51.100.10", port).expect("endpoint")
+}
+
+fn signed_rendezvous_candidate(
+    peer_id: PeerId,
+    transfer_nonce: TransferNonce,
+    candidate_nonce: CandidateNonce,
+    port: u16,
+) -> SignedCandidate {
+    SignedCandidate::new(
+        peer_id,
+        transfer_nonce,
+        candidate_nonce,
+        Candidate::new(observed_endpoint(port), CandidateTransport::Udp, 10_000),
+        signature(),
+    )
+}
+
 fn packet(transport: RelayTransport, payload: &[u8], sequence: u64) -> OpaqueRelayPacket {
     packet_sent_at(transport, payload, sequence, 1_000 + sequence)
 }
@@ -74,6 +103,64 @@ fn packet_sent_at(
         sent_at_micros,
     )
     .expect("opaque relay packet")
+}
+
+#[test]
+fn rendezvous_rejected_candidate_logs_public_redacted_error() {
+    let config = RendezvousServiceConfig::new(
+        "rv-f3-e2e",
+        RendezvousQuotas {
+            max_candidates_per_peer: 1,
+            max_total_candidates: 8,
+            max_observations_per_peer: 4,
+            max_total_observations: 32,
+            max_attempts_per_peer: 8,
+        },
+    )
+    .expect("config")
+    .with_log_peer_ids(false);
+    let mut service = RendezvousService::with_config(config);
+    let transfer_nonce = nonce(0xf3);
+    let peer_a = peer(1);
+    service.open_session(Session::new(
+        transfer_nonce,
+        10_000,
+        service.config().default_quotas(),
+    ));
+
+    service
+        .register_candidate(
+            100,
+            signed_rendezvous_candidate(peer_a, transfer_nonce, candidate_nonce(1), 50_000),
+            &|candidate: &SignedCandidate| candidate.signature().bytes() == signature().bytes(),
+        )
+        .expect("first candidate accepted");
+    let error = service
+        .register_candidate(
+            101,
+            signed_rendezvous_candidate(peer_a, transfer_nonce, candidate_nonce(2), 50_001),
+            &|candidate: &SignedCandidate| candidate.signature().bytes() == signature().bytes(),
+        )
+        .expect_err("peer candidate quota rejection");
+
+    assert_eq!(error, RendezvousError::QuotaExceeded);
+    assert_eq!(
+        service
+            .events()
+            .iter()
+            .map(ServiceEvent::kind)
+            .collect::<Vec<_>>(),
+        vec![
+            ServiceEventKind::SessionOpened,
+            ServiceEventKind::CandidateAccepted,
+            ServiceEventKind::CandidateRejected,
+        ]
+    );
+    let rejected = service.events().last().expect("rejection event");
+    assert_eq!(rejected.transfer_nonce(), transfer_nonce);
+    assert_eq!(rejected.at_micros(), 101);
+    assert_eq!(rejected.peer_id(), None);
+    assert_eq!(rejected.error(), Some(&RendezvousError::QuotaExceeded));
 }
 
 #[test]
