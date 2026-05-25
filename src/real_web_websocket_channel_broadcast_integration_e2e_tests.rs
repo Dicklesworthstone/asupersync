@@ -50,7 +50,6 @@ struct BroadcastIntegrationConfig {
     broadcast_buffer_size: usize,
 }
 
-#[derive(Debug, Clone)]
 struct SubscriptionMapping {
     connection_id: String,
     websocket_connection: WebSocketConnection,
@@ -337,7 +336,7 @@ impl Clone for BroadcastAwareWebSocketServer {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct BroadcastRoutingResult {
     routed: bool,
     target_channel: Option<String>,
@@ -345,7 +344,7 @@ struct BroadcastRoutingResult {
     routing_success: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct SubscriptionResult {
     success: bool,
     subscription_id: Option<SubscriptionId>,
@@ -422,7 +421,7 @@ struct WebSocketBroadcastConfig {
     websocket_message_timeout_ms: u64,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 struct ChannelStatistics {
     messages_sent: u64,
     messages_received: u64,

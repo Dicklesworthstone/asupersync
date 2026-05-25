@@ -9,8 +9,32 @@
 use crate::observability::metrics::{Counter, Gauge, Histogram};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
+
+/// Custom serde module for SystemTime serialization.
+mod system_time_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    pub fn serialize<S>(time: &SystemTime, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let duration_since_epoch = time
+            .duration_since(UNIX_EPOCH)
+            .map_err(serde::ser::Error::custom)?;
+        duration_since_epoch.as_secs().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(UNIX_EPOCH + std::time::Duration::from_secs(secs))
+    }
+}
 
 /// Network truth metrics schema covering RTT, loss, congestion, and pressure signals.
 #[derive(Debug, Clone)]
@@ -115,8 +139,9 @@ pub struct PathQuality {
     pub bandwidth_estimate: MetricEstimate,
     /// Path stability score (0.0-1.0)
     pub stability_score: f64,
-    /// Timestamp of last update
-    pub last_updated: Instant,
+    /// Timestamp of last update (seconds since Unix epoch)
+    #[serde(with = "system_time_serde")]
+    pub last_updated: SystemTime,
 }
 
 /// Metric estimate with uncertainty bounds.

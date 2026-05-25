@@ -3,8 +3,8 @@
 //! Tests the benchmark adapter framework with scp baseline and ATP profile comparison.
 
 use asupersync::atp::benchmark::{
-    AtpProfile, BenchmarkConfig, BenchmarkSuite, BenchmarkSuiteBuilder, ScpAdapter,
-    ToolAvailability,
+    AtpProfile, BenchmarkConfig, BenchmarkSuite, BenchmarkSuiteBuilder, CurlAdapter, RsyncAdapter,
+    ScpAdapter, ToolAvailability,
 };
 use std::time::Duration;
 
@@ -244,4 +244,158 @@ fn test_atp_profile_kinds_coverage() {
         "Smoke test suitable: {:?}",
         smoke_suitable.iter().map(|k| k.label()).collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn test_rsync_adapter_availability_check() {
+    let adapter = RsyncAdapter::new();
+    let availability = adapter.check_availability().await;
+
+    match availability {
+        ToolAvailability::Available(version) => {
+            println!("✅ Rsync is available: {}", version.version_string);
+            assert_eq!(adapter.tool_name(), "rsync");
+        }
+        ToolAvailability::NotFound => {
+            println!("⚠️  Rsync not found in PATH (expected in some environments)");
+        }
+        ToolAvailability::VersionDetectionFailed(reason) => {
+            println!("⚠️  Rsync version detection failed: {}", reason);
+        }
+        ToolAvailability::IncompatibleVersion(version) => {
+            println!("⚠️  Rsync incompatible version: {}", version.version_string);
+        }
+    }
+
+    // Test adapter configuration
+    assert!(!adapter.rsync_options.is_empty());
+    assert!(adapter.rsync_options.contains(&"--verbose".to_string()));
+}
+
+#[tokio::test]
+async fn test_curl_adapter_availability_check() {
+    let adapter = CurlAdapter::new();
+    let availability = adapter.check_availability().await;
+
+    match availability {
+        ToolAvailability::Available(version) => {
+            println!("✅ Curl is available: {}", version.version_string);
+            assert_eq!(adapter.tool_name(), "curl");
+        }
+        ToolAvailability::NotFound => {
+            println!("⚠️  Curl not found in PATH (expected in some environments)");
+        }
+        ToolAvailability::VersionDetectionFailed(reason) => {
+            println!("⚠️  Curl version detection failed: {}", reason);
+        }
+        ToolAvailability::IncompatibleVersion(version) => {
+            println!("⚠️  Curl incompatible version: {}", version.version_string);
+        }
+    }
+
+    // Test adapter configuration
+    assert!(!adapter.curl_options.is_empty());
+    assert!(adapter.curl_options.contains(&"--silent".to_string()));
+}
+
+#[tokio::test]
+async fn test_curl_http3_adapter_availability_check() {
+    let adapter = CurlAdapter::with_http3();
+    let availability = adapter.check_availability().await;
+
+    match availability {
+        ToolAvailability::Available(version) => {
+            println!("✅ Curl with HTTP/3 is available: {}", version.version_string);
+            assert_eq!(adapter.tool_name(), "curl-http3");
+        }
+        ToolAvailability::NotFound => {
+            println!("⚠️  Curl not found in PATH");
+        }
+        ToolAvailability::VersionDetectionFailed(reason) => {
+            println!("⚠️  Curl version detection failed: {}", reason);
+        }
+        ToolAvailability::IncompatibleVersion(version) => {
+            println!("⚠️  Curl without HTTP/3 support: {}", version.version_string);
+        }
+    }
+
+    // Test adapter configuration
+    assert!(adapter.enable_http3);
+    assert!(adapter.curl_options.contains(&"--http3".to_string()));
+}
+
+#[tokio::test]
+async fn test_multi_adapter_benchmark_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    // Test a comprehensive benchmark suite with multiple adapters
+    let config = BenchmarkConfig {
+        data_size: 16 * 1024, // 16KB for very fast test
+        iterations: 1,
+        timeout: Duration::from_secs(20),
+        preserve_artifacts: false,
+        ..BenchmarkConfig::default()
+    };
+
+    let temp_dir = tempfile::TempDir::new()?;
+    let source_path = temp_dir.path().join("multi_test_source");
+    let dest_path = temp_dir.path().join("multi_test_dest");
+
+    // Test each adapter individually
+    let adapters: Vec<Box<dyn asupersync::atp::benchmark::BaselineAdapter + Send + Sync>> = vec![
+        Box::new(ScpAdapter::new()),
+        Box::new(RsyncAdapter::new()),
+        Box::new(CurlAdapter::new()),
+    ];
+
+    let mut results = Vec::new();
+
+    for adapter in adapters {
+        let availability = adapter.check_availability().await;
+
+        match availability {
+            ToolAvailability::Available(_) => {
+                println!("Testing {} adapter...", adapter.tool_name());
+
+                match adapter.run_benchmark(&config, &source_path, &dest_path).await {
+                    Ok(result) => {
+                        println!("✅ {} benchmark completed successfully", adapter.tool_name());
+                        let stats = result.aggregate_stats();
+                        println!("  Throughput: {:.2} KB/s", stats.mean_throughput / 1024.0);
+                        println!("  Success rate: {:.1}%", stats.success_rate * 100.0);
+                        results.push((adapter.tool_name().to_string(), result));
+                    }
+                    Err(e) => {
+                        println!("⚠️  {} benchmark failed: {}", adapter.tool_name(), e);
+                        // Don't fail the test for tool-specific issues
+                    }
+                }
+            }
+            ToolAvailability::NotFound => {
+                println!("⚠️  {} not available, skipping", adapter.tool_name());
+            }
+            other => {
+                println!("⚠️  {} not usable: {:?}", adapter.tool_name(), other);
+            }
+        }
+    }
+
+    // Test ATP profiles for comparison
+    let atp_profile = AtpProfile::clean_lan();
+    match atp_profile.run_benchmark(&config, &source_path, &dest_path).await {
+        Ok(result) => {
+            println!("✅ ATP profile benchmark completed successfully");
+            let stats = result.aggregate_stats();
+            println!("  ATP Throughput: {:.2} KB/s", stats.mean_throughput / 1024.0);
+            results.push((atp_profile.kind.label().to_string(), result));
+        }
+        Err(e) => {
+            println!("⚠️  ATP profile benchmark failed: {}", e);
+        }
+    }
+
+    println!("✅ Multi-adapter smoke test completed with {} results", results.len());
+
+    // Should have at least ATP profile working
+    assert!(!results.is_empty(), "Should have at least one working benchmark");
+
+    Ok(())
 }

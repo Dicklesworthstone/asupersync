@@ -22,7 +22,7 @@ pub mod profiles;
 pub mod reports;
 pub mod suite;
 
-pub use adapters::{BaselineAdapter, ScpAdapter, ToolAvailability, ToolVersion};
+pub use adapters::{BaselineAdapter, CurlAdapter, RsyncAdapter, ScpAdapter, ToolAvailability, ToolVersion};
 pub use profiles::{AtpProfile, AtpProfileKind};
 pub use reports::{BenchmarkMetrics, BenchmarkReport, BenchmarkResult, ComparisonReport};
 pub use suite::BenchmarkSuite;

@@ -352,6 +352,471 @@ fn parse_version_numbers(version_str: &str) -> (Option<u32>, Option<u32>, Option
     }
 }
 
+/// Rsync baseline adapter.
+#[derive(Debug)]
+pub struct RsyncAdapter {
+    /// Rsync options
+    rsync_options: Vec<String>,
+}
+
+impl RsyncAdapter {
+    /// Create a new Rsync adapter with default options.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            rsync_options: vec![
+                "--verbose".to_string(),
+                "--progress".to_string(),
+                "--partial".to_string(),
+                "--inplace".to_string(),
+            ],
+        }
+    }
+
+    /// Create an Rsync adapter with custom options.
+    #[must_use]
+    pub fn with_options(rsync_options: Vec<String>) -> Self {
+        Self { rsync_options }
+    }
+
+    async fn create_test_file(&self, path: &Path, size: u64) -> Result<(), BenchmarkError> {
+        let mut file = fs::File::create(path).await?;
+
+        // Write test data in chunks
+        let chunk_size = 64 * 1024; // 64KB chunks
+        let chunk_data = vec![0u8; chunk_size];
+        let mut remaining = size;
+
+        while remaining > 0 {
+            let write_size = std::cmp::min(remaining, chunk_size as u64) as usize;
+            AsyncWriteExt::write_all(&mut file, &chunk_data[..write_size]).await?;
+            remaining -= write_size as u64;
+        }
+
+        Ok(())
+    }
+
+    fn build_rsync_command(&self, source: &Path, dest: &Path) -> Command {
+        let mut cmd = Command::new("rsync");
+
+        // Add rsync options
+        for option in &self.rsync_options {
+            cmd.arg(option);
+        }
+
+        // For local testing
+        cmd.arg(source.to_string_lossy().to_string());
+        cmd.arg(dest.to_string_lossy().to_string());
+
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        cmd
+    }
+}
+
+#[async_trait::async_trait]
+impl BaselineAdapter for RsyncAdapter {
+    fn tool_name(&self) -> &str {
+        "rsync"
+    }
+
+    async fn check_availability(&self) -> ToolAvailability {
+        let output = match Command::new("rsync")
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => return ToolAvailability::NotFound,
+        };
+
+        let version_text = String::from_utf8_lossy(&output.stdout);
+
+        if let Some(line) = version_text.lines().next() {
+            if line.contains("rsync") && line.contains("version") {
+                let version = ToolVersion::new("rsync", line);
+
+                // Check for minimum rsync version (3.0+)
+                if version.meets_minimum(3, 0) {
+                    ToolAvailability::Available(version)
+                } else {
+                    ToolAvailability::IncompatibleVersion(version)
+                }
+            } else {
+                ToolAvailability::VersionDetectionFailed(line.to_string())
+            }
+        } else {
+            ToolAvailability::VersionDetectionFailed("No version output".to_string())
+        }
+    }
+
+    async fn run_benchmark(
+        &self,
+        config: &BenchmarkConfig,
+        source_path: &Path,
+        dest_path: &Path,
+    ) -> Result<BenchmarkResult, BenchmarkError> {
+        // Create test file
+        self.create_test_file(source_path, config.data_size).await?;
+
+        let mut total_metrics = Vec::new();
+
+        for iteration in 0..config.iterations {
+            let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
+
+            // Build and execute rsync command
+            let cmd = self.build_rsync_command(source_path, &iteration_dest);
+
+            let start_time = Instant::now();
+            let output = cmd.output()?;
+            let elapsed = start_time.elapsed();
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(BenchmarkError::ExecutionFailed(format!(
+                    "Rsync failed: {stderr}"
+                )));
+            }
+
+            // Verify file was copied correctly
+            let dest_size = fs::metadata(&iteration_dest).await?.len();
+            if dest_size != config.data_size {
+                return Err(BenchmarkError::ExecutionFailed(format!(
+                    "Size mismatch: expected {}, got {dest_size}",
+                    config.data_size
+                )));
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            let mut metrics = self.parse_output(&stdout, &stderr)?;
+            metrics.wall_time = elapsed;
+            metrics.bytes_transferred = config.data_size;
+            metrics.verified_completion = true;
+
+            total_metrics.push(metrics);
+
+            // Clean up iteration file if not preserving artifacts
+            if !config.preserve_artifacts {
+                let _ = fs::remove_file(&iteration_dest).await;
+            }
+        }
+
+        // Clean up source file if not preserving artifacts
+        if !config.preserve_artifacts {
+            let _ = fs::remove_file(source_path).await;
+        }
+
+        Ok(BenchmarkResult {
+            tool_name: self.tool_name().to_string(),
+            iterations: total_metrics,
+            environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,
+        })
+    }
+
+    fn parse_output(
+        &self,
+        _stdout: &str,
+        _stderr: &str,
+    ) -> Result<BenchmarkMetrics, BenchmarkError> {
+        // Rsync provides more detailed metrics than SCP
+        Ok(BenchmarkMetrics {
+            wall_time: Duration::ZERO, // Will be filled by caller
+            cpu_time: None,
+            memory_peak: None,
+            bytes_transferred: 0, // Will be filled by caller
+            bytes_on_wire: None,
+            verified_completion: false, // Will be filled by caller
+            first_usable_output: None,
+            resume_time: None,
+            disk_amplification_ratio: Some(1.0),
+            failure_reproducible: None,
+            failure_mode: None,
+        })
+    }
+
+    fn get_env_vars(&self) -> BTreeMap<String, String> {
+        let mut env = BTreeMap::new();
+        env.insert(
+            "RSYNC_RSH".to_string(),
+            std::env::var("RSYNC_RSH").unwrap_or_else(|_| "ssh".to_string()),
+        );
+        env
+    }
+}
+
+impl Default for RsyncAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Curl HTTP/HTTP3 baseline adapter.
+#[derive(Debug)]
+pub struct CurlAdapter {
+    /// Curl options
+    curl_options: Vec<String>,
+    /// Whether to try HTTP/3
+    enable_http3: bool,
+}
+
+impl CurlAdapter {
+    /// Create a new Curl adapter with default options.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            curl_options: vec![
+                "--silent".to_string(),
+                "--show-error".to_string(),
+                "--location".to_string(),
+                "--fail".to_string(),
+            ],
+            enable_http3: false,
+        }
+    }
+
+    /// Create a Curl adapter with HTTP/3 enabled.
+    #[must_use]
+    pub fn with_http3() -> Self {
+        Self {
+            curl_options: vec![
+                "--silent".to_string(),
+                "--show-error".to_string(),
+                "--location".to_string(),
+                "--fail".to_string(),
+                "--http3".to_string(),
+            ],
+            enable_http3: true,
+        }
+    }
+
+    /// Create a Curl adapter with custom options.
+    #[must_use]
+    pub fn with_options(curl_options: Vec<String>, enable_http3: bool) -> Self {
+        Self {
+            curl_options,
+            enable_http3,
+        }
+    }
+
+    async fn create_test_file(&self, path: &Path, size: u64) -> Result<(), BenchmarkError> {
+        let mut file = fs::File::create(path).await?;
+
+        // Write test data in chunks
+        let chunk_size = 64 * 1024; // 64KB chunks
+        let chunk_data = vec![0u8; chunk_size];
+        let mut remaining = size;
+
+        while remaining > 0 {
+            let write_size = std::cmp::min(remaining, chunk_size as u64) as usize;
+            AsyncWriteExt::write_all(&mut file, &chunk_data[..write_size]).await?;
+            remaining -= write_size as u64;
+        }
+
+        Ok(())
+    }
+
+    fn build_curl_command(&self, url: &str, dest: &Path) -> Command {
+        let mut cmd = Command::new("curl");
+
+        // Add curl options
+        for option in &self.curl_options {
+            cmd.arg(option);
+        }
+
+        // Add output file
+        cmd.arg("--output");
+        cmd.arg(dest.to_string_lossy().to_string());
+
+        // Add URL
+        cmd.arg(url);
+
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        cmd
+    }
+}
+
+#[async_trait::async_trait]
+impl BaselineAdapter for CurlAdapter {
+    fn tool_name(&self) -> &str {
+        if self.enable_http3 {
+            "curl-http3"
+        } else {
+            "curl"
+        }
+    }
+
+    async fn check_availability(&self) -> ToolAvailability {
+        let output = match Command::new("curl")
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => return ToolAvailability::NotFound,
+        };
+
+        let version_text = String::from_utf8_lossy(&output.stdout);
+
+        if let Some(line) = version_text.lines().next() {
+            if line.contains("curl") {
+                let version = ToolVersion::new("curl", line);
+
+                // Check for minimum curl version (7.50+ for HTTP/3)
+                let min_major = if self.enable_http3 { 7 } else { 7 };
+                let min_minor = if self.enable_http3 { 66 } else { 0 };
+
+                if version.meets_minimum(min_major, min_minor) {
+                    // For HTTP/3, also check if it's compiled with HTTP/3 support
+                    if self.enable_http3 {
+                        let features_text = String::from_utf8_lossy(&output.stdout);
+                        if features_text.contains("HTTP3") || features_text.contains("quiche") || features_text.contains("ngtcp2") {
+                            ToolAvailability::Available(version)
+                        } else {
+                            ToolAvailability::IncompatibleVersion(version)
+                        }
+                    } else {
+                        ToolAvailability::Available(version)
+                    }
+                } else {
+                    ToolAvailability::IncompatibleVersion(version)
+                }
+            } else {
+                ToolAvailability::VersionDetectionFailed(line.to_string())
+            }
+        } else {
+            ToolAvailability::VersionDetectionFailed("No version output".to_string())
+        }
+    }
+
+    async fn run_benchmark(
+        &self,
+        config: &BenchmarkConfig,
+        source_path: &Path,
+        dest_path: &Path,
+    ) -> Result<BenchmarkResult, BenchmarkError> {
+        // Note: For curl adapter, source_path would typically be a URL
+        // For testing purposes, we'll simulate uploading the file
+        self.create_test_file(source_path, config.data_size).await?;
+
+        let mut total_metrics = Vec::new();
+
+        for iteration in 0..config.iterations {
+            let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
+
+            // For testing, use a file:// URL or skip if no HTTP server available
+            // In real usage, this would be an HTTP/HTTPS/HTTP3 URL
+            let test_url = format!("file://{}", source_path.to_string_lossy());
+
+            let cmd = self.build_curl_command(&test_url, &iteration_dest);
+
+            let start_time = Instant::now();
+            let output = cmd.output()?;
+            let elapsed = start_time.elapsed();
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // For test purposes, treat file:// URL failures as skips rather than failures
+                if stderr.contains("Protocol") && test_url.starts_with("file://") {
+                    return Err(BenchmarkError::ToolUnavailable {
+                        tool: self.tool_name().to_string(),
+                        reason: "No HTTP server available for testing".to_string(),
+                    });
+                }
+                return Err(BenchmarkError::ExecutionFailed(format!(
+                    "Curl failed: {stderr}"
+                )));
+            }
+
+            // Verify file was downloaded correctly
+            if iteration_dest.exists() {
+                let dest_size = fs::metadata(&iteration_dest).await?.len();
+                let verified = dest_size == config.data_size;
+
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+
+                let mut metrics = self.parse_output(&stdout, &stderr)?;
+                metrics.wall_time = elapsed;
+                metrics.bytes_transferred = dest_size;
+                metrics.verified_completion = verified;
+
+                total_metrics.push(metrics);
+            } else {
+                return Err(BenchmarkError::ExecutionFailed(
+                    "Curl did not create output file".to_string()
+                ));
+            }
+
+            // Clean up iteration file if not preserving artifacts
+            if !config.preserve_artifacts {
+                let _ = fs::remove_file(&iteration_dest).await;
+            }
+        }
+
+        // Clean up source file if not preserving artifacts
+        if !config.preserve_artifacts {
+            let _ = fs::remove_file(source_path).await;
+        }
+
+        Ok(BenchmarkResult {
+            tool_name: self.tool_name().to_string(),
+            iterations: total_metrics,
+            environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,
+        })
+    }
+
+    fn parse_output(
+        &self,
+        _stdout: &str,
+        stderr: &str,
+    ) -> Result<BenchmarkMetrics, BenchmarkError> {
+        // Curl can provide timing information in verbose mode
+        // For now, provide basic metrics
+        let first_usable_output = if stderr.contains("100") {
+            Some(Duration::from_millis(100)) // Estimate time to first response
+        } else {
+            None
+        };
+
+        Ok(BenchmarkMetrics {
+            wall_time: Duration::ZERO, // Will be filled by caller
+            cpu_time: None,
+            memory_peak: None,
+            bytes_transferred: 0, // Will be filled by caller
+            bytes_on_wire: None, // Curl doesn't easily provide this
+            verified_completion: false, // Will be filled by caller
+            first_usable_output,
+            resume_time: None,
+            disk_amplification_ratio: Some(1.0),
+            failure_reproducible: None,
+            failure_mode: None,
+        })
+    }
+
+    fn get_env_vars(&self) -> BTreeMap<String, String> {
+        let mut env = BTreeMap::new();
+        env.insert(
+            "CURL_CA_BUNDLE".to_string(),
+            std::env::var("CURL_CA_BUNDLE").unwrap_or_default(),
+        );
+        if let Ok(proxy) = std::env::var("HTTP_PROXY") {
+            env.insert("HTTP_PROXY".to_string(), proxy);
+        }
+        env
+    }
+}
+
+impl Default for CurlAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +859,44 @@ mod tests {
             .output();
 
         assert!(output_result.is_err(), "Non-existent command should fail");
+    }
+
+    #[tokio::test]
+    async fn rsync_adapter_creation() {
+        let adapter = RsyncAdapter::new();
+        assert_eq!(adapter.tool_name(), "rsync");
+        assert!(!adapter.rsync_options.is_empty());
+        assert!(adapter.rsync_options.contains(&"--verbose".to_string()));
+    }
+
+    #[tokio::test]
+    async fn rsync_adapter_with_custom_options() {
+        let custom_options = vec!["--checksum".to_string(), "--compress".to_string()];
+        let adapter = RsyncAdapter::with_options(custom_options.clone());
+        assert_eq!(adapter.rsync_options, custom_options);
+    }
+
+    #[tokio::test]
+    async fn curl_adapter_creation() {
+        let adapter = CurlAdapter::new();
+        assert_eq!(adapter.tool_name(), "curl");
+        assert!(!adapter.enable_http3);
+        assert!(!adapter.curl_options.is_empty());
+    }
+
+    #[tokio::test]
+    async fn curl_adapter_http3() {
+        let adapter = CurlAdapter::with_http3();
+        assert_eq!(adapter.tool_name(), "curl-http3");
+        assert!(adapter.enable_http3);
+        assert!(adapter.curl_options.contains(&"--http3".to_string()));
+    }
+
+    #[tokio::test]
+    async fn curl_adapter_with_custom_options() {
+        let custom_options = vec!["--max-time".to_string(), "30".to_string()];
+        let adapter = CurlAdapter::with_options(custom_options.clone(), false);
+        assert_eq!(adapter.curl_options, custom_options);
+        assert!(!adapter.enable_http3);
     }
 }

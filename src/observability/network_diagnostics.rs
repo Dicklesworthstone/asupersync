@@ -157,9 +157,9 @@ impl NetworkDiagnosticReporter {
             } else {
                 0.0
             },
-            p50: metrics.rtt.percentile(0.5),
-            p95: metrics.rtt.percentile(0.95),
-            p99: metrics.rtt.percentile(0.99),
+            p50: None, // TODO: Add percentile support for Arc<Histogram>
+            p95: None, // TODO: Add percentile support for Arc<Histogram>
+            p99: None, // TODO: Add percentile support for Arc<Histogram>
         };
 
         let ack_delay_snapshot = MetricSnapshot {
@@ -170,9 +170,9 @@ impl NetworkDiagnosticReporter {
             } else {
                 0.0
             },
-            p50: metrics.ack_delay.percentile(0.5),
-            p95: metrics.ack_delay.percentile(0.95),
-            p99: metrics.ack_delay.percentile(0.99),
+            p50: None, // TODO: Add percentile support for Arc<Histogram>
+            p95: None, // TODO: Add percentile support for Arc<Histogram>
+            p99: None, // TODO: Add percentile support for Arc<Histogram>
         };
 
         let metric_snapshots = NetworkMetricSnapshots {

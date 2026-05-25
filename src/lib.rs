@@ -21,6 +21,7 @@
 //! - [`types`]: Core types (identifiers, outcomes, budgets, policies)
 //! - [`record`]: Internal records for tasks, regions, obligations
 //! - [`trace`](mod@trace): Tracing infrastructure for deterministic replay
+//! - [`agent_swarm`]: Agent coordination and handoff mechanisms
 //! - [`atp`]: ATP data movement layer primitives
 //! - [`runtime`]: Scheduler and runtime state
 //! - [`cx`]: Capability context and scope API
@@ -156,6 +157,7 @@ compile_error!("feature `kafka` is unsupported on wasm32 browser preview builds.
 
 // ── Portable modules (no platform assumptions) ──────────────────────────
 pub mod actor;
+pub mod agent_swarm;
 pub mod adapter_certification;
 pub mod app;
 #[cfg(not(target_arch = "wasm32"))]
