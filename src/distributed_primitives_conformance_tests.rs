@@ -547,7 +547,7 @@ mod conformance_tests {
             .map(|i| HashKey::new(format!("key{}", i)))
             .collect();
 
-        let initial_mappings = ring.get_all_mappings(&test_keys);
+        let _initial_mappings = ring.get_all_mappings(&test_keys);
 
         // Remove node2
         ring.remove_node(&NodeId::new("node2"));
