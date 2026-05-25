@@ -240,6 +240,40 @@ fn asw_handoff_verifier_stale_proof_output_matches_reviewed_golden() {
 }
 
 #[test]
+fn asw_handoff_verifier_local_fallback_is_unsafe() {
+    let receipt = verifier_receipt_json("asw_handoff_verifier_local_fallback.json");
+    assert_eq!(
+        receipt["handoff_verifier"]["decision"].as_str(),
+        Some("unsafe_to_continue")
+    );
+    assert_eq!(
+        receipt["handoff_verifier"]["reason"].as_str(),
+        Some("proof evidence includes local RCH fallback")
+    );
+    assert_eq!(
+        receipt["handoff_verifier"]["evidence"]["remote_proof_count"].as_u64(),
+        Some(0)
+    );
+    assert!(
+        receipt["handoff_verifier"]["required_refreshes"]
+            .as_array()
+            .expect("required_refreshes must be array")
+            .iter()
+            .any(|value| value.as_str() == Some("rerun-remote-rch-proof")),
+        "local fallback proof must require a fresh remote proof"
+    );
+}
+
+#[test]
+fn asw_handoff_verifier_local_fallback_output_matches_reviewed_golden() {
+    assert_verifier_output_matches_golden(
+        "asw_handoff_verifier_local_fallback.json",
+        "asw_handoff_verifier_local_fallback_expected.json",
+        "ASW handoff verifier local-fallback receipt drifted from the reviewed golden",
+    );
+}
+
+#[test]
 fn dirty_peer_owned_tree_recommends_avoiding_surface() {
     let receipt = receipt_json("dirty_peer_owned_tree.json");
     assert_eq!(next_action_category(&receipt), "avoid-peer-owned-surface");

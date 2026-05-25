@@ -38,6 +38,10 @@ TRACKER_PATHS = {".beads/issues.jsonl", ".beads/beads.db"}
 TRACKER_DIRS = {".beads"}
 TRACKER_WRITE_LOCK_PATH = ".beads/.write.lock"
 AM_ACTIVE_RESERVATION_RE = re.compile(r"^\s*(?P<path>.+?)\s+\[(?P<mode>[^\]]+)\]\s+by\s+(?P<holder>.+?)\s*$")
+RCH_LOCAL_FALLBACK_RE = re.compile(
+    r"(?m)^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> str:
@@ -471,11 +475,26 @@ def proof_stale(executed_at: Any, generated_at: str, stale_after_hours: int) -> 
     return age_hours >= stale_after_hours
 
 
+def proof_local_fallback(proof: dict[str, Any]) -> bool:
+    return any(
+        RCH_LOCAL_FALLBACK_RE.search(str(proof.get(field) or ""))
+        for field in (
+            "command",
+            "output_excerpt",
+            "log_excerpt",
+            "stdout",
+            "stderr",
+            "summary",
+        )
+    )
+
+
 def proof_remote_required(proof: dict[str, Any]) -> bool:
     command = str(proof.get("command") or "")
     target_dir = str(proof.get("target_dir") or "")
     return (
-        bool(proof.get("remote", False))
+        not proof_local_fallback(proof)
+        and bool(proof.get("remote", False))
         and command.startswith("rch exec --")
         and "CARGO_TARGET_DIR" in command
         and "rch_target_p6" in (command + target_dir)
@@ -540,12 +559,21 @@ def verify_handoff_capsule(
         for proof in remote_proofs
         if proof_stale(proof.get("executed_at"), generated_at, stale_after_hours)
     ]
+    local_fallback_proofs = [
+        proof
+        for proof in proofs
+        if str(proof.get("status") or "") == "passed" and proof_local_fallback(proof)
+    ]
     local_or_unsafe_proofs = [
         proof
         for proof in proofs
-        if str(proof.get("status") or "") == "passed" and not proof_remote_required(proof)
+        if str(proof.get("status") or "") == "passed"
+        and not proof_remote_required(proof)
+        and not proof_local_fallback(proof)
     ]
-    if local_or_unsafe_proofs:
+    if local_fallback_proofs:
+        unsafe_reasons.append("proof evidence includes local RCH fallback")
+    elif local_or_unsafe_proofs:
         unsafe_reasons.append("proof evidence includes local-only or malformed RCH command")
     if not remote_proofs:
         required_refreshes.append("rerun-remote-rch-proof")
