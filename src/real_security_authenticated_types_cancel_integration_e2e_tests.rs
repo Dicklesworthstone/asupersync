@@ -435,7 +435,7 @@ impl CancelAwareAuthenticationSystem {
 
     fn create_security_cleanup_handler(&self, correlation_id: String) -> CancelHandle {
         let correlation_id_clone = correlation_id.clone();
-        let self_clone = /* simulate Arc clone behavior */;
+        let self_clone = self.clone(); // simulate Arc clone behavior
 
         CancelHandle::new(Box::new(move |reason| {
             // This would be an async closure in real implementation

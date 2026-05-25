@@ -36,9 +36,8 @@
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
 use proptest::prelude::*;

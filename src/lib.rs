@@ -582,6 +582,8 @@ pub mod real_obligation_saga_trace_integrity_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_obligation_saga_trace_recorder_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_observability_diagnostics_trace_event_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_observability_spectral_health_observability_diagnostics_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_plan_certificate_plan_latency_algebra_integration_e2e_tests;

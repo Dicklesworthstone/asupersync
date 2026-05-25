@@ -5,20 +5,20 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod tests {
-    use crate::stream::debounce::{DebounceStream, DebounceConfig, DebounceState};
-    use crate::sync::notify::{Notify, NotifyWaitGuard, NotifyState};
-    use crate::stream::{Stream, StreamExt};
-    use crate::channel::broadcast::{channel as broadcast_channel, Receiver, Sender};
+    use crate::channel::broadcast::{Receiver, Sender, channel as broadcast_channel};
     use crate::cx::{Cx, Scope};
-    use crate::runtime::{Runtime, RuntimeBuilder};
-    use crate::time::{Duration, Instant, sleep};
-    use crate::types::{Budget, Outcome, TaskId, RegionId};
     use crate::error::AsupersyncError;
+    use crate::runtime::{Runtime, RuntimeBuilder};
+    use crate::stream::debounce::{DebounceConfig, DebounceState, DebounceStream};
+    use crate::stream::{Stream, StreamExt};
+    use crate::sync::notify::{Notify, NotifyState, NotifyWaitGuard};
+    use crate::time::{Duration, Instant, sleep};
+    use crate::types::{Budget, Outcome, RegionId, TaskId};
 
-    use std::collections::{VecDeque, HashMap};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+    use std::collections::{HashMap, VecDeque};
     use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::task::{Context, Poll};
 
     /// Configuration for debounced notification coordination
@@ -114,14 +114,18 @@ mod tests {
 
     impl DebouncedNotifySystem {
         /// Create new debounced notification system
-        fn new(config: DebouncedNotifyConfig, strategy: CoordinationStrategy) -> Result<Self, AsupersyncError> {
+        fn new(
+            config: DebouncedNotifyConfig,
+            strategy: CoordinationStrategy,
+        ) -> Result<Self, AsupersyncError> {
             let debounce_config = DebounceConfig {
                 duration: config.debounce_duration,
                 max_size: config.max_batch_size,
             };
             let debounce_stream = DebounceStream::new(debounce_config)?;
 
-            let (broadcast_sender, broadcast_receiver) = broadcast_channel(config.stream_buffer_capacity);
+            let (broadcast_sender, broadcast_receiver) =
+                broadcast_channel(config.stream_buffer_capacity);
 
             Ok(Self {
                 config,
@@ -142,30 +146,34 @@ mod tests {
             self.is_running.store(true, Ordering::SeqCst);
 
             // Start debounce processing loop
-            let debounce_handle = cx.spawn(|cx| async move {
-                self.run_debounce_processor(cx).await
-            }).await?;
+            let debounce_handle = cx
+                .spawn(|cx| async move { self.run_debounce_processor(cx).await })
+                .await?;
 
             // Start notification coordinator
-            let notify_handle = cx.spawn(|cx| async move {
-                self.run_notification_coordinator(cx).await
-            }).await?;
+            let notify_handle = cx
+                .spawn(|cx| async move { self.run_notification_coordinator(cx).await })
+                .await?;
 
             // Start event delivery loop
-            let delivery_handle = cx.spawn(|cx| async move {
-                self.run_event_delivery(cx).await
-            }).await?;
+            let delivery_handle = cx
+                .spawn(|cx| async move { self.run_event_delivery(cx).await })
+                .await?;
 
             // Start coordination loop
-            let coordination_handle = cx.spawn(|cx| async move {
-                self.run_coordination_loop(cx).await
-            }).await?;
+            let coordination_handle = cx
+                .spawn(|cx| async move { self.run_coordination_loop(cx).await })
+                .await?;
 
             Ok(())
         }
 
         /// Submit event for debounced processing
-        async fn submit_event(&mut self, event: CoordinatedEvent, cx: &Cx) -> Result<(), AsupersyncError> {
+        async fn submit_event(
+            &mut self,
+            event: CoordinatedEvent,
+            cx: &Cx,
+        ) -> Result<(), AsupersyncError> {
             // Add to debounce stream
             self.debounce_stream.submit(event.clone()).await?;
             self.stats.events_received.fetch_add(1, Ordering::SeqCst);
@@ -173,7 +181,8 @@ mod tests {
             // Ensure notification group exists
             let notify_group = event.notify_group.clone();
             if !self.notify_map.contains_key(&notify_group) {
-                self.notify_map.insert(notify_group, Arc::new(Notify::new()));
+                self.notify_map
+                    .insert(notify_group, Arc::new(Notify::new()));
             }
 
             Ok(())
@@ -211,13 +220,15 @@ mod tests {
                     self.handle_immediate_notify(event, cx).await?;
                 }
                 CoordinationStrategy::BatchNotify { batch_threshold } => {
-                    self.handle_batch_notify(event, *batch_threshold, cx).await?;
+                    self.handle_batch_notify(event, *batch_threshold, cx)
+                        .await?;
                 }
                 CoordinationStrategy::TimeBasedNotify { interval } => {
                     self.handle_time_based_notify(event, *interval, cx).await?;
                 }
                 CoordinationStrategy::AdaptiveNotify { load_threshold } => {
-                    self.handle_adaptive_notify(event, *load_threshold, cx).await?;
+                    self.handle_adaptive_notify(event, *load_threshold, cx)
+                        .await?;
                 }
             }
 
@@ -252,7 +263,10 @@ mod tests {
         ) -> Result<(), AsupersyncError> {
             // Add to pending notifications for this group
             let notify_group = event.notify_group.clone();
-            let pending = self.pending_notifications.entry(notify_group.clone()).or_insert_with(Vec::new);
+            let pending = self
+                .pending_notifications
+                .entry(notify_group.clone())
+                .or_insert_with(Vec::new);
             pending.push(event);
 
             // Check if batch threshold reached
@@ -337,23 +351,36 @@ mod tests {
 
         /// Calculate current system load
         fn calculate_system_load(&self) -> f64 {
-            let buffer_load = self.event_buffer.len() as f64 / self.config.stream_buffer_capacity as f64;
-            let pending_load = self.pending_notifications.values()
+            let buffer_load =
+                self.event_buffer.len() as f64 / self.config.stream_buffer_capacity as f64;
+            let pending_load = self
+                .pending_notifications
+                .values()
                 .map(|v| v.len())
-                .sum::<usize>() as f64 / (self.config.notify_queue_depth * self.notify_map.len().max(1)) as f64;
+                .sum::<usize>() as f64
+                / (self.config.notify_queue_depth * self.notify_map.len().max(1)) as f64;
 
             (buffer_load + pending_load) / 2.0
         }
 
         /// Deliver event via broadcast channel
-        async fn deliver_event(&mut self, event: CoordinatedEvent, cx: &Cx) -> Result<(), AsupersyncError> {
+        async fn deliver_event(
+            &mut self,
+            event: CoordinatedEvent,
+            cx: &Cx,
+        ) -> Result<(), AsupersyncError> {
             match self.broadcast_sender.send(event, cx).await {
                 Ok(()) => {
                     self.stats.events_delivered.fetch_add(1, Ordering::SeqCst);
                 }
                 Err(e) => {
-                    self.stats.coordination_errors.fetch_add(1, Ordering::SeqCst);
-                    return Err(AsupersyncError::ChannelError(format!("Event delivery failed: {:?}", e)));
+                    self.stats
+                        .coordination_errors
+                        .fetch_add(1, Ordering::SeqCst);
+                    return Err(AsupersyncError::ChannelError(format!(
+                        "Event delivery failed: {:?}",
+                        e
+                    )));
                 }
             }
 
@@ -366,8 +393,12 @@ mod tests {
                 // Process any pending time-based notifications
                 if !self.event_buffer.is_empty() {
                     let now = Instant::now();
-                    let needs_flush = self.event_buffer.front()
-                        .map(|event| now.duration_since(event.timestamp) >= self.config.debounce_duration)
+                    let needs_flush = self
+                        .event_buffer
+                        .front()
+                        .map(|event| {
+                            now.duration_since(event.timestamp) >= self.config.debounce_duration
+                        })
                         .unwrap_or(false);
 
                     if needs_flush {
@@ -387,7 +418,9 @@ mod tests {
         /// Clean up unused notification groups
         async fn cleanup_notification_groups(&mut self) -> Result<(), AsupersyncError> {
             // Remove notification groups with no pending events
-            let empty_groups: Vec<_> = self.pending_notifications.iter()
+            let empty_groups: Vec<_> = self
+                .pending_notifications
+                .iter()
                 .filter(|(_, events)| events.is_empty())
                 .map(|(group, _)| group.clone())
                 .collect();
@@ -447,7 +480,9 @@ mod tests {
                 }
 
                 cycle_count += 1;
-                self.stats.coordination_cycles.fetch_add(1, Ordering::SeqCst);
+                self.stats
+                    .coordination_cycles
+                    .fetch_add(1, Ordering::SeqCst);
 
                 sleep(self.config.coordination_interval, cx).await?;
             }
@@ -461,8 +496,10 @@ mod tests {
             let delivered = self.stats.events_delivered.load(Ordering::SeqCst);
 
             // Check for delivery lag
-            if received > 0 && delivered as f64 / received as f64 < 0.8 {
-                self.stats.coordination_errors.fetch_add(1, Ordering::SeqCst);
+            if received > 0 && delivered as f64 / (received as f64) < 0.8 {
+                self.stats
+                    .coordination_errors
+                    .fetch_add(1, Ordering::SeqCst);
             }
 
             Ok(())
@@ -474,7 +511,9 @@ mod tests {
 
             // Adjust strategy based on load
             if load > 0.7 {
-                self.strategy = CoordinationStrategy::BatchNotify { batch_threshold: 30 };
+                self.strategy = CoordinationStrategy::BatchNotify {
+                    batch_threshold: 30,
+                };
             } else if load < 0.3 {
                 self.strategy = CoordinationStrategy::ImmediateNotify;
             }
@@ -501,18 +540,23 @@ mod tests {
         /// Wait for notification in specific group
         async fn wait_for_notification(&self, group: &str, cx: &Cx) -> Result<(), AsupersyncError> {
             if let Some(notify) = self.notify_map.get(group) {
-                let timeout = crate::time::timeout(self.config.notify_timeout, notify.notified(), cx).await;
+                let timeout =
+                    crate::time::timeout(self.config.notify_timeout, notify.notified(), cx).await;
                 match timeout {
                     Ok(()) => {
-                        self.stats.notification_waits_completed.fetch_add(1, Ordering::SeqCst);
+                        self.stats
+                            .notification_waits_completed
+                            .fetch_add(1, Ordering::SeqCst);
                         Ok(())
                     }
-                    Err(_) => {
-                        Err(AsupersyncError::Timeout("Notification wait timed out".to_string()))
-                    }
+                    Err(_) => Err(AsupersyncError::Timeout(
+                        "Notification wait timed out".to_string(),
+                    )),
                 }
             } else {
-                Err(AsupersyncError::InvalidState("Notification group not found".to_string()))
+                Err(AsupersyncError::InvalidState(
+                    "Notification group not found".to_string(),
+                ))
             }
         }
 
@@ -526,12 +570,26 @@ mod tests {
         fn get_stats(&self) -> DebouncedNotifyStats {
             DebouncedNotifyStats {
                 events_received: AtomicU64::new(self.stats.events_received.load(Ordering::SeqCst)),
-                events_debounced: AtomicU64::new(self.stats.events_debounced.load(Ordering::SeqCst)),
-                events_delivered: AtomicU64::new(self.stats.events_delivered.load(Ordering::SeqCst)),
-                notifications_sent: AtomicU64::new(self.stats.notifications_sent.load(Ordering::SeqCst)),
-                notification_waits_completed: AtomicU64::new(self.stats.notification_waits_completed.load(Ordering::SeqCst)),
-                coordination_cycles: AtomicU64::new(self.stats.coordination_cycles.load(Ordering::SeqCst)),
-                coordination_errors: AtomicU64::new(self.stats.coordination_errors.load(Ordering::SeqCst)),
+                events_debounced: AtomicU64::new(
+                    self.stats.events_debounced.load(Ordering::SeqCst),
+                ),
+                events_delivered: AtomicU64::new(
+                    self.stats.events_delivered.load(Ordering::SeqCst),
+                ),
+                notifications_sent: AtomicU64::new(
+                    self.stats.notifications_sent.load(Ordering::SeqCst),
+                ),
+                notification_waits_completed: AtomicU64::new(
+                    self.stats
+                        .notification_waits_completed
+                        .load(Ordering::SeqCst),
+                ),
+                coordination_cycles: AtomicU64::new(
+                    self.stats.coordination_cycles.load(Ordering::SeqCst),
+                ),
+                coordination_errors: AtomicU64::new(
+                    self.stats.coordination_errors.load(Ordering::SeqCst),
+                ),
             }
         }
     }
@@ -599,7 +657,8 @@ mod tests {
             assert_eq!(stats.coordination_errors.load(Ordering::SeqCst), 0);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test batch notification coordination
@@ -617,13 +676,15 @@ mod tests {
 
             // Submit batch of events to same group
             let now = Instant::now();
-            let batch_events = (0..5).map(|i| CoordinatedEvent {
-                data: format!("Batch Event {}", i),
-                timestamp: now + Duration::from_millis(i * 10),
-                priority: 1,
-                batch_id: Some(100),
-                notify_group: "batch_group".to_string(),
-            }).collect::<Vec<_>>();
+            let batch_events = (0..5)
+                .map(|i| CoordinatedEvent {
+                    data: format!("Batch Event {}", i),
+                    timestamp: now + Duration::from_millis(i * 10),
+                    priority: 1,
+                    batch_id: Some(100),
+                    notify_group: "batch_group".to_string(),
+                })
+                .collect::<Vec<_>>();
 
             // Submit all events quickly
             for event in batch_events {
@@ -642,7 +703,8 @@ mod tests {
             assert!(stats.coordination_errors.load(Ordering::SeqCst) == 0);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test adaptive coordination strategy
@@ -656,20 +718,24 @@ mod tests {
                 stream_buffer_capacity: 50, // Smaller capacity to test adaptation
                 ..DebouncedNotifyConfig::default()
             };
-            let strategy = CoordinationStrategy::AdaptiveNotify { load_threshold: 0.5 };
+            let strategy = CoordinationStrategy::AdaptiveNotify {
+                load_threshold: 0.5,
+            };
             let mut system = DebouncedNotifySystem::new(config, strategy)?;
 
             system.start(cx).await?;
 
             // Submit high load to trigger adaptation
             let now = Instant::now();
-            let high_load_events = (0..40).map(|i| CoordinatedEvent {
-                data: format!("Load Event {}", i),
-                timestamp: now + Duration::from_millis(i * 5),
-                priority: i % 3,
-                batch_id: Some(200 + (i / 10) as u64),
-                notify_group: format!("group_{}", i % 5),
-            }).collect::<Vec<_>>();
+            let high_load_events = (0..40)
+                .map(|i| CoordinatedEvent {
+                    data: format!("Load Event {}", i),
+                    timestamp: now + Duration::from_millis(i * 5),
+                    priority: i % 3,
+                    batch_id: Some(200 + (i / 10) as u64),
+                    notify_group: format!("group_{}", i % 5),
+                })
+                .collect::<Vec<_>>();
 
             // Submit events quickly to create load
             for event in high_load_events {
@@ -694,6 +760,7 @@ mod tests {
             assert!(error_rate < 0.1, "Error rate too high: {}", error_rate);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 }
