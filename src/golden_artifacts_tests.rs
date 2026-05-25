@@ -1999,7 +1999,7 @@ debug_mode = false
 
         // Frame sequence examples
         output.push_str("## Frame Sequence Examples\n");
-        let frame_examples = vec![
+        let frame_examples: Vec<(&str, &[u8], Vec<u8>)> = vec![
             (
                 "hello_message",
                 b"Hello, World!",
