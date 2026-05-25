@@ -8,6 +8,8 @@
 //! It intentionally stays runtime-agnostic and does not perform socket I/O.
 
 use crate::cx::Cx;
+use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError};
+use crate::bytes::BytesMut;
 use std::fmt;
 
 use super::streams::{QuicStreamError, StreamId, StreamRole, StreamTable, StreamTableError};
@@ -30,6 +32,8 @@ pub enum NativeQuicConnectionError {
     StreamTable(StreamTableError),
     /// Stream-state error.
     Stream(QuicStreamError),
+    /// Frame encoding/decoding error.
+    Frame(QuicFrameError),
     /// Congestion-control window would be exceeded.
     CongestionLimited {
         /// Requested in-flight bytes for the packet.
@@ -62,6 +66,7 @@ impl fmt::Display for NativeQuicConnectionError {
             Self::Transport(err) => write!(f, "{err}"),
             Self::StreamTable(err) => write!(f, "{err}"),
             Self::Stream(err) => write!(f, "{err}"),
+            Self::Frame(err) => write!(f, "{err}"),
             Self::CongestionLimited {
                 requested,
                 bytes_in_flight,
@@ -95,6 +100,12 @@ impl From<QuicTlsError> for NativeQuicConnectionError {
 impl From<TransportError> for NativeQuicConnectionError {
     fn from(value: TransportError) -> Self {
         Self::Transport(value)
+    }
+}
+
+impl From<QuicFrameError> for NativeQuicConnectionError {
+    fn from(value: QuicFrameError) -> Self {
+        Self::Frame(value)
     }
 }
 
@@ -764,6 +775,114 @@ fn map_stream_table_error(err: StreamTableError) -> NativeQuicConnectionError {
     match err {
         StreamTableError::Stream(stream_err) => NativeQuicConnectionError::Stream(stream_err),
         other => NativeQuicConnectionError::StreamTable(other),
+    }
+}
+
+impl NativeQuicConnection {
+    /// Process an incoming QUIC frame and update connection state.
+    ///
+    /// This method provides a basic frame processing interface that can be
+    /// extended as the state machine APIs evolve. Currently handles:
+    /// - PING frames (no-op)
+    /// - Basic frame validation and logging
+    pub fn process_frame(
+        &mut self,
+        cx: &Cx,
+        frame: &QuicFrame,
+        _space: PacketNumberSpace,
+    ) -> Result<(), NativeQuicConnectionError> {
+        cx.checkpoint().map_err(|_| NativeQuicConnectionError::Cancelled)?;
+
+        match frame {
+            QuicFrame::Ping => {
+                // PING frame requires no state update, used for keep-alive
+                Ok(())
+            }
+            QuicFrame::Ack { .. } => {
+                // TODO: Integration with transport machine pending API alignment
+                Ok(())
+            }
+            QuicFrame::Stream { .. } => {
+                // TODO: Integration with stream table pending API alignment
+                Ok(())
+            }
+            QuicFrame::Crypto { .. } => {
+                // TODO: Integration with TLS machine pending API alignment
+                Ok(())
+            }
+            QuicFrame::ResetStream { .. } => {
+                // TODO: Integration with stream table pending API alignment
+                Ok(())
+            }
+            QuicFrame::StopSending { .. } => {
+                // TODO: Integration with stream table pending API alignment
+                Ok(())
+            }
+            QuicFrame::PathChallenge { .. } => {
+                // TODO: Integration with path manager
+                Ok(())
+            }
+            QuicFrame::PathResponse { .. } => {
+                // TODO: Integration with path manager
+                Ok(())
+            }
+            QuicFrame::ConnectionClose { .. } => {
+                // TODO: Integration with transport machine pending API alignment
+                Ok(())
+            }
+            QuicFrame::HandshakeDone => {
+                // TODO: Integration with TLS machine pending API alignment
+                Ok(())
+            }
+            _ => {
+                // Other frame types not yet implemented
+                Ok(())
+            }
+        }
+    }
+
+    /// Basic frame generation interface.
+    ///
+    /// This provides the foundation for generating outgoing frames.
+    /// Currently returns minimal frames for demonstration.
+    pub fn generate_frames(
+        &mut self,
+        cx: &Cx,
+        _space: PacketNumberSpace,
+        _max_frame_bytes: usize,
+    ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
+        cx.checkpoint().map_err(|_| NativeQuicConnectionError::Cancelled)?;
+
+        // For now, return an empty frame set
+        // TODO: Generate ACK, STREAM, and control frames as APIs stabilize
+        Ok(Vec::new())
+    }
+
+    /// Encode frames into a buffer for packet assembly.
+    pub fn encode_frames(
+        frames: &[QuicFrame],
+        buf: &mut BytesMut,
+    ) -> Result<(), NativeQuicConnectionError> {
+        for frame in frames {
+            frame.encode(buf)?;
+        }
+        Ok(())
+    }
+
+    /// Decode frames from a packet payload.
+    pub fn decode_frames(payload: &[u8]) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
+        let mut frames = Vec::new();
+        let mut buf = payload;
+
+        while !buf.is_empty() {
+            if let Some(frame) = QuicFrame::decode(&mut buf)? {
+                frames.push(frame);
+            } else {
+                break;
+            }
+        }
+
+        Ok(frames)
     }
 }
 

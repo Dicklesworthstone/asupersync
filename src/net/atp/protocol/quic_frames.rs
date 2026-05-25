@@ -283,7 +283,7 @@ pub struct EcnCounts {
 }
 
 /// QUIC frame encoding/decoding errors
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum QuicFrameError {
     /// Varint encoding/decoding error
     #[error("varint error: {0}")]

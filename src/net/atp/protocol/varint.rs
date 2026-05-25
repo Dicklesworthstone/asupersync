@@ -169,7 +169,7 @@ impl From<VarInt> for u64 {
 }
 
 /// Varint encoding/decoding errors.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VarIntError {
     /// Value cannot fit in ATP's QUIC-style 62-bit varint space.
     #[error("varint value too large: {value} > {max}", value = .0, max = VARINT_MAX)]
