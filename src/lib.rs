@@ -343,6 +343,8 @@ pub mod real_channel_oneshot_cancel_symbol_cancel_nested_scope_integration_e2e_t
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_oneshot_cx_scope_cancellation_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_channel_oneshot_sync_once_cell_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_partition_distributed_distribution_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_channel_supervision_e2e_tests;
