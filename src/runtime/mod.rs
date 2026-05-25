@@ -15,6 +15,7 @@
 //! - [`io_driver`]: Reactor driver that dispatches readiness to wakers
 //! - [`region_heap`]: Region-owned heap allocator with quiescent reclamation
 //! - [`cache`]: Content-addressed artifact cache and zero-copy handoff policy
+//! - [`rch_health`]: Deterministic RCH worker health and cache-warm admission
 //!
 //! # Runtime Builder
 //!
@@ -140,6 +141,7 @@ pub mod obligation_table;
 pub mod panic_isolation;
 pub mod reactor;
 pub mod region_heap;
+pub mod rch_health;
 #[cfg(test)]
 mod region_heap_metamorphic_tests;
 pub mod region_table;

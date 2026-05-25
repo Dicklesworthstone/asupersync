@@ -110,7 +110,7 @@ mod tests {
     }
 
     /// Mock e-process monitor for observation sequence testing.
-    #[derive(Debug, Clone)]
+    #[derive(Debug)]
     struct MockLeakMonitor {
         inner: LeakMonitor,
         observation_sequence: Vec<u64>,
