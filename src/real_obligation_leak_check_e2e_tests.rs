@@ -1196,14 +1196,14 @@ impl ObligationCleanupHarness {
             .push(operation);
     }
 
-    fn create_reserved_send(&self, context: &str) -> ObligationId {
+    fn create_pending_obligation(&self, kind: ObligationKind, context: &str) -> ObligationId {
         let mut ledger = self
             .ledger
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = ledger.len();
         let token = ledger.acquire_with_context(
-            ObligationKind::SendPermit,
+            kind,
             self.holder,
             self.region,
             self.next_time(),
@@ -1225,6 +1225,7 @@ impl ObligationCleanupHarness {
             "obligation_created",
             json!({
                 "context": context,
+                "kind": kind.as_str(),
                 "obligation_id": obligation_id.to_string(),
                 "ledger_size_before": before,
                 "ledger_size_after": after
@@ -1234,7 +1235,15 @@ impl ObligationCleanupHarness {
         obligation_id
     }
 
-    fn abort_reserved_send(
+    fn create_reserved_send(&self, context: &str) -> ObligationId {
+        self.create_pending_obligation(ObligationKind::SendPermit, context)
+    }
+
+    fn create_pending_ack(&self, context: &str) -> ObligationId {
+        self.create_pending_obligation(ObligationKind::Ack, context)
+    }
+
+    fn abort_pending_obligation(
         &self,
         obligation_id: ObligationId,
         context: &str,
@@ -1280,6 +1289,18 @@ impl ObligationCleanupHarness {
                 Err(error.to_string())
             }
         }
+    }
+
+    fn abort_reserved_send(
+        &self,
+        obligation_id: ObligationId,
+        context: &str,
+    ) -> Result<(), String> {
+        self.abort_pending_obligation(obligation_id, context)
+    }
+
+    fn abort_pending_ack(&self, obligation_id: ObligationId, context: &str) -> Result<(), String> {
+        self.abort_pending_obligation(obligation_id, context)
     }
 
     fn snapshot(&self, check_type: &str) -> LeakSnapshot {
@@ -1741,6 +1762,316 @@ pub fn run_client_disconnect_forced_cancel_cleanup_e2e() {
                 "pending_after": after_cancel.pending_obligations,
                 "leaked_after": after_cancel.leaked_obligations,
                 "ledger_consistent": after_cancel.ledger_consistent,
+                "cleanup_tasks_started": cleanup_task_start_count,
+                "cleanup_tasks_completed": cleanup_task_complete_count,
+                "cleanup_region_closed": cleanup_region_is_closed,
+                "cleanup_runtime_quiescent": cleanup_runtime_is_quiescent,
+                "cleanup_elapsed_ms": cleanup_elapsed.as_millis(),
+                "cleanup_budget_ms": cleanup_budget.as_millis(),
+                "atp_log_schema_version": ATP_LOG_EVENT_SCHEMA_VERSION,
+                "chaos_seed": chaos_seed,
+                "chaos_summary": chaos_summary,
+                "chaos_decision_points": chaos_stats.decision_points,
+                "chaos_cancellations": chaos_stats.cancellations,
+                "chaos_delays": chaos_stats.delays,
+                "chaos_budget_exhaustions": chaos_stats.budget_exhaustions,
+                "chaos_total_delay_ms": chaos_stats.total_delay.as_millis()
+            }),
+        )
+        .expect("artifact bundle should be written when artifact env is set");
+}
+
+/// Runs the no-mock supervisor-restart cleanup scenario for pending ack obligations.
+///
+/// This complements the client-disconnect send-permit scenario by proving that
+/// restart recovery aborts outstanding acknowledgements without leaving pending
+/// obligations or live cleanup tasks behind.
+pub fn run_supervisor_restart_pending_ack_cleanup_e2e() {
+    let harness = Arc::new(ObligationCleanupHarness::new());
+    let pending_count = 12;
+    let cleanup_budget = Duration::from_millis(250);
+    let chaos_seed = 0x9005_7B51_u64;
+    let chaos_config = cleanup_chaos_config(chaos_seed);
+    let chaos_summary = chaos_config.summary();
+    let (cleanup_faults, chaos_stats) = build_cleanup_chaos_faults(&chaos_config, pending_count);
+
+    harness.log(
+        "test_start",
+        json!({
+            "test": "supervisor_restart_pending_ack_cleanup",
+            "pending_count": pending_count,
+            "cleanup_budget_ms": cleanup_budget.as_millis(),
+            "chaos_seed": chaos_seed,
+            "chaos_summary": chaos_summary
+        }),
+    );
+    harness.log_atp_event(
+        "test_started",
+        json!({
+            "scenario": "supervisor_restart_during_pending_ack",
+            "pending_count": pending_count,
+            "chaos_summary": chaos_summary,
+            "cleanup_budget_ms": cleanup_budget.as_millis(),
+        }),
+    );
+    harness.log_atp_event(
+        "seed_selected",
+        json!({
+            "seed": chaos_seed,
+            "scenario": "supervisor_restart_during_pending_ack",
+            "chaos_decision_points": chaos_stats.decision_points,
+            "chaos_cancellations": chaos_stats.cancellations,
+            "chaos_delays": chaos_stats.delays,
+            "chaos_budget_exhaustions": chaos_stats.budget_exhaustions,
+        }),
+    );
+
+    let initial_check = harness.snapshot("initial");
+    assert_eq!(
+        initial_check.pending_obligations, 0,
+        "should start with zero pending obligations"
+    );
+    assert_eq!(
+        initial_check.leaked_obligations, 0,
+        "should start with zero leaked obligations"
+    );
+
+    let mut pending_obligations = Vec::with_capacity(pending_count);
+    for index in 0..pending_count {
+        let obligation_id = harness.create_pending_ack(&format!("supervisor_restart_ack_{index}"));
+        pending_obligations.push(obligation_id);
+
+        if index % 3 == 2 {
+            harness.log(
+                "stage_progress",
+                json!({
+                    "stage": "ack_pending_before_restart",
+                    "created": index + 1,
+                    "pending_so_far": pending_obligations.len()
+                }),
+            );
+        }
+    }
+
+    let before_restart = harness.snapshot("before_supervisor_restart");
+    assert_eq!(
+        before_restart.pending_obligations, pending_count,
+        "all ack obligations should be pending before supervisor restart"
+    );
+    assert_eq!(
+        before_restart.leaked_obligations, 0,
+        "pending ack obligations should not be marked leaked before cleanup"
+    );
+
+    harness.log(
+        "supervisor_restart_requested",
+        json!({
+            "scenario": "supervisor_restart_during_pending_ack",
+            "pending_before": before_restart.pending_obligations,
+            "leaked_before": before_restart.leaked_obligations,
+            "cleanup_budget_ms": cleanup_budget.as_millis(),
+            "chaos_seed": chaos_seed,
+            "chaos_summary": chaos_summary,
+            "chaos_decision_points": chaos_stats.decision_points,
+            "chaos_cancellations": chaos_stats.cancellations,
+            "chaos_delays": chaos_stats.delays,
+            "chaos_budget_exhaustions": chaos_stats.budget_exhaustions
+        }),
+    );
+
+    let cleanup_runtime = RuntimeBuilder::new()
+        .thread_name_prefix("obligation-chaos-supervisor-restart-cleanup")
+        .worker_threads(2)
+        .build()
+        .expect("real cleanup runtime should build for supervisor restart E2E");
+    let runtime_handle = cleanup_runtime.handle();
+    let cleanup_started = Instant::now();
+    let cleanup_tasks_started = Arc::new(AtomicUsize::new(0));
+    let cleanup_tasks_completed = Arc::new(AtomicUsize::new(0));
+    let cleanup_region_closed = Arc::new(AtomicBool::new(false));
+    let mut cleanup_handles = Vec::with_capacity(pending_obligations.len());
+
+    for (index, obligation_id) in pending_obligations.iter().copied().enumerate() {
+        let cleanup_harness = Arc::clone(&harness);
+        let tasks_started = Arc::clone(&cleanup_tasks_started);
+        let tasks_completed = Arc::clone(&cleanup_tasks_completed);
+        let fault = cleanup_faults[index];
+        let handle = runtime_handle.spawn(async move {
+            tasks_started.fetch_add(1, Ordering::AcqRel);
+            if let Some(delay) = fault.delay {
+                std::thread::sleep(delay);
+            }
+            if fault.budget_exhausted {
+                std::thread::yield_now();
+            }
+            cleanup_harness.log(
+                "chaos_fault_injected",
+                json!({
+                    "stage": "supervisor_restart_cleanup_task",
+                    "task_index": index,
+                    "cancel_requested": fault.cancel_requested,
+                    "delay_ms": fault.delay.map_or(0, |delay| delay.as_millis()),
+                    "budget_exhausted": fault.budget_exhausted
+                }),
+            );
+            assert!(
+                fault.cancel_requested,
+                "restart chaos plan must cancel every pending ack obligation"
+            );
+            cleanup_harness
+                .abort_pending_ack(obligation_id, "supervisor_restart_cleanup")
+                .expect("supervisor restart cleanup should abort every pending ack obligation");
+            let completed = tasks_completed.fetch_add(1, Ordering::AcqRel) + 1;
+
+            if index % 3 == 2 {
+                cleanup_harness.log(
+                    "stage_progress",
+                    json!({
+                        "stage": "abort_pending_ack_after_restart",
+                        "aborted": completed
+                    }),
+                );
+            }
+        });
+        cleanup_handles.push(handle);
+    }
+
+    cleanup_runtime.block_on(async {
+        for handle in cleanup_handles {
+            handle.await;
+        }
+    });
+    cleanup_region_closed.store(true, Ordering::Release);
+    let cleanup_elapsed = cleanup_started.elapsed();
+
+    let after_restart = harness.snapshot("after_supervisor_restart_cleanup");
+    let cleanup_task_start_count = cleanup_tasks_started.load(Ordering::Acquire);
+    let cleanup_task_complete_count = cleanup_tasks_completed.load(Ordering::Acquire);
+    let cleanup_region_is_closed = cleanup_region_closed.load(Ordering::Acquire);
+    let cleanup_runtime_is_quiescent = cleanup_runtime.is_quiescent();
+
+    harness.log(
+        "supervisor_restart_cleanup_complete",
+        json!({
+            "pending_before": before_restart.pending_obligations,
+            "pending_after": after_restart.pending_obligations,
+            "leaked_after": after_restart.leaked_obligations,
+            "ledger_consistent": after_restart.ledger_consistent,
+            "cleanup_tasks_started": cleanup_task_start_count,
+            "cleanup_tasks_completed": cleanup_task_complete_count,
+            "cleanup_region_closed": cleanup_region_is_closed,
+            "cleanup_runtime_quiescent": cleanup_runtime_is_quiescent,
+            "region_close_implies_quiescence": cleanup_region_is_closed && cleanup_runtime_is_quiescent,
+            "cleanup_elapsed_ms": cleanup_elapsed.as_millis(),
+            "cleanup_budget_ms": cleanup_budget.as_millis(),
+            "chaos_seed": chaos_seed,
+            "chaos_decision_points": chaos_stats.decision_points,
+            "chaos_cancellations": chaos_stats.cancellations,
+            "chaos_delays": chaos_stats.delays,
+            "chaos_budget_exhaustions": chaos_stats.budget_exhaustions,
+            "chaos_total_delay_ms": chaos_stats.total_delay.as_millis()
+        }),
+    );
+
+    assert_eq!(
+        chaos_stats.decision_points as usize, pending_count,
+        "chaos plan should include one cleanup fault decision per pending ack obligation"
+    );
+    assert_eq!(
+        chaos_stats.cancellations as usize, pending_count,
+        "restart cleanup chaos plan should inject cancellation at every cleanup decision"
+    );
+    assert!(
+        cleanup_elapsed <= cleanup_budget,
+        "supervisor restart cleanup exceeded budget: {:?} > {:?}",
+        cleanup_elapsed,
+        cleanup_budget
+    );
+    assert_eq!(
+        after_restart.pending_obligations, 0,
+        "supervisor restart cleanup must resolve all pending ack obligations"
+    );
+    assert_eq!(
+        after_restart.leaked_obligations, 0,
+        "supervisor restart cleanup must not leak ack obligations"
+    );
+    assert_eq!(
+        cleanup_task_start_count, pending_count,
+        "supervisor restart cleanup should spawn one cleanup task per pending ack obligation"
+    );
+    assert_eq!(
+        cleanup_task_complete_count, pending_count,
+        "supervisor restart cleanup tasks must all complete"
+    );
+    assert!(
+        cleanup_region_is_closed,
+        "cleanup region marker should close after all restart cleanup tasks join"
+    );
+    assert!(
+        cleanup_runtime_is_quiescent,
+        "cleanup runtime should be quiescent after supervisor restart cleanup joins"
+    );
+    assert!(
+        after_restart.ledger_consistent,
+        "ledger should remain consistent after supervisor restart cleanup"
+    );
+
+    let validation_result = harness.validate_zero_leaks();
+    assert!(
+        validation_result.is_ok(),
+        "supervisor restart leak validation failed: {:?}",
+        validation_result
+    );
+    harness.log_atp_event(
+        "oracle_checked",
+        json!({
+            "oracle": "obligation_cleanup_no_leak",
+            "zero_pending": after_restart.pending_obligations == 0,
+            "zero_leaks": after_restart.leaked_obligations == 0,
+            "ledger_consistent": after_restart.ledger_consistent,
+            "region_close_implies_quiescence": cleanup_region_is_closed && cleanup_runtime_is_quiescent,
+            "chaos_cancellations": chaos_stats.cancellations,
+        }),
+    );
+
+    harness.log(
+        "test_result",
+        json!({
+            "passed": true,
+            "scenario": "supervisor_restart_during_pending_ack",
+            "zero_pending": after_restart.pending_obligations == 0,
+            "zero_leaks": after_restart.leaked_obligations == 0,
+            "no_task_leaks": cleanup_task_complete_count == pending_count,
+            "region_close_implies_quiescence": cleanup_region_is_closed && cleanup_runtime_is_quiescent,
+            "cleanup_within_budget": cleanup_elapsed <= cleanup_budget,
+            "chaos_seed": chaos_seed,
+            "chaos_decision_points": chaos_stats.decision_points,
+            "chaos_cancellations": chaos_stats.cancellations,
+            "chaos_delays": chaos_stats.delays,
+            "chaos_budget_exhaustions": chaos_stats.budget_exhaustions
+        }),
+    );
+    harness.log_atp_event(
+        "test_completed",
+        json!({
+            "passed": true,
+            "scenario": "supervisor_restart_during_pending_ack",
+            "cleanup_elapsed_ms": cleanup_elapsed.as_millis(),
+            "cleanup_budget_ms": cleanup_budget.as_millis(),
+            "chaos_seed": chaos_seed,
+        }),
+    );
+
+    harness
+        .write_artifact_bundle(
+            "supervisor_restart_pending_ack_cleanup",
+            json!({
+                "schema_version": "obligation-chaos-e2e-summary-v1",
+                "scenario": "supervisor_restart_during_pending_ack",
+                "pending_before": before_restart.pending_obligations,
+                "pending_after": after_restart.pending_obligations,
+                "leaked_after": after_restart.leaked_obligations,
+                "ledger_consistent": after_restart.ledger_consistent,
                 "cleanup_tasks_started": cleanup_task_start_count,
                 "cleanup_tasks_completed": cleanup_task_complete_count,
                 "cleanup_region_closed": cleanup_region_is_closed,

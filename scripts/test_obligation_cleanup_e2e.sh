@@ -18,14 +18,27 @@ RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 LOG_FILE="${OUTPUT_DIR}/obligation_cleanup_e2e_${TIMESTAMP}.log"
 ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
 SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
-SCENARIO_ID="client_disconnect_forced_cancel_cleanup"
-TEST_ARTIFACT_SCENARIO_DIR="${ASUPERSYNC_TEST_ARTIFACTS_DIR:-${ARTIFACT_DIR}/test-artifacts}/${SCENARIO_ID}"
 TEST_FILTER="${1:-test_client_disconnect_forced_cancel_cleans_pending_obligations}"
+
+case "$TEST_FILTER" in
+    *supervisor_restart_pending_ack*)
+        SCENARIO_ID="supervisor_restart_pending_ack_cleanup"
+        EXPECTED_CHAOS_CANCELLATIONS=12
+        WORKLOAD_ID="${WORKLOAD_ID:-asupersync-9u057b.9}"
+        RUNTIME_PROFILE="${RUNTIME_PROFILE:-real-service-obligation-chaos-supervisor-restart}"
+        WORKLOAD_CONFIG_REF="${WORKLOAD_CONFIG_REF:-scripts/test_obligation_cleanup_e2e.sh::supervisor_restart_pending_ack}"
+        ;;
+    *)
+        SCENARIO_ID="client_disconnect_forced_cancel_cleanup"
+        EXPECTED_CHAOS_CANCELLATIONS=16
+        WORKLOAD_ID="${WORKLOAD_ID:-asupersync-9u057b.5}"
+        RUNTIME_PROFILE="${RUNTIME_PROFILE:-real-service-obligation-chaos}"
+        WORKLOAD_CONFIG_REF="${WORKLOAD_CONFIG_REF:-scripts/test_obligation_cleanup_e2e.sh::client_disconnect_forced_cancel}"
+        ;;
+esac
+
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch-target-obligation-cleanup-e2e-${USER:-unknown}-${TIMESTAMP}-$$}"
-WORKLOAD_ID="${WORKLOAD_ID:-asupersync-9u057b.5}"
-RUNTIME_PROFILE="${RUNTIME_PROFILE:-real-service-obligation-chaos}"
-WORKLOAD_CONFIG_REF="${WORKLOAD_CONFIG_REF:-scripts/test_obligation_cleanup_e2e.sh::client_disconnect_forced_cancel}"
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
 RCH_QUEUE_WHEN_BUSY="${RCH_QUEUE_WHEN_BUSY:-1}"
 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-300}"
@@ -142,7 +155,7 @@ if [ "$TEST_RESULT" -eq 0 ]; then
     require_pattern '"event_type":"seed_selected"' "ATP seed-selected event"
     require_pattern '"event_type":"oracle_checked"' "ATP oracle-checked event"
     require_pattern '"event_type":"test_completed"' "ATP test-completed event"
-    require_pattern '"chaos_cancellations"[[:space:]]*:[[:space:]]*16' "forced-cancel chaos decisions"
+    require_pattern "\"chaos_cancellations\"[[:space:]]*:[[:space:]]*${EXPECTED_CHAOS_CANCELLATIONS}" "forced-cancel chaos decisions"
 
     if [ ! -s "${TEST_ARTIFACT_SCENARIO_DIR}/events.ndjson" ] || [ ! -s "${TEST_ARTIFACT_SCENARIO_DIR}/summary.json" ]; then
         echo "  ERROR: test artifact materialization failed"
@@ -162,7 +175,7 @@ cat > "$SUMMARY_FILE" << ENDJSON
 {
   "schema_version": "obligation-cleanup-e2e-runner-summary-v1",
   "suite_id": "obligation_cleanup_e2e",
-  "scenario_id": "client_disconnect_forced_cancel_cleanup",
+  "scenario_id": "${SCENARIO_ID}",
   "workload_id": "${WORKLOAD_ID}",
   "runtime_profile": "${RUNTIME_PROFILE}",
   "workload_config_ref": "${WORKLOAD_CONFIG_REF}",

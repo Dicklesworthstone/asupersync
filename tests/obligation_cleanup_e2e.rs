@@ -11,3 +11,8 @@
 fn test_client_disconnect_forced_cancel_cleans_pending_obligations() {
     asupersync::real_obligation_leak_check_e2e_tests::run_client_disconnect_forced_cancel_cleanup_e2e();
 }
+
+#[test]
+fn test_supervisor_restart_pending_ack_cleans_pending_obligations() {
+    asupersync::real_obligation_leak_check_e2e_tests::run_supervisor_restart_pending_ack_cleanup_e2e();
+}
