@@ -926,7 +926,7 @@ fn system_time_unix_nanos(time: SystemTime) -> u64 {
 // Additional StreamObject methods for ATP-E4 early usability support
 impl StreamManifest {
     /// Mark a chunk range as verified for early consumption.
-    pub fn mark_chunk_verified(&mut self, start_offset: u64, size: u64) -> AtpResult<()> {
+    pub fn mark_chunk_verified(&mut self, start_offset: u64, size: u64) -> AtpOutcome<()> {
         let epoch_id = self.epochs.len() as u64 + 1;
         let byte_range = ByteRange::new(start_offset, start_offset + size);
         let epoch = StreamEpoch::new(
@@ -964,7 +964,7 @@ impl StreamManifest {
             self.epochs.len() as u64 + 1,
             self.object_id.clone(),
             ByteRange::new(self.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly), self.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly)),
-            EpochState::Cancelled,
+            EpochState::Invalidated,
             vec![],
         );
 
@@ -981,7 +981,7 @@ impl StreamManifest {
             self.epochs.len() as u64 + 1,
             self.object_id.clone(),
             ByteRange::new(offset, offset),
-            EpochState::Invalid,
+            EpochState::Invalidated,
             vec![],
         );
 
@@ -993,20 +993,6 @@ impl StreamManifest {
         // Implementation would check manifest metadata
         self.epochs.last().map(|e| e.byte_range.end)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum EpochState {
-    /// Epoch data has been verified and is safe to consume
-    Verified,
-    /// Epoch data is provisional and may be reverted
-    Provisional,
-    /// Epoch represents final completed state
-    Final,
-    /// Epoch was cancelled
-    Cancelled,
-    /// Epoch was invalidated due to verification failure
-    Invalid,
 }
 
 impl EpochState {
