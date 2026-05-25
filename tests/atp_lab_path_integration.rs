@@ -114,6 +114,57 @@ async fn test_atp_path_lab_udp_blocked_relay_fallback() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
+async fn test_atp_path_lab_masque_connect_udp_fake_proxy() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut harness = AtpPathLabHarness::new(AtpPathTestConfig::relay_only());
+
+    let scenario = AtpLabScenario::new("enterprise-masque-connect-udp", 0xA7F0_0007)
+        .with_regime(AtpLabRegime::UdpBlocked)
+        .with_regime(AtpLabRegime::MasqueConnectUdpProxy);
+
+    let result = harness.execute_scenario(&scenario).await?;
+
+    assert_eq!(
+        result.path_validation.detected_nat_profile,
+        NatProfile::UdpBlocked,
+        "MASQUE proxy scenario should preserve the UDP-blocked observation"
+    );
+    assert!(
+        !result.path_validation.has_direct_path(),
+        "MASQUE proxy must not be reported as a direct peer-to-peer path"
+    );
+    assert!(
+        result.path_validation.relay_succeeded,
+        "MASQUE proxy is an online relay-family adapter"
+    );
+    assert!(
+        result.path_validation.masque_connect_udp_succeeded,
+        "Fake CONNECT-UDP proxy path should validate"
+    );
+    assert_eq!(
+        result.path_validation.selected_path_kind,
+        Some(PathKind::MasqueConnectUdp),
+        "Enterprise egress scenario should select the MASQUE adapter"
+    );
+    assert!(
+        result.path_validation.transfer_succeeded(),
+        "Transfer should complete over the fake MASQUE proxy model"
+    );
+    assert!(
+        result.trace_events.iter().any(|event| matches!(
+            &event.event,
+            asupersync::lab::atp_path::AtpPathEventKind::ConnectionAttempt {
+                path_kind: PathKind::MasqueConnectUdp,
+                target_endpoint,
+            } if target_endpoint == "masque-connect-udp-proxy:443"
+        )),
+        "Trace should expose the fake proxy endpoint"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_atp_path_lab_hard_nat_punch_failure() -> Result<(), Box<dyn std::error::Error>> {
     let mut harness = AtpPathLabHarness::new(AtpPathTestConfig::nat_stress());
 

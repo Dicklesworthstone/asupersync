@@ -86,6 +86,9 @@ impl AtpLabScenario {
             Self::new("udp-blocked-private-route", 0xA7F0_0003)
                 .with_regime(AtpLabRegime::UdpBlocked)
                 .with_regime(AtpLabRegime::TailscalePrivateRoute),
+            Self::new("enterprise-masque-connect-udp", 0xA7F0_0007)
+                .with_regime(AtpLabRegime::UdpBlocked)
+                .with_regime(AtpLabRegime::MasqueConnectUdpProxy),
             Self::new("path-migration-loss", 0xA7F0_0004)
                 .with_regime(AtpLabRegime::PathMigration)
                 .with_regime(AtpLabRegime::PacketDuplication)
@@ -216,6 +219,8 @@ pub enum AtpLabRegime {
     RelayOnly,
     /// Tailscale-like private route is available.
     TailscalePrivateRoute,
+    /// MASQUE/CONNECT-UDP proxy is available for enterprise egress.
+    MasqueConnectUdpProxy,
     /// Active path migration occurs mid-transfer.
     PathMigration,
     /// Packets may be duplicated.
@@ -256,6 +261,7 @@ impl AtpLabRegime {
             Self::Ipv6Direct => "ipv6_direct",
             Self::RelayOnly => "relay_only",
             Self::TailscalePrivateRoute => "tailscale_private_route",
+            Self::MasqueConnectUdpProxy => "masque_connect_udp_proxy",
             Self::PathMigration => "path_migration",
             Self::PacketDuplication => "packet_duplication",
             Self::PacketTruncation => "packet_truncation",
@@ -284,6 +290,8 @@ pub enum AtpLabFault {
     RelayPath,
     /// Private route is selected.
     PrivateRoute,
+    /// MASQUE/CONNECT-UDP proxy path is selected.
+    MasqueProxyPath,
     /// Path migration is triggered.
     PathMigrated,
     /// Packet duplication occurs.
@@ -332,6 +340,7 @@ impl AtpLabFault {
             Self::DirectPathBlocked => "direct_path_blocked",
             Self::RelayPath => "relay_path",
             Self::PrivateRoute => "private_route",
+            Self::MasqueProxyPath => "masque_proxy_path",
             Self::PathMigrated => "path_migrated",
             Self::PacketDuplicated => "packet_duplicated",
             Self::PacketTruncated => "packet_truncated",
@@ -519,6 +528,7 @@ fn fault_for_regime(regime: AtpLabRegime, rng: &mut DetRng) -> AtpLabFault {
         }
         AtpLabRegime::RelayOnly => AtpLabFault::RelayPath,
         AtpLabRegime::TailscalePrivateRoute => AtpLabFault::PrivateRoute,
+        AtpLabRegime::MasqueConnectUdpProxy => AtpLabFault::MasqueProxyPath,
         AtpLabRegime::PathMigration => AtpLabFault::PathMigrated,
         AtpLabRegime::PacketDuplication => AtpLabFault::PacketDuplicated,
         AtpLabRegime::PacketTruncation => AtpLabFault::PacketTruncated,
@@ -590,6 +600,7 @@ mod tests {
             AtpLabRegime::Ipv6Direct,
             AtpLabRegime::RelayOnly,
             AtpLabRegime::TailscalePrivateRoute,
+            AtpLabRegime::MasqueConnectUdpProxy,
             AtpLabRegime::PathMigration,
             AtpLabRegime::PacketDuplication,
             AtpLabRegime::PacketTruncation,
@@ -643,5 +654,17 @@ mod tests {
                 .starts_with("atp-lab-adversary")
         );
         assert!(artifact.attachments[0].text.contains("fault=lying_relay"));
+    }
+
+    #[test]
+    fn masque_proxy_regime_emits_non_failure_adapter_event() {
+        let plan = AtpLabScenario::new("masque-proxy", 0xA7F0_0007)
+            .with_regime(AtpLabRegime::MasqueConnectUdpProxy)
+            .compose(transfer());
+
+        assert_eq!(plan.events.len(), 1);
+        assert_eq!(plan.events[0].fault, AtpLabFault::MasqueProxyPath);
+        assert_eq!(plan.events[0].fault.label(), "masque_proxy_path");
+        assert!(plan.run_model().failure.is_none());
     }
 }

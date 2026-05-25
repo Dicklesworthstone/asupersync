@@ -69,6 +69,8 @@ pub struct AtpPathValidation {
     pub nat_punch_succeeded: bool,
     /// Relay path was used successfully
     pub relay_succeeded: bool,
+    /// MASQUE/CONNECT-UDP fake proxy path was used successfully
+    pub masque_connect_udp_succeeded: bool,
     /// Path migration occurred and preserved transfer
     pub migration_preserved_transfer: bool,
     /// Final selected path kind
@@ -86,6 +88,7 @@ impl AtpPathValidation {
             lan_multicast_succeeded: false,
             nat_punch_succeeded: false,
             relay_succeeded: false,
+            masque_connect_udp_succeeded: false,
             migration_preserved_transfer: false,
             selected_path_kind: None,
             detected_nat_profile: NatProfile::Unknown,
@@ -329,6 +332,16 @@ impl AtpPathLabHarness {
                     .test_path_kind(PathKind::TailscaleIp, trace_id, trace_events, validation)
                     .await?;
             }
+            AtpLabRegime::MasqueConnectUdpProxy => {
+                candidates_evaluated += self
+                    .test_path_kind(
+                        PathKind::MasqueConnectUdp,
+                        trace_id,
+                        trace_events,
+                        validation,
+                    )
+                    .await?;
+            }
             AtpLabRegime::PathMigration => {
                 // Test migration from LAN to IPv6
                 self.test_path_migration(
@@ -369,7 +382,7 @@ impl AtpPathLabHarness {
             trace_id,
             event: AtpPathEventKind::ConnectionAttempt {
                 path_kind,
-                target_endpoint: "simulated-endpoint".to_string(),
+                target_endpoint: target_endpoint_for_path(path_kind).to_string(),
             },
         });
 
@@ -391,6 +404,11 @@ impl AtpPathLabHarness {
             }
             PathKind::AtpRelayUdp | PathKind::AtpRelayTcpTls443 => {
                 validation.relay_succeeded = true;
+                true
+            }
+            PathKind::MasqueConnectUdp => {
+                validation.relay_succeeded = true;
+                validation.masque_connect_udp_succeeded = true;
                 true
             }
             PathKind::TailscaleIp => true,
@@ -462,11 +480,21 @@ impl AtpPathLabHarness {
             Some(PathKind::LanMulticast)
         } else if validation.nat_punch_succeeded {
             Some(PathKind::NatPunchedUdp)
+        } else if validation.masque_connect_udp_succeeded {
+            Some(PathKind::MasqueConnectUdp)
         } else if validation.relay_succeeded {
             Some(PathKind::AtpRelayUdp)
         } else {
             None
         }
+    }
+}
+
+fn target_endpoint_for_path(path_kind: PathKind) -> &'static str {
+    if path_kind.uses_connect_udp_proxy() {
+        "masque-connect-udp-proxy:443"
+    } else {
+        "simulated-endpoint"
     }
 }
 
@@ -516,5 +544,30 @@ mod tests {
             result.path_validation.detected_nat_profile,
             NatProfile::UdpBlocked
         );
+    }
+
+    #[tokio::test]
+    async fn test_masque_connect_udp_fake_proxy_path() {
+        let mut harness = AtpPathLabHarness::new(AtpPathTestConfig::relay_only());
+
+        let scenario = AtpLabScenario::new("masque-proxy", 0xA7F0_0007)
+            .with_regime(AtpLabRegime::MasqueConnectUdpProxy);
+
+        let result = harness.execute_scenario(&scenario).await.unwrap();
+
+        assert!(result.path_validation.relay_succeeded);
+        assert!(result.path_validation.masque_connect_udp_succeeded);
+        assert!(!result.path_validation.has_direct_path());
+        assert_eq!(
+            result.path_validation.selected_path_kind,
+            Some(PathKind::MasqueConnectUdp)
+        );
+        assert!(result.trace_events.iter().any(|event| matches!(
+            &event.event,
+            AtpPathEventKind::ConnectionAttempt {
+                path_kind: PathKind::MasqueConnectUdp,
+                target_endpoint,
+            } if target_endpoint == "masque-connect-udp-proxy:443"
+        )));
     }
 }

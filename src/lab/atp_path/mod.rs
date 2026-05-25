@@ -52,6 +52,7 @@ pub fn regime_to_path_kind(regime: AtpLabRegime) -> Option<PathKind> {
         AtpLabRegime::UdpBlocked => None, // Forces relay/mailbox fallback
         AtpLabRegime::RelayOnly => Some(PathKind::AtpRelayUdp),
         AtpLabRegime::TailscalePrivateRoute => Some(PathKind::TailscaleIp),
+        AtpLabRegime::MasqueConnectUdpProxy => Some(PathKind::MasqueConnectUdp),
         _ => None,
     }
 }
@@ -95,6 +96,10 @@ mod tests {
         assert_eq!(
             regime_to_path_kind(AtpLabRegime::RelayOnly),
             Some(PathKind::AtpRelayUdp)
+        );
+        assert_eq!(
+            regime_to_path_kind(AtpLabRegime::MasqueConnectUdpProxy),
+            Some(PathKind::MasqueConnectUdp)
         );
     }
 

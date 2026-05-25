@@ -63,6 +63,12 @@ pub enum PathKind {
     /// ATP relay over TCP/TLS on port 443 for UDP-hostile networks.
     AtpRelayTcpTls443,
     /// MASQUE/CONNECT-UDP-style relay adapter.
+    ///
+    /// ATP still owns peer authentication, payload encryption, and transfer
+    /// proof semantics. The proxy only carries UDP-like path traffic through an
+    /// authenticated HTTP/3 CONNECT-UDP tunnel, so proxy auth, policy denial,
+    /// nested congestion, and timing metadata remain explicit relay caveats
+    /// instead of becoming direct-path guarantees.
     MasqueConnectUdp,
     /// Store-and-forward encrypted mailbox path.
     OfflineMailbox,
@@ -108,6 +114,50 @@ impl PathKind {
     #[must_use]
     pub const fn is_relay(self) -> bool {
         matches!(self.family(), PathFamily::Relay)
+    }
+
+    /// Whether this path tunnels ATP UDP-like traffic through an HTTP proxy.
+    #[must_use]
+    pub const fn uses_connect_udp_proxy(self) -> bool {
+        matches!(self, Self::MasqueConnectUdp)
+    }
+
+    /// Whether the selected path introduces a nested congestion-control caveat.
+    #[must_use]
+    pub const fn has_nested_congestion_caveat(self) -> bool {
+        matches!(self, Self::AtpRelayTcpTls443 | Self::MasqueConnectUdp)
+    }
+
+    /// Whether an intermediary must authorize the path before ATP can use it.
+    #[must_use]
+    pub const fn requires_intermediary_authority(self) -> bool {
+        matches!(self, Self::MasqueConnectUdp)
+    }
+
+    /// Stable label for path proof summaries and audit artifacts.
+    #[must_use]
+    pub const fn proof_summary_label(self) -> &'static str {
+        match self {
+            Self::LanMulticast => "lan_multicast",
+            Self::ExplicitPublicUdp => "explicit_public_udp",
+            Self::PublicIpv6 => "public_ipv6",
+            Self::NatPunchedUdp => "nat_punched_udp",
+            Self::TailscaleIp => "tailscale_ip",
+            Self::AtpRelayUdp => "atp_relay_udp",
+            Self::AtpRelayTcpTls443 => "atp_relay_tcp_tls_443",
+            Self::MasqueConnectUdp => "masque_connect_udp_adapter",
+            Self::OfflineMailbox => "offline_mailbox",
+        }
+    }
+
+    /// Stable failure-mode hint for diagnostics that explain adapter caveats.
+    #[must_use]
+    pub const fn adapter_failure_hint(self) -> Option<&'static str> {
+        match self {
+            Self::MasqueConnectUdp => Some("proxy_auth_policy_or_connect_udp_failure"),
+            Self::AtpRelayTcpTls443 => Some("tcp_head_of_line_or_nested_retransmission"),
+            _ => None,
+        }
     }
 }
 
@@ -805,6 +855,28 @@ mod tests {
         );
         assert!(PathKind::PublicIpv6.is_direct());
         assert!(PathKind::AtpRelayTcpTls443.is_relay());
+    }
+
+    #[test]
+    fn masque_connect_udp_adapter_keeps_relay_family_and_proof_caveats() {
+        let kind = PathKind::MasqueConnectUdp;
+        let security = PathSecurity::for_kind(kind);
+
+        assert_eq!(kind.family(), PathFamily::Relay);
+        assert!(kind.is_relay());
+        assert!(kind.uses_connect_udp_proxy());
+        assert!(kind.has_nested_congestion_caveat());
+        assert!(kind.requires_intermediary_authority());
+        assert_eq!(kind.proof_summary_label(), "masque_connect_udp_adapter");
+        assert_eq!(
+            kind.adapter_failure_hint(),
+            Some("proxy_auth_policy_or_connect_udp_failure")
+        );
+        assert!(security.authenticated_peer);
+        assert!(security.end_to_end_encrypted);
+        assert!(!security.exposes_local_ip_to_peer);
+        assert!(security.relay_metadata_visible);
+        assert!(!security.store_and_forward);
     }
 
     #[test]
