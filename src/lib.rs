@@ -485,6 +485,8 @@ pub mod real_net_tcp_listener_server_connection_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_tcp_listener_service_concurrency_limit_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_net_tcp_stream_codec_framed_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_tls_connector_messaging_kafka_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_udp_net_quic_native_datagram_integration_e2e_tests;

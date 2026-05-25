@@ -1020,6 +1020,33 @@ impl LocalInbox {
         Ok(())
     }
 
+    /// Begin a later `get --pending` receive from a stored mailbox record.
+    pub fn start_mailbox_retrieval(
+        &mut self,
+        mailbox_id: &str,
+        receipt: &MailboxRetrievalReceipt,
+        last_seen_sequence: Option<u64>,
+        now_epoch_secs: u64,
+    ) -> Result<(), InboxError> {
+        let record = self
+            .mailbox_records
+            .get(mailbox_id)
+            .ok_or_else(|| InboxError::UnknownMailboxRecord(mailbox_id.to_string()))?;
+        record
+            .validate_retrieval(receipt, last_seen_sequence)
+            .map_err(InboxError::MailboxSecurity)?;
+
+        let item = self
+            .items
+            .get_mut(&record.item_id)
+            .ok_or_else(|| InboxError::UnknownItem(record.item_id.clone()))?;
+        ensure_transition(item.state, InboxState::Active)?;
+        item.state = InboxState::Active;
+        item.bytes_received = receipt.bytes_returned.min(item.bytes_total);
+        item.updated_epoch_secs = now_epoch_secs;
+        Ok(())
+    }
+
     /// Move an item through its lifecycle.
     pub fn transition(
         &mut self,
@@ -1150,6 +1177,8 @@ pub enum InboxError {
     UnknownItem(String),
     /// The grant id is unknown.
     UnknownGrant(String),
+    /// The mailbox record id is unknown.
+    UnknownMailboxRecord(String),
     /// The item id already exists.
     DuplicateItem(String),
     /// The mailbox record id already exists.
@@ -1179,6 +1208,9 @@ impl fmt::Display for InboxError {
         match self {
             Self::UnknownItem(item_id) => write!(f, "unknown inbox item `{item_id}`"),
             Self::UnknownGrant(grant_id) => write!(f, "unknown grant `{grant_id}`"),
+            Self::UnknownMailboxRecord(mailbox_id) => {
+                write!(f, "unknown mailbox record `{mailbox_id}`")
+            }
             Self::DuplicateItem(item_id) => write!(f, "duplicate inbox item `{item_id}`"),
             Self::DuplicateMailboxRecord(mailbox_id) => {
                 write!(f, "duplicate mailbox record `{mailbox_id}`")
@@ -1337,6 +1369,17 @@ mod tests {
         }
     }
 
+    fn stored_mailbox_receipt(bytes_returned: u64) -> MailboxRetrievalReceipt {
+        MailboxRetrievalReceipt {
+            manifest_root: digest(7),
+            stored_object_digest: digest(8),
+            manifest_epoch: 3,
+            sequence: 1,
+            bytes_returned,
+            retrieved_at_epoch_secs: 12,
+        }
+    }
+
     #[test]
     fn mailbox_privacy_policy_requires_encryption_or_public_policy() {
         let encrypted = MailboxPrivacyPolicy::encrypted();
@@ -1458,15 +1501,84 @@ mod tests {
         assert_eq!(record.redacted_source_peer, "peer-abc...");
         assert_eq!(record.evidence.stored_object_digest, digest(8));
 
-        let receipt = MailboxRetrievalReceipt {
-            manifest_root: digest(7),
-            stored_object_digest: digest(8),
-            manifest_epoch: 3,
-            sequence: 1,
-            bytes_returned: 128,
-            retrieved_at_epoch_secs: 12,
-        };
+        let receipt = stored_mailbox_receipt(128);
         record.validate_retrieval(&receipt, None).unwrap(); // ubs:ignore - test oracle
+    }
+
+    #[test]
+    fn mailbox_get_pending_validates_receipt_before_active_receive() {
+        let mut inbox = LocalInbox::new();
+        let mut quota = QuotaLedger::new();
+        quota.set_limit(QuotaBucket::Mailbox, QuotaLimit::new(1024, 4));
+        inbox
+            .offer(offer("in-1", "/data/inbox/project", 128))
+            .unwrap(); // ubs:ignore - test oracle
+        inbox.allow(ReceiveGrant::new(
+            "grant-1",
+            "peer-a",
+            receive_actions(),
+            GrantScope::PathPrefix(PathBuf::from("/data/inbox")),
+        ));
+        inbox
+            .store_mailbox(
+                "in-1",
+                "grant-1",
+                mailbox_store_request("mailbox-1", 128),
+                &mut quota,
+                11,
+            )
+            .unwrap(); // ubs:ignore - test oracle
+
+        inbox
+            .start_mailbox_retrieval("mailbox-1", &stored_mailbox_receipt(128), None, 13)
+            .unwrap(); // ubs:ignore - test oracle
+
+        let item = inbox.list()[0]; // ubs:ignore - test oracle
+        assert_eq!(item.state, InboxState::Active);
+        assert_eq!(item.bytes_received, 128);
+        assert_eq!(item.updated_epoch_secs, 13);
+    }
+
+    #[test]
+    fn mailbox_get_pending_rejects_tampered_receipt_without_state_change() {
+        let mut inbox = LocalInbox::new();
+        let mut quota = QuotaLedger::new();
+        quota.set_limit(QuotaBucket::Mailbox, QuotaLimit::new(1024, 4));
+        inbox
+            .offer(offer("in-1", "/data/inbox/project", 128))
+            .unwrap(); // ubs:ignore - test oracle
+        inbox.allow(ReceiveGrant::new(
+            "grant-1",
+            "peer-a",
+            receive_actions(),
+            GrantScope::PathPrefix(PathBuf::from("/data/inbox")),
+        ));
+        inbox
+            .store_mailbox(
+                "in-1",
+                "grant-1",
+                mailbox_store_request("mailbox-1", 128),
+                &mut quota,
+                11,
+            )
+            .unwrap(); // ubs:ignore - test oracle
+        let mut receipt = stored_mailbox_receipt(128);
+        receipt.stored_object_digest = digest(9);
+
+        let err = inbox
+            .start_mailbox_retrieval("mailbox-1", &receipt, None, 13)
+            .unwrap_err(); // ubs:ignore - test oracle
+
+        assert_eq!(
+            err,
+            InboxError::MailboxSecurity(MailboxSecurityError::DigestMismatch {
+                field: "stored_object_digest"
+            })
+        );
+        let item = inbox.list()[0]; // ubs:ignore - test oracle
+        assert_eq!(item.state, InboxState::MailboxStored);
+        assert_eq!(item.bytes_received, 0);
+        assert_eq!(item.updated_epoch_secs, 11);
     }
 
     #[test]
