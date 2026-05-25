@@ -19,8 +19,10 @@ REPORT_SCHEMA_VERSION = "atp-n9-workflow-report-v1"
 EVENT_SCHEMA_VERSION = "atp-n9-workflow-event-v1"
 SCHEDULER_PROFILE_SCHEMA_VERSION = "atp-e5-scheduler-workload-profile-v1"
 SCHEDULER_GATE_SCHEMA_VERSION = "atp-e5-scheduler-benchmark-gate-v1"
+BENCHMARK_REPORT_SCHEMA_VERSION = "atp-l3-public-regression-report-v1"
 BEAD_ID = "asupersync-m7hmrq"
 SCHEDULER_BEAD_ID = "asupersync-nva98g"
+BENCHMARK_BEAD_ID = "asupersync-2e1wev"
 
 FAILURE_BOTTLENECK_CLASSES = [
     "path",
@@ -267,7 +269,7 @@ WORKFLOWS: list[dict[str, Any]] = [
         "fixture_profile": {"files": 64, "edited_files": 4, "seed": "atp-n9-sync-tree"},
         "path_modes": ["direct", "cache"],
         "external_tools": ["asupersync"],
-        "smoke": False,
+        "smoke": True,
     },
     {
         "workflow_id": "sparse_image",
@@ -449,6 +451,133 @@ def scheduler_profile_for(workflow: dict[str, Any]) -> dict[str, Any]:
     raise AssertionError(f"missing scheduler workload profile: {profile_id}")
 
 
+def compare_budget(value: Any, budget: dict[str, Any]) -> bool:
+    comparison = budget["comparison"]
+    threshold = budget["threshold"]
+    if comparison == "less_than_or_equal":
+        return value <= threshold
+    if comparison == "greater_than_or_equal":
+        return value >= threshold
+    if comparison == "equals":
+        return value == threshold
+    raise AssertionError(f"unsupported comparison: {comparison}")
+
+
+def benchmark_metrics_for_event(event: dict[str, Any]) -> dict[str, Any]:
+    metrics = event["metrics"]
+    fixture_bytes = int(event["scheduler_profile"]["fixture"].get("bytes", 0))
+    bytes_on_wire = fixture_bytes + int(metrics["bytes_wasted"])
+    return {
+        "verified_completion_time_ms": metrics["whole_object_commit_ms"],
+        "resume_time_after_crash_ms": metrics["resume_after_interruption_ms"],
+        "bytes_on_wire": bytes_on_wire,
+        "cpu_ms_per_gib": metrics["cpu_ms_per_gib"],
+        "memory_peak_bytes": metrics["memory_peak_bytes"],
+        "disk_amplification_ratio": metrics["disk_amplification_ratio"],
+        "time_to_first_usable_file_ms": metrics["time_to_first_usable_file_ms"],
+        "failure_reproducibility": {
+            "replay_command": event["replay_pointer"]["command"],
+            "proof_root": event["proof_root"],
+            "manifest_root": event["manifest_root"],
+        },
+    }
+
+
+def benchmark_skip_classification(event: dict[str, Any]) -> dict[str, Any]:
+    if event["status"] != "skipped":
+        return {"status": event["status"], "kind": "none", "reason": ""}
+    if "external tool" in event["skip_reason"]:
+        kind = "missing_external_tool"
+    else:
+        kind = "policy_skip"
+    return {"status": "skipped", "kind": kind, "reason": event["skip_reason"]}
+
+
+def benchmark_threshold_comparison(event: dict[str, Any]) -> list[dict[str, Any]]:
+    comparisons = []
+    for metric, budget in sorted(SCHEDULER_METRIC_BUDGETS.items()):
+        value = event["metrics"][metric]
+        comparisons.append(
+            {
+                "metric": metric,
+                "value": value,
+                "threshold": budget["threshold"],
+                "comparison": budget["comparison"],
+                "passed": compare_budget(value, budget),
+            }
+        )
+    return comparisons
+
+
+def build_benchmark_report(
+    run_id: str,
+    generated_at: str,
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    rows = []
+    required_profile_classes = {
+        "bulk_file",
+        "sync_tree",
+        "lossy",
+        "relay_only",
+    }
+    for event in events:
+        profile_class = event["scheduler_profile"]["workload_class"]
+        benchmark_metrics = benchmark_metrics_for_event(event)
+        rows.append(
+            {
+                "workflow_id": event["workflow_id"],
+                "profile_id": event["scheduler_profile"]["profile_id"],
+                "profile_class": profile_class,
+                "status": event["status"],
+                "lane": "required_smoke" if profile_class in required_profile_classes else "optional_smoke",
+                "fixture_seed": event["scheduler_profile"]["fixture"].get(
+                    "seed",
+                    event["path_summary"]["fixture_digest"],
+                ),
+                "command_line": event["command_line"],
+                "path_summary": event["path_summary"],
+                "scheduler_decisions": event["scheduler_decisions"],
+                "repair_decision": event["scheduler_decisions"]["repair_decision"],
+                "disk_metrics": {
+                    "disk_amplification_ratio": benchmark_metrics["disk_amplification_ratio"],
+                    "memory_peak_bytes": benchmark_metrics["memory_peak_bytes"],
+                },
+                "benchmark_metrics": benchmark_metrics,
+                "baseline_normalization": {
+                    "baseline_id": f"{profile_class}-smoke-v1",
+                    "baseline_source": "contract_budget",
+                    "normalized_wall_clock_ratio": event["metrics"]["wall_clock_ms"]
+                    / SCHEDULER_METRIC_BUDGETS["wall_clock_ms"]["threshold"],
+                    "normalized_memory_ratio": event["metrics"]["memory_peak_bytes"]
+                    / SCHEDULER_METRIC_BUDGETS["memory_peak_bytes"]["threshold"],
+                },
+                "threshold_comparison": benchmark_threshold_comparison(event),
+                "skip_classification": benchmark_skip_classification(event),
+                "proof_root": event["proof_root"],
+                "replay_pointer": event["replay_pointer"],
+            }
+        )
+
+    return {
+        "schema_version": BENCHMARK_REPORT_SCHEMA_VERSION,
+        "bead_id": BENCHMARK_BEAD_ID,
+        "run_id": run_id,
+        "generated_at_utc": generated_at,
+        "status": "fail" if any(row["status"] == "fail" for row in rows) else "pass",
+        "public_dashboard": {
+            "workflow_count": len(rows),
+            "required_lane_count": sum(1 for row in rows if row["lane"] == "required_smoke"),
+            "optional_lane_count": sum(1 for row in rows if row["lane"] != "required_smoke"),
+            "skipped_count": sum(1 for row in rows if row["status"] == "skipped"),
+            "failed_count": sum(1 for row in rows if row["status"] == "fail"),
+        },
+        "required_profile_classes": sorted(required_profile_classes),
+        "manual_or_release_only_profile_classes": ["high_bdp", "mobile_unstable"],
+        "rows": rows,
+    }
+
+
 def selected_workflows(ids: list[str], mode: str) -> list[dict[str, Any]]:
     workflows_by_id = {workflow["workflow_id"]: workflow for workflow in WORKFLOWS}
     if ids:
@@ -601,7 +730,7 @@ def event_for(
         "event": "atp_perf_workflow_acceptance",
         "contract_version": CONTRACT_VERSION,
         "bead_id": BEAD_ID,
-        "supporting_bead_ids": [BEAD_ID, SCHEDULER_BEAD_ID],
+        "supporting_bead_ids": [BEAD_ID, SCHEDULER_BEAD_ID, BENCHMARK_BEAD_ID],
         "workflow_id": workflow_id,
         "workflow_class": workflow["workflow_class"],
         "mode": "contract" if contract_only else "smoke",
@@ -661,6 +790,7 @@ def write_outputs(
 ) -> dict[str, Any]:
     events_path = run_dir / "structured_events.jsonl"
     report_path = run_dir / "run_report.json"
+    benchmark_report_path = run_dir / "benchmark_report.json"
     summary_path = run_dir / "summary.txt"
     replay_path = run_dir / "replay_pointer.json"
     fixture_manifest_path = run_dir / "fixture_manifest.json"
@@ -679,7 +809,7 @@ def write_outputs(
         "schema_version": REPORT_SCHEMA_VERSION,
         "contract_version": CONTRACT_VERSION,
         "bead_id": BEAD_ID,
-        "supporting_bead_ids": [BEAD_ID, SCHEDULER_BEAD_ID],
+        "supporting_bead_ids": [BEAD_ID, SCHEDULER_BEAD_ID, BENCHMARK_BEAD_ID],
         "generated_at_utc": generated_at,
         "run_id": run_id,
         "mode": args.mode,
@@ -710,11 +840,13 @@ def write_outputs(
                 "bytes_wasted_must_not_increase": True,
             },
         },
+        "benchmark_report_schema_version": BENCHMARK_REPORT_SCHEMA_VERSION,
         "failure_bottleneck_classes": FAILURE_BOTTLENECK_CLASSES,
         "required_artifacts": [
             "summary.txt",
             "run_report.json",
             "structured_events.jsonl",
+            "benchmark_report.json",
             "fixture_manifest.json",
             "replay_pointer.json",
         ],
@@ -722,6 +854,7 @@ def write_outputs(
             "summary": str(summary_path),
             "run_report": str(report_path),
             "structured_events": str(events_path),
+            "benchmark_report": str(benchmark_report_path),
             "fixture_manifest": str(fixture_manifest_path),
             "replay_pointer": str(replay_path),
         },
@@ -737,6 +870,7 @@ def write_outputs(
             for event in skipped
         ],
     }
+    benchmark_report = build_benchmark_report(run_id, generated_at, events)
 
     fixture_manifest_path.write_text(
         json.dumps(
@@ -770,6 +904,10 @@ def write_outputs(
         + "\n",
         encoding="utf-8",
     )
+    benchmark_report_path.write_text(
+        json.dumps(benchmark_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     summary_lines = [
         "ATP-N9 workflow acceptance summary",
@@ -780,6 +918,7 @@ def write_outputs(
         f"passed: {report['summary']['pass_count']}",
         f"skipped: {report['summary']['skip_count']}",
         f"failed: {report['summary']['failure_count']}",
+        f"benchmark_report: {benchmark_report_path}",
         f"report: {report_path}",
         f"events: {events_path}",
     ]

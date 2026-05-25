@@ -9,6 +9,7 @@ const REPORT_SCHEMA_VERSION: &str = "atp-n9-workflow-report-v1";
 const EVENT_SCHEMA_VERSION: &str = "atp-n9-workflow-event-v1";
 const SCHEDULER_PROFILE_SCHEMA_VERSION: &str = "atp-e5-scheduler-workload-profile-v1";
 const SCHEDULER_GATE_SCHEMA_VERSION: &str = "atp-e5-scheduler-benchmark-gate-v1";
+const BENCHMARK_REPORT_SCHEMA_VERSION: &str = "atp-l3-public-regression-report-v1";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -285,6 +286,147 @@ fn scheduler_workload_profiles_cover_atp_e5_gate_surfaces() {
 }
 
 #[test]
+fn benchmark_cartel_public_report_covers_regression_surfaces() {
+    let report = run_contract_smoke();
+    assert_eq!(
+        report["benchmark_report_schema_version"].as_str(),
+        Some(BENCHMARK_REPORT_SCHEMA_VERSION)
+    );
+
+    let benchmark_report_path = artifact_path(&report, "benchmark_report");
+    let benchmark_report: Value = serde_json::from_str(
+        &std::fs::read_to_string(&benchmark_report_path)
+            .expect("benchmark report artifact must be readable"),
+    )
+    .expect("benchmark report must be JSON");
+    assert_eq!(
+        benchmark_report["schema_version"].as_str(),
+        Some(BENCHMARK_REPORT_SCHEMA_VERSION)
+    );
+    assert_eq!(
+        benchmark_report["bead_id"].as_str(),
+        Some("asupersync-2e1wev")
+    );
+    assert_eq!(benchmark_report["status"].as_str(), Some("pass"));
+
+    for required_field in [
+        "workflow_count",
+        "required_lane_count",
+        "optional_lane_count",
+        "skipped_count",
+        "failed_count",
+    ] {
+        assert!(
+            !benchmark_report["public_dashboard"][required_field].is_null(),
+            "public dashboard must include {required_field}"
+        );
+    }
+
+    let required_profiles = string_set(&benchmark_report, "required_profile_classes");
+    for required_profile in ["bulk_file", "sync_tree", "lossy", "relay_only"] {
+        assert!(
+            required_profiles.contains(required_profile),
+            "benchmark cartel must require {required_profile}"
+        );
+    }
+    let manual_profiles = string_set(&benchmark_report, "manual_or_release_only_profile_classes");
+    for manual_profile in ["high_bdp", "mobile_unstable"] {
+        assert!(
+            manual_profiles.contains(manual_profile),
+            "report must distinguish manual/release-only {manual_profile}"
+        );
+    }
+
+    let rows = array(&benchmark_report, "rows");
+    let row_profile_classes = rows
+        .iter()
+        .map(|row| {
+            row["profile_class"]
+                .as_str()
+                .expect("row profile_class must be string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    for required_profile in ["bulk_file", "sync_tree", "lossy", "relay_only"] {
+        assert!(
+            row_profile_classes.contains(required_profile),
+            "smoke benchmark rows must include {required_profile}"
+        );
+    }
+
+    let row_workflows = rows
+        .iter()
+        .map(|row| {
+            row["workflow_id"]
+                .as_str()
+                .expect("row workflow_id must be string")
+                .to_string()
+        })
+        .collect::<BTreeSet<_>>();
+    for required_workflow in [
+        "one_huge_file",
+        "sync_tree_small_edits",
+        "interrupted_resume_transfer",
+        "relay_only_transfer",
+    ] {
+        assert!(
+            row_workflows.contains(required_workflow),
+            "local reduced-size e2e report must include {required_workflow}"
+        );
+    }
+
+    for row in rows {
+        for required_field in [
+            "command_line",
+            "path_summary",
+            "scheduler_decisions",
+            "repair_decision",
+            "disk_metrics",
+            "benchmark_metrics",
+            "baseline_normalization",
+            "threshold_comparison",
+            "skip_classification",
+            "proof_root",
+            "replay_pointer",
+        ] {
+            assert!(
+                !row[required_field].is_null(),
+                "{} must include benchmark row field {required_field}",
+                row["workflow_id"].as_str().unwrap_or("<unknown>")
+            );
+        }
+        for required_metric in [
+            "verified_completion_time_ms",
+            "resume_time_after_crash_ms",
+            "bytes_on_wire",
+            "cpu_ms_per_gib",
+            "memory_peak_bytes",
+            "disk_amplification_ratio",
+            "time_to_first_usable_file_ms",
+            "failure_reproducibility",
+        ] {
+            assert!(
+                !row["benchmark_metrics"][required_metric].is_null(),
+                "{} must include benchmark metric {required_metric}",
+                row["workflow_id"].as_str().unwrap_or("<unknown>")
+            );
+        }
+        let comparisons = row["threshold_comparison"]
+            .as_array()
+            .expect("threshold comparison must be array");
+        assert!(
+            comparisons
+                .iter()
+                .any(
+                    |comparison| comparison["metric"].as_str() == Some("wall_clock_ms")
+                        && comparison["passed"].is_boolean()
+                ),
+            "threshold comparison must include wall_clock_ms pass/fail"
+        );
+    }
+}
+
+#[test]
 fn emitted_artifacts_have_required_schema_and_replay_fields() {
     let report = run_contract_smoke();
     assert_eq!(report["status"].as_str(), Some("pass"));
@@ -293,6 +435,7 @@ fn emitted_artifacts_have_required_schema_and_replay_fields() {
         "summary",
         "run_report",
         "structured_events",
+        "benchmark_report",
         "fixture_manifest",
         "replay_pointer",
     ] {
