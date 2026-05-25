@@ -26,6 +26,11 @@ use asupersync::atp::{
     AtpAutotuneSettings, AtpAutotuneTelemetry, AtpAutotuneTelemetryReport, AtpRepairCoordinator,
     AtpRepairCoordinatorDecision, AtpRepairRoiInputs,
 };
+use asupersync::atp::object::{ObjectGraph, ObjectId};
+use asupersync::atp::safety::{
+    DestinationPolicy, ReceiveConsentSource, ReceiveMetadataPolicy, ReceivePreflightInput,
+    RollbackResumePolicy, StorageEvidence, build_receive_plan, consent_token, ReceivePlan,
+};
 use asupersync::cli::doctor::{
     AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
     AdvancedRemediationDelta, AdvancedTroubleshootingPlaybook, AdvancedTrustTransition,
@@ -174,6 +179,8 @@ enum AtpCommand {
     Directory(AtpDirectoryArgs),
     /// Render ATP usable-early report artifacts
     EarlyUsability(AtpEarlyUsabilityArgs),
+    /// Receive ATP transfer with safety preflight
+    Get(AtpGetArgs),
     /// Verify ATP proof bundle offline
     Verify(AtpVerifyArgs),
     /// Replay emitted ATP crashpack artifacts
@@ -196,6 +203,115 @@ struct AtpEarlyUsabilityArgs {
     /// JSON report emitted by SDK, proof, or transfer artifact code.
     #[arg(long, value_name = "PATH")]
     report: PathBuf,
+}
+
+#[derive(Args, Debug)]
+struct AtpGetArgs {
+    /// Transfer ID or share token to receive
+    #[arg(value_name = "TRANSFER")]
+    transfer_id: String,
+
+    /// Destination directory (default: current directory)
+    #[arg(value_name = "DEST")]
+    destination: Option<PathBuf>,
+
+    /// Show receive plan without executing transfer
+    #[arg(long = "dry-run", action = ArgAction::SetTrue)]
+    dry_run: bool,
+
+    /// Destination policy: deny, inbox-only, quarantine-only, allow-listed
+    #[arg(long = "policy", default_value = "deny")]
+    policy: String,
+
+    /// Allow overwriting existing files
+    #[arg(long = "allow-overwrite", action = ArgAction::SetTrue)]
+    allow_overwrite: bool,
+
+    /// Allow symlink materialization
+    #[arg(long = "allow-symlinks", action = ArgAction::SetTrue)]
+    allow_symlinks: bool,
+
+    /// Allow executable bit materialization
+    #[arg(long = "allow-executables", action = ArgAction::SetTrue)]
+    allow_executables: bool,
+
+    /// Maximum transfer size (bytes)
+    #[arg(long = "max-bytes")]
+    max_bytes: Option<u64>,
+
+    /// Skip interactive confirmation prompts
+    #[arg(long = "accept", action = ArgAction::SetTrue)]
+    accept: bool,
+
+    /// Show detailed preflight report
+    #[arg(long = "verbose", short = 'v', action = ArgAction::SetTrue)]
+    verbose: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AtpGetPlanOutput {
+    plan: ReceivePlan,
+}
+
+impl Outputtable for AtpGetPlanOutput {
+    fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(&self.plan)
+    }
+
+    fn human_format(&self) -> String {
+        let mut output = String::new();
+        output.push_str("Receive Plan:\n");
+        for line in self.plan.stable_human_lines() {
+            output.push_str(&format!("  {}\n", line));
+        }
+        output
+    }
+}
+
+#[derive(Debug)]
+struct AtpGetPlanHumanOutput {
+    lines: Vec<String>,
+}
+
+impl AtpGetPlanHumanOutput {
+    fn new(plan: &ReceivePlan) -> Self {
+        let mut lines = vec!["Receive Plan:".to_string()];
+        for line in plan.stable_human_lines() {
+            lines.push(format!("  {}", line));
+        }
+        Self { lines }
+    }
+}
+
+impl Outputtable for AtpGetPlanHumanOutput {
+    fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(&self.lines)
+    }
+
+    fn human_format(&self) -> String {
+        self.lines.join("\n")
+    }
+}
+
+#[derive(Debug)]
+struct AtpGetStatusMessage {
+    message: String,
+}
+
+impl AtpGetStatusMessage {
+    fn new(message: &str) -> Self {
+        Self { message: message.to_string() }
+    }
+}
+
+impl Outputtable for AtpGetStatusMessage {
+    fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(&self.message)
+    }
+
+    fn human_format(&self) -> String {
+        self.message.clone()
+    }
 }
 
 #[derive(Args, Debug)]
@@ -1087,6 +1203,7 @@ fn run_atp(args: AtpArgs, output: &mut Output) -> Result<(), CliError> {
         AtpCommand::Status(args) => atp_status(&args, output),
         AtpCommand::Directory(args) => atp_directory(&args, output),
         AtpCommand::EarlyUsability(args) => atp_early_usability(&args, output),
+        AtpCommand::Get(args) => atp_get(&args, output),
         AtpCommand::Verify(args) => atp_verify(&args, output),
         AtpCommand::Replay(args) => atp_replay(&args, output),
         AtpCommand::Proof(args) => atp_proof(&args, output),
@@ -1350,6 +1467,156 @@ fn atp_early_usability_parse_error(err: impl std::error::Error) -> CliError {
     )
     .detail(err.to_string())
     .exit_code(ExitCode::USER_ERROR)
+}
+
+fn atp_get(args: &AtpGetArgs, output: &mut Output) -> Result<(), CliError> {
+    // Parse destination policy from CLI arguments
+    let destination_policy = parse_destination_policy(args)?;
+
+    // Get destination root path
+    let destination_root = args.destination.clone().unwrap_or_else(|| PathBuf::from("."));
+
+    // For this demo implementation, create a mock object graph
+    // In a real implementation, this would come from the transfer negotiation
+    let (graph, manifest_root) = create_mock_object_graph(&args.transfer_id);
+
+    // Build receive plan with safety preflight
+    let input = ReceivePreflightInput {
+        sender_identity: "peer-alpha".to_string(),
+        grant_id: None,
+        capability_scope: Some("transfer-scope".to_string()),
+        manifest_root: &manifest_root,
+        graph: &graph,
+        destination_policy,
+        destination_root: destination_root.clone(),
+        destination_relative_path: PathBuf::from(&args.transfer_id),
+        existing_destination_paths: scan_existing_paths(&destination_root)?,
+        storage_evidence: get_storage_evidence(&destination_root)?,
+        metadata_policy: ReceiveMetadataPolicy::PortableOnly,
+        consent_source: get_consent_source(args)?,
+        rollback_resume: RollbackResumePolicy::RollbackQuarantineKeepJournal,
+        trace_id: Some(format!("atp-get-{}", args.transfer_id)),
+        replay_pointer: None,
+    };
+
+    let plan = build_receive_plan(input)
+        .map_err(|err| CliError::new("receive_plan_error", "Failed to build receive plan")
+            .detail(err.to_string()))?;
+
+    if args.dry_run || args.verbose {
+        if output.format() == OutputFormat::Json {
+            output.write(&AtpGetPlanOutput { plan: plan.clone() })?;
+        } else {
+            let plan_output = AtpGetPlanHumanOutput::new(&plan);
+            output.write(&plan_output)?;
+        }
+    }
+
+    if args.dry_run {
+        return Ok(());
+    }
+
+    // Check if plan is admitted
+    match plan.decision {
+        asupersync::atp::safety::ReceiveDecision::Deny => {
+            let mut error = CliError::new("receive_denied", "Receive plan was denied");
+            for reason in &plan.rejected_reasons {
+                error = error.detail(format!("Rejection: {:?}", reason));
+            }
+            return Err(error);
+        }
+        asupersync::atp::safety::ReceiveDecision::QuarantineOnly => {
+            let msg = AtpGetStatusMessage::new("Transfer will be quarantined for manual review.");
+            output.write(&msg)?;
+        }
+        asupersync::atp::safety::ReceiveDecision::AllowFinalCommit => {
+            let msg = AtpGetStatusMessage::new("Transfer approved for direct commit.");
+            output.write(&msg)?;
+        }
+    }
+
+    // In a real implementation, execute the actual transfer here
+    let msg = AtpGetStatusMessage::new(&format!("Would execute transfer {} to {}",
+        args.transfer_id, destination_root.display()));
+    output.write(&msg)?;
+
+    Ok(())
+}
+
+fn parse_destination_policy(args: &AtpGetArgs) -> Result<DestinationPolicy, CliError> {
+    match args.policy.as_str() {
+        "deny" => Ok(DestinationPolicy::conservative_default()),
+        "inbox-only" => {
+            let inbox_root = args.destination.clone().unwrap_or_else(|| PathBuf::from(".atp-inbox"));
+            Ok(DestinationPolicy::InboxOnly { inbox_root })
+        }
+        "quarantine-only" => {
+            let quarantine_root = args.destination.clone().unwrap_or_else(|| PathBuf::from(".atp-quarantine"));
+            Ok(DestinationPolicy::QuarantineOnly { quarantine_root })
+        }
+        "allow-listed" => {
+            let destination_root = args.destination.clone().unwrap_or_else(|| PathBuf::from("."));
+            Ok(DestinationPolicy::AllowListed {
+                allowed_roots: std::iter::once(destination_root).collect(),
+                require_quarantine: false,
+                allow_overwrite: args.allow_overwrite,
+                allow_symlinks: args.allow_symlinks,
+                allow_executables: args.allow_executables,
+                allow_special_files: false,
+                case_sensitive: true,
+                max_bytes: args.max_bytes,
+            })
+        }
+        other => Err(CliError::new("invalid_policy", "Invalid destination policy")
+            .detail(format!("Unknown policy: {}. Valid values: deny, inbox-only, quarantine-only, allow-listed", other))
+        )
+    }
+}
+
+fn create_mock_object_graph(transfer_id: &str) -> (ObjectGraph, ObjectId) {
+    // Mock implementation - in reality this would come from transfer negotiation
+    use asupersync::atp::object::{Object, ObjectEdge};
+
+    let file = Object::file(format!("Transfer content for {}", transfer_id).into_bytes());
+    let file_id = file.id.clone();
+    let directory = Object::directory(vec![ObjectEdge::new(file_id, "transfer.txt".to_string())]);
+    let root = directory.id.clone();
+    let mut graph = ObjectGraph::new();
+    graph.add_object(file).expect("file object inserts");
+    graph.add_root(directory).expect("directory root inserts");
+    (graph, root)
+}
+
+fn scan_existing_paths(root: &Path) -> Result<BTreeSet<PathBuf>, CliError> {
+    let mut paths = BTreeSet::new();
+    if root.exists() {
+        if let Ok(entries) = fs::read_dir(root) {
+            for entry in entries.flatten() {
+                paths.insert(entry.path());
+            }
+        }
+    }
+    Ok(paths)
+}
+
+fn get_storage_evidence(_root: &Path) -> Result<StorageEvidence, CliError> {
+    // Simplified storage evidence - real implementation would check filesystem
+    Ok(StorageEvidence {
+        available_bytes: Some(1_000_000_000), // 1GB available
+        quota_remaining_bytes: Some(500_000_000), // 500MB quota
+        safety_margin_bytes: 10_000_000, // 10MB safety margin
+    })
+}
+
+fn get_consent_source(args: &AtpGetArgs) -> Result<ReceiveConsentSource, CliError> {
+    if args.accept {
+        Ok(ReceiveConsentSource::CliConfirmation {
+            token: "auto-accept".to_string(),
+        })
+    } else {
+        // In real implementation, would prompt user for consent
+        Ok(ReceiveConsentSource::None)
+    }
 }
 
 fn atp_replay(args: &AtpReplayArgs, output: &mut Output) -> Result<(), CliError> {
@@ -11680,5 +11947,218 @@ lab:
         let err = load_core_report(&path).expect_err("expected parse failure");
         assert_eq!(err.error_type, "doctor_export_error");
         assert!(err.title.contains("parse core diagnostics report JSON"));
+    }
+
+    #[test]
+    fn atp_get_dry_run_produces_receive_plan() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut output = Output::with_writer(OutputFormat::Human, Vec::<u8>::new());
+
+        let args = AtpGetArgs {
+            transfer_id: "test-transfer-123".to_string(),
+            destination: Some(temp.path().to_path_buf()),
+            dry_run: true,
+            policy: "allow-listed".to_string(),
+            allow_overwrite: false,
+            allow_symlinks: false,
+            allow_executables: false,
+            max_bytes: Some(1000),
+            accept: false,
+            verbose: true,
+        };
+
+        let result = atp_get(&args, &mut output);
+        assert!(result.is_ok(), "atp get dry-run should succeed");
+
+        let output_str = String::from_utf8(output.into_writer().unwrap()).unwrap();
+        assert!(output_str.contains("Receive Plan:"), "should contain receive plan");
+        assert!(output_str.contains("decision"), "should show decision");
+        assert!(output_str.contains("expected_bytes"), "should show expected bytes");
+    }
+
+    #[test]
+    fn atp_get_deny_policy_rejects_transfer() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut output = Output::with_writer(OutputFormat::Human, Vec::<u8>::new());
+
+        let args = AtpGetArgs {
+            transfer_id: "test-transfer-456".to_string(),
+            destination: Some(temp.path().to_path_buf()),
+            dry_run: false,
+            policy: "deny".to_string(),
+            allow_overwrite: false,
+            allow_symlinks: false,
+            allow_executables: false,
+            max_bytes: None,
+            accept: false,
+            verbose: false,
+        };
+
+        let result = atp_get(&args, &mut output);
+        assert!(result.is_err(), "deny policy should reject transfer");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.error_type, "receive_denied");
+    }
+
+    #[test]
+    fn atp_get_json_output_contains_plan_fields() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut output = Output::with_writer(OutputFormat::Json, Vec::<u8>::new());
+
+        let args = AtpGetArgs {
+            transfer_id: "test-transfer-json".to_string(),
+            destination: Some(temp.path().to_path_buf()),
+            dry_run: true,
+            policy: "allow-listed".to_string(),
+            allow_overwrite: true,
+            allow_symlinks: false,
+            allow_executables: false,
+            max_bytes: None,
+            accept: false,
+            verbose: false,
+        };
+
+        let result = atp_get(&args, &mut output);
+        assert!(result.is_ok(), "json output should succeed");
+
+        let output_bytes = output.into_writer().unwrap();
+        let output_str = String::from_utf8(output_bytes).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&output_str)
+            .expect("output should be valid JSON");
+
+        assert!(json.get("decision").is_some(), "should contain decision field");
+        assert!(json.get("sender_identity").is_some(), "should contain sender identity");
+        assert!(json.get("object_graph_summary").is_some(), "should contain object graph");
+        assert!(json.get("destination").is_some(), "should contain destination plan");
+        assert!(json.get("storage").is_some(), "should contain storage preflight");
+        assert!(json.get("plan_digest").is_some(), "should contain plan digest");
+    }
+
+    #[test]
+    fn atp_get_quarantine_policy_shows_appropriate_message() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut output = Output::with_writer(OutputFormat::Human, Vec::<u8>::new());
+
+        let args = AtpGetArgs {
+            transfer_id: "test-transfer-quarantine".to_string(),
+            destination: Some(temp.path().to_path_buf()),
+            dry_run: false,
+            policy: "quarantine-only".to_string(),
+            allow_overwrite: false,
+            allow_symlinks: false,
+            allow_executables: false,
+            max_bytes: None,
+            accept: true,
+            verbose: false,
+        };
+
+        let result = atp_get(&args, &mut output);
+        assert!(result.is_ok(), "quarantine policy should succeed");
+
+        let output_str = String::from_utf8(output.into_writer().unwrap()).unwrap();
+        assert!(output_str.contains("quarantined"), "should mention quarantine");
+    }
+
+    #[test]
+    fn parse_destination_policy_handles_all_variants() {
+        let temp = tempfile::tempdir().expect("tempdir");
+
+        // Test deny policy
+        let deny_args = AtpGetArgs {
+            transfer_id: "test".to_string(),
+            destination: None,
+            dry_run: true,
+            policy: "deny".to_string(),
+            allow_overwrite: false,
+            allow_symlinks: false,
+            allow_executables: false,
+            max_bytes: None,
+            accept: false,
+            verbose: false,
+        };
+        let policy = parse_destination_policy(&deny_args).expect("deny policy should parse");
+        assert!(matches!(policy, DestinationPolicy::Deny));
+
+        // Test allow-listed policy with flags
+        let allow_args = AtpGetArgs {
+            transfer_id: "test".to_string(),
+            destination: Some(temp.path().to_path_buf()),
+            dry_run: true,
+            policy: "allow-listed".to_string(),
+            allow_overwrite: true,
+            allow_symlinks: true,
+            allow_executables: true,
+            max_bytes: Some(1000),
+            accept: false,
+            verbose: false,
+        };
+        let policy = parse_destination_policy(&allow_args).expect("allow-listed policy should parse");
+        if let DestinationPolicy::AllowListed {
+            allow_overwrite,
+            allow_symlinks,
+            allow_executables,
+            max_bytes,
+            ..
+        } = policy {
+            assert!(allow_overwrite, "should allow overwrite");
+            assert!(allow_symlinks, "should allow symlinks");
+            assert!(allow_executables, "should allow executables");
+            assert_eq!(max_bytes, Some(1000), "should set max bytes");
+        } else {
+            panic!("expected AllowListed policy");
+        }
+
+        // Test invalid policy
+        let invalid_args = AtpGetArgs {
+            transfer_id: "test".to_string(),
+            destination: None,
+            dry_run: true,
+            policy: "invalid-policy".to_string(),
+            allow_overwrite: false,
+            allow_symlinks: false,
+            allow_executables: false,
+            max_bytes: None,
+            accept: false,
+            verbose: false,
+        };
+        let result = parse_destination_policy(&invalid_args);
+        assert!(result.is_err(), "invalid policy should error");
+        let err = result.unwrap_err();
+        assert_eq!(err.error_type, "invalid_policy");
+    }
+
+    #[test]
+    fn atp_get_args_parsing_works() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "atp",
+            "get",
+            "transfer-123",
+            "/dest/path",
+            "--dry-run",
+            "--policy=allow-listed",
+            "--allow-overwrite",
+            "--allow-symlinks",
+            "--max-bytes=500000",
+            "--accept",
+            "--verbose",
+        ]).expect("valid args should parse");
+
+        if let Command::Atp(AtpArgs {
+            command: AtpCommand::Get(args),
+        }) = cli.command {
+            assert_eq!(args.transfer_id, "transfer-123");
+            assert_eq!(args.destination, Some(PathBuf::from("/dest/path")));
+            assert!(args.dry_run);
+            assert_eq!(args.policy, "allow-listed");
+            assert!(args.allow_overwrite);
+            assert!(args.allow_symlinks);
+            assert_eq!(args.max_bytes, Some(500000));
+            assert!(args.accept);
+            assert!(args.verbose);
+        } else {
+            panic!("expected atp get command");
+        }
     }
 }
