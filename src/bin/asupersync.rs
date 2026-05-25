@@ -23,7 +23,8 @@ use asupersync::atp::stream_object::ByteRange;
 use asupersync::atp::sync::DirectoryEarlyUsabilityReport;
 use asupersync::atp::{
     ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneDecision, AtpAutotuneDecisionReceipt, AtpAutotunePolicy,
-    AtpAutotuneSettings, AtpAutotuneTelemetry, AtpAutotuneTelemetryReport,
+    AtpAutotuneSettings, AtpAutotuneTelemetry, AtpAutotuneTelemetryReport, AtpRepairCoordinator,
+    AtpRepairCoordinatorDecision, AtpRepairRoiInputs,
 };
 use asupersync::cli::doctor::{
     AdvancedCollaborationEntry, AdvancedDiagnosticsFixture, AdvancedDiagnosticsReportBundle,
@@ -1127,6 +1128,8 @@ fn atp_status(args: &AtpStatusArgs, output: &mut Output) -> Result<(), CliError>
         args.repair_symbols_per_second,
     );
     let receipt = AtpAutotunePolicy::default().decide_with_receipt(current, &telemetry);
+    let repair_inputs = AtpRepairRoiInputs::from_autotune_telemetry(&telemetry);
+    let repair_decision = AtpRepairCoordinator::default().decide(&repair_inputs);
     let decision = receipt.decision.clone();
     let payload = AtpStatusOutput {
         telemetry_path: args.telemetry.display().to_string(),
@@ -1139,6 +1142,7 @@ fn atp_status(args: &AtpStatusArgs, output: &mut Output) -> Result<(), CliError>
             .map(|metric| metric.as_str())
             .collect(),
         decision,
+        repair_decision,
         receipt,
     };
 
@@ -1721,6 +1725,7 @@ struct AtpStatusOutput {
     explain: bool,
     metric_names: Vec<&'static str>,
     decision: AtpAutotuneDecision,
+    repair_decision: AtpRepairCoordinatorDecision,
     receipt: AtpAutotuneDecisionReceipt,
 }
 
@@ -1731,6 +1736,9 @@ impl Outputtable for AtpStatusOutput {
             format!("Telemetry: {}", self.telemetry_path),
         ];
         lines.extend(self.receipt.human_summary_lines(self.explain));
+        if self.explain {
+            lines.extend(self.repair_decision.human_summary_lines());
+        }
 
         lines.join("\n")
     }
@@ -9132,6 +9140,8 @@ mod tests {
         assert!(rendered.contains("send_buffer_pressure"));
         assert!(rendered.contains("atp.autotune.loss_permille"));
         assert!(rendered.contains("Next settings:"));
+        assert!(rendered.contains("Repair action:"));
+        assert!(rendered.contains("Repair ROI:"));
         Ok(())
     }
 

@@ -49,6 +49,9 @@ pub use autotune::{
     AtpAutotuneReceiptConfidence, AtpAutotuneReceiptProofPointer, AtpAutotuneReceiptStatus,
     AtpAutotuneReceiptValidationError, AtpAutotuneSettings, AtpAutotuneTelemetry,
     AtpAutotuneTelemetryError, AtpAutotuneTelemetryReport, AtpBottleneckKind, AtpBottleneckSignal,
+    AtpRepairAction, AtpRepairCoordinator, AtpRepairCoordinatorDecision,
+    AtpRepairCoordinatorPolicy, AtpRepairDecisionFactor, AtpRepairDecisionFactorEffect,
+    AtpRepairDecisionFactorKind, AtpRepairPathMode, AtpRepairRoiInputs,
     AtpTransferPressureSnapshot,
 };
 pub use diagnostics::{

@@ -720,6 +720,689 @@ fn narrow_u32_metric(
     })
 }
 
+/// Repair path surface available for a coordinator decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtpRepairPathMode {
+    /// Direct retransmit or parity repair can use the primary path.
+    Direct,
+    /// Only a relay path is currently admissible.
+    RelayOnly,
+    /// Both direct and relay repair paths are currently admissible.
+    DirectAndRelay,
+}
+
+impl AtpRepairPathMode {
+    /// Return the stable path-mode name used in status and proof output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::RelayOnly => "relay_only",
+            Self::DirectAndRelay => "direct_and_relay",
+        }
+    }
+
+    const fn relay_available(self) -> bool {
+        matches!(self, Self::RelayOnly | Self::DirectAndRelay)
+    }
+}
+
+/// Repair action selected by [`AtpRepairCoordinator`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtpRepairAction {
+    /// Avoid repair overhead and rely on the normal transfer path.
+    NoRepair,
+    /// Request the missing bytes through exact retransmission.
+    ExactRetransmit,
+    /// Send low-rate parity symbols while the transfer continues.
+    ParityTrickle,
+    /// Send a bounded burst of parity symbols to recover a lossy tail quickly.
+    BurstRepair,
+    /// Use multiple admitted peers for repair symbols.
+    MultiPeerRepair,
+    /// Use only the relay path for repair traffic.
+    RelayOnlyRepair,
+}
+
+impl AtpRepairAction {
+    /// Return the stable action name used in status and proof output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoRepair => "no_repair",
+            Self::ExactRetransmit => "exact_retransmit",
+            Self::ParityTrickle => "parity_trickle",
+            Self::BurstRepair => "burst_repair",
+            Self::MultiPeerRepair => "multi_peer_repair",
+            Self::RelayOnlyRepair => "relay_only_repair",
+        }
+    }
+}
+
+/// Input vector for deterministic repair ROI decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpRepairRoiInputs {
+    /// Stable trace id linking this decision to path/proof logs.
+    pub trace_id: String,
+    /// Stable workload or transfer id.
+    pub workload_id: String,
+    /// Expected wall-clock time saved by repair.
+    pub expected_time_saved_micros: u64,
+    /// Encoder CPU cost expected for the repair symbols.
+    pub encode_cpu_micros: u64,
+    /// Decoder CPU cost expected for the repair symbols.
+    pub decode_cpu_micros: u64,
+    /// Additional bytes expected for repair traffic.
+    pub bandwidth_overhead_bytes: u64,
+    /// Memory pressure in permille, where 1000 is saturated.
+    pub memory_pressure_permille: u16,
+    /// Stream contention in permille, where 1000 is saturated.
+    pub stream_contention_permille: u16,
+    /// Relay cost in microseconds per MiB.
+    pub relay_cost_micros_per_mib: u64,
+    /// Path stability in permille, where 1000 is stable.
+    pub path_stability_permille: u16,
+    /// Value of resume/tail recovery in permille.
+    pub resume_value_permille: u16,
+    /// Observed loss in packets per thousand.
+    pub loss_permille: u16,
+    /// Number of admitted repair peers available for this transfer.
+    pub available_peer_count: u16,
+    /// Repair path surface currently available.
+    pub path_mode: AtpRepairPathMode,
+}
+
+impl AtpRepairRoiInputs {
+    /// Build conservative coordinator inputs from an autotune telemetry window.
+    #[must_use]
+    pub fn from_autotune_telemetry(telemetry: &AtpAutotuneTelemetry) -> Self {
+        let loss_permille = telemetry.loss_permille.unwrap_or(0);
+        let rtt_micros = telemetry.rtt_micros.unwrap_or(0);
+        let pto_micros = telemetry
+            .pto_micros
+            .unwrap_or_else(|| rtt_micros.saturating_mul(2));
+        let migration_events = telemetry.migration_events.unwrap_or(0);
+        let loss_wait = permille_of(pto_micros, loss_permille);
+        let migration_wait = rtt_micros.saturating_mul(u64::from(migration_events));
+        let repair_roi = telemetry.repair_roi_permille.unwrap_or(0);
+        let expected_time_saved_micros = loss_wait
+            .max(migration_wait)
+            .saturating_add(permille_of(rtt_micros, repair_roi.min(1_000)));
+        let encode_cpu_micros = u64::from(telemetry.encode_backlog_symbols.unwrap_or(0)) * 32;
+        let decode_cpu_micros = u64::from(telemetry.decode_backlog_symbols.unwrap_or(0)) * 48;
+        let bandwidth_overhead_bytes = u64::from(loss_permille)
+            .saturating_mul(16 * 1_024)
+            .min(4 * 1_048_576);
+        let queued_bytes = telemetry
+            .send_buffer_queued_bytes
+            .unwrap_or(0)
+            .saturating_add(telemetry.receive_buffer_queued_bytes.unwrap_or(0));
+        let memory_pressure_permille = ratio_permille(queued_bytes, 64 * 1_048_576);
+        let stream_contention_permille =
+            match (telemetry.in_flight_bytes, telemetry.congestion_window_bytes) {
+                (Some(in_flight), Some(cwnd)) => ratio_permille(in_flight, cwnd),
+                _ => 0,
+            };
+        let instability = u64::from(loss_permille)
+            .saturating_mul(4)
+            .saturating_add(u64::from(migration_events).saturating_mul(250))
+            .min(1_000);
+        let path_stability_permille = u16::try_from(1_000 - instability).unwrap_or(0);
+        let resume_value_permille = repair_roi
+            .max(if telemetry.decode_backlog_symbols.unwrap_or(0) > 0 {
+                400
+            } else {
+                0
+            })
+            .min(1_000);
+        let path_mode = if migration_events > 0 {
+            AtpRepairPathMode::DirectAndRelay
+        } else {
+            AtpRepairPathMode::Direct
+        };
+
+        Self {
+            trace_id: telemetry.trace_id.clone(),
+            workload_id: telemetry.workload_id.clone(),
+            expected_time_saved_micros,
+            encode_cpu_micros,
+            decode_cpu_micros,
+            bandwidth_overhead_bytes,
+            memory_pressure_permille,
+            stream_contention_permille,
+            relay_cost_micros_per_mib: telemetry.relay_cost_micros_per_mib.unwrap_or(u64::MAX),
+            path_stability_permille,
+            resume_value_permille,
+            loss_permille,
+            available_peer_count: 1,
+            path_mode,
+        }
+    }
+}
+
+/// Factor class recorded for an explainable repair decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtpRepairDecisionFactorKind {
+    /// Net ROI after cost accounting.
+    NetRoi,
+    /// Memory pressure cost gate.
+    MemoryPressure,
+    /// Stream contention cost gate.
+    StreamContention,
+    /// Relay path cost gate.
+    RelayCost,
+    /// Primary path stability gate.
+    PathStability,
+    /// Resume/tail value signal.
+    ResumeValue,
+    /// Loss signal.
+    Loss,
+    /// Peer diversity signal.
+    PeerDiversity,
+    /// Repair path mode signal.
+    PathMode,
+}
+
+impl AtpRepairDecisionFactorKind {
+    /// Return the stable factor name used in status and proof output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NetRoi => "net_roi",
+            Self::MemoryPressure => "memory_pressure",
+            Self::StreamContention => "stream_contention",
+            Self::RelayCost => "relay_cost",
+            Self::PathStability => "path_stability",
+            Self::ResumeValue => "resume_value",
+            Self::Loss => "loss",
+            Self::PeerDiversity => "peer_diversity",
+            Self::PathMode => "path_mode",
+        }
+    }
+}
+
+/// Directional effect of one repair decision factor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AtpRepairDecisionFactorEffect {
+    /// The factor supports enabling repair.
+    SupportsRepair,
+    /// The factor blocks repair or selects a fail-closed path.
+    BlocksRepair,
+    /// The factor contributes cost but does not independently block repair.
+    Cost,
+}
+
+impl AtpRepairDecisionFactorEffect {
+    /// Return the stable effect name used in status and proof output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SupportsRepair => "supports_repair",
+            Self::BlocksRepair => "blocks_repair",
+            Self::Cost => "cost",
+        }
+    }
+}
+
+/// One traceable factor in a repair coordinator decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpRepairDecisionFactor {
+    /// Factor class.
+    pub kind: AtpRepairDecisionFactorKind,
+    /// Observed value for the factor.
+    pub observed: u64,
+    /// Policy threshold used for the factor.
+    pub threshold: u64,
+    /// Directional effect on the decision.
+    pub effect: AtpRepairDecisionFactorEffect,
+}
+
+impl AtpRepairDecisionFactor {
+    const fn new(
+        kind: AtpRepairDecisionFactorKind,
+        observed: u64,
+        threshold: u64,
+        effect: AtpRepairDecisionFactorEffect,
+    ) -> Self {
+        Self {
+            kind,
+            observed,
+            threshold,
+            effect,
+        }
+    }
+}
+
+/// Deterministic, explainable repair coordinator decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpRepairCoordinatorDecision {
+    /// Selected repair action.
+    pub action: AtpRepairAction,
+    /// Stable reason suitable for logs and proof artifacts.
+    pub reason_code: String,
+    /// Whether the coordinator avoided repair because a conservative gate fired.
+    pub fail_closed: bool,
+    /// Expected gross benefit before cost accounting.
+    pub gross_benefit_micros: u64,
+    /// Total modeled repair cost.
+    pub total_cost_micros: u64,
+    /// Net ROI after subtracting modeled costs from gross benefit.
+    pub net_roi_micros: i64,
+    /// Traceable decision factors in stable order.
+    pub factors: Vec<AtpRepairDecisionFactor>,
+}
+
+impl AtpRepairCoordinatorDecision {
+    /// Build stable human status lines for `atp status --explain`.
+    #[must_use]
+    pub fn human_summary_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!("Repair action: {}", self.action.as_str()),
+            format!("Repair reason: {}", self.reason_code),
+            format!("Repair fail closed: {}", self.fail_closed),
+            format!(
+                "Repair ROI: gross_benefit_micros={}, total_cost_micros={}, net_roi_micros={}",
+                self.gross_benefit_micros, self.total_cost_micros, self.net_roi_micros
+            ),
+        ];
+        for factor in &self.factors {
+            lines.push(format!(
+                "- repair {}: effect={}, observed={}, threshold={}",
+                factor.kind.as_str(),
+                factor.effect.as_str(),
+                factor.observed,
+                factor.threshold
+            ));
+        }
+        lines
+    }
+}
+
+/// Conservative thresholds for repair ROI coordination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpRepairCoordinatorPolicy {
+    /// Minimum net ROI required before any repair action is enabled.
+    pub min_positive_roi_micros: u64,
+    /// Minimum net ROI for parity trickle.
+    pub parity_trickle_min_roi_micros: u64,
+    /// Minimum net ROI for burst repair.
+    pub burst_repair_min_roi_micros: u64,
+    /// Minimum net ROI for multi-peer repair.
+    pub multi_peer_min_roi_micros: u64,
+    /// Default direct bandwidth cost in microseconds per MiB.
+    pub bandwidth_cost_micros_per_mib: u64,
+    /// Maximum relay cost accepted for relay-only repair.
+    pub max_relay_cost_micros_per_mib: u64,
+    /// Memory pressure that blocks repair unless resume value is high.
+    pub high_memory_pressure_permille: u16,
+    /// Stream contention that blocks repair unless resume value is high.
+    pub high_stream_contention_permille: u16,
+    /// Path stability below this threshold prefers relay-only repair when cheap.
+    pub unstable_path_permille: u16,
+    /// Loss threshold for parity trickle.
+    pub parity_loss_permille: u16,
+    /// Loss threshold for burst repair.
+    pub burst_loss_permille: u16,
+    /// Minimum peers for multi-peer repair.
+    pub multi_peer_min_peers: u16,
+    /// Resume value that can override local pressure gates.
+    pub resume_value_floor_permille: u16,
+}
+
+impl Default for AtpRepairCoordinatorPolicy {
+    fn default() -> Self {
+        Self {
+            min_positive_roi_micros: 50_000,
+            parity_trickle_min_roi_micros: 150_000,
+            burst_repair_min_roi_micros: 1_000_000,
+            multi_peer_min_roi_micros: 1_500_000,
+            bandwidth_cost_micros_per_mib: 30_000,
+            max_relay_cost_micros_per_mib: 500_000,
+            high_memory_pressure_permille: 850,
+            high_stream_contention_permille: 900,
+            unstable_path_permille: 500,
+            parity_loss_permille: 10,
+            burst_loss_permille: 80,
+            multi_peer_min_peers: 2,
+            resume_value_floor_permille: 600,
+        }
+    }
+}
+
+/// Deterministic repair ROI coordinator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtpRepairCoordinator {
+    /// Policy thresholds used by the coordinator.
+    pub policy: AtpRepairCoordinatorPolicy,
+}
+
+impl Default for AtpRepairCoordinator {
+    fn default() -> Self {
+        Self {
+            policy: AtpRepairCoordinatorPolicy::default(),
+        }
+    }
+}
+
+impl AtpRepairCoordinator {
+    /// Create a coordinator with explicit policy thresholds.
+    #[must_use]
+    pub const fn new(policy: AtpRepairCoordinatorPolicy) -> Self {
+        Self { policy }
+    }
+
+    /// Decide the repair action for one traceable input vector.
+    #[must_use]
+    pub fn decide(self, inputs: &AtpRepairRoiInputs) -> AtpRepairCoordinatorDecision {
+        let gross_benefit_micros = inputs
+            .expected_time_saved_micros
+            .saturating_add(permille_of(
+                inputs.expected_time_saved_micros,
+                inputs.resume_value_permille,
+            ));
+        let bandwidth_cost_micros = mul_div_u64(
+            inputs.bandwidth_overhead_bytes,
+            self.policy.bandwidth_cost_micros_per_mib,
+            1_048_576,
+        );
+        let memory_cost_micros = permille_of(gross_benefit_micros, inputs.memory_pressure_permille);
+        let stream_cost_micros =
+            permille_of(gross_benefit_micros, inputs.stream_contention_permille);
+        let total_cost_micros = inputs
+            .encode_cpu_micros
+            .saturating_add(inputs.decode_cpu_micros)
+            .saturating_add(bandwidth_cost_micros)
+            .saturating_add(memory_cost_micros)
+            .saturating_add(stream_cost_micros);
+        let net_roi_micros = signed_diff_to_i64(gross_benefit_micros, total_cost_micros);
+        let mut factors = self.base_factors(inputs, net_roi_micros);
+
+        if inputs.memory_pressure_permille >= self.policy.high_memory_pressure_permille
+            && inputs.resume_value_permille < self.policy.resume_value_floor_permille
+        {
+            factors.push(AtpRepairDecisionFactor::new(
+                AtpRepairDecisionFactorKind::MemoryPressure,
+                u64::from(inputs.memory_pressure_permille),
+                u64::from(self.policy.high_memory_pressure_permille),
+                AtpRepairDecisionFactorEffect::BlocksRepair,
+            ));
+            return build_repair_decision(
+                AtpRepairAction::NoRepair,
+                "blocked_by_memory_pressure",
+                true,
+                gross_benefit_micros,
+                total_cost_micros,
+                net_roi_micros,
+                factors,
+            );
+        }
+
+        if inputs.stream_contention_permille >= self.policy.high_stream_contention_permille
+            && inputs.resume_value_permille < self.policy.resume_value_floor_permille
+        {
+            factors.push(AtpRepairDecisionFactor::new(
+                AtpRepairDecisionFactorKind::StreamContention,
+                u64::from(inputs.stream_contention_permille),
+                u64::from(self.policy.high_stream_contention_permille),
+                AtpRepairDecisionFactorEffect::BlocksRepair,
+            ));
+            return build_repair_decision(
+                AtpRepairAction::NoRepair,
+                "blocked_by_stream_contention",
+                true,
+                gross_benefit_micros,
+                total_cost_micros,
+                net_roi_micros,
+                factors,
+            );
+        }
+
+        if net_roi_micros < i64_from_u64(self.policy.min_positive_roi_micros) {
+            return build_repair_decision(
+                AtpRepairAction::NoRepair,
+                "repair_roi_not_positive",
+                true,
+                gross_benefit_micros,
+                total_cost_micros,
+                net_roi_micros,
+                factors,
+            );
+        }
+
+        let relay_viable = inputs.path_mode.relay_available()
+            && inputs.relay_cost_micros_per_mib <= self.policy.max_relay_cost_micros_per_mib;
+        if matches!(inputs.path_mode, AtpRepairPathMode::RelayOnly)
+            || (relay_viable && inputs.path_stability_permille < self.policy.unstable_path_permille)
+        {
+            let (action, reason, fail_closed) = if relay_viable {
+                (
+                    AtpRepairAction::RelayOnlyRepair,
+                    "relay_only_repair_roi_positive",
+                    false,
+                )
+            } else {
+                (AtpRepairAction::NoRepair, "relay_cost_not_viable", true)
+            };
+            return build_repair_decision(
+                action,
+                reason,
+                fail_closed,
+                gross_benefit_micros,
+                total_cost_micros,
+                net_roi_micros,
+                factors,
+            );
+        }
+
+        if inputs.available_peer_count >= self.policy.multi_peer_min_peers
+            && net_roi_micros >= i64_from_u64(self.policy.multi_peer_min_roi_micros)
+            && inputs.loss_permille >= self.policy.burst_loss_permille
+        {
+            return build_repair_decision(
+                AtpRepairAction::MultiPeerRepair,
+                "multi_peer_repair_roi_positive",
+                false,
+                gross_benefit_micros,
+                total_cost_micros,
+                net_roi_micros,
+                factors,
+            );
+        }
+
+        if inputs.loss_permille >= self.policy.burst_loss_permille
+            && net_roi_micros >= i64_from_u64(self.policy.burst_repair_min_roi_micros)
+        {
+            return build_repair_decision(
+                AtpRepairAction::BurstRepair,
+                "burst_repair_roi_positive",
+                false,
+                gross_benefit_micros,
+                total_cost_micros,
+                net_roi_micros,
+                factors,
+            );
+        }
+
+        if (inputs.loss_permille >= self.policy.parity_loss_permille
+            || inputs.resume_value_permille >= self.policy.resume_value_floor_permille)
+            && net_roi_micros >= i64_from_u64(self.policy.parity_trickle_min_roi_micros)
+        {
+            return build_repair_decision(
+                AtpRepairAction::ParityTrickle,
+                "parity_trickle_roi_positive",
+                false,
+                gross_benefit_micros,
+                total_cost_micros,
+                net_roi_micros,
+                factors,
+            );
+        }
+
+        build_repair_decision(
+            AtpRepairAction::ExactRetransmit,
+            "exact_retransmit_roi_positive",
+            false,
+            gross_benefit_micros,
+            total_cost_micros,
+            net_roi_micros,
+            factors,
+        )
+    }
+
+    fn base_factors(
+        self,
+        inputs: &AtpRepairRoiInputs,
+        net_roi_micros: i64,
+    ) -> Vec<AtpRepairDecisionFactor> {
+        vec![
+            AtpRepairDecisionFactor::new(
+                AtpRepairDecisionFactorKind::NetRoi,
+                u64_from_nonnegative_i64(net_roi_micros),
+                self.policy.min_positive_roi_micros,
+                if net_roi_micros >= i64_from_u64(self.policy.min_positive_roi_micros) {
+                    AtpRepairDecisionFactorEffect::SupportsRepair
+                } else {
+                    AtpRepairDecisionFactorEffect::BlocksRepair
+                },
+            ),
+            AtpRepairDecisionFactor::new(
+                AtpRepairDecisionFactorKind::MemoryPressure,
+                u64::from(inputs.memory_pressure_permille),
+                u64::from(self.policy.high_memory_pressure_permille),
+                AtpRepairDecisionFactorEffect::Cost,
+            ),
+            AtpRepairDecisionFactor::new(
+                AtpRepairDecisionFactorKind::StreamContention,
+                u64::from(inputs.stream_contention_permille),
+                u64::from(self.policy.high_stream_contention_permille),
+                AtpRepairDecisionFactorEffect::Cost,
+            ),
+            AtpRepairDecisionFactor::new(
+                AtpRepairDecisionFactorKind::RelayCost,
+                inputs.relay_cost_micros_per_mib,
+                self.policy.max_relay_cost_micros_per_mib,
+                if inputs.path_mode.relay_available()
+                    && inputs.relay_cost_micros_per_mib <= self.policy.max_relay_cost_micros_per_mib
+                {
+                    AtpRepairDecisionFactorEffect::SupportsRepair
+                } else {
+                    AtpRepairDecisionFactorEffect::Cost
+                },
+            ),
+            AtpRepairDecisionFactor::new(
+                AtpRepairDecisionFactorKind::PathStability,
+                u64::from(inputs.path_stability_permille),
+                u64::from(self.policy.unstable_path_permille),
+                if inputs.path_stability_permille < self.policy.unstable_path_permille {
+                    AtpRepairDecisionFactorEffect::BlocksRepair
+                } else {
+                    AtpRepairDecisionFactorEffect::SupportsRepair
+                },
+            ),
+            AtpRepairDecisionFactor::new(
+                AtpRepairDecisionFactorKind::ResumeValue,
+                u64::from(inputs.resume_value_permille),
+                u64::from(self.policy.resume_value_floor_permille),
+                if inputs.resume_value_permille >= self.policy.resume_value_floor_permille {
+                    AtpRepairDecisionFactorEffect::SupportsRepair
+                } else {
+                    AtpRepairDecisionFactorEffect::Cost
+                },
+            ),
+            AtpRepairDecisionFactor::new(
+                AtpRepairDecisionFactorKind::Loss,
+                u64::from(inputs.loss_permille),
+                u64::from(self.policy.parity_loss_permille),
+                if inputs.loss_permille >= self.policy.parity_loss_permille {
+                    AtpRepairDecisionFactorEffect::SupportsRepair
+                } else {
+                    AtpRepairDecisionFactorEffect::Cost
+                },
+            ),
+            AtpRepairDecisionFactor::new(
+                AtpRepairDecisionFactorKind::PeerDiversity,
+                u64::from(inputs.available_peer_count),
+                u64::from(self.policy.multi_peer_min_peers),
+                if inputs.available_peer_count >= self.policy.multi_peer_min_peers {
+                    AtpRepairDecisionFactorEffect::SupportsRepair
+                } else {
+                    AtpRepairDecisionFactorEffect::Cost
+                },
+            ),
+            AtpRepairDecisionFactor::new(
+                AtpRepairDecisionFactorKind::PathMode,
+                path_mode_rank(inputs.path_mode),
+                path_mode_rank(AtpRepairPathMode::DirectAndRelay),
+                AtpRepairDecisionFactorEffect::Cost,
+            ),
+        ]
+    }
+}
+
+fn build_repair_decision(
+    action: AtpRepairAction,
+    reason_code: &str,
+    fail_closed: bool,
+    gross_benefit_micros: u64,
+    total_cost_micros: u64,
+    net_roi_micros: i64,
+    factors: Vec<AtpRepairDecisionFactor>,
+) -> AtpRepairCoordinatorDecision {
+    AtpRepairCoordinatorDecision {
+        action,
+        reason_code: reason_code.to_string(),
+        fail_closed,
+        gross_benefit_micros,
+        total_cost_micros,
+        net_roi_micros,
+        factors,
+    }
+}
+
+fn path_mode_rank(path_mode: AtpRepairPathMode) -> u64 {
+    match path_mode {
+        AtpRepairPathMode::Direct => 1,
+        AtpRepairPathMode::RelayOnly => 2,
+        AtpRepairPathMode::DirectAndRelay => 3,
+    }
+}
+
+fn permille_of(value: u64, permille: u16) -> u64 {
+    mul_div_u64(value, u64::from(permille), 1_000)
+}
+
+fn ratio_permille(numerator: u64, denominator: u64) -> u16 {
+    if denominator == 0 {
+        return 1_000;
+    }
+    let ratio = mul_div_u64(numerator, 1_000, denominator).min(1_000);
+    u16::try_from(ratio).unwrap_or(1_000)
+}
+
+fn mul_div_u64(value: u64, multiplier: u64, divisor: u64) -> u64 {
+    let divisor = u128::from(divisor.max(1));
+    let divided = u128::from(value).saturating_mul(u128::from(multiplier)) / divisor;
+    u64::try_from(divided).unwrap_or(u64::MAX)
+}
+
+fn signed_diff_to_i64(benefit: u64, cost: u64) -> i64 {
+    let diff = i128::from(benefit) - i128::from(cost);
+    let clamped = diff.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+    i64::try_from(clamped).unwrap_or(if diff.is_negative() {
+        i64::MIN
+    } else {
+        i64::MAX
+    })
+}
+
+fn i64_from_u64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn u64_from_nonnegative_i64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
 /// Bottleneck class selected by the autotune policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AtpBottleneckKind {
@@ -2102,6 +2785,25 @@ mod tests {
         AtpAutotuneTelemetry::new("trace-a", "workload-a").with_sample_count(16)
     }
 
+    fn repair_inputs() -> AtpRepairRoiInputs {
+        AtpRepairRoiInputs {
+            trace_id: String::from("trace-repair"),
+            workload_id: String::from("workload-repair"),
+            expected_time_saved_micros: 400_000,
+            encode_cpu_micros: 10_000,
+            decode_cpu_micros: 10_000,
+            bandwidth_overhead_bytes: 64 * 1_024,
+            memory_pressure_permille: 50,
+            stream_contention_permille: 25,
+            relay_cost_micros_per_mib: 100_000,
+            path_stability_permille: 950,
+            resume_value_permille: 0,
+            loss_permille: 1,
+            available_peer_count: 1,
+            path_mode: AtpRepairPathMode::Direct,
+        }
+    }
+
     #[test]
     fn metric_names_are_stable_and_namespaced() {
         let names: Vec<_> = ATP_AUTOTUNE_METRIC_NAMES
@@ -2426,6 +3128,126 @@ mod tests {
             decision.settings.repair_symbols_per_second,
             current.repair_symbols_per_second
         );
+    }
+
+    #[test]
+    fn repair_coordinator_clean_path_defaults_to_no_repair() {
+        let coordinator = AtpRepairCoordinator::default();
+        let mut inputs = repair_inputs();
+        inputs.expected_time_saved_micros = 20_000;
+        inputs.bandwidth_overhead_bytes = 0;
+
+        let decision = coordinator.decide(&inputs);
+
+        assert_eq!(decision.action, AtpRepairAction::NoRepair);
+        assert!(decision.fail_closed);
+        assert_eq!(decision.reason_code, "repair_roi_not_positive");
+        assert!(
+            decision
+                .factors
+                .iter()
+                .any(|factor| factor.kind == AtpRepairDecisionFactorKind::NetRoi)
+        );
+    }
+
+    #[test]
+    fn repair_coordinator_selects_exact_retransmit_for_low_loss_positive_roi() {
+        let decision = AtpRepairCoordinator::default().decide(&repair_inputs());
+
+        assert_eq!(decision.action, AtpRepairAction::ExactRetransmit);
+        assert!(!decision.fail_closed);
+        assert_eq!(decision.reason_code, "exact_retransmit_roi_positive");
+        assert!(decision.net_roi_micros > 0);
+    }
+
+    #[test]
+    fn repair_coordinator_selects_parity_trickle_for_moderate_loss() {
+        let mut inputs = repair_inputs();
+        inputs.loss_permille = 25;
+        inputs.expected_time_saved_micros = 700_000;
+        inputs.resume_value_permille = 200;
+
+        let decision = AtpRepairCoordinator::default().decide(&inputs);
+
+        assert_eq!(decision.action, AtpRepairAction::ParityTrickle);
+        assert_eq!(decision.reason_code, "parity_trickle_roi_positive");
+    }
+
+    #[test]
+    fn repair_coordinator_selects_burst_and_multi_peer_for_high_loss() {
+        let coordinator = AtpRepairCoordinator::default();
+        let mut burst = repair_inputs();
+        burst.loss_permille = 120;
+        burst.expected_time_saved_micros = 2_000_000;
+        burst.resume_value_permille = 500;
+
+        let burst_decision = coordinator.decide(&burst);
+        assert_eq!(burst_decision.action, AtpRepairAction::BurstRepair);
+
+        let mut multi_peer = burst;
+        multi_peer.available_peer_count = 4;
+        let multi_peer_decision = coordinator.decide(&multi_peer);
+        assert_eq!(multi_peer_decision.action, AtpRepairAction::MultiPeerRepair);
+        assert_eq!(
+            multi_peer_decision.reason_code,
+            "multi_peer_repair_roi_positive"
+        );
+    }
+
+    #[test]
+    fn repair_coordinator_selects_relay_only_when_direct_path_is_unstable() {
+        let mut inputs = repair_inputs();
+        inputs.path_mode = AtpRepairPathMode::DirectAndRelay;
+        inputs.path_stability_permille = 200;
+        inputs.loss_permille = 40;
+        inputs.expected_time_saved_micros = 1_000_000;
+        inputs.relay_cost_micros_per_mib = 100_000;
+
+        let decision = AtpRepairCoordinator::default().decide(&inputs);
+
+        assert_eq!(decision.action, AtpRepairAction::RelayOnlyRepair);
+        assert_eq!(decision.reason_code, "relay_only_repair_roi_positive");
+        assert!(
+            decision
+                .human_summary_lines()
+                .join("\n")
+                .contains("Repair action: relay_only_repair")
+        );
+    }
+
+    #[test]
+    fn repair_coordinator_blocks_repair_under_high_memory_pressure() {
+        let mut inputs = repair_inputs();
+        inputs.expected_time_saved_micros = 2_000_000;
+        inputs.memory_pressure_permille = 950;
+        inputs.resume_value_permille = 100;
+
+        let decision = AtpRepairCoordinator::default().decide(&inputs);
+
+        assert_eq!(decision.action, AtpRepairAction::NoRepair);
+        assert_eq!(decision.reason_code, "blocked_by_memory_pressure");
+        assert!(decision.fail_closed);
+    }
+
+    #[test]
+    fn repair_roi_inputs_derive_traceable_status_values_from_autotune() {
+        let mut telemetry = healthy_telemetry();
+        telemetry.rtt_micros = Some(50_000);
+        telemetry.pto_micros = Some(300_000);
+        telemetry.loss_permille = Some(100);
+        telemetry.decode_backlog_symbols = Some(32);
+        telemetry.repair_roi_permille = Some(700);
+        telemetry.migration_events = Some(1);
+        telemetry.relay_cost_micros_per_mib = Some(100_000);
+
+        let inputs = AtpRepairRoiInputs::from_autotune_telemetry(&telemetry);
+        let decision = AtpRepairCoordinator::default().decide(&inputs);
+
+        assert_eq!(inputs.trace_id, "trace-a");
+        assert_eq!(inputs.workload_id, "workload-a");
+        assert_eq!(inputs.path_mode, AtpRepairPathMode::DirectAndRelay);
+        assert!(inputs.expected_time_saved_micros > 0);
+        assert_ne!(decision.action, AtpRepairAction::NoRepair);
     }
 
     #[test]
