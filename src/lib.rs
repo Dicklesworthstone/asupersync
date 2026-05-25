@@ -677,6 +677,8 @@ pub mod real_web_sse_broadcast_fanout_e2e_tests;
 pub mod real_websocket_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_websocket_server_channel_broadcast_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_runtime_scheduler_time_wheel_integration_e2e_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod runtime_state_machine_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
