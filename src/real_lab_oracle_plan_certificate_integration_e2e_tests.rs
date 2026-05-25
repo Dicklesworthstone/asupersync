@@ -361,7 +361,10 @@ impl CertificateAwareLabOracle {
                 cert
             }
             Outcome::Err(e) => {
-                return Outcome::Err(Error::internal(format!("Certificate generation failed: {}", e)));
+                return Outcome::Err(Error::internal(format!(
+                    "Certificate generation failed: {}",
+                    e
+                )));
             }
             Outcome::Cancelled => {
                 return Outcome::Cancelled;
@@ -386,7 +389,10 @@ impl CertificateAwareLabOracle {
             }
             Outcome::Err(e) => {
                 self.increment_stat("failed_validations", 1);
-                return Outcome::Err(Error::internal(format!("Certificate validation failed: {}", e)));
+                return Outcome::Err(Error::internal(format!(
+                    "Certificate validation failed: {}",
+                    e
+                )));
             }
             Outcome::Cancelled => {
                 return Outcome::Cancelled;

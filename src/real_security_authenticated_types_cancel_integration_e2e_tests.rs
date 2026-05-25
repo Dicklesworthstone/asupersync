@@ -241,7 +241,10 @@ impl CancelAwareAuthenticationSystem {
             }
             Err(e) => {
                 self.cleanup_failed_operation(&correlation_id).await;
-                return Outcome::Err(Error::internal(format!("Operation execution failed: {}", e)));
+                return Outcome::Err(Error::internal(format!(
+                    "Operation execution failed: {}",
+                    e
+                )));
             }
         };
 

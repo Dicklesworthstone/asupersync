@@ -289,7 +289,10 @@ impl RateLimitedSemaphoreSystem {
             Outcome::Err(e) => {
                 let tracker = self.backpressure_tracker.lock().unwrap();
                 tracker.semaphore_denials.fetch_add(1, Ordering::SeqCst);
-                return Err(Error::internal(format!("Semaphore acquisition failed: {}", e)));
+                return Err(Error::internal(format!(
+                    "Semaphore acquisition failed: {}",
+                    e
+                )));
             }
             Outcome::Cancelled => {
                 return Err(Error::internal("Semaphore acquisition cancelled"));
@@ -316,7 +319,10 @@ impl RateLimitedSemaphoreSystem {
                 let tracker = self.backpressure_tracker.lock().unwrap();
                 tracker.rate_limit_denials.fetch_add(1, Ordering::SeqCst);
                 tracker.combined_denials.fetch_add(1, Ordering::SeqCst);
-                return Err(Error::internal(format!("Rate limit acquisition failed: {}", e)));
+                return Err(Error::internal(format!(
+                    "Rate limit acquisition failed: {}",
+                    e
+                )));
             }
         };
 
@@ -354,7 +360,10 @@ impl RateLimitedSemaphoreSystem {
             Err(e) => {
                 let tracker = self.backpressure_tracker.lock().unwrap();
                 tracker.rate_limit_denials.fetch_add(1, Ordering::SeqCst);
-                return Err(Error::internal(format!("Rate limit acquisition failed: {}", e)));
+                return Err(Error::internal(format!(
+                    "Rate limit acquisition failed: {}",
+                    e
+                )));
             }
         };
 
@@ -378,7 +387,10 @@ impl RateLimitedSemaphoreSystem {
                 let tracker = self.backpressure_tracker.lock().unwrap();
                 tracker.semaphore_denials.fetch_add(1, Ordering::SeqCst);
                 tracker.combined_denials.fetch_add(1, Ordering::SeqCst);
-                return Err(Error::internal(format!("Semaphore acquisition failed: {}", e)));
+                return Err(Error::internal(format!(
+                    "Semaphore acquisition failed: {}",
+                    e
+                )));
             }
             Outcome::Cancelled => {
                 drop(rate_limit_token);
@@ -431,7 +443,9 @@ impl RateLimitedSemaphoreSystem {
                 )));
             }
             Outcome::Cancelled => {
-                return Err(Error::internal("Concurrent semaphore acquisition cancelled"));
+                return Err(Error::internal(
+                    "Concurrent semaphore acquisition cancelled",
+                ));
             }
         };
 
