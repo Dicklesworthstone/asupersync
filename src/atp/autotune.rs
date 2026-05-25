@@ -1271,6 +1271,62 @@ pub struct AtpAutotuneApplicationReceipt {
     pub decision_receipt: AtpAutotuneDecisionReceipt,
 }
 
+/// Error returned when an application receipt cannot be consumed by status,
+/// preflight, or proof code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtpAutotuneApplicationReceiptValidationError {
+    /// Application receipt schema is unsupported.
+    UnsupportedSchemaVersion {
+        /// Expected schema version.
+        expected: String,
+        /// Actual schema version.
+        actual: String,
+    },
+    /// Nested decision receipt is not consumer-safe.
+    DecisionReceiptInvalid {
+        /// Nested decision receipt validation error.
+        reason: AtpAutotuneReceiptValidationError,
+    },
+    /// Nested decision receipt identity does not match the application receipt.
+    DecisionReceiptMismatch {
+        /// Mismatched field name.
+        field: String,
+    },
+    /// The `applied` flag does not match the before/after settings.
+    AppliedFlagMismatch,
+}
+
+impl fmt::Display for AtpAutotuneApplicationReceiptValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedSchemaVersion { expected, actual } => write!(
+                f,
+                "unsupported ATP autotune application receipt schema {actual}, expected {expected}"
+            ),
+            Self::DecisionReceiptInvalid { reason } => {
+                write!(
+                    f,
+                    "ATP autotune application receipt embeds invalid decision receipt: {reason}"
+                )
+            }
+            Self::DecisionReceiptMismatch { field } => {
+                write!(
+                    f,
+                    "ATP autotune application receipt decision receipt mismatches {field}"
+                )
+            }
+            Self::AppliedFlagMismatch => {
+                write!(
+                    f,
+                    "ATP autotune application receipt applied flag mismatches settings"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for AtpAutotuneApplicationReceiptValidationError {}
+
 impl AtpAutotuneApplicationReceipt {
     fn from_parts(
         previous_settings: AtpAutotuneSettings,
@@ -1310,6 +1366,50 @@ impl AtpAutotuneApplicationReceipt {
             reason_code: String::from(reason_code),
             decision_receipt,
         }
+    }
+
+    /// Validate this application receipt before downstream consumers trust it.
+    pub fn validate_for_consumers(
+        &self,
+    ) -> Result<(), AtpAutotuneApplicationReceiptValidationError> {
+        if self.schema_version != ATP_AUTOTUNE_APPLICATION_RECEIPT_SCHEMA_VERSION {
+            return Err(
+                AtpAutotuneApplicationReceiptValidationError::UnsupportedSchemaVersion {
+                    expected: String::from(ATP_AUTOTUNE_APPLICATION_RECEIPT_SCHEMA_VERSION),
+                    actual: self.schema_version.clone(),
+                },
+            );
+        }
+        self.decision_receipt
+            .validate_for_consumers()
+            .map_err(|reason| {
+                AtpAutotuneApplicationReceiptValidationError::DecisionReceiptInvalid { reason }
+            })?;
+        if self.decision_receipt.trace_id != self.trace_id {
+            return Err(
+                AtpAutotuneApplicationReceiptValidationError::DecisionReceiptMismatch {
+                    field: String::from("trace_id"),
+                },
+            );
+        }
+        if self.decision_receipt.workload_id != self.workload_id {
+            return Err(
+                AtpAutotuneApplicationReceiptValidationError::DecisionReceiptMismatch {
+                    field: String::from("workload_id"),
+                },
+            );
+        }
+        if self.decision_receipt.sample_count != self.sample_count {
+            return Err(
+                AtpAutotuneApplicationReceiptValidationError::DecisionReceiptMismatch {
+                    field: String::from("sample_count"),
+                },
+            );
+        }
+        if self.applied != (self.previous_settings != self.applied_settings) {
+            return Err(AtpAutotuneApplicationReceiptValidationError::AppliedFlagMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -2610,6 +2710,48 @@ mod tests {
     }
 
     #[test]
+    fn application_receipt_validates_consumer_identity_and_applied_flag() {
+        let policy = AtpAutotunePolicy::default();
+        let mut state = AtpAutotuneApplicationState::default();
+        let mut telemetry = healthy_telemetry();
+        telemetry.loss_permille = Some(100);
+
+        let receipt = state.apply_policy_window(policy, &telemetry);
+
+        assert!(receipt.validate_for_consumers().is_ok());
+
+        let mut unsupported_schema = receipt.clone();
+        unsupported_schema.schema_version = String::from("atp-autotune-application-receipt-v0");
+        assert_eq!(
+            unsupported_schema.validate_for_consumers(),
+            Err(
+                AtpAutotuneApplicationReceiptValidationError::UnsupportedSchemaVersion {
+                    expected: String::from(ATP_AUTOTUNE_APPLICATION_RECEIPT_SCHEMA_VERSION),
+                    actual: String::from("atp-autotune-application-receipt-v0"),
+                },
+            )
+        );
+
+        let mut mismatched_trace = receipt.clone();
+        mismatched_trace.trace_id = String::from("other-trace");
+        assert_eq!(
+            mismatched_trace.validate_for_consumers(),
+            Err(
+                AtpAutotuneApplicationReceiptValidationError::DecisionReceiptMismatch {
+                    field: String::from("trace_id"),
+                },
+            )
+        );
+
+        let mut mismatched_applied = receipt;
+        mismatched_applied.applied = false;
+        assert_eq!(
+            mismatched_applied.validate_for_consumers(),
+            Err(AtpAutotuneApplicationReceiptValidationError::AppliedFlagMismatch)
+        );
+    }
+
+    #[test]
     fn application_state_resets_pending_growth_after_noisy_pressure() {
         let policy = AtpAutotunePolicy::default();
         let mut state = AtpAutotuneApplicationState::default();
@@ -2681,5 +2823,13 @@ mod tests {
         assert!(!applied.applied);
         assert_eq!(state.settings, before);
         assert_eq!(state.consecutive_growth_windows, 0);
+        assert!(matches!(
+            applied.validate_for_consumers(),
+            Err(
+                AtpAutotuneApplicationReceiptValidationError::DecisionReceiptInvalid {
+                    reason: AtpAutotuneReceiptValidationError::MissingTraceId,
+                },
+            )
+        ));
     }
 }

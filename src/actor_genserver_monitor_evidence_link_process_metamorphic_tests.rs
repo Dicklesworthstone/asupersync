@@ -208,7 +208,7 @@ mod tests {
         pub fn reply_to_call(
             &mut self,
             call_id: u64,
-            response: Vec<u8>,
+            _response: Vec<u8>,
         ) -> Result<(), &'static str> {
             if !self.pending_calls.contains_key(&call_id) {
                 return Err("Call not found");
@@ -327,7 +327,7 @@ mod tests {
                 let mut notifications = Vec::new();
 
                 for &monitor_ref in monitor_refs {
-                    if let Some(monitor) = self.monitors.get(&monitor_ref) {
+                    if self.monitors.contains_key(&monitor_ref) {
                         notifications.push(MockDownNotification {
                             monitored: task_id,
                             monitor_ref,
@@ -603,7 +603,7 @@ mod tests {
         pub stdio: MockStdio,
     }
 
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, Copy, PartialEq)]
     pub enum MockProcessState {
         Spawning,
         Running,
@@ -898,7 +898,7 @@ mod tests {
                 // The composition should be equivalent in terms of observable outcomes
                 // (though internal state may differ)
                 let retry_success_count = retry_results.iter().filter(|(_, success)| *success).count();
-                let timeout_retry_possibility_count = timeout_then_retry_results.iter()
+                let _timeout_retry_possibility_count = timeout_then_retry_results.iter()
                     .filter(|(_, possible)| *possible).count();
 
                 // The number of successful retries should be consistent with composition rules
@@ -1047,7 +1047,7 @@ mod tests {
             // Establish transitive monitoring relationships
             let mut monitor_chains = Vec::new();
 
-            for (i, &(task_a, task_b)) in task_pairs.iter().enumerate() {
+            for &(task_a, task_b) in &task_pairs {
                 current_time += 10;
 
                 // Create a third task for transitivity
@@ -1104,8 +1104,8 @@ mod tests {
             for (task_a, task_b, task_c, _mon_ref_ab, _mon_ref_bc) in &monitor_chains {
                 // If tasks have been cleaned up, they shouldn't be in watchers map
                 let has_a_watchers = monitor_set.watchers.contains_key(task_a);
-                let has_b_watchers = monitor_set.watchers.contains_key(task_b);
-                let has_c_watchers = monitor_set.watchers.contains_key(task_c);
+                let _has_b_watchers = monitor_set.watchers.contains_key(task_b);
+                let _has_c_watchers = monitor_set.watchers.contains_key(task_c);
 
                 // Cleanup consistency: if a task has no watchers, it shouldn't have monitors either
                 if !has_a_watchers {
@@ -1435,8 +1435,16 @@ mod tests {
             for (link_id, task_a, task_b) in &established_links {
                 if let Some(link) = link_set.links.get(link_id) {
                     // Both tasks should reference this link
-                    let task_a_links = link_set.task_links.get(&task_a).unwrap_or(&vec![]);
-                    let task_b_links = link_set.task_links.get(&task_b).unwrap_or(&vec![]);
+                    let task_a_links = link_set
+                        .task_links
+                        .get(task_a)
+                        .map(|links| links.as_slice())
+                        .unwrap_or(&[]);
+                    let task_b_links = link_set
+                        .task_links
+                        .get(task_b)
+                        .map(|links| links.as_slice())
+                        .unwrap_or(&[]);
 
                     prop_assert!(
                         task_a_links.contains(link_id),
@@ -1604,7 +1612,7 @@ mod tests {
             // Create a link with asymmetric policies
             let asym_task_a = 100;
             let asym_task_b = 200;
-            let asym_link = link_set.establish_link(
+            let _asym_link = link_set.establish_link(
                 asym_task_a,
                 asym_task_b,
                 MockExitPolicy::Propagate, // A propagates to B
