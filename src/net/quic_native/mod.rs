@@ -6,11 +6,16 @@
 //! - stream + flow-control model
 
 pub mod connection;
+pub mod connection_manager;
 pub mod endpoint;
 pub mod forensic_log;
+pub mod managed_endpoint;
 pub mod streams;
 pub mod tls;
 pub mod transport;
+
+#[cfg(test)]
+pub mod integration_tests;
 
 #[cfg(test)]
 pub mod transport_conformance_tests;
@@ -19,9 +24,16 @@ pub mod transport_conformance_tests;
 pub mod tls_conformance_harness;
 
 pub use connection::{NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError};
+pub use connection_manager::{
+    ConnectionRouter, ConnectionRouterError, ConnectionRouterStats, ConnectionTimerEvent,
+    QuicTimerScheduler, RoutingResult, TimerType,
+};
 pub use endpoint::{
     BatchResult, EndpointMetrics, OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointConfig,
     QuicUdpEndpointError, ReceivedPacket,
+};
+pub use managed_endpoint::{
+    ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint,
 };
 pub use streams::{
     FlowControlError, FlowCredit, QuicStream, QuicStreamError, StreamDirection, StreamId,
