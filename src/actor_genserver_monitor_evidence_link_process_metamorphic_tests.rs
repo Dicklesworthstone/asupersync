@@ -49,7 +49,6 @@ mod tests {
     #[cfg(test)]
     use proptest::prelude::*;
     use std::collections::{BTreeMap, HashMap, VecDeque};
-    use std::time::Duration;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Mock Implementations for Metamorphic Testing

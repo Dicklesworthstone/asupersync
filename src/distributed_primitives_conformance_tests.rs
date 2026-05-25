@@ -659,12 +659,12 @@ mod conformance_tests {
         // Initial state
         state_machine.put("a".to_string(), "1".to_string());
         state_machine.put("b".to_string(), "2".to_string());
-        let snapshot1 = state_machine.snapshot();
+        let _snapshot1 = state_machine.snapshot();
 
         // Incremental changes
         state_machine.put("c".to_string(), "3".to_string());
         state_machine.delete("a");
-        let snapshot2 = state_machine.snapshot();
+        let _snapshot2 = state_machine.snapshot();
 
         // More changes
         state_machine.put("d".to_string(), "4".to_string());
@@ -899,14 +899,14 @@ mod conformance_tests {
             let mappings2 = ring.get_all_mappings(&keys);
 
             // Multiple queries should be stable
-            prop_assert_eq!(mappings1, mappings2, "Hash ring should be deterministic");
+            prop_assert_eq!(&mappings1, &mappings2, "Hash ring should be deterministic");
 
             // All keys should be mapped
             prop_assert_eq!(mappings1.len(), keys.len(), "All keys should be mapped");
 
             // All mappings should be to valid nodes
-            for (_, node) in mappings1 {
-                prop_assert!(nodes.contains(&node), "All mappings should be to valid nodes");
+            for node in mappings1.values() {
+                prop_assert!(nodes.contains(node), "All mappings should be to valid nodes");
             }
         }
 
@@ -1002,7 +1002,7 @@ mod conformance_tests {
         // Simulate distributed system with hash ring, snapshots, and bridge sequences
         let mut hash_ring = MockConsistentHashRing::new(100);
         let mut state_machines: HashMap<NodeId, MockStateMachine> = HashMap::new();
-        let bridges: HashMap<String, MockBridge> = HashMap::new();
+        let _bridges: HashMap<String, MockBridge> = HashMap::new();
 
         // Setup nodes
         let nodes = vec![
