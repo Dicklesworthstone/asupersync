@@ -11,6 +11,9 @@ pub mod schema;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod contract_validation_tests;
+
 pub use failure_bundle::ATP_FAILURE_BUNDLE_SCHEMA_VERSION;
 pub use replay_artifacts::ATP_REPLAY_ARTIFACT_SCHEMA_ID;
 
