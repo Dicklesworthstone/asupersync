@@ -5,7 +5,8 @@
 mod autotune;
 
 use autotune::{
-    ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION, AtpAutotuneDecisionReceipt, AtpAutotunePolicy,
+    ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION, AtpAutotuneApplicationReceiptValidationError,
+    AtpAutotuneApplicationState, AtpAutotuneDecisionReceipt, AtpAutotuneMetric, AtpAutotunePolicy,
     AtpAutotuneSettings, AtpAutotuneTelemetryError, AtpAutotuneTelemetryReport,
 };
 use serde::Deserialize;
@@ -233,4 +234,43 @@ fn assert_redaction_safe(value: &Value) {
             "golden receipt leaked nondeterministic or host-specific token {forbidden}",
         );
     }
+}
+
+#[test]
+fn application_receipt_consumer_validation_rejects_mismatched_evidence() {
+    let report = AtpAutotuneTelemetryReport::new(
+        "trace-atp-application-validation",
+        "workload-application-validation",
+    )
+    .with_sample_count(16)
+    .with_sample(AtpAutotuneMetric::LossPermille, 100)
+    .with_sample(AtpAutotuneMetric::RepairRoiPermille, 900);
+    let telemetry = report
+        .into_telemetry()
+        .expect("application validation telemetry aggregates");
+    let mut state = AtpAutotuneApplicationState::default();
+
+    let receipt = state.apply_policy_window(AtpAutotunePolicy::default(), &telemetry);
+
+    receipt
+        .validate_for_consumers()
+        .expect("pressure-backoff application receipt should validate");
+
+    let mut mismatched_workload = receipt.clone();
+    mismatched_workload.workload_id = "other-workload".to_string();
+    assert_eq!(
+        mismatched_workload.validate_for_consumers(),
+        Err(
+            AtpAutotuneApplicationReceiptValidationError::DecisionReceiptMismatch {
+                field: "workload_id".to_string(),
+            },
+        )
+    );
+
+    let mut mismatched_applied = receipt;
+    mismatched_applied.applied = false;
+    assert_eq!(
+        mismatched_applied.validate_for_consumers(),
+        Err(AtpAutotuneApplicationReceiptValidationError::AppliedFlagMismatch)
+    );
 }
