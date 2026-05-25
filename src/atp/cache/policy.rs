@@ -3,7 +3,7 @@
 //! Implements intelligent cache eviction that preserves proof/journal invariants
 //! and optimizes for different use cases (hot data, long-term storage, etc.).
 
-use super::{CacheEntry, CacheMetrics, EvictionPolicy};
+use super::{CacheEntry, EvictionPolicy};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};

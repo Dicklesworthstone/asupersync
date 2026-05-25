@@ -10,7 +10,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime};
+#[cfg(feature = "tracing-integration")]
 use tracing::{debug, info, warn};
+
+// Provide no-op tracing macros when tracing is disabled
+#[cfg(not(feature = "tracing-integration"))]
+macro_rules! debug {
+    ($($arg:tt)*) => {};
+}
+#[cfg(not(feature = "tracing-integration"))]
+macro_rules! info {
+    ($($arg:tt)*) => {};
+}
+#[cfg(not(feature = "tracing-integration"))]
+macro_rules! warn {
+    ($($arg:tt)*) => {};
+}
 
 /// Configuration for multi-source repair scheduling
 #[derive(Debug, Clone, Serialize, Deserialize)]

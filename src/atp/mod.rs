@@ -11,6 +11,8 @@ pub mod autotune;
 #[cfg(feature = "benchmark-adapters")]
 pub mod benchmark;
 pub mod cache;
+#[cfg(test)]
+pub mod cache_seeding_integration_tests;
 pub mod diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
@@ -22,7 +24,6 @@ pub mod identity;
 pub mod inbox;
 pub mod journal;
 pub mod lab;
-pub mod logging;
 pub mod manifest;
 pub mod object;
 pub mod path;
@@ -95,10 +96,6 @@ pub use inbox::{
     InboxItem, InboxJsonRow, InboxOffer, InboxState, LocalInbox, MailboxPrivacyPolicy,
     MailboxRetrievalReceipt, MailboxSecurityError, MailboxStorageClass, MailboxStorageRecord,
     MailboxStoreRequest, MailboxTamperEvidence, ObjectDigest, ReceiveGrant,
-};
-pub use logging::{
-    AtpEvent, AtpLogger, AtpLoggerConfig, AtpSubsystem, EventContext, LogFormat, atp_logger,
-    init_atp_logger,
 };
 pub use manifest::{ChunkStrategy, ProofStrength};
 pub use planner::{

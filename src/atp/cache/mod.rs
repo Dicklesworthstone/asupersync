@@ -10,7 +10,7 @@ pub mod trust;
 
 use crate::atp::identity::IdentityError;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -243,12 +243,15 @@ impl AtpCache {
         // Check trust policy
         self.trust_policy.check_access(key)?;
 
+        // Clone storage location to avoid borrow conflict
+        let storage_location = entry.storage_location.clone();
+
         // Update access tracking
         self.update_access(&index_key);
         self.metrics.record_hit();
 
         // Load content from storage
-        match &entry.storage_location {
+        match &storage_location {
             StorageLocation::File(path) => {
                 match std::fs::read(path) {
                     Ok(content) => Ok(Some(content)),
