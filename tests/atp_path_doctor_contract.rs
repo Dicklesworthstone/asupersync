@@ -8,6 +8,10 @@ use asupersync::atp::{
     ATP_PATH_DOCTOR_SCHEMA, ATP_PATH_TRACE_ATTEMPT_SCHEMA, build_path_doctor_document,
     render_path_doctor_human,
 };
+use asupersync::lab::atp_path::{
+    AtpPathEventKind, AtpPathExecutionResult, AtpPathLabHarness, AtpPathTestConfig,
+};
+use asupersync::lab::{AtpLabRegime, AtpLabScenario};
 use asupersync::net::atp::{
     DirectCandidateRejection, DirectCandidateSource, PathDiscoveryInputs, PathDiscoveryPolicy,
     TailscaleCandidateObservation, TailscaleDetectionSource, TailscalePathPolicy,
@@ -77,6 +81,105 @@ fn udp_blocked_tcp_tls_fallback_race() -> PathRace {
     race
 }
 
+fn path_race_from_lab_result(result: &AtpPathExecutionResult) -> PathRace {
+    let attempts = result
+        .trace_events
+        .iter()
+        .filter_map(|event| match &event.event {
+            AtpPathEventKind::ConnectionAttempt { path_kind, .. } => {
+                Some((*path_kind, event.trace_id))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let mut race = PathRace::new();
+    for (index, (path_kind, trace_id)) in attempts.iter().copied().enumerate() {
+        race.add_candidate(PathCandidate::new(
+            PathCandidateId::new(index as u64 + 1),
+            path_kind,
+            trace_id,
+        ))
+        .expect("lab path candidate");
+    }
+    race.start_all().expect("start lab-derived path race");
+
+    for event in &result.trace_events {
+        match &event.event {
+            AtpPathEventKind::PathSucceeded {
+                path_kind,
+                latency_micros,
+            } => {
+                let candidate_id = candidate_id_for_path(&attempts, *path_kind);
+                race.record_outcome(
+                    candidate_id,
+                    PathOutcome::success(
+                        success_kind_for_path(*path_kind),
+                        event.timestamp.as_nanos().saturating_div(1_000),
+                        Some(*latency_micros),
+                    )
+                    .with_bytes(1_200, 1_024),
+                )
+                .expect("record lab path success");
+            }
+            AtpPathEventKind::PathFailed { path_kind, .. } => {
+                let candidate_id = candidate_id_for_path(&attempts, *path_kind);
+                race.record_outcome(
+                    candidate_id,
+                    PathOutcome::failure(
+                        failure_kind_for_path(*path_kind),
+                        event.timestamp.as_nanos().saturating_div(1_000),
+                    )
+                    .with_bytes(384, 0),
+                )
+                .expect("record lab path failure");
+            }
+            _ => {}
+        }
+    }
+
+    race
+}
+
+fn candidate_id_for_path(
+    attempts: &[(PathKind, PathTraceId)],
+    path_kind: PathKind,
+) -> PathCandidateId {
+    let index = attempts
+        .iter()
+        .position(|(candidate_kind, _)| *candidate_kind == path_kind)
+        .expect("lab trace should include connection attempt before outcome");
+    PathCandidateId::new(index as u64 + 1)
+}
+
+fn success_kind_for_path(path_kind: PathKind) -> PathSuccessKind {
+    match path_kind {
+        PathKind::TailscaleIp => PathSuccessKind::TailscaleSelected,
+        PathKind::AtpRelayUdp | PathKind::AtpRelayTcpTls443 | PathKind::MasqueConnectUdp => {
+            PathSuccessKind::RelaySelected
+        }
+        PathKind::OfflineMailbox => PathSuccessKind::MailboxAccepted,
+        PathKind::LanMulticast
+        | PathKind::ExplicitPublicUdp
+        | PathKind::PublicIpv6
+        | PathKind::NatPunchedUdp => PathSuccessKind::DirectValidated,
+    }
+}
+
+fn failure_kind_for_path(path_kind: PathKind) -> PathFailureKind {
+    match path_kind {
+        PathKind::NatPunchedUdp => PathFailureKind::HardNat,
+        PathKind::AtpRelayUdp | PathKind::AtpRelayTcpTls443 | PathKind::MasqueConnectUdp => {
+            PathFailureKind::RelayUnavailable
+        }
+        PathKind::TailscaleIp
+        | PathKind::LanMulticast
+        | PathKind::ExplicitPublicUdp
+        | PathKind::PublicIpv6
+        | PathKind::OfflineMailbox => PathFailureKind::ProtocolError,
+    }
+}
+
 #[test]
 fn path_doctor_document_has_stable_json_and_trace_contract() {
     let race = relay_fallback_race();
@@ -112,6 +215,70 @@ fn path_doctor_document_has_stable_json_and_trace_contract() {
     let human = render_path_doctor_human(&document);
     assert!(human.contains("Overall: degraded reason=relay_fallback_validated"));
     assert!(human.contains("Selected: candidate=2 kind=atp_relay_tcp_tls_443 family=relay"));
+    assert!(human.contains("Structured trace rows: 3"));
+}
+
+#[tokio::test]
+async fn path_doctor_example_is_validated_against_lab_scenario_log() {
+    let mut harness = AtpPathLabHarness::new(AtpPathTestConfig::nat_stress());
+    let scenario = AtpLabScenario::new("doctor-hard-nat-tcp-tls-failover", 0xA7F0_3001)
+        .with_regime(AtpLabRegime::HardNat)
+        .with_regime(AtpLabRegime::RelayTcpTls443)
+        .with_regime(AtpLabRegime::RelayOnly);
+
+    let result = harness
+        .execute_scenario(&scenario)
+        .await
+        .expect("lab path scenario");
+
+    assert_eq!(
+        result.path_validation.selected_path_kind,
+        Some(PathKind::AtpRelayTcpTls443)
+    );
+    assert_eq!(result.candidates_evaluated, 3);
+
+    let race = path_race_from_lab_result(&result);
+    let document = build_path_doctor_document("peer-redacted", &race);
+    let json = serde_json::to_value(&document).expect("serialize path doctor");
+
+    assert_eq!(json["schema_version"], ATP_PATH_DOCTOR_SCHEMA);
+    assert_eq!(json["summary"]["candidate_count"], 3);
+    assert_eq!(json["summary"]["failure_count"], 1);
+    assert_eq!(json["summary"]["drained_loser_count"], 1);
+    assert_eq!(json["summary"]["reason_code"], "relay_fallback_validated");
+    assert_eq!(json["selected_path"]["kind"], "atp_relay_tcp_tls_443");
+    assert_eq!(json["selected_path"]["family"], "relay");
+
+    assert!(
+        json["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|candidate| {
+                candidate["budget"]["connect_timeout_micros"]
+                    .as_u64()
+                    .unwrap()
+                    > 0
+                    && candidate["budget"]["loser_drain_timeout_micros"]
+                        .as_u64()
+                        .unwrap()
+                        > 0
+                    && candidate["security"]["authenticated_peer"] == true
+                    && candidate["security"]["end_to_end_encrypted"] == true
+            })
+    );
+
+    assert!(json["trace"].as_array().unwrap().iter().any(|entry| {
+        entry["kind"] == "atp_relay_udp"
+            && entry["state"] == "drained_loser"
+            && entry["detail"]
+                .as_str()
+                .unwrap()
+                .contains("lost to candidate 2")
+    }));
+
+    let human = render_path_doctor_human(&document);
+    assert!(human.contains("Selected: candidate=2 kind=atp_relay_tcp_tls_443"));
     assert!(human.contains("Structured trace rows: 3"));
 }
 
