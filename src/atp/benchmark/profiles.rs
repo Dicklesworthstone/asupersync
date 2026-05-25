@@ -243,6 +243,8 @@ impl AtpProfile {
                     verified_completion,
                     first_usable_output: transfer_metrics.first_usable_output,
                     resume_time: None, // Not testing resume in this benchmark
+                    disk_amplification_ratio: Some(1.0),
+                    failure_reproducible: None,
                     failure_mode: None,
                 })
             }
@@ -255,6 +257,8 @@ impl AtpProfile {
                 verified_completion: false,
                 first_usable_output: None,
                 resume_time: None,
+                disk_amplification_ratio: None,
+                failure_reproducible: Some(true),
                 failure_mode: Some(e),
             }),
         }

@@ -296,6 +296,8 @@ impl BaselineAdapter for ScpAdapter {
             verified_completion: false, // Will be filled by caller
             first_usable_output: None,
             resume_time: None,
+            disk_amplification_ratio: Some(1.0),
+            failure_reproducible: None,
             failure_mode: None,
         })
     }
