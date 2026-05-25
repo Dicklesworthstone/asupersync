@@ -505,6 +505,8 @@ pub mod real_lab_scenario_runner_trace_recorder_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_messaging_jetstream_obligation_dialectica_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_messaging_jetstream_channel_broadcast_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_dns_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_dns_resolver_happy_eyeballs_e2e_tests;
