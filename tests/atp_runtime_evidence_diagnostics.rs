@@ -1,5 +1,9 @@
 #![allow(missing_docs)]
 
+use asupersync::atp::diagnostics::{
+    ATP_NETWORK_TRUTH_PRESSURE_SCHEMA, AtpNetworkPressureLevel, AtpNetworkTruthMetric,
+    AtpNetworkTruthPressureModel, AtpNetworkTruthSignal, AtpNetworkTruthSignalKind,
+};
 use asupersync::atp::{
     ATP_RUNTIME_EVIDENCE_DIAGNOSTIC_SCHEMA, ATP_RUNTIME_EVIDENCE_EXPLANATION_SCHEMA,
     AtpCancellationDrainEvidence, AtpFinalizerEvidence, AtpObligationEvidenceCounts,
@@ -54,6 +58,46 @@ fn runtime_evidence_envelope() -> AtpRuntimeEvidenceEnvelope {
         "calibration window unavailable",
     ));
     envelope
+}
+
+fn network_truth_pressure_model() -> AtpNetworkTruthPressureModel {
+    let mut model = AtpNetworkTruthPressureModel::new(1_234_567);
+    model.path_id = Some("path-public-correlation-abcdef".to_string());
+    assert!(model.add_signal(AtpNetworkTruthSignal::measured(
+        AtpNetworkTruthMetric::Rtt,
+        28_000,
+        "micros",
+        120_000,
+        "pathlog-rtt-public-correlation",
+    )));
+    assert!(model.add_signal(AtpNetworkTruthSignal::measured(
+        AtpNetworkTruthMetric::Pto,
+        0,
+        "count",
+        0,
+        "pathlog-pto-public-correlation",
+    )));
+    assert!(model.add_signal(AtpNetworkTruthSignal::inferred(
+        AtpNetworkTruthMetric::Loss,
+        18,
+        "permille",
+        700_000,
+        "pathlog-loss-public-correlation",
+        "loss inferred from ACK gaps and resend pressure",
+    )));
+    assert!(model.add_signal(AtpNetworkTruthSignal::advisory(
+        AtpNetworkTruthMetric::RelayDirectDelta,
+        140_000,
+        "ppm",
+        520_000,
+        "relay-delta-public-correlation",
+        "relay delta is derived from current profile rather than a direct OS signal",
+    )));
+    assert!(model.add_signal(AtpNetworkTruthSignal::unsupported(
+        AtpNetworkTruthMetric::CongestionWindow,
+        "cwnd unavailable on this platform",
+    )));
+    model
 }
 
 #[test]
@@ -133,4 +177,89 @@ fn runtime_evidence_envelope_round_trips_as_contract_json() {
         serde_json::from_str(&json).expect("runtime evidence envelope deserializes");
 
     assert_eq!(roundtrip, envelope);
+}
+
+#[test]
+fn network_truth_pressure_model_distinguishes_facts_estimates_and_unsupported() {
+    let mut envelope = runtime_evidence_envelope();
+    envelope.network_truth = Some(network_truth_pressure_model());
+
+    let doc = AtpRuntimeEvidenceBridge::explain(envelope);
+    let network_truth = doc
+        .evidence
+        .network_truth
+        .as_ref()
+        .expect("network truth model is carried in diagnostic evidence");
+
+    assert_eq!(
+        network_truth.schema_version,
+        ATP_NETWORK_TRUTH_PRESSURE_SCHEMA
+    );
+    assert_eq!(
+        network_truth.pressure_level(),
+        AtpNetworkPressureLevel::Degraded
+    );
+    assert!(
+        network_truth.signals.iter().any(|signal| signal.kind
+            == AtpNetworkTruthSignalKind::MeasuredFact
+            && signal.metric == AtpNetworkTruthMetric::Rtt),
+        "RTT must be represented as a measured fact"
+    );
+    assert!(
+        network_truth.signals.iter().any(|signal| signal.kind
+            == AtpNetworkTruthSignalKind::AdvisoryEstimate
+            && signal.metric == AtpNetworkTruthMetric::RelayDirectDelta),
+        "relay/direct delta must stay an advisory estimate"
+    );
+    assert!(
+        doc.unavailable_signals
+            .iter()
+            .any(|signal| signal == "network truth congestion_window unsupported"),
+        "unsupported platform truth must be explicit"
+    );
+    assert!(
+        doc.network_truth_explanations
+            .iter()
+            .any(|line| line.contains("network truth pressure degraded"))
+    );
+    assert!(
+        doc.proof_claims
+            .iter()
+            .all(|claim| !claim.contains("network truth")),
+        "network truth facts and estimates must not be upgraded to proof claims"
+    );
+}
+
+#[test]
+fn user_network_truth_explanation_redacts_path_and_source_correlation() {
+    let mut envelope = runtime_evidence_envelope();
+    envelope.network_truth = Some(network_truth_pressure_model());
+
+    let doc = AtpRuntimeEvidenceBridge::explain_for_user(&envelope);
+    let network_truth = doc
+        .evidence
+        .network_truth
+        .as_ref()
+        .expect("network truth model is retained");
+
+    assert!(
+        network_truth
+            .path_id
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("<redacted>")
+    );
+    assert!(network_truth.signals.iter().all(|signal| {
+        signal
+            .source_ref
+            .as_deref()
+            .is_none_or(|source_ref| source_ref.starts_with("<redacted>"))
+    }));
+    assert!(
+        network_truth
+            .signals
+            .iter()
+            .filter_map(|signal| signal.detail.as_deref())
+            .all(|detail| detail == "<redacted>")
+    );
 }

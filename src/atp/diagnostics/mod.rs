@@ -6,6 +6,7 @@
 //! bounds, and e-process alerts.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// Stable schema for ATP runtime-evidence diagnostic envelopes.
 pub const ATP_RUNTIME_EVIDENCE_DIAGNOSTIC_SCHEMA: &str =
@@ -14,6 +15,13 @@ pub const ATP_RUNTIME_EVIDENCE_DIAGNOSTIC_SCHEMA: &str =
 /// Stable schema for rendered ATP runtime-evidence explanations.
 pub const ATP_RUNTIME_EVIDENCE_EXPLANATION_SCHEMA: &str =
     "asupersync.atp.diagnostics.runtime_explanation.v1";
+
+/// Stable schema for ATP practical network-truth pressure evidence.
+pub const ATP_NETWORK_TRUTH_PRESSURE_SCHEMA: &str =
+    "asupersync.atp.diagnostics.network_truth_pressure.v1";
+
+/// Maximum network-truth signals carried by one diagnostic envelope.
+pub const ATP_NETWORK_TRUTH_MAX_SIGNALS: usize = 16;
 
 const REDACTED: &str = "<redacted>";
 
@@ -89,6 +97,397 @@ impl AtpRuntimeSignalSource {
             Self::EProcessAlert => "eprocess_alert",
             Self::EvidenceLedger => "evidence_ledger",
         }
+    }
+}
+
+/// Evidence quality for one practical network-truth signal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtpNetworkTruthSignalKind {
+    /// Directly measured by ATP or the runtime.
+    MeasuredFact,
+    /// Inferred from multiple measured facts.
+    InferredPressure,
+    /// Useful estimate that must not be presented as measured fact.
+    AdvisoryEstimate,
+    /// Expected signal is unavailable on this platform/path.
+    Unsupported,
+}
+
+impl AtpNetworkTruthSignalKind {
+    /// Stable string label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MeasuredFact => "measured_fact",
+            Self::InferredPressure => "inferred_pressure",
+            Self::AdvisoryEstimate => "advisory_estimate",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// Practical network-truth metric families used by ATP diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtpNetworkTruthMetric {
+    /// Round-trip time.
+    Rtt,
+    /// ACK delay.
+    AckDelay,
+    /// Packet or symbol loss.
+    Loss,
+    /// Probe timeout pressure.
+    Pto,
+    /// Congestion window, when available.
+    CongestionWindow,
+    /// Bytes in flight, when available.
+    BytesInFlight,
+    /// Socket send/receive pressure.
+    SocketPressure,
+    /// Disk write/read lag pressure.
+    DiskLag,
+    /// CPU pressure from encode/decode work.
+    CpuEncodeDecodePressure,
+    /// Repair return-on-investment estimate.
+    RepairRoi,
+    /// Relay-vs-direct path delta.
+    RelayDirectDelta,
+    /// Path migration events.
+    PathMigration,
+    /// Cancellation pressure.
+    CancellationPressure,
+    /// Obligation drain latency.
+    ObligationDrainLatency,
+}
+
+impl AtpNetworkTruthMetric {
+    /// Every required metric family in deterministic order.
+    pub const ALL: [Self; 14] = [
+        Self::Rtt,
+        Self::AckDelay,
+        Self::Loss,
+        Self::Pto,
+        Self::CongestionWindow,
+        Self::BytesInFlight,
+        Self::SocketPressure,
+        Self::DiskLag,
+        Self::CpuEncodeDecodePressure,
+        Self::RepairRoi,
+        Self::RelayDirectDelta,
+        Self::PathMigration,
+        Self::CancellationPressure,
+        Self::ObligationDrainLatency,
+    ];
+
+    /// Stable string label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rtt => "rtt",
+            Self::AckDelay => "ack_delay",
+            Self::Loss => "loss",
+            Self::Pto => "pto",
+            Self::CongestionWindow => "congestion_window",
+            Self::BytesInFlight => "bytes_in_flight",
+            Self::SocketPressure => "socket_pressure",
+            Self::DiskLag => "disk_lag",
+            Self::CpuEncodeDecodePressure => "cpu_encode_decode_pressure",
+            Self::RepairRoi => "repair_roi",
+            Self::RelayDirectDelta => "relay_direct_delta",
+            Self::PathMigration => "path_migration",
+            Self::CancellationPressure => "cancellation_pressure",
+            Self::ObligationDrainLatency => "obligation_drain_latency",
+        }
+    }
+}
+
+/// Aggregated ATP network pressure level.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtpNetworkPressureLevel {
+    /// No meaningful pressure detected.
+    Nominal,
+    /// Pressure is visible but not yet transfer-degrading.
+    Watch,
+    /// Pressure is likely affecting transfer quality.
+    Degraded,
+    /// Pressure is high enough to require conservative behavior.
+    Critical,
+}
+
+impl AtpNetworkPressureLevel {
+    /// Stable string label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Nominal => "nominal",
+            Self::Watch => "watch",
+            Self::Degraded => "degraded",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+/// One practical network-truth signal for ATP diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AtpNetworkTruthSignal {
+    /// Metric family.
+    pub metric: AtpNetworkTruthMetric,
+    /// Evidence quality.
+    pub kind: AtpNetworkTruthSignalKind,
+    /// Integer value in the declared unit, if available.
+    pub value: Option<i64>,
+    /// Stable unit label, such as `micros`, `permille`, `bytes`, or `ppm`.
+    pub unit: String,
+    /// Pressure contribution in parts-per-million, clamped to 0..=1_000_000.
+    pub pressure_score_ppm: u32,
+    /// Source reference, such as a pathlog row or proof bundle id.
+    pub source_ref: Option<String>,
+    /// Short operator-facing detail.
+    pub detail: Option<String>,
+}
+
+impl AtpNetworkTruthSignal {
+    /// Builds a network-truth signal.
+    #[must_use]
+    pub fn new(
+        metric: AtpNetworkTruthMetric,
+        kind: AtpNetworkTruthSignalKind,
+        value: Option<i64>,
+        unit: impl Into<String>,
+        pressure_score_ppm: u32,
+        source_ref: Option<String>,
+        detail: Option<String>,
+    ) -> Self {
+        Self {
+            metric,
+            kind,
+            value,
+            unit: unit.into(),
+            pressure_score_ppm: pressure_score_ppm.min(1_000_000),
+            source_ref,
+            detail,
+        }
+    }
+
+    /// Builds a directly measured fact.
+    #[must_use]
+    pub fn measured(
+        metric: AtpNetworkTruthMetric,
+        value: i64,
+        unit: impl Into<String>,
+        pressure_score_ppm: u32,
+        source_ref: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            metric,
+            AtpNetworkTruthSignalKind::MeasuredFact,
+            Some(value),
+            unit,
+            pressure_score_ppm,
+            Some(source_ref.into()),
+            None,
+        )
+    }
+
+    /// Builds an inferred pressure signal.
+    #[must_use]
+    pub fn inferred(
+        metric: AtpNetworkTruthMetric,
+        value: i64,
+        unit: impl Into<String>,
+        pressure_score_ppm: u32,
+        source_ref: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            metric,
+            AtpNetworkTruthSignalKind::InferredPressure,
+            Some(value),
+            unit,
+            pressure_score_ppm,
+            Some(source_ref.into()),
+            Some(detail.into()),
+        )
+    }
+
+    /// Builds an advisory estimate.
+    #[must_use]
+    pub fn advisory(
+        metric: AtpNetworkTruthMetric,
+        value: i64,
+        unit: impl Into<String>,
+        pressure_score_ppm: u32,
+        source_ref: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            metric,
+            AtpNetworkTruthSignalKind::AdvisoryEstimate,
+            Some(value),
+            unit,
+            pressure_score_ppm,
+            Some(source_ref.into()),
+            Some(detail.into()),
+        )
+    }
+
+    /// Builds an unsupported-signal downgrade.
+    #[must_use]
+    pub fn unsupported(metric: AtpNetworkTruthMetric, reason: impl Into<String>) -> Self {
+        Self::new(
+            metric,
+            AtpNetworkTruthSignalKind::Unsupported,
+            None,
+            "unsupported",
+            0,
+            None,
+            Some(reason.into()),
+        )
+    }
+}
+
+/// Practical network-truth pressure evidence attached to ATP diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AtpNetworkTruthPressureModel {
+    /// Stable schema version.
+    pub schema_version: String,
+    /// Path or route id, when available.
+    pub path_id: Option<String>,
+    /// Deterministic lab/runtime timestamp in microseconds.
+    pub deterministic_timestamp_micros: u64,
+    /// Bounded metric signals.
+    pub signals: Vec<AtpNetworkTruthSignal>,
+    /// Redaction policy applied before user display.
+    pub redaction_policy: String,
+}
+
+impl AtpNetworkTruthPressureModel {
+    /// Creates an empty pressure model at a deterministic timestamp.
+    #[must_use]
+    pub fn new(deterministic_timestamp_micros: u64) -> Self {
+        Self {
+            schema_version: ATP_NETWORK_TRUTH_PRESSURE_SCHEMA.to_string(),
+            path_id: None,
+            deterministic_timestamp_micros,
+            signals: Vec::new(),
+            redaction_policy: "atp-network-truth-default".to_string(),
+        }
+    }
+
+    /// Adds a signal if the model has remaining cardinality budget.
+    pub fn add_signal(&mut self, signal: AtpNetworkTruthSignal) -> bool {
+        if self.signals.len() >= ATP_NETWORK_TRUTH_MAX_SIGNALS {
+            return false;
+        }
+        self.signals.push(signal);
+        true
+    }
+
+    /// Highest pressure contribution in parts-per-million.
+    #[must_use]
+    pub fn overall_pressure_score_ppm(&self) -> u32 {
+        self.signals
+            .iter()
+            .map(|signal| signal.pressure_score_ppm)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Pressure level without hysteresis.
+    #[must_use]
+    pub fn pressure_level(&self) -> AtpNetworkPressureLevel {
+        pressure_level_for_score(self.overall_pressure_score_ppm())
+    }
+
+    /// Pressure level with conservative downshift hysteresis.
+    #[must_use]
+    pub fn pressure_level_with_hysteresis(
+        &self,
+        previous: Option<AtpNetworkPressureLevel>,
+    ) -> AtpNetworkPressureLevel {
+        let candidate = self.pressure_level();
+        let Some(previous) = previous else {
+            return candidate;
+        };
+        if previous > candidate && self.overall_pressure_score_ppm() >= retention_floor(previous) {
+            previous
+        } else {
+            candidate
+        }
+    }
+
+    /// Metrics represented as unsupported by this model.
+    #[must_use]
+    pub fn unsupported_metrics(&self) -> Vec<AtpNetworkTruthMetric> {
+        let mut unsupported = self
+            .signals
+            .iter()
+            .filter(|signal| signal.kind == AtpNetworkTruthSignalKind::Unsupported)
+            .map(|signal| signal.metric)
+            .collect::<Vec<_>>();
+        unsupported.sort();
+        unsupported.dedup();
+        unsupported
+    }
+
+    /// Required metrics absent from this model.
+    #[must_use]
+    pub fn missing_required_metrics(&self) -> Vec<AtpNetworkTruthMetric> {
+        let present = self
+            .signals
+            .iter()
+            .map(|signal| signal.metric)
+            .collect::<BTreeSet<_>>();
+        AtpNetworkTruthMetric::ALL
+            .into_iter()
+            .filter(|metric| !present.contains(metric))
+            .collect()
+    }
+
+    /// Concise operator-facing summary.
+    #[must_use]
+    pub fn summary_line(&self) -> String {
+        format!(
+            "network truth pressure {} score_ppm={} signals={} unsupported={} missing={}",
+            self.pressure_level().as_str(),
+            self.overall_pressure_score_ppm(),
+            self.signals.len(),
+            self.unsupported_metrics().len(),
+            self.missing_required_metrics().len()
+        )
+    }
+
+    /// Returns a user-safe copy with correlation ids and details redacted.
+    #[must_use]
+    pub fn redacted_for_user(&self) -> Self {
+        let mut redacted = self.clone();
+        redacted.path_id = redacted.path_id.as_deref().map(redact_token);
+        for signal in &mut redacted.signals {
+            signal.source_ref = signal.source_ref.as_deref().map(redact_token);
+            signal.detail = signal.detail.as_deref().map(|_| REDACTED.to_string());
+        }
+        redacted.redaction_policy = format!("{}+user_safe", self.redaction_policy);
+        redacted
+    }
+}
+
+fn pressure_level_for_score(score_ppm: u32) -> AtpNetworkPressureLevel {
+    match score_ppm {
+        0..=200_000 => AtpNetworkPressureLevel::Nominal,
+        200_001..=600_000 => AtpNetworkPressureLevel::Watch,
+        600_001..=850_000 => AtpNetworkPressureLevel::Degraded,
+        _ => AtpNetworkPressureLevel::Critical,
+    }
+}
+
+fn retention_floor(level: AtpNetworkPressureLevel) -> u32 {
+    match level {
+        AtpNetworkPressureLevel::Nominal => 0,
+        AtpNetworkPressureLevel::Watch => 150_000,
+        AtpNetworkPressureLevel::Degraded => 500_000,
+        AtpNetworkPressureLevel::Critical => 750_000,
     }
 }
 
@@ -256,6 +655,8 @@ pub struct AtpRuntimeEvidenceEnvelope {
     pub replay: Option<AtpReplayEvidencePointer>,
     /// Runtime evidence signals.
     pub signals: Vec<AtpRuntimeEvidenceSignal>,
+    /// Practical network-truth pressure evidence.
+    pub network_truth: Option<AtpNetworkTruthPressureModel>,
     /// Redaction policy applied before user display.
     pub redaction_policy: String,
 }
@@ -274,6 +675,7 @@ impl AtpRuntimeEvidenceEnvelope {
             finalizer: None,
             replay: None,
             signals: Vec::new(),
+            network_truth: None,
             redaction_policy: "atp-runtime-evidence-default".to_string(),
         }
     }
@@ -293,6 +695,10 @@ impl AtpRuntimeEvidenceEnvelope {
         for signal in &mut redacted.signals {
             signal.evidence_ref = signal.evidence_ref.as_deref().map(redact_token);
         }
+        redacted.network_truth = redacted
+            .network_truth
+            .as_ref()
+            .map(AtpNetworkTruthPressureModel::redacted_for_user);
         redacted.redaction_policy = format!("{}+user_safe", self.redaction_policy);
         redacted
     }
@@ -313,6 +719,8 @@ pub struct AtpRuntimeDiagnosticDocument {
     pub proof_claims: Vec<String>,
     /// Advisory risks that must not be described as proof.
     pub advisory_risks: Vec<String>,
+    /// Practical network-truth explanations that are facts/estimates, not proof claims.
+    pub network_truth_explanations: Vec<String>,
     /// Signals expected by the diagnostic but unavailable.
     pub unavailable_signals: Vec<String>,
     /// Structured evidence envelope used to build the document.
@@ -329,6 +737,7 @@ impl AtpRuntimeEvidenceBridge {
     pub fn explain(envelope: AtpRuntimeEvidenceEnvelope) -> AtpRuntimeDiagnosticDocument {
         let mut proof_claims = Vec::new();
         let mut advisory_risks = Vec::new();
+        let mut network_truth_explanations = Vec::new();
         let mut unavailable_signals = Vec::new();
 
         if let Some(region_id) = &envelope.cx_region_id {
@@ -396,11 +805,29 @@ impl AtpRuntimeEvidenceBridge {
                 }
             }
         }
+        if let Some(network_truth) = &envelope.network_truth {
+            network_truth_explanations.push(network_truth.summary_line());
+            for metric in network_truth.unsupported_metrics() {
+                unavailable_signals.push(format!("network truth {} unsupported", metric.as_str()));
+            }
+            for metric in network_truth.missing_required_metrics() {
+                unavailable_signals.push(format!("network truth {} missing", metric.as_str()));
+            }
+            if network_truth.pressure_level() >= AtpNetworkPressureLevel::Watch {
+                advisory_risks.push(format!(
+                    "network truth pressure is {} (score_ppm={})",
+                    network_truth.pressure_level().as_str(),
+                    network_truth.overall_pressure_score_ppm()
+                ));
+            }
+        }
 
         proof_claims.sort();
         proof_claims.dedup();
         advisory_risks.sort();
         advisory_risks.dedup();
+        network_truth_explanations.sort();
+        network_truth_explanations.dedup();
         unavailable_signals.sort();
         unavailable_signals.dedup();
 
@@ -409,7 +836,12 @@ impl AtpRuntimeEvidenceBridge {
         } else {
             "ATP runtime evidence includes advisory or unavailable signals".to_string()
         };
-        let human_summary = render_summary(&headline, &proof_claims, &advisory_risks);
+        let human_summary = render_summary(
+            &headline,
+            &proof_claims,
+            &advisory_risks,
+            &network_truth_explanations,
+        );
 
         AtpRuntimeDiagnosticDocument {
             schema_version: ATP_RUNTIME_EVIDENCE_EXPLANATION_SCHEMA.to_string(),
@@ -418,6 +850,7 @@ impl AtpRuntimeEvidenceBridge {
             human_summary,
             proof_claims,
             advisory_risks,
+            network_truth_explanations,
             unavailable_signals,
             evidence: envelope,
         }
@@ -430,13 +863,21 @@ impl AtpRuntimeEvidenceBridge {
     }
 }
 
-fn render_summary(headline: &str, proof_claims: &[String], advisory_risks: &[String]) -> String {
+fn render_summary(
+    headline: &str,
+    proof_claims: &[String],
+    advisory_risks: &[String],
+    network_truth_explanations: &[String],
+) -> String {
     let mut parts = vec![headline.to_string()];
     if let Some(first_proof) = proof_claims.first() {
         parts.push(format!("Proof: {first_proof}."));
     }
     if let Some(first_risk) = advisory_risks.first() {
         parts.push(format!("Advisory: {first_risk}."));
+    }
+    if let Some(first_network_truth) = network_truth_explanations.first() {
+        parts.push(format!("Network truth: {first_network_truth}."));
     }
     parts.join(" ")
 }
@@ -586,6 +1027,113 @@ mod tests {
             doc.proof_claims
                 .iter()
                 .all(|claim| !claim.contains("obligation accounting closed cleanly"))
+        );
+    }
+
+    #[test]
+    fn network_truth_pressure_keeps_measurements_out_of_proof_claims() {
+        let mut envelope = sample_envelope();
+        let mut network_truth = AtpNetworkTruthPressureModel::new(42_000);
+        network_truth.path_id = Some("path-local-correlation-123456".to_string());
+        assert!(network_truth.add_signal(AtpNetworkTruthSignal::measured(
+            AtpNetworkTruthMetric::Rtt,
+            25_000,
+            "micros",
+            120_000,
+            "pathlog-rtt-123456",
+        )));
+        assert!(network_truth.add_signal(AtpNetworkTruthSignal::inferred(
+            AtpNetworkTruthMetric::Loss,
+            22,
+            "permille",
+            720_000,
+            "pathlog-loss-123456",
+            "loss inferred from ACK gap and retransmit evidence",
+        )));
+        assert!(network_truth.add_signal(AtpNetworkTruthSignal::unsupported(
+            AtpNetworkTruthMetric::CongestionWindow,
+            "platform did not expose cwnd",
+        )));
+        envelope.network_truth = Some(network_truth);
+
+        let doc = AtpRuntimeEvidenceBridge::explain(envelope);
+        assert!(
+            doc.network_truth_explanations
+                .iter()
+                .any(|line| line.contains("network truth pressure degraded"))
+        );
+        assert!(
+            doc.advisory_risks
+                .iter()
+                .any(|risk| risk.contains("network truth pressure is degraded"))
+        );
+        assert!(
+            doc.proof_claims
+                .iter()
+                .all(|claim| !claim.contains("network truth")),
+            "measured network facts must not become proof claims"
+        );
+        assert!(
+            doc.unavailable_signals
+                .iter()
+                .any(|signal| signal == "network truth congestion_window unsupported")
+        );
+    }
+
+    #[test]
+    fn network_truth_model_bounds_cardinality_and_redacts_user_view() {
+        let mut model = AtpNetworkTruthPressureModel::new(7);
+        model.path_id = Some("path-sensitive-abcdef".to_string());
+        for idx in 0..ATP_NETWORK_TRUTH_MAX_SIGNALS {
+            assert!(model.add_signal(AtpNetworkTruthSignal::advisory(
+                AtpNetworkTruthMetric::RelayDirectDelta,
+                i64::try_from(idx).expect("idx fits"),
+                "ppm",
+                250_000,
+                format!("relay-delta-sensitive-{idx}"),
+                "relay path id contained a local endpoint",
+            )));
+        }
+        assert!(!model.add_signal(AtpNetworkTruthSignal::measured(
+            AtpNetworkTruthMetric::Rtt,
+            1,
+            "micros",
+            1,
+            "overflow",
+        )));
+
+        let redacted = model.redacted_for_user();
+        assert_eq!(redacted.signals.len(), ATP_NETWORK_TRUTH_MAX_SIGNALS);
+        assert!(
+            redacted
+                .path_id
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with(REDACTED)
+        );
+        assert!(
+            redacted
+                .signals
+                .iter()
+                .all(|signal| signal.detail.as_deref() == Some(REDACTED))
+        );
+    }
+
+    #[test]
+    fn network_truth_pressure_hysteresis_prevents_noisy_downshift() {
+        let mut model = AtpNetworkTruthPressureModel::new(99);
+        assert!(model.add_signal(AtpNetworkTruthSignal::inferred(
+            AtpNetworkTruthMetric::DiskLag,
+            510_000,
+            "ppm",
+            510_000,
+            "disk-lag-row",
+            "disk write lag remained near degraded threshold",
+        )));
+        assert_eq!(model.pressure_level(), AtpNetworkPressureLevel::Watch);
+        assert_eq!(
+            model.pressure_level_with_hysteresis(Some(AtpNetworkPressureLevel::Degraded)),
+            AtpNetworkPressureLevel::Degraded
         );
     }
 }
