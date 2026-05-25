@@ -205,6 +205,25 @@ pub enum RchRefusalClass {
     LocalFallbackRefused,
 }
 
+impl RchRefusalClass {
+    /// Stable machine code used in admission receipts and schedule rows.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::NoWorkers => "no_workers",
+            Self::Unreachable => "unreachable",
+            Self::QueueSaturated => "queue_saturated",
+            Self::ActiveProjectExcluded => "active_project_excluded",
+            Self::DiskPressure => "disk_pressure",
+            Self::RetrievalFlaky => "retrieval_flaky",
+            Self::StaleSnapshot => "stale_snapshot",
+            Self::ContradictorySnapshot => "contradictory_snapshot",
+            Self::HysteresisBackoff => "hysteresis_backoff",
+            Self::LocalFallbackRefused => "local_fallback_refused",
+        }
+    }
+}
+
 /// Deterministic worker snapshot captured outside the core runtime.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RchWorkerSnapshot {
@@ -308,6 +327,18 @@ pub enum RchAdmissionDecision {
     Refuse,
 }
 
+impl RchAdmissionDecision {
+    /// Stable machine code used in admission receipts and schedule rows.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Admit => "admit",
+            Self::Defer => "defer",
+            Self::Refuse => "refuse",
+        }
+    }
+}
+
 /// Per-worker candidate row included in an admission receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RchWorkerCandidateReceipt {
@@ -348,6 +379,39 @@ pub struct RchWorkerAdmissionReceipt {
     pub reasons: Vec<String>,
 }
 
+/// ASW workload-admission schedule row derived from an RCH health receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RchWorkerAdmissionScheduleRow {
+    /// Schema version for downstream ASW scheduling consumers.
+    pub schema_version: &'static str,
+    /// Proof lane evaluated by this row.
+    pub lane_id: String,
+    /// Final fleet decision.
+    pub decision: RchAdmissionDecision,
+    /// Stable decision code for log and JSON consumers.
+    pub decision_code: &'static str,
+    /// Whether the proof lane required remote execution.
+    pub remote_required: bool,
+    /// Selected redacted worker, if admitted.
+    pub selected_worker: Option<RchWorkerId>,
+    /// Fleet-level refusal class.
+    pub refusal_class: Option<RchRefusalClass>,
+    /// Stable refusal code for log and JSON consumers.
+    pub refusal_code: Option<&'static str>,
+    /// Whether local Cargo fallback is allowed.
+    pub local_fallback_allowed: bool,
+    /// Number of worker snapshots evaluated.
+    pub candidate_count: usize,
+    /// Number of workers that can accept this proof lane.
+    pub admissible_worker_count: usize,
+    /// Number of workers blocked by policy or health signals.
+    pub blocked_worker_count: usize,
+    /// Number of admissible workers with cache-warmth evidence.
+    pub cache_warm_admissible_worker_count: usize,
+    /// Stable structured reason codes for admission scheduling.
+    pub reason_codes: Vec<&'static str>,
+}
+
 impl RchWorkerAdmissionReceipt {
     /// Counts workers that can accept this proof lane.
     #[must_use]
@@ -374,6 +438,48 @@ impl RchWorkerAdmissionReceipt {
             .iter()
             .filter(|candidate| candidate.admissible && candidate.cache_warmth_bps > 0)
             .count()
+    }
+
+    /// Projects this receipt into a compact ASW workload-admission schedule row.
+    #[must_use]
+    pub fn schedule_row(&self) -> RchWorkerAdmissionScheduleRow {
+        let refusal_code = self.refusal_class.map(RchRefusalClass::code);
+        let mut reason_codes = Vec::new();
+        let push_reason = |reason_codes: &mut Vec<&'static str>, code| {
+            if !reason_codes.contains(&code) {
+                reason_codes.push(code);
+            }
+        };
+        push_reason(&mut reason_codes, self.decision.code());
+        if let Some(code) = refusal_code {
+            push_reason(&mut reason_codes, code);
+        }
+        if self.remote_required {
+            push_reason(&mut reason_codes, "remote_required");
+        }
+        if self.remote_required && self.decision != RchAdmissionDecision::Admit {
+            push_reason(&mut reason_codes, "local_fallback_refused");
+        }
+        if self.cache_warm_admissible_worker_count() > 0 {
+            push_reason(&mut reason_codes, "cache_warm_capacity_present");
+        }
+
+        RchWorkerAdmissionScheduleRow {
+            schema_version: "rch-worker-admission-schedule-row-v1",
+            lane_id: self.lane_id.clone(),
+            decision: self.decision,
+            decision_code: self.decision.code(),
+            remote_required: self.remote_required,
+            selected_worker: self.selected_worker.clone(),
+            refusal_class: self.refusal_class,
+            refusal_code,
+            local_fallback_allowed: self.local_fallback_allowed,
+            candidate_count: self.candidates.len(),
+            admissible_worker_count: self.admissible_worker_count(),
+            blocked_worker_count: self.blocked_worker_count(),
+            cache_warm_admissible_worker_count: self.cache_warm_admissible_worker_count(),
+            reason_codes,
+        }
     }
 }
 
@@ -666,12 +772,10 @@ mod tests {
         assert_eq!(receipt.admissible_worker_count(), 2);
         assert_eq!(receipt.blocked_worker_count(), 1);
         assert_eq!(receipt.cache_warm_admissible_worker_count(), 1);
-        assert!(
-            receipt
-                .candidates
-                .iter()
-                .all(|candidate| !candidate.worker_id.as_str().contains("vmi-"))
-        );
+        assert!(receipt
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.worker_id.as_str().contains("vmi-")));
     }
 
     #[test]
@@ -736,13 +840,11 @@ mod tests {
         );
         assert_eq!(cargo_receipt.candidates[0].cache_warmth_bps, 100);
         assert_eq!(clippy_receipt.candidates[0].cache_warmth_bps, 95);
-        assert!(
-            cargo_receipt
-                .candidates
-                .iter()
-                .chain(clippy_receipt.candidates.iter())
-                .all(|candidate| !candidate.worker_id.as_str().contains("vmi-"))
-        );
+        assert!(cargo_receipt
+            .candidates
+            .iter()
+            .chain(clippy_receipt.candidates.iter())
+            .all(|candidate| !candidate.worker_id.as_str().contains("vmi-")));
     }
 
     #[test]
@@ -758,12 +860,10 @@ mod tests {
             Some(RchRefusalClass::LocalFallbackRefused)
         );
         assert!(!receipt.local_fallback_allowed);
-        assert!(
-            receipt
-                .reasons
-                .iter()
-                .any(|reason| reason.contains("local Cargo fallback"))
-        );
+        assert!(receipt
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("local Cargo fallback")));
     }
 
     #[test]
@@ -830,6 +930,62 @@ mod tests {
         assert_eq!(
             receipt.candidates[0].refusal_class,
             Some(RchRefusalClass::HysteresisBackoff)
+        );
+    }
+
+    #[test]
+    fn schedule_row_summarizes_cache_warm_capacity_without_host_leaks() {
+        let mut blocked = healthy_worker("vmi-blocked.internal");
+        blocked.queue_state = RchQueueState::Saturated;
+        let hot = healthy_worker("vmi-hot.internal");
+
+        let receipt = admit(&[blocked, hot.clone()]);
+        let row = receipt.schedule_row();
+
+        assert_eq!(row.schema_version, "rch-worker-admission-schedule-row-v1");
+        assert_eq!(row.lane_id, "cargo-test-admission");
+        assert_eq!(row.decision, RchAdmissionDecision::Admit);
+        assert_eq!(row.decision_code, "admit");
+        assert_eq!(row.refusal_class, None);
+        assert_eq!(row.refusal_code, None);
+        assert_eq!(row.selected_worker, Some(hot.worker_id));
+        assert_eq!(row.candidate_count, 2);
+        assert_eq!(row.admissible_worker_count, 1);
+        assert_eq!(row.blocked_worker_count, 1);
+        assert_eq!(row.cache_warm_admissible_worker_count, 1);
+        assert!(row.reason_codes.contains(&"remote_required"));
+        assert!(row.reason_codes.contains(&"cache_warm_capacity_present"));
+        assert!(!row.reason_codes.contains(&"local_fallback_refused"));
+        assert!(row
+            .selected_worker
+            .as_ref()
+            .is_some_and(|worker| !worker.as_str().contains("vmi-")));
+    }
+
+    #[test]
+    fn schedule_row_records_remote_required_refusal_without_local_fallback() {
+        let mut excluded = healthy_worker("vmi-excluded.internal");
+        excluded.active_project_exclusion = true;
+
+        let receipt = admit(&[excluded]);
+        let row = receipt.schedule_row();
+
+        assert_eq!(row.decision, RchAdmissionDecision::Refuse);
+        assert_eq!(row.decision_code, "refuse");
+        assert_eq!(
+            row.refusal_class,
+            Some(RchRefusalClass::LocalFallbackRefused)
+        );
+        assert_eq!(row.refusal_code, Some("local_fallback_refused"));
+        assert!(!row.local_fallback_allowed);
+        assert!(row.reason_codes.contains(&"remote_required"));
+        assert!(row.reason_codes.contains(&"local_fallback_refused"));
+        assert_eq!(
+            row.reason_codes
+                .iter()
+                .filter(|code| **code == "local_fallback_refused")
+                .count(),
+            1
         );
     }
 }
