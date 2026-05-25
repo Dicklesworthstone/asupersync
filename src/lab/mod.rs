@@ -76,6 +76,9 @@ pub mod swarm_replay;
 pub mod util;
 pub mod virtual_time_wheel;
 
+#[cfg(test)]
+mod deterministic_validation_tests;
+
 pub use crate::util::{
     StrictEntropyGuard, disable_strict_entropy, enable_strict_entropy, strict_entropy_enabled,
 };
