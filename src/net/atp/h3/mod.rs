@@ -42,7 +42,8 @@ pub mod session;
 pub mod stream;
 
 pub use adapter::{
-    AdapterConfig, AdapterStats, AtpH3Adapter, FeatureSupport, TransmissionStrategy,
+    AdapterConfig, AdapterDowngrade, AdapterNegotiationReport, AdapterStats, AtpH3Adapter,
+    FeatureSupport, H3_WEBTRANSPORT_ADAPTER_KIND, NATIVE_ATP_FOUNDATION_KIND, TransmissionStrategy,
 };
 pub use codec::{H3FrameCodec, WebTransportFrameType};
 pub use session::{H3Session, SessionState, SessionStats};

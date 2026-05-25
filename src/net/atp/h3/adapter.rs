@@ -4,6 +4,11 @@ use super::{AtpH3Error, AtpH3Result, H3FrameCodec, H3Session};
 use crate::net::atp::protocol::{AtpFrame, FrameType};
 use std::collections::{HashMap, hash_map::Entry};
 
+/// Stable adapter kind for ATP-over-H3/WebTransport compatibility reports.
+pub const H3_WEBTRANSPORT_ADAPTER_KIND: &str = "h3_webtransport_adapter";
+/// Stable foundation kind that remains authoritative for native ATP semantics.
+pub const NATIVE_ATP_FOUNDATION_KIND: &str = "native_atp_over_native_quic";
+
 /// ATP-over-H3 adapter configuration.
 #[derive(Debug, Clone)]
 pub struct AdapterConfig {
@@ -70,6 +75,83 @@ impl Default for FeatureSupport {
     }
 }
 
+/// Stable diagnostic report for one compatibility-adapter negotiation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterNegotiationReport {
+    /// Adapter kind that produced this report.
+    pub adapter_kind: String,
+    /// Native ATP foundation this adapter is layered after.
+    pub foundation_kind: String,
+    /// Whether this is an adapter after native ATP instead of a foundation.
+    pub adapter_after_native: bool,
+    /// Whether this adapter claims to replace native QUIC.
+    pub replacement_for_native_quic: bool,
+    /// Stable list of features supported by this adapter.
+    pub supported_features: Vec<String>,
+    /// Stable list of explicit downgrades for unsupported native features.
+    pub downgrades: Vec<AdapterDowngrade>,
+    /// Stable list of adapter-specific constraints.
+    pub constraints: Vec<String>,
+}
+
+/// One explicit compatibility-adapter downgrade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterDowngrade {
+    /// Native ATP feature that is downgraded or unavailable.
+    pub feature: String,
+    /// Stable machine-readable downgrade reason.
+    pub reason_code: String,
+    /// Stable user-facing caveat for diagnostics.
+    pub caveat: String,
+}
+
+impl AdapterDowngrade {
+    fn for_unsupported_feature(feature: &str) -> Self {
+        let (reason_code, caveat) = if feature.contains("QUIC connection migration") {
+            (
+                "native_quic_migration_unavailable",
+                "connection migration stays a native ATP capability",
+            )
+        } else if feature.contains("Raw UDP") || feature.contains("STUN") {
+            (
+                "raw_udp_unavailable",
+                "browser and H3 adapter paths cannot expose raw UDP primitives",
+            )
+        } else if feature.contains("Custom QUIC") {
+            (
+                "custom_quic_extensions_unavailable",
+                "custom QUIC extension negotiation stays in the native ATP path",
+            )
+        } else if feature.contains("Zero-copy") {
+            (
+                "zero_copy_unavailable",
+                "adapter framing copies across WebTransport and WASM boundaries",
+            )
+        } else if feature.contains("flow control") {
+            (
+                "h3_flow_control_boundary",
+                "fine-grained flow control is mediated by the H3/WebTransport layer",
+            )
+        } else if feature.contains("pacing") {
+            (
+                "packet_pacing_unavailable",
+                "packet pacing is mediated by browser and H3 transport policy",
+            )
+        } else {
+            (
+                "adapter_feature_unavailable",
+                "feature is unavailable in this compatibility adapter",
+            )
+        };
+
+        Self {
+            feature: feature.to_string(),
+            reason_code: reason_code.to_string(),
+            caveat: caveat.to_string(),
+        }
+    }
+}
+
 /// Main ATP-over-H3 adapter.
 #[derive(Debug)]
 pub struct AtpH3Adapter {
@@ -102,6 +184,44 @@ impl AtpH3Adapter {
     /// Check if an ATP feature is supported over WebTransport.
     pub fn is_feature_supported(&self, feature: &str) -> bool {
         self.features.supported.iter().any(|f| f.contains(feature))
+    }
+
+    /// Build a stable negotiation report for diagnostics and proof artifacts.
+    pub fn negotiation_report(&self) -> AdapterNegotiationReport {
+        let mut supported_features = self.features.supported.clone();
+        supported_features.sort();
+
+        let mut downgrades: Vec<_> = self
+            .features
+            .unsupported
+            .iter()
+            .map(|feature| AdapterDowngrade::for_unsupported_feature(feature))
+            .collect();
+        downgrades.sort_by(|left, right| left.feature.cmp(&right.feature));
+
+        let mut constraints = self.features.constraints.clone();
+        constraints.sort();
+
+        AdapterNegotiationReport {
+            adapter_kind: H3_WEBTRANSPORT_ADAPTER_KIND.to_string(),
+            foundation_kind: NATIVE_ATP_FOUNDATION_KIND.to_string(),
+            adapter_after_native: true,
+            replacement_for_native_quic: false,
+            supported_features,
+            downgrades,
+            constraints,
+        }
+    }
+
+    /// Build a stable unsupported-feature error for adapter diagnostics.
+    pub fn unsupported_feature_error(&self, feature: &str) -> AtpH3Error {
+        let downgrade = AdapterDowngrade::for_unsupported_feature(feature);
+        AtpH3Error::UnsupportedFeature(format!(
+            "{feature} unavailable in {H3_WEBTRANSPORT_ADAPTER_KIND}; \
+             native foundation={NATIVE_ATP_FOUNDATION_KIND}; \
+             replacement_for_native_quic=false; downgrade_reason={}",
+            downgrade.reason_code
+        ))
     }
 
     /// Create a new H3 session.
@@ -254,6 +374,24 @@ mod tests {
         assert!(adapter.is_feature_supported("ATP frame codec"));
         assert!(!adapter.is_feature_supported("Raw UDP socket"));
         assert!(!adapter.is_feature_supported("QUIC migration"));
+    }
+
+    #[test]
+    fn test_negotiation_report_is_stable_and_adapter_scoped() {
+        let adapter = AtpH3Adapter::new(AdapterConfig::default());
+        let report = adapter.negotiation_report();
+
+        assert_eq!(report.adapter_kind, H3_WEBTRANSPORT_ADAPTER_KIND);
+        assert_eq!(report.foundation_kind, NATIVE_ATP_FOUNDATION_KIND);
+        assert!(report.adapter_after_native);
+        assert!(!report.replacement_for_native_quic);
+        assert_eq!(report, adapter.negotiation_report());
+        assert!(
+            report
+                .downgrades
+                .iter()
+                .any(|downgrade| downgrade.reason_code == "raw_udp_unavailable")
+        );
     }
 
     #[test]
