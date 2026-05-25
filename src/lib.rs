@@ -407,6 +407,8 @@ pub mod real_distributed_snapshot_raptorq_encoder_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_distributed_snapshot_trace_distributed_lattice_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_distributed_snapshot_obligation_saga_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_e2e_hardening_consolidation;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_epoch_obligation_no_leak_proof_integration_e2e_tests;
