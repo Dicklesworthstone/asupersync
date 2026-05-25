@@ -283,10 +283,12 @@
         "RFC 9000 Sections 12.4, 13, 19",
         "RFC 9221 Section 4"
       ],
-      "current_status": "missing_followup",
+      "current_status": "partial_state_machine",
       "source_files": [
         "src/net/quic_core/mod.rs",
-        "src/net/quic_native/mod.rs"
+        "src/net/quic_native/mod.rs",
+        "src/net/atp/protocol/quic_frames.rs",
+        "src/net/quic_native/connection.rs"
       ],
       "source_markers": [
         {
@@ -296,9 +298,17 @@
         {
           "file": "src/net/quic_native/mod.rs",
           "marker": "pub mod transport;"
+        },
+        {
+          "file": "src/net/atp/protocol/quic_frames.rs",
+          "marker": "pub enum QuicFrame"
+        },
+        {
+          "file": "src/net/quic_native/connection.rs",
+          "marker": "pub fn process_frame"
         }
       ],
-      "gap": "Packet headers and transport state exist, but ATP-required frame codecs and packet assembly are not yet implemented.",
+      "gap": "Comprehensive QUIC frame codec exists and is integrated into native connection with basic processing interface. State machine integration pending full API alignment.",
       "atp_dependency_impact": "ATP-B object transfer cannot move over native QUIC until STREAM and control frames are encoded, decoded, prioritized, and traced.",
       "followup_beads": [
         "asupersync-kwvb2g",
