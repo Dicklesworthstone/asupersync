@@ -3,7 +3,7 @@
 //! Tests the ATP path lab harness against the required coverage matrix
 //! for deterministic NAT/path validation scenarios.
 
-use asupersync::atp::lab::{AtpLabScenario, AtpLabRegime};
+use asupersync::atp::lab::{AtpLabRegime, AtpLabScenario};
 use asupersync::atp::path::PathKind;
 use asupersync::lab::atp_path::{AtpPathLabHarness, AtpPathTestConfig};
 use asupersync::net::atp::path::NatProfile;
@@ -66,7 +66,8 @@ async fn test_atp_path_lab_lan_ipv6_scenario() -> Result<(), Box<dyn std::error:
 
     println!(
         "✅ LAN+IPv6 scenario completed in {:?} with {} trace events",
-        result.execution_time, result.trace_events.len()
+        result.execution_time,
+        result.trace_events.len()
     );
 
     Ok(())
@@ -76,8 +77,8 @@ async fn test_atp_path_lab_lan_ipv6_scenario() -> Result<(), Box<dyn std::error:
 async fn test_atp_path_lab_udp_blocked_relay_fallback() -> Result<(), Box<dyn std::error::Error>> {
     let mut harness = AtpPathLabHarness::new(AtpPathTestConfig::relay_only());
 
-    let scenario = AtpLabScenario::new("udp-blocked-relay", 0xA7F0_0003)
-        .with_regime(AtpLabRegime::UdpBlocked);
+    let scenario =
+        AtpLabScenario::new("udp-blocked-relay", 0xA7F0_0003).with_regime(AtpLabRegime::UdpBlocked);
 
     let result = harness.execute_scenario(&scenario).await?;
 
@@ -140,7 +141,10 @@ async fn test_atp_path_lab_hard_nat_punch_failure() -> Result<(), Box<dyn std::e
         "Scenario should execute as expected even with failures"
     );
 
-    assert_eq!(result.candidates_evaluated, 2, "Should evaluate 2 candidates");
+    assert_eq!(
+        result.candidates_evaluated, 2,
+        "Should evaluate 2 candidates"
+    );
 
     Ok(())
 }
@@ -161,8 +165,15 @@ async fn test_atp_path_lab_migration_scenario() -> Result<(), Box<dyn std::error
     );
 
     // Should have migration events in trace
-    let migration_events = result.trace_events.iter()
-        .filter(|event| matches!(event.event, asupersync::lab::atp_path::AtpPathEventKind::MigrationTriggered { .. }))
+    let migration_events = result
+        .trace_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event,
+                asupersync::lab::atp_path::AtpPathEventKind::MigrationTriggered { .. }
+            )
+        })
         .count();
 
     assert!(

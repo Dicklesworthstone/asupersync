@@ -11,7 +11,7 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
     use crate::cx::{Cx, scope};
     use crate::lab::oracle::loser_drain::{LoserDrainOracle, LoserDrainViolation};
     use crate::raptorq::decision_contract::{
-        GovernanceSnapshot, GovernanceTelemetry, RaptorQDecisionContract
+        GovernanceSnapshot, GovernanceTelemetry, RaptorQDecisionContract,
     };
     use crate::runtime::{RuntimeBuilder, spawn};
     use crate::time::{Duration, Instant, sleep, timeout};
@@ -86,9 +86,9 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
 
     #[derive(Debug, Clone, PartialEq)]
     enum MockDecoderType {
-        Conservative,     // Baseline decoder
-        Optimized,       // High-performance decoder
-        Experimental,    // Bleeding-edge decoder
+        Conservative, // Baseline decoder
+        Optimized,    // High-performance decoder
+        Experimental, // Bleeding-edge decoder
     }
 
     #[derive(Debug, Clone, PartialEq)]
@@ -168,30 +168,30 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
         fn default_for_type(decoder_type: &MockDecoderType) -> Self {
             match decoder_type {
                 MockDecoderType::Conservative => Self {
-                    density_permille: 850, // High density, stable
-                    rank_deficit_permille: 50, // Low rank issues
+                    density_permille: 850,               // High density, stable
+                    rank_deficit_permille: 50,           // Low rank issues
                     inactivation_pressure_permille: 100, // Low pressure
-                    overhead_ratio_permille: 200, // Reasonable overhead
+                    overhead_ratio_permille: 200,        // Reasonable overhead
                     baseline_loss: 10,
                     high_support_loss: 25,
                     block_schur_loss: 15,
                     budget_exhausted: false,
                 },
                 MockDecoderType::Optimized => Self {
-                    density_permille: 750, // Medium density
-                    rank_deficit_permille: 150, // Some rank issues
+                    density_permille: 750,               // Medium density
+                    rank_deficit_permille: 150,          // Some rank issues
                     inactivation_pressure_permille: 250, // Medium pressure
-                    overhead_ratio_permille: 300, // Higher overhead
+                    overhead_ratio_permille: 300,        // Higher overhead
                     baseline_loss: 20,
                     high_support_loss: 35,
                     block_schur_loss: 40,
                     budget_exhausted: false,
                 },
                 MockDecoderType::Experimental => Self {
-                    density_permille: 600, // Lower density
-                    rank_deficit_permille: 300, // High rank issues
+                    density_permille: 600,               // Lower density
+                    rank_deficit_permille: 300,          // High rank issues
                     inactivation_pressure_permille: 400, // High pressure
-                    overhead_ratio_permille: 500, // High overhead
+                    overhead_ratio_permille: 500,        // High overhead
                     baseline_loss: 80,
                     high_support_loss: 120,
                     block_schur_loss: 200,
@@ -230,10 +230,7 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
         }
 
         fn next_task_id(&self) -> TaskId {
-            TaskId::new_for_test(
-                self.next_task_id.fetch_add(1, Ordering::AcqRel),
-                0,
-            )
+            TaskId::new_for_test(self.next_task_id.fetch_add(1, Ordering::AcqRel), 0)
         }
 
         fn next_time(&self) -> Time {
@@ -256,9 +253,9 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
                 let task_id = self.next_task_id();
 
                 let decoder_type = match i {
-                    0 => MockDecoderType::Conservative,  // Usually the winner
-                    1 => MockDecoderType::Optimized,     // Medium risk
-                    _ => MockDecoderType::Experimental,  // High risk, likely loser
+                    0 => MockDecoderType::Conservative, // Usually the winner
+                    1 => MockDecoderType::Optimized,    // Medium risk
+                    _ => MockDecoderType::Experimental, // High risk, likely loser
                 };
 
                 let decoder_path = MockDecoderPath::new(path_id, decoder_type, task_id);
@@ -278,11 +275,9 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
             }
 
             // Start the race in the oracle
-            let race_id = self.loser_drain_oracle.on_race_start(
-                region,
-                task_ids,
-                self.next_time(),
-            );
+            let race_id = self
+                .loser_drain_oracle
+                .on_race_start(region, task_ids, self.next_time());
 
             // Update stats
             {
@@ -323,11 +318,14 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
                 let posterior = RaptorQDecisionContract::state_posterior_permille(&snapshot);
 
                 // Simulate decision logic based on posterior
-                let action = if posterior[2] > 600 {  // High regression probability
+                let action = if posterior[2] > 600 {
+                    // High regression probability
                     "fallback"
-                } else if posterior[2] > 300 {  // Medium regression
+                } else if posterior[2] > 300 {
+                    // Medium regression
                     "rollback"
-                } else if posterior[1] > 400 {  // High degraded probability
+                } else if posterior[1] > 400 {
+                    // High degraded probability
                     "canary_hold"
                 } else {
                     "continue"
@@ -372,14 +370,16 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
             decisions: &[(u64, String)],
         ) -> Result<(), Box<dyn std::error::Error>> {
             // Determine winner (first path with "continue" decision, or conservative path)
-            let winner_path_id = decisions.iter()
+            let winner_path_id = decisions
+                .iter()
                 .find(|(_, action)| action == "continue")
                 .map(|(path_id, _)| *path_id)
                 .unwrap_or_else(|| path_ids[0]); // Default to first path (conservative)
 
             let winner_task_id = {
                 let paths = self.active_decoder_paths.lock().unwrap();
-                paths.get(&winner_path_id)
+                paths
+                    .get(&winner_path_id)
                     .map(|p| p.task_id)
                     .ok_or("Winner path not found")?
             };
@@ -391,7 +391,8 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
 
             // Complete winner task
             let completion_time = self.next_time();
-            self.loser_drain_oracle.on_task_complete(winner_task_id, completion_time);
+            self.loser_drain_oracle
+                .on_task_complete(winner_task_id, completion_time);
 
             // Drain losing paths
             for &path_id in path_ids {
@@ -414,7 +415,8 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
 
                 // Complete loser task (proper draining)
                 let drain_time = self.next_time();
-                self.loser_drain_oracle.on_task_complete(loser_task_id, drain_time);
+                self.loser_drain_oracle
+                    .on_task_complete(loser_task_id, drain_time);
 
                 // Mark as completed
                 {
@@ -438,7 +440,8 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
 
             // Complete the race
             let race_complete_time = self.next_time();
-            self.loser_drain_oracle.on_race_complete(race_id, winner_task_id, race_complete_time);
+            self.loser_drain_oracle
+                .on_race_complete(race_id, winner_task_id, race_complete_time);
 
             // Update stats
             {
@@ -498,9 +501,9 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
                 }
             }
 
-            let decisions = self.evaluate_decision_contract_for_race(
-                cx, &path_ids, 100, 50
-            ).await?;
+            let decisions = self
+                .evaluate_decision_contract_for_race(cx, &path_ids, 100, 50)
+                .await?;
 
             // Simulate incomplete draining (intentional bug)
             let winner_path_id = path_ids[0];
@@ -511,11 +514,13 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
 
             // Complete winner
             let completion_time = self.next_time();
-            self.loser_drain_oracle.on_task_complete(winner_task_id, completion_time);
+            self.loser_drain_oracle
+                .on_task_complete(winner_task_id, completion_time);
 
             // Complete race WITHOUT properly draining all losers (bug simulation)
             let race_complete_time = self.next_time();
-            self.loser_drain_oracle.on_race_complete(race_id, winner_task_id, race_complete_time);
+            self.loser_drain_oracle
+                .on_race_complete(race_id, winner_task_id, race_complete_time);
 
             // Verify oracle detects the violation
             match self.loser_drain_oracle.check() {
@@ -566,10 +571,7 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
         }
 
         fn next_region_id(&self) -> RegionId {
-            RegionId::new_for_test(
-                self.next_region_id.fetch_add(1, Ordering::AcqRel),
-                0,
-            )
+            RegionId::new_for_test(self.next_region_id.fetch_add(1, Ordering::AcqRel), 0)
         }
 
         /// Test basic decision contract with proper loser draining
@@ -582,13 +584,14 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
             let region = self.next_region_id();
             let (race_id, path_ids) = self.manager.create_decoder_race(cx, region, 3).await?;
 
-            let decisions = self.manager.evaluate_decision_contract_for_race(
-                cx, &path_ids, 100, 50
-            ).await?;
+            let decisions = self
+                .manager
+                .evaluate_decision_contract_for_race(cx, &path_ids, 100, 50)
+                .await?;
 
-            self.manager.execute_race_with_loser_drain(
-                cx, race_id, &path_ids, &decisions
-            ).await?;
+            self.manager
+                .execute_race_with_loser_drain(cx, race_id, &path_ids, &decisions)
+                .await?;
 
             self.manager.verify_loser_drain_invariants(cx).await?;
 
@@ -624,13 +627,14 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
                     }
                 }
 
-                let decisions = self.manager.evaluate_decision_contract_for_race(
-                    cx, &path_ids, 150, 75
-                ).await?;
+                let decisions = self
+                    .manager
+                    .evaluate_decision_contract_for_race(cx, &path_ids, 150, 75)
+                    .await?;
 
-                self.manager.execute_race_with_loser_drain(
-                    cx, race_id, &path_ids, &decisions
-                ).await?;
+                self.manager
+                    .execute_race_with_loser_drain(cx, race_id, &path_ids, &decisions)
+                    .await?;
 
                 self.manager.verify_loser_drain_invariants(cx).await?;
 
@@ -649,7 +653,10 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
             println!("Testing oracle violation detection capabilities");
 
             let region = self.next_region_id();
-            let detected = self.manager.simulate_problematic_scenario(cx, region).await?;
+            let detected = self
+                .manager
+                .simulate_problematic_scenario(cx, region)
+                .await?;
 
             assert!(detected, "Oracle should detect loser drain violations");
 
@@ -669,20 +676,29 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
             // Start multiple races concurrently
             for i in 0..5 {
                 let region = self.next_region_id();
-                let (race_id, path_ids) = self.manager.create_decoder_race(cx, region, 2 + i % 3).await?;
+                let (race_id, path_ids) = self
+                    .manager
+                    .create_decoder_race(cx, region, 2 + i % 3)
+                    .await?;
 
                 race_handles.push((race_id, path_ids, region));
             }
 
             // Process all races
             for (race_id, path_ids, _region) in race_handles {
-                let decisions = self.manager.evaluate_decision_contract_for_race(
-                    cx, &path_ids, 80 + path_ids.len() * 10, 40 + path_ids.len() * 5
-                ).await?;
+                let decisions = self
+                    .manager
+                    .evaluate_decision_contract_for_race(
+                        cx,
+                        &path_ids,
+                        80 + path_ids.len() * 10,
+                        40 + path_ids.len() * 5,
+                    )
+                    .await?;
 
-                self.manager.execute_race_with_loser_drain(
-                    cx, race_id, &path_ids, &decisions
-                ).await?;
+                self.manager
+                    .execute_race_with_loser_drain(cx, race_id, &path_ids, &decisions)
+                    .await?;
             }
 
             self.manager.verify_loser_drain_invariants(cx).await?;
@@ -738,7 +754,10 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
 
             println!("✓ Decision contract + loser drain basic integration test passed");
             println!("  - Decisions evaluated: {}", stats.decisions_evaluated);
-            println!("  - Decoder races completed: {}", stats.decoder_races_completed);
+            println!(
+                "  - Decoder races completed: {}",
+                stats.decoder_races_completed
+            );
             println!("  - Loser tasks drained: {}", stats.loser_tasks_drained);
 
             Ok::<(), Box<dyn std::error::Error>>(())
@@ -772,7 +791,8 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
                 "Should have evaluated multiple decisions"
             );
             assert!(
-                stats.fallback_decisions + stats.rollback_decisions + stats.canary_hold_decisions > 0,
+                stats.fallback_decisions + stats.rollback_decisions + stats.canary_hold_decisions
+                    > 0,
                 "Should have triggered fallback/rollback/canary decisions under pressure"
             );
 
@@ -814,7 +834,10 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
             );
 
             println!("✓ Loser drain oracle violation detection test passed");
-            println!("  - Oracle violations detected: {}", stats.oracle_violations_detected);
+            println!(
+                "  - Oracle violations detected: {}",
+                stats.oracle_violations_detected
+            );
 
             Ok::<(), Box<dyn std::error::Error>>(())
         })
@@ -859,8 +882,12 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
 
             println!("✓ Multiple concurrent races test passed");
             println!("  - Total races started: {}", stats.decoder_races_started);
-            println!("  - Total races completed: {}", stats.decoder_races_completed);
-            println!("  - Race completion rate: {:.2}%",
+            println!(
+                "  - Total races completed: {}",
+                stats.decoder_races_completed
+            );
+            println!(
+                "  - Race completion rate: {:.2}%",
                 (stats.decoder_races_completed as f64 / stats.decoder_races_started as f64) * 100.0
             );
 
@@ -934,13 +961,26 @@ mod real_raptorq_decision_contract_loser_drain_e2e {
             println!("  - Total decisions: {}", stats.decisions_evaluated);
             println!("  - Total races: {}", stats.decoder_races_completed);
             println!("  - Total losers drained: {}", stats.loser_tasks_drained);
-            println!("  - Oracle violations: {}", stats.oracle_violations_detected);
-            println!("  - Avg decision latency: {}μs", stats.avg_decision_latency_micros);
-            println!("  - Race completion rate: {:.2}%",
-                stats.to_json()["race_completion_rate"].as_f64().unwrap_or(0.0) * 100.0
+            println!(
+                "  - Oracle violations: {}",
+                stats.oracle_violations_detected
             );
-            println!("  - Loser drain efficiency: {:.2}",
-                stats.to_json()["loser_drain_efficiency"].as_f64().unwrap_or(0.0)
+            println!(
+                "  - Avg decision latency: {}μs",
+                stats.avg_decision_latency_micros
+            );
+            println!(
+                "  - Race completion rate: {:.2}%",
+                stats.to_json()["race_completion_rate"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    * 100.0
+            );
+            println!(
+                "  - Loser drain efficiency: {:.2}",
+                stats.to_json()["loser_drain_efficiency"]
+                    .as_f64()
+                    .unwrap_or(0.0)
             );
 
             Ok::<(), Box<dyn std::error::Error>>(())

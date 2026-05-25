@@ -7,21 +7,23 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod real_cli_output_trace_streaming_e2e {
-    use crate::cli::output::{OutputFormat, OutputRenderer, ProgressRenderer, ColorChoice};
+    use crate::cli::output::{ColorChoice, OutputFormat, OutputRenderer, ProgressRenderer};
     use crate::cx::{Cx, scope};
     use crate::runtime::{RuntimeBuilder, spawn};
     use crate::time::{Duration, Instant, sleep, timeout};
-    use crate::trace::streaming::{StreamingReplayer, ReplayCheckpoint, ReplayProgress, StreamingReplayError};
     use crate::trace::file::{TraceReader, TraceWriter};
     use crate::trace::replay::ReplayEvent;
+    use crate::trace::streaming::{
+        ReplayCheckpoint, ReplayProgress, StreamingReplayError, StreamingReplayer,
+    };
     use crate::types::{RegionId, TaskId, Time};
-    use serde::{Serialize, Deserialize};
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::collections::{HashMap, VecDeque};
-    use std::io::{self, Write, BufWriter, BufReader};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::io::{self, BufReader, BufWriter, Write};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use tempfile::{NamedTempFile, TempDir};
 
     /// Statistics for CLI output + trace streaming integration testing
@@ -163,10 +165,14 @@ mod real_cli_output_trace_streaming_e2e {
 
             let data = match &event_type {
                 MockEventType::CommandStart => "Command started".to_string(),
-                MockEventType::Progress => format!("Progress: {}/{}", self.events_generated, self.event_count),
+                MockEventType::Progress => {
+                    format!("Progress: {}/{}", self.events_generated, self.event_count)
+                }
                 MockEventType::Output => format!("Output line {}", self.events_generated),
                 MockEventType::Warning => format!("Warning at event {}", self.events_generated),
-                MockEventType::Error => format!("Error condition at event {}", self.events_generated),
+                MockEventType::Error => {
+                    format!("Error condition at event {}", self.events_generated)
+                }
                 MockEventType::CommandEnd => "Command completed".to_string(),
             };
 
@@ -230,11 +236,15 @@ mod real_cli_output_trace_streaming_e2e {
             let output_file = NamedTempFile::new_in(&self.temp_dir)?;
             let trace_file = NamedTempFile::new_in(&self.temp_dir)?;
 
-            self.output_files.insert(command_name.to_string(), output_file);
-            self.trace_files.insert(command_name.to_string(), trace_file);
+            self.output_files
+                .insert(command_name.to_string(), output_file);
+            self.trace_files
+                .insert(command_name.to_string(), trace_file);
 
-            println!("Started streaming for command: {} (format: {:?})",
-                command_name, output_format);
+            println!(
+                "Started streaming for command: {} (format: {:?})",
+                command_name, output_format
+            );
 
             Ok(())
         }
@@ -246,29 +256,38 @@ mod real_cli_output_trace_streaming_e2e {
             event: MockCommandEvent,
             output_format: OutputFormat,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            let output_file = self.output_files.get_mut(command_name)
+            let output_file = self
+                .output_files
+                .get_mut(command_name)
                 .ok_or("Command not found")?;
 
-            let trace_file = self.trace_files.get_mut(command_name)
+            let trace_file = self
+                .trace_files
+                .get_mut(command_name)
                 .ok_or("Trace file not found")?;
 
             // Format output based on format type
             let formatted_output = match output_format {
-                OutputFormat::Json | OutputFormat::StreamJson => {
-                    event.to_jsonl()?
-                }
+                OutputFormat::Json | OutputFormat::StreamJson => event.to_jsonl()?,
                 OutputFormat::JsonPretty => {
                     let mut pretty = serde_json::to_string_pretty(&event)?;
                     pretty.push('\n');
                     pretty
                 }
                 OutputFormat::Human => {
-                    format!("[{}] {}: {}\n", event.timestamp, event.command_name, event.data)
+                    format!(
+                        "[{}] {}: {}\n",
+                        event.timestamp, event.command_name, event.data
+                    )
                 }
                 OutputFormat::Tsv => {
-                    format!("{}\t{}\t{}\t{}\n",
-                        event.timestamp, event.command_name,
-                        format!("{:?}", event.event_type), event.data)
+                    format!(
+                        "{}\t{}\t{}\t{}\n",
+                        event.timestamp,
+                        event.command_name,
+                        format!("{:?}", event.event_type),
+                        event.data
+                    )
                 }
             };
 
@@ -293,7 +312,8 @@ mod real_cli_output_trace_streaming_e2e {
                 stats.jsonl_records_produced += 1;
                 stats.trace_events_streamed += 1;
                 stats.output_bytes_written += output_size;
-                stats.peak_memory_usage_bytes = stats.peak_memory_usage_bytes.max(event.memory_usage);
+                stats.peak_memory_usage_bytes =
+                    stats.peak_memory_usage_bytes.max(event.memory_usage);
             }
 
             Ok(())
@@ -327,7 +347,10 @@ mod real_cli_output_trace_streaming_e2e {
             &mut self,
             command_name: &str,
         ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-            let checkpoint_file = self.temp_dir.path().join(format!("{}_checkpoint.json", command_name));
+            let checkpoint_file = self
+                .temp_dir
+                .path()
+                .join(format!("{}_checkpoint.json", command_name));
 
             let checkpoint_data = json!({
                 "command_name": command_name,
@@ -355,10 +378,14 @@ mod real_cli_output_trace_streaming_e2e {
             &self,
             command_name: &str,
         ) -> Result<bool, Box<dyn std::error::Error>> {
-            let output_file = self.output_files.get(command_name)
+            let output_file = self
+                .output_files
+                .get(command_name)
                 .ok_or("Command not found")?;
 
-            let trace_file = self.trace_files.get(command_name)
+            let trace_file = self
+                .trace_files
+                .get(command_name)
                 .ok_or("Trace file not found")?;
 
             // Read and verify output file
@@ -366,8 +393,14 @@ mod real_cli_output_trace_streaming_e2e {
             let trace_content = std::fs::read_to_string(trace_file.path())?;
 
             // Count lines to verify completeness
-            let output_lines = output_content.lines().filter(|line| !line.is_empty()).count();
-            let trace_lines = trace_content.lines().filter(|line| !line.is_empty()).count();
+            let output_lines = output_content
+                .lines()
+                .filter(|line| !line.is_empty())
+                .count();
+            let trace_lines = trace_content
+                .lines()
+                .filter(|line| !line.is_empty())
+                .count();
 
             // Verify JSONL format integrity
             let mut jsonl_valid = true;
@@ -392,8 +425,10 @@ mod real_cli_output_trace_streaming_e2e {
                 stats.data_corruption_events += 1;
             }
 
-            println!("Integrity check for {}: output_lines={}, trace_lines={}, jsonl_valid={}",
-                command_name, output_lines, trace_lines, jsonl_valid);
+            println!(
+                "Integrity check for {}: output_lines={}, trace_lines={}, jsonl_valid={}",
+                command_name, output_lines, trace_lines, jsonl_valid
+            );
 
             Ok(is_valid)
         }
@@ -402,7 +437,10 @@ mod real_cli_output_trace_streaming_e2e {
         fn get_file_paths(&self, command_name: &str) -> Option<(PathBuf, PathBuf)> {
             let output_file = self.output_files.get(command_name)?;
             let trace_file = self.trace_files.get(command_name)?;
-            Some((output_file.path().to_path_buf(), trace_file.path().to_path_buf()))
+            Some((
+                output_file.path().to_path_buf(),
+                trace_file.path().to_path_buf(),
+            ))
         }
     }
 
@@ -417,7 +455,8 @@ mod real_cli_output_trace_streaming_e2e {
             buffer_size_limit: usize,
             stats: Arc<Mutex<CliOutputStreamingStats>>,
         ) -> Result<Self, Box<dyn std::error::Error>> {
-            let output_manager = StreamingOutputManager::new(buffer_size_limit, Arc::clone(&stats))?;
+            let output_manager =
+                StreamingOutputManager::new(buffer_size_limit, Arc::clone(&stats))?;
 
             Ok(Self {
                 output_manager,
@@ -433,11 +472,15 @@ mod real_cli_output_trace_streaming_e2e {
             event_count: usize,
             output_format: OutputFormat,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            println!("Running long-running command: {} ({} events)",
-                command_name, event_count);
+            println!(
+                "Running long-running command: {} ({} events)",
+                command_name, event_count
+            );
 
             // Start streaming
-            self.output_manager.start_command_stream(command_name, output_format).await?;
+            self.output_manager
+                .start_command_stream(command_name, output_format)
+                .await?;
 
             // Create mock command
             let mut command = MockLongRunningCommand::new(command_name, event_count);
@@ -445,7 +488,9 @@ mod real_cli_output_trace_streaming_e2e {
             // Stream events
             while !command.is_complete() {
                 if let Some(event) = command.generate_next_event() {
-                    self.output_manager.stream_event(command_name, event, output_format).await?;
+                    self.output_manager
+                        .stream_event(command_name, event, output_format)
+                        .await?;
 
                     // Small delay to simulate real command execution
                     sleep(Duration::from_millis(1)).await;
@@ -483,14 +528,17 @@ mod real_cli_output_trace_streaming_e2e {
                 "overflow_test",
                 1000, // 1000 events
                 OutputFormat::StreamJson,
-            ).await?;
+            )
+            .await?;
 
             // Verify no buffer overflows occurred
             let stats = self.stats.lock().unwrap();
             let overflow_incidents = stats.buffer_overflow_incidents;
 
             if overflow_incidents > 0 {
-                return Err(format!("Buffer overflow detected: {} incidents", overflow_incidents).into());
+                return Err(
+                    format!("Buffer overflow detected: {} incidents", overflow_incidents).into(),
+                );
             }
 
             println!("Buffer overflow prevention test passed");
@@ -517,7 +565,8 @@ mod real_cli_output_trace_streaming_e2e {
 
                 // Note: This is a simplified concurrent test
                 // In real implementation, we'd use proper async concurrency
-                self.run_long_running_command(cx, name, event_count, format).await?;
+                self.run_long_running_command(cx, name, event_count, format)
+                    .await?;
             }
 
             println!("Concurrent streaming test completed");
@@ -528,10 +577,14 @@ mod real_cli_output_trace_streaming_e2e {
         async fn verify_all_integrity(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
             println!("Verifying output integrity for all commands");
 
-            let command_names: Vec<String> = self.output_manager.output_files.keys().cloned().collect();
+            let command_names: Vec<String> =
+                self.output_manager.output_files.keys().cloned().collect();
 
             for command_name in &command_names {
-                let is_valid = self.output_manager.verify_output_integrity(command_name).await?;
+                let is_valid = self
+                    .output_manager
+                    .verify_output_integrity(command_name)
+                    .await?;
                 if !is_valid {
                     println!("Integrity check failed for command: {}", command_name);
                     return Ok(false);
@@ -573,12 +626,9 @@ mod real_cli_output_trace_streaming_e2e {
             println!("Testing basic streaming JSONL output");
 
             // Run basic command
-            self.manager.run_long_running_command(
-                cx,
-                "basic_jsonl_test",
-                500,
-                OutputFormat::StreamJson,
-            ).await?;
+            self.manager
+                .run_long_running_command(cx, "basic_jsonl_test", 500, OutputFormat::StreamJson)
+                .await?;
 
             // Verify integrity
             let is_valid = self.manager.verify_all_integrity().await?;
@@ -596,12 +646,14 @@ mod real_cli_output_trace_streaming_e2e {
             println!("Testing large-scale streaming");
 
             // Run large command
-            self.manager.run_long_running_command(
-                cx,
-                "large_scale_test",
-                2000, // 2000 events
-                OutputFormat::Json,
-            ).await?;
+            self.manager
+                .run_long_running_command(
+                    cx,
+                    "large_scale_test",
+                    2000, // 2000 events
+                    OutputFormat::Json,
+                )
+                .await?;
 
             // Test buffer overflow prevention
             self.manager.test_buffer_overflow_prevention(cx).await?;
@@ -627,12 +679,9 @@ mod real_cli_output_trace_streaming_e2e {
 
             for (i, format) in formats.iter().enumerate() {
                 let command_name = format!("format_test_{}", i);
-                self.manager.run_long_running_command(
-                    cx,
-                    &command_name,
-                    100,
-                    *format,
-                ).await?;
+                self.manager
+                    .run_long_running_command(cx, &command_name, 100, *format)
+                    .await?;
             }
 
             // Verify all formats produced valid output
@@ -655,7 +704,10 @@ mod real_cli_output_trace_streaming_e2e {
 
             // Verify integrity after concurrent operations
             let is_valid = self.manager.verify_all_integrity().await?;
-            assert!(is_valid, "Concurrent streaming integrity should be maintained");
+            assert!(
+                is_valid,
+                "Concurrent streaming integrity should be maintained"
+            );
 
             println!("Concurrent commands test completed successfully");
             Ok(())
@@ -674,8 +726,8 @@ mod real_cli_output_trace_streaming_e2e {
         println!("=== Starting CLI output + trace streaming basic JSONL test ===");
 
         scope(|cx| async move {
-            let mut harness = CliOutputStreamingTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness =
+                CliOutputStreamingTestHarness::new().expect("Failed to create test harness");
 
             // Test basic functionality
             harness
@@ -690,10 +742,7 @@ mod real_cli_output_trace_streaming_e2e {
             );
 
             // Verify basic operation
-            assert!(
-                stats.commands_executed > 0,
-                "Should have executed commands"
-            );
+            assert!(stats.commands_executed > 0, "Should have executed commands");
             assert!(
                 stats.jsonl_records_produced > 0,
                 "Should have produced JSONL records"
@@ -723,8 +772,8 @@ mod real_cli_output_trace_streaming_e2e {
         println!("=== Testing CLI output large-scale streaming ===");
 
         scope(|cx| async move {
-            let mut harness = CliOutputStreamingTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness =
+                CliOutputStreamingTestHarness::new().expect("Failed to create test harness");
 
             // Test large-scale streaming
             harness
@@ -763,8 +812,8 @@ mod real_cli_output_trace_streaming_e2e {
         println!("=== Testing CLI output format compatibility ===");
 
         scope(|cx| async move {
-            let mut harness = CliOutputStreamingTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness =
+                CliOutputStreamingTestHarness::new().expect("Failed to create test harness");
 
             // Test format compatibility
             harness
@@ -801,8 +850,8 @@ mod real_cli_output_trace_streaming_e2e {
         println!("=== Testing CLI output concurrent commands ===");
 
         scope(|cx| async move {
-            let mut harness = CliOutputStreamingTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness =
+                CliOutputStreamingTestHarness::new().expect("Failed to create test harness");
 
             // Test concurrent commands
             harness
@@ -835,8 +884,8 @@ mod real_cli_output_trace_streaming_e2e {
         println!("=== Testing comprehensive CLI output + trace streaming integration ===");
 
         scope(|cx| async move {
-            let mut harness = CliOutputStreamingTestHarness::new()
-                .expect("Failed to create test harness");
+            let mut harness =
+                CliOutputStreamingTestHarness::new().expect("Failed to create test harness");
 
             // Run comprehensive test sequence
             println!("Running comprehensive streaming tests...");
@@ -896,8 +945,17 @@ mod real_cli_output_trace_streaming_e2e {
             println!("  - Total output bytes: {}", stats.output_bytes_written);
             println!("  - Buffer flushes: {}", stats.buffer_flushes_performed);
             println!("  - Checkpoints: {}", stats.checkpoints_created);
-            println!("  - Bytes per record: {:.2}", stats.to_json()["bytes_per_record"].as_f64().unwrap_or(0.0));
-            println!("  - Streaming efficiency: {:.2}%", stats.to_json()["streaming_efficiency"].as_f64().unwrap_or(0.0) * 100.0);
+            println!(
+                "  - Bytes per record: {:.2}",
+                stats.to_json()["bytes_per_record"].as_f64().unwrap_or(0.0)
+            );
+            println!(
+                "  - Streaming efficiency: {:.2}%",
+                stats.to_json()["streaming_efficiency"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    * 100.0
+            );
             println!("  - Test duration: {}ms", stats.test_duration_ms);
 
             Ok::<(), Box<dyn std::error::Error>>(())

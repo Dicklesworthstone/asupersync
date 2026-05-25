@@ -43,8 +43,8 @@ mod tests {
     use crate::http::h2::{
         error::{ErrorCode, H2Error},
         frame::{
-            continuation_flags, headers_flags, ContinuationFrame, Frame, FrameHeader, FrameType,
-            HeadersFrame, PrioritySpec, FRAME_HEADER_SIZE,
+            ContinuationFrame, FRAME_HEADER_SIZE, Frame, FrameHeader, FrameType, HeadersFrame,
+            PrioritySpec, continuation_flags, headers_flags,
         },
         stream::{Stream, StreamState},
     };
@@ -158,10 +158,9 @@ mod tests {
         fn apply_continuation_frame(&mut self, frame: ContinuationFrame) -> Result<(), H2Error> {
             self.current_phase = FrameStreamTestPhase::ContinuationFrameProcessing;
 
-            let result = self.stream.recv_continuation(
-                frame.header_block.clone(),
-                frame.end_headers,
-            );
+            let result = self
+                .stream
+                .recv_continuation(frame.header_block.clone(), frame.end_headers);
 
             if result.is_ok() {
                 self.stats.continuation_frames_parsed += 1;
@@ -224,7 +223,10 @@ mod tests {
 
         // Apply the frame to the stream
         let result = harness.apply_headers_frame(headers_frame);
-        assert!(result.is_ok(), "HEADERS frame should be accepted on idle stream");
+        assert!(
+            result.is_ok(),
+            "HEADERS frame should be accepted on idle stream"
+        );
 
         // Verify state transition from Idle to Open
         let state_correct = harness.verify_state_transition(StreamState::Open);
@@ -251,11 +253,17 @@ mod tests {
 
         // Apply the frame to the stream
         let result = harness.apply_headers_frame(headers_frame);
-        assert!(result.is_ok(), "HEADERS frame with END_STREAM should be accepted on idle stream");
+        assert!(
+            result.is_ok(),
+            "HEADERS frame with END_STREAM should be accepted on idle stream"
+        );
 
         // Verify state transition from Idle to HalfClosedRemote
         let state_correct = harness.verify_state_transition(StreamState::HalfClosedRemote);
-        assert!(state_correct, "Stream should transition from Idle to HalfClosedRemote with END_STREAM");
+        assert!(
+            state_correct,
+            "Stream should transition from Idle to HalfClosedRemote with END_STREAM"
+        );
 
         let test_result = harness.finalize_test(true, None);
         assert!(test_result.success);
@@ -287,11 +295,17 @@ mod tests {
         );
 
         let result = harness.apply_continuation_frame(continuation_frame);
-        assert!(result.is_ok(), "CONTINUATION frame should be accepted to complete header block");
+        assert!(
+            result.is_ok(),
+            "CONTINUATION frame should be accepted to complete header block"
+        );
 
         // Verify the stream transitioned to Open state
         let state_correct = harness.verify_state_transition(StreamState::Open);
-        assert!(state_correct, "Stream should be in Open state after complete header block");
+        assert!(
+            state_correct,
+            "Stream should be in Open state after complete header block"
+        );
 
         let test_result = harness.finalize_test(true, None);
         assert!(test_result.success);
@@ -320,14 +334,14 @@ mod tests {
         assert!(state_correct, "Stream should be HalfClosedRemote");
 
         // Now try to send a CONTINUATION frame - this should be rejected
-        let continuation_frame = harness.create_continuation_frame(
-            7,
-            b"extra: header\r\n\r\n",
-            true,
-        );
+        let continuation_frame =
+            harness.create_continuation_frame(7, b"extra: header\r\n\r\n", true);
 
         let result = harness.apply_continuation_frame(continuation_frame);
-        assert!(result.is_err(), "CONTINUATION frame should be rejected on closed stream");
+        assert!(
+            result.is_err(),
+            "CONTINUATION frame should be rejected on closed stream"
+        );
 
         if let Err(e) = result {
             assert_eq!(e.code, ErrorCode::ProtocolError);
@@ -343,14 +357,14 @@ mod tests {
         let mut harness = FrameStreamTestHarness::new(9);
 
         // Try to send a CONTINUATION frame without a preceding HEADERS frame
-        let continuation_frame = harness.create_continuation_frame(
-            9,
-            b"unexpected: continuation\r\n\r\n",
-            true,
-        );
+        let continuation_frame =
+            harness.create_continuation_frame(9, b"unexpected: continuation\r\n\r\n", true);
 
         let result = harness.apply_continuation_frame(continuation_frame);
-        assert!(result.is_err(), "CONTINUATION frame without preceding HEADERS should be rejected");
+        assert!(
+            result.is_err(),
+            "CONTINUATION frame without preceding HEADERS should be rejected"
+        );
 
         if let Err(e) = result {
             assert_eq!(e.code, ErrorCode::ProtocolError);
@@ -386,7 +400,10 @@ mod tests {
         );
 
         let result = harness.apply_continuation_frame(cont1_frame);
-        assert!(result.is_ok(), "First CONTINUATION frame should be accepted");
+        assert!(
+            result.is_ok(),
+            "First CONTINUATION frame should be accepted"
+        );
 
         // Second CONTINUATION frame (not the last)
         let cont2_frame = harness.create_continuation_frame(
@@ -396,7 +413,10 @@ mod tests {
         );
 
         let result = harness.apply_continuation_frame(cont2_frame);
-        assert!(result.is_ok(), "Second CONTINUATION frame should be accepted");
+        assert!(
+            result.is_ok(),
+            "Second CONTINUATION frame should be accepted"
+        );
 
         // Final CONTINUATION frame (with END_HEADERS)
         let cont_final_frame = harness.create_continuation_frame(
@@ -406,11 +426,17 @@ mod tests {
         );
 
         let result = harness.apply_continuation_frame(cont_final_frame);
-        assert!(result.is_ok(), "Final CONTINUATION frame should be accepted");
+        assert!(
+            result.is_ok(),
+            "Final CONTINUATION frame should be accepted"
+        );
 
         // Verify the stream transitioned to Open state
         let state_correct = harness.verify_state_transition(StreamState::Open);
-        assert!(state_correct, "Stream should be in Open state after complete multi-frame header block");
+        assert!(
+            state_correct,
+            "Stream should be in Open state after complete multi-frame header block"
+        );
 
         let test_result = harness.finalize_test(true, None);
         assert!(test_result.success);
@@ -439,7 +465,10 @@ mod tests {
 
         // Apply the frame to the stream
         let result = harness.apply_headers_frame(headers_frame);
-        assert!(result.is_ok(), "HEADERS frame with priority should be accepted on idle stream");
+        assert!(
+            result.is_ok(),
+            "HEADERS frame with priority should be accepted on idle stream"
+        );
 
         // Verify state transition from Idle to Open
         let state_correct = harness.verify_state_transition(StreamState::Open);
@@ -480,7 +509,10 @@ mod tests {
         );
 
         let result = harness.apply_continuation_frame(cont1);
-        assert!(result.is_ok(), "First CONTINUATION frame should be accepted");
+        assert!(
+            result.is_ok(),
+            "First CONTINUATION frame should be accepted"
+        );
 
         // Phase 3: Send second CONTINUATION frame
         let cont2 = harness.create_continuation_frame(
@@ -490,7 +522,10 @@ mod tests {
         );
 
         let result = harness.apply_continuation_frame(cont2);
-        assert!(result.is_ok(), "Second CONTINUATION frame should be accepted");
+        assert!(
+            result.is_ok(),
+            "Second CONTINUATION frame should be accepted"
+        );
 
         // Phase 4: Send final CONTINUATION frame with END_HEADERS
         let cont_final = harness.create_continuation_frame(
@@ -500,11 +535,17 @@ mod tests {
         );
 
         let result = harness.apply_continuation_frame(cont_final);
-        assert!(result.is_ok(), "Final CONTINUATION frame should be accepted");
+        assert!(
+            result.is_ok(),
+            "Final CONTINUATION frame should be accepted"
+        );
 
         // Verify final state
         let state_correct = harness.verify_state_transition(StreamState::Open);
-        assert!(state_correct, "Stream should be in Open state after complete header processing");
+        assert!(
+            state_correct,
+            "Stream should be in Open state after complete header processing"
+        );
 
         let test_result = harness.finalize_test(true, None);
         assert!(test_result.success);
@@ -514,7 +555,13 @@ mod tests {
         assert_eq!(test_result.stats.successful_integrations, 1);
 
         // Verify comprehensive integration statistics
-        assert!(test_result.stats.padding_bytes_processed > 0, "Should have processed header block data");
-        assert_eq!(test_result.stats.validation_errors, 0, "Should have no validation errors");
+        assert!(
+            test_result.stats.padding_bytes_processed > 0,
+            "Should have processed header block data"
+        );
+        assert_eq!(
+            test_result.stats.validation_errors, 0,
+            "Should have no validation errors"
+        );
     }
 }

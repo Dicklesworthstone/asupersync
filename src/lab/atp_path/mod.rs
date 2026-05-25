@@ -21,7 +21,7 @@
 pub mod harness;
 
 pub use harness::{
-    AtpPathLabHarness, AtpPathTestConfig, AtpPathExecutionResult, AtpPathValidation,
+    AtpPathExecutionResult, AtpPathLabHarness, AtpPathTestConfig, AtpPathValidation,
 };
 
 use crate::atp::lab::AtpLabRegime;

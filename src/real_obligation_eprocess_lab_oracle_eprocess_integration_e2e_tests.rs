@@ -8,14 +8,14 @@
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod real_obligation_eprocess_oracle_e2e {
     use crate::cx::{Cx, scope};
-    use crate::lab::oracle::eprocess::{EValue, EProcessOracle, EProcessConfig, ViolationType};
+    use crate::lab::oracle::eprocess::{EProcessConfig, EProcessOracle, EValue, ViolationType};
     use crate::obligation::eprocess::{LeakMonitor, MonitorConfig};
     use crate::runtime::{RuntimeBuilder, spawn};
     use crate::time::{Duration, Instant, sleep, timeout};
     use crate::types::{ObligationId, RegionId, TaskId, Time};
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
 
@@ -133,10 +133,7 @@ mod real_obligation_eprocess_oracle_e2e {
         }
 
         fn next_obligation_id(&self) -> ObligationId {
-            ObligationId::new_for_test(
-                self.next_obligation_id.fetch_add(1, Ordering::AcqRel),
-                0,
-            )
+            ObligationId::new_for_test(self.next_obligation_id.fetch_add(1, Ordering::AcqRel), 0)
         }
 
         fn current_time(&self) -> Time {
@@ -158,11 +155,8 @@ mod real_obligation_eprocess_oracle_e2e {
 
             for _ in 0..count {
                 let obligation_id = self.next_obligation_id();
-                let obligation = MockObligation::new(
-                    obligation_id,
-                    expected_lifetime_ns,
-                    current_time,
-                );
+                let obligation =
+                    MockObligation::new(obligation_id, expected_lifetime_ns, current_time);
 
                 {
                     let mut obligations = self.active_obligations.lock().unwrap();
@@ -170,8 +164,10 @@ mod real_obligation_eprocess_oracle_e2e {
                 }
 
                 obligation_ids.push(obligation_id);
-                println!("Created obligation {:?} with expected lifetime {}ns",
-                    obligation_id, expected_lifetime_ns);
+                println!(
+                    "Created obligation {:?} with expected lifetime {}ns",
+                    obligation_id, expected_lifetime_ns
+                );
             }
 
             Ok(obligation_ids)
@@ -182,7 +178,10 @@ mod real_obligation_eprocess_oracle_e2e {
             &mut self,
             obligation_ids: &[ObligationId],
         ) -> Result<(), Box<dyn std::error::Error>> {
-            println!("Firing rules concurrently for {} obligations", obligation_ids.len());
+            println!(
+                "Firing rules concurrently for {} obligations",
+                obligation_ids.len()
+            );
 
             // Add all obligations to firing queue
             {
@@ -230,8 +229,11 @@ mod real_obligation_eprocess_oracle_e2e {
             }
 
             if !violating_obligations.is_empty() {
-                println!("Aged obligations by {}ns, {} now violating",
-                    delta_ns, violating_obligations.len());
+                println!(
+                    "Aged obligations by {}ns, {} now violating",
+                    delta_ns,
+                    violating_obligations.len()
+                );
             }
 
             Ok(violating_obligations)
@@ -240,17 +242,13 @@ mod real_obligation_eprocess_oracle_e2e {
         /// Get obligation ages for monitoring
         fn get_obligation_ages(&self) -> Vec<u64> {
             let obligations = self.active_obligations.lock().unwrap();
-            obligations.values()
-                .map(|ob| ob.current_age())
-                .collect()
+            obligations.values().map(|ob| ob.current_age()).collect()
         }
 
         /// Get violating obligations count
         fn get_violating_count(&self) -> usize {
             let obligations = self.active_obligations.lock().unwrap();
-            obligations.values()
-                .filter(|ob| ob.is_violating())
-                .count()
+            obligations.values().filter(|ob| ob.is_violating()).count()
         }
     }
 
@@ -285,8 +283,11 @@ mod real_obligation_eprocess_oracle_e2e {
             let ages = self.rule_engine.get_obligation_ages();
             let violating_count = self.rule_engine.get_violating_count();
 
-            println!("Monitoring cycle: {} obligations, {} violating",
-                ages.len(), violating_count);
+            println!(
+                "Monitoring cycle: {} obligations, {} violating",
+                ages.len(),
+                violating_count
+            );
 
             // Feed ages to leak monitor
             let mut monitor_alert = false;
@@ -295,14 +296,17 @@ mod real_obligation_eprocess_oracle_e2e {
 
                 if self.leak_monitor.is_alert() && !monitor_alert {
                     monitor_alert = true;
-                    println!("E-process monitor triggered alert at e-value: {:.6}",
-                        self.leak_monitor.current_evalue());
+                    println!(
+                        "E-process monitor triggered alert at e-value: {:.6}",
+                        self.leak_monitor.current_evalue()
+                    );
 
                     // Update stats
                     {
                         let mut stats = self.stats.lock().unwrap();
                         stats.eprocess_alerts_triggered += 1;
-                        stats.max_evalue_observed = stats.max_evalue_observed
+                        stats.max_evalue_observed = stats
+                            .max_evalue_observed
                             .max(self.leak_monitor.current_evalue());
 
                         if violating_count > 0 {
@@ -318,7 +322,10 @@ mod real_obligation_eprocess_oracle_e2e {
             let oracle_violation = self.oracle.check_obligations(&ages)?;
 
             if oracle_violation {
-                println!("Oracle detected violation with {} violating obligations", violating_count);
+                println!(
+                    "Oracle detected violation with {} violating obligations",
+                    violating_count
+                );
 
                 // Update stats
                 {
@@ -344,13 +351,16 @@ mod real_obligation_eprocess_oracle_e2e {
             obligation_count: usize,
             expected_lifetime_ns: u64,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            println!("Creating concurrent violation scenario with {} obligations", obligation_count);
+            println!(
+                "Creating concurrent violation scenario with {} obligations",
+                obligation_count
+            );
 
             // Create obligations
-            let obligation_ids = self.rule_engine.create_obligations(
-                obligation_count,
-                expected_lifetime_ns,
-            ).await?;
+            let obligation_ids = self
+                .rule_engine
+                .create_obligations(obligation_count, expected_lifetime_ns)
+                .await?;
 
             // Update stats
             {
@@ -362,16 +372,24 @@ mod real_obligation_eprocess_oracle_e2e {
             println!("Phase 1: Normal operation");
             for i in 0..3 {
                 // Age obligations normally (under expected lifetime)
-                self.rule_engine.age_obligations(expected_lifetime_ns / 4).await?;
+                self.rule_engine
+                    .age_obligations(expected_lifetime_ns / 4)
+                    .await?;
 
                 // Fire rules concurrently
-                self.rule_engine.fire_rules_concurrently(&obligation_ids).await?;
+                self.rule_engine
+                    .fire_rules_concurrently(&obligation_ids)
+                    .await?;
 
                 // Monitor
                 let (monitor_alert, oracle_violation) = self.run_monitoring_cycle(cx).await?;
 
-                println!("Cycle {}: monitor_alert={}, oracle_violation={}",
-                    i + 1, monitor_alert, oracle_violation);
+                println!(
+                    "Cycle {}: monitor_alert={}, oracle_violation={}",
+                    i + 1,
+                    monitor_alert,
+                    oracle_violation
+                );
 
                 // Should not trigger in normal operation
                 if monitor_alert && self.rule_engine.get_violating_count() == 0 {
@@ -385,16 +403,24 @@ mod real_obligation_eprocess_oracle_e2e {
             println!("Phase 2: Creating violations");
 
             // Age obligations significantly beyond expected lifetime
-            self.rule_engine.age_obligations(expected_lifetime_ns * 3).await?;
+            self.rule_engine
+                .age_obligations(expected_lifetime_ns * 3)
+                .await?;
 
             // Fire rules concurrently on violating obligations
-            self.rule_engine.fire_rules_concurrently(&obligation_ids).await?;
+            self.rule_engine
+                .fire_rules_concurrently(&obligation_ids)
+                .await?;
 
             // Monitor - should detect violations
             let (monitor_alert, oracle_violation) = self.run_monitoring_cycle(cx).await?;
 
-            println!("Violation phase: monitor_alert={}, oracle_violation={}, violating_count={}",
-                monitor_alert, oracle_violation, self.rule_engine.get_violating_count());
+            println!(
+                "Violation phase: monitor_alert={}, oracle_violation={}, violating_count={}",
+                monitor_alert,
+                oracle_violation,
+                self.rule_engine.get_violating_count()
+            );
 
             Ok(())
         }
@@ -430,7 +456,7 @@ mod real_obligation_eprocess_oracle_e2e {
             println!("Testing basic eprocess + oracle integration");
 
             let monitor_config = MonitorConfig {
-                alpha: 0.01, // 1% false positive rate
+                alpha: 0.01,                     // 1% false positive rate
                 expected_lifetime_ns: 1_000_000, // 1ms
                 min_observations: 3,
             };
@@ -441,22 +467,22 @@ mod real_obligation_eprocess_oracle_e2e {
                 min_observations: 3,
             };
 
-            let mut manager = EProcessOracleManager::new(
-                monitor_config,
-                oracle_config,
-                Arc::clone(&self.stats),
-            );
+            let mut manager =
+                EProcessOracleManager::new(monitor_config, oracle_config, Arc::clone(&self.stats));
 
             // Create violation scenario
-            manager.create_concurrent_violation_scenario(
-                cx,
-                5, // 5 obligations
-                1_000_000, // 1ms expected lifetime
-            ).await?;
+            manager
+                .create_concurrent_violation_scenario(
+                    cx, 5,         // 5 obligations
+                    1_000_000, // 1ms expected lifetime
+                )
+                .await?;
 
             let (evalue, is_alert, observations) = manager.get_monitor_state();
-            println!("Final monitor state: evalue={:.6}, alert={}, observations={}",
-                evalue, is_alert, observations);
+            println!(
+                "Final monitor state: evalue={:.6}, alert={}, observations={}",
+                evalue, is_alert, observations
+            );
 
             println!("Basic integration test completed successfully");
             Ok(())
@@ -470,7 +496,7 @@ mod real_obligation_eprocess_oracle_e2e {
             println!("Testing high concurrency rule firing scenario");
 
             let monitor_config = MonitorConfig {
-                alpha: 0.05, // 5% false positive rate
+                alpha: 0.05,                   // 5% false positive rate
                 expected_lifetime_ns: 500_000, // 0.5ms
                 min_observations: 5,
             };
@@ -481,22 +507,22 @@ mod real_obligation_eprocess_oracle_e2e {
                 min_observations: 5,
             };
 
-            let mut manager = EProcessOracleManager::new(
-                monitor_config,
-                oracle_config,
-                Arc::clone(&self.stats),
-            );
+            let mut manager =
+                EProcessOracleManager::new(monitor_config, oracle_config, Arc::clone(&self.stats));
 
             // Create high-concurrency scenario
-            manager.create_concurrent_violation_scenario(
-                cx,
-                20, // 20 obligations
-                500_000, // 0.5ms expected lifetime
-            ).await?;
+            manager
+                .create_concurrent_violation_scenario(
+                    cx, 20,      // 20 obligations
+                    500_000, // 0.5ms expected lifetime
+                )
+                .await?;
 
             let (evalue, is_alert, observations) = manager.get_monitor_state();
-            println!("High concurrency final state: evalue={:.6}, alert={}, observations={}",
-                evalue, is_alert, observations);
+            println!(
+                "High concurrency final state: evalue={:.6}, alert={}, observations={}",
+                evalue, is_alert, observations
+            );
 
             println!("High concurrency test completed successfully");
             Ok(())
@@ -510,7 +536,7 @@ mod real_obligation_eprocess_oracle_e2e {
             println!("Testing false positive control");
 
             let monitor_config = MonitorConfig {
-                alpha: 0.001, // 0.1% false positive rate (very strict)
+                alpha: 0.001,                    // 0.1% false positive rate (very strict)
                 expected_lifetime_ns: 2_000_000, // 2ms
                 min_observations: 10,
             };
@@ -521,17 +547,16 @@ mod real_obligation_eprocess_oracle_e2e {
                 min_observations: 10,
             };
 
-            let mut manager = EProcessOracleManager::new(
-                monitor_config,
-                oracle_config,
-                Arc::clone(&self.stats),
-            );
+            let mut manager =
+                EProcessOracleManager::new(monitor_config, oracle_config, Arc::clone(&self.stats));
 
             // Run normal operations only (no violations)
-            let obligation_ids = manager.rule_engine.create_obligations(
-                10,
-                2_000_000, // 2ms expected
-            ).await?;
+            let obligation_ids = manager
+                .rule_engine
+                .create_obligations(
+                    10, 2_000_000, // 2ms expected
+                )
+                .await?;
 
             // Run many normal cycles
             for i in 0..15 {
@@ -539,21 +564,29 @@ mod real_obligation_eprocess_oracle_e2e {
                 manager.rule_engine.age_obligations(100_000).await?; // 0.1ms
 
                 // Fire rules
-                manager.rule_engine.fire_rules_concurrently(&obligation_ids).await?;
+                manager
+                    .rule_engine
+                    .fire_rules_concurrently(&obligation_ids)
+                    .await?;
 
                 // Monitor
                 let (monitor_alert, oracle_violation) = manager.run_monitoring_cycle(cx).await?;
 
                 if monitor_alert {
-                    println!("Alert in normal operation cycle {} (potential false positive)", i + 1);
+                    println!(
+                        "Alert in normal operation cycle {} (potential false positive)",
+                        i + 1
+                    );
                 }
 
                 sleep(Duration::from_millis(1)).await;
             }
 
             let (evalue, is_alert, observations) = manager.get_monitor_state();
-            println!("False positive test final state: evalue={:.6}, alert={}, observations={}",
-                evalue, is_alert, observations);
+            println!(
+                "False positive test final state: evalue={:.6}, alert={}, observations={}",
+                evalue, is_alert, observations
+            );
 
             println!("False positive control test completed");
             Ok(())
@@ -578,28 +611,28 @@ mod real_obligation_eprocess_oracle_e2e {
                 min_observations: 4,
             };
 
-            let mut manager = EProcessOracleManager::new(
-                monitor_config,
-                oracle_config,
-                Arc::clone(&self.stats),
-            );
+            let mut manager =
+                EProcessOracleManager::new(monitor_config, oracle_config, Arc::clone(&self.stats));
 
             // Create multiple bursts of violations
             for burst in 0..3 {
                 println!("Violation burst {}", burst + 1);
 
-                manager.create_concurrent_violation_scenario(
-                    cx,
-                    8, // 8 obligations per burst
-                    800_000, // 0.8ms expected
-                ).await?;
+                manager
+                    .create_concurrent_violation_scenario(
+                        cx, 8,       // 8 obligations per burst
+                        800_000, // 0.8ms expected
+                    )
+                    .await?;
 
                 sleep(Duration::from_millis(2)).await;
             }
 
             let (evalue, is_alert, observations) = manager.get_monitor_state();
-            println!("Multiple bursts final state: evalue={:.6}, alert={}, observations={}",
-                evalue, is_alert, observations);
+            println!(
+                "Multiple bursts final state: evalue={:.6}, alert={}, observations={}",
+                evalue, is_alert, observations
+            );
 
             println!("Multiple violation bursts test completed");
             Ok(())
@@ -633,10 +666,7 @@ mod real_obligation_eprocess_oracle_e2e {
             );
 
             // Verify basic operation
-            assert!(
-                stats.monitors_created > 0,
-                "Should have created monitors"
-            );
+            assert!(stats.monitors_created > 0, "Should have created monitors");
             assert!(
                 stats.oracle_checks_performed > 0,
                 "Should have performed oracle checks"
@@ -683,7 +713,10 @@ mod real_obligation_eprocess_oracle_e2e {
             );
 
             println!("✓ High concurrency eprocess test passed");
-            println!("  - Concurrent rule firings: {}", stats.concurrent_rule_firings);
+            println!(
+                "  - Concurrent rule firings: {}",
+                stats.concurrent_rule_firings
+            );
             println!("  - Max e-value observed: {:.6}", stats.max_evalue_observed);
 
             Ok::<(), Box<dyn std::error::Error>>(())
@@ -712,7 +745,9 @@ mod real_obligation_eprocess_oracle_e2e {
             );
 
             // Verify false positive control
-            let fp_rate = stats.to_json()["false_positive_rate"].as_f64().unwrap_or(0.0);
+            let fp_rate = stats.to_json()["false_positive_rate"]
+                .as_f64()
+                .unwrap_or(0.0);
             println!("False positive rate: {:.4}%", fp_rate * 100.0);
 
             println!("✓ False positive control test passed");
@@ -749,7 +784,13 @@ mod real_obligation_eprocess_oracle_e2e {
             );
 
             println!("✓ Multiple violation bursts test passed");
-            println!("  - Detection accuracy: {:.2}%", stats.to_json()["detection_accuracy"].as_f64().unwrap_or(0.0) * 100.0);
+            println!(
+                "  - Detection accuracy: {:.2}%",
+                stats.to_json()["detection_accuracy"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    * 100.0
+            );
 
             Ok::<(), Box<dyn std::error::Error>>(())
         })
@@ -817,11 +858,24 @@ mod real_obligation_eprocess_oracle_e2e {
             println!("  - Total rule firings: {}", stats.concurrent_rule_firings);
             println!("  - Total observations: {}", stats.observations_processed);
             println!("  - E-process alerts: {}", stats.eprocess_alerts_triggered);
-            println!("  - Oracle violations: {}", stats.oracle_violations_detected);
-            println!("  - Detection accuracy: {:.2}%",
-                stats.to_json()["detection_accuracy"].as_f64().unwrap_or(0.0) * 100.0);
-            println!("  - False positive rate: {:.4}%",
-                stats.to_json()["false_positive_rate"].as_f64().unwrap_or(0.0) * 100.0);
+            println!(
+                "  - Oracle violations: {}",
+                stats.oracle_violations_detected
+            );
+            println!(
+                "  - Detection accuracy: {:.2}%",
+                stats.to_json()["detection_accuracy"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    * 100.0
+            );
+            println!(
+                "  - False positive rate: {:.4}%",
+                stats.to_json()["false_positive_rate"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    * 100.0
+            );
             println!("  - Max e-value: {:.6}", stats.max_evalue_observed);
             println!("  - Test duration: {}ms", stats.test_duration_ms);
 

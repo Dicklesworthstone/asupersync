@@ -8,18 +8,18 @@
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod real_channel_crash_saga_rollback_e2e {
     use crate::channel::crash::{CrashConfig, CrashController, CrashSender, RestartMode};
-    use crate::channel::mpsc::{channel, SendError, Sender, Receiver};
+    use crate::channel::mpsc::{Receiver, SendError, Sender, channel};
     use crate::cx::{Cx, scope};
     use crate::obligation::saga::{
-        Lattice, Monotonicity, SagaBatch, SagaExecutionPlan, SagaPlan, SagaStep,
-        MonotoneSagaExecutor, SagaResult, SagaError
+        Lattice, MonotoneSagaExecutor, Monotonicity, SagaBatch, SagaError, SagaExecutionPlan,
+        SagaPlan, SagaResult, SagaStep,
     };
     use crate::runtime::{RuntimeBuilder, spawn};
     use crate::time::{Duration, Instant, sleep, timeout};
-    use crate::types::{RegionId, TaskId, Time, ObligationId};
+    use crate::types::{ObligationId, RegionId, TaskId, Time};
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-    use std::sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
 
@@ -85,11 +85,11 @@ mod real_channel_crash_saga_rollback_e2e {
 
     #[derive(Debug, Clone, PartialEq)]
     enum MockOperationType {
-        DatabaseWrite,    // Non-monotone, requires compensation
-        CacheUpdate,      // Monotone, mergeable
-        LogEntry,         // Monotone, append-only
-        ExternalApi,      // Non-monotone, may fail, needs compensation
-        ResourceLock,     // Non-monotone, must be released
+        DatabaseWrite, // Non-monotone, requires compensation
+        CacheUpdate,   // Monotone, mergeable
+        LogEntry,      // Monotone, append-only
+        ExternalApi,   // Non-monotone, may fail, needs compensation
+        ResourceLock,  // Non-monotone, must be released
     }
 
     impl MockSagaOperation {
@@ -103,27 +103,27 @@ mod real_channel_crash_saga_rollback_e2e {
                 MockOperationType::DatabaseWrite => (
                     Monotonicity::NonMonotone,
                     Some(format!("ROLLBACK: {}", step_data)),
-                    true
+                    true,
                 ),
                 MockOperationType::CacheUpdate => (
                     Monotonicity::Monotone,
                     None, // Monotone operations don't need explicit compensation
-                    false
+                    false,
                 ),
                 MockOperationType::LogEntry => (
                     Monotonicity::Monotone,
                     None, // Logs are append-only, no compensation needed
-                    false
+                    false,
                 ),
                 MockOperationType::ExternalApi => (
                     Monotonicity::NonMonotone,
                     Some(format!("CANCEL_API: {}", step_data)),
-                    true
+                    true,
                 ),
                 MockOperationType::ResourceLock => (
                     Monotonicity::NonMonotone,
                     Some(format!("UNLOCK: {}", step_data)),
-                    true
+                    true,
                 ),
             };
 
@@ -143,7 +143,9 @@ mod real_channel_crash_saga_rollback_e2e {
                 name: format!("step_{}", self.operation_id),
                 monotonicity: self.monotonicity,
                 operation_data: self.step_data.clone().into_bytes(),
-                compensation_data: self.compensation_data.as_ref()
+                compensation_data: self
+                    .compensation_data
+                    .as_ref()
                     .map(|s| s.clone().into_bytes()),
             }
         }
@@ -185,9 +187,15 @@ mod real_channel_crash_saga_rollback_e2e {
             // State progression: Initial -> Executing -> Compensating -> (Completed|Failed)
             let current_state = match (&self.current_state, &other.current_state) {
                 (MockSagaState::Failed, _) | (_, MockSagaState::Failed) => MockSagaState::Failed,
-                (MockSagaState::Completed, _) | (_, MockSagaState::Completed) => MockSagaState::Completed,
-                (MockSagaState::Compensating, _) | (_, MockSagaState::Compensating) => MockSagaState::Compensating,
-                (MockSagaState::Executing, _) | (_, MockSagaState::Executing) => MockSagaState::Executing,
+                (MockSagaState::Completed, _) | (_, MockSagaState::Completed) => {
+                    MockSagaState::Completed
+                }
+                (MockSagaState::Compensating, _) | (_, MockSagaState::Compensating) => {
+                    MockSagaState::Compensating
+                }
+                (MockSagaState::Executing, _) | (_, MockSagaState::Executing) => {
+                    MockSagaState::Executing
+                }
                 _ => MockSagaState::Initial,
             };
 
@@ -347,10 +355,11 @@ mod real_channel_crash_saga_rollback_e2e {
                 let sagas = self.active_sagas.lock().unwrap();
                 let controllers = self.crash_controllers.lock().unwrap();
 
-                let saga_plan = sagas.get(&saga_id)
-                    .ok_or("Saga not found")?.clone();
-                let controller = controllers.get(&channel_name)
-                    .ok_or("Crash controller not found")?.clone();
+                let saga_plan = sagas.get(&saga_id).ok_or("Saga not found")?.clone();
+                let controller = controllers
+                    .get(&channel_name)
+                    .ok_or("Crash controller not found")?
+                    .clone();
 
                 (saga_plan, controller)
             };
@@ -364,13 +373,20 @@ mod real_channel_crash_saga_rollback_e2e {
             current_lattice.current_state = MockSagaState::Executing;
             let mut steps_completed = 0;
 
-            println!("Executing saga {} with {} operations", saga_id, saga_plan.operations.len());
+            println!(
+                "Executing saga {} with {} operations",
+                saga_id,
+                saga_plan.operations.len()
+            );
 
             for (step_index, operation) in saga_plan.operations.iter().enumerate() {
                 // Check if we should crash at this step
                 if let Some(crash_point) = saga_plan.crash_point {
                     if step_index == crash_point {
-                        println!("Triggering crash at step {} for saga {}", crash_point, saga_id);
+                        println!(
+                            "Triggering crash at step {} for saga {}",
+                            crash_point, saga_id
+                        );
 
                         // Trigger crash
                         crash_controller.crash();
@@ -384,9 +400,14 @@ mod real_channel_crash_saga_rollback_e2e {
                         }
 
                         // Execute compensation chain in reverse order
-                        return self.execute_compensation_chain(
-                            cx, saga_id, step_index, &saga_plan.operations
-                        ).await;
+                        return self
+                            .execute_compensation_chain(
+                                cx,
+                                saga_id,
+                                step_index,
+                                &saga_plan.operations,
+                            )
+                            .await;
                     }
                 }
 
@@ -395,11 +416,16 @@ mod real_channel_crash_saga_rollback_e2e {
                     match crash_sender.send(operation.step_data.clone()).await {
                         Ok(()) => {
                             println!("Step {} executed: {}", step_index, operation.step_data);
-                            current_lattice.completed_operations.insert(operation.operation_id);
+                            current_lattice
+                                .completed_operations
+                                .insert(operation.operation_id);
                             steps_completed += 1;
                         }
                         Err(SendError::Disconnected(_)) => {
-                            println!("Channel disconnected during step {}, triggering compensation", step_index);
+                            println!(
+                                "Channel disconnected during step {}, triggering compensation",
+                                step_index
+                            );
 
                             // Update stats
                             {
@@ -410,9 +436,14 @@ mod real_channel_crash_saga_rollback_e2e {
                             }
 
                             // Execute compensation chain
-                            return self.execute_compensation_chain(
-                                cx, saga_id, step_index, &saga_plan.operations
-                            ).await;
+                            return self
+                                .execute_compensation_chain(
+                                    cx,
+                                    saga_id,
+                                    step_index,
+                                    &saga_plan.operations,
+                                )
+                                .await;
                         }
                         Err(e) => {
                             return Err(format!("Unexpected send error: {:?}", e).into());
@@ -420,8 +451,13 @@ mod real_channel_crash_saga_rollback_e2e {
                     }
                 } else {
                     // Non-channel operations always succeed in this test
-                    println!("Non-channel step {} executed: {}", step_index, operation.step_data);
-                    current_lattice.completed_operations.insert(operation.operation_id);
+                    println!(
+                        "Non-channel step {} executed: {}",
+                        step_index, operation.step_data
+                    );
+                    current_lattice
+                        .completed_operations
+                        .insert(operation.operation_id);
                     steps_completed += 1;
                 }
 
@@ -451,7 +487,10 @@ mod real_channel_crash_saga_rollback_e2e {
             failed_step: usize,
             operations: &[MockSagaOperation],
         ) -> Result<SagaResult<MockSagaLattice>, Box<dyn std::error::Error>> {
-            println!("Executing compensation chain for saga {} (failed at step {})", saga_id, failed_step);
+            println!(
+                "Executing compensation chain for saga {} (failed at step {})",
+                saga_id, failed_step
+            );
 
             let mut compensation_lattice = MockSagaLattice::bottom();
             compensation_lattice.current_state = MockSagaState::Compensating;
@@ -483,7 +522,9 @@ mod real_channel_crash_saga_rollback_e2e {
                             logs.push(compensation_event);
                         }
 
-                        compensation_lattice.compensation_executed.insert(operation.operation_id);
+                        compensation_lattice
+                            .compensation_executed
+                            .insert(operation.operation_id);
                         compensation_steps += 1;
 
                         // Small delay between compensation steps
@@ -553,9 +594,15 @@ mod real_channel_crash_saga_rollback_e2e {
             }
 
             if is_reverse_order {
-                println!("✓ Compensation executed in correct reverse order for saga {}", saga_id);
+                println!(
+                    "✓ Compensation executed in correct reverse order for saga {}",
+                    saga_id
+                );
             } else {
-                println!("✗ Compensation order violation detected for saga {}", saga_id);
+                println!(
+                    "✗ Compensation order violation detected for saga {}",
+                    saga_id
+                );
             }
 
             Ok(is_reverse_order)
@@ -601,20 +648,19 @@ mod real_channel_crash_saga_rollback_e2e {
                 .with_deterministic_crash(2)
                 .with_max_restarts(Some(1));
 
-            let controller = self.manager.create_crash_controller(
-                "basic_test_channel".to_string(),
-                crash_config,
-            ).await?;
+            let controller = self
+                .manager
+                .create_crash_controller("basic_test_channel".to_string(), crash_config)
+                .await?;
 
             // Create saga with 5 operations, expect crash at step 2
             let saga_id = self.manager.create_saga_plan(5, Some(2)).await?;
 
             // Execute saga - should crash and compensate
-            let result = self.manager.execute_saga_with_crash(
-                cx,
-                saga_id,
-                "basic_test_channel".to_string(),
-            ).await?;
+            let result = self
+                .manager
+                .execute_saga_with_crash(cx, saga_id, "basic_test_channel".to_string())
+                .await?;
 
             // Verify result is compensation
             match result {
@@ -628,7 +674,10 @@ mod real_channel_crash_saga_rollback_e2e {
 
             // Verify compensation order
             let order_correct = self.manager.verify_compensation_order(saga_id).await?;
-            assert!(order_correct, "Compensation should be executed in reverse order");
+            assert!(
+                order_correct,
+                "Compensation should be executed in reverse order"
+            );
 
             println!("Basic saga crash compensation test completed successfully");
             Ok(())
@@ -642,9 +691,9 @@ mod real_channel_crash_saga_rollback_e2e {
             println!("Testing multiple sagas with different crash points");
 
             let test_cases = vec![
-                ("early_crash", 0, 7),  // Crash at first step
-                ("mid_crash", 3, 7),    // Crash in middle
-                ("late_crash", 5, 7),   // Crash near end
+                ("early_crash", 0, 7), // Crash at first step
+                ("mid_crash", 3, 7),   // Crash in middle
+                ("late_crash", 5, 7),  // Crash near end
             ];
 
             for (test_name, crash_point, total_steps) in test_cases {
@@ -655,19 +704,21 @@ mod real_channel_crash_saga_rollback_e2e {
                     .with_deterministic_crash(crash_point as u64)
                     .with_max_restarts(Some(2));
 
-                let controller = self.manager.create_crash_controller(
-                    format!("test_channel_{}", test_name),
-                    crash_config,
-                ).await?;
+                let controller = self
+                    .manager
+                    .create_crash_controller(format!("test_channel_{}", test_name), crash_config)
+                    .await?;
 
                 // Create and execute saga
-                let saga_id = self.manager.create_saga_plan(total_steps, Some(crash_point)).await?;
+                let saga_id = self
+                    .manager
+                    .create_saga_plan(total_steps, Some(crash_point))
+                    .await?;
 
-                let result = self.manager.execute_saga_with_crash(
-                    cx,
-                    saga_id,
-                    format!("test_channel_{}", test_name),
-                ).await?;
+                let result = self
+                    .manager
+                    .execute_saga_with_crash(cx, saga_id, format!("test_channel_{}", test_name))
+                    .await?;
 
                 // Verify compensation
                 match result {
@@ -681,7 +732,11 @@ mod real_channel_crash_saga_rollback_e2e {
 
                 // Verify compensation order
                 let order_correct = self.manager.verify_compensation_order(saga_id).await?;
-                assert!(order_correct, "Compensation order incorrect for {}", test_name);
+                assert!(
+                    order_correct,
+                    "Compensation order incorrect for {}",
+                    test_name
+                );
             }
 
             println!("Multiple sagas test completed successfully");
@@ -696,23 +751,21 @@ mod real_channel_crash_saga_rollback_e2e {
             println!("Testing saga success case with no crash");
 
             // Create crash controller that never crashes
-            let crash_config = CrashConfig::new(98765)
-                .with_crash_probability(0.0); // No crash
+            let crash_config = CrashConfig::new(98765).with_crash_probability(0.0); // No crash
 
-            let controller = self.manager.create_crash_controller(
-                "no_crash_channel".to_string(),
-                crash_config,
-            ).await?;
+            let controller = self
+                .manager
+                .create_crash_controller("no_crash_channel".to_string(), crash_config)
+                .await?;
 
             // Create saga with no crash point
             let saga_id = self.manager.create_saga_plan(4, None).await?;
 
             // Execute saga - should complete successfully
-            let result = self.manager.execute_saga_with_crash(
-                cx,
-                saga_id,
-                "no_crash_channel".to_string(),
-            ).await?;
+            let result = self
+                .manager
+                .execute_saga_with_crash(cx, saga_id, "no_crash_channel".to_string())
+                .await?;
 
             // Verify result is success
             match result {
@@ -740,10 +793,10 @@ mod real_channel_crash_saga_rollback_e2e {
                 .with_crash_probability(0.7) // High probability for testing
                 .with_max_restarts(Some(3));
 
-            let controller = self.manager.create_crash_controller(
-                "probabilistic_channel".to_string(),
-                crash_config,
-            ).await?;
+            let controller = self
+                .manager
+                .create_crash_controller("probabilistic_channel".to_string(), crash_config)
+                .await?;
 
             // Run multiple sagas to test probabilistic behavior
             let mut crashed_sagas = 0;
@@ -752,11 +805,10 @@ mod real_channel_crash_saga_rollback_e2e {
             for i in 0..5 {
                 let saga_id = self.manager.create_saga_plan(6, None).await?;
 
-                let result = self.manager.execute_saga_with_crash(
-                    cx,
-                    saga_id,
-                    "probabilistic_channel".to_string(),
-                ).await?;
+                let result = self
+                    .manager
+                    .execute_saga_with_crash(cx, saga_id, "probabilistic_channel".to_string())
+                    .await?;
 
                 match result {
                     SagaResult::Success(_) => {
@@ -783,7 +835,10 @@ mod real_channel_crash_saga_rollback_e2e {
             );
 
             // Should have at least some crashes with 70% probability
-            assert!(crashed_sagas > 0, "Expected some crashes with high probability");
+            assert!(
+                crashed_sagas > 0,
+                "Expected some crashes with high probability"
+            );
 
             Ok(())
         }
@@ -816,14 +871,8 @@ mod real_channel_crash_saga_rollback_e2e {
             );
 
             // Verify basic operation
-            assert!(
-                stats.sagas_started > 0,
-                "Should have started sagas"
-            );
-            assert!(
-                stats.sagas_crashed > 0,
-                "Should have crashed sagas"
-            );
+            assert!(stats.sagas_started > 0, "Should have started sagas");
+            assert!(stats.sagas_crashed > 0, "Should have crashed sagas");
             assert!(
                 stats.compensation_chains_executed > 0,
                 "Should have executed compensation chains"
@@ -836,7 +885,10 @@ mod real_channel_crash_saga_rollback_e2e {
             println!("✓ Channel crash + saga basic compensation test passed");
             println!("  - Sagas started: {}", stats.sagas_started);
             println!("  - Sagas crashed: {}", stats.sagas_crashed);
-            println!("  - Compensation chains: {}", stats.compensation_chains_executed);
+            println!(
+                "  - Compensation chains: {}",
+                stats.compensation_chains_executed
+            );
 
             Ok::<(), Box<dyn std::error::Error>>(())
         })
@@ -875,7 +927,10 @@ mod real_channel_crash_saga_rollback_e2e {
 
             println!("✓ Multiple saga crash scenarios test passed");
             println!("  - Total sagas: {}", stats.sagas_started);
-            println!("  - Avg compensation chain length: {:.2}", stats.avg_compensation_chain_length);
+            println!(
+                "  - Avg compensation chain length: {:.2}",
+                stats.avg_compensation_chain_length
+            );
 
             Ok::<(), Box<dyn std::error::Error>>(())
         })
@@ -942,8 +997,17 @@ mod real_channel_crash_saga_rollback_e2e {
             );
 
             println!("✓ Probabilistic crash scenarios test passed");
-            println!("  - Saga crash rate: {:.2}%", stats.to_json()["saga_crash_rate"].as_f64().unwrap_or(0.0) * 100.0);
-            println!("  - Compensation effectiveness: {:.2}%", stats.to_json()["compensation_effectiveness"].as_f64().unwrap_or(0.0) * 100.0);
+            println!(
+                "  - Saga crash rate: {:.2}%",
+                stats.to_json()["saga_crash_rate"].as_f64().unwrap_or(0.0) * 100.0
+            );
+            println!(
+                "  - Compensation effectiveness: {:.2}%",
+                stats.to_json()["compensation_effectiveness"]
+                    .as_f64()
+                    .unwrap_or(0.0)
+                    * 100.0
+            );
 
             Ok::<(), Box<dyn std::error::Error>>(())
         })
@@ -988,10 +1052,7 @@ mod real_channel_crash_saga_rollback_e2e {
             );
 
             // Verify comprehensive operation
-            assert!(
-                stats.sagas_started >= 15,
-                "Should have started many sagas"
-            );
+            assert!(stats.sagas_started >= 15, "Should have started many sagas");
             assert!(
                 stats.sagas_crashed >= 5,
                 "Should have crashed multiple sagas"
@@ -1014,8 +1075,14 @@ mod real_channel_crash_saga_rollback_e2e {
             println!("✓ Comprehensive channel crash + saga integration test passed");
             println!("  - Total sagas: {}", stats.sagas_started);
             println!("  - Total crashes: {}", stats.sagas_crashed);
-            println!("  - Total compensations: {}", stats.compensation_chains_executed);
-            println!("  - Rollback success rate: {:.2}%", stats.rollback_success_rate * 100.0);
+            println!(
+                "  - Total compensations: {}",
+                stats.compensation_chains_executed
+            );
+            println!(
+                "  - Rollback success rate: {:.2}%",
+                stats.rollback_success_rate * 100.0
+            );
             println!("  - Test duration: {}ms", stats.test_duration_ms);
 
             Ok::<(), Box<dyn std::error::Error>>(())

@@ -5,9 +5,8 @@
 
 use crate::lab::crashpack::evidence_ledger::{AtpEvidenceEntry, AtpEvidenceLedger};
 use crate::lab::crashpack::{
-    ATP_CRASHPACK_SCHEMA_VERSION, AtpCrashpack, TransferOracleResult, TransferViolation,
-    ViolationSeverity, atp_specialized_log, is_atp_path_event, is_atp_quic_event,
-    is_atp_repair_event,
+    atp_specialized_log, is_atp_path_event, is_atp_quic_event, is_atp_repair_event, AtpCrashpack,
+    TransferOracleResult, TransferViolation, ViolationSeverity, ATP_CRASHPACK_SCHEMA_VERSION,
 };
 use crate::lab::oracle::evidence::EvidenceStrength;
 use crate::lab::oracle::{OracleEntryReport, OracleReport, OracleStats};

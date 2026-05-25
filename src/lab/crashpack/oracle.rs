@@ -9,10 +9,10 @@
 //! - Proof bundle validity oracle
 
 use crate::lab::crashpack::evidence_ledger::AtpEvidenceLedger;
-use crate::lab::oracle::OracleStats;
 use crate::lab::oracle::evidence::{
     BayesFactor, EvidenceEntry, EvidenceLine, EvidenceStrength, LogLikelihoodContributions,
 };
+use crate::lab::oracle::OracleStats;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -815,11 +815,9 @@ mod tests {
             .expect("final exposure entry is recorded");
         assert!(!final_exposure.evidence.passed);
         assert_eq!(final_exposure.evidence.invariant, "final_exposure");
-        assert!(
-            final_exposure.evidence.evidence_lines[0]
-                .intuition
-                .contains("2 exposure(s)")
-        );
+        assert!(final_exposure.evidence.evidence_lines[0]
+            .intuition
+            .contains("2 exposure(s)"));
 
         let cancellation_drain = result
             .evidence_ledger
@@ -829,11 +827,9 @@ mod tests {
             .expect("cancellation drain entry is recorded");
         assert!(!cancellation_drain.evidence.passed);
         assert_eq!(cancellation_drain.evidence.invariant, "cancellation_drain");
-        assert!(
-            cancellation_drain.evidence.evidence_lines[0]
-                .intuition
-                .contains("3 pending drain(s)")
-        );
+        assert!(cancellation_drain.evidence.evidence_lines[0]
+            .intuition
+            .contains("3 pending drain(s)"));
     }
 
     #[test]

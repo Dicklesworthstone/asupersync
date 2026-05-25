@@ -7,7 +7,7 @@
 
 use crate::lab::conformal::{CalibrationReport, ConformalCalibrator, ConformalConfig};
 use crate::lab::instrumented_future::{
-    AwaitPoint, CancellationInjector, InstrumentedFuture, InjectionStrategy,
+    AwaitPoint, CancellationInjector, InjectionStrategy, InstrumentedFuture,
 };
 use crate::lab::oracle::{OracleEntryReport, OracleReport};
 use crate::time::Time;
@@ -15,8 +15,8 @@ use crate::types::{Outcome, TaskId, TraceId};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -42,7 +42,8 @@ impl MockOracleMetrics {
 
     fn generate_report(&self, chaos_level: f64) -> OracleReport {
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
-        let effective_violation_rate = (self.base_violation_rate * (1.0 + chaos_level * self.chaos_multiplier)).min(0.95);
+        let effective_violation_rate =
+            (self.base_violation_rate * (1.0 + chaos_level * self.chaos_multiplier)).min(0.95);
 
         // Use deterministic pseudo-random generation based on counter
         let violates_invariant = (count % 100) < (effective_violation_rate * 100.0) as u64;
@@ -177,7 +178,11 @@ impl ConformalChaosIntegrationManager {
     }
 
     /// Make predictions and track coverage under chaos conditions.
-    fn predict_under_chaos(&mut self, chaos_level: f64, prediction_count: usize) -> Vec<CalibrationReport> {
+    fn predict_under_chaos(
+        &mut self,
+        chaos_level: f64,
+        prediction_count: usize,
+    ) -> Vec<CalibrationReport> {
         let mut reports = Vec::new();
 
         for _ in 0..prediction_count {
@@ -240,8 +245,11 @@ impl InstrumentedFutureTestDriver {
     }
 
     /// Execute a future with instrumentation using various injection strategies.
-    async fn execute_with_strategies<F>(&mut self, future_factory: impl Fn() -> F, strategies: Vec<(&str, InjectionStrategy)>)
-    where
+    async fn execute_with_strategies<F>(
+        &mut self,
+        future_factory: impl Fn() -> F,
+        strategies: Vec<(&str, InjectionStrategy)>,
+    ) where
         F: Future<Output = Result<String, String>>,
     {
         for (name, strategy) in strategies {
@@ -265,7 +273,9 @@ impl InstrumentedFutureTestDriver {
         let waker = futures_lite::future::block_on(async {
             use std::task::{RawWaker, RawWakerVTable, Waker};
 
-            unsafe fn clone(_: *const ()) -> RawWaker { RawWaker::new(std::ptr::null(), &VTABLE) }
+            unsafe fn clone(_: *const ()) -> RawWaker {
+                RawWaker::new(std::ptr::null(), &VTABLE)
+            }
             unsafe fn wake(_: *const ()) {}
             unsafe fn wake_by_ref(_: *const ()) {}
             unsafe fn drop(_: *const ()) {}
@@ -278,7 +288,8 @@ impl InstrumentedFutureTestDriver {
         let mut context = Context::from_waker(&waker);
 
         // Poll until completion or cancellation
-        for poll_attempt in 1..=100 { // Limit to prevent infinite loops
+        for poll_attempt in 1..=100 {
+            // Limit to prevent infinite loops
             await_points.push(poll_attempt);
 
             match pinned.as_mut().poll(&mut context) {
@@ -303,7 +314,10 @@ impl InstrumentedFutureTestDriver {
                 await_counts.iter().sum::<u64>() as f64 / await_counts.len() as f64
             };
 
-            stats.insert(strategy.clone(), (*min_awaits as usize, *max_awaits as usize, avg_awaits));
+            stats.insert(
+                strategy.clone(),
+                (*min_awaits as usize, *max_awaits as usize, avg_awaits),
+            );
         }
 
         stats
@@ -339,7 +353,8 @@ impl ConformalInstrumentedChaosTest {
         let chaos_levels = vec![0.0, 0.3, 0.7, 1.0];
 
         for &chaos_level in &chaos_levels {
-            self.conformal_manager.calibrate_under_chaos(chaos_level, self.calibration_samples / chaos_levels.len());
+            self.conformal_manager
+                .calibrate_under_chaos(chaos_level, self.calibration_samples / chaos_levels.len());
         }
 
         // Phase 2: Generate predictions while running instrumented futures under chaos
@@ -355,12 +370,20 @@ impl ConformalInstrumentedChaosTest {
         for (strategy_name, strategy) in injection_strategies.clone() {
             for &chaos_level in &chaos_levels {
                 // Execute instrumented futures
-                let future_factory = move || MockComplexFuture::multi_poll(15 + ((chaos_level * 10.0) as u64));
-                self.future_driver.execute_with_strategies(future_factory, vec![(strategy_name, strategy.clone())]).await;
+                let future_factory =
+                    move || MockComplexFuture::multi_poll(15 + ((chaos_level * 10.0) as u64));
+                self.future_driver
+                    .execute_with_strategies(
+                        future_factory,
+                        vec![(strategy_name, strategy.clone())],
+                    )
+                    .await;
 
                 // Make conformal predictions under same chaos level
-                let prediction_count = self.prediction_samples / (chaos_levels.len() * injection_strategies.len());
-                self.conformal_manager.predict_under_chaos(chaos_level, prediction_count);
+                let prediction_count =
+                    self.prediction_samples / (chaos_levels.len() * injection_strategies.len());
+                self.conformal_manager
+                    .predict_under_chaos(chaos_level, prediction_count);
             }
         }
 
@@ -417,7 +440,9 @@ impl TestResult {
         }
 
         let min_coverage = coverage_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max_coverage = coverage_values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let max_coverage = coverage_values
+            .iter()
+            .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
         // Coverage shouldn't vary by more than 20 percentage points across chaos levels
         (max_coverage - min_coverage) <= 0.20
@@ -456,10 +481,23 @@ mod tests {
 
         println!("{}", result.summary());
 
-        assert!(result.verify_success(), "Integration test failed: {}", result.summary());
-        assert!(result.coverage_guaranteed, "Coverage guarantee not maintained");
-        assert!(result.total_predictions >= 20, "Insufficient predictions made");
-        assert!(result.calibration_samples >= 10, "Insufficient calibration samples");
+        assert!(
+            result.verify_success(),
+            "Integration test failed: {}",
+            result.summary()
+        );
+        assert!(
+            result.coverage_guaranteed,
+            "Coverage guarantee not maintained"
+        );
+        assert!(
+            result.total_predictions >= 20,
+            "Insufficient predictions made"
+        );
+        assert!(
+            result.calibration_samples >= 10,
+            "Insufficient calibration samples"
+        );
     }
 
     #[tokio::test]
@@ -470,12 +508,18 @@ mod tests {
         println!("{}", result.summary());
 
         // With alpha=0.10, we expect 90% coverage
-        assert!(result.coverage_guaranteed, "Coverage guarantee failed under high chaos");
+        assert!(
+            result.coverage_guaranteed,
+            "Coverage guarantee failed under high chaos"
+        );
         assert!(result.target_coverage >= 0.90, "Target coverage too low");
 
         // Verify coverage is maintained even at highest chaos level
         if let Some(&chaos_1_coverage) = result.coverage_by_chaos.get("chaos_1.0") {
-            assert!(chaos_1_coverage >= 0.85, "Coverage degraded too much under maximum chaos");
+            assert!(
+                chaos_1_coverage >= 0.85,
+                "Coverage degraded too much under maximum chaos"
+            );
         }
     }
 
@@ -487,12 +531,23 @@ mod tests {
         println!("{}", result.summary());
 
         // With alpha=0.01, we expect 99% coverage - very strict
-        assert!(result.coverage_guaranteed, "Strict coverage guarantee failed");
-        assert!((result.target_coverage - 0.99).abs() < 0.001, "Target coverage incorrect");
+        assert!(
+            result.coverage_guaranteed,
+            "Strict coverage guarantee failed"
+        );
+        assert!(
+            (result.target_coverage - 0.99).abs() < 0.001,
+            "Target coverage incorrect"
+        );
 
         // All chaos levels should maintain high coverage
         for (level, &coverage) in &result.coverage_by_chaos {
-            assert!(coverage >= 0.96, "Coverage at {} fell below 96%: {}", level, coverage);
+            assert!(
+                coverage >= 0.96,
+                "Coverage at {} fell below 96%: {}",
+                level,
+                coverage
+            );
         }
     }
 
@@ -506,11 +561,17 @@ mod tests {
         assert!(result.verify_success(), "Test failed");
 
         // Verify different injection strategies produced different await patterns
-        assert!(result.await_point_stats.len() >= 3, "Insufficient injection strategy diversity");
+        assert!(
+            result.await_point_stats.len() >= 3,
+            "Insufficient injection strategy diversity"
+        );
 
         // Check that probabilistic injection created variable await counts
         if let Some(&(min, max, avg)) = result.await_point_stats.get("probabilistic_30pct") {
-            assert!(max > min, "Probabilistic injection should create variability");
+            assert!(
+                max > min,
+                "Probabilistic injection should create variability"
+            );
             assert!(avg > min as f64, "Average should be between min and max");
             assert!(avg < max as f64, "Average should be between min and max");
         }
@@ -530,7 +591,10 @@ mod tests {
 
         // Both should pass coverage guarantees
         assert!(baseline_result.coverage_guaranteed, "Baseline test failed");
-        assert!(stability_result.coverage_guaranteed, "Stability test failed");
+        assert!(
+            stability_result.coverage_guaranteed,
+            "Stability test failed"
+        );
 
         // Coverage should be reasonably consistent between runs
         // (allowing for some variance due to pseudo-randomness)
@@ -540,7 +604,11 @@ mod tests {
             / stability_result.coverage_by_chaos.len() as f64;
 
         let coverage_diff = (baseline_avg - stability_avg).abs();
-        assert!(coverage_diff <= 0.10, "Coverage too variable between runs: {:.3}", coverage_diff);
+        assert!(
+            coverage_diff <= 0.10,
+            "Coverage too variable between runs: {:.3}",
+            coverage_diff
+        );
     }
 
     #[tokio::test]
@@ -552,8 +620,14 @@ mod tests {
         println!("{}", result.summary());
 
         // Should still maintain coverage even with minimal samples
-        assert!(result.coverage_guaranteed, "Coverage failed with minimal samples");
-        assert!(result.calibration_samples >= 5, "Didn't use minimum required samples");
+        assert!(
+            result.coverage_guaranteed,
+            "Coverage failed with minimal samples"
+        );
+        assert!(
+            result.calibration_samples >= 5,
+            "Didn't use minimum required samples"
+        );
     }
 
     #[tokio::test]
@@ -567,7 +641,13 @@ mod tests {
             ("every_3rd", InjectionStrategy::EveryNth(3)),
             ("first_5", InjectionStrategy::FirstN(5)),
             ("probabilistic_50", InjectionStrategy::Probabilistic(0.5)),
-            ("window_around_10", InjectionStrategy::WindowAround { center: 10, radius: 3 }),
+            (
+                "window_around_10",
+                InjectionStrategy::WindowAround {
+                    center: 10,
+                    radius: 3,
+                },
+            ),
             ("except_first_3", InjectionStrategy::ExceptFirst(3)),
             ("last_5_points", InjectionStrategy::LastN(5)),
         ];
@@ -575,22 +655,38 @@ mod tests {
         // Execute with comprehensive strategies
         for (name, strategy) in strategies {
             let future_factory = || MockComplexFuture::multi_poll(20);
-            test.future_driver.execute_with_strategies(future_factory, vec![(name, strategy.clone())]).await;
+            test.future_driver
+                .execute_with_strategies(future_factory, vec![(name, strategy.clone())])
+                .await;
         }
 
         // Make predictions under chaos
         let chaos_levels = vec![0.0, 0.5, 1.0];
         for &chaos_level in &chaos_levels {
             let predictions = test.conformal_manager.predict_under_chaos(chaos_level, 15);
-            assert!(!predictions.is_empty(), "Should generate predictions under chaos level {}", chaos_level);
+            assert!(
+                !predictions.is_empty(),
+                "Should generate predictions under chaos level {}",
+                chaos_level
+            );
         }
 
         let coverage_guaranteed = test.conformal_manager.verify_coverage_guarantee();
         let await_stats = test.future_driver.get_await_statistics();
 
-        assert!(coverage_guaranteed, "Coverage guarantee failed with comprehensive strategies");
-        assert!(await_stats.len() >= 6, "Should test multiple injection strategies: got {}", await_stats.len());
+        assert!(
+            coverage_guaranteed,
+            "Coverage guarantee failed with comprehensive strategies"
+        );
+        assert!(
+            await_stats.len() >= 6,
+            "Should test multiple injection strategies: got {}",
+            await_stats.len()
+        );
 
-        println!("Comprehensive test passed with {} strategies tested", await_stats.len());
+        println!(
+            "Comprehensive test passed with {} strategies tested",
+            await_stats.len()
+        );
     }
 }

@@ -9,12 +9,12 @@
 mod real_obligation_graded_no_aliasing_proof_e2e {
     use crate::cx::{Cx, scope};
     use crate::obligation::graded::{GradedObligation, Resolution, ResolvedProof};
-    use crate::obligation::no_aliasing_proof::{NoAliasingProver, ProofResult};
     use crate::obligation::marking::{MarkingEvent, MarkingEventKind};
+    use crate::obligation::no_aliasing_proof::{NoAliasingProver, ProofResult};
     use crate::record::ObligationKind;
     use crate::runtime::{RuntimeBuilder, spawn};
     use crate::time::{Duration, Instant, sleep, timeout};
-    use crate::types::{Budget, RegionId, TaskId, ObligationId, Time};
+    use crate::types::{Budget, ObligationId, RegionId, TaskId, Time};
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -754,17 +754,11 @@ mod real_obligation_graded_no_aliasing_proof_e2e {
         }
 
         fn next_task_id(&self) -> TaskId {
-            TaskId::new_for_test(
-                self.next_task_id.fetch_add(1, Ordering::AcqRel),
-                0,
-            )
+            TaskId::new_for_test(self.next_task_id.fetch_add(1, Ordering::AcqRel), 0)
         }
 
         fn next_region_id(&self) -> RegionId {
-            RegionId::new_for_test(
-                self.next_region_id.fetch_add(1, Ordering::AcqRel),
-                0,
-            )
+            RegionId::new_for_test(self.next_region_id.fetch_add(1, Ordering::AcqRel), 0)
         }
 
         /// Test real graded obligations with aliasing proofs
@@ -795,7 +789,10 @@ mod real_obligation_graded_no_aliasing_proof_e2e {
                 .resolve_obligation_with_proof(cx, obligation_id, Resolution::Commit, region1)
                 .await?;
 
-            assert!(is_valid, "Real aliasing proof should be valid for simple case");
+            assert!(
+                is_valid,
+                "Real aliasing proof should be valid for simple case"
+            );
 
             println!("Real graded obligation test completed successfully");
             Ok(())
@@ -841,7 +838,10 @@ mod real_obligation_graded_no_aliasing_proof_e2e {
                 .resolve_obligation_with_proof(cx, obligation_id, Resolution::Commit, region1)
                 .await?;
 
-            assert!(is_valid, "Real aliasing proof should be valid for nested transfers");
+            assert!(
+                is_valid,
+                "Real aliasing proof should be valid for nested transfers"
+            );
 
             println!("Real nested capability transfers test completed");
             Ok(())
