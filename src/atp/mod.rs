@@ -66,7 +66,9 @@ pub use grant::{GrantInfo, GrantManager, GrantQuery, GrantStats, PairingCode, Pa
 pub use identity::{DurablePeerIdentity, IdentityError};
 pub use inbox::{
     AllowAction, DaemonDiagnostics, GrantQuota, GrantScope, InboxDiagnostics, InboxError,
-    InboxItem, InboxJsonRow, InboxOffer, InboxState, LocalInbox, ObjectDigest, ReceiveGrant,
+    InboxItem, InboxJsonRow, InboxOffer, InboxState, LocalInbox, MailboxPrivacyPolicy,
+    MailboxRetrievalReceipt, MailboxSecurityError, MailboxStorageClass, MailboxStorageRecord,
+    MailboxStoreRequest, MailboxTamperEvidence, ObjectDigest, ReceiveGrant,
 };
 pub use logging::{
     AtpEvent, AtpLogger, AtpLoggerConfig, AtpSubsystem, EventContext, LogFormat, atp_logger,

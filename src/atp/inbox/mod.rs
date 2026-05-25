@@ -1,5 +1,6 @@
 //! Local ATP inbox state, receive grants, and daemon diagnostics.
 
+use crate::atp::quota::{QuotaAllocation, QuotaBucket, QuotaError, QuotaLedger};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -515,6 +516,92 @@ pub struct MailboxRetrievalReceipt {
     pub retrieved_at_epoch_secs: u64,
 }
 
+/// Request to place an inbox offer into encrypted offline mailbox custody.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxStoreRequest {
+    /// Stable mailbox record identifier used for quota accounting and replay logs.
+    pub mailbox_id: String,
+    /// Privacy policy applied before relay custody.
+    pub privacy_policy: MailboxPrivacyPolicy,
+    /// Tamper-evidence committed by the sender before upload.
+    pub evidence: MailboxTamperEvidence,
+    /// Bytes charged to relay mailbox storage.
+    pub stored_bytes: u64,
+}
+
+impl MailboxStoreRequest {
+    fn validate_for_item(
+        &self,
+        item: &InboxItem,
+        now_epoch_secs: u64,
+    ) -> Result<(), MailboxSecurityError> {
+        self.privacy_policy.validate()?;
+        if now_epoch_secs > self.evidence.expires_at_epoch_secs {
+            return Err(MailboxSecurityError::StaleEntry {
+                expired_at_epoch_secs: self.evidence.expires_at_epoch_secs,
+                observed_epoch_secs: now_epoch_secs,
+            });
+        }
+        if !object_digest_eq(&self.evidence.manifest_root, &item.object_root) {
+            return Err(MailboxSecurityError::DigestMismatch {
+                field: "manifest_root",
+            });
+        }
+        if self.evidence.manifest_epoch != item.manifest_epoch {
+            return Err(MailboxSecurityError::ManifestEpochMismatch {
+                expected: item.manifest_epoch,
+                observed: self.evidence.manifest_epoch,
+            });
+        }
+        if self.evidence.content_length != self.stored_bytes {
+            return Err(MailboxSecurityError::Truncated {
+                expected_bytes: self.evidence.content_length,
+                observed_bytes: self.stored_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    fn quota_allocation(&self) -> QuotaAllocation {
+        QuotaAllocation::one_record(QuotaBucket::Mailbox, self.stored_bytes)
+    }
+}
+
+/// Durable offline mailbox custody record for a pending transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxStorageRecord {
+    /// Stable mailbox record identifier.
+    pub mailbox_id: String,
+    /// Inbox item represented by this mailbox record.
+    pub item_id: String,
+    /// Object graph root committed by the manifest.
+    pub object_root: ObjectDigest,
+    /// Source peer token redacted for relay-visible diagnostics.
+    pub redacted_source_peer: String,
+    /// Grant used to authorize mailbox custody.
+    pub grant_id: String,
+    /// Privacy policy applied before relay custody.
+    pub privacy_policy: MailboxPrivacyPolicy,
+    /// Tamper-evidence needed before receiver trust.
+    pub evidence: MailboxTamperEvidence,
+    /// Quota allocation record id.
+    pub allocation_record_id: String,
+    /// Time this record entered mailbox custody.
+    pub stored_at_epoch_secs: u64,
+}
+
+impl MailboxStorageRecord {
+    /// Validate a receiver retrieval receipt before exposing mailbox bytes.
+    pub fn validate_retrieval(
+        &self,
+        receipt: &MailboxRetrievalReceipt,
+        last_seen_sequence: Option<u64>,
+    ) -> Result<(), MailboxSecurityError> {
+        self.evidence
+            .validate_retrieval(receipt, last_seen_sequence)
+    }
+}
+
 /// Offline mailbox security validation failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MailboxSecurityError {
@@ -743,6 +830,7 @@ impl DaemonDiagnostics {
 pub struct LocalInbox {
     grants: BTreeMap<String, ReceiveGrant>,
     items: BTreeMap<String, InboxItem>,
+    mailbox_records: BTreeMap<String, MailboxStorageRecord>,
 }
 
 impl LocalInbox {
@@ -752,6 +840,7 @@ impl LocalInbox {
         Self {
             grants: BTreeMap::new(),
             items: BTreeMap::new(),
+            mailbox_records: BTreeMap::new(),
         }
     }
 
@@ -864,6 +953,73 @@ impl LocalInbox {
         Ok(())
     }
 
+    /// Store an offered transfer in encrypted offline mailbox custody.
+    pub fn store_mailbox(
+        &mut self,
+        item_id: &str,
+        grant_id: &str,
+        request: MailboxStoreRequest,
+        quota: &mut QuotaLedger,
+        now_epoch_secs: u64,
+    ) -> Result<(), InboxError> {
+        if self.mailbox_records.contains_key(&request.mailbox_id) {
+            return Err(InboxError::DuplicateMailboxRecord(request.mailbox_id));
+        }
+
+        let item = self
+            .items
+            .get(item_id)
+            .ok_or_else(|| InboxError::UnknownItem(item_id.to_string()))?;
+        ensure_transition(item.state, InboxState::MailboxStored)?;
+        request
+            .validate_for_item(item, now_epoch_secs)
+            .map_err(InboxError::MailboxSecurity)?;
+
+        let grant = self
+            .grants
+            .get(grant_id)
+            .ok_or_else(|| InboxError::UnknownGrant(grant_id.to_string()))?;
+        if !grant.allows_path(
+            AllowAction::Receive,
+            &item.destination_path,
+            request.stored_bytes,
+            now_epoch_secs,
+        ) {
+            return Err(InboxError::Unauthorized {
+                grant_id: grant_id.to_string(),
+                action: AllowAction::Receive,
+            });
+        }
+
+        quota
+            .reserve(request.mailbox_id.clone(), request.quota_allocation())
+            .map_err(InboxError::Quota)?;
+
+        let redacted_source_peer = request.privacy_policy.redact_peer(&item.source_peer);
+        let record = MailboxStorageRecord {
+            mailbox_id: request.mailbox_id.clone(),
+            item_id: item.item_id.clone(),
+            object_root: item.object_root.clone(),
+            redacted_source_peer,
+            grant_id: grant_id.to_string(),
+            privacy_policy: request.privacy_policy,
+            evidence: request.evidence,
+            allocation_record_id: request.mailbox_id.clone(),
+            stored_at_epoch_secs: now_epoch_secs,
+        };
+
+        let item = self
+            .items
+            .get_mut(item_id)
+            .ok_or_else(|| InboxError::UnknownItem(item_id.to_string()))?;
+        item.state = InboxState::MailboxStored;
+        item.grant_id = Some(grant_id.to_string());
+        item.updated_epoch_secs = now_epoch_secs;
+        self.mailbox_records
+            .insert(record.mailbox_id.clone(), record);
+        Ok(())
+    }
+
     /// Move an item through its lifecycle.
     pub fn transition(
         &mut self,
@@ -912,6 +1068,12 @@ impl LocalInbox {
             .values()
             .filter(|item| item.state == state)
             .collect()
+    }
+
+    /// Return stored mailbox records in stable mailbox id order.
+    #[must_use]
+    pub fn mailbox_records(&self) -> Vec<&MailboxStorageRecord> {
+        self.mailbox_records.values().collect()
     }
 
     /// Return stable JSON-compatible rows.
@@ -990,6 +1152,8 @@ pub enum InboxError {
     UnknownGrant(String),
     /// The item id already exists.
     DuplicateItem(String),
+    /// The mailbox record id already exists.
+    DuplicateMailboxRecord(String),
     /// The grant does not authorize the operation.
     Unauthorized {
         /// Grant that failed authorization.
@@ -1004,6 +1168,10 @@ pub enum InboxError {
         /// Requested state.
         to: InboxState,
     },
+    /// Mailbox privacy or tamper evidence failed validation.
+    MailboxSecurity(MailboxSecurityError),
+    /// Mailbox quota accounting failed before state transition.
+    Quota(QuotaError),
 }
 
 impl fmt::Display for InboxError {
@@ -1012,6 +1180,9 @@ impl fmt::Display for InboxError {
             Self::UnknownItem(item_id) => write!(f, "unknown inbox item `{item_id}`"),
             Self::UnknownGrant(grant_id) => write!(f, "unknown grant `{grant_id}`"),
             Self::DuplicateItem(item_id) => write!(f, "duplicate inbox item `{item_id}`"),
+            Self::DuplicateMailboxRecord(mailbox_id) => {
+                write!(f, "duplicate mailbox record `{mailbox_id}`")
+            }
             Self::Unauthorized { grant_id, action } => {
                 write!(
                     f,
@@ -1022,6 +1193,8 @@ impl fmt::Display for InboxError {
             Self::InvalidTransition { from, to } => {
                 write!(f, "invalid inbox transition from {from} to {to}")
             }
+            Self::MailboxSecurity(err) => write!(f, "{err}"),
+            Self::Quota(err) => write!(f, "{err}"),
         }
     }
 }
@@ -1102,6 +1275,7 @@ fn redact_token_to(token: &str, visible_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::quota::{QuotaLimit, QuotaUsage};
 
     fn digest(byte: u8) -> ObjectDigest {
         ObjectDigest::new([byte; 32])
@@ -1143,6 +1317,23 @@ mod tests {
             sequence: 42,
             bytes_returned: 4096,
             retrieved_at_epoch_secs: 99,
+        }
+    }
+
+    fn mailbox_store_request(mailbox_id: &str, stored_bytes: u64) -> MailboxStoreRequest {
+        MailboxStoreRequest {
+            mailbox_id: mailbox_id.to_string(),
+            privacy_policy: MailboxPrivacyPolicy::encrypted(),
+            evidence: MailboxTamperEvidence {
+                manifest_root: digest(7),
+                stored_object_digest: digest(8),
+                manifest_epoch: 3,
+                sequence: 1,
+                content_length: stored_bytes,
+                expires_at_epoch_secs: 100,
+                previous_record_digest: None,
+            },
+            stored_bytes,
         }
     }
 
@@ -1223,6 +1414,125 @@ mod tests {
                 observed_epoch_secs: 101,
             })
         );
+    }
+
+    #[test]
+    fn encrypted_mailbox_store_charges_quota_and_records_tamper_evidence() {
+        let mut inbox = LocalInbox::new();
+        let mut quota = QuotaLedger::new();
+        quota.set_limit(QuotaBucket::Mailbox, QuotaLimit::new(1024, 4));
+        inbox
+            .offer(offer("in-1", "/data/inbox/project", 128))
+            .unwrap(); // ubs:ignore - test oracle
+        inbox.allow(ReceiveGrant::new(
+            "grant-1",
+            "peer-a",
+            receive_actions(),
+            GrantScope::PathPrefix(PathBuf::from("/data/inbox")),
+        ));
+
+        inbox
+            .store_mailbox(
+                "in-1",
+                "grant-1",
+                mailbox_store_request("mailbox-1", 128),
+                &mut quota,
+                11,
+            )
+            .unwrap(); // ubs:ignore - test oracle
+
+        let item = inbox.list()[0]; // ubs:ignore - test oracle
+        assert_eq!(item.state, InboxState::MailboxStored);
+        assert_eq!(item.grant_id.as_deref(), Some("grant-1"));
+        assert_eq!(
+            quota.usage(QuotaBucket::Mailbox),
+            QuotaUsage {
+                bytes: 128,
+                records: 1
+            }
+        );
+
+        let record = inbox.mailbox_records()[0]; // ubs:ignore - test oracle
+        assert_eq!(record.mailbox_id, "mailbox-1");
+        assert_eq!(record.allocation_record_id, "mailbox-1");
+        assert_eq!(record.redacted_source_peer, "peer-abc...");
+        assert_eq!(record.evidence.stored_object_digest, digest(8));
+
+        let receipt = MailboxRetrievalReceipt {
+            manifest_root: digest(7),
+            stored_object_digest: digest(8),
+            manifest_epoch: 3,
+            sequence: 1,
+            bytes_returned: 128,
+            retrieved_at_epoch_secs: 12,
+        };
+        record.validate_retrieval(&receipt, None).unwrap(); // ubs:ignore - test oracle
+    }
+
+    #[test]
+    fn mailbox_store_rejects_plain_private_storage_before_quota_mutation() {
+        let mut inbox = LocalInbox::new();
+        let mut quota = QuotaLedger::new();
+        quota.set_limit(QuotaBucket::Mailbox, QuotaLimit::new(1024, 4));
+        inbox
+            .offer(offer("in-1", "/data/inbox/project", 128))
+            .unwrap(); // ubs:ignore - test oracle
+        inbox.allow(ReceiveGrant::new(
+            "grant-1",
+            "peer-a",
+            receive_actions(),
+            GrantScope::PathPrefix(PathBuf::from("/data/inbox")),
+        ));
+        let mut request = mailbox_store_request("mailbox-1", 128);
+        request.privacy_policy.encrypted_at_rest = false;
+
+        let err = inbox
+            .store_mailbox("in-1", "grant-1", request, &mut quota, 11)
+            .unwrap_err(); // ubs:ignore - test oracle
+
+        assert_eq!(
+            err,
+            InboxError::MailboxSecurity(MailboxSecurityError::MissingEncryption)
+        );
+        assert_eq!(inbox.list()[0].state, InboxState::Offered); // ubs:ignore - test oracle
+        assert_eq!(quota.usage(QuotaBucket::Mailbox), QuotaUsage::default());
+        assert!(inbox.mailbox_records().is_empty());
+    }
+
+    #[test]
+    fn mailbox_store_rejects_quota_exhaustion_before_state_transition() {
+        let mut inbox = LocalInbox::new();
+        let mut quota = QuotaLedger::new();
+        quota.set_limit(QuotaBucket::Mailbox, QuotaLimit::new(64, 1));
+        inbox
+            .offer(offer("in-1", "/data/inbox/project", 128))
+            .unwrap(); // ubs:ignore - test oracle
+        inbox.allow(ReceiveGrant::new(
+            "grant-1",
+            "peer-a",
+            receive_actions(),
+            GrantScope::PathPrefix(PathBuf::from("/data/inbox")),
+        ));
+
+        let err = inbox
+            .store_mailbox(
+                "in-1",
+                "grant-1",
+                mailbox_store_request("mailbox-1", 128),
+                &mut quota,
+                11,
+            )
+            .unwrap_err(); // ubs:ignore - test oracle
+
+        assert!(matches!(
+            err,
+            InboxError::Quota(QuotaError::Exhausted {
+                bucket: QuotaBucket::Mailbox,
+                ..
+            })
+        ));
+        assert_eq!(inbox.list()[0].state, InboxState::Offered); // ubs:ignore - test oracle
+        assert_eq!(quota.usage(QuotaBucket::Mailbox), QuotaUsage::default());
     }
 
     #[test]

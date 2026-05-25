@@ -141,7 +141,9 @@
     "command": "RCH_REQUIRE_REMOTE=1 rch exec -- scripts/detect_forbidden_quic_deps.sh",
     "expected_exit_code": 0,
     "on_failure": "Block PR/release - forbidden dependencies detected in ATP native core",
-    "report_artifacts": "artifacts/atp_quic_dependency_audit_*.json"
+    "report_artifacts": "artifacts/atp_quic_dependency_audit_*.json",
+    "audit_only_contract": "--audit-only runs the same dependency checks without writing report artifacts",
+    "cargo_target_dir_contract": "Nested cargo tree checks reuse caller CARGO_TARGET_DIR when it is set; otherwise each profile falls back to a deterministic tmp target directory"
   },
   "proof_lane_integration": {
     "manifest_file": "artifacts/proof_lane_manifest_v1.json",
@@ -167,6 +169,8 @@
     "production_tokio_guarantee_preserved": "✓ Default and metrics profiles remain Tokio-free as documented",
     "adapter_crates_cannot_smuggle": "✓ Feature flags and adapter crates cannot introduce external QUIC into native ATP",
     "ci_surfaces_violations_clearly": "✓ CI validation provides clear error messages for dependency violations",
-    "proof_lane_manifest_integration": "✓ Audit gates integrated into proof lane manifest with clear coverage documentation"
+    "proof_lane_manifest_integration": "✓ Audit gates integrated into proof lane manifest with clear coverage documentation",
+    "audit_only_is_non_mutating": "✓ --audit-only skips report artifact generation while preserving the same cargo-tree checks",
+    "caller_target_dir_preserved": "✓ Cargo-tree proof invocations honor caller CARGO_TARGET_DIR before falling back to profile-specific tmp target dirs"
   }
 }

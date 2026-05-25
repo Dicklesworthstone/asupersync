@@ -523,6 +523,8 @@ pub enum ServiceEventKind {
     EndpointObservationAccepted,
     /// Candidate accepted.
     CandidateAccepted,
+    /// Candidate rejected before it entered the rendezvous set.
+    CandidateRejected,
     /// Hole-punch attempt granted.
     AttemptGranted,
 }
@@ -534,6 +536,7 @@ pub struct ServiceEvent {
     transfer_nonce: TransferNonce,
     peer_id: Option<PeerId>,
     at_micros: u64,
+    error: Option<Error>,
 }
 
 impl ServiceEvent {
@@ -559,6 +562,12 @@ impl ServiceEvent {
     #[must_use]
     pub const fn at_micros(&self) -> u64 {
         self.at_micros
+    }
+
+    /// Public, redaction-safe rejection error associated with this event.
+    #[must_use]
+    pub fn error(&self) -> Option<&Error> {
+        self.error.as_ref()
     }
 }
 
@@ -805,7 +814,7 @@ impl Service {
     pub fn open_session(&mut self, session: Session) {
         let nonce = session.nonce;
         self.sessions.insert(session.nonce, session);
-        self.record_event(ServiceEventKind::SessionOpened, nonce, None, 0);
+        self.record_event(ServiceEventKind::SessionOpened, nonce, None, 0, None);
     }
 
     /// Return a session by nonce.
@@ -890,6 +899,7 @@ impl Service {
             transfer_nonce,
             Some(peer_id),
             now_micros,
+            None,
         );
 
         Ok(ObservationReceipt {
@@ -939,6 +949,7 @@ impl Service {
             transfer_nonce,
             Some(peer_id),
             now_micros,
+            None,
         );
 
         Ok(grant)
@@ -1011,51 +1022,65 @@ impl Service {
     {
         let transfer_nonce = signed.transfer_nonce;
         let peer_id = signed.peer_id;
-        let session = self
-            .sessions
-            .get_mut(&transfer_nonce)
-            .ok_or(Error::UnknownSession)?;
+        let result = if let Some(session) = self.sessions.get_mut(&transfer_nonce) {
+            if session.is_expired(now_micros) {
+                Err(Error::ExpiredSession)
+            } else if now_micros >= signed.candidate.expires_at_micros {
+                Err(Error::ExpiredCandidate)
+            } else if signed.candidate.expires_at_micros > session.expires_at_micros {
+                Err(Error::CandidateOutlivesSession)
+            } else if let Err(error) = validate_capability_context(now_micros, &signed) {
+                Err(error)
+            } else if !verifier.verify(&signed) {
+                Err(Error::InvalidSignature)
+            } else if let Err(error) =
+                validate_relay_candidate(now_micros, &signed, session, verifier)
+            {
+                Err(error.public_error())
+            } else if session
+                .seen_candidate_nonces
+                .contains(&(peer_id, signed.candidate_nonce))
+            {
+                Err(Error::NonceReplay)
+            } else if session.candidates.len() >= session.quotas.max_total_candidates {
+                Err(Error::QuotaExceeded)
+            } else if session.peer_candidate_count(peer_id)
+                >= session.quotas.max_candidates_per_peer
+            {
+                Err(Error::QuotaExceeded)
+            } else {
+                session
+                    .seen_candidate_nonces
+                    .insert((peer_id, signed.candidate_nonce));
+                session.candidates.push(signed);
+                Ok(())
+            }
+        } else {
+            Err(Error::UnknownSession)
+        };
 
-        if session.is_expired(now_micros) {
-            return Err(Error::ExpiredSession);
+        match result {
+            Ok(()) => {
+                self.record_event(
+                    ServiceEventKind::CandidateAccepted,
+                    transfer_nonce,
+                    Some(peer_id),
+                    now_micros,
+                    None,
+                );
+                Ok(())
+            }
+            Err(error) => {
+                self.record_event(
+                    ServiceEventKind::CandidateRejected,
+                    transfer_nonce,
+                    Some(peer_id),
+                    now_micros,
+                    Some(error.clone()),
+                );
+                Err(error)
+            }
         }
-        if now_micros >= signed.candidate.expires_at_micros {
-            return Err(Error::ExpiredCandidate);
-        }
-        if signed.candidate.expires_at_micros > session.expires_at_micros {
-            return Err(Error::CandidateOutlivesSession);
-        }
-        validate_capability_context(now_micros, &signed)?;
-        if !verifier.verify(&signed) {
-            return Err(Error::InvalidSignature);
-        }
-        if let Err(error) = validate_relay_candidate(now_micros, &signed, session, verifier) {
-            return Err(error.public_error());
-        }
-        if session
-            .seen_candidate_nonces
-            .contains(&(peer_id, signed.candidate_nonce))
-        {
-            return Err(Error::NonceReplay);
-        }
-        if session.candidates.len() >= session.quotas.max_total_candidates {
-            return Err(Error::QuotaExceeded);
-        }
-        if session.peer_candidate_count(peer_id) >= session.quotas.max_candidates_per_peer {
-            return Err(Error::QuotaExceeded);
-        }
-
-        session
-            .seen_candidate_nonces
-            .insert((peer_id, signed.candidate_nonce));
-        session.candidates.push(signed);
-        self.record_event(
-            ServiceEventKind::CandidateAccepted,
-            transfer_nonce,
-            Some(peer_id),
-            now_micros,
-        );
-        Ok(())
     }
 
     fn record_event(
@@ -1064,12 +1089,14 @@ impl Service {
         transfer_nonce: TransferNonce,
         peer_id: Option<PeerId>,
         at_micros: u64,
+        error: Option<Error>,
     ) {
         self.events.push(ServiceEvent {
             kind,
             transfer_nonce,
             peer_id: peer_id.filter(|_| self.config.log_peer_ids),
             at_micros,
+            error,
         });
     }
 }
@@ -1887,6 +1914,64 @@ mod tests {
             Error::RelayAuthorizationFailed.to_string(),
             "authorization failed"
         );
+    }
+
+    #[test]
+    fn candidate_rejection_events_are_redaction_safe_and_public() {
+        let config = ServiceConfig::new(
+            "rv-redacted",
+            Quotas {
+                max_candidates_per_peer: 1,
+                max_total_candidates: 8,
+                max_observations_per_peer: 4,
+                max_total_observations: 32,
+                max_attempts_per_peer: 8,
+            },
+        )
+        .expect("config")
+        .with_log_peer_ids(false);
+        let mut service = Service::with_config(config);
+        let transfer_nonce = nonce(7);
+        let peer_a = peer(1);
+        service.open_session(Session::new(
+            transfer_nonce,
+            1_000,
+            service.config().default_quotas(),
+        ));
+
+        service
+            .register_candidate(
+                10,
+                signed_candidate(peer_a, transfer_nonce, candidate_nonce(9)),
+                &|_: &SignedCandidate| true,
+            )
+            .expect("first candidate accepted");
+        let error = service
+            .register_candidate(
+                11,
+                signed_candidate(peer_a, transfer_nonce, candidate_nonce(10)),
+                &|_: &SignedCandidate| true,
+            )
+            .expect_err("peer quota rejection");
+
+        assert_eq!(error, Error::QuotaExceeded);
+        assert_eq!(
+            service
+                .events()
+                .iter()
+                .map(ServiceEvent::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                ServiceEventKind::SessionOpened,
+                ServiceEventKind::CandidateAccepted,
+                ServiceEventKind::CandidateRejected,
+            ]
+        );
+        let rejected = service.events().last().expect("rejection event");
+        assert_eq!(rejected.transfer_nonce(), transfer_nonce);
+        assert_eq!(rejected.at_micros(), 11);
+        assert_eq!(rejected.peer_id(), None);
+        assert_eq!(rejected.error(), Some(&Error::QuotaExceeded));
     }
 
     #[test]

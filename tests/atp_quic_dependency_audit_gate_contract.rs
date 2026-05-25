@@ -8,6 +8,15 @@
 
 use std::process::Command;
 
+fn audit_target_dir(profile_name: &str) -> String {
+    std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| {
+        format!(
+            "/tmp/rch_target_atp_audit_{}",
+            profile_name.replace('-', "_")
+        )
+    })
+}
+
 #[test]
 fn atp_dependency_audit_gate_passes() {
     // Run the ATP dependency audit script
@@ -61,11 +70,7 @@ fn atp_native_core_profiles_are_self_contained() {
         let mut cmd = Command::new("rch");
         cmd.args(["exec", "--"]).arg("env");
 
-        // Set unique target directory for each profile
-        let target_dir = format!(
-            "/tmp/rch_target_atp_audit_{}",
-            profile_name.replace("-", "_")
-        );
+        let target_dir = audit_target_dir(profile_name);
         cmd.arg(format!("CARGO_TARGET_DIR={}", target_dir));
 
         cmd.args(["cargo", "tree", "-e", "normal", "-p", "asupersync"]);
@@ -178,6 +183,44 @@ fn audit_script_exists_and_is_executable() {
 }
 
 #[test]
+fn audit_only_mode_is_non_mutating() {
+    let script = std::fs::read_to_string("scripts/detect_forbidden_quic_deps.sh")
+        .expect("ATP dependency audit script must be readable");
+
+    assert!(
+        script.contains("AUDIT_ONLY=false"),
+        "script must default audit-only mode off before option parsing"
+    );
+    assert!(
+        script.contains("--audit-only)") && script.contains("AUDIT_ONLY=true"),
+        "script must wire --audit-only into AUDIT_ONLY=true"
+    );
+    assert!(
+        script.contains("Audit-only mode: skipping report generation"),
+        "--audit-only must skip report generation instead of writing audit artifacts"
+    );
+    assert!(
+        script.contains("generate_audit_report \"$total_violations\""),
+        "normal mode must still generate the dependency audit report"
+    );
+}
+
+#[test]
+fn audit_script_honors_caller_cargo_target_dir() {
+    let script = std::fs::read_to_string("scripts/detect_forbidden_quic_deps.sh")
+        .expect("ATP dependency audit script must be readable");
+
+    assert!(
+        script.contains("fallback_target_dir"),
+        "script must retain deterministic profile-specific target-dir fallback"
+    );
+    assert!(
+        script.contains("local temp_dir=\"${CARGO_TARGET_DIR:-$fallback_target_dir}\""),
+        "script must reuse caller CARGO_TARGET_DIR for every nested cargo tree check"
+    );
+}
+
+#[test]
 fn audit_contract_exists() {
     // Verify that the contract file exists and is valid JSON
     let contract_path = "artifacts/atp_quic_dependency_audit_gate_contract_v1.json";
@@ -205,6 +248,22 @@ fn audit_contract_exists() {
     assert!(
         contract["enforcement_policy"]["principle"].is_string(),
         "Contract must document enforcement principle"
+    );
+
+    assert_eq!(
+        contract["CI_integration"]["audit_only_contract"]
+            .as_str()
+            .unwrap(),
+        "--audit-only runs the same dependency checks without writing report artifacts",
+        "Contract must require non-mutating audit-only mode"
+    );
+
+    assert!(
+        contract["acceptance_criteria"]["caller_target_dir_preserved"]
+            .as_str()
+            .unwrap()
+            .contains("honor caller CARGO_TARGET_DIR"),
+        "Contract must require caller CARGO_TARGET_DIR preservation"
     );
 }
 

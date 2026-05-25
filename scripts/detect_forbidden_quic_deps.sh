@@ -15,6 +15,9 @@ EXIT_SUCCESS=0
 EXIT_FORBIDDEN_DEPS=1
 EXIT_AUDIT_FAILURE=2
 
+AUDIT_ONLY=false
+VERBOSE=false
+
 # Forbidden external QUIC stack crates
 FORBIDDEN_QUIC_CRATES=(
     "quinn"
@@ -53,7 +56,8 @@ FORBIDDEN_TOKIO_CRATES=(
 check_dependency_tree() {
     local profile="$1"
     local feature_args="$2"
-    local temp_dir="${TMPDIR:-/tmp}/rch_target_quic_audit_${profile//-/_}"
+    local fallback_target_dir="${TMPDIR:-/tmp}/rch_target_quic_audit_${profile//-/_}"
+    local temp_dir="${CARGO_TARGET_DIR:-$fallback_target_dir}"
 
     echo "Checking dependency tree for profile: $profile"
     echo "Feature args: $feature_args"
@@ -162,8 +166,11 @@ main() {
     local total_violations=0
     audit_atp_native_core || total_violations=$?
 
-    # Generate audit report
-    generate_audit_report "$total_violations"
+    if [[ "$AUDIT_ONLY" == "true" ]]; then
+        echo "Audit-only mode: skipping report generation"
+    else
+        generate_audit_report "$total_violations"
+    fi
 
     # Final result
     echo "=================================================================="
