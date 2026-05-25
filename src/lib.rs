@@ -353,6 +353,8 @@ pub mod real_codec_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_codec_length_delimited_framed_read_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_combinator_bulkhead_service_load_shed_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_combinator_race_bracket_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_combinator_race_obligation_lyapunov_integration_e2e_tests;

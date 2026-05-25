@@ -506,8 +506,8 @@ mod tests {
 
         // Generate GF(256) multiplication table
         let mut mul_table = vec![0u8; 256 * 256];
-        for a in 0..256u32 {
-            for b in 0..256u32 {
+        for a in 0..256usize {
+            for b in 0..256usize {
                 let product = gf256_multiply(a as u8, b as u8);
                 mul_table[a * 256 + b] = product;
             }

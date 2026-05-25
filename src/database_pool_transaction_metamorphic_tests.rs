@@ -540,7 +540,7 @@ mod tests {
             let reparsed = MockQuery::new(&serialized);
 
             // Semantic preservation: normalized forms should be equivalent
-            prop_assert_eq!(query.normalized_form, reparsed.normalized_form,
+            prop_assert_eq!(&query.normalized_form, &reparsed.normalized_form,
                 "Parse-serialize round-trip changed semantics: '{}' vs '{}'",
                 query.normalized_form, reparsed.normalized_form);
 
@@ -574,7 +574,7 @@ mod tests {
             let bound2 = query.bind_parameters(&params2).expect("Failed to bind parameters");
 
             // Consistency: same parameters should produce identical bound queries
-            prop_assert_eq!(bound1, bound2,
+            prop_assert_eq!(&bound1, &bound2,
                 "Parameter binding inconsistency: '{}' vs '{}'", bound1, bound2);
 
             // Correctness: bound query should contain parameter values
@@ -602,11 +602,12 @@ mod tests {
             let normalized_twice = query_normalized.normalized_form;
 
             // Stability: repeated normalization converges to fixed point
-            prop_assert_eq!(normalized_once, normalized_twice,
+            prop_assert_eq!(&normalized_once, &normalized_twice,
                 "Query normalization not stable: '{}' vs '{}'", normalized_once, normalized_twice);
 
             // Consistency: normalized form should be uppercase and whitespace-normalized
-            prop_assert_eq!(normalized_once, normalized_once.to_uppercase());
+            let uppercase_once = normalized_once.to_uppercase();
+            prop_assert_eq!(&normalized_once, &uppercase_once);
             prop_assert!(!normalized_once.contains("  "), "Normalized query contains double spaces");
         }
     }
@@ -890,7 +891,7 @@ mod tests {
 
                 // Verify stack integrity: remaining savepoints should be in correct order
                 for (i, expected_sp) in savepoint_names.iter().take(expected_depth).enumerate() {
-                    prop_assert_eq!(tx.savepoints[i], *expected_sp);
+                    prop_assert_eq!(&tx.savepoints[i], expected_sp);
                 }
             }
         }
