@@ -178,6 +178,15 @@ pub enum AtpPathEventKind {
         from_path: PathKind,
         to_path: PathKind,
     },
+    /// A fallback path was selected after a preferred candidate failed.
+    FallbackSelected {
+        from_path: PathKind,
+        to_path: PathKind,
+        reason: String,
+        relay_cost_micros: Option<u64>,
+    },
+    /// A path-race loser was explicitly drained after selection.
+    LoserPathDrained { path_kind: PathKind, reason: String },
     /// Transfer completed via selected path
     TransferCompleted {
         selected_path: PathKind,
@@ -296,6 +305,16 @@ impl AtpPathLabHarness {
 
         // Determine final path selection based on validation results
         path_validation.selected_path_kind = self.select_best_path(&path_validation);
+        if let Some(selected_path) = path_validation.selected_path_kind {
+            trace_events.push(AtpPathTraceEvent {
+                timestamp: self.next_timestamp(),
+                trace_id: PathTraceId::new(trace_events.len() as u64),
+                event: AtpPathEventKind::TransferCompleted {
+                    selected_path,
+                    bytes_transferred: plan.transfer.bytes,
+                },
+            });
+        }
 
         Ok(AtpPathExecutionResult {
             path_validation,
@@ -351,10 +370,30 @@ impl AtpPathLabHarness {
             }
             AtpLabRegime::UdpBlocked => {
                 validation.detected_nat_profile = NatProfile::UdpBlocked;
-                // UDP blocked forces relay usage
+                candidates_evaluated += self
+                    .test_path_kind(PathKind::NatPunchedUdp, trace_id, trace_events, validation)
+                    .await?;
                 candidates_evaluated += self
                     .test_path_kind(PathKind::AtpRelayUdp, trace_id, trace_events, validation)
                     .await?;
+                trace_events.push(AtpPathTraceEvent {
+                    timestamp: self.next_timestamp(),
+                    trace_id,
+                    event: AtpPathEventKind::FallbackSelected {
+                        from_path: PathKind::NatPunchedUdp,
+                        to_path: PathKind::AtpRelayUdp,
+                        reason: "udp_blocked_direct_datagrams".to_string(),
+                        relay_cost_micros: Some(55_000),
+                    },
+                });
+                trace_events.push(AtpPathTraceEvent {
+                    timestamp: self.next_timestamp(),
+                    trace_id,
+                    event: AtpPathEventKind::LoserPathDrained {
+                        path_kind: PathKind::NatPunchedUdp,
+                        reason: "direct_udp_candidate_failed_before_relay_selection".to_string(),
+                    },
+                });
             }
             AtpLabRegime::RelayOnly => {
                 candidates_evaluated += self
@@ -489,12 +528,21 @@ impl AtpPathLabHarness {
                 },
             });
         } else {
+            let reason = match (path_kind, validation.detected_nat_profile) {
+                (PathKind::NatPunchedUdp, NatProfile::UdpBlocked) => {
+                    "UDP blocked direct datagrams before relay fallback"
+                }
+                (PathKind::NatPunchedUdp, NatProfile::HardSymmetricNat) => {
+                    "Hard or symmetric NAT prevented hole punching"
+                }
+                _ => "Network conditions prevented connection",
+            };
             trace_events.push(AtpPathTraceEvent {
                 timestamp: self.next_timestamp(),
                 trace_id,
                 event: AtpPathEventKind::PathFailed {
                     path_kind,
-                    reason: "Network conditions prevented connection".to_string(),
+                    reason: reason.to_string(),
                 },
             });
         }

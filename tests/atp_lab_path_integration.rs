@@ -116,6 +116,40 @@ async fn test_atp_path_lab_udp_blocked_relay_fallback() -> Result<(), Box<dyn st
         Some(PathKind::AtpRelayUdp),
         "Should select ATP relay as the path"
     );
+    assert_eq!(
+        result.candidates_evaluated, 2,
+        "UDP-blocked fallback should first evaluate the failed direct UDP candidate"
+    );
+    assert!(result.trace_events.iter().any(|event| matches!(
+        &event.event,
+        AtpPathEventKind::PathFailed {
+            path_kind: PathKind::NatPunchedUdp,
+            reason,
+        } if reason.contains("UDP blocked")
+    )));
+    assert!(result.trace_events.iter().any(|event| matches!(
+        &event.event,
+        AtpPathEventKind::FallbackSelected {
+            from_path: PathKind::NatPunchedUdp,
+            to_path: PathKind::AtpRelayUdp,
+            reason,
+            relay_cost_micros: Some(55_000),
+        } if reason == "udp_blocked_direct_datagrams"
+    )));
+    assert!(result.trace_events.iter().any(|event| matches!(
+        &event.event,
+        AtpPathEventKind::LoserPathDrained {
+            path_kind: PathKind::NatPunchedUdp,
+            reason,
+        } if reason.contains("direct_udp_candidate_failed")
+    )));
+    assert!(result.trace_events.iter().any(|event| matches!(
+        &event.event,
+        AtpPathEventKind::TransferCompleted {
+            selected_path: PathKind::AtpRelayUdp,
+            bytes_transferred: 1_048_576,
+        }
+    )));
 
     Ok(())
 }
