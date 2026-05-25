@@ -570,6 +570,8 @@ pub mod real_raptorq_decoder_stream_backpressure_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_decoder_trace_integrity_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_raptorq_decoder_lab_network_packet_loss_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_raptorq_encoding_raptorq_decoding_integration_e2e_tests;
