@@ -3,18 +3,21 @@
 use asupersync::atp::logging::{
     ATP_LOG_EVENT_SCHEMA_VERSION, AtpEvent, AtpLogger, AtpSubsystem, EventContext,
 };
+use asupersync::atp::manifest::Manifest;
+use asupersync::atp::object::{MetadataPolicy, Object, ObjectEdge, ObjectGraph, ObjectKind};
 use asupersync::observability::LogLevel;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const FIXTURE_REL_PATH: &str = "tests/atp/fixtures/direct_success_seed_90057b12.json";
 const GOLDEN_REL_PATH: &str = "tests/atp/golden_logs/direct_success.jsonl";
 const FIXTURE_SCHEMA_VERSION: &str = "asupersync.atp.fixture_corpus.v1";
 const FIXTURE_ID: &str = "atp-direct-success-seed-90057b12";
 const TEST_CASE_ID: &str = "asupersync-vk4kcf.12";
+const OBJECT_GRAPH_TEST_CASE_ID: &str = "asupersync-vk4kcf.8";
 const FIXTURE_SEED: u64 = 0x9005_7B12;
 const TIMESTAMP: &str = "2026-05-24T00:00:00Z";
 
@@ -45,6 +48,11 @@ struct FixtureManifest {
     large_data_policy: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixturePathPolicy {
+    SafeRelativeUtf8,
+}
+
 #[test]
 fn direct_success_fixture_is_deterministic_and_hash_stable() {
     let fixture = load_fixture();
@@ -73,6 +81,111 @@ fn direct_success_fixture_is_deterministic_and_hash_stable() {
     assert!(
         metadata.len() < 16 * 1024,
         "fixture corpus must not commit large binary blobs"
+    );
+}
+
+#[test]
+fn direct_success_fixture_builds_verified_object_graph_result_log() {
+    let fixture = load_fixture();
+    let graph = object_graph_from_fixture(&fixture);
+    graph
+        .validate()
+        .expect("fixture object graph should validate");
+
+    assert_eq!(graph.object_count(), fixture.object_graph.len() + 1);
+
+    let roots = graph.roots().cloned().collect::<Vec<_>>();
+    assert_eq!(roots.len(), 1, "fixture should expose one directory root");
+    let root = graph.get_object(&roots[0]).expect("root object");
+    assert_eq!(root.metadata.kind, ObjectKind::DirectoryObject);
+    assert_eq!(root.children.len(), fixture.object_graph.len());
+
+    for fixture_object in &fixture.object_graph {
+        assert_eq!(
+            classify_fixture_path(&fixture_object.path),
+            Ok(FixturePathPolicy::SafeRelativeUtf8)
+        );
+        let generated =
+            deterministic_bytes(fixture_object.generation.seed, fixture_object.logical_size);
+        let object_id = Object::file(generated).id;
+        let object = graph
+            .get_object(&object_id)
+            .expect("fixture file object should be present in graph");
+        assert_eq!(object.metadata.kind, ObjectKind::FileObject);
+        assert_eq!(
+            object.metadata.size_bytes,
+            Some(fixture_object.logical_size)
+        );
+    }
+
+    for rejected in [
+        "",
+        "/absolute/escape",
+        "../escape",
+        "payload/../escape",
+        "payload\\escape",
+    ] {
+        assert!(
+            classify_fixture_path(rejected).is_err(),
+            "fixture path policy should reject {rejected:?}"
+        );
+    }
+
+    let manifest = Manifest::from_graph(&graph, MetadataPolicy::portable())
+        .expect("fixture graph should produce a manifest");
+    assert_ne!(
+        *manifest.merkle_root.hash(),
+        [0; 32],
+        "manifest root should bind object graph content"
+    );
+    let manifest_again = Manifest::from_graph(&graph, MetadataPolicy::portable())
+        .expect("fixture graph should produce a deterministic manifest root");
+    assert_eq!(manifest.merkle_root, manifest_again.merkle_root);
+
+    let mut reordered = fixture.clone();
+    reordered.object_graph.reverse();
+    let reordered_manifest = Manifest::from_graph(
+        &object_graph_from_fixture(&reordered),
+        MetadataPolicy::portable(),
+    )
+    .expect("reordered fixture graph should produce a manifest");
+    assert_eq!(
+        manifest.merkle_root, reordered_manifest.merkle_root,
+        "object graph fixture generation must be path-order deterministic"
+    );
+
+    let rendered_log = render_object_graph_result_log(&fixture, graph.object_count());
+    let event: AtpEvent = serde_json::from_str(&rendered_log).expect("result log event is JSON");
+    assert_eq!(event.schema_version, ATP_LOG_EVENT_SCHEMA_VERSION);
+    assert_eq!(
+        event.context.test_case_id.as_deref(),
+        Some(OBJECT_GRAPH_TEST_CASE_ID)
+    );
+    assert_eq!(event.event_type, "oracle_checked");
+    assert_eq!(
+        event.data["object_graph_shape"].as_str(),
+        Some(fixture.shape.as_str())
+    );
+    assert_eq!(
+        event.data["object_count"].as_u64(),
+        Some(graph.object_count() as u64)
+    );
+    assert_eq!(
+        event.data["final_commit_record"].as_str(),
+        Some("verified_atomic_commit")
+    );
+    assert_eq!(
+        event.data["manifest_root"].as_str(),
+        Some("[REDACTED_PRIVATE_KEY]")
+    );
+    assert_eq!(event.data["journal_path"].as_str(), Some("[REDACTED_PATH]"));
+    assert_eq!(
+        event.data["proof_bundle_path"].as_str(),
+        Some("[REDACTED_PATH]")
+    );
+    assert!(
+        !rendered_log.contains(&fixture.expected_manifest_root),
+        "object graph result log must redact manifest roots"
     );
 }
 
@@ -269,22 +382,109 @@ fn render_log_event(logger: &AtpLogger, event_type: &str, data: Value) -> String
         subsystem: AtpSubsystem::E2eTest,
         event_type: event_type.to_string(),
         data,
-        context: event_context(),
+        context: event_context(TEST_CASE_ID),
         redacted_fields: Vec::new(),
     };
 
     logger.render_event(&event).expect("render ATP log event")
 }
 
-fn event_context() -> EventContext {
+fn render_object_graph_result_log(manifest: &FixtureManifest, object_count: usize) -> String {
+    let logger = AtpLogger::new();
+    let event = AtpEvent {
+        schema_version: ATP_LOG_EVENT_SCHEMA_VERSION.to_string(),
+        timestamp: TIMESTAMP.to_string(),
+        level: LogLevel::Info,
+        subsystem: AtpSubsystem::E2eTest,
+        event_type: "oracle_checked".to_string(),
+        data: json!({
+            "chunking_profile": "fixed_64k",
+            "dedupe_reuse_decision": "no_reuse_first_seed",
+            "final_commit_record": "verified_atomic_commit",
+            "fixture_id": manifest.fixture_id,
+            "journal_path": "/Users/alice/.asupersync/journals/direct-success.atpj",
+            "manifest_root": manifest.expected_manifest_root,
+            "object_count": object_count,
+            "object_graph_shape": manifest.shape,
+            "proof_bundle_path": "/Users/alice/.asupersync/proofs/direct-success.json",
+            "replay_pointer": "atp replay --fixture atp-direct-success-seed-90057b12",
+            "selected_path": "direct-quic-0001",
+        }),
+        context: event_context(OBJECT_GRAPH_TEST_CASE_ID),
+        redacted_fields: Vec::new(),
+    };
+
+    logger
+        .render_event(&event)
+        .expect("render ATP object graph result log")
+}
+
+fn event_context(test_case_id: &str) -> EventContext {
     EventContext {
         session_id: "atp-nr4-fixture-corpus".to_string(),
         transfer_id: Some("transfer-direct-success".to_string()),
         connection_id: Some("direct-quic-0001".to_string()),
         peer_id: Some("peer-secret-alpha".to_string()),
-        test_case_id: Some(TEST_CASE_ID.to_string()),
+        test_case_id: Some(test_case_id.to_string()),
         trace_id: "trace-atp-fixture-corpus-v1".to_string(),
         span_id: "root".to_string(),
+    }
+}
+
+fn object_graph_from_fixture(manifest: &FixtureManifest) -> ObjectGraph {
+    let mut graph = ObjectGraph::new();
+    let mut edges = manifest
+        .object_graph
+        .iter()
+        .map(|fixture_object| {
+            classify_fixture_path(&fixture_object.path)
+                .expect("fixture path is safe relative UTF-8");
+            let generated =
+                deterministic_bytes(fixture_object.generation.seed, fixture_object.logical_size);
+            assert_eq!(sha256_hex(&generated), fixture_object.content_hash);
+
+            let object = Object::file(generated);
+            let object_id = object.id.clone();
+            graph
+                .add_object(object)
+                .expect("fixture file object should be valid");
+            ObjectEdge::new(object_id, fixture_object.path.clone())
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let root = Object::directory(edges);
+    graph.add_root(root).expect("fixture root should be valid");
+    graph
+}
+
+fn classify_fixture_path(path: &str) -> Result<FixturePathPolicy, &'static str> {
+    if path.is_empty() {
+        return Err("empty path");
+    }
+    if path.contains('\\') {
+        return Err("platform-dependent separator");
+    }
+
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return Err("absolute path");
+    }
+
+    let mut saw_normal = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => saw_normal = true,
+            Component::ParentDir => return Err("parent traversal"),
+            Component::CurDir => return Err("current-dir component"),
+            Component::RootDir | Component::Prefix(_) => return Err("absolute path"),
+        }
+    }
+
+    if saw_normal {
+        Ok(FixturePathPolicy::SafeRelativeUtf8)
+    } else {
+        Err("missing normal component")
     }
 }
 
