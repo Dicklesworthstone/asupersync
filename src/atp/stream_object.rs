@@ -923,6 +923,102 @@ fn system_time_unix_nanos(time: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
+// Additional StreamObject methods for ATP-E4 early usability support
+impl StreamManifest {
+    /// Mark a chunk range as verified for early consumption.
+    pub fn mark_chunk_verified(&mut self, start_offset: u64, size: u64) -> AtpResult<()> {
+        let epoch_id = self.epochs.len() as u64 + 1;
+        let byte_range = ByteRange::new(start_offset, start_offset + size);
+        let epoch = StreamEpoch::new(
+            epoch_id,
+            self.object_id.clone(),
+            byte_range,
+            EpochState::Verified,
+            vec![],
+        );
+
+        self.add_epoch(epoch)
+    }
+
+    /// Check if large streams require explicit prefix policy.
+    pub fn requires_explicit_prefix_policy(&self) -> bool {
+        self.expected_total_bytes().map_or(false, |size| size > 10_000_000) // 10MB threshold
+    }
+
+    /// Check if consumption policy allows reading a given range.
+    pub fn check_consumption_policy(
+        &self,
+        start_offset: u64,
+        size: u64,
+        policy: ConsumptionPolicy,
+    ) -> bool {
+        let end_offset = start_offset + size;
+        let available_end = self.consumable_prefix_end(policy);
+        end_offset <= available_end
+    }
+
+    /// Mark stream as cancelled with reason.
+    pub fn mark_cancelled(&mut self, reason: &str) {
+        // Add cancellation marker epoch
+        let cancellation_epoch = StreamEpoch::new(
+            self.epochs.len() as u64 + 1,
+            self.object_id.clone(),
+            ByteRange::new(self.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly), self.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly)),
+            EpochState::Cancelled,
+            vec![],
+        );
+
+        let _ = self.add_epoch(cancellation_epoch);
+    }
+
+    /// Invalidate content from a given offset due to verification failure.
+    pub fn invalidate_from_offset(&mut self, offset: u64, reason: &str) {
+        // Remove or mark invalid any epochs that start at or after the offset
+        self.epochs.retain(|epoch| epoch.byte_range.start < offset);
+
+        // Add invalidation marker
+        let invalidation_epoch = StreamEpoch::new(
+            self.epochs.len() as u64 + 1,
+            self.object_id.clone(),
+            ByteRange::new(offset, offset),
+            EpochState::Invalid,
+            vec![],
+        );
+
+        let _ = self.add_epoch(invalidation_epoch);
+    }
+
+    /// Get expected total bytes for this stream.
+    pub fn expected_total_bytes(&self) -> Option<u64> {
+        // Implementation would check manifest metadata
+        self.epochs.last().map(|e| e.byte_range.end)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EpochState {
+    /// Epoch data has been verified and is safe to consume
+    Verified,
+    /// Epoch data is provisional and may be reverted
+    Provisional,
+    /// Epoch represents final completed state
+    Final,
+    /// Epoch was cancelled
+    Cancelled,
+    /// Epoch was invalidated due to verification failure
+    Invalid,
+}
+
+impl EpochState {
+    pub fn is_verified(&self) -> bool {
+        matches!(self, EpochState::Verified | EpochState::Final)
+    }
+
+    pub fn is_provisional(&self) -> bool {
+        matches!(self, EpochState::Provisional)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

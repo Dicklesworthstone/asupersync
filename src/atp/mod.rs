@@ -11,6 +11,8 @@ pub mod autotune;
 #[cfg(feature = "benchmark-adapters")]
 pub mod benchmark;
 pub mod diagnostics;
+#[cfg(test)]
+pub mod early_usability_tests;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
 pub mod governance;
