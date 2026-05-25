@@ -8,6 +8,12 @@ use asupersync::atp::{
     ATP_PATH_DOCTOR_SCHEMA, ATP_PATH_TRACE_ATTEMPT_SCHEMA, build_path_doctor_document,
     render_path_doctor_human,
 };
+use asupersync::net::atp::{
+    DirectCandidateRejection, DirectCandidateSource, PathDiscoveryInputs, PathDiscoveryPolicy,
+    TailscaleCandidateObservation, TailscaleDetectionSource, TailscalePathPolicy,
+    discover_direct_paths,
+};
+use std::net::SocketAddr;
 
 fn path_candidate(raw: u64, kind: PathKind) -> PathCandidate {
     PathCandidate::new(
@@ -15,6 +21,10 @@ fn path_candidate(raw: u64, kind: PathKind) -> PathCandidate {
         kind,
         PathTraceId::new(90_000 + raw),
     )
+}
+
+fn socket(address: &str) -> SocketAddr {
+    address.parse().expect("socket address")
 }
 
 fn relay_fallback_race() -> PathRace {
@@ -130,4 +140,102 @@ fn path_doctor_identifies_udp_blocked_tcp_tls_443_fallback() {
     let human = render_path_doctor_human(&document);
     assert!(human.contains("warning tcp_tls_443_fallback_selected"));
     assert!(human.contains("kind=atp_relay_tcp_tls_443"));
+}
+
+#[test]
+fn tailscale_provider_is_optional_ranked_and_redacted_in_path_doctor() {
+    let report = discover_direct_paths(
+        PathDiscoveryPolicy::safe_default().with_tailscale_policy(TailscalePathPolicy::Prefer),
+        PathDiscoveryInputs {
+            explicit_direct_endpoint: Some("198.51.100.20:41641".to_string()),
+            tailscale_candidates: vec![TailscaleCandidateObservation::new(
+                socket("100.100.10.20:41641"),
+                TailscaleDetectionSource::FakeProvider,
+                1_000,
+            )],
+            now_micros: 2_000,
+            ..PathDiscoveryInputs::default()
+        },
+    );
+
+    let doctor = report.doctor_report();
+    let selected = doctor.selected.as_ref().expect("selected path");
+    assert_eq!(selected.source, DirectCandidateSource::TailscaleProvider);
+    assert_eq!(selected.kind, PathKind::TailscaleIp);
+    assert_eq!(selected.endpoint_scope, "tailscale-ipv4:41641");
+    assert_eq!(
+        selected.evidence,
+        "tailscale_fake_provider_candidate_validated"
+    );
+    assert!(
+        doctor
+            .guidance
+            .contains(&"keep_native_direct_or_atp_relay_fallback_because_tailscale_is_optional")
+    );
+    assert!(
+        doctor
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.endpoint_scope.contains("100.100.10.20"))
+    );
+}
+
+#[test]
+fn tailscale_policy_contract_distinguishes_absent_disabled_forbidden_and_stale() {
+    let absent = discover_direct_paths(
+        PathDiscoveryPolicy::safe_default(),
+        PathDiscoveryInputs::default(),
+    );
+    assert!(absent.rejections.iter().any(|rejection| {
+        rejection.source == DirectCandidateSource::TailscaleProvider
+            && rejection.reason == DirectCandidateRejection::TailscaleNotPresent
+    }));
+
+    let candidate = TailscaleCandidateObservation::new(
+        socket("100.100.10.20:41641"),
+        TailscaleDetectionSource::StatusCommand,
+        1_000,
+    );
+    let disabled = discover_direct_paths(
+        PathDiscoveryPolicy::safe_default().with_tailscale_policy(TailscalePathPolicy::Disabled),
+        PathDiscoveryInputs {
+            tailscale_candidates: vec![candidate.clone()],
+            now_micros: 2_000,
+            ..PathDiscoveryInputs::default()
+        },
+    );
+    assert!(disabled.rejections.iter().any(|rejection| {
+        rejection.source == DirectCandidateSource::TailscaleProvider
+            && rejection.reason == DirectCandidateRejection::PolicyDisabled
+    }));
+
+    let forbidden = discover_direct_paths(
+        PathDiscoveryPolicy::safe_default().with_tailscale_policy(TailscalePathPolicy::Forbid),
+        PathDiscoveryInputs {
+            tailscale_candidates: vec![candidate.clone()],
+            now_micros: 2_000,
+            ..PathDiscoveryInputs::default()
+        },
+    );
+    assert!(forbidden.rejections.iter().any(|rejection| {
+        rejection.source == DirectCandidateSource::TailscaleProvider
+            && rejection.reason == DirectCandidateRejection::PolicyForbidden
+    }));
+
+    let stale = discover_direct_paths(
+        PathDiscoveryPolicy::safe_default()
+            .with_tailscale_policy(TailscalePathPolicy::Allow)
+            .with_tailscale_max_staleness_micros(10),
+        PathDiscoveryInputs {
+            tailscale_candidates: vec![candidate],
+            now_micros: 1_011,
+            ..PathDiscoveryInputs::default()
+        },
+    );
+    assert!(stale.rejections.iter().any(|rejection| {
+        rejection.source == DirectCandidateSource::TailscaleProvider
+            && rejection.reason == DirectCandidateRejection::StaleCandidate
+            && rejection.detail.contains("source=status_command")
+            && !rejection.detail.contains("100.100.10.20")
+    }));
 }
