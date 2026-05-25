@@ -491,6 +491,8 @@ pub mod real_net_quic_core_session_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_quic_native_streams_net_quic_native_tls_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_net_quic_native_streams_raptorq_decoder_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_tcp_listener_server_connection_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_tcp_listener_service_concurrency_limit_integration_e2e_tests;
