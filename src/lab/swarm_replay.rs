@@ -29,6 +29,9 @@ pub const SWARM_PRESSURE_SCHEMA_VERSION: &str = "asupersync.swarm-pressure-lab.v
 /// Stable schema version for deterministic agent-run summaries.
 pub const SWARM_AGENT_RUN_SCHEMA_VERSION: &str = "asupersync.swarm-agent-run-lab.v1";
 
+/// Stable schema version for swarm what-if admission plans.
+pub const SWARM_WHAT_IF_PLAN_SCHEMA_VERSION: &str = "asupersync.swarm-what-if-plan.v1";
+
 const MAX_FIRST_SLICE_TASKS: usize = 10_000;
 
 /// Deterministic workload knobs for a swarm replay lab run.
@@ -154,6 +157,11 @@ pub enum SwarmReplayError {
     ZeroInteractiveTasks,
     /// No synthetic agents were requested.
     ZeroAgentCount,
+    /// A what-if workload was missing a stable id.
+    EmptyWorkloadId {
+        /// Workload index in the scenario input.
+        workload_index: usize,
+    },
     /// The interactive latency bound was zero.
     ZeroInteractiveLatencyBound,
     /// A configured synthetic agent index is outside the scenario.
@@ -219,6 +227,12 @@ impl fmt::Display for SwarmReplayError {
                 f.write_str("interactive_tasks must be greater than zero")
             }
             Self::ZeroAgentCount => f.write_str("agent_count must be greater than zero"),
+            Self::EmptyWorkloadId { workload_index } => {
+                write!(
+                    f,
+                    "what-if workload {workload_index} must have a nonempty id"
+                )
+            }
             Self::ZeroInteractiveLatencyBound => {
                 f.write_str("interactive_latency_bound_steps must be greater than zero")
             }
@@ -583,6 +597,334 @@ pub struct SwarmPressureSummary {
     pub invariant_violations: Vec<String>,
     /// Deterministic event log for dashboard/future artifact consumers.
     pub event_log: Vec<SwarmPressureEvent>,
+}
+
+/// Work class used by the deterministic swarm what-if planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmWhatIfWorkClass {
+    /// Source edits, source-only checks, and lightweight agent work.
+    Code,
+    /// Documentation or tracker-only work that should not consume proof lanes.
+    Docs,
+    /// Cargo/RCH proof work.
+    Proof,
+    /// Artifact-heavy ATP or replay work.
+    Artifact,
+    /// Operator doctor/cockpit work.
+    Doctor,
+    /// Cleanup requests that remain report-only unless explicitly authorized.
+    Cleanup,
+}
+
+/// Priority class used by the deterministic swarm what-if planner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmWhatIfPriority {
+    /// Background work that may be deferred first.
+    Background,
+    /// Normal foreground agent work.
+    Foreground,
+    /// Release-frontier or unblocker work.
+    Critical,
+}
+
+/// One workload class in a swarm admission what-if scenario.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmWhatIfWorkload {
+    /// Stable workload id included in deferred-work reports.
+    pub workload_id: String,
+    /// Work class for capacity weighting.
+    pub work_class: SwarmWhatIfWorkClass,
+    /// Number of agents in this workload class.
+    pub agent_count: usize,
+    /// Whether this workload requires an admissible remote RCH worker.
+    pub remote_required: bool,
+    /// Priority for deterministic deferral ordering.
+    pub priority: SwarmWhatIfPriority,
+    /// Estimated artifact footprint in GiB for this workload class.
+    pub artifact_gib: u64,
+}
+
+impl SwarmWhatIfWorkload {
+    /// Creates a workload row for the what-if planner.
+    #[must_use]
+    pub fn new(
+        workload_id: impl Into<String>,
+        work_class: SwarmWhatIfWorkClass,
+        agent_count: usize,
+        remote_required: bool,
+        priority: SwarmWhatIfPriority,
+        artifact_gib: u64,
+    ) -> Self {
+        Self {
+            workload_id: workload_id.into(),
+            work_class,
+            agent_count,
+            remote_required,
+            priority,
+            artifact_gib,
+        }
+    }
+}
+
+/// Deterministic input for pre-admission swarm planning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmWhatIfScenario {
+    /// Stable scenario id copied into the plan.
+    pub scenario_id: String,
+    /// Age of the oldest input snapshot in seconds.
+    pub input_age_secs: u64,
+    /// Local agent slots available before RCH workers are considered.
+    pub local_agent_slots: usize,
+    /// Remote RCH workers currently admissible.
+    pub rch_workers_admissible: usize,
+    /// RCH workers with cache warmth for the requested proof lanes.
+    pub cache_warm_workers: usize,
+    /// Host memory pressure on a 0..=10_000 basis-point scale.
+    pub memory_pressure_bps: u16,
+    /// Disk/artifact pressure on a 0..=10_000 basis-point scale.
+    pub disk_pressure_bps: u16,
+    /// Count of active reservation conflicts visible to the operator.
+    pub reservation_conflicts: usize,
+    /// Workload classes to simulate.
+    pub workloads: Vec<SwarmWhatIfWorkload>,
+}
+
+impl SwarmWhatIfScenario {
+    /// Returns total agent count across workload classes.
+    #[must_use]
+    pub fn agent_count(&self) -> usize {
+        self.workloads
+            .iter()
+            .map(|workload| workload.agent_count)
+            .sum()
+    }
+
+    /// Validate that the scenario is bounded and replayable.
+    pub fn validate(&self) -> Result<(), SwarmReplayError> {
+        if self.scenario_id.trim().is_empty() {
+            return Err(SwarmReplayError::EmptyScenarioId);
+        }
+        let agent_count = self.agent_count();
+        if agent_count > MAX_FIRST_SLICE_TASKS {
+            return Err(SwarmReplayError::TooManyTasks {
+                task_count: agent_count,
+                max: MAX_FIRST_SLICE_TASKS,
+            });
+        }
+        for (workload_index, workload) in self.workloads.iter().enumerate() {
+            if workload.workload_id.trim().is_empty() {
+                return Err(SwarmReplayError::EmptyWorkloadId { workload_index });
+            }
+            if workload.agent_count == 0 {
+                return Err(SwarmReplayError::ZeroAgentCount);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Input freshness class attached to a what-if plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmWhatIfInputFreshness {
+    /// Inputs are fresh enough for direct operator action.
+    Fresh,
+    /// Inputs are usable but should be refreshed soon.
+    Partial,
+    /// Inputs are stale; the recommendation is conservative.
+    Stale,
+}
+
+/// Planner recommendation for the next swarm wave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmWhatIfRecommendation {
+    /// Admit all requested work.
+    AdmitNow,
+    /// Admit a bounded prefix under the returned cap.
+    AdmitWithCap,
+    /// Defer lower-priority workloads first.
+    DeferLowPriority,
+    /// Split the wave into smaller deterministic batches.
+    SplitWave,
+    /// Request more remote RCH workers before admitting remote-required work.
+    RequestRemoteWorkers,
+    /// Refuse until the first blocker clears.
+    RefuseUntilBlockerClears,
+}
+
+/// Starvation-risk class for the simulated wave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmWhatIfStarvationRisk {
+    /// No modeled starvation pressure.
+    Low,
+    /// Some queueing or coordination pressure is expected.
+    Medium,
+    /// Work is likely to wait behind capacity pressure.
+    High,
+    /// Critical starvation risk or fail-closed pressure.
+    Critical,
+}
+
+/// Byte-stable plan emitted by the deterministic what-if planner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmWhatIfPlan {
+    /// Stable schema version.
+    pub schema_version: String,
+    /// Scenario id copied from input.
+    pub scenario_id: String,
+    /// Total requested agents.
+    pub agent_count: usize,
+    /// Weighted capacity demand used for queue estimates.
+    pub weighted_demand_units: usize,
+    /// Weighted capacity available for this scenario.
+    pub weighted_capacity_units: usize,
+    /// Bounded queue estimate after admission.
+    pub bounded_queue_estimate: usize,
+    /// Final recommendation.
+    pub recommendation: SwarmWhatIfRecommendation,
+    /// Starvation risk for the simulated wave.
+    pub starvation_risk: SwarmWhatIfStarvationRisk,
+    /// Input freshness classification.
+    pub input_freshness: SwarmWhatIfInputFreshness,
+    /// Confidence score on a 0..=100 basis-point-like scale.
+    pub confidence_bps: u16,
+    /// Optional agent cap for `admit_with_cap` or `split_wave`.
+    pub admit_agent_cap: Option<usize>,
+    /// Workload ids the planner would defer first.
+    pub deferred_workload_ids: Vec<String>,
+    /// First cap an operator should adjust.
+    pub first_cap_to_adjust: Option<String>,
+    /// First blocker that must clear before full admission.
+    pub first_blocker: Option<String>,
+    /// Visible caveats about stale or partial inputs.
+    pub caveats: Vec<String>,
+    /// Deterministic operator log lines.
+    pub detailed_log: Vec<String>,
+    /// Planner never asks for file deletion.
+    pub destructive_cleanup_required: bool,
+    /// Planner never asks for branch/worktree creation.
+    pub branch_or_worktree_required: bool,
+}
+
+/// Plans a deterministic swarm admission wave without launching live work.
+pub fn plan_swarm_admission_wave(
+    scenario: &SwarmWhatIfScenario,
+) -> Result<SwarmWhatIfPlan, SwarmReplayError> {
+    scenario.validate()?;
+
+    let agent_count = scenario.agent_count();
+    let weighted_demand_units = weighted_demand_units(&scenario.workloads);
+    let weighted_capacity_units = weighted_capacity_units(scenario);
+    let bounded_queue_estimate = weighted_demand_units.saturating_sub(weighted_capacity_units);
+    let input_freshness = input_freshness(scenario.input_age_secs);
+    let mut caveats = input_caveats(input_freshness);
+    let mut deferred_workload_ids = Vec::new();
+    let mut first_cap_to_adjust = None;
+    let mut first_blocker = None;
+    let recommendation;
+
+    if agent_count == 0 {
+        recommendation = SwarmWhatIfRecommendation::AdmitNow;
+    } else if disk_blocks_artifact_work(scenario) {
+        recommendation = SwarmWhatIfRecommendation::RefuseUntilBlockerClears;
+        deferred_workload_ids = matching_workload_ids(&scenario.workloads, |workload| {
+            matches!(
+                workload.work_class,
+                SwarmWhatIfWorkClass::Artifact | SwarmWhatIfWorkClass::Proof
+            )
+        });
+        first_cap_to_adjust = Some("artifact_disk_pressure".to_string());
+        first_blocker = Some("disk/artifact pressure blocks proof-heavy admission".to_string());
+    } else if remote_workers_block_required_work(scenario) {
+        recommendation = SwarmWhatIfRecommendation::RequestRemoteWorkers;
+        deferred_workload_ids =
+            matching_workload_ids(&scenario.workloads, |workload| workload.remote_required);
+        first_cap_to_adjust = Some("rch_worker_pool".to_string());
+        first_blocker = Some("remote-required work has no admissible RCH worker".to_string());
+    } else if scenario.reservation_conflicts > 0 {
+        recommendation = SwarmWhatIfRecommendation::DeferLowPriority;
+        deferred_workload_ids = low_priority_workload_ids(&scenario.workloads);
+        first_cap_to_adjust = Some("file_reservation_conflicts".to_string());
+        first_blocker = Some("active reservation conflict requires coordination first".to_string());
+    } else if scenario.memory_pressure_bps >= 9_000 {
+        recommendation = SwarmWhatIfRecommendation::SplitWave;
+        deferred_workload_ids = noncritical_workload_ids(&scenario.workloads);
+        first_cap_to_adjust = Some("memory_tier_cap".to_string());
+        first_blocker = Some("memory-tier pressure is above admission threshold".to_string());
+    } else if weighted_demand_units > weighted_capacity_units.saturating_mul(2).max(1)
+        || (agent_count >= 200 && bounded_queue_estimate > 0)
+    {
+        recommendation = SwarmWhatIfRecommendation::SplitWave;
+        deferred_workload_ids = noncritical_workload_ids(&scenario.workloads);
+        first_cap_to_adjust = Some("agent_wave_cap".to_string());
+        first_blocker = Some("wave demand exceeds deterministic admission envelope".to_string());
+    } else if weighted_demand_units > weighted_capacity_units {
+        recommendation = SwarmWhatIfRecommendation::AdmitWithCap;
+        deferred_workload_ids = low_priority_workload_ids(&scenario.workloads);
+        first_cap_to_adjust = Some("proof_lane_cap".to_string());
+    } else {
+        recommendation = SwarmWhatIfRecommendation::AdmitNow;
+    }
+
+    if input_freshness != SwarmWhatIfInputFreshness::Fresh {
+        caveats.push(
+            "refresh stale capacity, RCH, and reservation inputs before widening the wave"
+                .to_string(),
+        );
+    }
+    if remote_workers_block_required_work(scenario) {
+        caveats.push(
+            "local Cargo fallback is not a planner recommendation for remote-required lanes"
+                .to_string(),
+        );
+    }
+
+    deferred_workload_ids.sort();
+    deferred_workload_ids.dedup();
+
+    let starvation_risk = starvation_risk(
+        bounded_queue_estimate,
+        weighted_capacity_units,
+        scenario.memory_pressure_bps,
+        scenario.disk_pressure_bps,
+        scenario.reservation_conflicts,
+    );
+    let admit_agent_cap = admission_agent_cap(recommendation, scenario, weighted_capacity_units);
+    let confidence_bps = confidence_bps(input_freshness, starvation_risk, first_blocker.is_some());
+    let detailed_log = what_if_log(
+        scenario,
+        weighted_demand_units,
+        weighted_capacity_units,
+        bounded_queue_estimate,
+        recommendation,
+        starvation_risk,
+        &first_blocker,
+    );
+
+    Ok(SwarmWhatIfPlan {
+        schema_version: SWARM_WHAT_IF_PLAN_SCHEMA_VERSION.to_string(),
+        scenario_id: scenario.scenario_id.clone(),
+        agent_count,
+        weighted_demand_units,
+        weighted_capacity_units,
+        bounded_queue_estimate,
+        recommendation,
+        starvation_risk,
+        input_freshness,
+        confidence_bps,
+        admit_agent_cap,
+        deferred_workload_ids,
+        first_cap_to_adjust,
+        first_blocker,
+        caveats,
+        detailed_log,
+        destructive_cleanup_required: false,
+        branch_or_worktree_required: false,
+    })
 }
 
 /// Deterministic knobs for the synthetic agent-run lab harness.
@@ -1468,6 +1810,214 @@ fn build_agent_run_summary(
 
 fn count_agent_events(events: &[SwarmAgentRunEvent], kind: SwarmAgentRunEventKind) -> usize {
     events.iter().filter(|event| event.kind == kind).count()
+}
+
+fn weighted_demand_units(workloads: &[SwarmWhatIfWorkload]) -> usize {
+    workloads
+        .iter()
+        .map(|workload| {
+            let class_weight = match workload.work_class {
+                SwarmWhatIfWorkClass::Code
+                | SwarmWhatIfWorkClass::Docs
+                | SwarmWhatIfWorkClass::Doctor
+                | SwarmWhatIfWorkClass::Cleanup => 1usize,
+                SwarmWhatIfWorkClass::Proof => 2,
+                SwarmWhatIfWorkClass::Artifact => 3,
+            };
+            let artifact_weight = usize::try_from(workload.artifact_gib / 16).unwrap_or(usize::MAX);
+            workload
+                .agent_count
+                .saturating_mul(class_weight)
+                .saturating_add(artifact_weight)
+        })
+        .sum()
+}
+
+fn weighted_capacity_units(scenario: &SwarmWhatIfScenario) -> usize {
+    scenario
+        .local_agent_slots
+        .saturating_mul(2)
+        .saturating_add(scenario.rch_workers_admissible.saturating_mul(4))
+        .saturating_add(scenario.cache_warm_workers.saturating_mul(2))
+}
+
+fn input_freshness(input_age_secs: u64) -> SwarmWhatIfInputFreshness {
+    match input_age_secs {
+        0..=300 => SwarmWhatIfInputFreshness::Fresh,
+        301..=900 => SwarmWhatIfInputFreshness::Partial,
+        _ => SwarmWhatIfInputFreshness::Stale,
+    }
+}
+
+fn input_caveats(input_freshness: SwarmWhatIfInputFreshness) -> Vec<String> {
+    match input_freshness {
+        SwarmWhatIfInputFreshness::Fresh => Vec::new(),
+        SwarmWhatIfInputFreshness::Partial => {
+            vec!["some inputs are aging; keep the wave bounded".to_string()]
+        }
+        SwarmWhatIfInputFreshness::Stale => {
+            vec!["inputs are stale; treat this as a conservative forecast".to_string()]
+        }
+    }
+}
+
+fn disk_blocks_artifact_work(scenario: &SwarmWhatIfScenario) -> bool {
+    scenario.disk_pressure_bps >= 9_000
+        && scenario.workloads.iter().any(|workload| {
+            matches!(
+                workload.work_class,
+                SwarmWhatIfWorkClass::Artifact | SwarmWhatIfWorkClass::Proof
+            ) || workload.artifact_gib > 0
+        })
+}
+
+fn remote_workers_block_required_work(scenario: &SwarmWhatIfScenario) -> bool {
+    scenario.rch_workers_admissible == 0
+        && scenario
+            .workloads
+            .iter()
+            .any(|workload| workload.remote_required)
+}
+
+fn matching_workload_ids(
+    workloads: &[SwarmWhatIfWorkload],
+    predicate: impl Fn(&SwarmWhatIfWorkload) -> bool,
+) -> Vec<String> {
+    workloads
+        .iter()
+        .filter(|workload| predicate(workload))
+        .map(|workload| workload.workload_id.clone())
+        .collect()
+}
+
+fn low_priority_workload_ids(workloads: &[SwarmWhatIfWorkload]) -> Vec<String> {
+    let mut ids = matching_workload_ids(workloads, |workload| {
+        workload.priority == SwarmWhatIfPriority::Background
+    });
+    if ids.is_empty() {
+        ids = noncritical_workload_ids(workloads);
+    }
+    ids
+}
+
+fn noncritical_workload_ids(workloads: &[SwarmWhatIfWorkload]) -> Vec<String> {
+    matching_workload_ids(workloads, |workload| {
+        workload.priority != SwarmWhatIfPriority::Critical
+    })
+}
+
+fn admission_agent_cap(
+    recommendation: SwarmWhatIfRecommendation,
+    scenario: &SwarmWhatIfScenario,
+    weighted_capacity_units: usize,
+) -> Option<usize> {
+    if !matches!(
+        recommendation,
+        SwarmWhatIfRecommendation::AdmitWithCap | SwarmWhatIfRecommendation::SplitWave
+    ) {
+        return None;
+    }
+    let average_weight = average_workload_weight(&scenario.workloads);
+    let cap = weighted_capacity_units
+        .checked_div(average_weight.max(1))
+        .unwrap_or(0)
+        .max(1)
+        .min(scenario.agent_count());
+    Some(cap)
+}
+
+fn average_workload_weight(workloads: &[SwarmWhatIfWorkload]) -> usize {
+    let agent_count = workloads
+        .iter()
+        .map(|workload| workload.agent_count)
+        .sum::<usize>();
+    if agent_count == 0 {
+        return 1;
+    }
+    weighted_demand_units(workloads)
+        .checked_div(agent_count)
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn starvation_risk(
+    bounded_queue_estimate: usize,
+    weighted_capacity_units: usize,
+    memory_pressure_bps: u16,
+    disk_pressure_bps: u16,
+    reservation_conflicts: usize,
+) -> SwarmWhatIfStarvationRisk {
+    if memory_pressure_bps >= 9_500
+        || disk_pressure_bps >= 9_500
+        || (weighted_capacity_units == 0 && bounded_queue_estimate > 0)
+    {
+        return SwarmWhatIfStarvationRisk::Critical;
+    }
+    if bounded_queue_estimate > weighted_capacity_units.max(1) {
+        return SwarmWhatIfStarvationRisk::High;
+    }
+    if bounded_queue_estimate > 0
+        || reservation_conflicts > 0
+        || memory_pressure_bps >= 8_000
+        || disk_pressure_bps >= 8_000
+    {
+        return SwarmWhatIfStarvationRisk::Medium;
+    }
+    SwarmWhatIfStarvationRisk::Low
+}
+
+fn confidence_bps(
+    input_freshness: SwarmWhatIfInputFreshness,
+    starvation_risk: SwarmWhatIfStarvationRisk,
+    has_blocker: bool,
+) -> u16 {
+    let freshness_score = match input_freshness {
+        SwarmWhatIfInputFreshness::Fresh => 95u16,
+        SwarmWhatIfInputFreshness::Partial => 75,
+        SwarmWhatIfInputFreshness::Stale => 45,
+    };
+    let risk_penalty = match starvation_risk {
+        SwarmWhatIfStarvationRisk::Low => 0u16,
+        SwarmWhatIfStarvationRisk::Medium => 8,
+        SwarmWhatIfStarvationRisk::High => 16,
+        SwarmWhatIfStarvationRisk::Critical => 24,
+    };
+    let blocker_penalty = if has_blocker { 8 } else { 0 };
+    freshness_score.saturating_sub(risk_penalty + blocker_penalty)
+}
+
+fn what_if_log(
+    scenario: &SwarmWhatIfScenario,
+    weighted_demand_units: usize,
+    weighted_capacity_units: usize,
+    bounded_queue_estimate: usize,
+    recommendation: SwarmWhatIfRecommendation,
+    starvation_risk: SwarmWhatIfStarvationRisk,
+    first_blocker: &Option<String>,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "scenario={} agents={} workloads={}",
+            scenario.scenario_id,
+            scenario.agent_count(),
+            scenario.workloads.len()
+        ),
+        format!(
+            "capacity_units={} demand_units={} queue_estimate={}",
+            weighted_capacity_units, weighted_demand_units, bounded_queue_estimate
+        ),
+        format!(
+            "pressures memory_bps={} disk_bps={} reservations={}",
+            scenario.memory_pressure_bps,
+            scenario.disk_pressure_bps,
+            scenario.reservation_conflicts
+        ),
+        format!("recommendation={recommendation:?} starvation_risk={starvation_risk:?}"),
+    ];
+    if let Some(blocker) = first_blocker {
+        lines.push(format!("first_blocker={blocker}"));
+    }
+    lines
 }
 
 fn no_duplicate_bead_claims(events: &[SwarmAgentRunEvent]) -> bool {

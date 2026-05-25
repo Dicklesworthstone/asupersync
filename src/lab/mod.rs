@@ -190,12 +190,15 @@ pub use spork_harness::{
 };
 pub use swarm_replay::{
     SWARM_AGENT_RUN_SCHEMA_VERSION, SWARM_PRESSURE_SCHEMA_VERSION, SWARM_REPLAY_SCHEMA_VERSION,
-    SwarmAgentRunEvent, SwarmAgentRunEventKind, SwarmAgentRunForbiddenActions,
-    SwarmAgentRunScenario, SwarmAgentRunSummary, SwarmDiskPressureLevel,
-    SwarmDiskPressureTransition, SwarmPressureEvent, SwarmPressureEventKind, SwarmPressureLane,
-    SwarmPressureScenario, SwarmPressureSummary, SwarmRchWorkerEvent, SwarmRchWorkerEventKind,
-    SwarmReplayError, SwarmReplayEvent, SwarmReplayEventKind, SwarmReplayScenario,
-    SwarmReplayShrinkHint, SwarmReplaySummary, SwarmReplayTaskOutcome, SwarmReplayTaskStatus,
+    SWARM_WHAT_IF_PLAN_SCHEMA_VERSION, SwarmAgentRunEvent, SwarmAgentRunEventKind,
+    SwarmAgentRunForbiddenActions, SwarmAgentRunScenario, SwarmAgentRunSummary,
+    SwarmDiskPressureLevel, SwarmDiskPressureTransition, SwarmPressureEvent,
+    SwarmPressureEventKind, SwarmPressureLane, SwarmPressureScenario, SwarmPressureSummary,
+    SwarmRchWorkerEvent, SwarmRchWorkerEventKind, SwarmReplayError, SwarmReplayEvent,
+    SwarmReplayEventKind, SwarmReplayScenario, SwarmReplayShrinkHint, SwarmReplaySummary,
+    SwarmReplayTaskOutcome, SwarmReplayTaskStatus, SwarmWhatIfInputFreshness, SwarmWhatIfPlan,
+    SwarmWhatIfPriority, SwarmWhatIfRecommendation, SwarmWhatIfScenario, SwarmWhatIfStarvationRisk,
+    SwarmWhatIfWorkClass, SwarmWhatIfWorkload, plan_swarm_admission_wave,
     run_swarm_agent_run_scenario, run_swarm_pressure_scenario, run_swarm_replay_scenario,
 };
 pub use util::{

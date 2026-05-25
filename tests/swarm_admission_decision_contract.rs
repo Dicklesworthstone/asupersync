@@ -1,6 +1,11 @@
 #![allow(missing_docs)]
 
 use asupersync::cx::Cx;
+use asupersync::lab::{
+    SWARM_WHAT_IF_PLAN_SCHEMA_VERSION, SwarmWhatIfInputFreshness, SwarmWhatIfPriority,
+    SwarmWhatIfRecommendation, SwarmWhatIfScenario, SwarmWhatIfStarvationRisk,
+    SwarmWhatIfWorkClass, SwarmWhatIfWorkload, plan_swarm_admission_wave,
+};
 use asupersync::observability::swarm_pressure_governor::SwarmWorkloadLeaseTransition;
 use asupersync::observability::{
     AdmissionDecision, SwarmAdmissionOwner, SwarmPressureGovernor, SwarmPressureGovernorConfig,
@@ -709,6 +714,368 @@ fn deterministic_agent_swarm_simulates_10_50_200_workloads() {
              for {workload_count} workloads"
         );
     }
+}
+
+fn what_if_scenario(
+    scenario_id: &str,
+    local_agent_slots: usize,
+    rch_workers_admissible: usize,
+    cache_warm_workers: usize,
+    workloads: Vec<SwarmWhatIfWorkload>,
+) -> SwarmWhatIfScenario {
+    SwarmWhatIfScenario {
+        scenario_id: scenario_id.to_string(),
+        input_age_secs: 120,
+        local_agent_slots,
+        rch_workers_admissible,
+        cache_warm_workers,
+        memory_pressure_bps: 1_500,
+        disk_pressure_bps: 1_200,
+        reservation_conflicts: 0,
+        workloads,
+    }
+}
+
+fn workload(
+    id: &str,
+    work_class: SwarmWhatIfWorkClass,
+    agent_count: usize,
+    remote_required: bool,
+    priority: SwarmWhatIfPriority,
+    artifact_gib: u64,
+) -> SwarmWhatIfWorkload {
+    SwarmWhatIfWorkload::new(
+        id,
+        work_class,
+        agent_count,
+        remote_required,
+        priority,
+        artifact_gib,
+    )
+}
+
+#[test]
+fn what_if_planner_handles_empty_10_50_and_200_agent_waves() {
+    let empty = what_if_scenario("asw-empty", 8, 1, 1, Vec::new());
+    let empty_plan = plan_swarm_admission_wave(&empty).expect("empty plan");
+    assert_eq!(empty_plan.schema_version, SWARM_WHAT_IF_PLAN_SCHEMA_VERSION);
+    assert_eq!(empty_plan.agent_count, 0);
+    assert_eq!(
+        empty_plan.recommendation,
+        SwarmWhatIfRecommendation::AdmitNow
+    );
+    assert_eq!(empty_plan.starvation_risk, SwarmWhatIfStarvationRisk::Low);
+
+    let ten = what_if_scenario(
+        "asw-10-normal",
+        16,
+        2,
+        1,
+        vec![
+            workload(
+                "code-10",
+                SwarmWhatIfWorkClass::Code,
+                6,
+                false,
+                SwarmWhatIfPriority::Foreground,
+                0,
+            ),
+            workload(
+                "proof-10",
+                SwarmWhatIfWorkClass::Proof,
+                4,
+                true,
+                SwarmWhatIfPriority::Critical,
+                8,
+            ),
+        ],
+    );
+    let ten_plan = plan_swarm_admission_wave(&ten).expect("10-agent plan");
+    assert_eq!(ten_plan.agent_count, 10);
+    assert_eq!(ten_plan.recommendation, SwarmWhatIfRecommendation::AdmitNow);
+    assert!(ten_plan.deferred_workload_ids.is_empty());
+    assert!(!ten_plan.destructive_cleanup_required);
+    assert!(!ten_plan.branch_or_worktree_required);
+
+    let fifty = what_if_scenario(
+        "asw-50-mixed",
+        18,
+        2,
+        1,
+        vec![
+            workload(
+                "code-50",
+                SwarmWhatIfWorkClass::Code,
+                20,
+                false,
+                SwarmWhatIfPriority::Foreground,
+                0,
+            ),
+            workload(
+                "docs-50",
+                SwarmWhatIfWorkClass::Docs,
+                10,
+                false,
+                SwarmWhatIfPriority::Background,
+                0,
+            ),
+            workload(
+                "proof-50",
+                SwarmWhatIfWorkClass::Proof,
+                15,
+                true,
+                SwarmWhatIfPriority::Critical,
+                16,
+            ),
+            workload(
+                "artifact-50",
+                SwarmWhatIfWorkClass::Artifact,
+                5,
+                true,
+                SwarmWhatIfPriority::Foreground,
+                64,
+            ),
+        ],
+    );
+    let fifty_plan = plan_swarm_admission_wave(&fifty).expect("50-agent plan");
+    assert_eq!(fifty_plan.agent_count, 50);
+    assert_eq!(
+        fifty_plan.recommendation,
+        SwarmWhatIfRecommendation::AdmitWithCap
+    );
+    assert_eq!(
+        fifty_plan.first_cap_to_adjust.as_deref(),
+        Some("proof_lane_cap")
+    );
+    assert_eq!(fifty_plan.deferred_workload_ids, vec!["docs-50"]);
+    assert!(fifty_plan.admit_agent_cap.is_some());
+
+    let two_hundred = what_if_scenario(
+        "asw-200-saturation",
+        64,
+        8,
+        4,
+        vec![
+            workload(
+                "code-200",
+                SwarmWhatIfWorkClass::Code,
+                100,
+                false,
+                SwarmWhatIfPriority::Foreground,
+                0,
+            ),
+            workload(
+                "proof-200",
+                SwarmWhatIfWorkClass::Proof,
+                80,
+                true,
+                SwarmWhatIfPriority::Critical,
+                32,
+            ),
+            workload(
+                "artifact-200",
+                SwarmWhatIfWorkClass::Artifact,
+                20,
+                true,
+                SwarmWhatIfPriority::Foreground,
+                80,
+            ),
+        ],
+    );
+    let two_hundred_plan = plan_swarm_admission_wave(&two_hundred).expect("200-agent plan");
+    assert_eq!(two_hundred_plan.agent_count, 200);
+    assert_eq!(
+        two_hundred_plan.recommendation,
+        SwarmWhatIfRecommendation::SplitWave
+    );
+    assert_eq!(
+        two_hundred_plan.first_cap_to_adjust.as_deref(),
+        Some("agent_wave_cap")
+    );
+    assert!(
+        two_hundred_plan
+            .deferred_workload_ids
+            .contains(&"artifact-200".to_string())
+    );
+}
+
+#[test]
+fn what_if_planner_surfaces_disk_memory_rch_and_reservation_blockers() {
+    let mut disk = what_if_scenario(
+        "asw-disk-red",
+        32,
+        4,
+        2,
+        vec![workload(
+            "artifact-red",
+            SwarmWhatIfWorkClass::Artifact,
+            12,
+            true,
+            SwarmWhatIfPriority::Foreground,
+            128,
+        )],
+    );
+    disk.disk_pressure_bps = 9_500;
+    let disk_plan = plan_swarm_admission_wave(&disk).expect("disk plan");
+    assert_eq!(
+        disk_plan.recommendation,
+        SwarmWhatIfRecommendation::RefuseUntilBlockerClears
+    );
+    assert_eq!(
+        disk_plan.starvation_risk,
+        SwarmWhatIfStarvationRisk::Critical
+    );
+    assert_eq!(
+        disk_plan.first_cap_to_adjust.as_deref(),
+        Some("artifact_disk_pressure")
+    );
+
+    let rch = what_if_scenario(
+        "asw-rch-scarce",
+        32,
+        0,
+        0,
+        vec![workload(
+            "remote-proof",
+            SwarmWhatIfWorkClass::Proof,
+            8,
+            true,
+            SwarmWhatIfPriority::Critical,
+            16,
+        )],
+    );
+    let rch_plan = plan_swarm_admission_wave(&rch).expect("rch scarcity plan");
+    assert_eq!(
+        rch_plan.recommendation,
+        SwarmWhatIfRecommendation::RequestRemoteWorkers
+    );
+    assert!(
+        rch_plan
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("local Cargo fallback"))
+    );
+
+    let mut memory = what_if_scenario(
+        "asw-memory-red",
+        32,
+        4,
+        2,
+        vec![
+            workload(
+                "critical-proof",
+                SwarmWhatIfWorkClass::Proof,
+                12,
+                true,
+                SwarmWhatIfPriority::Critical,
+                16,
+            ),
+            workload(
+                "background-docs",
+                SwarmWhatIfWorkClass::Docs,
+                12,
+                false,
+                SwarmWhatIfPriority::Background,
+                0,
+            ),
+        ],
+    );
+    memory.memory_pressure_bps = 9_600;
+    let memory_plan = plan_swarm_admission_wave(&memory).expect("memory plan");
+    assert_eq!(
+        memory_plan.recommendation,
+        SwarmWhatIfRecommendation::SplitWave
+    );
+    assert_eq!(
+        memory_plan.first_cap_to_adjust.as_deref(),
+        Some("memory_tier_cap")
+    );
+    assert_eq!(memory_plan.deferred_workload_ids, vec!["background-docs"]);
+
+    let mut reservations = what_if_scenario(
+        "asw-reservation-conflict",
+        32,
+        4,
+        2,
+        vec![
+            workload(
+                "foreground-code",
+                SwarmWhatIfWorkClass::Code,
+                10,
+                false,
+                SwarmWhatIfPriority::Foreground,
+                0,
+            ),
+            workload(
+                "optional-doctor",
+                SwarmWhatIfWorkClass::Doctor,
+                5,
+                false,
+                SwarmWhatIfPriority::Background,
+                0,
+            ),
+        ],
+    );
+    reservations.reservation_conflicts = 2;
+    let reservation_plan =
+        plan_swarm_admission_wave(&reservations).expect("reservation conflict plan");
+    assert_eq!(
+        reservation_plan.recommendation,
+        SwarmWhatIfRecommendation::DeferLowPriority
+    );
+    assert_eq!(
+        reservation_plan.first_cap_to_adjust.as_deref(),
+        Some("file_reservation_conflicts")
+    );
+    assert_eq!(
+        reservation_plan.deferred_workload_ids,
+        vec!["optional-doctor"]
+    );
+}
+
+#[test]
+fn what_if_planner_replays_identical_inputs_with_stale_input_caveats() {
+    let mut stale = what_if_scenario(
+        "asw-stale-replay",
+        24,
+        3,
+        1,
+        vec![
+            workload(
+                "code-stale",
+                SwarmWhatIfWorkClass::Code,
+                16,
+                false,
+                SwarmWhatIfPriority::Foreground,
+                0,
+            ),
+            workload(
+                "cleanup-stale",
+                SwarmWhatIfWorkClass::Cleanup,
+                2,
+                false,
+                SwarmWhatIfPriority::Background,
+                0,
+            ),
+        ],
+    );
+    stale.input_age_secs = 1_800;
+    let first = plan_swarm_admission_wave(&stale).expect("first stale plan");
+    let replay = plan_swarm_admission_wave(&stale).expect("replayed stale plan");
+    assert_eq!(first, replay);
+    assert_eq!(first.input_freshness, SwarmWhatIfInputFreshness::Stale);
+    assert!(
+        first
+            .detailed_log
+            .iter()
+            .any(|line| line.contains("queue_estimate="))
+    );
+    assert!(
+        first
+            .caveats
+            .iter()
+            .any(|caveat| caveat.contains("refresh stale capacity"))
+    );
 }
 
 #[test]
