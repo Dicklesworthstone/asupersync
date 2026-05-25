@@ -123,10 +123,10 @@ fn test_excess_repair_symbols_with_hard_regime() {
 #[test]
 fn test_k_prime_boundary_conditions() {
     let test_cases = vec![
-        (512, false),   // Below boundary
-        (1023, false),  // Just below boundary
-        (1024, true),   // At boundary
-        (1025, true),   // Above boundary
+        (512, false),  // Below boundary
+        (1023, false), // Just below boundary
+        (1024, true),  // At boundary
+        (1025, true),  // Above boundary
     ];
 
     for (k, expect_boundary) in test_cases {
@@ -162,10 +162,17 @@ fn test_k_prime_boundary_conditions() {
         if expect_boundary {
             // K' boundary should affect conformance
             let conformance = metadata.conformance_validation.as_ref().unwrap();
-            assert!(conformance.verified_guarantees.contains(&"inactivation_decode_correctness".to_string()));
+            assert!(
+                conformance
+                    .verified_guarantees
+                    .contains(&"inactivation_decode_correctness".to_string())
+            );
         }
 
-        println!("K/K' boundary test passed for K={}: boundary={}", k, expect_boundary);
+        println!(
+            "K/K' boundary test passed for K={}: boundary={}",
+            k, expect_boundary
+        );
     }
 }
 
@@ -204,7 +211,11 @@ fn test_corrupted_symbol_fallback() {
 
     // Verify conformance tracks corruption handling
     let conformance = metadata.conformance_validation.as_ref().unwrap();
-    assert!(conformance.verified_guarantees.contains(&"linear_algebra_gf256".to_string()));
+    assert!(
+        conformance
+            .verified_guarantees
+            .contains(&"linear_algebra_gf256".to_string())
+    );
 
     println!(
         "Corrupted symbol fallback test passed: reason={:?}",
@@ -216,10 +227,10 @@ fn test_corrupted_symbol_fallback() {
 #[test]
 fn test_padding_truncation_edge_cases() {
     let padding_test_cases = vec![
-        (8, 32, 0),    // No padding
-        (8, 32, 7),    // Small padding
-        (8, 32, 16),   // Half symbol padding
-        (8, 32, 31),   // Almost full symbol padding
+        (8, 32, 0),  // No padding
+        (8, 32, 7),  // Small padding
+        (8, 32, 16), // Half symbol padding
+        (8, 32, 31), // Almost full symbol padding
     ];
 
     for (k, symbol_size, padding_bytes) in padding_test_cases {
@@ -291,8 +302,11 @@ fn test_comprehensive_conformance_validation() {
 
     for guarantee in expected_guarantees {
         assert!(
-            conformance.verified_guarantees.contains(&guarantee.to_string()),
-            "Missing guarantee: {}", guarantee
+            conformance
+                .verified_guarantees
+                .contains(&guarantee.to_string()),
+            "Missing guarantee: {}",
+            guarantee
         );
     }
 
@@ -307,37 +321,37 @@ fn test_atp_release_proof_documentation() {
     // Add verified guarantees
     proof_report.add_guarantee_verified(
         "RaptorQ_basic_integration",
-        "Basic RaptorQ decode metadata integration with ATP proof bundles"
+        "Basic RaptorQ decode metadata integration with ATP proof bundles",
     );
 
     proof_report.add_guarantee_verified(
         "RaptorQ_excess_repair",
-        "Excess repair symbol handling and overhead tracking"
+        "Excess repair symbol handling and overhead tracking",
     );
 
     proof_report.add_guarantee_verified(
         "RaptorQ_k_prime_boundary",
-        "K/K-prime boundary condition handling and fallback"
+        "K/K-prime boundary condition handling and fallback",
     );
 
     proof_report.add_guarantee_verified(
         "RaptorQ_corrupted_symbols",
-        "Corrupted symbol detection and fallback scenarios"
+        "Corrupted symbol detection and fallback scenarios",
     );
 
     proof_report.add_guarantee_verified(
         "RaptorQ_padding_truncation",
-        "Padding truncation edge case handling"
+        "Padding truncation edge case handling",
     );
 
     proof_report.add_guarantee_verified(
         "RFC6330_compliance",
-        "Systematic encoding, repair equations, and decode algorithms conform to RFC 6330"
+        "Systematic encoding, repair equations, and decode algorithms conform to RFC 6330",
     );
 
     proof_report.add_guarantee_verified(
         "hard_regime_telemetry",
-        "Decode performance and fallback reasons logged for tail/lossy/relay/mobile conditions"
+        "Decode performance and fallback reasons logged for tail/lossy/relay/mobile conditions",
     );
 
     let report_json = proof_report.to_json();

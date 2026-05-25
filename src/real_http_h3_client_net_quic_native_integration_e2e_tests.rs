@@ -30,18 +30,18 @@ mod tests {
         cx::{Cx, Scope},
         error::{Error, Result},
         http::h3::{
+            H3Error, H3Stream, H3StreamId, ResumptionTicket, ZeroRttState,
             client::{H3Client, H3ClientConfig, H3Request, H3Response},
-            H3Error, H3Stream, H3StreamId, ZeroRttState, ResumptionTicket,
         },
         net::quic_native::{
-            QuicConnection, QuicConnectionConfig, QuicEndpoint, QuicStream,
-            SessionTicket, TicketRotation, TransportParameters, ConnectionId,
-            ZeroRttContext, ResumptionToken, TicketStore,
+            ConnectionId, QuicConnection, QuicConnectionConfig, QuicEndpoint, QuicStream,
+            ResumptionToken, SessionTicket, TicketRotation, TicketStore, TransportParameters,
+            ZeroRttContext,
         },
         net::tcp::{TcpListener, TcpStream},
-        runtime::{spawn, Runtime},
+        runtime::{Runtime, spawn},
         sync::{Arc, Mutex, RwLock},
-        time::{sleep, Duration, Instant},
+        time::{Duration, Instant, sleep},
         types::{Budget, CancelReason, Outcome, TaskId, Time},
     };
     use std::{
@@ -204,7 +204,8 @@ mod tests {
                         h3_streams.insert(stream_id, h3_stream);
 
                         // Process H3 request on this stream
-                        self.handle_h3_request(cx, stream_id, &mut h3_streams).await?;
+                        self.handle_h3_request(cx, stream_id, &mut h3_streams)
+                            .await?;
                     }
                     Err(_) => break,
                 }
@@ -219,7 +220,8 @@ mod tests {
             stream_id: H3StreamId,
             streams: &mut HashMap<H3StreamId, H3Stream>,
         ) -> Result<()> {
-            let stream = streams.get_mut(&stream_id)
+            let stream = streams
+                .get_mut(&stream_id)
                 .ok_or_else(|| Error::new("H3 stream not found"))?;
 
             // Read H3 request
@@ -241,7 +243,10 @@ mod tests {
             }
 
             // Send H3 response
-            let response_body = format!("H3 Response for stream {}, 0-RTT: {}", stream_id, was_zero_rtt);
+            let response_body = format!(
+                "H3 Response for stream {}, 0-RTT: {}",
+                stream_id, was_zero_rtt
+            );
             let response = H3Response::ok()
                 .with_header("content-type", "text/plain")
                 .with_body(response_body.into_bytes());
@@ -489,7 +494,9 @@ mod tests {
         }
 
         async fn get_zero_rtt_event_count(&self, event_type: ZeroRttEventType) -> usize {
-            self.zero_rtt_events.lock().await
+            self.zero_rtt_events
+                .lock()
+                .await
                 .iter()
                 .filter(|event| event.event_type == event_type)
                 .count()
@@ -521,49 +528,58 @@ mod tests {
         let framework = H3QuicTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            // Start H3 server
-            let server_addr = framework.start_h3_server(cx).await.unwrap();
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                // Start H3 server
+                let server_addr = framework.start_h3_server(cx).await.unwrap();
 
-            // Phase 1: Initial connection to establish session
-            let client = framework.create_h3_client(server_addr).await.unwrap();
-            let initial_request = TestRequest {
-                method: "GET".to_string(),
-                path: "/establish".to_string(),
-                headers: HashMap::new(),
-                body: None,
-                expect_zero_rtt: false,
-            };
+                // Phase 1: Initial connection to establish session
+                let client = framework.create_h3_client(server_addr).await.unwrap();
+                let initial_request = TestRequest {
+                    method: "GET".to_string(),
+                    path: "/establish".to_string(),
+                    headers: HashMap::new(),
+                    body: None,
+                    expect_zero_rtt: false,
+                };
 
-            let response1 = framework.send_h3_request(cx, &client, initial_request).await.unwrap();
-            assert_eq!(response1.status, 200);
-            assert!(!response1.was_zero_rtt);
+                let response1 = framework
+                    .send_h3_request(cx, &client, initial_request)
+                    .await
+                    .unwrap();
+                assert_eq!(response1.status, 200);
+                assert!(!response1.was_zero_rtt);
 
-            // Wait for session ticket
-            sleep(Duration::from_millis(200)).await;
+                // Wait for session ticket
+                sleep(Duration::from_millis(200)).await;
 
-            // Phase 2: New connection with 0-RTT
-            let client2 = framework.create_h3_client(server_addr).await.unwrap();
-            let zero_rtt_request = TestRequest {
-                method: "POST".to_string(),
-                path: "/zero_rtt".to_string(),
-                headers: [("content-type".to_string(), "application/json".to_string())].into(),
-                body: Some(b"{\"test\": \"0rtt_data\"}".to_vec()),
-                expect_zero_rtt: true,
-            };
+                // Phase 2: New connection with 0-RTT
+                let client2 = framework.create_h3_client(server_addr).await.unwrap();
+                let zero_rtt_request = TestRequest {
+                    method: "POST".to_string(),
+                    path: "/zero_rtt".to_string(),
+                    headers: [("content-type".to_string(), "application/json".to_string())].into(),
+                    body: Some(b"{\"test\": \"0rtt_data\"}".to_vec()),
+                    expect_zero_rtt: true,
+                };
 
-            let response2 = framework.send_h3_request(cx, &client2, zero_rtt_request).await.unwrap();
-            assert_eq!(response2.status, 200);
-            assert!(response2.was_zero_rtt);
+                let response2 = framework
+                    .send_h3_request(cx, &client2, zero_rtt_request)
+                    .await
+                    .unwrap();
+                assert_eq!(response2.status, 200);
+                assert!(response2.was_zero_rtt);
 
-            // Verify stats
-            let stats = framework.get_resumption_stats().await;
-            assert_eq!(stats.zero_rtt_attempts, 1);
-            assert_eq!(stats.zero_rtt_successes, 1);
-            assert!(stats.data_bytes_0rtt > 0);
+                // Verify stats
+                let stats = framework.get_resumption_stats().await;
+                assert_eq!(stats.zero_rtt_attempts, 1);
+                assert_eq!(stats.zero_rtt_successes, 1);
+                assert!(stats.data_bytes_0rtt > 0);
 
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -571,28 +587,41 @@ mod tests {
         let framework = H3QuicTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            let server_addr = framework.start_h3_server(cx).await.unwrap();
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                let server_addr = framework.start_h3_server(cx).await.unwrap();
 
-            // Test resumption across single rotation
-            let resumption_success = framework.test_resumption_across_rotation(cx, server_addr).await.unwrap();
-            assert!(resumption_success, "0-RTT resumption should work after ticket rotation");
+                // Test resumption across single rotation
+                let resumption_success = framework
+                    .test_resumption_across_rotation(cx, server_addr)
+                    .await
+                    .unwrap();
+                assert!(
+                    resumption_success,
+                    "0-RTT resumption should work after ticket rotation"
+                );
 
-            // Verify ticket rotation was recorded
-            let rotation_events = framework.get_zero_rtt_event_count(ZeroRttEventType::TicketRotated).await;
-            assert!(rotation_events >= 1);
+                // Verify ticket rotation was recorded
+                let rotation_events = framework
+                    .get_zero_rtt_event_count(ZeroRttEventType::TicketRotated)
+                    .await;
+                assert!(rotation_events >= 1);
 
-            // Verify 0-RTT was successful
-            let zero_rtt_successes = framework.get_zero_rtt_event_count(ZeroRttEventType::ZeroRttAccepted).await;
-            assert!(zero_rtt_successes >= 1);
+                // Verify 0-RTT was successful
+                let zero_rtt_successes = framework
+                    .get_zero_rtt_event_count(ZeroRttEventType::ZeroRttAccepted)
+                    .await;
+                assert!(zero_rtt_successes >= 1);
 
-            // Check final stats
-            let stats = framework.get_resumption_stats().await;
-            assert!(stats.tickets_rotated >= 1);
-            assert!(stats.zero_rtt_successes >= 1);
+                // Check final stats
+                let stats = framework.get_resumption_stats().await;
+                assert!(stats.tickets_rotated >= 1);
+                assert!(stats.zero_rtt_successes >= 1);
 
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -600,36 +629,42 @@ mod tests {
         let framework = H3QuicTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            let server_addr = framework.start_h3_server(cx).await.unwrap();
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                let server_addr = framework.start_h3_server(cx).await.unwrap();
 
-            // Test 0-RTT across multiple rotations
-            let rotation_count = 5;
-            let results = framework.test_continuous_rotation_survival(
-                cx,
-                server_addr,
-                rotation_count,
-            ).await.unwrap();
+                // Test 0-RTT across multiple rotations
+                let rotation_count = 5;
+                let results = framework
+                    .test_continuous_rotation_survival(cx, server_addr, rotation_count)
+                    .await
+                    .unwrap();
 
-            // Verify that most (at least 80%) of 0-RTT attempts succeeded
-            let success_count = results.iter().filter(|&&success| success).count();
-            let success_rate = success_count as f64 / results.len() as f64;
+                // Verify that most (at least 80%) of 0-RTT attempts succeeded
+                let success_count = results.iter().filter(|&&success| success).count();
+                let success_rate = success_count as f64 / results.len() as f64;
 
-            assert!(success_rate >= 0.8,
-                "0-RTT success rate should be at least 80% across rotations, got {}",
-                success_rate);
+                assert!(
+                    success_rate >= 0.8,
+                    "0-RTT success rate should be at least 80% across rotations, got {}",
+                    success_rate
+                );
 
-            // Verify all rotations were recorded
-            let rotation_events = framework.get_zero_rtt_event_count(ZeroRttEventType::TicketRotated).await;
-            assert_eq!(rotation_events, rotation_count as usize);
+                // Verify all rotations were recorded
+                let rotation_events = framework
+                    .get_zero_rtt_event_count(ZeroRttEventType::TicketRotated)
+                    .await;
+                assert_eq!(rotation_events, rotation_count as usize);
 
-            // Check stats reflect multiple rotations
-            let stats = framework.get_resumption_stats().await;
-            assert_eq!(stats.tickets_rotated, rotation_count as u64);
-            assert!(stats.zero_rtt_successes >= (rotation_count as u64 * 4 / 5)); // At least 80%
+                // Check stats reflect multiple rotations
+                let stats = framework.get_resumption_stats().await;
+                assert_eq!(stats.tickets_rotated, rotation_count as u64);
+                assert!(stats.zero_rtt_successes >= (rotation_count as u64 * 4 / 5)); // At least 80%
 
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -637,49 +672,58 @@ mod tests {
         let framework = H3QuicTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            let server_addr = framework.start_h3_server(cx).await.unwrap();
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                let server_addr = framework.start_h3_server(cx).await.unwrap();
 
-            // Establish multiple connections to populate ticket cache
-            for i in 0..3 {
+                // Establish multiple connections to populate ticket cache
+                for i in 0..3 {
+                    let client = framework.create_h3_client(server_addr).await.unwrap();
+                    let request = TestRequest {
+                        method: "GET".to_string(),
+                        path: &format!("/cache_test_{}", i),
+                        headers: HashMap::new(),
+                        body: None,
+                        expect_zero_rtt: false,
+                    };
+                    framework
+                        .send_h3_request(cx, &client, request)
+                        .await
+                        .unwrap();
+                }
+
+                // Wait for tickets to be cached
+                sleep(Duration::from_millis(300)).await;
+
+                // Verify cache consistency before rotation
+                assert!(framework.verify_ticket_cache_consistency().await.unwrap());
+
+                // Perform ticket rotation
+                framework.rotate_session_tickets(cx).await.unwrap();
+
+                // Verify cache consistency after rotation
+                assert!(framework.verify_ticket_cache_consistency().await.unwrap());
+
+                // Test that cached tickets still work for 0-RTT
                 let client = framework.create_h3_client(server_addr).await.unwrap();
-                let request = TestRequest {
-                    method: "GET".to_string(),
-                    path: &format!("/cache_test_{}", i),
+                let zero_rtt_request = TestRequest {
+                    method: "POST".to_string(),
+                    path: "/post_rotation_test".to_string(),
                     headers: HashMap::new(),
-                    body: None,
-                    expect_zero_rtt: false,
+                    body: Some(b"post-rotation 0-RTT test".to_vec()),
+                    expect_zero_rtt: true,
                 };
-                framework.send_h3_request(cx, &client, request).await.unwrap();
-            }
 
-            // Wait for tickets to be cached
-            sleep(Duration::from_millis(300)).await;
+                let response = framework
+                    .send_h3_request(cx, &client, zero_rtt_request)
+                    .await
+                    .unwrap();
+                assert!(response.was_zero_rtt);
 
-            // Verify cache consistency before rotation
-            assert!(framework.verify_ticket_cache_consistency().await.unwrap());
-
-            // Perform ticket rotation
-            framework.rotate_session_tickets(cx).await.unwrap();
-
-            // Verify cache consistency after rotation
-            assert!(framework.verify_ticket_cache_consistency().await.unwrap());
-
-            // Test that cached tickets still work for 0-RTT
-            let client = framework.create_h3_client(server_addr).await.unwrap();
-            let zero_rtt_request = TestRequest {
-                method: "POST".to_string(),
-                path: "/post_rotation_test".to_string(),
-                headers: HashMap::new(),
-                body: Some(b"post-rotation 0-RTT test".to_vec()),
-                expect_zero_rtt: true,
-            };
-
-            let response = framework.send_h3_request(cx, &client, zero_rtt_request).await.unwrap();
-            assert!(response.was_zero_rtt);
-
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -687,70 +731,86 @@ mod tests {
         let framework = H3QuicTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            let server_addr = framework.start_h3_server(cx).await.unwrap();
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                let server_addr = framework.start_h3_server(cx).await.unwrap();
 
-            // Establish initial session
-            let initial_client = framework.create_h3_client(server_addr).await.unwrap();
-            let handshake_request = TestRequest {
-                method: "GET".to_string(),
-                path: "/handshake".to_string(),
-                headers: HashMap::new(),
-                body: None,
-                expect_zero_rtt: false,
-            };
-            framework.send_h3_request(cx, &initial_client, handshake_request).await.unwrap();
+                // Establish initial session
+                let initial_client = framework.create_h3_client(server_addr).await.unwrap();
+                let handshake_request = TestRequest {
+                    method: "GET".to_string(),
+                    path: "/handshake".to_string(),
+                    headers: HashMap::new(),
+                    body: None,
+                    expect_zero_rtt: false,
+                };
+                framework
+                    .send_h3_request(cx, &initial_client, handshake_request)
+                    .await
+                    .unwrap();
 
-            sleep(Duration::from_millis(200)).await;
+                sleep(Duration::from_millis(200)).await;
 
-            let framework_ref = &framework;
+                let framework_ref = &framework;
 
-            // Spawn concurrent 0-RTT requests while rotating tickets
-            let tasks: Vec<_> = (0..6).map(|i| {
-                spawn(cx, Budget::unlimited(), async move {
-                    let client = framework_ref.create_h3_client(server_addr).await.unwrap();
-                    let request = TestRequest {
-                        method: "PUT".to_string(),
-                        path: &format!("/concurrent_{}", i),
-                        headers: [("x-request-id".to_string(), i.to_string())].into(),
-                        body: Some(format!("concurrent request {}", i).into_bytes()),
-                        expect_zero_rtt: true,
-                    };
+                // Spawn concurrent 0-RTT requests while rotating tickets
+                let tasks: Vec<_> = (0..6)
+                    .map(|i| {
+                        spawn(cx, Budget::unlimited(), async move {
+                            let client = framework_ref.create_h3_client(server_addr).await.unwrap();
+                            let request = TestRequest {
+                                method: "PUT".to_string(),
+                                path: &format!("/concurrent_{}", i),
+                                headers: [("x-request-id".to_string(), i.to_string())].into(),
+                                body: Some(format!("concurrent request {}", i).into_bytes()),
+                                expect_zero_rtt: true,
+                            };
 
-                    // Add some jitter to requests
-                    sleep(Duration::from_millis(i as u64 * 50)).await;
+                            // Add some jitter to requests
+                            sleep(Duration::from_millis(i as u64 * 50)).await;
 
-                    let response = framework_ref.send_h3_request(cx, &client, request).await.unwrap();
-                    Ok(response.was_zero_rtt)
-                })
-            }).collect();
+                            let response = framework_ref
+                                .send_h3_request(cx, &client, request)
+                                .await
+                                .unwrap();
+                            Ok(response.was_zero_rtt)
+                        })
+                    })
+                    .collect();
 
-            // Trigger rotation in the middle of concurrent requests
-            sleep(Duration::from_millis(150)).await;
-            framework.rotate_session_tickets(cx).await.unwrap();
+                // Trigger rotation in the middle of concurrent requests
+                sleep(Duration::from_millis(150)).await;
+                framework.rotate_session_tickets(cx).await.unwrap();
 
-            // Wait for all requests to complete
-            let mut zero_rtt_successes = 0;
-            for task in tasks {
-                match task.join().await {
-                    Outcome::Ok(Ok(was_zero_rtt)) => {
-                        if was_zero_rtt {
-                            zero_rtt_successes += 1;
+                // Wait for all requests to complete
+                let mut zero_rtt_successes = 0;
+                for task in tasks {
+                    match task.join().await {
+                        Outcome::Ok(Ok(was_zero_rtt)) => {
+                            if was_zero_rtt {
+                                zero_rtt_successes += 1;
+                            }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
 
-            // Should have some 0-RTT successes despite concurrent rotation
-            assert!(zero_rtt_successes > 0, "Should have at least some 0-RTT successes");
+                // Should have some 0-RTT successes despite concurrent rotation
+                assert!(
+                    zero_rtt_successes > 0,
+                    "Should have at least some 0-RTT successes"
+                );
 
-            // Verify that rotation occurred
-            let rotation_events = framework.get_zero_rtt_event_count(ZeroRttEventType::TicketRotated).await;
-            assert_eq!(rotation_events, 1);
+                // Verify that rotation occurred
+                let rotation_events = framework
+                    .get_zero_rtt_event_count(ZeroRttEventType::TicketRotated)
+                    .await;
+                assert_eq!(rotation_events, 1);
 
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -758,55 +818,75 @@ mod tests {
         let framework = H3QuicTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            let server_addr = framework.start_h3_server(cx).await.unwrap();
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                let server_addr = framework.start_h3_server(cx).await.unwrap();
 
-            // Phase 1: Establish session
-            let client1 = framework.create_h3_client(server_addr).await.unwrap();
-            framework.send_h3_request(cx, &client1, TestRequest {
-                method: "GET".to_string(),
-                path: "/establish".to_string(),
-                headers: HashMap::new(),
-                body: None,
-                expect_zero_rtt: false,
-            }).await.unwrap();
+                // Phase 1: Establish session
+                let client1 = framework.create_h3_client(server_addr).await.unwrap();
+                framework
+                    .send_h3_request(
+                        cx,
+                        &client1,
+                        TestRequest {
+                            method: "GET".to_string(),
+                            path: "/establish".to_string(),
+                            headers: HashMap::new(),
+                            body: None,
+                            expect_zero_rtt: false,
+                        },
+                    )
+                    .await
+                    .unwrap();
 
-            sleep(Duration::from_millis(200)).await;
+                sleep(Duration::from_millis(200)).await;
 
-            // Phase 2: Rotate tickets
-            framework.rotate_session_tickets(cx).await.unwrap();
+                // Phase 2: Rotate tickets
+                framework.rotate_session_tickets(cx).await.unwrap();
 
-            // Phase 3: Send 0-RTT request with specific data
-            let test_data = b"Critical data that must survive 0-RTT across ticket rotation";
-            let client2 = framework.create_h3_client(server_addr).await.unwrap();
-            let zero_rtt_request = TestRequest {
-                method: "POST".to_string(),
-                path: "/data_integrity_test".to_string(),
-                headers: [
-                    ("content-type".to_string(), "application/octet-stream".to_string()),
-                    ("x-test-data-length".to_string(), test_data.len().to_string()),
-                ].into(),
-                body: Some(test_data.to_vec()),
-                expect_zero_rtt: true,
-            };
+                // Phase 3: Send 0-RTT request with specific data
+                let test_data = b"Critical data that must survive 0-RTT across ticket rotation";
+                let client2 = framework.create_h3_client(server_addr).await.unwrap();
+                let zero_rtt_request = TestRequest {
+                    method: "POST".to_string(),
+                    path: "/data_integrity_test".to_string(),
+                    headers: [
+                        (
+                            "content-type".to_string(),
+                            "application/octet-stream".to_string(),
+                        ),
+                        (
+                            "x-test-data-length".to_string(),
+                            test_data.len().to_string(),
+                        ),
+                    ]
+                    .into(),
+                    body: Some(test_data.to_vec()),
+                    expect_zero_rtt: true,
+                };
 
-            let response = framework.send_h3_request(cx, &client2, zero_rtt_request).await.unwrap();
+                let response = framework
+                    .send_h3_request(cx, &client2, zero_rtt_request)
+                    .await
+                    .unwrap();
 
-            // Verify 0-RTT worked and data integrity
-            assert!(response.was_zero_rtt);
-            assert_eq!(response.status, 200);
-            assert!(response.body.len() > 0);
+                // Verify 0-RTT worked and data integrity
+                assert!(response.was_zero_rtt);
+                assert_eq!(response.status, 200);
+                assert!(response.body.len() > 0);
 
-            // Verify response contains reference to our test data
-            let response_text = String::from_utf8_lossy(&response.body);
-            assert!(response_text.contains("0-RTT: true"));
+                // Verify response contains reference to our test data
+                let response_text = String::from_utf8_lossy(&response.body);
+                assert!(response_text.contains("0-RTT: true"));
 
-            // Check that data was properly transmitted in 0-RTT
-            let stats = framework.get_resumption_stats().await;
-            assert_eq!(stats.data_bytes_0rtt, test_data.len() as u64);
+                // Check that data was properly transmitted in 0-RTT
+                let stats = framework.get_resumption_stats().await;
+                assert_eq!(stats.data_bytes_0rtt, test_data.len() as u64);
 
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -814,37 +894,45 @@ mod tests {
         let framework = H3QuicTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            let server_addr = framework.start_h3_server(cx).await.unwrap();
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                let server_addr = framework.start_h3_server(cx).await.unwrap();
 
-            // Create client but don't establish session first
-            // This should cause 0-RTT to be rejected and fallback to regular handshake
-            let client = framework.create_h3_client(server_addr).await.unwrap();
-            let zero_rtt_request = TestRequest {
-                method: "GET".to_string(),
-                path: "/should_fallback".to_string(),
-                headers: HashMap::new(),
-                body: Some(b"This should fallback to regular handshake".to_vec()),
-                expect_zero_rtt: true,
-            };
+                // Create client but don't establish session first
+                // This should cause 0-RTT to be rejected and fallback to regular handshake
+                let client = framework.create_h3_client(server_addr).await.unwrap();
+                let zero_rtt_request = TestRequest {
+                    method: "GET".to_string(),
+                    path: "/should_fallback".to_string(),
+                    headers: HashMap::new(),
+                    body: Some(b"This should fallback to regular handshake".to_vec()),
+                    expect_zero_rtt: true,
+                };
 
-            let response = framework.send_h3_request(cx, &client, zero_rtt_request).await.unwrap();
+                let response = framework
+                    .send_h3_request(cx, &client, zero_rtt_request)
+                    .await
+                    .unwrap();
 
-            // Should have fallen back to regular handshake
-            assert!(!response.was_zero_rtt);
-            assert_eq!(response.status, 200);
+                // Should have fallen back to regular handshake
+                assert!(!response.was_zero_rtt);
+                assert_eq!(response.status, 200);
 
-            // Verify rejection was recorded
-            let rejection_events = framework.get_zero_rtt_event_count(ZeroRttEventType::ZeroRttRejected).await;
-            assert_eq!(rejection_events, 1);
+                // Verify rejection was recorded
+                let rejection_events = framework
+                    .get_zero_rtt_event_count(ZeroRttEventType::ZeroRttRejected)
+                    .await;
+                assert_eq!(rejection_events, 1);
 
-            // Verify stats reflect the rejection
-            let stats = framework.get_resumption_stats().await;
-            assert_eq!(stats.zero_rtt_attempts, 1);
-            assert_eq!(stats.zero_rtt_rejections, 1);
-            assert_eq!(stats.zero_rtt_successes, 0);
+                // Verify stats reflect the rejection
+                let stats = framework.get_resumption_stats().await;
+                assert_eq!(stats.zero_rtt_attempts, 1);
+                assert_eq!(stats.zero_rtt_rejections, 1);
+                assert_eq!(stats.zero_rtt_successes, 0);
 
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 }

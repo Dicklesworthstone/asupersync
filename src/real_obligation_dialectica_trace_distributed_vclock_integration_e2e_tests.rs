@@ -30,20 +30,20 @@ mod tests {
         cx::{Cx, Scope},
         error::{Error, Result},
         obligation::dialectica::{
-            DialecticaProof, DialecticaWitness, ProofObligation, CausalDependency,
-            SerializationContext, ProofState, WitnessVerification,
+            CausalDependency, DialecticaProof, DialecticaWitness, ProofObligation, ProofState,
+            SerializationContext, WitnessVerification,
         },
-        trace::distributed::vclock::{
-            VectorClock, NodeId, LogicalTime, CausalOrdering, ClockMerge,
-            DistributedEvent, CausalityViolation,
-        },
-        runtime::{spawn, Runtime},
+        runtime::{Runtime, spawn},
         sync::{Arc, Mutex, RwLock},
-        time::{sleep, Duration, Instant},
+        time::{Duration, Instant, sleep},
+        trace::distributed::vclock::{
+            CausalOrdering, CausalityViolation, ClockMerge, DistributedEvent, LogicalTime, NodeId,
+            VectorClock,
+        },
         types::{Budget, CancelReason, ObligationId, Outcome, RegionId, TaskId, Time},
     };
     use std::{
-        collections::{HashMap, HashSet, VecDeque, BTreeMap},
+        collections::{BTreeMap, HashMap, HashSet, VecDeque},
         sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     };
 
@@ -163,7 +163,8 @@ mod tests {
 
             // Capture current vector clock state
             let mut node_registry = self.node_registry.write().await;
-            let node_state = node_registry.get_mut(&node_id)
+            let node_state = node_registry
+                .get_mut(&node_id)
                 .ok_or_else(|| Error::new("Node not found"))?;
 
             // Advance local clock for obligation creation
@@ -182,7 +183,10 @@ mod tests {
                 serialization_context: SerializationContext::new_with_vclock(origin_vclock.clone()),
             };
 
-            self.obligation_registry.write().await.insert(obligation_id, dialectica_obligation);
+            self.obligation_registry
+                .write()
+                .await
+                .insert(obligation_id, dialectica_obligation);
             node_state.active_proofs.insert(obligation_id);
 
             // Record causal event
@@ -214,19 +218,22 @@ mod tests {
             node_id: NodeId,
         ) -> Result<DialecticaProof> {
             let mut obligation_registry = self.obligation_registry.write().await;
-            let obligation = obligation_registry.get_mut(&obligation_id)
+            let obligation = obligation_registry
+                .get_mut(&obligation_id)
                 .ok_or_else(|| Error::new("Obligation not found"))?;
 
             // Advance vector clock for proof construction
             let mut node_registry = self.node_registry.write().await;
-            let node_state = node_registry.get_mut(&node_id)
+            let node_state = node_registry
+                .get_mut(&node_id)
                 .ok_or_else(|| Error::new("Node not found"))?;
 
             node_state.local_vclock.advance_local(node_id)?;
             let proof_vclock = node_state.local_vclock.clone();
 
             // Verify causal dependencies are satisfied
-            self.verify_causal_dependencies(cx, &obligation.causal_deps, &proof_vclock).await?;
+            self.verify_causal_dependencies(cx, &obligation.causal_deps, &proof_vclock)
+                .await?;
 
             // Construct dialectica proof with causal context
             let proof = DialecticaProof::construct_with_causal_context(
@@ -258,7 +265,8 @@ mod tests {
             {
                 let mut stats = self.serialization_stats.lock().await;
                 stats.proof_reconstructions += 1;
-                stats.max_causal_chain_length = stats.max_causal_chain_length
+                stats.max_causal_chain_length = stats
+                    .max_causal_chain_length
                     .max(obligation.causal_deps.len());
             }
 
@@ -273,23 +281,28 @@ mod tests {
             target_node: NodeId,
         ) -> Result<Vec<u8>> {
             let obligation_registry = self.obligation_registry.read().await;
-            let obligation = obligation_registry.get(&obligation_id)
+            let obligation = obligation_registry
+                .get(&obligation_id)
                 .ok_or_else(|| Error::new("Obligation not found"))?;
 
             // Get source node's vector clock
             let node_registry = self.node_registry.read().await;
-            let source_state = node_registry.get(&source_node)
+            let source_state = node_registry
+                .get(&source_node)
                 .ok_or_else(|| Error::new("Source node not found"))?;
-            let target_state = node_registry.get(&target_node)
+            let target_state = node_registry
+                .get(&target_node)
                 .ok_or_else(|| Error::new("Target node not found"))?;
 
             // Check causal ordering before serialization
-            let causal_order = source_state.local_vclock.compare(&target_state.local_vclock)?;
+            let causal_order = source_state
+                .local_vclock
+                .compare(&target_state.local_vclock)?;
 
             match causal_order {
                 CausalOrdering::Before | CausalOrdering::Concurrent => {
                     // Safe to serialize - no causality violation
-                },
+                }
                 CausalOrdering::After => {
                     // Potential causality violation - record and handle
                     let mut stats = self.serialization_stats.lock().await;
@@ -324,22 +337,31 @@ mod tests {
             target_node: NodeId,
         ) -> Result<ObligationId> {
             // Deserialize with causal context preservation
-            let (obligation, serialization_context) = DialecticaObligation::deserialize_with_causal_context(serialized_data)?;
+            let (obligation, serialization_context) =
+                DialecticaObligation::deserialize_with_causal_context(serialized_data)?;
 
             // Get target node state for clock merging
             let mut node_registry = self.node_registry.write().await;
-            let target_state = node_registry.get_mut(&target_node)
+            let target_state = node_registry
+                .get_mut(&target_node)
                 .ok_or_else(|| Error::new("Target node not found"))?;
 
             // Merge vector clocks to maintain causality
             target_state.local_vclock.merge(&obligation.origin_vclock)?;
-            target_state.local_vclock.merge(&obligation.current_vclock)?;
+            target_state
+                .local_vclock
+                .merge(&obligation.current_vclock)?;
 
             // Advance local time for deserialization event
             target_state.local_vclock.advance_local(target_node)?;
 
             // Verify causal dependencies can be satisfied
-            self.verify_causal_dependencies(cx, &obligation.causal_deps, &target_state.local_vclock).await?;
+            self.verify_causal_dependencies(
+                cx,
+                &obligation.causal_deps,
+                &target_state.local_vclock,
+            )
+            .await?;
 
             // Register obligation on target node
             let mut obligation_registry = self.obligation_registry.write().await;
@@ -375,13 +397,14 @@ mod tests {
 
                 // Verify the dependency obligation exists and is resolved
                 let obligation_registry = self.obligation_registry.read().await;
-                let dep_obligation = obligation_registry.get(&dep.obligation_id)
+                let dep_obligation = obligation_registry
+                    .get(&dep.obligation_id)
                     .ok_or_else(|| Error::new("Dependency obligation not found"))?;
 
                 match dep_obligation.state {
                     ProofState::Resolved => {
                         // Dependency satisfied
-                    },
+                    }
                     _ => {
                         return Err(Error::new("Dependency obligation not resolved"));
                     }
@@ -422,7 +445,9 @@ mod tests {
         }
 
         async fn get_causal_event_count(&self, event_type: CausalEventType) -> usize {
-            self.causal_event_log.lock().await
+            self.causal_event_log
+                .lock()
+                .await
                 .iter()
                 .filter(|event| event.event_type == event_type)
                 .count()
@@ -438,57 +463,66 @@ mod tests {
         let framework = DialecticaVClockTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            // Create two nodes for cross-node causality testing
-            framework.create_node(NodeId::new(1)).await.unwrap();
-            framework.create_node(NodeId::new(2)).await.unwrap();
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                // Create two nodes for cross-node causality testing
+                framework.create_node(NodeId::new(1)).await.unwrap();
+                framework.create_node(NodeId::new(2)).await.unwrap();
 
-            // Create dialectica obligation on node 1
-            let obligation_id = ObligationId::new_for_test(1, 0);
-            let causal_deps = vec![
-                CausalDependency::new(
+                // Create dialectica obligation on node 1
+                let obligation_id = ObligationId::new_for_test(1, 0);
+                let causal_deps = vec![CausalDependency::new(
                     ObligationId::new_for_test(0, 0),
                     VectorClock::new_with_node(NodeId::new(1)),
-                ),
-            ];
+                )];
 
-            framework.create_dialectica_obligation(cx, NodeId::new(1), obligation_id, causal_deps).await.unwrap();
+                framework
+                    .create_dialectica_obligation(cx, NodeId::new(1), obligation_id, causal_deps)
+                    .await
+                    .unwrap();
 
-            // Construct proof on node 1
-            let proof = framework.construct_proof(cx, obligation_id, NodeId::new(1)).await.unwrap();
-            assert!(proof.is_valid());
+                // Construct proof on node 1
+                let proof = framework
+                    .construct_proof(cx, obligation_id, NodeId::new(1))
+                    .await
+                    .unwrap();
+                assert!(proof.is_valid());
 
-            // Serialize obligation for transfer to node 2
-            let serialized = framework.serialize_obligation_causally(
-                cx,
-                obligation_id,
-                NodeId::new(1),
-                NodeId::new(2),
-            ).await.unwrap();
+                // Serialize obligation for transfer to node 2
+                let serialized = framework
+                    .serialize_obligation_causally(
+                        cx,
+                        obligation_id,
+                        NodeId::new(1),
+                        NodeId::new(2),
+                    )
+                    .await
+                    .unwrap();
 
-            assert!(!serialized.is_empty());
+                assert!(!serialized.is_empty());
 
-            // Deserialize on node 2
-            let deserialized_id = framework.deserialize_obligation_causally(
-                cx,
-                &serialized,
-                NodeId::new(2),
-            ).await.unwrap();
+                // Deserialize on node 2
+                let deserialized_id = framework
+                    .deserialize_obligation_causally(cx, &serialized, NodeId::new(2))
+                    .await
+                    .unwrap();
 
-            assert_eq!(deserialized_id, obligation_id);
+                assert_eq!(deserialized_id, obligation_id);
 
-            // Verify cross-node causality is maintained
-            let causality_preserved = framework.verify_cross_node_causality(cx).await.unwrap();
-            assert!(causality_preserved);
+                // Verify cross-node causality is maintained
+                let causality_preserved = framework.verify_cross_node_causality(cx).await.unwrap();
+                assert!(causality_preserved);
 
-            // Check serialization stats
-            let stats = framework.get_serialization_stats().await;
-            assert_eq!(stats.obligations_serialized, 1);
-            assert_eq!(stats.vclock_merges_performed, 1);
-            assert_eq!(stats.causal_violations_detected, 0);
+                // Check serialization stats
+                let stats = framework.get_serialization_stats().await;
+                assert_eq!(stats.obligations_serialized, 1);
+                assert_eq!(stats.vclock_merges_performed, 1);
+                assert_eq!(stats.causal_violations_detected, 0);
 
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -496,69 +530,80 @@ mod tests {
         let framework = DialecticaVClockTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            // Create multiple nodes with different vector clock states
-            for i in 1..=4 {
-                framework.create_node(NodeId::new(i)).await.unwrap();
-            }
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                // Create multiple nodes with different vector clock states
+                for i in 1..=4 {
+                    framework.create_node(NodeId::new(i)).await.unwrap();
+                }
 
-            let mut obligation_ids = Vec::new();
+                let mut obligation_ids = Vec::new();
 
-            // Create obligations on different nodes with causal dependencies
-            for i in 1..=4 {
-                let obligation_id = ObligationId::new_for_test(i, 0);
-                let causal_deps = if i > 1 {
-                    vec![CausalDependency::new(
-                        ObligationId::new_for_test(i - 1, 0),
-                        VectorClock::new_with_node(NodeId::new(i - 1)),
-                    )]
-                } else {
-                    vec![]
-                };
+                // Create obligations on different nodes with causal dependencies
+                for i in 1..=4 {
+                    let obligation_id = ObligationId::new_for_test(i, 0);
+                    let causal_deps = if i > 1 {
+                        vec![CausalDependency::new(
+                            ObligationId::new_for_test(i - 1, 0),
+                            VectorClock::new_with_node(NodeId::new(i - 1)),
+                        )]
+                    } else {
+                        vec![]
+                    };
 
-                framework.create_dialectica_obligation(
-                    cx,
-                    NodeId::new(i),
-                    obligation_id,
-                    causal_deps,
-                ).await.unwrap();
+                    framework
+                        .create_dialectica_obligation(
+                            cx,
+                            NodeId::new(i),
+                            obligation_id,
+                            causal_deps,
+                        )
+                        .await
+                        .unwrap();
 
-                obligation_ids.push(obligation_id);
-            }
+                    obligation_ids.push(obligation_id);
+                }
 
-            // Construct proofs maintaining causal order
-            for (i, &obligation_id) in obligation_ids.iter().enumerate() {
-                framework.construct_proof(cx, obligation_id, NodeId::new(i as u64 + 1)).await.unwrap();
-            }
+                // Construct proofs maintaining causal order
+                for (i, &obligation_id) in obligation_ids.iter().enumerate() {
+                    framework
+                        .construct_proof(cx, obligation_id, NodeId::new(i as u64 + 1))
+                        .await
+                        .unwrap();
+                }
 
-            // Serialize obligations across vector clock boundaries
-            for i in 1..4 {
-                let serialized = framework.serialize_obligation_causally(
-                    cx,
-                    obligation_ids[i - 1],
-                    NodeId::new(i),
-                    NodeId::new(i + 1),
-                ).await.unwrap();
+                // Serialize obligations across vector clock boundaries
+                for i in 1..4 {
+                    let serialized = framework
+                        .serialize_obligation_causally(
+                            cx,
+                            obligation_ids[i - 1],
+                            NodeId::new(i),
+                            NodeId::new(i + 1),
+                        )
+                        .await
+                        .unwrap();
 
-                framework.deserialize_obligation_causally(
-                    cx,
-                    &serialized,
-                    NodeId::new(i + 1),
-                ).await.unwrap();
-            }
+                    framework
+                        .deserialize_obligation_causally(cx, &serialized, NodeId::new(i + 1))
+                        .await
+                        .unwrap();
+                }
 
-            // Verify vector clock boundaries are preserved
-            let causality_preserved = framework.verify_cross_node_causality(cx).await.unwrap();
-            assert!(causality_preserved);
+                // Verify vector clock boundaries are preserved
+                let causality_preserved = framework.verify_cross_node_causality(cx).await.unwrap();
+                assert!(causality_preserved);
 
-            // Check that all obligations were processed
-            let stats = framework.get_serialization_stats().await;
-            assert_eq!(stats.obligations_serialized, 3);
-            assert!(stats.vclock_merges_performed >= 3);
-            assert_eq!(stats.causal_violations_detected, 0);
+                // Check that all obligations were processed
+                let stats = framework.get_serialization_stats().await;
+                assert_eq!(stats.obligations_serialized, 3);
+                assert!(stats.vclock_merges_performed >= 3);
+                assert_eq!(stats.causal_violations_detected, 0);
 
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -566,77 +611,88 @@ mod tests {
         let framework = DialecticaVClockTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            // Create nodes for complex causal dependency chain
-            for i in 1..=5 {
-                framework.create_node(NodeId::new(i)).await.unwrap();
-            }
-
-            // Create chain of causally dependent obligations
-            let chain_length = 5;
-            let mut obligation_chain = Vec::new();
-
-            for i in 0..chain_length {
-                let obligation_id = ObligationId::new_for_test(i, 0);
-                let causal_deps = if i > 0 {
-                    // Each obligation depends on the previous one
-                    vec![CausalDependency::new(
-                        obligation_chain[i - 1],
-                        VectorClock::new_with_node(NodeId::new(i)),
-                    )]
-                } else {
-                    vec![]
-                };
-
-                framework.create_dialectica_obligation(
-                    cx,
-                    NodeId::new(i + 1),
-                    obligation_id,
-                    causal_deps,
-                ).await.unwrap();
-
-                obligation_chain.push(obligation_id);
-            }
-
-            // Resolve obligations in causal order
-            for (i, &obligation_id) in obligation_chain.iter().enumerate() {
-                framework.construct_proof(cx, obligation_id, NodeId::new(i + 1)).await.unwrap();
-
-                // Mark as resolved for dependency checking
-                let mut obligation_registry = framework.obligation_registry.write().await;
-                if let Some(obligation) = obligation_registry.get_mut(&obligation_id) {
-                    obligation.state = ProofState::Resolved;
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                // Create nodes for complex causal dependency chain
+                for i in 1..=5 {
+                    framework.create_node(NodeId::new(i)).await.unwrap();
                 }
-            }
 
-            // Serialize entire chain across vector clock boundaries
-            for i in 0..chain_length - 1 {
-                let serialized = framework.serialize_obligation_causally(
-                    cx,
-                    obligation_chain[i],
-                    NodeId::new(i + 1),
-                    NodeId::new(i + 2),
-                ).await.unwrap();
+                // Create chain of causally dependent obligations
+                let chain_length = 5;
+                let mut obligation_chain = Vec::new();
 
-                framework.deserialize_obligation_causally(
-                    cx,
-                    &serialized,
-                    NodeId::new(i + 2),
-                ).await.unwrap();
-            }
+                for i in 0..chain_length {
+                    let obligation_id = ObligationId::new_for_test(i, 0);
+                    let causal_deps = if i > 0 {
+                        // Each obligation depends on the previous one
+                        vec![CausalDependency::new(
+                            obligation_chain[i - 1],
+                            VectorClock::new_with_node(NodeId::new(i)),
+                        )]
+                    } else {
+                        vec![]
+                    };
 
-            // Verify causal dependency chain integrity
-            let causality_preserved = framework.verify_cross_node_causality(cx).await.unwrap();
-            assert!(causality_preserved);
+                    framework
+                        .create_dialectica_obligation(
+                            cx,
+                            NodeId::new(i + 1),
+                            obligation_id,
+                            causal_deps,
+                        )
+                        .await
+                        .unwrap();
 
-            // Check stats reflect complex causal chain processing
-            let stats = framework.get_serialization_stats().await;
-            assert!(stats.max_causal_chain_length > 0);
-            assert_eq!(stats.causal_violations_detected, 0);
-            assert!(stats.dependency_chains_resolved > 0 || stats.obligations_serialized > 0);
+                    obligation_chain.push(obligation_id);
+                }
 
-            Ok(())
-        }).await.unwrap();
+                // Resolve obligations in causal order
+                for (i, &obligation_id) in obligation_chain.iter().enumerate() {
+                    framework
+                        .construct_proof(cx, obligation_id, NodeId::new(i + 1))
+                        .await
+                        .unwrap();
+
+                    // Mark as resolved for dependency checking
+                    let mut obligation_registry = framework.obligation_registry.write().await;
+                    if let Some(obligation) = obligation_registry.get_mut(&obligation_id) {
+                        obligation.state = ProofState::Resolved;
+                    }
+                }
+
+                // Serialize entire chain across vector clock boundaries
+                for i in 0..chain_length - 1 {
+                    let serialized = framework
+                        .serialize_obligation_causally(
+                            cx,
+                            obligation_chain[i],
+                            NodeId::new(i + 1),
+                            NodeId::new(i + 2),
+                        )
+                        .await
+                        .unwrap();
+
+                    framework
+                        .deserialize_obligation_causally(cx, &serialized, NodeId::new(i + 2))
+                        .await
+                        .unwrap();
+                }
+
+                // Verify causal dependency chain integrity
+                let causality_preserved = framework.verify_cross_node_causality(cx).await.unwrap();
+                assert!(causality_preserved);
+
+                // Check stats reflect complex causal chain processing
+                let stats = framework.get_serialization_stats().await;
+                assert!(stats.max_causal_chain_length > 0);
+                assert_eq!(stats.causal_violations_detected, 0);
+                assert!(stats.dependency_chains_resolved > 0 || stats.obligations_serialized > 0);
+
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -644,57 +700,61 @@ mod tests {
         let framework = DialecticaVClockTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            // Create nodes with deliberately conflicting vector clock states
-            framework.create_node(NodeId::new(1)).await.unwrap();
-            framework.create_node(NodeId::new(2)).await.unwrap();
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                // Create nodes with deliberately conflicting vector clock states
+                framework.create_node(NodeId::new(1)).await.unwrap();
+                framework.create_node(NodeId::new(2)).await.unwrap();
 
-            // Create obligation on node 1
-            let obligation_id_1 = ObligationId::new_for_test(1, 0);
-            framework.create_dialectica_obligation(
-                cx,
-                NodeId::new(1),
-                obligation_id_1,
-                vec![],
-            ).await.unwrap();
+                // Create obligation on node 1
+                let obligation_id_1 = ObligationId::new_for_test(1, 0);
+                framework
+                    .create_dialectica_obligation(cx, NodeId::new(1), obligation_id_1, vec![])
+                    .await
+                    .unwrap();
 
-            // Create obligation on node 2 that would violate causality
-            let obligation_id_2 = ObligationId::new_for_test(2, 0);
+                // Create obligation on node 2 that would violate causality
+                let obligation_id_2 = ObligationId::new_for_test(2, 0);
 
-            // Manually advance node 2's clock to create future timestamp
-            {
-                let mut node_registry = framework.node_registry.write().await;
-                let node_state = node_registry.get_mut(&NodeId::new(2)).unwrap();
-                for _ in 0..5 {
-                    node_state.local_vclock.advance_local(NodeId::new(2)).unwrap();
+                // Manually advance node 2's clock to create future timestamp
+                {
+                    let mut node_registry = framework.node_registry.write().await;
+                    let node_state = node_registry.get_mut(&NodeId::new(2)).unwrap();
+                    for _ in 0..5 {
+                        node_state
+                            .local_vclock
+                            .advance_local(NodeId::new(2))
+                            .unwrap();
+                    }
                 }
-            }
 
-            framework.create_dialectica_obligation(
-                cx,
-                NodeId::new(2),
-                obligation_id_2,
-                vec![],
-            ).await.unwrap();
+                framework
+                    .create_dialectica_obligation(cx, NodeId::new(2), obligation_id_2, vec![])
+                    .await
+                    .unwrap();
 
-            // Try to serialize from node 2 (future) to node 1 (past)
-            // This should detect a causality violation
-            let result = framework.serialize_obligation_causally(
-                cx,
-                obligation_id_2,
-                NodeId::new(2),
-                NodeId::new(1),
-            ).await;
+                // Try to serialize from node 2 (future) to node 1 (past)
+                // This should detect a causality violation
+                let result = framework
+                    .serialize_obligation_causally(
+                        cx,
+                        obligation_id_2,
+                        NodeId::new(2),
+                        NodeId::new(1),
+                    )
+                    .await;
 
-            // Should fail due to causal ordering violation
-            assert!(result.is_err());
+                // Should fail due to causal ordering violation
+                assert!(result.is_err());
 
-            // Check that violation was detected and recorded
-            let stats = framework.get_serialization_stats().await;
-            assert!(stats.causal_violations_detected > 0);
+                // Check that violation was detected and recorded
+                let stats = framework.get_serialization_stats().await;
+                assert!(stats.causal_violations_detected > 0);
 
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -702,73 +762,90 @@ mod tests {
         let framework = DialecticaVClockTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            // Create multiple nodes for concurrent operations
-            let node_count = 6;
-            for i in 1..=node_count {
-                framework.create_node(NodeId::new(i)).await.unwrap();
-            }
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                // Create multiple nodes for concurrent operations
+                let node_count = 6;
+                for i in 1..=node_count {
+                    framework.create_node(NodeId::new(i)).await.unwrap();
+                }
 
-            let framework_ref = &framework;
+                let framework_ref = &framework;
 
-            // Spawn concurrent tasks to create and serialize obligations
-            let tasks: Vec<_> = (1..=node_count).map(|i| {
-                spawn(cx, Budget::unlimited(), async move {
-                    let obligation_id = ObligationId::new_for_test(i, 0);
+                // Spawn concurrent tasks to create and serialize obligations
+                let tasks: Vec<_> = (1..=node_count)
+                    .map(|i| {
+                        spawn(cx, Budget::unlimited(), async move {
+                            let obligation_id = ObligationId::new_for_test(i, 0);
 
-                    // Create obligation
-                    framework_ref.create_dialectica_obligation(
-                        cx,
-                        NodeId::new(i),
-                        obligation_id,
-                        vec![],
-                    ).await.unwrap();
+                            // Create obligation
+                            framework_ref
+                                .create_dialectica_obligation(
+                                    cx,
+                                    NodeId::new(i),
+                                    obligation_id,
+                                    vec![],
+                                )
+                                .await
+                                .unwrap();
 
-                    // Construct proof
-                    framework_ref.construct_proof(cx, obligation_id, NodeId::new(i)).await.unwrap();
+                            // Construct proof
+                            framework_ref
+                                .construct_proof(cx, obligation_id, NodeId::new(i))
+                                .await
+                                .unwrap();
 
-                    // Serialize to next node (circular)
-                    let target_node = if i < node_count { i + 1 } else { 1 };
-                    let serialized = framework_ref.serialize_obligation_causally(
-                        cx,
-                        obligation_id,
-                        NodeId::new(i),
-                        NodeId::new(target_node),
-                    ).await.unwrap();
+                            // Serialize to next node (circular)
+                            let target_node = if i < node_count { i + 1 } else { 1 };
+                            let serialized = framework_ref
+                                .serialize_obligation_causally(
+                                    cx,
+                                    obligation_id,
+                                    NodeId::new(i),
+                                    NodeId::new(target_node),
+                                )
+                                .await
+                                .unwrap();
 
-                    // Deserialize on target node
-                    framework_ref.deserialize_obligation_causally(
-                        cx,
-                        &serialized,
-                        NodeId::new(target_node),
-                    ).await.unwrap();
+                            // Deserialize on target node
+                            framework_ref
+                                .deserialize_obligation_causally(
+                                    cx,
+                                    &serialized,
+                                    NodeId::new(target_node),
+                                )
+                                .await
+                                .unwrap();
 
-                    Ok(obligation_id)
-                })
-            }).collect();
+                            Ok(obligation_id)
+                        })
+                    })
+                    .collect();
 
-            // Wait for all concurrent operations to complete
-            let mut results = Vec::new();
-            for task in tasks {
-                let result = task.join().await;
-                assert!(matches!(result, Outcome::Ok(Ok(_))));
-                results.push(result);
-            }
+                // Wait for all concurrent operations to complete
+                let mut results = Vec::new();
+                for task in tasks {
+                    let result = task.join().await;
+                    assert!(matches!(result, Outcome::Ok(Ok(_))));
+                    results.push(result);
+                }
 
-            // Verify all operations completed successfully
-            assert_eq!(results.len(), node_count as usize);
+                // Verify all operations completed successfully
+                assert_eq!(results.len(), node_count as usize);
 
-            // Check final causality state
-            let causality_preserved = framework.verify_cross_node_causality(cx).await.unwrap();
-            assert!(causality_preserved);
+                // Check final causality state
+                let causality_preserved = framework.verify_cross_node_causality(cx).await.unwrap();
+                assert!(causality_preserved);
 
-            // Verify concurrent operations were recorded
-            let stats = framework.get_serialization_stats().await;
-            assert_eq!(stats.obligations_serialized, node_count);
-            assert_eq!(stats.causal_violations_detected, 0);
+                // Verify concurrent operations were recorded
+                let stats = framework.get_serialization_stats().await;
+                assert_eq!(stats.obligations_serialized, node_count);
+                assert_eq!(stats.causal_violations_detected, 0);
 
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -776,68 +853,74 @@ mod tests {
         let framework = DialecticaVClockTestFramework::new().await.unwrap();
         let runtime = framework.runtime.clone();
 
-        runtime.region(Budget::unlimited(), |cx| async move {
-            // Create nodes for witness verification across vector clock boundaries
-            framework.create_node(NodeId::new(1)).await.unwrap();
-            framework.create_node(NodeId::new(2)).await.unwrap();
+        runtime
+            .region(Budget::unlimited(), |cx| async move {
+                // Create nodes for witness verification across vector clock boundaries
+                framework.create_node(NodeId::new(1)).await.unwrap();
+                framework.create_node(NodeId::new(2)).await.unwrap();
 
-            // Create obligation with witness requirement
-            let obligation_id = ObligationId::new_for_test(1, 0);
-            framework.create_dialectica_obligation(
-                cx,
-                NodeId::new(1),
-                obligation_id,
-                vec![],
-            ).await.unwrap();
+                // Create obligation with witness requirement
+                let obligation_id = ObligationId::new_for_test(1, 0);
+                framework
+                    .create_dialectica_obligation(cx, NodeId::new(1), obligation_id, vec![])
+                    .await
+                    .unwrap();
 
-            // Construct proof and witness
-            let proof = framework.construct_proof(cx, obligation_id, NodeId::new(1)).await.unwrap();
+                // Construct proof and witness
+                let proof = framework
+                    .construct_proof(cx, obligation_id, NodeId::new(1))
+                    .await
+                    .unwrap();
 
-            // Create witness for the proof
-            let witness = DialecticaWitness::construct_for_proof(&proof)?;
+                // Create witness for the proof
+                let witness = DialecticaWitness::construct_for_proof(&proof)?;
 
-            // Update obligation with witness
-            {
-                let mut obligation_registry = framework.obligation_registry.write().await;
-                if let Some(obligation) = obligation_registry.get_mut(&obligation_id) {
-                    obligation.witness = Some(witness.clone());
-                    obligation.state = ProofState::Witnessed;
+                // Update obligation with witness
+                {
+                    let mut obligation_registry = framework.obligation_registry.write().await;
+                    if let Some(obligation) = obligation_registry.get_mut(&obligation_id) {
+                        obligation.witness = Some(witness.clone());
+                        obligation.state = ProofState::Witnessed;
+                    }
                 }
-            }
 
-            // Serialize obligation with witness across vector clock boundary
-            let serialized = framework.serialize_obligation_causally(
-                cx,
-                obligation_id,
-                NodeId::new(1),
-                NodeId::new(2),
-            ).await.unwrap();
+                // Serialize obligation with witness across vector clock boundary
+                let serialized = framework
+                    .serialize_obligation_causally(
+                        cx,
+                        obligation_id,
+                        NodeId::new(1),
+                        NodeId::new(2),
+                    )
+                    .await
+                    .unwrap();
 
-            // Deserialize and verify witness is preserved
-            let deserialized_id = framework.deserialize_obligation_causally(
-                cx,
-                &serialized,
-                NodeId::new(2),
-            ).await.unwrap();
+                // Deserialize and verify witness is preserved
+                let deserialized_id = framework
+                    .deserialize_obligation_causally(cx, &serialized, NodeId::new(2))
+                    .await
+                    .unwrap();
 
-            assert_eq!(deserialized_id, obligation_id);
+                assert_eq!(deserialized_id, obligation_id);
 
-            // Verify witness integrity across vector clock boundary
-            {
-                let obligation_registry = framework.obligation_registry.read().await;
-                let obligation = obligation_registry.get(&obligation_id).unwrap();
-                assert!(obligation.witness.is_some());
+                // Verify witness integrity across vector clock boundary
+                {
+                    let obligation_registry = framework.obligation_registry.read().await;
+                    let obligation = obligation_registry.get(&obligation_id).unwrap();
+                    assert!(obligation.witness.is_some());
 
-                let preserved_witness = obligation.witness.as_ref().unwrap();
-                assert!(preserved_witness.verify_against_proof(&proof)?);
-            }
+                    let preserved_witness = obligation.witness.as_ref().unwrap();
+                    assert!(preserved_witness.verify_against_proof(&proof)?);
+                }
 
-            // Check that witness verification was recorded
-            let stats = framework.get_serialization_stats().await;
-            assert_eq!(stats.obligations_serialized, 1);
-            assert_eq!(stats.causal_violations_detected, 0);
+                // Check that witness verification was recorded
+                let stats = framework.get_serialization_stats().await;
+                assert_eq!(stats.obligations_serialized, 1);
+                assert_eq!(stats.causal_violations_detected, 0);
 
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 }

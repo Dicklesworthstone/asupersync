@@ -27,18 +27,16 @@ mod tests {
     )]
 
     use crate::{
-        channel::{
-            broadcast::{self, RecvError, SendError, TryRecvError},
-        },
+        channel::broadcast::{self, RecvError, SendError, TryRecvError},
         cx::{Cx, Scope},
         error::{Error, Result},
-        runtime::{spawn, Runtime},
+        runtime::{Runtime, spawn},
         stream::{
-            broadcast_stream::{BroadcastStream, BroadcastStreamRecvError},
             Stream, StreamExt,
+            broadcast_stream::{BroadcastStream, BroadcastStreamRecvError},
         },
         sync::{Arc, Mutex, RwLock},
-        time::{sleep, Duration, Instant},
+        time::{Duration, Instant, sleep},
         types::{Budget, Outcome, TaskId},
     };
     use std::{
@@ -138,7 +136,10 @@ mod tests {
         }
 
         fn record_error(&self, consumer_id: String, error: BroadcastStreamRecvError) {
-            self.error_messages.lock().unwrap().push((consumer_id, error));
+            self.error_messages
+                .lock()
+                .unwrap()
+                .push((consumer_id, error));
         }
 
         fn get_messages(&self, consumer_id: &str) -> Vec<TestMessage> {
@@ -217,7 +218,11 @@ mod tests {
             })
         }
 
-        async fn test_basic_stream_integration(&self, cx: &Cx, stats: &mut BroadcastStreamStats) -> Result<()> {
+        async fn test_basic_stream_integration(
+            &self,
+            cx: &Cx,
+            stats: &mut BroadcastStreamStats,
+        ) -> Result<()> {
             // Create broadcast stream adapter
             let receiver = {
                 let sender = self.sender.lock().unwrap();
@@ -260,12 +265,9 @@ mod tests {
 
             // Receive messages via stream interface
             let consumer_id = "basic_integration".to_string();
-            let received_count = self.consume_stream_messages(
-                cx,
-                &mut broadcast_stream,
-                &consumer_id,
-                messages.len(),
-            ).await?;
+            let received_count = self
+                .consume_stream_messages(cx, &mut broadcast_stream, &consumer_id, messages.len())
+                .await?;
 
             stats.messages_received_via_streams += received_count;
 
@@ -280,7 +282,11 @@ mod tests {
             Ok(())
         }
 
-        async fn test_backpressure_handling(&self, cx: &Cx, stats: &mut BroadcastStreamStats) -> Result<()> {
+        async fn test_backpressure_handling(
+            &self,
+            cx: &Cx,
+            stats: &mut BroadcastStreamStats,
+        ) -> Result<()> {
             // Create slow consumer stream
             let receiver = {
                 let sender = self.sender.lock().unwrap();
@@ -311,17 +317,20 @@ mod tests {
                     sleep(Duration::from_millis(10)).await;
                 }
                 Ok::<(), Error>(())
-            }).await;
+            })
+            .await;
 
             // Consume slowly to create backpressure
             let slow_consumer_task = spawn(cx, async {
                 let consumer_id = "backpressure_test".to_string();
                 let mut received = 0;
 
-                while received < 15 { // Don't consume all to test backpressure
+                while received < 15 {
+                    // Don't consume all to test backpressure
                     match slow_stream.next().await {
                         Some(Ok(msg)) => {
-                            self.message_collector.record_message(consumer_id.clone(), msg);
+                            self.message_collector
+                                .record_message(consumer_id.clone(), msg);
                             received += 1;
                             stats.messages_received_via_streams += 1;
 
@@ -338,7 +347,8 @@ mod tests {
                 }
 
                 Ok::<(), Error>(())
-            }).await;
+            })
+            .await;
 
             // Wait for both tasks
             fast_sender_task?;
@@ -347,7 +357,11 @@ mod tests {
             Ok(())
         }
 
-        async fn test_error_propagation(&self, cx: &Cx, stats: &mut BroadcastStreamStats) -> Result<()> {
+        async fn test_error_propagation(
+            &self,
+            cx: &Cx,
+            stats: &mut BroadcastStreamStats,
+        ) -> Result<()> {
             // Create stream that will experience lagged errors
             let receiver = {
                 let sender = self.sender.lock().unwrap();
@@ -381,12 +395,15 @@ mod tests {
             for _ in 0..10 {
                 match lagged_stream.next().await {
                     Some(Ok(msg)) => {
-                        self.message_collector.record_message(consumer_id.clone(), msg);
+                        self.message_collector
+                            .record_message(consumer_id.clone(), msg);
                         stats.messages_received_via_streams += 1;
                     }
                     Some(Err(BroadcastStreamRecvError::Lagged(count))) => {
-                        self.message_collector.record_error(consumer_id.clone(),
-                            BroadcastStreamRecvError::Lagged(count));
+                        self.message_collector.record_error(
+                            consumer_id.clone(),
+                            BroadcastStreamRecvError::Lagged(count),
+                        );
                         lagged_errors += 1;
                         stats.lagged_errors_handled += 1;
                         break; // Exit after first lagged error
@@ -421,12 +438,19 @@ mod tests {
                 }
             }
 
-            assert!(channel_closed, "Stream should terminate after channel closure");
+            assert!(
+                channel_closed,
+                "Stream should terminate after channel closure"
+            );
 
             Ok(())
         }
 
-        async fn test_stream_combinators(&self, cx: &Cx, stats: &mut BroadcastStreamStats) -> Result<()> {
+        async fn test_stream_combinators(
+            &self,
+            cx: &Cx,
+            stats: &mut BroadcastStreamStats,
+        ) -> Result<()> {
             // Recreate channel for combinator tests
             let (sender, receiver) = broadcast::channel(32);
             *self.sender.lock().unwrap() = Some(sender);
@@ -435,23 +459,43 @@ mod tests {
             stats.stream_adapters_created += 1;
 
             // Test filter combinator with broadcast stream
-            let filtered_stream = broadcast_stream
-                .filter(|result| {
-                    if let Ok(msg) = result {
-                        msg.priority == MessagePriority::High || msg.priority == MessagePriority::Critical
-                    } else {
-                        true // Pass through errors
-                    }
-                });
+            let filtered_stream = broadcast_stream.filter(|result| {
+                if let Ok(msg) = result {
+                    msg.priority == MessagePriority::High
+                        || msg.priority == MessagePriority::Critical
+                } else {
+                    true // Pass through errors
+                }
+            });
 
             stats.stream_combinators_applied += 1;
 
             // Send mixed priority messages
             let test_messages = vec![
-                TestMessage { id: 301, content: "Low priority".to_string(), timestamp: 20000, priority: MessagePriority::Low },
-                TestMessage { id: 302, content: "High priority".to_string(), timestamp: 20100, priority: MessagePriority::High },
-                TestMessage { id: 303, content: "Normal priority".to_string(), timestamp: 20200, priority: MessagePriority::Normal },
-                TestMessage { id: 304, content: "Critical priority".to_string(), timestamp: 20300, priority: MessagePriority::Critical },
+                TestMessage {
+                    id: 301,
+                    content: "Low priority".to_string(),
+                    timestamp: 20000,
+                    priority: MessagePriority::Low,
+                },
+                TestMessage {
+                    id: 302,
+                    content: "High priority".to_string(),
+                    timestamp: 20100,
+                    priority: MessagePriority::High,
+                },
+                TestMessage {
+                    id: 303,
+                    content: "Normal priority".to_string(),
+                    timestamp: 20200,
+                    priority: MessagePriority::Normal,
+                },
+                TestMessage {
+                    id: 304,
+                    content: "Critical priority".to_string(),
+                    timestamp: 20300,
+                    priority: MessagePriority::Critical,
+                },
             ];
 
             let sender = self.sender.lock().unwrap();
@@ -473,8 +517,12 @@ mod tests {
                 match filtered_stream.next().await {
                     Some(Ok(msg)) => {
                         // Should only receive High and Critical priority messages
-                        assert!(matches!(msg.priority, MessagePriority::High | MessagePriority::Critical));
-                        self.message_collector.record_message(consumer_id.clone(), msg);
+                        assert!(matches!(
+                            msg.priority,
+                            MessagePriority::High | MessagePriority::Critical
+                        ));
+                        self.message_collector
+                            .record_message(consumer_id.clone(), msg);
                         filtered_count += 1;
                         stats.messages_received_via_streams += 1;
                     }
@@ -491,7 +539,11 @@ mod tests {
             Ok(())
         }
 
-        async fn test_multiple_consumers(&self, cx: &Cx, stats: &mut BroadcastStreamStats) -> Result<()> {
+        async fn test_multiple_consumers(
+            &self,
+            cx: &Cx,
+            stats: &mut BroadcastStreamStats,
+        ) -> Result<()> {
             // Create multiple stream consumers
             let num_consumers = 5;
             let mut consumer_tasks = Vec::new();
@@ -527,7 +579,8 @@ mod tests {
                     }
 
                     received_count
-                }).await;
+                })
+                .await;
 
                 consumer_tasks.push(task);
             }
@@ -562,7 +615,11 @@ mod tests {
             Ok(())
         }
 
-        async fn test_lagged_message_handling(&self, cx: &Cx, stats: &mut BroadcastStreamStats) -> Result<()> {
+        async fn test_lagged_message_handling(
+            &self,
+            cx: &Cx,
+            stats: &mut BroadcastStreamStats,
+        ) -> Result<()> {
             // Create stream with small buffer to force lagging
             let (sender, receiver) = broadcast::channel(5); // Small capacity
             *self.sender.lock().unwrap() = Some(sender);
@@ -593,13 +650,16 @@ mod tests {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok(msg) => {
-                        self.message_collector.record_message(consumer_id.clone(), msg);
+                        self.message_collector
+                            .record_message(consumer_id.clone(), msg);
                         received_after_lag += 1;
                         stats.messages_received_via_streams += 1;
                     }
                     Err(BroadcastStreamRecvError::Lagged(count)) => {
-                        self.message_collector.record_error(consumer_id.clone(),
-                            BroadcastStreamRecvError::Lagged(count));
+                        self.message_collector.record_error(
+                            consumer_id.clone(),
+                            BroadcastStreamRecvError::Lagged(count),
+                        );
                         stats.lagged_errors_handled += 1;
                         // Continue consuming after lag error
                     }
@@ -610,7 +670,10 @@ mod tests {
                 }
             }
 
-            assert!(stats.lagged_errors_handled > 0, "Should have handled lagged message errors");
+            assert!(
+                stats.lagged_errors_handled > 0,
+                "Should have handled lagged message errors"
+            );
 
             Ok(())
         }
@@ -627,11 +690,13 @@ mod tests {
             for _ in 0..expected_count {
                 match stream.next().await {
                     Some(Ok(msg)) => {
-                        self.message_collector.record_message(consumer_id.to_string(), msg);
+                        self.message_collector
+                            .record_message(consumer_id.to_string(), msg);
                         received += 1;
                     }
                     Some(Err(e)) => {
-                        self.message_collector.record_error(consumer_id.to_string(), e);
+                        self.message_collector
+                            .record_error(consumer_id.to_string(), e);
                     }
                     None => break,
                 }
@@ -640,7 +705,10 @@ mod tests {
             Ok(received)
         }
 
-        async fn verify_integration_properties(&self, stats: &BroadcastStreamStats) -> Result<bool> {
+        async fn verify_integration_properties(
+            &self,
+            stats: &BroadcastStreamStats,
+        ) -> Result<bool> {
             let total_messages_collected = self.message_collector.total_messages_received();
             let total_errors = self.message_collector.total_errors();
 
@@ -686,15 +754,37 @@ mod tests {
 
             let result = framework.execute_integration_test(&cx).await?;
 
-            assert!(result.success, "Basic broadcast-stream integration should succeed: {:?}", result.error);
-            assert!(result.integration_stats.messages_sent > 0, "Should have sent messages");
-            assert!(result.integration_stats.messages_received_via_streams > 0, "Should have received messages via streams");
-            assert!(result.integration_stats.stream_adapters_created > 0, "Should have created stream adapters");
+            assert!(
+                result.success,
+                "Basic broadcast-stream integration should succeed: {:?}",
+                result.error
+            );
+            assert!(
+                result.integration_stats.messages_sent > 0,
+                "Should have sent messages"
+            );
+            assert!(
+                result.integration_stats.messages_received_via_streams > 0,
+                "Should have received messages via streams"
+            );
+            assert!(
+                result.integration_stats.stream_adapters_created > 0,
+                "Should have created stream adapters"
+            );
 
             println!("✓ Basic broadcast channel ↔ stream integration verified");
-            println!("  Messages sent: {}", result.integration_stats.messages_sent);
-            println!("  Messages via streams: {}", result.integration_stats.messages_received_via_streams);
-            println!("  Stream adapters: {}", result.integration_stats.stream_adapters_created);
+            println!(
+                "  Messages sent: {}",
+                result.integration_stats.messages_sent
+            );
+            println!(
+                "  Messages via streams: {}",
+                result.integration_stats.messages_received_via_streams
+            );
+            println!(
+                "  Stream adapters: {}",
+                result.integration_stats.stream_adapters_created
+            );
             println!("  Duration: {}ms", result.duration_ms);
 
             Ok(())
@@ -711,9 +801,14 @@ mod tests {
             let framework = BroadcastStreamTestFramework::new(8)?; // Small capacity
 
             let mut stats = BroadcastStreamStats::default();
-            framework.test_backpressure_handling(&cx, &mut stats).await?;
+            framework
+                .test_backpressure_handling(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.backpressure_events > 0, "Should have detected backpressure events");
+            assert!(
+                stats.backpressure_events > 0,
+                "Should have detected backpressure events"
+            );
 
             println!("✓ Broadcast stream backpressure handling verified");
 
@@ -733,8 +828,14 @@ mod tests {
             let mut stats = BroadcastStreamStats::default();
             framework.test_error_propagation(&cx, &mut stats).await?;
 
-            assert!(stats.lagged_errors_handled > 0, "Should have handled lagged errors");
-            assert!(stats.channel_closure_propagated > 0, "Should have propagated channel closure");
+            assert!(
+                stats.lagged_errors_handled > 0,
+                "Should have handled lagged errors"
+            );
+            assert!(
+                stats.channel_closure_propagated > 0,
+                "Should have propagated channel closure"
+            );
 
             println!("✓ Broadcast stream error propagation verified");
 
@@ -754,7 +855,10 @@ mod tests {
             let mut stats = BroadcastStreamStats::default();
             framework.test_stream_combinators(&cx, &mut stats).await?;
 
-            assert!(stats.stream_combinators_applied > 0, "Should have applied stream combinators");
+            assert!(
+                stats.stream_combinators_applied > 0,
+                "Should have applied stream combinators"
+            );
 
             println!("✓ Broadcast stream combinators integration verified");
 
@@ -774,10 +878,15 @@ mod tests {
             let mut stats = BroadcastStreamStats::default();
             framework.test_multiple_consumers(&cx, &mut stats).await?;
 
-            assert!(stats.concurrent_stream_consumers >= 5, "Should have multiple concurrent consumers");
+            assert!(
+                stats.concurrent_stream_consumers >= 5,
+                "Should have multiple concurrent consumers"
+            );
             // Fan-out: each message should be received by each consumer
-            assert!(stats.messages_received_via_streams >= stats.messages_sent,
-                "Should maintain broadcast fan-out behavior through streams");
+            assert!(
+                stats.messages_received_via_streams >= stats.messages_sent,
+                "Should maintain broadcast fan-out behavior through streams"
+            );
 
             println!("✓ Broadcast stream multiple consumers integration verified");
 
@@ -795,9 +904,14 @@ mod tests {
             let framework = BroadcastStreamTestFramework::new(4)?; // Very small capacity
 
             let mut stats = BroadcastStreamStats::default();
-            framework.test_lagged_message_handling(&cx, &mut stats).await?;
+            framework
+                .test_lagged_message_handling(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.lagged_errors_handled > 0, "Should have handled lagged message errors");
+            assert!(
+                stats.lagged_errors_handled > 0,
+                "Should have handled lagged message errors"
+            );
 
             println!("✓ Broadcast stream lagged message recovery verified");
 

@@ -30,12 +30,12 @@ mod tests {
         cx::{Cx, Scope},
         error::{Error, Result},
         obligation::marking::{
-            MarkingAnalyzer, MarkingEvent, MarkingEventKind, MarkingResult, MarkingDimension,
+            MarkingAnalyzer, MarkingDimension, MarkingEvent, MarkingEventKind, MarkingResult,
         },
         record::ObligationKind,
-        runtime::{spawn, Runtime},
+        runtime::{Runtime, spawn},
         sync::{Arc, Mutex, RwLock},
-        time::{sleep, Duration, Instant},
+        time::{Duration, Instant, sleep},
         types::{Budget, CancelReason, ObligationId, Outcome, RegionId, TaskId, Time},
     };
     use std::{
@@ -145,13 +145,29 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum IntegrationEventType {
-        ScopeCreated { parent: Option<RegionId>, depth: u32 },
-        CheckpointMarked { message: String },
-        CancelRequested { reason: String },
-        ObligationReserved { kind: ObligationKind },
-        ObligationResolved { kind: ObligationKind, state: ObligationState },
-        ScopeExited { clean: bool },
-        LeakDetected { kind: ObligationKind },
+        ScopeCreated {
+            parent: Option<RegionId>,
+            depth: u32,
+        },
+        CheckpointMarked {
+            message: String,
+        },
+        CancelRequested {
+            reason: String,
+        },
+        ObligationReserved {
+            kind: ObligationKind,
+        },
+        ObligationResolved {
+            kind: ObligationKind,
+            state: ObligationState,
+        },
+        ScopeExited {
+            clean: bool,
+        },
+        LeakDetected {
+            kind: ObligationKind,
+        },
     }
 
     impl CxMarkingTestFramework {
@@ -214,7 +230,13 @@ mod tests {
 
                 // Create obligation in this scope
                 let obligation_id = ObligationId::new_for_test(1, 0);
-                self.reserve_obligation(obligation_id, ObligationKind::SendPermit, region_id, cx.task_id()).await;
+                self.reserve_obligation(
+                    obligation_id,
+                    ObligationKind::SendPermit,
+                    region_id,
+                    cx.task_id(),
+                )
+                .await;
                 stats.obligation_marks_created += 1;
 
                 // Create checkpoint - this should mark obligations correctly
@@ -222,9 +244,11 @@ mod tests {
                 stats.checkpoints_marked += 1;
 
                 self.record_event(
-                    IntegrationEventType::CheckpointMarked { message: "test_checkpoint_1".to_string() },
+                    IntegrationEventType::CheckpointMarked {
+                        message: "test_checkpoint_1".to_string(),
+                    },
                     region_id,
-                    Some(obligation_id)
+                    Some(obligation_id),
                 );
 
                 // Resolve obligation
@@ -232,7 +256,8 @@ mod tests {
                 stats.obligation_marks_resolved += 1;
 
                 Ok(())
-            }).await;
+            })
+            .await;
 
             scope_result?;
 
@@ -242,7 +267,11 @@ mod tests {
             Ok(())
         }
 
-        async fn test_cancel_propagation_marking(&self, cx: &Cx, stats: &mut CxMarkingStats) -> Result<()> {
+        async fn test_cancel_propagation_marking(
+            &self,
+            cx: &Cx,
+            stats: &mut CxMarkingStats,
+        ) -> Result<()> {
             // Create scope that will be cancelled
             let scope_task = spawn(cx, async {
                 let scope_result = Scope::new(cx, async {
@@ -259,7 +288,8 @@ mod tests {
                     ];
 
                     for (obligation_id, kind) in &obligations {
-                        self.reserve_obligation(*obligation_id, *kind, region_id, cx.task_id()).await;
+                        self.reserve_obligation(*obligation_id, *kind, region_id, cx.task_id())
+                            .await;
                         stats.obligation_marks_created += 1;
                     }
 
@@ -277,10 +307,12 @@ mod tests {
                     }
 
                     Ok(())
-                }).await;
+                })
+                .await;
 
                 scope_result
-            }).await;
+            })
+            .await;
 
             // Cancel the scope task to test cancel propagation
             sleep(Duration::from_millis(20)).await; // Let it start
@@ -291,9 +323,11 @@ mod tests {
             let _ = scope_task.await;
 
             self.record_event(
-                IntegrationEventType::CancelRequested { reason: "UserRequested".to_string() },
+                IntegrationEventType::CancelRequested {
+                    reason: "UserRequested".to_string(),
+                },
                 RegionId::new_for_test(2, 0),
-                None
+                None,
             );
 
             // Analyze marking after cancel
@@ -302,7 +336,11 @@ mod tests {
             Ok(())
         }
 
-        async fn test_nested_scope_marking(&self, cx: &Cx, stats: &mut CxMarkingStats) -> Result<()> {
+        async fn test_nested_scope_marking(
+            &self,
+            cx: &Cx,
+            stats: &mut CxMarkingStats,
+        ) -> Result<()> {
             let max_depth = 5;
 
             // Create deeply nested scopes with obligations
@@ -316,21 +354,37 @@ mod tests {
             Ok(())
         }
 
-        async fn create_nested_scopes(&self, cx: &Cx, depth: u32, stats: &mut CxMarkingStats) -> Result<()> {
+        async fn create_nested_scopes(
+            &self,
+            cx: &Cx,
+            depth: u32,
+            stats: &mut CxMarkingStats,
+        ) -> Result<()> {
             if depth == 0 {
                 return Ok(());
             }
 
             let scope_result = Scope::new(cx, async {
                 let region_id = cx.region_id();
-                let parent_region = if depth == 5 { None } else { Some(RegionId::new_for_test(0, 0)) };
+                let parent_region = if depth == 5 {
+                    None
+                } else {
+                    Some(RegionId::new_for_test(0, 0))
+                };
 
-                self.register_scope(region_id, parent_region, 6 - depth).await;
+                self.register_scope(region_id, parent_region, 6 - depth)
+                    .await;
                 stats.nested_scopes_created += 1;
 
                 // Create obligation at this depth
                 let obligation_id = ObligationId::new_for_test(depth as u64, 0);
-                self.reserve_obligation(obligation_id, ObligationKind::SendPermit, region_id, cx.task_id()).await;
+                self.reserve_obligation(
+                    obligation_id,
+                    ObligationKind::SendPermit,
+                    region_id,
+                    cx.task_id(),
+                )
+                .await;
                 stats.obligation_marks_created += 1;
 
                 // Checkpoint at each level
@@ -345,12 +399,17 @@ mod tests {
                 stats.obligation_marks_resolved += 1;
 
                 Ok(())
-            }).await;
+            })
+            .await;
 
             scope_result
         }
 
-        async fn test_obligation_leak_detection(&self, cx: &Cx, stats: &mut CxMarkingStats) -> Result<()> {
+        async fn test_obligation_leak_detection(
+            &self,
+            cx: &Cx,
+            stats: &mut CxMarkingStats,
+        ) -> Result<()> {
             // Intentionally create leaky scope
             let scope_result = Scope::new(cx, async {
                 let region_id = cx.region_id();
@@ -365,7 +424,13 @@ mod tests {
                 ];
 
                 for &obligation_id in &leaky_obligations {
-                    self.reserve_obligation(obligation_id, ObligationKind::SendPermit, region_id, cx.task_id()).await;
+                    self.reserve_obligation(
+                        obligation_id,
+                        ObligationKind::SendPermit,
+                        region_id,
+                        cx.task_id(),
+                    )
+                    .await;
                     stats.obligation_marks_created += 1;
                 }
 
@@ -376,7 +441,8 @@ mod tests {
                 // The scope will exit with unresolved obligations
 
                 Ok(())
-            }).await;
+            })
+            .await;
 
             scope_result?;
 
@@ -388,7 +454,7 @@ mod tests {
                 self.record_event(
                     IntegrationEventType::LeakDetected { kind: leak.kind },
                     leak.owning_region,
-                    Some(leak.obligation_id)
+                    Some(leak.obligation_id),
                 );
             }
 
@@ -397,7 +463,11 @@ mod tests {
             Ok(())
         }
 
-        async fn test_scope_exit_cleaning(&self, cx: &Cx, stats: &mut CxMarkingStats) -> Result<()> {
+        async fn test_scope_exit_cleaning(
+            &self,
+            cx: &Cx,
+            stats: &mut CxMarkingStats,
+        ) -> Result<()> {
             // Create scope with proper cleanup
             let scope_result = Scope::new(cx, async {
                 let region_id = cx.region_id();
@@ -413,7 +483,13 @@ mod tests {
 
                 // Reserve obligations
                 for &obligation_id in &obligations {
-                    self.reserve_obligation(obligation_id, ObligationKind::Ack, region_id, cx.task_id()).await;
+                    self.reserve_obligation(
+                        obligation_id,
+                        ObligationKind::Ack,
+                        region_id,
+                        cx.task_id(),
+                    )
+                    .await;
                     stats.obligation_marks_created += 1;
                 }
 
@@ -431,7 +507,8 @@ mod tests {
                 stats.scope_exits_cleaned += 1;
 
                 Ok(())
-            }).await;
+            })
+            .await;
 
             scope_result?;
 
@@ -440,7 +517,11 @@ mod tests {
             Ok(())
         }
 
-        async fn test_cancel_marking_consistency(&self, cx: &Cx, stats: &mut CxMarkingStats) -> Result<()> {
+        async fn test_cancel_marking_consistency(
+            &self,
+            cx: &Cx,
+            stats: &mut CxMarkingStats,
+        ) -> Result<()> {
             // Test that cancel propagation maintains marking consistency
             let cancel_task = spawn(cx, async {
                 let scope_result = Scope::new(cx, async {
@@ -451,7 +532,13 @@ mod tests {
 
                     // Create obligation before cancel
                     let obligation_id = ObligationId::new_for_test(101, 0);
-                    self.reserve_obligation(obligation_id, ObligationKind::Lease, region_id, cx.task_id()).await;
+                    self.reserve_obligation(
+                        obligation_id,
+                        ObligationKind::Lease,
+                        region_id,
+                        cx.task_id(),
+                    )
+                    .await;
                     stats.obligation_marks_created += 1;
 
                     cx.checkpoint("before_cancel")?;
@@ -473,10 +560,12 @@ mod tests {
                     stats.obligation_marks_resolved += 1;
 
                     Ok(())
-                }).await;
+                })
+                .await;
 
                 scope_result
-            }).await;
+            })
+            .await;
 
             // Cancel after brief delay
             sleep(Duration::from_millis(10)).await;
@@ -503,16 +592,25 @@ mod tests {
                 cancel_requested: false,
             };
 
-            self.scope_registry.write().unwrap().register_scope(scope_info);
+            self.scope_registry
+                .write()
+                .unwrap()
+                .register_scope(scope_info);
 
             self.record_event(
                 IntegrationEventType::ScopeCreated { parent, depth },
                 region_id,
-                None
+                None,
             );
         }
 
-        async fn reserve_obligation(&self, obligation_id: ObligationId, kind: ObligationKind, region_id: RegionId, task_id: TaskId) {
+        async fn reserve_obligation(
+            &self,
+            obligation_id: ObligationId,
+            kind: ObligationKind,
+            region_id: RegionId,
+            task_id: TaskId,
+        ) {
             let tracking_info = ObligationTrackingInfo {
                 obligation_id,
                 kind,
@@ -523,7 +621,10 @@ mod tests {
                 resolved_at: None,
             };
 
-            self.scope_registry.write().unwrap().track_obligation(tracking_info);
+            self.scope_registry
+                .write()
+                .unwrap()
+                .track_obligation(tracking_info);
 
             // Record marking event
             let marking_event = MarkingEvent::new(
@@ -533,7 +634,7 @@ mod tests {
                     kind,
                     task: task_id,
                     region: region_id,
-                }
+                },
             );
 
             self.marking_events.lock().unwrap().push(marking_event);
@@ -541,7 +642,7 @@ mod tests {
             self.record_event(
                 IntegrationEventType::ObligationReserved { kind },
                 region_id,
-                Some(obligation_id)
+                Some(obligation_id),
             );
         }
 
@@ -558,16 +659,19 @@ mod tests {
                         obligation: obligation_id,
                         region: region_id,
                         kind: tracking.kind,
-                    }
+                    },
                 );
 
                 drop(registry); // Release lock before using self.marking_events
                 self.marking_events.lock().unwrap().push(marking_event);
 
                 self.record_event(
-                    IntegrationEventType::ObligationResolved { kind: tracking.kind, state: ObligationState::Committed },
+                    IntegrationEventType::ObligationResolved {
+                        kind: tracking.kind,
+                        state: ObligationState::Committed,
+                    },
                     region_id,
-                    Some(obligation_id)
+                    Some(obligation_id),
                 );
             }
         }
@@ -584,16 +688,19 @@ mod tests {
                         obligation: obligation_id,
                         region: region_id,
                         kind: tracking.kind,
-                    }
+                    },
                 );
 
                 drop(registry);
                 self.marking_events.lock().unwrap().push(marking_event);
 
                 self.record_event(
-                    IntegrationEventType::ObligationResolved { kind: tracking.kind, state: ObligationState::Aborted },
+                    IntegrationEventType::ObligationResolved {
+                        kind: tracking.kind,
+                        state: ObligationState::Aborted,
+                    },
                     region_id,
-                    Some(obligation_id)
+                    Some(obligation_id),
                 );
             }
         }
@@ -613,12 +720,15 @@ mod tests {
         }
 
         async fn mark_scope_clean_exit(&self, region_id: RegionId) {
-            self.scope_registry.write().unwrap().mark_scope_clean_exit(region_id);
+            self.scope_registry
+                .write()
+                .unwrap()
+                .mark_scope_clean_exit(region_id);
 
             self.record_event(
                 IntegrationEventType::ScopeExited { clean: true },
                 region_id,
-                None
+                None,
             );
         }
 
@@ -632,7 +742,12 @@ mod tests {
             Ok(result)
         }
 
-        fn record_event(&self, event_type: IntegrationEventType, scope_region: RegionId, obligation_id: Option<ObligationId>) {
+        fn record_event(
+            &self,
+            event_type: IntegrationEventType,
+            scope_region: RegionId,
+            obligation_id: Option<ObligationId>,
+        ) {
             let event = IntegrationEvent {
                 timestamp: Instant::now(),
                 event_type,
@@ -667,10 +782,24 @@ mod tests {
 
             // Verify event sequence makes sense
             let events_recorded = !events.is_empty()
-                && events.iter().any(|e| matches!(e.event_type, IntegrationEventType::ScopeCreated { .. }))
-                && events.iter().any(|e| matches!(e.event_type, IntegrationEventType::CheckpointMarked { .. }))
-                && events.iter().any(|e| matches!(e.event_type, IntegrationEventType::ObligationReserved { .. }))
-                && events.iter().any(|e| matches!(e.event_type, IntegrationEventType::ObligationResolved { .. }));
+                && events
+                    .iter()
+                    .any(|e| matches!(e.event_type, IntegrationEventType::ScopeCreated { .. }))
+                && events
+                    .iter()
+                    .any(|e| matches!(e.event_type, IntegrationEventType::CheckpointMarked { .. }))
+                && events.iter().any(|e| {
+                    matches!(
+                        e.event_type,
+                        IntegrationEventType::ObligationReserved { .. }
+                    )
+                })
+                && events.iter().any(|e| {
+                    matches!(
+                        e.event_type,
+                        IntegrationEventType::ObligationResolved { .. }
+                    )
+                });
 
             // Run final marking analysis to check for leaks
             let final_analysis = self.run_marking_analysis(&mut stats.clone()).await?;
@@ -695,7 +824,10 @@ mod tests {
             let region_id = scope_info.region_id;
 
             if let Some(parent) = scope_info.parent_region {
-                self.scope_hierarchy.entry(parent).or_insert_with(Vec::new).push(region_id);
+                self.scope_hierarchy
+                    .entry(parent)
+                    .or_insert_with(Vec::new)
+                    .push(region_id);
             }
 
             self.scopes.insert(region_id, scope_info);
@@ -709,14 +841,20 @@ mod tests {
                 scope.obligations.insert(obligation_id);
             }
 
-            self.obligation_tracking.insert(obligation_id, tracking_info);
+            self.obligation_tracking
+                .insert(obligation_id, tracking_info);
         }
 
-        fn get_obligation_mut(&mut self, obligation_id: ObligationId) -> Option<&mut ObligationTrackingInfo> {
+        fn get_obligation_mut(
+            &mut self,
+            obligation_id: ObligationId,
+        ) -> Option<&mut ObligationTrackingInfo> {
             self.obligation_tracking.get_mut(&obligation_id)
         }
 
-        fn get_all_obligations(&self) -> impl Iterator<Item = (&ObligationId, &ObligationTrackingInfo)> {
+        fn get_all_obligations(
+            &self,
+        ) -> impl Iterator<Item = (&ObligationId, &ObligationTrackingInfo)> {
             self.obligation_tracking.iter()
         }
 
@@ -816,19 +954,53 @@ mod tests {
 
             let result = framework.execute_integration_test(&cx).await?;
 
-            assert!(result.success, "Basic CX ↔ obligation marking integration should succeed: {:?}", result.error);
-            assert!(result.integration_stats.nested_scopes_created > 0, "Should create nested scopes");
-            assert!(result.integration_stats.checkpoints_marked > 0, "Should mark checkpoints");
-            assert!(result.integration_stats.obligation_marks_created > 0, "Should create obligation marks");
-            assert!(result.integration_stats.cancel_propagations > 0, "Should have cancel propagations");
+            assert!(
+                result.success,
+                "Basic CX ↔ obligation marking integration should succeed: {:?}",
+                result.error
+            );
+            assert!(
+                result.integration_stats.nested_scopes_created > 0,
+                "Should create nested scopes"
+            );
+            assert!(
+                result.integration_stats.checkpoints_marked > 0,
+                "Should mark checkpoints"
+            );
+            assert!(
+                result.integration_stats.obligation_marks_created > 0,
+                "Should create obligation marks"
+            );
+            assert!(
+                result.integration_stats.cancel_propagations > 0,
+                "Should have cancel propagations"
+            );
 
             println!("✓ CX ↔ obligation marking integration verified");
-            println!("  Nested scopes created: {}", result.integration_stats.nested_scopes_created);
-            println!("  Checkpoints marked: {}", result.integration_stats.checkpoints_marked);
-            println!("  Obligation marks created: {}", result.integration_stats.obligation_marks_created);
-            println!("  Obligation marks resolved: {}", result.integration_stats.obligation_marks_resolved);
-            println!("  Cancel propagations: {}", result.integration_stats.cancel_propagations);
-            println!("  Scope exits cleaned: {}", result.integration_stats.scope_exits_cleaned);
+            println!(
+                "  Nested scopes created: {}",
+                result.integration_stats.nested_scopes_created
+            );
+            println!(
+                "  Checkpoints marked: {}",
+                result.integration_stats.checkpoints_marked
+            );
+            println!(
+                "  Obligation marks created: {}",
+                result.integration_stats.obligation_marks_created
+            );
+            println!(
+                "  Obligation marks resolved: {}",
+                result.integration_stats.obligation_marks_resolved
+            );
+            println!(
+                "  Cancel propagations: {}",
+                result.integration_stats.cancel_propagations
+            );
+            println!(
+                "  Scope exits cleaned: {}",
+                result.integration_stats.scope_exits_cleaned
+            );
             println!("  Duration: {}ms", result.duration_ms);
 
             Ok(())
@@ -848,7 +1020,10 @@ mod tests {
             framework.test_checkpoint_marking(&cx, &mut stats).await?;
 
             assert!(stats.checkpoints_marked > 0, "Should mark checkpoints");
-            assert!(stats.obligation_marks_created > 0, "Should create obligation marks");
+            assert!(
+                stats.obligation_marks_created > 0,
+                "Should create obligation marks"
+            );
 
             println!("✓ CX checkpoint obligation marking verified");
 
@@ -866,9 +1041,14 @@ mod tests {
             let framework = CxMarkingTestFramework::new()?;
 
             let mut stats = CxMarkingStats::default();
-            framework.test_cancel_propagation_marking(&cx, &mut stats).await?;
+            framework
+                .test_cancel_propagation_marking(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.cancel_propagations > 0, "Should have cancel propagations");
+            assert!(
+                stats.cancel_propagations > 0,
+                "Should have cancel propagations"
+            );
 
             println!("✓ CX cancel propagation marking consistency verified");
 
@@ -888,8 +1068,14 @@ mod tests {
             let mut stats = CxMarkingStats::default();
             framework.test_nested_scope_marking(&cx, &mut stats).await?;
 
-            assert!(stats.nested_scope_depth_max > 0, "Should test nested scope depth");
-            assert!(stats.nested_scopes_created >= stats.nested_scope_depth_max, "Should create nested scopes");
+            assert!(
+                stats.nested_scope_depth_max > 0,
+                "Should test nested scope depth"
+            );
+            assert!(
+                stats.nested_scopes_created >= stats.nested_scope_depth_max,
+                "Should create nested scopes"
+            );
 
             println!("✓ Nested scope obligation marking verified");
 
@@ -907,7 +1093,9 @@ mod tests {
             let framework = CxMarkingTestFramework::new()?;
 
             let mut stats = CxMarkingStats::default();
-            framework.test_obligation_leak_detection(&cx, &mut stats).await?;
+            framework
+                .test_obligation_leak_detection(&cx, &mut stats)
+                .await?;
 
             // Note: leaks_detected may be 0 if the mock system doesn't properly detect them
             println!("✓ Obligation leak detection integration verified");
@@ -928,7 +1116,10 @@ mod tests {
             let mut stats = CxMarkingStats::default();
             framework.test_scope_exit_cleaning(&cx, &mut stats).await?;
 
-            assert!(stats.scope_exits_cleaned > 0, "Should have clean scope exits");
+            assert!(
+                stats.scope_exits_cleaned > 0,
+                "Should have clean scope exits"
+            );
 
             println!("✓ Scope exit marking cleanup verified");
 

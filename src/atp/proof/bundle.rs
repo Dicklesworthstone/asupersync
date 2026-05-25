@@ -1482,7 +1482,10 @@ impl RaptorQDecodeMetadata {
         proof: &crate::raptorq::proof::DecodeProof,
         telemetry: Option<&RaptorQTelemetry>,
     ) -> Self {
-        let decode_success = matches!(proof.outcome, crate::raptorq::proof::ProofOutcome::Success { .. });
+        let decode_success = matches!(
+            proof.outcome,
+            crate::raptorq::proof::ProofOutcome::Success { .. }
+        );
         let overhead_ratio = if proof.received.source_count > 0 {
             proof.received.total as f64 / proof.received.source_count as f64
         } else {
@@ -1511,8 +1514,8 @@ impl RaptorQDecodeMetadata {
             k_prime_boundary: proof.config.k >= 1024, // K' boundary per RFC 6330
             excess_repair_symbols: excess_repair_symbols as u32,
             padding_truncated_bytes: 0, // Not available in current API
-            random_loss_pattern: None, // Could be enhanced based on test context
-            corrupted_symbols: 0, // Not available in current API
+            random_loss_pattern: None,  // Could be enhanced based on test context
+            corrupted_symbols: 0,       // Not available in current API
             pivot_events: proof.elimination.pivot_events.len() as u32,
             failure_reason,
             block_proof_hash: Some(proof.content_hash().to_hex()),
@@ -1531,7 +1534,10 @@ impl RaptorQDecodeMetadata {
             repair_roi: t.repair_roi,
         });
 
-        let success = matches!(proof.outcome, crate::raptorq::proof::ProofOutcome::Success { .. });
+        let success = matches!(
+            proof.outcome,
+            crate::raptorq::proof::ProofOutcome::Success { .. }
+        );
         let overhead_ratio = if proof.received.source_count > 0 {
             proof.received.total as f64 / proof.received.source_count as f64
         } else {
@@ -1564,9 +1570,21 @@ impl RaptorQDecodeMetadata {
             burst_loss_events: burst_events,
             tail_repair_activations: if loss_rate > 0.3 { 1 } else { 0 },
             lossy_repair_activations: if loss_rate > 0.2 { 1 } else { 0 },
-            resume_repair_operations: if regime_type == "mobile-unstable" { 1 } else { 0 },
-            relay_expensive_activations: if regime_type == "relay-expensive" { 1 } else { 0 },
-            mobile_unstable_activations: if regime_type == "mobile-unstable" { 1 } else { 0 },
+            resume_repair_operations: if regime_type == "mobile-unstable" {
+                1
+            } else {
+                0
+            },
+            relay_expensive_activations: if regime_type == "relay-expensive" {
+                1
+            } else {
+                0
+            },
+            mobile_unstable_activations: if regime_type == "mobile-unstable" {
+                1
+            } else {
+                0
+            },
             total_fallback_triggers: burst_events,
             repair_roi: if loss_rate > 0.5 { 0.8 } else { 0.95 },
         });
@@ -1584,16 +1602,23 @@ impl RaptorQConformanceResult {
             "linear_algebra_gf256".to_string(),
         ];
 
-        let success = matches!(proof.outcome, crate::raptorq::proof::ProofOutcome::Success { .. });
-        let corruption_detected = matches!(proof.outcome,
-            crate::raptorq::proof::ProofOutcome::Failure { reason: crate::raptorq::proof::FailureReason::SymbolEquationArityMismatch { .. } }
+        let success = matches!(
+            proof.outcome,
+            crate::raptorq::proof::ProofOutcome::Success { .. }
+        );
+        let corruption_detected = matches!(
+            proof.outcome,
+            crate::raptorq::proof::ProofOutcome::Failure {
+                reason: crate::raptorq::proof::FailureReason::SymbolEquationArityMismatch { .. }
+            }
         );
 
         Self {
             rfc6330_compliant: success,
             verified_guarantees,
             systematic_encoding_valid: proof.config.k > 0,
-            repair_equation_correct: proof.elimination.pivot_events.len() <= proof.config.k as usize,
+            repair_equation_correct: proof.elimination.pivot_events.len()
+                <= proof.config.k as usize,
             inactivation_decode_conformant: proof.elimination.pivots > 0 || proof.config.k == 0,
             linear_algebra_valid: proof.peeling.solved > 0 || proof.config.k == 0,
             gf256_operations_correct: !corruption_detected,

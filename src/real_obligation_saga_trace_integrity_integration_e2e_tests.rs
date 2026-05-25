@@ -30,11 +30,11 @@ mod tests {
         error::{Error, Result},
         lab::LabRuntime,
         obligation::saga::{
-            CompensationAction, CompensationActionType, CompensationResult, Lattice, MonotoneSagaExecutor,
-            Monotonicity, Saga, SagaBatch, SagaExecutionPlan, SagaOpKind, SagaPlan, SagaStep,
-            SagaStepError, SagaStepType, SagaOperationState,
+            CompensationAction, CompensationActionType, CompensationResult, Lattice,
+            MonotoneSagaExecutor, Monotonicity, Saga, SagaBatch, SagaExecutionPlan, SagaOpKind,
+            SagaOperationState, SagaPlan, SagaStep, SagaStepError, SagaStepType,
         },
-        runtime::{spawn, Runtime},
+        runtime::{Runtime, spawn},
         sync::{Mutex, RwLock},
         time::{Duration, Instant, sleep},
         trace::{
@@ -131,7 +131,10 @@ mod tests {
 
     impl MockSagaWithIntegrity {
         fn new(saga_id: String, plan: SagaPlan) -> Self {
-            let integrity_system = Arc::new(MockTraceIntegritySystem::new(format!("{}_integrity", saga_id)));
+            let integrity_system = Arc::new(MockTraceIntegritySystem::new(format!(
+                "{}_integrity",
+                saga_id
+            )));
             let executor = MonotoneSagaExecutor::new();
 
             Self {
@@ -159,7 +162,9 @@ mod tests {
                 match batch {
                     SagaBatch::CoordinationFree(steps) => {
                         for (step_idx, step) in steps.iter().enumerate() {
-                            let step_result = self.execute_step_with_integrity(cx, step, batch_idx, step_idx).await;
+                            let step_result = self
+                                .execute_step_with_integrity(cx, step, batch_idx, step_idx)
+                                .await;
                             forward_results.push(step_result);
                             stats.forward_steps_executed += 1;
 
@@ -169,7 +174,9 @@ mod tests {
                         }
                     }
                     SagaBatch::Coordinated(step) => {
-                        let step_result = self.execute_step_with_integrity(cx, step, batch_idx, 0).await;
+                        let step_result = self
+                            .execute_step_with_integrity(cx, step, batch_idx, 0)
+                            .await;
                         forward_results.push(step_result);
                         stats.forward_steps_executed += 1;
                     }
@@ -180,11 +187,9 @@ mod tests {
             let failure_point = stats.forward_steps_executed / 2;
 
             // Phase 4: Execute compensating actions
-            let compensation_results = self.execute_compensations_with_integrity(
-                cx,
-                failure_point as usize,
-                &mut stats
-            ).await?;
+            let compensation_results = self
+                .execute_compensations_with_integrity(cx, failure_point as usize, &mut stats)
+                .await?;
 
             // Phase 5: Verify hash chain integrity
             let final_verification = self.verify_final_integrity(&mut stats).await?;
@@ -195,7 +200,11 @@ mod tests {
                 test_name: self.saga_id.clone(),
                 phase: SagaIntegrityTestPhase::Assert,
                 success: final_verification.is_valid && compensation_results.all_successful(),
-                error: if final_verification.is_valid { None } else { Some("Hash chain integrity verification failed".to_string()) },
+                error: if final_verification.is_valid {
+                    None
+                } else {
+                    Some("Hash chain integrity verification failed".to_string())
+                },
                 duration_ms: duration.as_millis() as u64,
                 integrity_stats: stats,
             })
@@ -218,13 +227,16 @@ mod tests {
 
             // Record step execution in hash chain
             let operation_type = self.infer_operation_type(step);
-            let post_hash = self.integrity_system.record_saga_step_execution(
-                &self.saga_id,
-                batch_idx,
-                step_idx,
-                &step.label,
-                operation_type,
-            ).await?;
+            let post_hash = self
+                .integrity_system
+                .record_saga_step_execution(
+                    &self.saga_id,
+                    batch_idx,
+                    step_idx,
+                    &step.label,
+                    operation_type,
+                )
+                .await?;
 
             // Record operation history
             let record = SagaOperationRecord {
@@ -257,11 +269,9 @@ mod tests {
                     continue; // Skip operations that didn't complete
                 }
 
-                let compensation_result = self.execute_compensation_with_integrity(
-                    cx,
-                    record,
-                    stats,
-                ).await?;
+                let compensation_result = self
+                    .execute_compensation_with_integrity(cx, record, stats)
+                    .await?;
 
                 compensation_results.add_result(record.step_index, compensation_result);
                 stats.compensation_steps_executed += 1;
@@ -285,15 +295,19 @@ mod tests {
             let compensation_type = self.determine_compensation_type(operation.operation_type);
 
             // Simulate compensation execution
-            self.simulate_compensation_execution(cx, operation, compensation_type).await?;
+            self.simulate_compensation_execution(cx, operation, compensation_type)
+                .await?;
 
             // Record compensation in hash chain - this is the key integration point
-            let hash_after = self.integrity_system.record_saga_compensation_execution(
-                &self.saga_id,
-                operation.step_index,
-                compensation_type,
-                &operation.integrity_hash,
-            ).await?;
+            let hash_after = self
+                .integrity_system
+                .record_saga_compensation_execution(
+                    &self.saga_id,
+                    operation.step_index,
+                    compensation_type,
+                    &operation.integrity_hash,
+                )
+                .await?;
 
             // Track compensation execution
             let compensation_record = CompensationRecord {
@@ -305,7 +319,9 @@ mod tests {
                 chain_position: self.integrity_system.get_sequence().await?,
             };
 
-            self.compensation_tracker.record_compensation(compensation_record).await?;
+            self.compensation_tracker
+                .record_compensation(compensation_record)
+                .await?;
 
             stats.compensation_hash_extensions += 1;
 
@@ -318,16 +334,24 @@ mod tests {
             })
         }
 
-        async fn verify_final_integrity(&self, stats: &mut SagaIntegrityStats) -> Result<ChainVerification> {
+        async fn verify_final_integrity(
+            &self,
+            stats: &mut SagaIntegrityStats,
+        ) -> Result<ChainVerification> {
             // Get final hash chain state
             let integrity_snapshot = self.integrity_system.create_snapshot().await?;
 
             // Verify chain consistency
-            let verification = self.integrity_system.verify_integrity(&integrity_snapshot.hash_chain).await?;
+            let verification = self
+                .integrity_system
+                .verify_integrity(&integrity_snapshot.hash_chain)
+                .await?;
             stats.integrity_verifications_passed += if verification.is_valid { 1 } else { 0 };
 
             // Verify compensation ordering in chain
-            let ordering_verification = self.verify_compensation_ordering(&integrity_snapshot).await?;
+            let ordering_verification = self
+                .verify_compensation_ordering(&integrity_snapshot)
+                .await?;
             stats.chain_consistency_checks += 1;
 
             Ok(ChainVerification {
@@ -375,7 +399,10 @@ mod tests {
             }
         }
 
-        fn determine_compensation_type(&self, operation_type: SagaStepType) -> CompensationActionType {
+        fn determine_compensation_type(
+            &self,
+            operation_type: SagaStepType,
+        ) -> CompensationActionType {
             match operation_type {
                 SagaStepType::ResourceAllocation => CompensationActionType::ReleaseResource,
                 SagaStepType::StateUpdate => CompensationActionType::RestoreState,
@@ -451,7 +478,10 @@ mod tests {
             let previous_hash = self.current_hash.lock().unwrap().clone();
 
             // Create hash incorporating saga step
-            let step_data = format!("{}:{}:{}:{:?}", saga_id, batch_idx, step_idx, operation_type);
+            let step_data = format!(
+                "{}:{}:{}:{:?}",
+                saga_id, batch_idx, step_idx, operation_type
+            );
             let new_hash = self.compute_step_hash(sequence, &previous_hash, &step_data);
 
             let new_node = HashChainNode {
@@ -479,13 +509,15 @@ mod tests {
             let previous_hash = self.current_hash.lock().unwrap().clone();
 
             // Create hash incorporating compensation - this is the critical integration point
-            let compensation_data = format!("COMPENSATION:{}:{}:{:?}:{}",
-                saga_id, step_index, compensation_type, original_hash);
+            let compensation_data = format!(
+                "COMPENSATION:{}:{}:{:?}:{}",
+                saga_id, step_index, compensation_type, original_hash
+            );
             let new_hash = self.compute_compensation_hash(
                 sequence,
                 &previous_hash,
                 &compensation_data,
-                original_hash
+                original_hash,
             );
 
             let new_node = HashChainNode {
@@ -530,9 +562,7 @@ mod tests {
                 if window[1].previous_hash != window[0].hash {
                     issues.push(format!(
                         "Hash chain break at sequence {}: expected previous_hash {}, got {}",
-                        window[1].sequence,
-                        window[0].hash,
-                        window[1].previous_hash
+                        window[1].sequence, window[0].hash, window[1].previous_hash
                     ));
                 }
             }
@@ -542,8 +572,7 @@ mod tests {
                 if window[1].sequence != window[0].sequence + 1 {
                     issues.push(format!(
                         "Sequence gap: {} -> {}",
-                        window[0].sequence,
-                        window[1].sequence
+                        window[0].sequence, window[1].sequence
                     ));
                 }
             }
@@ -555,7 +584,12 @@ mod tests {
             })
         }
 
-        fn compute_step_hash(&self, sequence: u64, previous_hash: &IntegrityHash, step_data: &str) -> IntegrityHash {
+        fn compute_step_hash(
+            &self,
+            sequence: u64,
+            previous_hash: &IntegrityHash,
+            step_data: &str,
+        ) -> IntegrityHash {
             // Simple hash computation for testing
             let combined = format!("{}:{}:{}", sequence, previous_hash, step_data);
             IntegrityHash::from_string(&combined)
@@ -569,8 +603,10 @@ mod tests {
             original_hash: &IntegrityHash,
         ) -> IntegrityHash {
             // Hash compensation with reference to original operation
-            let combined = format!("{}:{}:{}:ORIG:{}",
-                sequence, previous_hash, compensation_data, original_hash);
+            let combined = format!(
+                "{}:{}:{}:ORIG:{}",
+                sequence, previous_hash, compensation_data, original_hash
+            );
             IntegrityHash::from_string(&combined)
         }
     }
@@ -602,7 +638,9 @@ mod tests {
 
     impl CompensationResults {
         fn new() -> Self {
-            Self { results: HashMap::new() }
+            Self {
+                results: HashMap::new(),
+            }
         }
 
         fn add_result(&mut self, step_index: usize, result: CompensationResult) {
@@ -632,13 +670,22 @@ mod tests {
         }
 
         async fn record_compensation(&self, record: CompensationRecord) -> Result<()> {
-            self.compensations.lock().unwrap().insert(record.step_index, record.clone());
+            self.compensations
+                .lock()
+                .unwrap()
+                .insert(record.step_index, record.clone());
             self.execution_order.lock().unwrap().push_back(record);
             Ok(())
         }
 
         async fn get_execution_order(&self) -> Result<Vec<CompensationRecord>> {
-            Ok(self.execution_order.lock().unwrap().iter().cloned().collect())
+            Ok(self
+                .execution_order
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect())
         }
     }
 
@@ -654,7 +701,11 @@ mod tests {
 
         fn from_string(s: &str) -> Self {
             // Simple mock implementation
-            Self(s.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64)))
+            Self(
+                s.as_bytes()
+                    .iter()
+                    .fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64)),
+            )
         }
     }
 
@@ -708,27 +759,44 @@ mod tests {
                 ],
             );
 
-            let saga_with_integrity = MockSagaWithIntegrity::new(
-                "saga_compensation_test".to_string(),
-                saga_plan,
-            );
+            let saga_with_integrity =
+                MockSagaWithIntegrity::new("saga_compensation_test".to_string(), saga_plan);
 
             // Execute saga with failure injection to trigger compensations
             let result = saga_with_integrity.execute_with_integrity(&cx).await?;
 
             // Verify compensation extended hash chain correctly
-            assert!(result.success, "Saga compensation should succeed: {:?}", result.error);
-            assert!(result.integrity_stats.compensation_steps_executed > 0,
-                "Should have executed compensation steps");
-            assert!(result.integrity_stats.compensation_hash_extensions > 0,
-                "Should have extended hash chain with compensations");
-            assert_eq!(result.integrity_stats.integrity_verifications_passed, 1,
-                "Hash chain integrity should pass verification");
+            assert!(
+                result.success,
+                "Saga compensation should succeed: {:?}",
+                result.error
+            );
+            assert!(
+                result.integrity_stats.compensation_steps_executed > 0,
+                "Should have executed compensation steps"
+            );
+            assert!(
+                result.integrity_stats.compensation_hash_extensions > 0,
+                "Should have extended hash chain with compensations"
+            );
+            assert_eq!(
+                result.integrity_stats.integrity_verifications_passed, 1,
+                "Hash chain integrity should pass verification"
+            );
 
             println!("✓ Saga compensation correctly extended hash chain");
-            println!("  Forward steps: {}", result.integrity_stats.forward_steps_executed);
-            println!("  Compensation steps: {}", result.integrity_stats.compensation_steps_executed);
-            println!("  Hash chain extensions: {}", result.integrity_stats.compensation_hash_extensions);
+            println!(
+                "  Forward steps: {}",
+                result.integrity_stats.forward_steps_executed
+            );
+            println!(
+                "  Compensation steps: {}",
+                result.integrity_stats.compensation_steps_executed
+            );
+            println!(
+                "  Hash chain extensions: {}",
+                result.integrity_stats.compensation_hash_extensions
+            );
             println!("  Duration: {}ms", result.duration_ms);
 
             Ok(())
@@ -758,18 +826,20 @@ mod tests {
                 ],
             );
 
-            let saga_with_integrity = MockSagaWithIntegrity::new(
-                "saga_ordering_test".to_string(),
-                saga_plan,
-            );
+            let saga_with_integrity =
+                MockSagaWithIntegrity::new("saga_ordering_test".to_string(), saga_plan);
 
             let result = saga_with_integrity.execute_with_integrity(&cx).await?;
 
             assert!(result.success, "Saga with ordering test should succeed");
-            assert!(result.integrity_stats.compensation_steps_executed >= 3,
-                "Should compensate multiple steps");
-            assert!(result.integrity_stats.chain_consistency_checks > 0,
-                "Should verify chain consistency");
+            assert!(
+                result.integrity_stats.compensation_steps_executed >= 3,
+                "Should compensate multiple steps"
+            );
+            assert!(
+                result.integrity_stats.chain_consistency_checks > 0,
+                "Should verify chain consistency"
+            );
 
             println!("✓ Compensation ordering correctly preserved in hash chain");
 
@@ -797,21 +867,34 @@ mod tests {
                 ],
             );
 
-            let saga_with_integrity = MockSagaWithIntegrity::new(
-                "saga_partial_test".to_string(),
-                saga_plan,
-            );
+            let saga_with_integrity =
+                MockSagaWithIntegrity::new("saga_partial_test".to_string(), saga_plan);
 
             let result = saga_with_integrity.execute_with_integrity(&cx).await?;
 
-            assert!(result.success, "Partial compensation should maintain integrity");
+            assert!(
+                result.success,
+                "Partial compensation should maintain integrity"
+            );
 
             // Verify that even partial compensation maintains hash chain integrity
-            let integrity_snapshot = saga_with_integrity.integrity_system.create_snapshot().await?;
-            let verification = saga_with_integrity.integrity_system.verify_integrity(&integrity_snapshot.hash_chain).await?;
+            let integrity_snapshot = saga_with_integrity
+                .integrity_system
+                .create_snapshot()
+                .await?;
+            let verification = saga_with_integrity
+                .integrity_system
+                .verify_integrity(&integrity_snapshot.hash_chain)
+                .await?;
 
-            assert!(verification.is_valid, "Hash chain should remain valid after partial compensation");
-            assert!(verification.issues.is_empty(), "Should have no integrity issues");
+            assert!(
+                verification.is_valid,
+                "Hash chain should remain valid after partial compensation"
+            );
+            assert!(
+                verification.issues.is_empty(),
+                "Should have no integrity issues"
+            );
 
             println!("✓ Hash chain integrity maintained after partial compensation");
 

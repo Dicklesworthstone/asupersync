@@ -37,12 +37,12 @@ mod tests {
             decoder::{DecodeError, Decoder, ReceivedSymbol},
             gf256::Gf256,
             proof::{DecodeConfig, DecodeProof, FailureReason},
-            systematic::{SystematicParams},
+            systematic::SystematicParams,
         },
-        runtime::{spawn, Runtime},
+        runtime::{Runtime, spawn},
         sync::{Arc, Mutex, RwLock},
-        time::{sleep, Duration, Instant},
-        types::{Budget, Outcome, TaskId, ObjectId},
+        time::{Duration, Instant, sleep},
+        types::{Budget, ObjectId, Outcome, TaskId},
     };
     use std::{
         collections::{BTreeMap, HashMap, VecDeque},
@@ -209,7 +209,11 @@ mod tests {
             })
         }
 
-        async fn test_basic_block_delivery(&self, cx: &Cx, stats: &mut QuicRaptorQStats) -> Result<()> {
+        async fn test_basic_block_delivery(
+            &self,
+            cx: &Cx,
+            stats: &mut QuicRaptorQStats,
+        ) -> Result<()> {
             // Create QUIC stream for RaptorQ delivery
             let stream_id = StreamId::local(StreamRole::Client, StreamDirection::Unidirectional, 1);
             let stream = QuicStream::new(stream_id, 65536, 65536); // 64KB windows
@@ -233,12 +237,16 @@ mod tests {
                 partial_blocks: VecDeque::new(),
             };
 
-            self.decoder_contexts.lock().unwrap().insert(object_id, context);
+            self.decoder_contexts
+                .lock()
+                .unwrap()
+                .insert(object_id, context);
 
             // Generate and deliver RaptorQ block via QUIC stream
             let raptorq_block = self.generate_raptorq_block(object_id, 0, &systematic_params)?;
 
-            self.deliver_block_via_stream(cx, stream_id, raptorq_block, stats).await?;
+            self.deliver_block_via_stream(cx, stream_id, raptorq_block, stats)
+                .await?;
             stats.raptorq_blocks_delivered += 1;
 
             // Attempt decode
@@ -249,7 +257,11 @@ mod tests {
             Ok(())
         }
 
-        async fn test_stream_reset_scenarios(&self, cx: &Cx, stats: &mut QuicRaptorQStats) -> Result<()> {
+        async fn test_stream_reset_scenarios(
+            &self,
+            cx: &Cx,
+            stats: &mut QuicRaptorQStats,
+        ) -> Result<()> {
             let stream_id = StreamId::local(StreamRole::Client, StreamDirection::Unidirectional, 2);
             let stream = QuicStream::new(stream_id, 32768, 32768);
 
@@ -269,38 +281,59 @@ mod tests {
                 partial_blocks: VecDeque::new(),
             };
 
-            self.decoder_contexts.lock().unwrap().insert(object_id, context);
+            self.decoder_contexts
+                .lock()
+                .unwrap()
+                .insert(object_id, context);
 
             // Start delivering RaptorQ block
             let raptorq_block = self.generate_raptorq_block(object_id, 1, &systematic_params)?;
 
             // Deliver partial block (simulate partial transmission)
             let partial_symbols = &raptorq_block.symbols[0..raptorq_block.symbols.len() / 2];
-            self.deliver_partial_symbols(cx, stream_id, partial_symbols, &raptorq_block, stats).await?;
+            self.deliver_partial_symbols(cx, stream_id, partial_symbols, &raptorq_block, stats)
+                .await?;
 
             // Simulate stream reset
             self.reset_stream(stream_id, 42).await?; // Error code 42
             stats.stream_resets_handled += 1;
 
             // Verify partial symbols are handled correctly
-            let context = self.decoder_contexts.lock().unwrap().get(&object_id).cloned();
+            let context = self
+                .decoder_contexts
+                .lock()
+                .unwrap()
+                .get(&object_id)
+                .cloned();
             if let Some(ctx) = context {
-                assert!(!ctx.partial_blocks.is_empty(), "Should have partial block after reset");
+                assert!(
+                    !ctx.partial_blocks.is_empty(),
+                    "Should have partial block after reset"
+                );
             }
 
             Ok(())
         }
 
-        async fn test_stream_re_establishment(&self, cx: &Cx, stats: &mut QuicRaptorQStats) -> Result<()> {
-            let original_stream_id = StreamId::local(StreamRole::Client, StreamDirection::Unidirectional, 3);
-            let new_stream_id = StreamId::local(StreamRole::Client, StreamDirection::Unidirectional, 4);
+        async fn test_stream_re_establishment(
+            &self,
+            cx: &Cx,
+            stats: &mut QuicRaptorQStats,
+        ) -> Result<()> {
+            let original_stream_id =
+                StreamId::local(StreamRole::Client, StreamDirection::Unidirectional, 3);
+            let new_stream_id =
+                StreamId::local(StreamRole::Client, StreamDirection::Unidirectional, 4);
 
             // Reset original stream (from previous test scenario)
             self.reset_stream(original_stream_id, 100).await?;
 
             // Re-establish with new stream
             let new_stream = QuicStream::new(new_stream_id, 65536, 65536);
-            self.stream_table.lock().unwrap().insert(new_stream_id, new_stream);
+            self.stream_table
+                .lock()
+                .unwrap()
+                .insert(new_stream_id, new_stream);
             stats.quic_streams_created += 1;
             stats.stream_re_establishments += 1;
 
@@ -320,11 +353,15 @@ mod tests {
                 partial_blocks: VecDeque::new(),
             };
 
-            self.decoder_contexts.lock().unwrap().insert(object_id, context);
+            self.decoder_contexts
+                .lock()
+                .unwrap()
+                .insert(object_id, context);
 
             // Deliver complete RaptorQ block on new stream
             let raptorq_block = self.generate_raptorq_block(object_id, 2, &systematic_params)?;
-            self.deliver_block_via_stream(cx, new_stream_id, raptorq_block, stats).await?;
+            self.deliver_block_via_stream(cx, new_stream_id, raptorq_block, stats)
+                .await?;
             stats.raptorq_blocks_delivered += 1;
 
             // Verify decode succeeds after re-establishment
@@ -336,7 +373,11 @@ mod tests {
             Ok(())
         }
 
-        async fn test_flow_control_backpressure(&self, cx: &Cx, stats: &mut QuicRaptorQStats) -> Result<()> {
+        async fn test_flow_control_backpressure(
+            &self,
+            cx: &Cx,
+            stats: &mut QuicRaptorQStats,
+        ) -> Result<()> {
             // Create stream with very small flow control window
             let stream_id = StreamId::local(StreamRole::Server, StreamDirection::Bidirectional, 1);
             let stream = QuicStream::new(stream_id, 1024, 1024); // Small 1KB window
@@ -357,20 +398,27 @@ mod tests {
                 partial_blocks: VecDeque::new(),
             };
 
-            self.decoder_contexts.lock().unwrap().insert(object_id, context);
+            self.decoder_contexts
+                .lock()
+                .unwrap()
+                .insert(object_id, context);
 
             // Try to deliver large RaptorQ block that exceeds flow control
             let raptorq_block = self.generate_raptorq_block(object_id, 3, &systematic_params)?;
 
             // This should trigger flow control backpressure
-            let delivery_result = self.deliver_block_with_flow_control(
-                cx, stream_id, raptorq_block, stats
-            ).await;
+            let delivery_result = self
+                .deliver_block_with_flow_control(cx, stream_id, raptorq_block, stats)
+                .await;
 
             match delivery_result {
                 Err(Error::QuicStream(QuicStreamError::Flow(_))) => {
                     stats.flow_control_events += 1;
-                    self.record_stream_event(stream_id, StreamEventType::FlowControlTriggered, Some(3));
+                    self.record_stream_event(
+                        stream_id,
+                        StreamEventType::FlowControlTriggered,
+                        Some(3),
+                    );
                 }
                 Ok(_) => {
                     // Delivery succeeded (flow control window was sufficient)
@@ -382,13 +430,18 @@ mod tests {
             Ok(())
         }
 
-        async fn test_multi_stream_delivery(&self, cx: &Cx, stats: &mut QuicRaptorQStats) -> Result<()> {
+        async fn test_multi_stream_delivery(
+            &self,
+            cx: &Cx,
+            stats: &mut QuicRaptorQStats,
+        ) -> Result<()> {
             let num_streams = 4;
             let mut stream_ids = Vec::new();
 
             // Create multiple streams for parallel RaptorQ delivery
             for i in 0..num_streams {
-                let stream_id = StreamId::local(StreamRole::Client, StreamDirection::Unidirectional, 10 + i);
+                let stream_id =
+                    StreamId::local(StreamRole::Client, StreamDirection::Unidirectional, 10 + i);
                 let stream = QuicStream::new(stream_id, 32768, 32768);
 
                 self.stream_table.lock().unwrap().insert(stream_id, stream);
@@ -412,21 +465,29 @@ mod tests {
                     partial_blocks: VecDeque::new(),
                 };
 
-                self.decoder_contexts.lock().unwrap().insert(object_id, context);
+                self.decoder_contexts
+                    .lock()
+                    .unwrap()
+                    .insert(object_id, context);
                 object_ids.push(object_id);
             }
 
             // Deliver RaptorQ blocks across multiple streams concurrently
             let mut delivery_tasks = Vec::new();
 
-            for (i, (&stream_id, &object_id)) in stream_ids.iter().zip(object_ids.iter()).enumerate() {
+            for (i, (&stream_id, &object_id)) in
+                stream_ids.iter().zip(object_ids.iter()).enumerate()
+            {
                 let systematic_params = SystematicParams::new(8, 128)?;
-                let raptorq_block = self.generate_raptorq_block(object_id, i as u32, &systematic_params)?;
+                let raptorq_block =
+                    self.generate_raptorq_block(object_id, i as u32, &systematic_params)?;
 
                 let task = spawn(cx, async move {
-                    self.deliver_block_via_stream(cx, stream_id, raptorq_block, stats).await?;
+                    self.deliver_block_via_stream(cx, stream_id, raptorq_block, stats)
+                        .await?;
                     Ok::<(), Error>(())
-                }).await;
+                })
+                .await;
 
                 delivery_tasks.push((task, object_id));
             }
@@ -445,8 +506,13 @@ mod tests {
             Ok(())
         }
 
-        async fn test_partial_block_recovery(&self, cx: &Cx, stats: &mut QuicRaptorQStats) -> Result<()> {
-            let stream_id = StreamId::local(StreamRole::Server, StreamDirection::Unidirectional, 20);
+        async fn test_partial_block_recovery(
+            &self,
+            cx: &Cx,
+            stats: &mut QuicRaptorQStats,
+        ) -> Result<()> {
+            let stream_id =
+                StreamId::local(StreamRole::Server, StreamDirection::Unidirectional, 20);
             let stream = QuicStream::new(stream_id, 16384, 16384);
 
             self.stream_table.lock().unwrap().insert(stream_id, stream);
@@ -465,7 +531,10 @@ mod tests {
                 partial_blocks: VecDeque::new(),
             };
 
-            self.decoder_contexts.lock().unwrap().insert(object_id, context);
+            self.decoder_contexts
+                .lock()
+                .unwrap()
+                .insert(object_id, context);
 
             // Generate RaptorQ block
             let raptorq_block = self.generate_raptorq_block(object_id, 4, &systematic_params)?;
@@ -477,16 +546,21 @@ mod tests {
                 let chunk_symbols = &raptorq_block.symbols[chunk_start..chunk_end];
 
                 // Deliver chunk
-                self.deliver_partial_symbols(cx, stream_id, chunk_symbols, &raptorq_block, stats).await?;
+                self.deliver_partial_symbols(cx, stream_id, chunk_symbols, &raptorq_block, stats)
+                    .await?;
 
                 // Simulate random interruption (reset every other chunk)
                 if chunk_start % (chunk_size * 2) == 0 {
-                    self.reset_stream(stream_id, 200 + chunk_start as u64).await?;
+                    self.reset_stream(stream_id, 200 + chunk_start as u64)
+                        .await?;
                     stats.stream_resets_handled += 1;
 
                     // Re-establish stream
                     let new_stream = QuicStream::new(stream_id, 16384, 16384);
-                    self.stream_table.lock().unwrap().insert(stream_id, new_stream);
+                    self.stream_table
+                        .lock()
+                        .unwrap()
+                        .insert(stream_id, new_stream);
                     stats.stream_re_establishments += 1;
                 }
 
@@ -514,7 +588,8 @@ mod tests {
         ) -> Result<()> {
             // Simulate delivering each symbol via QUIC stream
             for symbol in &block.symbols {
-                self.deliver_symbol_via_stream(cx, stream_id, symbol, stats).await?;
+                self.deliver_symbol_via_stream(cx, stream_id, symbol, stats)
+                    .await?;
                 stats.symbols_transmitted += 1;
             }
 
@@ -525,7 +600,7 @@ mod tests {
                 StreamEventType::DataDelivered {
                     bytes: block.symbols.len() as u64 * 512, // Estimate
                 },
-                Some(block.block_number)
+                Some(block.block_number),
             );
 
             Ok(())
@@ -553,7 +628,7 @@ mod tests {
                         FlowControlError::Exhausted {
                             attempted: data_len,
                             remaining: stream.send_credit.available(),
-                        }
+                        },
                     )));
                 }
 
@@ -580,7 +655,8 @@ mod tests {
             stats: &mut QuicRaptorQStats,
         ) -> Result<()> {
             for symbol in symbols {
-                self.deliver_symbol_via_stream(cx, stream_id, symbol, stats).await?;
+                self.deliver_symbol_via_stream(cx, stream_id, symbol, stats)
+                    .await?;
                 stats.symbols_transmitted += 1;
             }
 
@@ -593,7 +669,12 @@ mod tests {
                 started_at: Instant::now(),
             };
 
-            if let Some(mut context) = self.decoder_contexts.lock().unwrap().get_mut(&block.object_id) {
+            if let Some(mut context) = self
+                .decoder_contexts
+                .lock()
+                .unwrap()
+                .get_mut(&block.object_id)
+            {
                 context.partial_blocks.push_back(partial_block);
             }
 
@@ -609,7 +690,10 @@ mod tests {
         ) -> Result<()> {
             // This method specifically tests flow control limits
             for symbol in &block.symbols {
-                match self.deliver_symbol_via_stream(cx, stream_id, symbol, stats).await {
+                match self
+                    .deliver_symbol_via_stream(cx, stream_id, symbol, stats)
+                    .await
+                {
                     Ok(_) => {
                         stats.symbols_transmitted += 1;
                     }
@@ -619,7 +703,7 @@ mod tests {
                             FlowControlError::Exhausted {
                                 attempted: symbol.data.len() as u64,
                                 remaining: 0,
-                            }
+                            },
                         )));
                     }
                     Err(e) => return Err(e),
@@ -641,7 +725,12 @@ mod tests {
             Ok(())
         }
 
-        fn record_stream_event(&self, stream_id: StreamId, event_type: StreamEventType, block: Option<u32>) {
+        fn record_stream_event(
+            &self,
+            stream_id: StreamId,
+            event_type: StreamEventType,
+            block: Option<u32>,
+        ) {
             let event = StreamEvent {
                 stream_id,
                 event_type,
@@ -711,7 +800,11 @@ mod tests {
             })
         }
 
-        async fn attempt_decode(&self, object_id: ObjectId, stats: &mut QuicRaptorQStats) -> Result<bool> {
+        async fn attempt_decode(
+            &self,
+            object_id: ObjectId,
+            stats: &mut QuicRaptorQStats,
+        ) -> Result<bool> {
             let mut contexts = self.decoder_contexts.lock().unwrap();
             let context = contexts.get_mut(&object_id);
 
@@ -802,12 +895,14 @@ mod tests {
             // Verify that delivered blocks have proper structure
             let block_structure_valid = delivered_blocks.iter().all(|block| {
                 !block.symbols.is_empty()
-                && block.symbols.iter().all(|symbol| !symbol.data.is_empty())
+                    && block.symbols.iter().all(|symbol| !symbol.data.is_empty())
             });
 
             // Verify stream events were recorded
             let events_recorded = !stream_events.is_empty()
-                && stream_events.iter().any(|e| matches!(e.event_type, StreamEventType::DataDelivered { .. }));
+                && stream_events
+                    .iter()
+                    .any(|e| matches!(e.event_type, StreamEventType::DataDelivered { .. }));
 
             Ok(properties_verified && block_structure_valid && events_recorded)
         }
@@ -863,17 +958,45 @@ mod tests {
 
             let result = framework.execute_integration_test(&cx).await?;
 
-            assert!(result.success, "Basic QUIC streams ↔ RaptorQ integration should succeed: {:?}", result.error);
-            assert!(result.integration_stats.quic_streams_created > 0, "Should create QUIC streams");
-            assert!(result.integration_stats.raptorq_blocks_delivered > 0, "Should deliver RaptorQ blocks");
-            assert!(result.integration_stats.successful_decodes > 0, "Should have successful decodes");
+            assert!(
+                result.success,
+                "Basic QUIC streams ↔ RaptorQ integration should succeed: {:?}",
+                result.error
+            );
+            assert!(
+                result.integration_stats.quic_streams_created > 0,
+                "Should create QUIC streams"
+            );
+            assert!(
+                result.integration_stats.raptorq_blocks_delivered > 0,
+                "Should deliver RaptorQ blocks"
+            );
+            assert!(
+                result.integration_stats.successful_decodes > 0,
+                "Should have successful decodes"
+            );
 
             println!("✓ MILESTONE 180: QUIC streams ↔ RaptorQ decoder integration verified");
-            println!("  QUIC streams: {}", result.integration_stats.quic_streams_created);
-            println!("  RaptorQ blocks delivered: {}", result.integration_stats.raptorq_blocks_delivered);
-            println!("  Successful decodes: {}", result.integration_stats.successful_decodes);
-            println!("  Stream resets: {}", result.integration_stats.stream_resets_handled);
-            println!("  Stream re-establishments: {}", result.integration_stats.stream_re_establishments);
+            println!(
+                "  QUIC streams: {}",
+                result.integration_stats.quic_streams_created
+            );
+            println!(
+                "  RaptorQ blocks delivered: {}",
+                result.integration_stats.raptorq_blocks_delivered
+            );
+            println!(
+                "  Successful decodes: {}",
+                result.integration_stats.successful_decodes
+            );
+            println!(
+                "  Stream resets: {}",
+                result.integration_stats.stream_resets_handled
+            );
+            println!(
+                "  Stream re-establishments: {}",
+                result.integration_stats.stream_re_establishments
+            );
             println!("  Duration: {}ms", result.duration_ms);
 
             Ok(())
@@ -890,9 +1013,14 @@ mod tests {
             let framework = QuicRaptorQTestFramework::new()?;
 
             let mut stats = QuicRaptorQStats::default();
-            framework.test_stream_reset_scenarios(&cx, &mut stats).await?;
+            framework
+                .test_stream_reset_scenarios(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.stream_resets_handled > 0, "Should handle stream resets");
+            assert!(
+                stats.stream_resets_handled > 0,
+                "Should handle stream resets"
+            );
 
             println!("✓ QUIC stream reset with RaptorQ recovery verified");
 
@@ -910,10 +1038,18 @@ mod tests {
             let framework = QuicRaptorQTestFramework::new()?;
 
             let mut stats = QuicRaptorQStats::default();
-            framework.test_stream_re_establishment(&cx, &mut stats).await?;
+            framework
+                .test_stream_re_establishment(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.stream_re_establishments > 0, "Should re-establish streams");
-            assert!(stats.decode_integrity_verifications > 0, "Should verify decode integrity");
+            assert!(
+                stats.stream_re_establishments > 0,
+                "Should re-establish streams"
+            );
+            assert!(
+                stats.decode_integrity_verifications > 0,
+                "Should verify decode integrity"
+            );
 
             println!("✓ QUIC stream re-establishment with decode continuity verified");
 
@@ -931,7 +1067,9 @@ mod tests {
             let framework = QuicRaptorQTestFramework::new()?;
 
             let mut stats = QuicRaptorQStats::default();
-            framework.test_flow_control_backpressure(&cx, &mut stats).await?;
+            framework
+                .test_flow_control_backpressure(&cx, &mut stats)
+                .await?;
 
             // Flow control events may or may not occur depending on data size vs window
             println!("✓ QUIC flow control backpressure with RaptorQ verified");
@@ -950,10 +1088,18 @@ mod tests {
             let framework = QuicRaptorQTestFramework::new()?;
 
             let mut stats = QuicRaptorQStats::default();
-            framework.test_multi_stream_delivery(&cx, &mut stats).await?;
+            framework
+                .test_multi_stream_delivery(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.multi_stream_deliveries > 0, "Should deliver via multiple streams");
-            assert!(stats.quic_streams_created >= 4, "Should create multiple streams");
+            assert!(
+                stats.multi_stream_deliveries > 0,
+                "Should deliver via multiple streams"
+            );
+            assert!(
+                stats.quic_streams_created >= 4,
+                "Should create multiple streams"
+            );
 
             println!("✓ Multi-stream QUIC RaptorQ delivery verified");
 
@@ -971,9 +1117,14 @@ mod tests {
             let framework = QuicRaptorQTestFramework::new()?;
 
             let mut stats = QuicRaptorQStats::default();
-            framework.test_partial_block_recovery(&cx, &mut stats).await?;
+            framework
+                .test_partial_block_recovery(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.partial_block_recoveries > 0, "Should recover from partial blocks");
+            assert!(
+                stats.partial_block_recoveries > 0,
+                "Should recover from partial blocks"
+            );
 
             println!("✓ Partial RaptorQ block recovery across stream interruptions verified");
 

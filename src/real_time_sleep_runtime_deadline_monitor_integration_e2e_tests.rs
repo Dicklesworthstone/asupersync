@@ -30,13 +30,15 @@ mod tests {
         error::{Error, Result},
         lab::LabRuntime,
         runtime::{
+            Runtime,
             deadline_monitor::{
-                AdaptiveDeadlineConfig, DeadlineMonitor, DeadlineWarning, MonitorConfig, WarningReason,
+                AdaptiveDeadlineConfig, DeadlineMonitor, DeadlineWarning, MonitorConfig,
+                WarningReason,
             },
-            spawn, Runtime,
+            spawn,
         },
         sync::{Arc, Mutex, RwLock},
-        time::{sleep, Duration, Instant, Time, TimerDriverHandle},
+        time::{Duration, Instant, Time, TimerDriverHandle, sleep},
         types::{Budget, Outcome, RegionId, TaskId},
     };
     use std::{
@@ -120,7 +122,12 @@ mod tests {
         }
 
         fn get_warning_count(&self, reason: WarningReason) -> u64 {
-            self.warning_counts.lock().unwrap().get(&reason).copied().unwrap_or(0)
+            self.warning_counts
+                .lock()
+                .unwrap()
+                .get(&reason)
+                .copied()
+                .unwrap_or(0)
         }
 
         fn total_warnings(&self) -> u64 {
@@ -169,16 +176,20 @@ mod tests {
             let mut stats = SleepDeadlineStats::default();
 
             // Phase 1: Test basic sleep-deadline integration
-            self.test_sleep_with_deadline_warnings(cx, &mut stats).await?;
+            self.test_sleep_with_deadline_warnings(cx, &mut stats)
+                .await?;
 
             // Phase 2: Test progress checkpoint integration
-            self.test_sleep_checkpoints_integration(cx, &mut stats).await?;
+            self.test_sleep_checkpoints_integration(cx, &mut stats)
+                .await?;
 
             // Phase 3: Test timeout detection integration
-            self.test_timeout_detection_integration(cx, &mut stats).await?;
+            self.test_timeout_detection_integration(cx, &mut stats)
+                .await?;
 
             // Phase 4: Test adaptive threshold behavior
-            self.test_adaptive_threshold_integration(cx, &mut stats).await?;
+            self.test_adaptive_threshold_integration(cx, &mut stats)
+                .await?;
 
             let duration = start_time.elapsed();
 
@@ -192,7 +203,11 @@ mod tests {
             })
         }
 
-        async fn test_sleep_with_deadline_warnings(&self, cx: &Cx, stats: &mut SleepDeadlineStats) -> Result<()> {
+        async fn test_sleep_with_deadline_warnings(
+            &self,
+            cx: &Cx,
+            stats: &mut SleepDeadlineStats,
+        ) -> Result<()> {
             // Test 1: Sleep that should trigger approaching deadline warning
             let approaching_deadline_task = spawn(cx, async {
                 let budget = Budget::new(Duration::from_millis(200))?; // Short deadline
@@ -201,8 +216,10 @@ mod tests {
                 cx.with_budget(budget, async {
                     sleep(sleep_duration).await;
                     Ok(())
-                }).await
-            }).await;
+                })
+                .await
+            })
+            .await;
 
             stats.sleep_tasks_spawned += 1;
 
@@ -214,8 +231,10 @@ mod tests {
                 cx.with_budget(budget, async {
                     sleep(sleep_duration).await;
                     Ok(())
-                }).await
-            }).await;
+                })
+                .await
+            })
+            .await;
 
             stats.sleep_tasks_spawned += 1;
 
@@ -223,14 +242,20 @@ mod tests {
             sleep(Duration::from_millis(300)).await;
 
             // Verify warnings were generated appropriately
-            let approaching_warnings = self.warning_collector.get_warning_count(WarningReason::ApproachingDeadline);
+            let approaching_warnings = self
+                .warning_collector
+                .get_warning_count(WarningReason::ApproachingDeadline);
             stats.approaching_deadline_warnings = approaching_warnings;
             stats.deadline_warnings_emitted += approaching_warnings;
 
             Ok(())
         }
 
-        async fn test_sleep_checkpoints_integration(&self, cx: &Cx, stats: &mut SleepDeadlineStats) -> Result<()> {
+        async fn test_sleep_checkpoints_integration(
+            &self,
+            cx: &Cx,
+            stats: &mut SleepDeadlineStats,
+        ) -> Result<()> {
             // Test sleep with periodic checkpoints
             let checkpoint_task = spawn(cx, async {
                 let budget = Budget::new(Duration::from_millis(1000))?;
@@ -243,8 +268,10 @@ mod tests {
                         stats.checkpoints_recorded += 1;
                     }
                     Ok(())
-                }).await
-            }).await;
+                })
+                .await
+            })
+            .await;
 
             // Test sleep without checkpoints (should trigger no progress warning)
             let no_checkpoint_task = spawn(cx, async {
@@ -254,30 +281,40 @@ mod tests {
                     // Long sleep without checkpoints
                     sleep(Duration::from_millis(800)).await;
                     Ok(())
-                }).await
-            }).await;
+                })
+                .await
+            })
+            .await;
 
             stats.sleep_tasks_spawned += 2;
 
             // Allow deadline monitor to detect lack of progress
             sleep(Duration::from_millis(600)).await;
 
-            let no_progress_warnings = self.warning_collector.get_warning_count(WarningReason::NoProgress);
+            let no_progress_warnings = self
+                .warning_collector
+                .get_warning_count(WarningReason::NoProgress);
             stats.no_progress_warnings = no_progress_warnings;
             stats.deadline_warnings_emitted += no_progress_warnings;
 
             Ok(())
         }
 
-        async fn test_timeout_detection_integration(&self, cx: &Cx, stats: &mut SleepDeadlineStats) -> Result<()> {
+        async fn test_timeout_detection_integration(
+            &self,
+            cx: &Cx,
+            stats: &mut SleepDeadlineStats,
+        ) -> Result<()> {
             // Test sleep that should timeout
             let timeout_task = spawn(cx, async {
                 let budget = Budget::new(Duration::from_millis(100))?; // Very short deadline
 
-                let result = cx.with_budget(budget, async {
-                    sleep(Duration::from_millis(500)).await; // Much longer sleep
-                    Ok(())
-                }).await;
+                let result = cx
+                    .with_budget(budget, async {
+                        sleep(Duration::from_millis(500)).await; // Much longer sleep
+                        Ok(())
+                    })
+                    .await;
 
                 // Should timeout
                 match result {
@@ -287,7 +324,8 @@ mod tests {
                     }
                     _ => Err(Error::Other("Expected timeout but got different result")),
                 }
-            }).await;
+            })
+            .await;
 
             stats.sleep_tasks_spawned += 1;
 
@@ -297,7 +335,11 @@ mod tests {
             Ok(())
         }
 
-        async fn test_adaptive_threshold_integration(&self, cx: &Cx, stats: &mut SleepDeadlineStats) -> Result<()> {
+        async fn test_adaptive_threshold_integration(
+            &self,
+            cx: &Cx,
+            stats: &mut SleepDeadlineStats,
+        ) -> Result<()> {
             // Create multiple similar sleep tasks to build up historical data
             for i in 0..10 {
                 let adaptive_task = spawn(cx, async move {
@@ -307,8 +349,10 @@ mod tests {
                     cx.with_budget(budget, async {
                         sleep(sleep_duration).await;
                         Ok(())
-                    }).await
-                }).await;
+                    })
+                    .await
+                })
+                .await;
 
                 stats.sleep_tasks_spawned += 1;
 
@@ -324,8 +368,10 @@ mod tests {
                 cx.with_budget(budget, async {
                     sleep(sleep_duration).await;
                     Ok(())
-                }).await
-            }).await;
+                })
+                .await
+            })
+            .await;
 
             stats.sleep_tasks_spawned += 1;
 
@@ -387,22 +433,33 @@ mod tests {
             })
         }
 
-        async fn start_monitoring(&self, warning_callback: impl Fn(DeadlineWarning) + Send + 'static) -> Result<()> {
+        async fn start_monitoring(
+            &self,
+            warning_callback: impl Fn(DeadlineWarning) + Send + 'static,
+        ) -> Result<()> {
             *self.warning_callback.lock().unwrap() = Some(Box::new(warning_callback));
             self.running.store(true, Ordering::Release);
             Ok(())
         }
 
-        fn register_task(&self, task_id: TaskId, region_id: RegionId, deadline: Time) -> Result<()> {
+        fn register_task(
+            &self,
+            task_id: TaskId,
+            region_id: RegionId,
+            deadline: Time,
+        ) -> Result<()> {
             let mut tasks = self.monitored_tasks.write().unwrap();
-            tasks.insert(task_id, MonitoredTask {
+            tasks.insert(
                 task_id,
-                region_id,
-                deadline,
-                last_checkpoint: None,
-                last_checkpoint_message: None,
-                warning_emitted: false,
-            });
+                MonitoredTask {
+                    task_id,
+                    region_id,
+                    deadline,
+                    last_checkpoint: None,
+                    last_checkpoint_message: None,
+                    warning_emitted: false,
+                },
+            );
             Ok(())
         }
 
@@ -451,24 +508,50 @@ mod tests {
             let framework = SleepDeadlineTestFramework::new(
                 "basic_integration".to_string(),
                 false, // Use real runtime, not lab
-            ).await?;
+            )
+            .await?;
 
             let result = framework.execute_integration_test(&cx).await?;
 
-            assert!(result.success, "Basic sleep-deadline integration should succeed: {:?}", result.error);
-            assert!(result.monitoring_stats.deadline_warnings_emitted > 0,
-                "Should have emitted deadline warnings");
-            assert!(result.monitoring_stats.approaching_deadline_warnings > 0,
-                "Should have approaching deadline warnings");
-            assert!(result.monitoring_stats.timeouts_detected > 0,
-                "Should have detected timeouts");
+            assert!(
+                result.success,
+                "Basic sleep-deadline integration should succeed: {:?}",
+                result.error
+            );
+            assert!(
+                result.monitoring_stats.deadline_warnings_emitted > 0,
+                "Should have emitted deadline warnings"
+            );
+            assert!(
+                result.monitoring_stats.approaching_deadline_warnings > 0,
+                "Should have approaching deadline warnings"
+            );
+            assert!(
+                result.monitoring_stats.timeouts_detected > 0,
+                "Should have detected timeouts"
+            );
 
             println!("✓ Basic sleep ↔ deadline monitor integration verified");
-            println!("  Sleep tasks spawned: {}", result.monitoring_stats.sleep_tasks_spawned);
-            println!("  Deadline warnings: {}", result.monitoring_stats.deadline_warnings_emitted);
-            println!("  Approaching deadline: {}", result.monitoring_stats.approaching_deadline_warnings);
-            println!("  No progress warnings: {}", result.monitoring_stats.no_progress_warnings);
-            println!("  Timeouts detected: {}", result.monitoring_stats.timeouts_detected);
+            println!(
+                "  Sleep tasks spawned: {}",
+                result.monitoring_stats.sleep_tasks_spawned
+            );
+            println!(
+                "  Deadline warnings: {}",
+                result.monitoring_stats.deadline_warnings_emitted
+            );
+            println!(
+                "  Approaching deadline: {}",
+                result.monitoring_stats.approaching_deadline_warnings
+            );
+            println!(
+                "  No progress warnings: {}",
+                result.monitoring_stats.no_progress_warnings
+            );
+            println!(
+                "  Timeouts detected: {}",
+                result.monitoring_stats.timeouts_detected
+            );
             println!("  Duration: {}ms", result.duration_ms);
 
             Ok(())
@@ -482,17 +565,23 @@ mod tests {
 
         runtime.block_on(async {
             let cx = Cx::root(&runtime)?;
-            let framework = SleepDeadlineTestFramework::new(
-                "checkpoint_monitoring".to_string(),
-                false,
-            ).await?;
+            let framework =
+                SleepDeadlineTestFramework::new("checkpoint_monitoring".to_string(), false).await?;
 
             // Test focused on checkpoint behavior
             let mut stats = SleepDeadlineStats::default();
-            framework.test_sleep_checkpoints_integration(&cx, &mut stats).await?;
+            framework
+                .test_sleep_checkpoints_integration(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.checkpoints_recorded > 0, "Should have recorded checkpoints");
-            assert!(stats.no_progress_warnings > 0, "Should have no-progress warnings for long sleeps");
+            assert!(
+                stats.checkpoints_recorded > 0,
+                "Should have recorded checkpoints"
+            );
+            assert!(
+                stats.no_progress_warnings > 0,
+                "Should have no-progress warnings for long sleeps"
+            );
 
             println!("✓ Sleep checkpoint progress monitoring integration verified");
 
@@ -507,16 +596,19 @@ mod tests {
 
         runtime.block_on(async {
             let cx = Cx::root(&runtime)?;
-            let framework = SleepDeadlineTestFramework::new(
-                "timeout_enforcement".to_string(),
-                false,
-            ).await?;
+            let framework =
+                SleepDeadlineTestFramework::new("timeout_enforcement".to_string(), false).await?;
 
             // Test focused on timeout behavior
             let mut stats = SleepDeadlineStats::default();
-            framework.test_timeout_detection_integration(&cx, &mut stats).await?;
+            framework
+                .test_timeout_detection_integration(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.timeouts_detected > 0, "Should have detected timeouts from sleep exceeding deadline");
+            assert!(
+                stats.timeouts_detected > 0,
+                "Should have detected timeouts from sleep exceeding deadline"
+            );
 
             println!("✓ Sleep timeout deadline enforcement integration verified");
 
@@ -531,16 +623,19 @@ mod tests {
 
         runtime.block_on(async {
             let cx = Cx::root(&runtime)?;
-            let framework = SleepDeadlineTestFramework::new(
-                "adaptive_thresholds".to_string(),
-                false,
-            ).await?;
+            let framework =
+                SleepDeadlineTestFramework::new("adaptive_thresholds".to_string(), false).await?;
 
             // Test adaptive threshold behavior
             let mut stats = SleepDeadlineStats::default();
-            framework.test_adaptive_threshold_integration(&cx, &mut stats).await?;
+            framework
+                .test_adaptive_threshold_integration(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.sleep_tasks_spawned >= 10, "Should have spawned multiple tasks for adaptation");
+            assert!(
+                stats.sleep_tasks_spawned >= 10,
+                "Should have spawned multiple tasks for adaptation"
+            );
 
             println!("✓ Sleep adaptive deadline threshold integration verified");
 
@@ -558,11 +653,15 @@ mod tests {
             let framework = SleepDeadlineTestFramework::new(
                 "lab_runtime_integration".to_string(),
                 true, // Use lab runtime for deterministic timing
-            ).await?;
+            )
+            .await?;
 
             let result = framework.execute_integration_test(&cx).await?;
 
-            assert!(result.success, "Lab runtime sleep-deadline integration should succeed");
+            assert!(
+                result.success,
+                "Lab runtime sleep-deadline integration should succeed"
+            );
 
             println!("✓ Sleep ↔ deadline monitor lab runtime integration verified");
 

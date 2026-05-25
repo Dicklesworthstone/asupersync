@@ -30,10 +30,12 @@ mod tests {
         cx::{Cx, Scope},
         error::{Error, Result},
         grpc::health::{HealthError, HealthService, ServingStatus},
-        runtime::{spawn, Runtime},
-        service::discover::{Change, Discover, DnsDiscoveryConfig, DnsServiceDiscovery, StaticList},
+        runtime::{Runtime, spawn},
+        service::discover::{
+            Change, Discover, DnsDiscoveryConfig, DnsServiceDiscovery, StaticList,
+        },
         sync::{Arc, Mutex, RwLock},
-        time::{sleep, Duration, Instant},
+        time::{Duration, Instant, sleep},
         types::{Budget, Outcome, TaskId, Time},
     };
     use std::{
@@ -138,7 +140,10 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum IntegrationEventType {
-        HealthStatusChanged { from: ServingStatus, to: ServingStatus },
+        HealthStatusChanged {
+            from: ServingStatus,
+            to: ServingStatus,
+        },
         BackendAddedToDiscovery,
         BackendRemovedFromDiscovery,
         DiscoveryPolled,
@@ -173,16 +178,20 @@ mod tests {
             self.test_unhealthy_backend_removal(cx, &mut stats).await?;
 
             // Phase 3: Test healthy backend restoration
-            self.test_healthy_backend_restoration(cx, &mut stats).await?;
+            self.test_healthy_backend_restoration(cx, &mut stats)
+                .await?;
 
             // Phase 4: Test multi-service health states
-            self.test_multi_service_health_states(cx, &mut stats).await?;
+            self.test_multi_service_health_states(cx, &mut stats)
+                .await?;
 
             // Phase 5: Test health check subscriptions integration
-            self.test_health_subscription_integration(cx, &mut stats).await?;
+            self.test_health_subscription_integration(cx, &mut stats)
+                .await?;
 
             // Phase 6: Test discovery polling with health filtering
-            self.test_discovery_polling_integration(cx, &mut stats).await?;
+            self.test_discovery_polling_integration(cx, &mut stats)
+                .await?;
 
             let duration = start_time.elapsed();
 
@@ -196,16 +205,25 @@ mod tests {
             })
         }
 
-        async fn test_basic_health_propagation(&self, cx: &Cx, stats: &mut HealthDiscoveryStats) -> Result<()> {
+        async fn test_basic_health_propagation(
+            &self,
+            cx: &Cx,
+            stats: &mut HealthDiscoveryStats,
+        ) -> Result<()> {
             // Register backend services with health checks
             let service_name = "test.service.Basic";
             let backend_addr: SocketAddr = "127.0.0.1:8001".parse().unwrap();
 
             // Register service in health checker
-            self.health_service.set_status(service_name, ServingStatus::Serving)?;
+            self.health_service
+                .set_status(service_name, ServingStatus::Serving)?;
             stats.health_services_registered += 1;
 
-            self.record_event(IntegrationEventType::ServiceRegistered, service_name.to_string(), None);
+            self.record_event(
+                IntegrationEventType::ServiceRegistered,
+                service_name.to_string(),
+                None,
+            );
 
             // Create service discovery with health integration
             let discovery = Arc::new(MockServiceDiscovery::new_with_health_filter(
@@ -216,7 +234,10 @@ mod tests {
             discovery.add_endpoint(backend_addr);
             stats.backend_services_discovered += 1;
 
-            self.discovery_services.lock().unwrap().insert(service_name.to_string(), discovery.clone());
+            self.discovery_services
+                .lock()
+                .unwrap()
+                .insert(service_name.to_string(), discovery.clone());
 
             // Register backend in registry
             self.backend_registry.write().unwrap().register_backend(
@@ -228,28 +249,37 @@ mod tests {
             self.record_event(
                 IntegrationEventType::BackendAddedToDiscovery,
                 service_name.to_string(),
-                Some(backend_addr)
+                Some(backend_addr),
             );
 
             // Test health status change propagation
-            self.health_service.set_status(service_name, ServingStatus::NotServing)?;
+            self.health_service
+                .set_status(service_name, ServingStatus::NotServing)?;
             stats.health_status_changes += 1;
 
             // Simulate propagation delay
             sleep(Duration::from_millis(10)).await;
 
             // Verify health change triggered discovery update
-            self.propagate_health_change_to_discovery(service_name, ServingStatus::NotServing).await?;
+            self.propagate_health_change_to_discovery(service_name, ServingStatus::NotServing)
+                .await?;
             stats.discovery_updates_triggered += 1;
 
             // Verify backend is filtered out due to unhealthy status
             let endpoints = discovery.get_healthy_endpoints().await;
-            assert!(endpoints.is_empty(), "Unhealthy backend should be filtered out");
+            assert!(
+                endpoints.is_empty(),
+                "Unhealthy backend should be filtered out"
+            );
 
             Ok(())
         }
 
-        async fn test_unhealthy_backend_removal(&self, cx: &Cx, stats: &mut HealthDiscoveryStats) -> Result<()> {
+        async fn test_unhealthy_backend_removal(
+            &self,
+            cx: &Cx,
+            stats: &mut HealthDiscoveryStats,
+        ) -> Result<()> {
             let service_name = "test.service.UnhealthyRemoval";
             let healthy_backend: SocketAddr = "127.0.0.1:8002".parse().unwrap();
             let unhealthy_backend: SocketAddr = "127.0.0.1:8003".parse().unwrap();
@@ -263,7 +293,8 @@ mod tests {
 
             for &backend in &backends {
                 discovery.add_endpoint(backend);
-                self.health_service.set_status(service_name, ServingStatus::Serving)?;
+                self.health_service
+                    .set_status(service_name, ServingStatus::Serving)?;
 
                 self.backend_registry.write().unwrap().register_backend(
                     backend,
@@ -274,37 +305,57 @@ mod tests {
                 stats.backend_services_discovered += 1;
             }
 
-            self.discovery_services.lock().unwrap().insert(service_name.to_string(), discovery.clone());
+            self.discovery_services
+                .lock()
+                .unwrap()
+                .insert(service_name.to_string(), discovery.clone());
             stats.health_services_registered += 1;
 
             // Initially all backends should be healthy
             let initial_endpoints = discovery.get_healthy_endpoints().await;
-            assert_eq!(initial_endpoints.len(), 2, "Should have 2 healthy backends initially");
+            assert_eq!(
+                initial_endpoints.len(),
+                2,
+                "Should have 2 healthy backends initially"
+            );
 
             // Mark one backend as unhealthy
-            self.health_service.set_status(service_name, ServingStatus::NotServing)?;
+            self.health_service
+                .set_status(service_name, ServingStatus::NotServing)?;
             stats.health_status_changes += 1;
 
             // Simulate unhealthy backend detection and removal
-            self.propagate_health_change_to_discovery(service_name, ServingStatus::NotServing).await?;
+            self.propagate_health_change_to_discovery(service_name, ServingStatus::NotServing)
+                .await?;
             discovery.remove_unhealthy_endpoint(unhealthy_backend).await;
             stats.backends_removed_unhealthy += 1;
 
             self.record_event(
                 IntegrationEventType::BackendRemovedFromDiscovery,
                 service_name.to_string(),
-                Some(unhealthy_backend)
+                Some(unhealthy_backend),
             );
 
             // Verify only healthy backend remains
             let remaining_endpoints = discovery.get_healthy_endpoints().await;
-            assert_eq!(remaining_endpoints.len(), 1, "Should have 1 healthy backend after removal");
-            assert!(remaining_endpoints.contains(&healthy_backend), "Healthy backend should remain");
+            assert_eq!(
+                remaining_endpoints.len(),
+                1,
+                "Should have 1 healthy backend after removal"
+            );
+            assert!(
+                remaining_endpoints.contains(&healthy_backend),
+                "Healthy backend should remain"
+            );
 
             Ok(())
         }
 
-        async fn test_healthy_backend_restoration(&self, cx: &Cx, stats: &mut HealthDiscoveryStats) -> Result<()> {
+        async fn test_healthy_backend_restoration(
+            &self,
+            cx: &Cx,
+            stats: &mut HealthDiscoveryStats,
+        ) -> Result<()> {
             let service_name = "test.service.HealthyRestoration";
             let backend_addr: SocketAddr = "127.0.0.1:8004".parse().unwrap();
 
@@ -314,7 +365,8 @@ mod tests {
             ));
 
             // Start with unhealthy backend (removed from discovery)
-            self.health_service.set_status(service_name, ServingStatus::NotServing)?;
+            self.health_service
+                .set_status(service_name, ServingStatus::NotServing)?;
 
             self.backend_registry.write().unwrap().register_backend(
                 backend_addr,
@@ -327,32 +379,48 @@ mod tests {
 
             // Backend should not be in discovery initially
             let initial_endpoints = discovery.get_healthy_endpoints().await;
-            assert!(initial_endpoints.is_empty(), "Should have no healthy backends initially");
+            assert!(
+                initial_endpoints.is_empty(),
+                "Should have no healthy backends initially"
+            );
 
             // Mark backend as healthy (restore to discovery)
-            self.health_service.set_status(service_name, ServingStatus::Serving)?;
+            self.health_service
+                .set_status(service_name, ServingStatus::Serving)?;
             stats.health_status_changes += 1;
 
             // Simulate health restoration and addition back to discovery
-            self.propagate_health_change_to_discovery(service_name, ServingStatus::Serving).await?;
+            self.propagate_health_change_to_discovery(service_name, ServingStatus::Serving)
+                .await?;
             discovery.add_endpoint(backend_addr);
             stats.backends_restored_healthy += 1;
 
             self.record_event(
                 IntegrationEventType::BackendAddedToDiscovery,
                 service_name.to_string(),
-                Some(backend_addr)
+                Some(backend_addr),
             );
 
             // Verify backend is restored to discovery
             let restored_endpoints = discovery.get_healthy_endpoints().await;
-            assert_eq!(restored_endpoints.len(), 1, "Should have 1 restored healthy backend");
-            assert!(restored_endpoints.contains(&backend_addr), "Backend should be restored");
+            assert_eq!(
+                restored_endpoints.len(),
+                1,
+                "Should have 1 restored healthy backend"
+            );
+            assert!(
+                restored_endpoints.contains(&backend_addr),
+                "Backend should be restored"
+            );
 
             Ok(())
         }
 
-        async fn test_multi_service_health_states(&self, cx: &Cx, stats: &mut HealthDiscoveryStats) -> Result<()> {
+        async fn test_multi_service_health_states(
+            &self,
+            cx: &Cx,
+            stats: &mut HealthDiscoveryStats,
+        ) -> Result<()> {
             let services = vec![
                 "test.service.Alpha",
                 "test.service.Beta",
@@ -363,7 +431,8 @@ mod tests {
 
             // Register backend for multiple services
             for service_name in &services {
-                self.health_service.set_status(service_name, ServingStatus::Serving)?;
+                self.health_service
+                    .set_status(service_name, ServingStatus::Serving)?;
                 stats.health_services_registered += 1;
 
                 let discovery = Arc::new(MockServiceDiscovery::new_with_health_filter(
@@ -372,7 +441,10 @@ mod tests {
                 ));
 
                 discovery.add_endpoint(backend_addr);
-                self.discovery_services.lock().unwrap().insert(service_name.to_string(), discovery);
+                self.discovery_services
+                    .lock()
+                    .unwrap()
+                    .insert(service_name.to_string(), discovery);
                 stats.backend_services_discovered += 1;
             }
 
@@ -384,12 +456,14 @@ mod tests {
 
             // Test independent health state management
             // Set first service as unhealthy
-            self.health_service.set_status(services[0], ServingStatus::NotServing)?;
+            self.health_service
+                .set_status(services[0], ServingStatus::NotServing)?;
             stats.health_status_changes += 1;
             stats.multi_service_states_managed += 1;
 
             // Propagate change to its discovery
-            self.propagate_health_change_to_discovery(services[0], ServingStatus::NotServing).await?;
+            self.propagate_health_change_to_discovery(services[0], ServingStatus::NotServing)
+                .await?;
 
             // Verify only the specific service's discovery is affected
             let discovery_services = self.discovery_services.lock().unwrap();
@@ -399,17 +473,29 @@ mod tests {
             let gamma_discovery = discovery_services.get(services[2]).unwrap();
 
             // Alpha should be empty (unhealthy), others should still have the backend
-            assert!(alpha_discovery.get_healthy_endpoints().await.is_empty(),
-                "Alpha service should have no healthy endpoints");
-            assert_eq!(beta_discovery.get_healthy_endpoints().await.len(), 1,
-                "Beta service should still have 1 healthy endpoint");
-            assert_eq!(gamma_discovery.get_healthy_endpoints().await.len(), 1,
-                "Gamma service should still have 1 healthy endpoint");
+            assert!(
+                alpha_discovery.get_healthy_endpoints().await.is_empty(),
+                "Alpha service should have no healthy endpoints"
+            );
+            assert_eq!(
+                beta_discovery.get_healthy_endpoints().await.len(),
+                1,
+                "Beta service should still have 1 healthy endpoint"
+            );
+            assert_eq!(
+                gamma_discovery.get_healthy_endpoints().await.len(),
+                1,
+                "Gamma service should still have 1 healthy endpoint"
+            );
 
             Ok(())
         }
 
-        async fn test_health_subscription_integration(&self, cx: &Cx, stats: &mut HealthDiscoveryStats) -> Result<()> {
+        async fn test_health_subscription_integration(
+            &self,
+            cx: &Cx,
+            stats: &mut HealthDiscoveryStats,
+        ) -> Result<()> {
             let service_name = "test.service.Subscription";
             let backend_addr: SocketAddr = "127.0.0.1:8006".parse().unwrap();
 
@@ -431,11 +517,12 @@ mod tests {
             self.record_event(
                 IntegrationEventType::HealthCheckSubscribed,
                 service_name.to_string(),
-                None
+                None,
             );
 
             // Register service and backend
-            self.health_service.set_status(service_name, ServingStatus::Serving)?;
+            self.health_service
+                .set_status(service_name, ServingStatus::Serving)?;
             stats.health_services_registered += 1;
 
             let discovery = Arc::new(MockServiceDiscovery::new_with_health_filter(
@@ -444,7 +531,10 @@ mod tests {
             ));
 
             discovery.add_endpoint(backend_addr);
-            self.discovery_services.lock().unwrap().insert(service_name.to_string(), discovery.clone());
+            self.discovery_services
+                .lock()
+                .unwrap()
+                .insert(service_name.to_string(), discovery.clone());
             stats.backend_services_discovered += 1;
 
             // Test health status change notifications
@@ -460,25 +550,36 @@ mod tests {
                 stats.health_status_changes += 1;
 
                 // Simulate subscription notification
-                self.notify_health_subscriptions(service_name, status).await?;
+                self.notify_health_subscriptions(service_name, status)
+                    .await?;
 
                 sleep(Duration::from_millis(5)).await;
             }
 
             // Verify subscription received all status changes
             let received_statuses = status_changes.lock().unwrap().clone();
-            assert_eq!(received_statuses.len(), status_sequence.len(),
-                "Should receive all health status changes");
+            assert_eq!(
+                received_statuses.len(),
+                status_sequence.len(),
+                "Should receive all health status changes"
+            );
 
             for (i, &expected) in status_sequence.iter().enumerate() {
-                assert_eq!(received_statuses[i], expected,
-                    "Status change {} should match expected", i);
+                assert_eq!(
+                    received_statuses[i], expected,
+                    "Status change {} should match expected",
+                    i
+                );
             }
 
             Ok(())
         }
 
-        async fn test_discovery_polling_integration(&self, cx: &Cx, stats: &mut HealthDiscoveryStats) -> Result<()> {
+        async fn test_discovery_polling_integration(
+            &self,
+            cx: &Cx,
+            stats: &mut HealthDiscoveryStats,
+        ) -> Result<()> {
             let service_name = "test.service.Polling";
             let backends: Vec<SocketAddr> = vec![
                 "127.0.0.1:8007".parse().unwrap(),
@@ -494,7 +595,8 @@ mod tests {
 
             // Register all backends as initially healthy
             for &backend in &backends {
-                self.health_service.set_status(service_name, ServingStatus::Serving)?;
+                self.health_service
+                    .set_status(service_name, ServingStatus::Serving)?;
                 discovery.add_endpoint(backend);
 
                 self.backend_registry.write().unwrap().register_backend(
@@ -507,7 +609,10 @@ mod tests {
             stats.health_services_registered += 1;
             stats.backend_services_discovered += backends.len() as u64;
 
-            self.discovery_services.lock().unwrap().insert(service_name.to_string(), discovery.clone());
+            self.discovery_services
+                .lock()
+                .unwrap()
+                .insert(service_name.to_string(), discovery.clone());
 
             // Simulate discovery polling with health filtering
             for poll_cycle in 0..5 {
@@ -518,26 +623,33 @@ mod tests {
                 self.record_event(
                     IntegrationEventType::DiscoveryPolled,
                     service_name.to_string(),
-                    None
+                    None,
                 );
 
                 // Simulate health status changes during polling
                 if poll_cycle == 2 {
                     // Mark middle backend as unhealthy
-                    self.health_service.set_status(service_name, ServingStatus::NotServing)?;
+                    self.health_service
+                        .set_status(service_name, ServingStatus::NotServing)?;
                     stats.health_status_changes += 1;
 
-                    self.propagate_health_change_to_discovery(service_name, ServingStatus::NotServing).await?;
+                    self.propagate_health_change_to_discovery(
+                        service_name,
+                        ServingStatus::NotServing,
+                    )
+                    .await?;
                     discovery.remove_unhealthy_endpoint(backends[1]).await;
                     stats.backends_removed_unhealthy += 1;
                 }
 
                 if poll_cycle == 4 {
                     // Restore backend to healthy
-                    self.health_service.set_status(service_name, ServingStatus::Serving)?;
+                    self.health_service
+                        .set_status(service_name, ServingStatus::Serving)?;
                     stats.health_status_changes += 1;
 
-                    self.propagate_health_change_to_discovery(service_name, ServingStatus::Serving).await?;
+                    self.propagate_health_change_to_discovery(service_name, ServingStatus::Serving)
+                        .await?;
                     discovery.add_endpoint(backends[1]);
                     stats.backends_restored_healthy += 1;
                 }
@@ -547,15 +659,25 @@ mod tests {
 
             // Final verification: all backends should be healthy again
             let final_endpoints = discovery.get_healthy_endpoints().await;
-            assert_eq!(final_endpoints.len(), backends.len(),
-                "All backends should be healthy after polling cycles");
+            assert_eq!(
+                final_endpoints.len(),
+                backends.len(),
+                "All backends should be healthy after polling cycles"
+            );
 
             Ok(())
         }
 
-        async fn propagate_health_change_to_discovery(&self, service_name: &str, new_status: ServingStatus) -> Result<()> {
+        async fn propagate_health_change_to_discovery(
+            &self,
+            service_name: &str,
+            new_status: ServingStatus,
+        ) -> Result<()> {
             // Update backend registry
-            self.backend_registry.write().unwrap().update_service_health(service_name, new_status);
+            self.backend_registry
+                .write()
+                .unwrap()
+                .update_service_health(service_name, new_status);
 
             // Record integration event
             self.record_event(
@@ -564,7 +686,7 @@ mod tests {
                     to: new_status,
                 },
                 service_name.to_string(),
-                None
+                None,
             );
 
             // Simulate discovery update propagation
@@ -575,7 +697,11 @@ mod tests {
             Ok(())
         }
 
-        async fn notify_health_subscriptions(&self, service_name: &str, status: ServingStatus) -> Result<()> {
+        async fn notify_health_subscriptions(
+            &self,
+            service_name: &str,
+            status: ServingStatus,
+        ) -> Result<()> {
             let subscriptions = self.health_subscriptions.lock().unwrap().clone();
 
             for subscription in subscriptions {
@@ -587,7 +713,12 @@ mod tests {
             Ok(())
         }
 
-        fn record_event(&self, event_type: IntegrationEventType, service_name: String, backend_address: Option<SocketAddr>) {
+        fn record_event(
+            &self,
+            event_type: IntegrationEventType,
+            service_name: String,
+            backend_address: Option<SocketAddr>,
+        ) {
             let event = IntegrationEvent {
                 timestamp: Instant::now(),
                 event_type,
@@ -598,7 +729,10 @@ mod tests {
             self.integration_events.lock().unwrap().push(event);
         }
 
-        async fn verify_integration_properties(&self, stats: &HealthDiscoveryStats) -> Result<bool> {
+        async fn verify_integration_properties(
+            &self,
+            stats: &HealthDiscoveryStats,
+        ) -> Result<bool> {
             let events = self.integration_events.lock().unwrap();
 
             // Verify core integration properties
@@ -624,9 +758,21 @@ mod tests {
 
             // Verify event sequence makes sense
             let events_recorded = !events.is_empty()
-                && events.iter().any(|e| matches!(e.event_type, IntegrationEventType::HealthStatusChanged { .. }))
-                && events.iter().any(|e| matches!(e.event_type, IntegrationEventType::BackendAddedToDiscovery))
-                && events.iter().any(|e| matches!(e.event_type, IntegrationEventType::BackendRemovedFromDiscovery));
+                && events.iter().any(|e| {
+                    matches!(
+                        e.event_type,
+                        IntegrationEventType::HealthStatusChanged { .. }
+                    )
+                })
+                && events
+                    .iter()
+                    .any(|e| matches!(e.event_type, IntegrationEventType::BackendAddedToDiscovery))
+                && events.iter().any(|e| {
+                    matches!(
+                        e.event_type,
+                        IntegrationEventType::BackendRemovedFromDiscovery
+                    )
+                });
 
             Ok(properties_verified && events_recorded)
         }
@@ -643,7 +789,12 @@ mod tests {
             }
         }
 
-        fn register_backend(&mut self, address: SocketAddr, service_names: Vec<String>, health_status: ServingStatus) {
+        fn register_backend(
+            &mut self,
+            address: SocketAddr,
+            service_names: Vec<String>,
+            health_status: ServingStatus,
+        ) {
             let backend = BackendInfo {
                 address,
                 service_names: service_names.clone(),
@@ -655,13 +806,17 @@ mod tests {
             self.backends.insert(address, backend);
 
             for service_name in service_names {
-                self.services.entry(service_name.clone()).or_insert_with(Vec::new).push(address);
+                self.services
+                    .entry(service_name.clone())
+                    .or_insert_with(Vec::new)
+                    .push(address);
                 self.health_status_map.insert(service_name, health_status);
             }
         }
 
         fn update_service_health(&mut self, service_name: &str, new_status: ServingStatus) {
-            self.health_status_map.insert(service_name.to_string(), new_status);
+            self.health_status_map
+                .insert(service_name.to_string(), new_status);
 
             // Update all backends serving this service
             if let Some(addresses) = self.services.get(service_name) {
@@ -706,7 +861,9 @@ mod tests {
             // Simulate health filter update
         }
 
-        async fn poll_discover_with_health_filter(&self) -> Result<Vec<Change<SocketAddr>>, Box<dyn std::error::Error + Send + Sync>> {
+        async fn poll_discover_with_health_filter(
+            &self,
+        ) -> Result<Vec<Change<SocketAddr>>, Box<dyn std::error::Error + Send + Sync>> {
             // Simulate polling with health filtering
             let changes = self.change_log.lock().unwrap().drain(..).collect();
             Ok(changes)
@@ -729,7 +886,10 @@ mod tests {
                 });
             }
 
-            self.statuses.write().unwrap().insert(service_name.to_string(), status);
+            self.statuses
+                .write()
+                .unwrap()
+                .insert(service_name.to_string(), status);
             Ok(())
         }
     }
@@ -754,19 +914,53 @@ mod tests {
 
             let result = framework.execute_integration_test(&cx).await?;
 
-            assert!(result.success, "Basic gRPC health ↔ service discovery integration should succeed: {:?}", result.error);
-            assert!(result.integration_stats.health_services_registered > 0, "Should register health services");
-            assert!(result.integration_stats.backend_services_discovered > 0, "Should discover backend services");
-            assert!(result.integration_stats.health_status_changes > 0, "Should have health status changes");
-            assert!(result.integration_stats.discovery_updates_triggered > 0, "Should trigger discovery updates");
+            assert!(
+                result.success,
+                "Basic gRPC health ↔ service discovery integration should succeed: {:?}",
+                result.error
+            );
+            assert!(
+                result.integration_stats.health_services_registered > 0,
+                "Should register health services"
+            );
+            assert!(
+                result.integration_stats.backend_services_discovered > 0,
+                "Should discover backend services"
+            );
+            assert!(
+                result.integration_stats.health_status_changes > 0,
+                "Should have health status changes"
+            );
+            assert!(
+                result.integration_stats.discovery_updates_triggered > 0,
+                "Should trigger discovery updates"
+            );
 
             println!("✓ gRPC health ↔ service discovery integration verified");
-            println!("  Health services registered: {}", result.integration_stats.health_services_registered);
-            println!("  Backend services discovered: {}", result.integration_stats.backend_services_discovered);
-            println!("  Health status changes: {}", result.integration_stats.health_status_changes);
-            println!("  Discovery updates triggered: {}", result.integration_stats.discovery_updates_triggered);
-            println!("  Backends removed (unhealthy): {}", result.integration_stats.backends_removed_unhealthy);
-            println!("  Backends restored (healthy): {}", result.integration_stats.backends_restored_healthy);
+            println!(
+                "  Health services registered: {}",
+                result.integration_stats.health_services_registered
+            );
+            println!(
+                "  Backend services discovered: {}",
+                result.integration_stats.backend_services_discovered
+            );
+            println!(
+                "  Health status changes: {}",
+                result.integration_stats.health_status_changes
+            );
+            println!(
+                "  Discovery updates triggered: {}",
+                result.integration_stats.discovery_updates_triggered
+            );
+            println!(
+                "  Backends removed (unhealthy): {}",
+                result.integration_stats.backends_removed_unhealthy
+            );
+            println!(
+                "  Backends restored (healthy): {}",
+                result.integration_stats.backends_restored_healthy
+            );
             println!("  Duration: {}ms", result.duration_ms);
 
             Ok(())
@@ -783,10 +977,18 @@ mod tests {
             let framework = HealthDiscoveryTestFramework::new()?;
 
             let mut stats = HealthDiscoveryStats::default();
-            framework.test_basic_health_propagation(&cx, &mut stats).await?;
+            framework
+                .test_basic_health_propagation(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.health_status_changes > 0, "Should have health status changes");
-            assert!(stats.discovery_updates_triggered > 0, "Should trigger discovery updates");
+            assert!(
+                stats.health_status_changes > 0,
+                "Should have health status changes"
+            );
+            assert!(
+                stats.discovery_updates_triggered > 0,
+                "Should trigger discovery updates"
+            );
 
             println!("✓ Health status propagation to service discovery verified");
 
@@ -804,9 +1006,14 @@ mod tests {
             let framework = HealthDiscoveryTestFramework::new()?;
 
             let mut stats = HealthDiscoveryStats::default();
-            framework.test_unhealthy_backend_removal(&cx, &mut stats).await?;
+            framework
+                .test_unhealthy_backend_removal(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.backends_removed_unhealthy > 0, "Should remove unhealthy backends");
+            assert!(
+                stats.backends_removed_unhealthy > 0,
+                "Should remove unhealthy backends"
+            );
 
             println!("✓ Unhealthy backend removal from discovery verified");
 
@@ -824,9 +1031,14 @@ mod tests {
             let framework = HealthDiscoveryTestFramework::new()?;
 
             let mut stats = HealthDiscoveryStats::default();
-            framework.test_healthy_backend_restoration(&cx, &mut stats).await?;
+            framework
+                .test_healthy_backend_restoration(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.backends_restored_healthy > 0, "Should restore healthy backends");
+            assert!(
+                stats.backends_restored_healthy > 0,
+                "Should restore healthy backends"
+            );
 
             println!("✓ Healthy backend restoration to discovery verified");
 
@@ -844,9 +1056,14 @@ mod tests {
             let framework = HealthDiscoveryTestFramework::new()?;
 
             let mut stats = HealthDiscoveryStats::default();
-            framework.test_multi_service_health_states(&cx, &mut stats).await?;
+            framework
+                .test_multi_service_health_states(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.multi_service_states_managed > 0, "Should manage multiple service health states");
+            assert!(
+                stats.multi_service_states_managed > 0,
+                "Should manage multiple service health states"
+            );
 
             println!("✓ Multi-service health state management verified");
 
@@ -864,9 +1081,14 @@ mod tests {
             let framework = HealthDiscoveryTestFramework::new()?;
 
             let mut stats = HealthDiscoveryStats::default();
-            framework.test_health_subscription_integration(&cx, &mut stats).await?;
+            framework
+                .test_health_subscription_integration(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.health_check_subscriptions > 0, "Should have health check subscriptions");
+            assert!(
+                stats.health_check_subscriptions > 0,
+                "Should have health check subscriptions"
+            );
 
             println!("✓ Health check subscription integration verified");
 
@@ -884,9 +1106,14 @@ mod tests {
             let framework = HealthDiscoveryTestFramework::new()?;
 
             let mut stats = HealthDiscoveryStats::default();
-            framework.test_discovery_polling_integration(&cx, &mut stats).await?;
+            framework
+                .test_discovery_polling_integration(&cx, &mut stats)
+                .await?;
 
-            assert!(stats.discovery_polls_completed > 0, "Should complete discovery polls");
+            assert!(
+                stats.discovery_polls_completed > 0,
+                "Should complete discovery polls"
+            );
 
             println!("✓ Discovery polling with health filtering verified");
 

@@ -3487,7 +3487,9 @@ mod tests {
 
     /// Generate deterministic test data for a given size.
     fn generate_atp_test_data(size: usize, offset: u8) -> Vec<u8> {
-        (0..size).map(|i| ((i + offset as usize) % 256) as u8).collect()
+        (0..size)
+            .map(|i| ((i + offset as usize) % 256) as u8)
+            .collect()
     }
 
     /// Create test received symbols with deterministic ESIs.
@@ -3562,10 +3564,11 @@ mod tests {
 
     #[test]
     fn test_atp_proof_hash_hex_roundtrip() {
-        let test_bytes = [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
-                          0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10,
-                          0x0f, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78,
-                          0x87, 0x96, 0xa5, 0xb4, 0xc3, 0xd2, 0xe1, 0xf0];
+        let test_bytes = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+            0x32, 0x10, 0x0f, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78, 0x87, 0x96, 0xa5, 0xb4,
+            0xc3, 0xd2, 0xe1, 0xf0,
+        ];
         let hash = ProofHash(test_bytes);
 
         let hex = hash.to_hex();
@@ -3591,7 +3594,10 @@ mod tests {
         assert!(ProofHash::from_hex(&format!("{valid_hex}00")).is_none());
 
         // Invalid hex characters
-        assert!(ProofHash::from_hex("g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").is_none());
+        assert!(
+            ProofHash::from_hex("g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .is_none()
+        );
     }
 
     #[test]
@@ -3807,9 +3813,7 @@ mod tests {
         };
 
         let mut builder = DecodeProof::builder(minimal_config);
-        builder.set_received(ReceivedSummary::from_received(
-            vec![(0, true)].into_iter()
-        ));
+        builder.set_received(ReceivedSummary::from_received(vec![(0, true)].into_iter()));
         builder.set_success(&[generate_atp_test_data(64, 0)]);
         let proof = builder.build();
 
