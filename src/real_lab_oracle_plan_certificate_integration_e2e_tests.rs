@@ -341,7 +341,7 @@ impl CertificateAwareLabOracle {
                 self.increment_stat("oracle_events_collected", collected_events.len() as u64);
             }
             Outcome::Err(e) => {
-                return Outcome::Err(Error::msg(format!("Event collection failed: {}", e)));
+                return Outcome::Err(Error::internal(format!("Event collection failed: {}", e)));
             }
             Outcome::Cancelled => {
                 return Outcome::Cancelled;
@@ -361,7 +361,7 @@ impl CertificateAwareLabOracle {
                 cert
             }
             Outcome::Err(e) => {
-                return Outcome::Err(Error::msg(format!("Certificate generation failed: {}", e)));
+                return Outcome::Err(Error::internal(format!("Certificate generation failed: {}", e)));
             }
             Outcome::Cancelled => {
                 return Outcome::Cancelled;
@@ -386,7 +386,7 @@ impl CertificateAwareLabOracle {
             }
             Outcome::Err(e) => {
                 self.increment_stat("failed_validations", 1);
-                return Outcome::Err(Error::msg(format!("Certificate validation failed: {}", e)));
+                return Outcome::Err(Error::internal(format!("Certificate validation failed: {}", e)));
             }
             Outcome::Cancelled => {
                 return Outcome::Cancelled;

@@ -225,7 +225,7 @@ impl TraceMinimizer {
         // Validate the result
         if !self.validate_candidate(&minimized).await? {
             warn!("Dependency pruning produced invalid trace, falling back to original");
-            return Err(Error::msg("Dependency pruning failed validation"));
+            return Err(Error::internal("Dependency pruning failed validation"));
         }
 
         Ok(minimized)
@@ -264,7 +264,7 @@ impl TraceMinimizer {
         // Validate the result
         if !self.validate_candidate(&minimized).await? {
             warn!("Causal cone minimization produced invalid trace, falling back");
-            return Err(Error::msg("Causal cone minimization failed validation"));
+            return Err(Error::internal("Causal cone minimization failed validation"));
         }
 
         Ok(minimized)

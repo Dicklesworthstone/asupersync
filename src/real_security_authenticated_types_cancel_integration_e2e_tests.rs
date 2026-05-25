@@ -209,7 +209,7 @@ impl CancelAwareAuthenticationSystem {
             }
             Err(e) => {
                 self.cleanup_failed_operation(&correlation_id).await;
-                return Outcome::Err(Error::msg(format!("Authentication failed: {}", e)));
+                return Outcome::Err(Error::internal(format!("Authentication failed: {}", e)));
             }
         };
 
@@ -241,7 +241,7 @@ impl CancelAwareAuthenticationSystem {
             }
             Err(e) => {
                 self.cleanup_failed_operation(&correlation_id).await;
-                return Outcome::Err(Error::msg(format!("Operation execution failed: {}", e)));
+                return Outcome::Err(Error::internal(format!("Operation execution failed: {}", e)));
             }
         };
 
@@ -316,7 +316,7 @@ impl CancelAwareAuthenticationSystem {
 
         while elapsed < operation_duration {
             if cancel_token.is_cancelled() {
-                return Err(Error::msg("Operation cancelled during execution"));
+                return Err(Error::internal("Operation cancelled during execution"));
             }
 
             tokio::time::sleep(check_interval).await;
@@ -325,7 +325,7 @@ impl CancelAwareAuthenticationSystem {
 
         // Final cancellation check
         if cancel_token.is_cancelled() {
-            return Err(Error::msg("Operation cancelled at completion"));
+            return Err(Error::internal("Operation cancelled at completion"));
         }
 
         Ok(OperationExecutionResult {

@@ -349,7 +349,7 @@ impl TraceAwareKafkaSystem {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
                 Outcome::Err(e) => {
-                    return Outcome::Err(Error::msg(format!("Consumer poll failed: {}", e)));
+                    return Outcome::Err(Error::internal(format!("Consumer poll failed: {}", e)));
                 }
                 Outcome::Cancelled => {
                     return Outcome::Cancelled;

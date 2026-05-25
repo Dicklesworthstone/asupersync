@@ -255,7 +255,7 @@ impl ConsistentHashLoadBalanceSystem {
                     format!("Hash resolution failed: {}", e),
                 )
                 .await;
-                return Outcome::Err(Error::msg(format!(
+                return Outcome::Err(Error::internal(format!(
                     "Consistent hash resolution failed: {}",
                     e
                 )));
@@ -278,7 +278,7 @@ impl ConsistentHashLoadBalanceSystem {
                     format!("Load balancing failed: {}", e),
                 )
                 .await;
-                return Outcome::Err(Error::msg(format!(
+                return Outcome::Err(Error::internal(format!(
                     "Load balancing integration failed: {}",
                     e
                 )));
