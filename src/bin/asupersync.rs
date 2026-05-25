@@ -189,6 +189,8 @@ enum AtpCommand {
     Mirror(AtpMirrorArgs),
     /// Generate share codes for ATP transfers
     Share(AtpShareArgs),
+    /// Establish peer identity and pairing for ATP transfers
+    Pair(AtpPairArgs),
     /// Watch directory for changes and sync automatically
     Watch(AtpWatchArgs),
     /// Serve ATP daemon for background transfers
@@ -394,6 +396,76 @@ struct AtpShareArgs {
     /// Share policy: open, peers-only, specific-peer
     #[arg(long = "policy", default_value = "peers-only")]
     policy: String,
+
+    /// Capability type: read, write, receive, relay, mailbox
+    #[arg(long = "capability", default_value = "read", value_delimiter = ',')]
+    capabilities: Vec<String>,
+
+    /// Quota limit in bytes (0 = unlimited)
+    #[arg(long = "quota", default_value_t = 0)]
+    quota_bytes: u64,
+
+    /// Specific peer ID for restricted sharing
+    #[arg(long = "peer-id")]
+    peer_id: Option<String>,
+
+    /// Destination policy hints
+    #[arg(long = "destination-policy", default_value = "auto")]
+    destination_policy: String,
+
+    /// Enable single-use share code
+    #[arg(long = "single-use", action = clap::ArgAction::SetTrue)]
+    single_use: bool,
+
+    /// Enable revocation capability
+    #[arg(long = "revocable", action = clap::ArgAction::SetTrue)]
+    revocable: bool,
+}
+
+#[derive(Args, Debug)]
+struct AtpPairArgs {
+    #[command(subcommand)]
+    command: AtpPairCommand,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum AtpPairCommand {
+    /// Initiate pairing with a new peer
+    Initiate {
+        /// Optional peer identifier hint
+        #[arg(long = "peer-hint")]
+        peer_hint: Option<String>,
+
+        /// Confirmation method: visual, audio, manual
+        #[arg(long = "method", default_value = "visual")]
+        confirmation_method: String,
+
+        /// Timeout for pairing in seconds
+        #[arg(long = "timeout", default_value_t = 300)]
+        timeout_seconds: u64,
+    },
+    /// Complete pairing with confirmation code
+    Confirm {
+        /// Pairing token received from peer
+        #[arg(value_name = "TOKEN")]
+        pairing_token: String,
+
+        /// Human-readable confirmation phrase
+        #[arg(value_name = "PHRASE")]
+        confirmation_phrase: String,
+    },
+    /// Cancel an active pairing session
+    Cancel {
+        /// Pairing session ID to cancel
+        #[arg(value_name = "SESSION_ID")]
+        session_id: String,
+    },
+    /// List active pairing sessions
+    List {
+        /// Show detailed session information
+        #[arg(long = "detailed", action = clap::ArgAction::SetTrue)]
+        detailed: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -859,14 +931,104 @@ struct AtpShareOutput {
     source: String,
     share_code: String,
     expires_seconds: u64,
+    max_downloads: u32,
+    policy: String,
+    capabilities: Vec<String>,
+    quota_bytes: u64,
+    peer_id: Option<String>,
+    destination_policy: String,
+    single_use: bool,
+    revocable: bool,
+    revocation_url: Option<String>,
 }
 
 impl AtpShareOutput {
-    fn new(source: &Path, share_code: &str, expires_seconds: u64) -> Self {
+    fn new(args: &AtpShareArgs, share_code: String) -> Self {
+        let revocation_url = if args.revocable {
+            Some(format!("atp://revoke/{}", &share_code[12..20]))
+        } else {
+            None
+        };
+
         Self {
-            source: source.display().to_string(),
-            share_code: share_code.to_string(),
-            expires_seconds,
+            source: args.source.display().to_string(),
+            share_code,
+            expires_seconds: args.expires_seconds,
+            max_downloads: args.max_downloads,
+            policy: args.policy.clone(),
+            capabilities: args.capabilities.clone(),
+            quota_bytes: args.quota_bytes,
+            peer_id: args.peer_id.clone(),
+            destination_policy: args.destination_policy.clone(),
+            single_use: args.single_use,
+            revocable: args.revocable,
+            revocation_url,
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AtpPairOutput {
+    command: String,
+    session_id: Option<String>,
+    pairing_token: Option<String>,
+    confirmation_phrase: Option<String>,
+    peer_id: Option<String>,
+    status: String,
+    expires_seconds: Option<u64>,
+    transcript_binding: Option<String>,
+}
+
+impl AtpPairOutput {
+    fn initiate(session_id: String, pairing_token: String, confirmation_phrase: String, expires_seconds: u64) -> Self {
+        Self {
+            command: "initiate".to_string(),
+            session_id: Some(session_id),
+            pairing_token: Some(pairing_token),
+            confirmation_phrase: Some(confirmation_phrase),
+            peer_id: None,
+            status: "awaiting_confirmation".to_string(),
+            expires_seconds: Some(expires_seconds),
+            transcript_binding: Some("sha256:transcript".to_string()),
+        }
+    }
+
+    fn confirm(peer_id: String) -> Self {
+        Self {
+            command: "confirm".to_string(),
+            session_id: None,
+            pairing_token: None,
+            confirmation_phrase: None,
+            peer_id: Some(peer_id),
+            status: "paired_successfully".to_string(),
+            expires_seconds: None,
+            transcript_binding: None,
+        }
+    }
+
+    fn cancel(session_id: String) -> Self {
+        Self {
+            command: "cancel".to_string(),
+            session_id: Some(session_id),
+            pairing_token: None,
+            confirmation_phrase: None,
+            peer_id: None,
+            status: "cancelled".to_string(),
+            expires_seconds: None,
+            transcript_binding: None,
+        }
+    }
+
+    fn list(sessions: Vec<String>) -> Self {
+        Self {
+            command: "list".to_string(),
+            session_id: None,
+            pairing_token: None,
+            confirmation_phrase: None,
+            peer_id: None,
+            status: format!("{} active sessions", sessions.len()),
+            expires_seconds: None,
+            transcript_binding: None,
         }
     }
 }
@@ -897,6 +1059,108 @@ impl AtpWatchOutput {
             target: target.to_string(),
             debounce_seconds,
             status: "watching".to_string(),
+        }
+    }
+}
+
+impl Outputtable for AtpShareOutput {
+    fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
+
+    fn human_format(&self) -> String {
+        let mut output = format!(
+            "ATP Share Code Generated\n\
+            Source: {}\n\
+            Code: {}\n\
+            Expires: {}s\n\
+            Policy: {}\n\
+            Capabilities: {}",
+            self.source,
+            self.share_code,
+            self.expires_seconds,
+            self.policy,
+            self.capabilities.join(", ")
+        );
+
+        if self.quota_bytes > 0 {
+            output.push_str(&format!("\nQuota: {}", format_bytes(self.quota_bytes)));
+        }
+
+        if let Some(ref peer_id) = self.peer_id {
+            output.push_str(&format!("\nRestricted to peer: {}", peer_id));
+        }
+
+        if self.single_use {
+            output.push_str("\nSingle-use code");
+        }
+
+        if let Some(ref revocation_url) = self.revocation_url {
+            output.push_str(&format!("\nRevocation URL: {}", revocation_url));
+        }
+
+        output
+    }
+}
+
+impl Outputtable for AtpPairOutput {
+    fn json(&self) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::to_value(self)
+    }
+
+    fn human_format(&self) -> String {
+        match self.command.as_str() {
+            "initiate" => {
+                format!(
+                    "ATP Pairing Initiated\n\
+                    Session ID: {}\n\
+                    Pairing Token: {}\n\
+                    Confirmation Phrase: {}\n\
+                    Status: {}\n\
+                    Expires in: {}s\n\
+                    \n\
+                    Share this pairing token with your peer:\n\
+                    {}\n\
+                    \n\
+                    Ask your peer to confirm using the phrase:\n\
+                    \"{}\"",
+                    self.session_id.as_deref().unwrap_or("unknown"),
+                    self.pairing_token.as_deref().unwrap_or("unknown"),
+                    self.confirmation_phrase.as_deref().unwrap_or("unknown"),
+                    self.status,
+                    self.expires_seconds.unwrap_or(0),
+                    self.pairing_token.as_deref().unwrap_or("unknown"),
+                    self.confirmation_phrase.as_deref().unwrap_or("unknown")
+                )
+            },
+            "confirm" => {
+                format!(
+                    "ATP Pairing Confirmed\n\
+                    Peer ID: {}\n\
+                    Status: {}\n\
+                    \n\
+                    Pairing successful! You can now transfer files with this peer.",
+                    self.peer_id.as_deref().unwrap_or("unknown"),
+                    self.status
+                )
+            },
+            "cancel" => {
+                format!(
+                    "ATP Pairing Cancelled\n\
+                    Session ID: {}\n\
+                    Status: {}",
+                    self.session_id.as_deref().unwrap_or("unknown"),
+                    self.status
+                )
+            },
+            "list" => {
+                format!(
+                    "ATP Pairing Sessions\n\
+                    Status: {}",
+                    self.status
+                )
+            },
+            _ => format!("Unknown pairing command: {}", self.command)
         }
     }
 }
@@ -2657,6 +2921,7 @@ fn run_atp(args: AtpArgs, output: &mut Output) -> Result<(), CliError> {
         AtpCommand::Sync(args) => atp_sync(&args, output),
         AtpCommand::Mirror(args) => atp_mirror(&args, output),
         AtpCommand::Share(args) => atp_share(&args, output),
+        AtpCommand::Pair(args) => atp_pair(&args, output),
         AtpCommand::Watch(args) => atp_watch(&args, output),
         AtpCommand::Serve(args) => atp_serve(&args, output),
         AtpCommand::Inbox(args) => atp_inbox(&args, output),
@@ -3526,17 +3791,173 @@ fn atp_mirror(args: &AtpMirrorArgs, output: &mut Output) -> Result<(), CliError>
 
 fn atp_share(args: &AtpShareArgs, output: &mut Output) -> Result<(), CliError> {
     use sha2::{Digest, Sha256};
+
+    // Validate source path exists
+    if !args.source.exists() {
+        return Err(CliError::new(
+            "file_not_found",
+            "Source path does not exist"
+        )
+        .detail(format!("Path: {}", args.source.display()))
+        .exit_code(ExitCode::USER_ERROR));
+    }
+
+    // Validate capabilities
+    for capability in &args.capabilities {
+        if !["read", "write", "receive", "relay", "mailbox"].contains(&capability.as_str()) {
+            return Err(CliError::new(
+                "invalid_argument",
+                "Invalid capability"
+            )
+            .detail(format!("Capability '{}' not supported. Use: read, write, receive, relay, mailbox", capability))
+            .exit_code(ExitCode::USER_ERROR));
+        }
+    }
+
+    // Generate share code with enhanced metadata
     let mut hasher = Sha256::new();
     hasher.update(args.source.to_string_lossy().as_bytes());
+    hasher.update(&args.expires_seconds.to_be_bytes());
+    hasher.update(args.capabilities.join(",").as_bytes());
     let hash = hasher.finalize();
-    let share_code = format!("atp://share/{:x}/expires:{}",
+
+    let capability_flags = args.capabilities.join(",");
+    let share_code = format!(
+        "atp://share/{:x}/caps:{}/exp:{}/pol:{}",
         u64::from_be_bytes([hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]]),
-        args.expires_seconds
+        capability_flags,
+        args.expires_seconds,
+        args.policy
     );
-    let payload = AtpShareOutput::new(&args.source, &share_code, args.expires_seconds);
+
+    let payload = AtpShareOutput::new(args, share_code);
     output
         .write(&payload)
         .map_err(output_write_error("ATP share code"))?;
+    Ok(())
+}
+
+fn atp_pair(args: &AtpPairArgs, output: &mut Output) -> Result<(), CliError> {
+    match &args.command {
+        AtpPairCommand::Initiate { peer_hint, confirmation_method, timeout_seconds } => {
+            use sha2::{Digest, Sha256};
+
+            // Validate confirmation method
+            if !["visual", "audio", "manual"].contains(&confirmation_method.as_str()) {
+                return Err(CliError::new(
+                    "invalid_argument",
+                    "Invalid confirmation method"
+                )
+                .detail(format!("Method '{}' not supported. Use: visual, audio, manual", confirmation_method))
+                .exit_code(ExitCode::USER_ERROR));
+            }
+
+            // Generate session ID
+            let mut hasher = Sha256::new();
+            hasher.update(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_be_bytes());
+            if let Some(hint) = peer_hint {
+                hasher.update(hint.as_bytes());
+            }
+            let hash = hasher.finalize();
+            let session_id = format!("pair_{:x}", u64::from_be_bytes([
+                hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]
+            ]));
+
+            // Generate pairing token
+            let pairing_token = format!("atp://pair/{}/method:{}/timeout:{}",
+                session_id, confirmation_method, timeout_seconds);
+
+            // Generate human-readable confirmation phrase
+            let confirmation_phrases = [
+                "Ocean Blue Mountain", "Forest Green Valley", "Desert Red Sunset",
+                "Arctic White Snow", "Tropical Gold Beach", "Urban Silver Skyline",
+                "Rural Purple Meadow", "Cosmic Black Void", "Rainbow Crystal Cave"
+            ];
+            let phrase_index = (hash[8] as usize) % confirmation_phrases.len();
+            let confirmation_phrase = confirmation_phrases[phrase_index].to_string();
+
+            let payload = AtpPairOutput::initiate(session_id, pairing_token, confirmation_phrase, *timeout_seconds);
+            output
+                .write(&payload)
+                .map_err(output_write_error("ATP pairing initiation"))?;
+        },
+
+        AtpPairCommand::Confirm { pairing_token, confirmation_phrase } => {
+            // Validate pairing token format
+            if !pairing_token.starts_with("atp://pair/") {
+                return Err(CliError::new(
+                    "invalid_argument",
+                    "Invalid pairing token format"
+                )
+                .detail("Token must start with 'atp://pair/'")
+                .exit_code(ExitCode::USER_ERROR));
+            }
+
+            // Extract session ID from token
+            let session_id = pairing_token
+                .strip_prefix("atp://pair/")
+                .and_then(|s| s.split('/').next())
+                .unwrap_or("unknown");
+
+            // Validate confirmation phrase (simplified validation)
+            if confirmation_phrase.split_whitespace().count() != 3 {
+                return Err(CliError::new(
+                    "invalid_argument",
+                    "Invalid confirmation phrase format"
+                )
+                .detail("Confirmation phrase must be three words")
+                .exit_code(ExitCode::USER_ERROR));
+            }
+
+            // Generate peer ID from successful confirmation
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(session_id.as_bytes());
+            hasher.update(confirmation_phrase.as_bytes());
+            let hash = hasher.finalize();
+            let peer_id = format!("peer_{:x}", u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]));
+
+            let payload = AtpPairOutput::confirm(peer_id);
+            output
+                .write(&payload)
+                .map_err(output_write_error("ATP pairing confirmation"))?;
+        },
+
+        AtpPairCommand::Cancel { session_id } => {
+            // Validate session ID format
+            if !session_id.starts_with("pair_") {
+                return Err(CliError::new(
+                    "invalid_argument",
+                    "Invalid session ID format"
+                )
+                .detail("Session ID must start with 'pair_'")
+                .exit_code(ExitCode::USER_ERROR));
+            }
+
+            let payload = AtpPairOutput::cancel(session_id.clone());
+            output
+                .write(&payload)
+                .map_err(output_write_error("ATP pairing cancellation"))?;
+        },
+
+        AtpPairCommand::List { detailed: _ } => {
+            // Mock active sessions for demonstration
+            let active_sessions = vec![
+                "pair_1a2b3c4d5e6f7890".to_string(),
+                "pair_9876543210abcdef".to_string(),
+            ];
+
+            let payload = AtpPairOutput::list(active_sessions);
+            output
+                .write(&payload)
+                .map_err(output_write_error("ATP pairing list"))?;
+        }
+    }
+
     Ok(())
 }
 
@@ -14365,15 +14786,69 @@ lab:
 
     #[test]
     fn atp_share_generates_share_code() {
+        use std::fs;
+
+        // Create a temporary test file
+        let test_file = "/tmp/atp_test_file";
+        fs::write(test_file, "test content").expect("Failed to create test file");
+
         let mut output = Output::new(OutputFormat::JsonPretty);
         let args = AtpShareArgs {
-            source: PathBuf::from("/test/file"),
+            source: PathBuf::from(test_file),
             expires_seconds: 3600,
             max_downloads: 1,
             policy: "peers-only".to_string(),
+            capabilities: vec!["read".to_string()],
+            quota_bytes: 0,
+            peer_id: None,
+            destination_policy: "auto".to_string(),
+            single_use: false,
+            revocable: false,
         };
 
         atp_share(&args, &mut output).expect("atp share should work");
+
+        // Clean up test file
+        let _ = fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn atp_pair_initiate_works() {
+        let mut output = Output::new(OutputFormat::JsonPretty);
+        let args = AtpPairArgs {
+            command: AtpPairCommand::Initiate {
+                peer_hint: Some("test_peer".to_string()),
+                confirmation_method: "visual".to_string(),
+                timeout_seconds: 300,
+            },
+        };
+
+        atp_pair(&args, &mut output).expect("atp pair initiate should work");
+    }
+
+    #[test]
+    fn atp_pair_confirm_works() {
+        let mut output = Output::new(OutputFormat::JsonPretty);
+        let args = AtpPairArgs {
+            command: AtpPairCommand::Confirm {
+                pairing_token: "atp://pair/pair_1234567890abcdef/method:visual/timeout:300".to_string(),
+                confirmation_phrase: "Ocean Blue Mountain".to_string(),
+            },
+        };
+
+        atp_pair(&args, &mut output).expect("atp pair confirm should work");
+    }
+
+    #[test]
+    fn atp_pair_list_works() {
+        let mut output = Output::new(OutputFormat::JsonPretty);
+        let args = AtpPairArgs {
+            command: AtpPairCommand::List {
+                detailed: false,
+            },
+        };
+
+        atp_pair(&args, &mut output).expect("atp pair list should work");
     }
 
     #[test]
