@@ -3,9 +3,11 @@
 //! Integration tests for the ATP multi-peer test infrastructure framework.
 //! Tests the framework itself rather than ATP implementations.
 
-use asupersync::atp::multi_peer::{
+mod atp;
+
+use crate::atp::multi_peer::{
     MULTI_PEER_REPORT_SCHEMA, MultiPeerScenario, PeerRole, ScenarioType,
-    contracts::{CacheContract, MailboxContract, SwarmContract},
+    contracts::{CacheContract, MailboxContract, MultiPeerContract, SwarmContract},
     harness::{MultiPeerHarness, ScenarioExecutor, TestReportGenerator},
     scenarios::AllScenarios,
 };
@@ -105,11 +107,9 @@ fn test_swarm_scenarios_validation() {
             scenario.scenario_id
         );
 
-        // Should pass contract validation if it's a swarm type
-        if matches!(
-            scenario.scenario_type,
-            ScenarioType::Swarm | ScenarioType::PeerChurn
-        ) {
+        // SwarmContract intentionally covers the pure swarm scenarios. Peer churn
+        // scenarios are collected with swarm coverage, but keep their own type.
+        if matches!(scenario.scenario_type, ScenarioType::Swarm) {
             let validation_result = contract.validate_scenario(scenario);
             assert!(
                 validation_result.is_ok(),
@@ -265,14 +265,14 @@ async fn test_harness_infrastructure() {
         description: "Simple scenario for testing harness infrastructure.".to_string(),
         scenario_type: ScenarioType::Swarm,
         peers: vec![
-            asupersync::atp::multi_peer::PeerConfig {
+            crate::atp::multi_peer::PeerConfig {
                 peer_id: "receiver".to_string(),
                 role: PeerRole::Receiver,
-                availability: asupersync::atp::multi_peer::AvailabilitySchedule {
+                availability: crate::atp::multi_peer::AvailabilitySchedule {
                     initially_online: true,
                     schedule: vec![],
                 },
-                capabilities: asupersync::atp::multi_peer::PeerCapabilities {
+                capabilities: crate::atp::multi_peer::PeerCapabilities {
                     storage_quota: Some(10 * 1024 * 1024),
                     bandwidth_limit: Some(1024 * 1024),
                     cache_enabled: true,
@@ -281,14 +281,14 @@ async fn test_harness_infrastructure() {
                 },
                 work_dir: None,
             },
-            asupersync::atp::multi_peer::PeerConfig {
+            crate::atp::multi_peer::PeerConfig {
                 peer_id: "seed1".to_string(),
                 role: PeerRole::Seed,
-                availability: asupersync::atp::multi_peer::AvailabilitySchedule {
+                availability: crate::atp::multi_peer::AvailabilitySchedule {
                     initially_online: true,
                     schedule: vec![],
                 },
-                capabilities: asupersync::atp::multi_peer::PeerCapabilities {
+                capabilities: crate::atp::multi_peer::PeerCapabilities {
                     storage_quota: Some(5 * 1024 * 1024),
                     bandwidth_limit: Some(512 * 1024),
                     cache_enabled: true,
@@ -375,7 +375,7 @@ fn test_report_generation() {
     let mut mock_results = Vec::new();
 
     for (i, scenario) in scenarios.iter().enumerate() {
-        let result = asupersync::atp::multi_peer::MultiPeerResult {
+        let result = crate::atp::multi_peer::MultiPeerResult {
             schema_version: MULTI_PEER_REPORT_SCHEMA.to_string(),
             scenario: scenario.clone(),
             executed_at: std::time::SystemTime::now(),
@@ -388,7 +388,7 @@ fn test_report_generation() {
             duration: Duration::from_secs(30 + i as u64 * 10),
             peer_results: std::collections::HashMap::new(),
             network_events: Vec::new(),
-            transfer_metrics: asupersync::atp::multi_peer::TransferMetrics {
+            transfer_metrics: crate::atp::multi_peer::TransferMetrics {
                 total_bytes: (i + 1) as u64 * 1024 * 1024, // 1MB, 2MB, 3MB, etc.
                 verified_bytes: if i % 2 == 0 {
                     (i + 1) as u64 * 1024 * 1024
@@ -401,13 +401,13 @@ fn test_report_generation() {
                 source_selections: Vec::new(),
             },
             cache_metrics: std::collections::HashMap::new(),
-            verification_results: asupersync::atp::multi_peer::VerificationResults {
+            verification_results: crate::atp::multi_peer::VerificationResults {
                 crypto_verified: i % 2 == 0,
                 manifest_verified: i % 2 == 0,
                 proof_verified: i % 2 == 0,
                 failures: Vec::new(),
             },
-            artifacts: asupersync::atp::multi_peer::ArtifactPaths {
+            artifacts: crate::atp::multi_peer::ArtifactPaths {
                 report: std::path::PathBuf::from("/tmp/report.json"),
                 logs: std::path::PathBuf::from("/tmp/logs"),
                 traces: Vec::new(),

@@ -231,7 +231,9 @@ impl MailboxScenarios {
     pub fn relay_restart() -> MultiPeerScenario {
         MultiPeerScenario {
             scenario_id: "mailbox-relay-restart".to_string(),
-            description: "Mailbox relay restarts during transfer, testing persistence and recovery.".to_string(),
+            description:
+                "Mailbox relay restarts during transfer, testing persistence and recovery."
+                    .to_string(),
             scenario_type: ScenarioType::Mailbox,
             peers: vec![
                 PeerConfig {
@@ -274,8 +276,8 @@ impl MailboxScenarios {
                     availability: AvailabilitySchedule {
                         initially_online: true,
                         schedule: vec![
-                            (Duration::from_secs(60), false),  // Restart: goes offline
-                            (Duration::from_secs(90), true),   // Comes back online
+                            (Duration::from_secs(60), false), // Restart: goes offline
+                            (Duration::from_secs(90), true),  // Comes back online
                         ],
                     },
                     capabilities: PeerCapabilities {
@@ -292,11 +294,17 @@ impl MailboxScenarios {
                 latency_ms: [
                     (("sender".to_string(), "mailbox-relay".to_string()), 30),
                     (("receiver".to_string(), "mailbox-relay".to_string()), 35),
-                ].iter().cloned().collect(),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
                 packet_loss: [
                     (("sender".to_string(), "mailbox-relay".to_string()), 0.002),
                     (("receiver".to_string(), "mailbox-relay".to_string()), 0.002),
-                ].iter().cloned().collect(),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
                 bandwidth: std::collections::HashMap::new(),
                 partitions: vec![],
             },
@@ -322,16 +330,14 @@ impl MailboxScenarios {
                 bytes_transferred: Some(3 * 1024 * 1024),
                 peer_rejections: Some(0),
                 cache_metrics: None,
-                log_events: vec![
-                    LogEventExpectation {
-                        event_type: "mailbox_persistence_recovery".to_string(),
-                        required_fields: vec![
-                            "recovered_chunks".to_string(),
-                            "restart_timestamp".to_string(),
-                        ],
-                        count: Some(1),
-                    },
-                ],
+                log_events: vec![LogEventExpectation {
+                    event_type: "mailbox_persistence_recovery".to_string(),
+                    required_fields: vec![
+                        "recovered_chunks".to_string(),
+                        "restart_timestamp".to_string(),
+                    ],
+                    count: Some(1),
+                }],
             },
             timeout: Duration::from_secs(400),
         }
@@ -341,7 +347,9 @@ impl MailboxScenarios {
     pub fn tampered_chunks() -> MultiPeerScenario {
         MultiPeerScenario {
             scenario_id: "mailbox-tampered-chunks".to_string(),
-            description: "Malicious actor tampers with stored chunks. Receiver should detect and reject.".to_string(),
+            description:
+                "Malicious actor tampers with stored chunks. Receiver should detect and reject."
+                    .to_string(),
             scenario_type: ScenarioType::Adversarial,
             peers: vec![
                 PeerConfig {
@@ -442,18 +450,16 @@ impl MailboxScenarios {
                 success: false, // Should fail due to tampered chunks
                 completion_time: None,
                 bytes_transferred: Some(0), // No verified bytes due to tampering
-                peer_rejections: Some(1), // Tamperer should be rejected
+                peer_rejections: Some(1),   // Tamperer should be rejected
                 cache_metrics: None,
-                log_events: vec![
-                    LogEventExpectation {
-                        event_type: "chunk_verification_failure".to_string(),
-                        required_fields: vec![
-                            "chunk_hash_mismatch".to_string(),
-                            "mailbox_id".to_string(),
-                        ],
-                        count: None, // May be multiple depending on chunks tampered
-                    },
-                ],
+                log_events: vec![LogEventExpectation {
+                    event_type: "chunk_verification_failure".to_string(),
+                    required_fields: vec![
+                        "chunk_hash_mismatch".to_string(),
+                        "mailbox_id".to_string(),
+                    ],
+                    count: None, // May be multiple depending on chunks tampered
+                }],
             },
             timeout: Duration::from_secs(240),
         }
@@ -473,7 +479,7 @@ impl MailboxScenarios {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::multi_peer::contracts::MailboxContract;
+    use crate::atp::multi_peer::contracts::{MailboxContract, MultiPeerContract};
 
     #[test]
     fn test_sender_offline_scenario_validation() {
@@ -499,18 +505,29 @@ mod tests {
         let scenario = MailboxScenarios::relay_restart();
 
         // Find the mailbox peer
-        let mailbox_peer = scenario.peers.iter()
+        let mailbox_peer = scenario
+            .peers
+            .iter()
             .find(|p| matches!(p.role, PeerRole::Mailbox))
             .unwrap();
 
         // Should have restart schedule (offline then online)
         assert!(!mailbox_peer.availability.schedule.is_empty());
-        let has_offline = mailbox_peer.availability.schedule.iter()
+        let has_offline = mailbox_peer
+            .availability
+            .schedule
+            .iter()
             .any(|(_, online)| !online);
-        let has_online = mailbox_peer.availability.schedule.iter()
+        let has_online = mailbox_peer
+            .availability
+            .schedule
+            .iter()
             .any(|(_, online)| *online);
 
-        assert!(has_offline && has_online, "Mailbox should have restart schedule");
+        assert!(
+            has_offline && has_online,
+            "Mailbox should have restart schedule"
+        );
     }
 
     #[test]
@@ -520,7 +537,9 @@ mod tests {
         assert!(matches!(scenario.scenario_type, ScenarioType::Adversarial));
         assert!(!scenario.expectations.success); // Should expect failure
 
-        let has_malicious = scenario.peers.iter()
+        let has_malicious = scenario
+            .peers
+            .iter()
             .any(|p| matches!(p.role, PeerRole::Malicious));
         assert!(has_malicious, "Should have malicious peer for tampering");
     }
@@ -532,8 +551,11 @@ mod tests {
 
         // Each scenario should be valid according to its type
         for scenario in &scenarios {
-            assert!(scenario.validate().is_ok(),
-                "Scenario {} should be valid", scenario.scenario_id);
+            assert!(
+                scenario.validate().is_ok(),
+                "Scenario {} should be valid",
+                scenario.scenario_id
+            );
         }
     }
 }

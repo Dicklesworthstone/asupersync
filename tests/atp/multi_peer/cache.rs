@@ -13,7 +13,8 @@ impl CacheScenarios {
     pub fn relay_cache_handoff() -> MultiPeerScenario {
         MultiPeerScenario {
             scenario_id: "cache-relay-handoff".to_string(),
-            description: "Sender uploads to relay cache. Receiver downloads from cache later.".to_string(),
+            description: "Sender uploads to relay cache. Receiver downloads from cache later."
+                .to_string(),
             scenario_type: ScenarioType::Cache,
             peers: vec![
                 PeerConfig {
@@ -27,7 +28,7 @@ impl CacheScenarios {
                     },
                     capabilities: PeerCapabilities {
                         storage_quota: Some(10 * 1024 * 1024), // 10MB
-                        bandwidth_limit: Some(1024 * 1024), // 1MB/s
+                        bandwidth_limit: Some(1024 * 1024),    // 1MB/s
                         cache_enabled: false,
                         seeding_enabled: false,
                         relay_enabled: false,
@@ -44,7 +45,7 @@ impl CacheScenarios {
                         ],
                     },
                     capabilities: PeerCapabilities {
-                        storage_quota: Some(15 * 1024 * 1024), // 15MB
+                        storage_quota: Some(15 * 1024 * 1024),  // 15MB
                         bandwidth_limit: Some(2 * 1024 * 1024), // 2MB/s
                         cache_enabled: true,
                         seeding_enabled: false,
@@ -73,11 +74,17 @@ impl CacheScenarios {
                 latency_ms: [
                     (("sender".to_string(), "relay-cache".to_string()), 25),
                     (("receiver".to_string(), "relay-cache".to_string()), 30),
-                ].iter().cloned().collect(),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
                 packet_loss: [
                     (("sender".to_string(), "relay-cache".to_string()), 0.001),
                     (("receiver".to_string(), "relay-cache".to_string()), 0.002),
-                ].iter().cloned().collect(),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
                 bandwidth: std::collections::HashMap::new(),
                 partitions: vec![],
             },
@@ -103,8 +110,8 @@ impl CacheScenarios {
                 bytes_transferred: Some(8 * 1024 * 1024),
                 peer_rejections: Some(0),
                 cache_metrics: Some(CacheMetrics {
-                    hits: Some(64), // Expected cache hits (8MB / 128KB = 64 chunks)
-                    misses: Some(0), // Should be all hits from cache
+                    hits: Some(64),     // Expected cache hits (8MB / 128KB = 64 chunks)
+                    misses: Some(0),    // Should be all hits from cache
                     evictions: Some(0), // No evictions expected
                 }),
                 log_events: vec![
@@ -119,10 +126,7 @@ impl CacheScenarios {
                     },
                     LogEventExpectation {
                         event_type: "cache_hit".to_string(),
-                        required_fields: vec![
-                            "chunk_hash".to_string(),
-                            "cache_key".to_string(),
-                        ],
+                        required_fields: vec!["chunk_hash".to_string(), "cache_key".to_string()],
                         count: None,
                     },
                 ],
@@ -135,7 +139,8 @@ impl CacheScenarios {
     pub fn local_cache_hit_miss() -> MultiPeerScenario {
         MultiPeerScenario {
             scenario_id: "cache-local-hit-miss".to_string(),
-            description: "Test local cache behavior with cache hits, misses, and policy decisions.".to_string(),
+            description: "Test local cache behavior with cache hits, misses, and policy decisions."
+                .to_string(),
             scenario_type: ScenarioType::Cache,
             peers: vec![
                 PeerConfig {
@@ -146,7 +151,7 @@ impl CacheScenarios {
                         schedule: vec![],
                     },
                     capabilities: PeerCapabilities {
-                        storage_quota: Some(20 * 1024 * 1024), // 20MB
+                        storage_quota: Some(20 * 1024 * 1024),  // 20MB
                         bandwidth_limit: Some(2 * 1024 * 1024), // 2MB/s
                         cache_enabled: true,
                         seeding_enabled: false,
@@ -163,7 +168,7 @@ impl CacheScenarios {
                     },
                     capabilities: PeerCapabilities {
                         storage_quota: Some(30 * 1024 * 1024), // 30MB
-                        bandwidth_limit: Some(1024 * 1024), // 1MB/s
+                        bandwidth_limit: Some(1024 * 1024),    // 1MB/s
                         cache_enabled: true,
                         seeding_enabled: true,
                         relay_enabled: false,
@@ -179,7 +184,7 @@ impl CacheScenarios {
                     },
                     capabilities: PeerCapabilities {
                         storage_quota: Some(25 * 1024 * 1024), // 25MB
-                        bandwidth_limit: Some(1024 * 1024), // 1MB/s
+                        bandwidth_limit: Some(1024 * 1024),    // 1MB/s
                         cache_enabled: true,
                         seeding_enabled: true,
                         relay_enabled: false,
@@ -191,7 +196,10 @@ impl CacheScenarios {
                 latency_ms: [
                     (("receiver".to_string(), "seed1".to_string()), 20),
                     (("receiver".to_string(), "seed2".to_string()), 40),
-                ].iter().cloned().collect(),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
                 packet_loss: std::collections::HashMap::new(),
                 bandwidth: std::collections::HashMap::new(),
                 partitions: vec![],
@@ -214,17 +222,14 @@ impl CacheScenarios {
                 bytes_transferred: Some(12 * 1024 * 1024),
                 peer_rejections: Some(0),
                 cache_metrics: Some(CacheMetrics {
-                    hits: Some(24), // Expect some hits from repeated chunks
-                    misses: Some(24), // Some misses for new chunks
+                    hits: Some(24),     // Expect some hits from repeated chunks
+                    misses: Some(24),   // Some misses for new chunks
                     evictions: Some(0), // No evictions with sufficient cache space
                 }),
                 log_events: vec![
                     LogEventExpectation {
                         event_type: "cache_lookup".to_string(),
-                        required_fields: vec![
-                            "chunk_hash".to_string(),
-                            "cache_result".to_string(),
-                        ],
+                        required_fields: vec!["chunk_hash".to_string(), "cache_result".to_string()],
                         count: None,
                     },
                     LogEventExpectation {
@@ -246,7 +251,8 @@ impl CacheScenarios {
     pub fn cache_quota_eviction() -> MultiPeerScenario {
         MultiPeerScenario {
             scenario_id: "cache-quota-eviction".to_string(),
-            description: "Test cache eviction behavior when quota is exceeded with LRU policy.".to_string(),
+            description: "Test cache eviction behavior when quota is exceeded with LRU policy."
+                .to_string(),
             scenario_type: ScenarioType::Cache,
             peers: vec![
                 PeerConfig {
@@ -258,7 +264,7 @@ impl CacheScenarios {
                     },
                     capabilities: PeerCapabilities {
                         storage_quota: Some(4 * 1024 * 1024), // Small 4MB cache to force eviction
-                        bandwidth_limit: Some(1024 * 1024), // 1MB/s
+                        bandwidth_limit: Some(1024 * 1024),   // 1MB/s
                         cache_enabled: true,
                         seeding_enabled: false,
                         relay_enabled: false,
@@ -274,7 +280,7 @@ impl CacheScenarios {
                     },
                     capabilities: PeerCapabilities {
                         storage_quota: Some(20 * 1024 * 1024), // 20MB
-                        bandwidth_limit: Some(512 * 1024), // 512KB/s
+                        bandwidth_limit: Some(512 * 1024),     // 512KB/s
                         cache_enabled: true,
                         seeding_enabled: true,
                         relay_enabled: false,
@@ -302,7 +308,10 @@ impl CacheScenarios {
                 latency_ms: [
                     (("receiver".to_string(), "seed1".to_string()), 50),
                     (("receiver".to_string(), "relay-cache".to_string()), 25),
-                ].iter().cloned().collect(),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
                 packet_loss: std::collections::HashMap::new(),
                 bandwidth: std::collections::HashMap::new(),
                 partitions: vec![],
@@ -325,8 +334,8 @@ impl CacheScenarios {
                 bytes_transferred: Some(10 * 1024 * 1024),
                 peer_rejections: Some(0),
                 cache_metrics: Some(CacheMetrics {
-                    hits: Some(0), // Initial transfer - no hits expected
-                    misses: Some(80), // All chunks miss first time
+                    hits: Some(0),       // Initial transfer - no hits expected
+                    misses: Some(80),    // All chunks miss first time
                     evictions: Some(48), // ~48 evictions to fit in 4MB cache (32 chunks max)
                 }),
                 log_events: vec![
@@ -357,7 +366,8 @@ impl CacheScenarios {
     pub fn seed_mode() -> MultiPeerScenario {
         MultiPeerScenario {
             scenario_id: "cache-seed-mode".to_string(),
-            description: "Peer in seed mode caches and serves content to other peers efficiently.".to_string(),
+            description: "Peer in seed mode caches and serves content to other peers efficiently."
+                .to_string(),
             scenario_type: ScenarioType::Cache,
             peers: vec![
                 PeerConfig {
@@ -371,7 +381,7 @@ impl CacheScenarios {
                     },
                     capabilities: PeerCapabilities {
                         storage_quota: Some(10 * 1024 * 1024), // 10MB
-                        bandwidth_limit: Some(1024 * 1024), // 1MB/s
+                        bandwidth_limit: Some(1024 * 1024),    // 1MB/s
                         cache_enabled: false,
                         seeding_enabled: false,
                         relay_enabled: false,
@@ -386,7 +396,7 @@ impl CacheScenarios {
                         schedule: vec![], // Always online
                     },
                     capabilities: PeerCapabilities {
-                        storage_quota: Some(50 * 1024 * 1024), // 50MB cache
+                        storage_quota: Some(50 * 1024 * 1024),  // 50MB cache
                         bandwidth_limit: Some(3 * 1024 * 1024), // 3MB/s
                         cache_enabled: true,
                         seeding_enabled: true,
@@ -403,7 +413,7 @@ impl CacheScenarios {
                     },
                     capabilities: PeerCapabilities {
                         storage_quota: Some(15 * 1024 * 1024), // 15MB
-                        bandwidth_limit: Some(1024 * 1024), // 1MB/s
+                        bandwidth_limit: Some(1024 * 1024),    // 1MB/s
                         cache_enabled: true,
                         seeding_enabled: false,
                         relay_enabled: false,
@@ -421,7 +431,7 @@ impl CacheScenarios {
                     },
                     capabilities: PeerCapabilities {
                         storage_quota: Some(15 * 1024 * 1024), // 15MB
-                        bandwidth_limit: Some(1024 * 1024), // 1MB/s
+                        bandwidth_limit: Some(1024 * 1024),    // 1MB/s
                         cache_enabled: true,
                         seeding_enabled: false,
                         relay_enabled: false,
@@ -431,10 +441,16 @@ impl CacheScenarios {
             ],
             network: NetworkConfig {
                 latency_ms: [
-                    (("original-sender".to_string(), "seed-cache".to_string()), 20),
+                    (
+                        ("original-sender".to_string(), "seed-cache".to_string()),
+                        20,
+                    ),
                     (("receiver1".to_string(), "seed-cache".to_string()), 15),
                     (("receiver2".to_string(), "seed-cache".to_string()), 25),
-                ].iter().cloned().collect(),
+                ]
+                .iter()
+                .cloned()
+                .collect(),
                 packet_loss: std::collections::HashMap::new(),
                 bandwidth: std::collections::HashMap::new(),
                 partitions: vec![],
@@ -461,21 +477,19 @@ impl CacheScenarios {
                 bytes_transferred: Some(6 * 1024 * 1024),
                 peer_rejections: Some(0),
                 cache_metrics: Some(CacheMetrics {
-                    hits: Some(48), // Second receiver should get cache hits
-                    misses: Some(48), // First receiver gets misses
+                    hits: Some(48),     // Second receiver should get cache hits
+                    misses: Some(48),   // First receiver gets misses
                     evictions: Some(0), // Sufficient cache space
                 }),
-                log_events: vec![
-                    LogEventExpectation {
-                        event_type: "seed_cache_serve".to_string(),
-                        required_fields: vec![
-                            "served_chunk_hash".to_string(),
-                            "requesting_peer".to_string(),
-                            "cache_efficiency".to_string(),
-                        ],
-                        count: None,
-                    },
-                ],
+                log_events: vec![LogEventExpectation {
+                    event_type: "seed_cache_serve".to_string(),
+                    required_fields: vec![
+                        "served_chunk_hash".to_string(),
+                        "requesting_peer".to_string(),
+                        "cache_efficiency".to_string(),
+                    ],
+                    count: None,
+                }],
             },
             timeout: Duration::from_secs(500),
         }
@@ -495,7 +509,7 @@ impl CacheScenarios {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::multi_peer::contracts::CacheContract;
+    use crate::atp::multi_peer::contracts::{CacheContract, MultiPeerContract};
 
     #[test]
     fn test_relay_cache_handoff_validation() {
@@ -506,7 +520,9 @@ mod tests {
         assert_eq!(scenario.scenario_id, "cache-relay-handoff");
 
         // Should have relay peer with cache enabled
-        let has_relay_cache = scenario.peers.iter()
+        let has_relay_cache = scenario
+            .peers
+            .iter()
             .any(|p| matches!(p.role, PeerRole::Relay) && p.capabilities.cache_enabled);
         assert!(has_relay_cache, "Should have relay with cache enabled");
     }
@@ -535,19 +551,25 @@ mod tests {
         assert!(scenario.scenario_id.contains("eviction"));
 
         // Should have peers with storage quotas
-        let has_quota = scenario.peers.iter()
+        let has_quota = scenario
+            .peers
+            .iter()
             .any(|p| p.capabilities.storage_quota.is_some());
         assert!(has_quota, "Eviction scenario should have storage quotas");
 
         // Transfer size should exceed cache size to force eviction
-        let min_cache_size = scenario.peers.iter()
+        let min_cache_size = scenario
+            .peers
+            .iter()
             .filter_map(|p| p.capabilities.storage_quota)
             .min()
             .unwrap_or(0);
 
         if let SourceSpec::RandomBytes(transfer_size) = scenario.transfer.source {
-            assert!(transfer_size > min_cache_size,
-                "Transfer size should exceed smallest cache to force eviction");
+            assert!(
+                transfer_size > min_cache_size,
+                "Transfer size should exceed smallest cache to force eviction"
+            );
         }
     }
 
@@ -556,18 +578,31 @@ mod tests {
         let scenario = CacheScenarios::seed_mode();
 
         // Should have seed peer with cache and seeding enabled
-        let seed_peer = scenario.peers.iter()
+        let seed_peer = scenario
+            .peers
+            .iter()
             .find(|p| matches!(p.role, PeerRole::Seed))
             .expect("Should have seed peer");
 
-        assert!(seed_peer.capabilities.cache_enabled, "Seed should have cache enabled");
-        assert!(seed_peer.capabilities.seeding_enabled, "Seed should have seeding enabled");
+        assert!(
+            seed_peer.capabilities.cache_enabled,
+            "Seed should have cache enabled"
+        );
+        assert!(
+            seed_peer.capabilities.seeding_enabled,
+            "Seed should have seeding enabled"
+        );
 
         // Should have multiple receivers
-        let receiver_count = scenario.peers.iter()
+        let receiver_count = scenario
+            .peers
+            .iter()
             .filter(|p| matches!(p.role, PeerRole::Receiver))
             .count();
-        assert!(receiver_count >= 2, "Seed mode should have multiple receivers");
+        assert!(
+            receiver_count >= 2,
+            "Seed mode should have multiple receivers"
+        );
     }
 
     #[test]
@@ -576,12 +611,17 @@ mod tests {
 
         for scenario in &scenarios {
             // All cache scenarios should have cache-related log events
-            let has_cache_events = scenario.expectations.log_events.iter()
+            let has_cache_events = scenario
+                .expectations
+                .log_events
+                .iter()
                 .any(|event| event.event_type.contains("cache"));
 
-            assert!(has_cache_events,
+            assert!(
+                has_cache_events,
                 "Cache scenario {} should have cache-related log events",
-                scenario.scenario_id);
+                scenario.scenario_id
+            );
         }
     }
 
@@ -592,11 +632,17 @@ mod tests {
 
         let contract = CacheContract;
         for scenario in &scenarios {
-            assert!(scenario.validate().is_ok(),
-                "Scenario {} should be valid", scenario.scenario_id);
+            assert!(
+                scenario.validate().is_ok(),
+                "Scenario {} should be valid",
+                scenario.scenario_id
+            );
 
-            assert!(contract.validate_scenario(&scenario).is_ok(),
-                "Scenario {} should pass cache contract validation", scenario.scenario_id);
+            assert!(
+                contract.validate_scenario(&scenario).is_ok(),
+                "Scenario {} should pass cache contract validation",
+                scenario.scenario_id
+            );
         }
     }
 }

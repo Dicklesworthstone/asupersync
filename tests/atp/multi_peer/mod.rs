@@ -5,12 +5,12 @@
 //! complex ATP data movement scenarios involving multiple peers, offline modes,
 //! caching, and swarm transfers.
 
-pub mod contracts;
-pub mod mailbox;
-pub mod swarm;
 pub mod cache;
-pub mod scenarios;
+pub mod contracts;
 pub mod harness;
+pub mod mailbox;
+pub mod scenarios;
+pub mod swarm;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -375,20 +375,40 @@ impl MultiPeerScenario {
         // Validate peer roles make sense for scenario type
         match self.scenario_type {
             ScenarioType::Mailbox => {
-                let has_sender = self.peers.iter().any(|p| matches!(p.role, PeerRole::Sender));
-                let has_receiver = self.peers.iter().any(|p| matches!(p.role, PeerRole::Receiver));
-                let has_mailbox = self.peers.iter().any(|p| matches!(p.role, PeerRole::Mailbox));
+                let has_sender = self
+                    .peers
+                    .iter()
+                    .any(|p| matches!(p.role, PeerRole::Sender));
+                let has_receiver = self
+                    .peers
+                    .iter()
+                    .any(|p| matches!(p.role, PeerRole::Receiver));
+                let has_mailbox = self
+                    .peers
+                    .iter()
+                    .any(|p| matches!(p.role, PeerRole::Mailbox));
 
                 if !has_sender || !has_receiver || !has_mailbox {
-                    return Err("Mailbox scenario requires sender, receiver, and mailbox peers".to_string());
+                    return Err(
+                        "Mailbox scenario requires sender, receiver, and mailbox peers".to_string(),
+                    );
                 }
             }
             ScenarioType::Swarm => {
-                let has_receiver = self.peers.iter().any(|p| matches!(p.role, PeerRole::Receiver));
-                let seed_count = self.peers.iter().filter(|p| matches!(p.role, PeerRole::Seed)).count();
+                let has_receiver = self
+                    .peers
+                    .iter()
+                    .any(|p| matches!(p.role, PeerRole::Receiver));
+                let seed_count = self
+                    .peers
+                    .iter()
+                    .filter(|p| matches!(p.role, PeerRole::Seed))
+                    .count();
 
                 if !has_receiver || seed_count < 2 {
-                    return Err("Swarm scenario requires receiver and multiple seed peers".to_string());
+                    return Err(
+                        "Swarm scenario requires receiver and multiple seed peers".to_string()
+                    );
                 }
             }
             _ => {} // Other scenarios have more flexible requirements
@@ -404,7 +424,10 @@ impl MultiPeerScenario {
 
     /// Get peers by role
     pub fn peers_by_role(&self, role: &PeerRole) -> Vec<&PeerConfig> {
-        self.peers.iter().filter(|p| std::mem::discriminant(&p.role) == std::mem::discriminant(role)).collect()
+        self.peers
+            .iter()
+            .filter(|p| std::mem::discriminant(&p.role) == std::mem::discriminant(role))
+            .collect()
     }
 }
 

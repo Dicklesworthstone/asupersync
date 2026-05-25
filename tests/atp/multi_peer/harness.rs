@@ -3,15 +3,13 @@
 //! Provides the infrastructure to execute multi-peer scenarios when the underlying
 //! ATP implementations become available.
 
-use crate::atp::multi_peer::*;
 use crate::atp::multi_peer::contracts::{
-    MultiPeerContract, MailboxContract, SwarmContract, CacheContract, AdversarialContract
+    AdversarialContract, CacheContract, MailboxContract, MultiPeerContract, SwarmContract,
 };
+use crate::atp::multi_peer::*;
 use serde_json;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 
@@ -36,7 +34,10 @@ impl MultiPeerHarness {
     }
 
     /// Create harness with custom settings
-    pub fn with_settings(timeout: Duration, preserve_artifacts: bool) -> Result<Self, std::io::Error> {
+    pub fn with_settings(
+        timeout: Duration,
+        preserve_artifacts: bool,
+    ) -> Result<Self, std::io::Error> {
         Ok(Self {
             work_dir: TempDir::new()?,
             default_timeout: timeout,
@@ -45,7 +46,10 @@ impl MultiPeerHarness {
     }
 
     /// Execute a single multi-peer scenario
-    pub async fn execute_scenario(&self, scenario: &MultiPeerScenario) -> Result<MultiPeerResult, String> {
+    pub async fn execute_scenario(
+        &self,
+        scenario: &MultiPeerScenario,
+    ) -> Result<MultiPeerResult, String> {
         // Validate scenario first
         scenario.validate()?;
 
@@ -71,7 +75,7 @@ impl MultiPeerHarness {
         let executed_at = SystemTime::now();
 
         // Execute the scenario
-        let result = match contract.execute_scenario(scenario).await {
+        let result = match contract.execute_scenario(scenario) {
             Ok(mut result) => {
                 // Validate result with contract
                 if let Err(validation_error) = contract.validate_result(&result) {
@@ -124,7 +128,10 @@ impl MultiPeerHarness {
     }
 
     /// Execute multiple scenarios
-    pub async fn execute_scenarios(&self, scenarios: &[MultiPeerScenario]) -> Vec<Result<MultiPeerResult, String>> {
+    pub async fn execute_scenarios(
+        &self,
+        scenarios: &[MultiPeerScenario],
+    ) -> Vec<Result<MultiPeerResult, String>> {
         let mut results = Vec::new();
 
         for scenario in scenarios {
@@ -136,7 +143,10 @@ impl MultiPeerHarness {
     }
 
     /// Execute scenarios in parallel (when safe to do so)
-    pub async fn execute_scenarios_parallel(&self, scenarios: &[MultiPeerScenario]) -> Vec<Result<MultiPeerResult, String>> {
+    pub async fn execute_scenarios_parallel(
+        &self,
+        scenarios: &[MultiPeerScenario],
+    ) -> Vec<Result<MultiPeerResult, String>> {
         // For now, execute sequentially since we don't have resource isolation
         // This would be enhanced to run truly parallel when the infrastructure supports it
         self.execute_scenarios(scenarios).await
@@ -169,13 +179,16 @@ impl MultiPeerHarness {
     }
 
     /// Save result artifact to disk
-    fn save_result_artifact(&self, result: &MultiPeerResult, scenario_dir: &Path) -> Result<(), String> {
+    fn save_result_artifact(
+        &self,
+        result: &MultiPeerResult,
+        scenario_dir: &Path,
+    ) -> Result<(), String> {
         let report_path = scenario_dir.join("report.json");
         let json = serde_json::to_string_pretty(result)
             .map_err(|e| format!("Failed to serialize result: {}", e))?;
 
-        std::fs::write(&report_path, json)
-            .map_err(|e| format!("Failed to write report: {}", e))?;
+        std::fs::write(&report_path, json).map_err(|e| format!("Failed to write report: {}", e))?;
 
         Ok(())
     }
@@ -198,7 +211,8 @@ impl Drop for MultiPeerHarness {
             if let Ok(permanent_dir) = std::env::current_dir().map(|d| d.join("test_artifacts")) {
                 let _ = std::fs::create_dir_all(&permanent_dir);
                 if let Ok(timestamp) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
-                    let timestamped_dir = permanent_dir.join(format!("multi_peer_{}", timestamp.as_secs()));
+                    let timestamped_dir =
+                        permanent_dir.join(format!("multi_peer_{}", timestamp.as_secs()));
                     let _ = std::fs::rename(self.work_dir.path(), timestamped_dir);
                 }
             }
@@ -212,8 +226,8 @@ pub struct ScenarioExecutor;
 impl ScenarioExecutor {
     /// Execute smoke test scenarios
     pub async fn smoke_test() -> Result<Vec<MultiPeerResult>, String> {
-        let harness = MultiPeerHarness::new()
-            .map_err(|e| format!("Failed to create harness: {}", e))?;
+        let harness =
+            MultiPeerHarness::new().map_err(|e| format!("Failed to create harness: {}", e))?;
 
         let scenarios = crate::atp::multi_peer::scenarios::AllScenarios::smoke_test();
         let results = harness.execute_scenarios(&scenarios).await;
@@ -241,8 +255,8 @@ impl ScenarioExecutor {
     where
         F: Fn(&MultiPeerScenario) -> bool,
     {
-        let harness = MultiPeerHarness::new()
-            .map_err(|e| format!("Failed to create harness: {}", e))?;
+        let harness =
+            MultiPeerHarness::new().map_err(|e| format!("Failed to create harness: {}", e))?;
 
         let all_scenarios = crate::atp::multi_peer::scenarios::AllScenarios::all();
         let filtered_scenarios: Vec<_> = all_scenarios.into_iter().filter(filter).collect();
@@ -272,14 +286,16 @@ impl ScenarioExecutor {
             scenario.timeout <= Duration::from_secs(300)
                 && scenario.peers.len() <= 4
                 && !matches!(scenario.scenario_type, ScenarioType::Adversarial)
-        }).await
+        })
+        .await
     }
 
     /// Execute adversarial scenarios
     pub async fn adversarial_test() -> Result<Vec<MultiPeerResult>, String> {
         Self::execute_filtered(|scenario| {
             matches!(scenario.scenario_type, ScenarioType::Adversarial)
-        }).await
+        })
+        .await
     }
 }
 
@@ -327,7 +343,10 @@ impl TestReportGenerator {
             if !result.success {
                 failures.push(TestFailure {
                     scenario_id: result.scenario.scenario_id.clone(),
-                    error: result.error.clone().unwrap_or_else(|| "Unknown error".to_string()),
+                    error: result
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Unknown error".to_string()),
                     duration: result.duration,
                 });
             }
@@ -338,7 +357,11 @@ impl TestReportGenerator {
             total_scenarios,
             successful,
             failed,
-            success_rate: if total_scenarios > 0 { successful as f64 / total_scenarios as f64 } else { 0.0 },
+            success_rate: if total_scenarios > 0 {
+                successful as f64 / total_scenarios as f64
+            } else {
+                0.0
+            },
             total_duration,
             total_bytes_transferred,
             by_type,
@@ -357,25 +380,39 @@ impl TestReportGenerator {
         summary.push_str(&format!("  Total Scenarios: {}\n", report.total_scenarios));
         summary.push_str(&format!("  Successful: {}\n", report.successful));
         summary.push_str(&format!("  Failed: {}\n", report.failed));
-        summary.push_str(&format!("  Success Rate: {:.1}%\n", report.success_rate * 100.0));
-        summary.push_str(&format!("  Total Duration: {:.2}s\n", report.total_duration.as_secs_f64()));
-        summary.push_str(&format!("  Bytes Transferred: {:.2} MB\n\n",
-            report.total_bytes_transferred as f64 / (1024.0 * 1024.0)));
+        summary.push_str(&format!(
+            "  Success Rate: {:.1}%\n",
+            report.success_rate * 100.0
+        ));
+        summary.push_str(&format!(
+            "  Total Duration: {:.2}s\n",
+            report.total_duration.as_secs_f64()
+        ));
+        summary.push_str(&format!(
+            "  Bytes Transferred: {:.2} MB\n\n",
+            report.total_bytes_transferred as f64 / (1024.0 * 1024.0)
+        ));
 
         summary.push_str("By Scenario Type:\n");
         for (scenario_type, stats) in &report.by_type {
-            summary.push_str(&format!("  {}: {}/{} ({:.1}%)\n",
+            summary.push_str(&format!(
+                "  {}: {}/{} ({:.1}%)\n",
                 scenario_type,
                 stats.successful,
                 stats.total,
-                if stats.total > 0 { stats.successful as f64 / stats.total as f64 * 100.0 } else { 0.0 }
+                if stats.total > 0 {
+                    stats.successful as f64 / stats.total as f64 * 100.0
+                } else {
+                    0.0
+                }
             ));
         }
 
         if !report.failures.is_empty() {
             summary.push_str("\nFailures:\n");
             for failure in &report.failures {
-                summary.push_str(&format!("  {}: {} ({:.2}s)\n",
+                summary.push_str(&format!(
+                    "  {}: {} ({:.2}s)\n",
                     failure.scenario_id,
                     failure.error,
                     failure.duration.as_secs_f64()
@@ -440,10 +477,16 @@ mod tests {
 
         // Execute one scenario (will fail since ATP features aren't implemented)
         let result = harness.execute_scenario(&scenarios[0]).await;
-        assert!(result.is_ok(), "Should return result even if execution fails");
+        assert!(
+            result.is_ok(),
+            "Should return result even if execution fails"
+        );
 
         let result = result.unwrap();
-        assert!(!result.success, "Should fail since ATP features not implemented");
+        assert!(
+            !result.success,
+            "Should fail since ATP features not implemented"
+        );
         assert!(result.error.is_some(), "Should have error message");
     }
 

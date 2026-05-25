@@ -2,10 +2,10 @@
 //!
 //! Provides access to all scenario types and utilities for scenario management.
 
-use crate::atp::multi_peer::*;
+use crate::atp::multi_peer::cache::CacheScenarios;
 use crate::atp::multi_peer::mailbox::MailboxScenarios;
 use crate::atp::multi_peer::swarm::SwarmScenarios;
-use crate::atp::multi_peer::cache::CacheScenarios;
+use crate::atp::multi_peer::*;
 
 /// Collection of all multi-peer scenarios
 pub struct AllScenarios;
@@ -37,8 +37,11 @@ impl AllScenarios {
 
     /// Get scenarios by type
     pub fn by_type(scenario_type: &ScenarioType) -> Vec<MultiPeerScenario> {
-        Self::all().into_iter()
-            .filter(|s| std::mem::discriminant(&s.scenario_type) == std::mem::discriminant(scenario_type))
+        Self::all()
+            .into_iter()
+            .filter(|s| {
+                std::mem::discriminant(&s.scenario_type) == std::mem::discriminant(scenario_type)
+            })
             .collect()
     }
 
@@ -53,29 +56,30 @@ impl AllScenarios {
 
     /// Get adversarial scenarios for security testing
     pub fn adversarial() -> Vec<MultiPeerScenario> {
-        Self::all().into_iter()
+        Self::all()
+            .into_iter()
             .filter(|s| matches!(s.scenario_type, ScenarioType::Adversarial))
             .collect()
     }
 
     /// Get scenarios by expected completion time (for CI selection)
     pub fn by_completion_time(max_duration: Duration) -> Vec<MultiPeerScenario> {
-        Self::all().into_iter()
+        Self::all()
+            .into_iter()
             .filter(|s| s.timeout <= max_duration)
             .collect()
     }
 
     /// Get scenario by ID
     pub fn by_id(scenario_id: &str) -> Option<MultiPeerScenario> {
-        Self::all().into_iter()
+        Self::all()
+            .into_iter()
             .find(|s| s.scenario_id == scenario_id)
     }
 
     /// List all scenario IDs
     pub fn list_ids() -> Vec<String> {
-        Self::all().into_iter()
-            .map(|s| s.scenario_id)
-            .collect()
+        Self::all().into_iter().map(|s| s.scenario_id).collect()
     }
 }
 
@@ -84,25 +88,39 @@ pub struct ScenarioFilters;
 
 impl ScenarioFilters {
     /// Filter scenarios that require specific peer counts
-    pub fn min_peer_count(scenarios: Vec<MultiPeerScenario>, min_peers: usize) -> Vec<MultiPeerScenario> {
-        scenarios.into_iter()
+    pub fn min_peer_count(
+        scenarios: Vec<MultiPeerScenario>,
+        min_peers: usize,
+    ) -> Vec<MultiPeerScenario> {
+        scenarios
+            .into_iter()
             .filter(|s| s.peers.len() >= min_peers)
             .collect()
     }
 
     /// Filter scenarios by network complexity
-    pub fn network_complexity(scenarios: Vec<MultiPeerScenario>, max_latency_ms: u64) -> Vec<MultiPeerScenario> {
-        scenarios.into_iter()
+    pub fn network_complexity(
+        scenarios: Vec<MultiPeerScenario>,
+        max_latency_ms: u64,
+    ) -> Vec<MultiPeerScenario> {
+        scenarios
+            .into_iter()
             .filter(|s| {
-                s.network.latency_ms.values()
+                s.network
+                    .latency_ms
+                    .values()
                     .all(|&latency| latency <= max_latency_ms)
             })
             .collect()
     }
 
     /// Filter scenarios by data size
-    pub fn by_data_size(scenarios: Vec<MultiPeerScenario>, max_size: u64) -> Vec<MultiPeerScenario> {
-        scenarios.into_iter()
+    pub fn by_data_size(
+        scenarios: Vec<MultiPeerScenario>,
+        max_size: u64,
+    ) -> Vec<MultiPeerScenario> {
+        scenarios
+            .into_iter()
             .filter(|s| {
                 match &s.transfer.source {
                     SourceSpec::RandomBytes(size) => *size <= max_size,
@@ -117,17 +135,18 @@ impl ScenarioFilters {
     pub fn implementable_now(scenarios: Vec<MultiPeerScenario>) -> Vec<MultiPeerScenario> {
         // For now, all scenarios require unimplemented ATP features
         // This filter will be updated as features are implemented
-        scenarios.into_iter()
+        scenarios
+            .into_iter()
             .filter(|s| {
                 // Currently all multi-peer scenarios depend on unimplemented features
                 // This is a placeholder that will be updated as ATP-J* features are implemented
                 match s.scenario_type {
-                    ScenarioType::Mailbox => false, // Requires ATP-J1
-                    ScenarioType::Swarm => false,   // Requires ATP-J2
-                    ScenarioType::Cache => false,   // Requires ATP-J3
-                    ScenarioType::PeerChurn => false, // Requires swarm infrastructure
+                    ScenarioType::Mailbox => false,     // Requires ATP-J1
+                    ScenarioType::Swarm => false,       // Requires ATP-J2
+                    ScenarioType::Cache => false,       // Requires ATP-J3
+                    ScenarioType::PeerChurn => false,   // Requires swarm infrastructure
                     ScenarioType::Adversarial => false, // Requires verification infrastructure
-                    ScenarioType::Hybrid(_) => false, // Requires multiple features
+                    ScenarioType::Hybrid(_) => false,   // Requires multiple features
                 }
             })
             .collect()
@@ -135,7 +154,8 @@ impl ScenarioFilters {
 
     /// Filter scenarios suitable for CI/automated testing
     pub fn ci_suitable(scenarios: Vec<MultiPeerScenario>) -> Vec<MultiPeerScenario> {
-        scenarios.into_iter()
+        scenarios
+            .into_iter()
             .filter(|s| {
                 // Criteria for CI suitability:
                 // 1. Reasonable timeout
@@ -195,7 +215,10 @@ impl ScenarioValidation {
         for scenario in scenarios {
             // Check ID format: type-description
             if !scenario.scenario_id.contains('-') {
-                errors.push(format!("{}: ID should contain hyphen", scenario.scenario_id));
+                errors.push(format!(
+                    "{}: ID should contain hyphen",
+                    scenario.scenario_id
+                ));
             }
 
             // Check ID matches scenario type
@@ -204,15 +227,14 @@ impl ScenarioValidation {
                 ScenarioType::Swarm => "swarm",
                 ScenarioType::Cache => "cache",
                 ScenarioType::PeerChurn => "swarm", // Peer churn is a swarm variant
-                ScenarioType::Adversarial => "", // Can be any type with malicious behavior
+                ScenarioType::Adversarial => "",    // Can be any type with malicious behavior
                 ScenarioType::Hybrid(_) => "hybrid",
             };
 
             if !type_prefix.is_empty() && !scenario.scenario_id.starts_with(type_prefix) {
                 errors.push(format!(
                     "{}: ID should start with '{}'",
-                    scenario.scenario_id,
-                    type_prefix
+                    scenario.scenario_id, type_prefix
                 ));
             }
 
@@ -238,31 +260,38 @@ impl ScenarioStats {
     pub fn generate_stats(scenarios: &[MultiPeerScenario]) -> ScenarioStatistics {
         let total_count = scenarios.len();
 
-        let by_type = scenarios.iter().fold(std::collections::HashMap::new(), |mut acc, s| {
-            let type_name = match s.scenario_type {
-                ScenarioType::Mailbox => "Mailbox",
-                ScenarioType::Swarm => "Swarm",
-                ScenarioType::Cache => "Cache",
-                ScenarioType::PeerChurn => "PeerChurn",
-                ScenarioType::Adversarial => "Adversarial",
-                ScenarioType::Hybrid(_) => "Hybrid",
-            };
-            *acc.entry(type_name.to_string()).or_insert(0) += 1;
-            acc
-        });
+        let by_type = scenarios
+            .iter()
+            .fold(std::collections::HashMap::new(), |mut acc, s| {
+                let type_name = match s.scenario_type {
+                    ScenarioType::Mailbox => "Mailbox",
+                    ScenarioType::Swarm => "Swarm",
+                    ScenarioType::Cache => "Cache",
+                    ScenarioType::PeerChurn => "PeerChurn",
+                    ScenarioType::Adversarial => "Adversarial",
+                    ScenarioType::Hybrid(_) => "Hybrid",
+                };
+                *acc.entry(type_name.to_string()).or_insert(0) += 1;
+                acc
+            });
 
         let peer_counts: Vec<usize> = scenarios.iter().map(|s| s.peers.len()).collect();
-        let avg_peers = if peer_counts.is_empty() { 0.0 } else {
+        let avg_peers = if peer_counts.is_empty() {
+            0.0
+        } else {
             peer_counts.iter().sum::<usize>() as f64 / peer_counts.len() as f64
         };
 
         let timeouts: Vec<Duration> = scenarios.iter().map(|s| s.timeout).collect();
-        let avg_timeout = if timeouts.is_empty() { Duration::ZERO } else {
+        let avg_timeout = if timeouts.is_empty() {
+            Duration::ZERO
+        } else {
             let total_secs: u64 = timeouts.iter().map(|d| d.as_secs()).sum();
             Duration::from_secs(total_secs / timeouts.len() as u64)
         };
 
-        let transfer_sizes: Vec<u64> = scenarios.iter()
+        let transfer_sizes: Vec<u64> = scenarios
+            .iter()
             .filter_map(|s| match &s.transfer.source {
                 SourceSpec::RandomBytes(size) => Some(*size),
                 SourceSpec::SparseFile { size, .. } => Some(*size),
@@ -270,17 +299,18 @@ impl ScenarioStats {
             })
             .collect();
 
-        let avg_transfer_size = if transfer_sizes.is_empty() { 0 } else {
+        let avg_transfer_size = if transfer_sizes.is_empty() {
+            0
+        } else {
             transfer_sizes.iter().sum::<u64>() / transfer_sizes.len() as u64
         };
 
-        let adversarial_count = scenarios.iter()
+        let adversarial_count = scenarios
+            .iter()
             .filter(|s| matches!(s.scenario_type, ScenarioType::Adversarial))
             .count();
 
-        let encrypted_count = scenarios.iter()
-            .filter(|s| s.transfer.encrypted)
-            .count();
+        let encrypted_count = scenarios.iter().filter(|s| s.transfer.encrypted).count();
 
         ScenarioStatistics {
             total_count,
@@ -300,11 +330,26 @@ impl ScenarioStats {
 
         // Define features that should be covered
         let all_features = vec![
-            "mailbox_upload", "mailbox_download", "mailbox_offline_sender", "mailbox_offline_receiver",
-            "swarm_multi_source", "swarm_verification", "swarm_rarest_first", "swarm_peer_churn",
-            "cache_hit", "cache_miss", "cache_eviction", "cache_quota", "cache_relay",
-            "adversarial_malicious_peers", "adversarial_tampered_chunks", "peer_rejection",
-            "encrypted_transfer", "repair_coding", "verification_failure", "network_partitions"
+            "mailbox_upload",
+            "mailbox_download",
+            "mailbox_offline_sender",
+            "mailbox_offline_receiver",
+            "swarm_multi_source",
+            "swarm_verification",
+            "swarm_rarest_first",
+            "swarm_peer_churn",
+            "cache_hit",
+            "cache_miss",
+            "cache_eviction",
+            "cache_quota",
+            "cache_relay",
+            "adversarial_malicious_peers",
+            "adversarial_tampered_chunks",
+            "peer_rejection",
+            "encrypted_transfer",
+            "repair_coding",
+            "verification_failure",
+            "network_partitions",
         ];
 
         // Check which features are covered by scenarios
@@ -313,10 +358,18 @@ impl ScenarioStats {
                 ScenarioType::Mailbox => {
                     covered_features.insert("mailbox_upload");
                     covered_features.insert("mailbox_download");
-                    if scenario.peers.iter().any(|p| !p.availability.initially_online) {
+                    if scenario
+                        .peers
+                        .iter()
+                        .any(|p| !p.availability.initially_online)
+                    {
                         covered_features.insert("mailbox_offline_receiver");
                     }
-                    if scenario.peers.iter().any(|p| !p.availability.schedule.is_empty()) {
+                    if scenario
+                        .peers
+                        .iter()
+                        .any(|p| !p.availability.schedule.is_empty())
+                    {
                         covered_features.insert("mailbox_offline_sender");
                     }
                 }
@@ -337,7 +390,11 @@ impl ScenarioStats {
                         covered_features.insert("cache_eviction");
                         covered_features.insert("cache_quota");
                     }
-                    if scenario.peers.iter().any(|p| matches!(p.role, PeerRole::Relay)) {
+                    if scenario
+                        .peers
+                        .iter()
+                        .any(|p| matches!(p.role, PeerRole::Relay))
+                    {
                         covered_features.insert("cache_relay");
                     }
                 }
@@ -373,7 +430,8 @@ impl ScenarioStats {
             }
         }
 
-        let coverage_percentage = (covered_features.len() as f64 / all_features.len() as f64) * 100.0;
+        let coverage_percentage =
+            (covered_features.len() as f64 / all_features.len() as f64) * 100.0;
 
         CoverageReport {
             total_features: all_features.len(),
@@ -415,9 +473,15 @@ mod tests {
         assert!(!scenarios.is_empty(), "Should have scenarios");
 
         // Should have scenarios from each type
-        let has_mailbox = scenarios.iter().any(|s| matches!(s.scenario_type, ScenarioType::Mailbox));
-        let has_swarm = scenarios.iter().any(|s| matches!(s.scenario_type, ScenarioType::Swarm));
-        let has_cache = scenarios.iter().any(|s| matches!(s.scenario_type, ScenarioType::Cache));
+        let has_mailbox = scenarios
+            .iter()
+            .any(|s| matches!(s.scenario_type, ScenarioType::Mailbox));
+        let has_swarm = scenarios
+            .iter()
+            .any(|s| matches!(s.scenario_type, ScenarioType::Swarm));
+        let has_cache = scenarios
+            .iter()
+            .any(|s| matches!(s.scenario_type, ScenarioType::Cache));
 
         assert!(has_mailbox, "Should have mailbox scenarios");
         assert!(has_swarm, "Should have swarm scenarios");
@@ -430,7 +494,10 @@ mod tests {
 
         // Test by type filtering
         let mailbox_scenarios = AllScenarios::by_type(&ScenarioType::Mailbox);
-        assert!(!mailbox_scenarios.is_empty(), "Should have mailbox scenarios");
+        assert!(
+            !mailbox_scenarios.is_empty(),
+            "Should have mailbox scenarios"
+        );
 
         // Test completion time filtering
         let quick_scenarios = AllScenarios::by_completion_time(Duration::from_secs(300));
@@ -438,7 +505,11 @@ mod tests {
 
         // Test smoke test selection
         let smoke_scenarios = AllScenarios::smoke_test();
-        assert_eq!(smoke_scenarios.len(), 3, "Should have 3 smoke test scenarios");
+        assert_eq!(
+            smoke_scenarios.len(),
+            3,
+            "Should have 3 smoke test scenarios"
+        );
     }
 
     #[test]
@@ -446,16 +517,22 @@ mod tests {
         let scenarios = AllScenarios::all();
 
         // Test validation
-        assert!(ScenarioValidation::validate_all(&scenarios).is_ok(),
-            "All scenarios should be valid");
+        assert!(
+            ScenarioValidation::validate_all(&scenarios).is_ok(),
+            "All scenarios should be valid"
+        );
 
         // Test unique IDs
-        assert!(ScenarioValidation::check_unique_ids(&scenarios).is_ok(),
-            "All scenario IDs should be unique");
+        assert!(
+            ScenarioValidation::check_unique_ids(&scenarios).is_ok(),
+            "All scenario IDs should be unique"
+        );
 
         // Test naming conventions
-        assert!(ScenarioValidation::validate_naming(&scenarios).is_ok(),
-            "All scenarios should follow naming conventions");
+        assert!(
+            ScenarioValidation::validate_naming(&scenarios).is_ok(),
+            "All scenarios should follow naming conventions"
+        );
     }
 
     #[test]
@@ -479,10 +556,15 @@ mod tests {
         // Test CI suitability
         let ci_scenarios = ScenarioFilters::ci_suitable(scenarios);
         for scenario in &ci_scenarios {
-            assert!(scenario.timeout <= Duration::from_secs(300), "Should have reasonable timeout");
+            assert!(
+                scenario.timeout <= Duration::from_secs(300),
+                "Should have reasonable timeout"
+            );
             assert!(scenario.peers.len() <= 5, "Should not have too many peers");
-            assert!(!matches!(scenario.scenario_type, ScenarioType::Adversarial),
-                "Should not include adversarial scenarios");
+            assert!(
+                !matches!(scenario.scenario_type, ScenarioType::Adversarial),
+                "Should not include adversarial scenarios"
+            );
         }
     }
 
@@ -498,8 +580,10 @@ mod tests {
         // Test coverage report
         let coverage = ScenarioStats::coverage_report(&scenarios);
         assert!(coverage.total_features > 0, "Should have features to cover");
-        assert!(coverage.coverage_percentage >= 0.0 && coverage.coverage_percentage <= 100.0,
-            "Coverage should be valid percentage");
+        assert!(
+            coverage.coverage_percentage >= 0.0 && coverage.coverage_percentage <= 100.0,
+            "Coverage should be valid percentage"
+        );
     }
 
     #[test]
@@ -513,11 +597,17 @@ mod tests {
         for id in &ids {
             let scenario = AllScenarios::by_id(id);
             assert!(scenario.is_some(), "Should find scenario by ID: {}", id);
-            assert_eq!(scenario.unwrap().scenario_id, *id, "Should return correct scenario");
+            assert_eq!(
+                scenario.unwrap().scenario_id,
+                *id,
+                "Should return correct scenario"
+            );
         }
 
         // Test non-existent ID
-        assert!(AllScenarios::by_id("non-existent").is_none(),
-            "Should not find non-existent scenario");
+        assert!(
+            AllScenarios::by_id("non-existent").is_none(),
+            "Should not find non-existent scenario"
+        );
     }
 }

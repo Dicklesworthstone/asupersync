@@ -53,13 +53,22 @@ impl MultiPeerContract for MailboxContract {
 
         if sender.availability.initially_online && receiver.availability.initially_online {
             // Both online initially - need to check if one goes offline
-            let sender_goes_offline = sender.availability.schedule.iter()
+            let sender_goes_offline = sender
+                .availability
+                .schedule
+                .iter()
                 .any(|(_, online)| !online);
-            let receiver_goes_offline = receiver.availability.schedule.iter()
+            let receiver_goes_offline = receiver
+                .availability
+                .schedule
+                .iter()
                 .any(|(_, online)| !online);
 
             if !sender_goes_offline && !receiver_goes_offline {
-                return Err("Mailbox scenario should have offline behavior - both peers always online".to_string());
+                return Err(
+                    "Mailbox scenario should have offline behavior - both peers always online"
+                        .to_string(),
+                );
             }
         }
 
@@ -87,7 +96,10 @@ impl MultiPeerContract for MailboxContract {
                     // Check log for any plaintext access (this would be implementation-specific)
                     // For now, we just verify the peer participated
                     if peer_result.bytes_received > 0 && peer_result.bytes_sent == 0 {
-                        return Err(format!("Mailbox peer {} appears to have only received data without forwarding", mailbox_peer.peer_id));
+                        return Err(format!(
+                            "Mailbox peer {} appears to have only received data without forwarding",
+                            mailbox_peer.peer_id
+                        ));
                     }
                 }
             }
@@ -96,15 +108,17 @@ impl MultiPeerContract for MailboxContract {
         // Verify transfer completed successfully if expected
         if result.scenario.expectations.success {
             if !result.success {
-                return Err(format!("Expected successful transfer but got: {:?}", result.error));
+                return Err(format!(
+                    "Expected successful transfer but got: {:?}",
+                    result.error
+                ));
             }
 
             if let Some(expected_bytes) = result.scenario.expectations.bytes_transferred {
                 if result.transfer_metrics.verified_bytes != expected_bytes {
                     return Err(format!(
                         "Expected {} verified bytes but got {}",
-                        expected_bytes,
-                        result.transfer_metrics.verified_bytes
+                        expected_bytes, result.transfer_metrics.verified_bytes
                     ));
                 }
             }
@@ -133,7 +147,10 @@ impl MultiPeerContract for SwarmContract {
         }
 
         if seeds.len() < 2 {
-            return Err("Swarm scenario requires at least 2 seed peers for multi-source transfer".to_string());
+            return Err(
+                "Swarm scenario requires at least 2 seed peers for multi-source transfer"
+                    .to_string(),
+            );
         }
 
         // Validate repair configuration for multi-source
@@ -163,7 +180,9 @@ impl MultiPeerContract for SwarmContract {
             let receiver = result.scenario.peers_by_role(&PeerRole::Receiver);
             if let Some(receiver_peer) = receiver.first() {
                 if let Some(receiver_result) = result.peer_results.get(&receiver_peer.peer_id) {
-                    let unique_sources: HashSet<_> = receiver_result.connections.iter()
+                    let unique_sources: HashSet<_> = receiver_result
+                        .connections
+                        .iter()
                         .filter(|conn| conn.event_type == "connect")
                         .map(|conn| &conn.remote_peer)
                         .collect();
@@ -180,7 +199,9 @@ impl MultiPeerContract for SwarmContract {
             // Check that malicious peers were properly rejected
             let malicious_peers = result.scenario.peers_by_role(&PeerRole::Malicious);
             if malicious_peers.is_empty() {
-                return Err("Peer rejections occurred but no malicious peers configured".to_string());
+                return Err(
+                    "Peer rejections occurred but no malicious peers configured".to_string()
+                );
             }
         }
 
@@ -200,7 +221,9 @@ impl MultiPeerContract for CacheContract {
         }
 
         // Verify at least one peer has cache enabled
-        let cache_enabled = scenario.peers.iter()
+        let cache_enabled = scenario
+            .peers
+            .iter()
             .any(|peer| peer.capabilities.cache_enabled);
 
         if !cache_enabled {
@@ -209,11 +232,15 @@ impl MultiPeerContract for CacheContract {
 
         // Verify quota configurations for cache eviction tests
         if scenario.scenario_id.contains("eviction") {
-            let has_quota = scenario.peers.iter()
+            let has_quota = scenario
+                .peers
+                .iter()
                 .any(|peer| peer.capabilities.storage_quota.is_some());
 
             if !has_quota {
-                return Err("Cache eviction scenario requires storage quota configuration".to_string());
+                return Err(
+                    "Cache eviction scenario requires storage quota configuration".to_string(),
+                );
             }
         }
 
@@ -242,8 +269,7 @@ impl MultiPeerContract for CacheContract {
                     if actual_metrics.hits.unwrap_or(0) != expected_hits {
                         return Err(format!(
                             "Expected {} cache hits but got {:?}",
-                            expected_hits,
-                            actual_metrics.hits
+                            expected_hits, actual_metrics.hits
                         ));
                     }
                 }
@@ -272,7 +298,9 @@ impl MultiPeerContract for AdversarialContract {
         }
 
         // Verify honest peers exist
-        let honest_peers: Vec<_> = scenario.peers.iter()
+        let honest_peers: Vec<_> = scenario
+            .peers
+            .iter()
             .filter(|peer| !matches!(peer.role, PeerRole::Malicious))
             .collect();
 
@@ -325,13 +353,19 @@ pub struct SchemaValidator;
 impl SchemaValidator {
     /// Validate multi-peer result schema
     pub fn validate_result_schema(result_json: &str) -> Result<MultiPeerResult, String> {
-        let parsed: Value = serde_json::from_str(result_json)
-            .map_err(|e| format!("Invalid JSON: {}", e))?;
+        let parsed: Value =
+            serde_json::from_str(result_json).map_err(|e| format!("Invalid JSON: {}", e))?;
 
         // Check required top-level fields
         let required_fields = [
-            "schema_version", "scenario", "executed_at", "success",
-            "duration", "peer_results", "transfer_metrics", "artifacts"
+            "schema_version",
+            "scenario",
+            "executed_at",
+            "success",
+            "duration",
+            "peer_results",
+            "transfer_metrics",
+            "artifacts",
         ];
 
         for field in &required_fields {
@@ -345,21 +379,19 @@ impl SchemaValidator {
             if version != MULTI_PEER_REPORT_SCHEMA {
                 return Err(format!(
                     "Unsupported schema version: {} (expected {})",
-                    version,
-                    MULTI_PEER_REPORT_SCHEMA
+                    version, MULTI_PEER_REPORT_SCHEMA
                 ));
             }
         }
 
         // Deserialize to struct for full validation
-        serde_json::from_str(result_json)
-            .map_err(|e| format!("Schema validation failed: {}", e))
+        serde_json::from_str(result_json).map_err(|e| format!("Schema validation failed: {}", e))
     }
 
     /// Validate event schema
     pub fn validate_event_schema(event_json: &str) -> Result<NetworkEvent, String> {
-        let parsed: Value = serde_json::from_str(event_json)
-            .map_err(|e| format!("Invalid JSON: {}", e))?;
+        let parsed: Value =
+            serde_json::from_str(event_json).map_err(|e| format!("Invalid JSON: {}", e))?;
 
         // Check required fields
         let required_fields = ["timestamp", "event_type", "peers"];
