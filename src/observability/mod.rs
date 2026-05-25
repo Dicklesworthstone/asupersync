@@ -59,6 +59,8 @@ pub mod metrics;
 pub mod mock_code_finder_clean_sweep_audit_test;
 #[cfg(test)]
 pub mod multi_runtime_subscriber_audit_test;
+pub mod network_diagnostics;
+pub mod network_truth;
 pub mod obligation_tracker;
 #[cfg(feature = "metrics")]
 pub mod otel;
@@ -204,6 +206,13 @@ pub use entry::LogEntry;
 pub use level::LogLevel;
 pub use metrics::{
     Counter, Gauge, Histogram, MetricValue, Metrics, MetricsProvider, NoOpMetrics, OutcomeKind,
+};
+pub use network_diagnostics::{
+    LimitingFactor, NetworkDiagnosticCli, NetworkDiagnosticReport, NetworkDiagnosticReporter,
+    NetworkSummary, PressureLevel,
+};
+pub use network_truth::{
+    MetricEstimate, NetworkTruthCollector, NetworkTruthMetrics, PathQuality, PressureModel,
 };
 pub use obligation_tracker::{
     ObligationInfo, ObligationStateInfo, ObligationSummary, ObligationTracker,
