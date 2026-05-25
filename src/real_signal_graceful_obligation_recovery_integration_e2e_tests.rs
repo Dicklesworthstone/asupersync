@@ -49,8 +49,8 @@ mod tests {
         },
         runtime::{Runtime, spawn},
         signal::{
-            graceful::{GracefulBuilder, GracefulOutcome},
             ShutdownController,
+            graceful::{GracefulBuilder, GracefulOutcome},
         },
         time::{Duration, Instant, sleep},
         types::{Budget, ObligationId, Outcome, Time},
@@ -268,7 +268,9 @@ mod tests {
             let mut stats = SignalRecoveryStats::default();
 
             // Get initial state
-            if let (Ok(ledger), Ok(trackers)) = (self.ledger.lock(), self.obligation_trackers.lock()) {
+            if let (Ok(ledger), Ok(trackers)) =
+                (self.ledger.lock(), self.obligation_trackers.lock())
+            {
                 stats.obligations_pending_at_signal = ledger.pending().len() as u64;
                 stats.obligations_active_at_signal = trackers.len() as u64;
             }
@@ -298,10 +300,15 @@ mod tests {
             SignalRecoveryTestResult {
                 test_name: "signal_graceful_obligation_recovery_integration".to_string(),
                 phase: SignalRecoveryTestPhase::QuiescenceVerification,
-                success: matches!(result, GracefulOutcome::Completed(_)) && stats.convergence_achieved,
+                success: matches!(result, GracefulOutcome::Completed(_))
+                    && stats.convergence_achieved,
                 error: match result {
-                    GracefulOutcome::ShutdownSignaled => Some("Shutdown signaled before recovery completed".to_string()),
-                    GracefulOutcome::Completed(_) if !stats.convergence_achieved => Some("Recovery did not achieve convergence".to_string()),
+                    GracefulOutcome::ShutdownSignaled => {
+                        Some("Shutdown signaled before recovery completed".to_string())
+                    }
+                    GracefulOutcome::Completed(_) if !stats.convergence_achieved => {
+                        Some("Recovery did not achieve convergence".to_string())
+                    }
                     _ => None,
                 },
                 duration_ms: duration.as_millis() as u64,
@@ -317,7 +324,8 @@ mod tests {
                 // Execute recovery tick
                 let current_time = self.virtual_time_ns.load(Ordering::SeqCst);
                 let tick_result = if let (Ok(mut ledger), Ok(mut governor)) =
-                    (self.ledger.lock(), self.governor.lock()) {
+                    (self.ledger.lock(), self.governor.lock())
+                {
                     governor.tick(&mut *ledger, current_time)
                 } else {
                     break;
@@ -344,7 +352,8 @@ mod tests {
                 tick_count += 1;
 
                 // Advance virtual time slightly
-                self.virtual_time_ns.fetch_add(100_000_000, Ordering::SeqCst); // 100ms
+                self.virtual_time_ns
+                    .fetch_add(100_000_000, Ordering::SeqCst); // 100ms
 
                 // Small delay to prevent busy loop
                 sleep(Duration::from_millis(10)).await;
@@ -367,10 +376,14 @@ mod tests {
                         crate::obligation::recovery::RecoveryAction::StaleAbort { .. } => {
                             stats.stale_obligations_cleaned += 1;
                         }
-                        crate::obligation::recovery::RecoveryAction::ConflictResolved { .. } => {
+                        crate::obligation::recovery::RecoveryAction::ConflictResolved {
+                            ..
+                        } => {
                             stats.conflicts_resolved += 1;
                         }
-                        crate::obligation::recovery::RecoveryAction::ViolationAborted { .. } => {
+                        crate::obligation::recovery::RecoveryAction::ViolationAborted {
+                            ..
+                        } => {
                             stats.violations_fixed += 1;
                         }
                         crate::obligation::recovery::RecoveryAction::Flagged { .. } => {
@@ -385,15 +398,20 @@ mod tests {
             if let Ok(mut trackers) = self.obligation_trackers.lock() {
                 for action in &result.actions {
                     match action {
-                        crate::obligation::recovery::RecoveryAction::StaleAbort { id, .. } |
-                        crate::obligation::recovery::RecoveryAction::ConflictResolved { id } |
-                        crate::obligation::recovery::RecoveryAction::ViolationAborted { id, .. } => {
+                        crate::obligation::recovery::RecoveryAction::StaleAbort { id, .. }
+                        | crate::obligation::recovery::RecoveryAction::ConflictResolved { id }
+                        | crate::obligation::recovery::RecoveryAction::ViolationAborted {
+                            id,
+                            ..
+                        } => {
                             if let Some(tracker) = trackers.get_mut(id) {
                                 tracker.recovered_at = Some(Instant::now());
                                 tracker.recovery_duration_ms = Some(
-                                    tracker.recovered_at.unwrap()
+                                    tracker
+                                        .recovered_at
+                                        .unwrap()
                                         .duration_since(tracker.created_at)
-                                        .as_millis() as u64
+                                        .as_millis() as u64,
                                 );
                                 tracker.successfully_recovered = true;
                                 tracker.recovery_action = Some(format!("{:?}", action));
@@ -423,9 +441,9 @@ mod tests {
 
         pub fn verify_recovery_convergence(&self) -> bool {
             if let Ok(ledger) = self.ledger.lock() {
-                ledger.pending().is_empty() &&
-                ledger.conflicts().is_empty() &&
-                ledger.linearity_violations().is_empty()
+                ledger.pending().is_empty()
+                    && ledger.conflicts().is_empty()
+                    && ledger.linearity_violations().is_empty()
             } else {
                 false
             }
@@ -454,13 +472,31 @@ mod tests {
             let result = harness.run_recovery_sequence().await;
 
             // Verify recovery succeeded
-            assert!(result.success, "Signal should trigger successful obligation recovery");
-            assert!(result.recovery_stats.recovery_ticks_executed > 0, "Recovery ticks should be executed");
-            assert!(result.recovery_stats.convergence_achieved, "Recovery should achieve convergence");
-            assert!(harness.verify_no_obligations_lost(), "No obligations should be lost during recovery");
-            assert!(harness.verify_recovery_convergence(), "System should converge to quiescent state");
+            assert!(
+                result.success,
+                "Signal should trigger successful obligation recovery"
+            );
+            assert!(
+                result.recovery_stats.recovery_ticks_executed > 0,
+                "Recovery ticks should be executed"
+            );
+            assert!(
+                result.recovery_stats.convergence_achieved,
+                "Recovery should achieve convergence"
+            );
+            assert!(
+                harness.verify_no_obligations_lost(),
+                "No obligations should be lost during recovery"
+            );
+            assert!(
+                harness.verify_recovery_convergence(),
+                "System should converge to quiescent state"
+            );
 
-            println!("✓ Basic signal-triggered obligation recovery: {:?}", result.recovery_stats);
+            println!(
+                "✓ Basic signal-triggered obligation recovery: {:?}",
+                result.recovery_stats
+            );
         });
     }
 
@@ -483,13 +519,28 @@ mod tests {
             let result = harness.run_recovery_sequence().await;
 
             // Verify stale obligations were cleaned up
-            assert!(result.success, "Recovery should succeed with stale obligations");
-            assert!(result.recovery_stats.stale_obligations_cleaned >= 2,
-                "Stale obligations should be cleaned: {}", result.recovery_stats.stale_obligations_cleaned);
-            assert!(result.recovery_stats.convergence_achieved, "Should achieve convergence after cleanup");
-            assert!(harness.verify_recovery_convergence(), "System should be quiescent after cleanup");
+            assert!(
+                result.success,
+                "Recovery should succeed with stale obligations"
+            );
+            assert!(
+                result.recovery_stats.stale_obligations_cleaned >= 2,
+                "Stale obligations should be cleaned: {}",
+                result.recovery_stats.stale_obligations_cleaned
+            );
+            assert!(
+                result.recovery_stats.convergence_achieved,
+                "Should achieve convergence after cleanup"
+            );
+            assert!(
+                harness.verify_recovery_convergence(),
+                "System should be quiescent after cleanup"
+            );
 
-            println!("✓ Stale obligation cleanup during signal recovery: {:?}", result.recovery_stats);
+            println!(
+                "✓ Stale obligation cleanup during signal recovery: {:?}",
+                result.recovery_stats
+            );
         });
     }
 
@@ -513,12 +564,24 @@ mod tests {
 
             // Verify conflicts were resolved
             assert!(result.success, "Recovery should succeed with conflicts");
-            assert!(result.recovery_stats.conflicts_resolved >= 2,
-                "Conflicts should be resolved: {}", result.recovery_stats.conflicts_resolved);
-            assert!(result.recovery_stats.convergence_achieved, "Should achieve convergence after conflict resolution");
-            assert!(harness.verify_recovery_convergence(), "System should be quiescent after conflict resolution");
+            assert!(
+                result.recovery_stats.conflicts_resolved >= 2,
+                "Conflicts should be resolved: {}",
+                result.recovery_stats.conflicts_resolved
+            );
+            assert!(
+                result.recovery_stats.convergence_achieved,
+                "Should achieve convergence after conflict resolution"
+            );
+            assert!(
+                harness.verify_recovery_convergence(),
+                "System should be quiescent after conflict resolution"
+            );
 
-            println!("✓ Conflict resolution during signal recovery: {:?}", result.recovery_stats);
+            println!(
+                "✓ Conflict resolution during signal recovery: {:?}",
+                result.recovery_stats
+            );
         });
     }
 
@@ -551,13 +614,31 @@ mod tests {
 
             // Verify comprehensive recovery
             assert!(result.success, "Recovery should succeed under stress");
-            assert!(result.recovery_stats.obligations_active_at_signal >= 20, "Should have many active obligations");
-            assert!(result.recovery_stats.recovery_actions_taken > 0, "Recovery actions should be taken");
-            assert!(result.recovery_stats.convergence_achieved, "Should achieve convergence under stress");
-            assert!(harness.verify_no_obligations_lost(), "No obligations should be lost under stress");
-            assert!(harness.verify_recovery_convergence(), "System should converge under stress");
+            assert!(
+                result.recovery_stats.obligations_active_at_signal >= 20,
+                "Should have many active obligations"
+            );
+            assert!(
+                result.recovery_stats.recovery_actions_taken > 0,
+                "Recovery actions should be taken"
+            );
+            assert!(
+                result.recovery_stats.convergence_achieved,
+                "Should achieve convergence under stress"
+            );
+            assert!(
+                harness.verify_no_obligations_lost(),
+                "No obligations should be lost under stress"
+            );
+            assert!(
+                harness.verify_recovery_convergence(),
+                "System should converge under stress"
+            );
 
-            println!("✓ Multi-obligation stress test recovery: {:?}", result.recovery_stats);
+            println!(
+                "✓ Multi-obligation stress test recovery: {:?}",
+                result.recovery_stats
+            );
         });
     }
 
@@ -585,14 +666,26 @@ mod tests {
             let result = harness.run_recovery_sequence().await;
 
             // Verify recovery completed within grace period
-            assert!(result.success, "Recovery should complete within grace period");
-            assert!(result.recovery_stats.recovery_completion_ms < result.recovery_stats.grace_period_ms,
+            assert!(
+                result.success,
+                "Recovery should complete within grace period"
+            );
+            assert!(
+                result.recovery_stats.recovery_completion_ms
+                    < result.recovery_stats.grace_period_ms,
                 "Recovery should complete within grace period: {}ms < {}ms",
-                result.recovery_stats.recovery_completion_ms, result.recovery_stats.grace_period_ms);
-            assert!(result.recovery_stats.convergence_achieved, "Should achieve convergence within grace period");
+                result.recovery_stats.recovery_completion_ms,
+                result.recovery_stats.grace_period_ms
+            );
+            assert!(
+                result.recovery_stats.convergence_achieved,
+                "Should achieve convergence within grace period"
+            );
 
-            println!("✓ Grace period management during recovery: {}ms recovery in {}ms grace period",
-                result.recovery_stats.recovery_completion_ms, result.recovery_stats.grace_period_ms);
+            println!(
+                "✓ Grace period management during recovery: {}ms recovery in {}ms grace period",
+                result.recovery_stats.recovery_completion_ms, result.recovery_stats.grace_period_ms
+            );
         });
     }
 
@@ -616,17 +709,38 @@ mod tests {
 
             // Verify complete quiescence achieved
             assert!(result.success, "Recovery should achieve complete success");
-            assert!(result.recovery_stats.convergence_achieved, "Should achieve convergence");
-            assert!(result.recovery_stats.quiescence_achieved, "Should achieve quiescence");
-            assert!(harness.verify_recovery_convergence(), "System should be fully quiescent");
+            assert!(
+                result.recovery_stats.convergence_achieved,
+                "Should achieve convergence"
+            );
+            assert!(
+                result.recovery_stats.quiescence_achieved,
+                "Should achieve quiescence"
+            );
+            assert!(
+                harness.verify_recovery_convergence(),
+                "System should be fully quiescent"
+            );
 
             // Verify all anomalies were handled
             let final_stats = harness.get_stats_snapshot();
-            assert!(final_stats.stale_obligations_cleaned > 0, "Should clean stale obligations");
-            assert!(final_stats.conflicts_resolved > 0, "Should resolve conflicts");
-            assert!(final_stats.recovery_actions_taken > 0, "Should take recovery actions");
+            assert!(
+                final_stats.stale_obligations_cleaned > 0,
+                "Should clean stale obligations"
+            );
+            assert!(
+                final_stats.conflicts_resolved > 0,
+                "Should resolve conflicts"
+            );
+            assert!(
+                final_stats.recovery_actions_taken > 0,
+                "Should take recovery actions"
+            );
 
-            println!("✓ Complete quiescence verification: {:?}", result.recovery_stats);
+            println!(
+                "✓ Complete quiescence verification: {:?}",
+                result.recovery_stats
+            );
         });
     }
 }

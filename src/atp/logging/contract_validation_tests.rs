@@ -15,7 +15,7 @@ use crate::atp::logging::failure_bundle::*;
 use crate::atp::logging::redaction::*;
 use crate::atp::logging::replay_artifacts::*;
 use crate::atp::logging::schema::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -62,7 +62,7 @@ fn test_atp_event_schema_version_stability() {
     let event = create_test_event(
         AtpSubsystem::Transfer,
         "transfer_started",
-        json!({ "object_id": "obj-123", "size_bytes": 1024 })
+        json!({ "object_id": "obj-123", "size_bytes": 1024 }),
     );
 
     assert_eq!(event.schema_version, TEST_SCHEMA_VERSION);
@@ -79,19 +79,33 @@ fn test_atp_subsystem_completeness() {
     let all_subsystems = AtpSubsystem::all();
 
     // Verify core ATP subsystems are present
-    let subsystem_names: Vec<String> = all_subsystems.iter()
+    let subsystem_names: Vec<String> = all_subsystems
+        .iter()
         .map(|s| s.as_str().to_string())
         .collect();
 
     let required_subsystems = vec![
-        "Path", "Quic", "Transfer", "Scheduler", "Repair",
-        "Disk", "Journal", "Verifier", "Daemon", "Cli",
-        "UnitTest", "LabTest", "E2eTest"
+        "Path",
+        "Quic",
+        "Transfer",
+        "Scheduler",
+        "Repair",
+        "Disk",
+        "Journal",
+        "Verifier",
+        "Daemon",
+        "Cli",
+        "UnitTest",
+        "LabTest",
+        "E2eTest",
     ];
 
     for required in required_subsystems {
-        assert!(subsystem_names.contains(&required),
-                "Missing required subsystem: {}", required);
+        assert!(
+            subsystem_names.contains(&required),
+            "Missing required subsystem: {}",
+            required
+        );
     }
 
     // Each subsystem must have non-empty event types
@@ -105,8 +119,11 @@ fn test_atp_subsystem_completeness() {
             _ => vec!["generic_event".to_string()], // Default for test subsystems
         };
 
-        assert!(!event_types.is_empty(),
-                "Subsystem {} must have defined event types", subsystem.as_str());
+        assert!(
+            !event_types.is_empty(),
+            "Subsystem {} must have defined event types",
+            subsystem.as_str()
+        );
     }
 }
 
@@ -156,15 +173,43 @@ fn test_trace_redaction_sensitive_field_detection() {
     let redacted_event = apply_redaction_policy(&event);
 
     // Sensitive fields should be redacted
-    assert!(redacted_event.redacted_fields.contains(&"peer_id".to_string()));
-    assert!(redacted_event.redacted_fields.contains(&"auth_token".to_string()));
-    assert!(redacted_event.redacted_fields.contains(&"api_key".to_string()));
-    assert!(redacted_event.redacted_fields.contains(&"password".to_string()));
-    assert!(redacted_event.redacted_fields.contains(&"private_key".to_string()));
+    assert!(
+        redacted_event
+            .redacted_fields
+            .contains(&"peer_id".to_string())
+    );
+    assert!(
+        redacted_event
+            .redacted_fields
+            .contains(&"auth_token".to_string())
+    );
+    assert!(
+        redacted_event
+            .redacted_fields
+            .contains(&"api_key".to_string())
+    );
+    assert!(
+        redacted_event
+            .redacted_fields
+            .contains(&"password".to_string())
+    );
+    assert!(
+        redacted_event
+            .redacted_fields
+            .contains(&"private_key".to_string())
+    );
 
     // Non-sensitive fields should not be redacted
-    assert!(!redacted_event.redacted_fields.contains(&"transfer_id".to_string()));
-    assert!(!redacted_event.redacted_fields.contains(&"file_size".to_string()));
+    assert!(
+        !redacted_event
+            .redacted_fields
+            .contains(&"transfer_id".to_string())
+    );
+    assert!(
+        !redacted_event
+            .redacted_fields
+            .contains(&"file_size".to_string())
+    );
 
     // Redacted data should not contain original sensitive values
     let data_str = redacted_event.data.to_string();
@@ -230,7 +275,7 @@ fn test_failure_bundle_schema_validation() {
                     "timestamp": "2026-05-25T12:00:02Z",
                     "event": "transfer_failed",
                     "data": {"error": "connection_timeout"}
-                })
+                }),
             ],
             trace_summary: json!({
                 "total_events": 2,
@@ -240,28 +285,25 @@ fn test_failure_bundle_schema_validation() {
         },
         qlog_data: Some(QlogData {
             qlog_version: "0.3".to_string(),
-            events: vec![
-                json!({
-                    "time": 0.0,
-                    "name": "connection_started",
-                    "data": {}
-                })
-            ],
+            events: vec![json!({
+                "time": 0.0,
+                "name": "connection_started",
+                "data": {}
+            })],
         }),
         path_log: Some(PathLog {
-            discovery_attempts: vec![
-                json!({
-                    "candidate": "192.168.1.100:443",
-                    "result": "success",
-                    "latency_ms": 45
-                })
-            ],
+            discovery_attempts: vec![json!({
+                "candidate": "192.168.1.100:443",
+                "result": "success",
+                "latency_ms": 45
+            })],
             selected_path: Some("quic+udp://192.168.1.100:443".to_string()),
         }),
         repair_log: None,
         journal_digest: None,
         proof_bundle: None,
-        replay_command: "atp --seed=0x123456789abcdef0 transfer file.txt remote:file.txt".to_string(),
+        replay_command: "atp --seed=0x123456789abcdef0 transfer file.txt remote:file.txt"
+            .to_string(),
         additional_data: json!({
             "test_case": "ATP-N16",
             "custom_metadata": "failure_bundle_test"
@@ -313,7 +355,7 @@ fn test_replay_artifact_consistency() {
                 "duration_ms": 10,
                 "result": "failed",
                 "error": "peer_disconnected"
-            })
+            }),
         ],
         checkpoint_data: Some(json!({
             "last_successful_step": 2,
@@ -322,7 +364,7 @@ fn test_replay_artifact_consistency() {
         replay_instructions: vec![
             "Set environment variable ATP_DETERMINISTIC=1".to_string(),
             "Use seed 0xdeadbeefcafebabe".to_string(),
-            "Run: atp --replay transfer file.txt remote:file.txt".to_string()
+            "Run: atp --replay transfer file.txt remote:file.txt".to_string(),
         ],
     };
 
@@ -341,7 +383,10 @@ fn test_replay_artifact_consistency() {
     // Execution trace must maintain order and structure
     assert_eq!(parsed.execution_trace[0]["step"], json!(1));
     assert_eq!(parsed.execution_trace[2]["result"], json!("failed"));
-    assert_eq!(parsed.execution_trace[2]["error"], json!("peer_disconnected"));
+    assert_eq!(
+        parsed.execution_trace[2]["error"],
+        json!("peer_disconnected")
+    );
 }
 
 #[test]
@@ -351,32 +396,54 @@ fn test_redaction_policy_completeness() {
 
     // Must have patterns for common sensitive data
     let required_patterns = vec![
-        "peer_id", "auth_token", "api_key", "password", "private_key",
-        "session_cookie", "bearer_token", "access_token", "refresh_token"
+        "peer_id",
+        "auth_token",
+        "api_key",
+        "password",
+        "private_key",
+        "session_cookie",
+        "bearer_token",
+        "access_token",
+        "refresh_token",
     ];
 
     for pattern in required_patterns {
-        assert!(sensitive_patterns.iter().any(|p| p.contains(pattern)),
-                "Missing redaction pattern for: {}", pattern);
+        assert!(
+            sensitive_patterns.iter().any(|p| p.contains(pattern)),
+            "Missing redaction pattern for: {}",
+            pattern
+        );
     }
 
     // Test redaction on various event types
     let test_cases = vec![
-        (AtpSubsystem::Security, "auth_attempt", json!({
-            "username": "alice",
-            "password": "secret123",
-            "result": "success"
-        })),
-        (AtpSubsystem::Quic, "connection_established", json!({
-            "peer_id": "peer-secret-12345",
-            "connection_id": "conn-public-67890",
-            "protocol_version": "1.0"
-        })),
-        (AtpSubsystem::Transfer, "transfer_authorized", json!({
-            "api_key": "sk_live_abcdefghijk",
-            "transfer_id": "transfer-public-id",
-            "file_size": 2048
-        }))
+        (
+            AtpSubsystem::Security,
+            "auth_attempt",
+            json!({
+                "username": "alice",
+                "password": "secret123",
+                "result": "success"
+            }),
+        ),
+        (
+            AtpSubsystem::Quic,
+            "connection_established",
+            json!({
+                "peer_id": "peer-secret-12345",
+                "connection_id": "conn-public-67890",
+                "protocol_version": "1.0"
+            }),
+        ),
+        (
+            AtpSubsystem::Transfer,
+            "transfer_authorized",
+            json!({
+                "api_key": "sk_live_abcdefghijk",
+                "transfer_id": "transfer-public-id",
+                "file_size": 2048
+            }),
+        ),
     ];
 
     for (subsystem, event_type, data) in test_cases {
@@ -384,8 +451,11 @@ fn test_redaction_policy_completeness() {
         let redacted = apply_redaction_policy(&event);
 
         // Should have some redacted fields for these sensitive events
-        assert!(!redacted.redacted_fields.is_empty(),
-                "Event {} should have redacted fields", event_type);
+        assert!(
+            !redacted.redacted_fields.is_empty(),
+            "Event {} should have redacted fields",
+            event_type
+        );
 
         // Redacted event should be serializable
         let serialized = serde_json::to_string(&redacted).expect("redacted event should serialize");
@@ -406,11 +476,7 @@ fn test_event_format_stability_across_subsystems() {
     ];
 
     for subsystem in subsystems {
-        let event = create_test_event(
-            subsystem,
-            "test_event",
-            json!({ "test_data": "value" })
-        );
+        let event = create_test_event(subsystem, "test_event", json!({ "test_data": "value" }));
 
         // All events must have consistent structure
         assert_eq!(event.schema_version, TEST_SCHEMA_VERSION);
@@ -451,7 +517,7 @@ fn test_logging_performance_bounds() {
             json!({
                 "iteration": i,
                 "data": format!("test_data_{}", i)
-            })
+            }),
         );
 
         // Serialize event (common operation)
@@ -464,8 +530,11 @@ fn test_logging_performance_bounds() {
     let duration = start.elapsed();
 
     // Performance bound: 1000 events should process in under 1 second
-    assert!(duration.as_millis() < 1000,
-            "Logging performance too slow: {}ms for 1000 events", duration.as_millis());
+    assert!(
+        duration.as_millis() < 1000,
+        "Logging performance too slow: {}ms for 1000 events",
+        duration.as_millis()
+    );
 }
 
 #[test]
@@ -474,24 +543,39 @@ fn test_memory_usage_bounds() {
     use std::mem::size_of;
 
     // AtpEvent should be reasonably sized
-    assert!(size_of::<AtpEvent>() < 1024, "AtpEvent too large: {} bytes", size_of::<AtpEvent>());
+    assert!(
+        size_of::<AtpEvent>() < 1024,
+        "AtpEvent too large: {} bytes",
+        size_of::<AtpEvent>()
+    );
 
     // EventContext should be compact
-    assert!(size_of::<EventContext>() < 512, "EventContext too large: {} bytes", size_of::<EventContext>());
+    assert!(
+        size_of::<EventContext>() < 512,
+        "EventContext too large: {} bytes",
+        size_of::<EventContext>()
+    );
 
     // FailureBundle is allowed to be larger but should be bounded
-    assert!(size_of::<FailureBundle>() < 4096, "FailureBundle too large: {} bytes", size_of::<FailureBundle>());
+    assert!(
+        size_of::<FailureBundle>() < 4096,
+        "FailureBundle too large: {} bytes",
+        size_of::<FailureBundle>()
+    );
 
     // Test that collections don't grow unbounded
     let mut large_event = create_test_event(
         AtpSubsystem::Transfer,
         "large_data_test",
-        json!({ "large_field": "x".repeat(10000) })
+        json!({ "large_field": "x".repeat(10000) }),
     );
 
     // Should be able to apply redaction even to large events
     let redacted = apply_redaction_policy(&large_event);
-    assert!(redacted.redacted_fields.len() <= 100, "Too many redacted fields tracked");
+    assert!(
+        redacted.redacted_fields.len() <= 100,
+        "Too many redacted fields tracked"
+    );
 
     // Add many redacted fields to test bounds
     for i in 0..200 {
@@ -500,7 +584,11 @@ fn test_memory_usage_bounds() {
 
     // Should serialize even with many redacted fields but track reasonable bounds
     let serialized = serde_json::to_string(&large_event).expect("should serialize large event");
-    assert!(serialized.len() < 100_000, "Serialized event too large: {} bytes", serialized.len());
+    assert!(
+        serialized.len() < 100_000,
+        "Serialized event too large: {} bytes",
+        serialized.len()
+    );
 }
 
 #[test]
@@ -587,9 +675,19 @@ fn apply_redaction_policy(event: &AtpEvent) -> AtpEvent {
 /// Get list of sensitive field patterns for redaction.
 fn get_sensitive_field_patterns() -> Vec<&'static str> {
     vec![
-        "peer_id", "auth_token", "api_key", "password", "private_key",
-        "session_cookie", "bearer_token", "access_token", "refresh_token",
-        "client_secret", "private_data", "credentials", "authorization"
+        "peer_id",
+        "auth_token",
+        "api_key",
+        "password",
+        "private_key",
+        "session_cookie",
+        "bearer_token",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "private_data",
+        "credentials",
+        "authorization",
     ]
 }
 

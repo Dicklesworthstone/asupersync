@@ -11,10 +11,10 @@ pub mod autotune;
 #[cfg(feature = "benchmark-adapters")]
 pub mod benchmark;
 pub mod diagnostics;
-#[cfg(test)]
-pub mod early_usability_tests;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
+#[cfg(test)]
+pub mod early_usability_tests;
 pub mod governance;
 pub mod grant;
 pub mod identity;
@@ -77,10 +77,10 @@ pub use doctor::{
     render_platform_doctor_human,
 };
 pub use governance::{
-    config::{AtpGovernanceConfig, AtpGovernanceCliArgs, AtpGovernanceMetadata, AtpCustomLimits},
-    AtpFairnessCoordinator, AtpFairnessPolicy, AtpFairShareAllocation, AtpTransferId,
-    AtpGovernanceDecision, AtpGovernanceViolation, AtpGovernanceViolationKind, AtpResourceBudget,
-    AtpResourceDemand, AtpResourceGovernor,
+    AtpFairShareAllocation, AtpFairnessCoordinator, AtpFairnessPolicy, AtpGovernanceDecision,
+    AtpGovernanceViolation, AtpGovernanceViolationKind, AtpResourceBudget, AtpResourceDemand,
+    AtpResourceGovernor, AtpTransferId,
+    config::{AtpCustomLimits, AtpGovernanceCliArgs, AtpGovernanceConfig, AtpGovernanceMetadata},
 };
 pub use grant::{GrantInfo, GrantManager, GrantQuery, GrantStats, PairingCode, PairingManager};
 pub use identity::{DurablePeerIdentity, IdentityError};

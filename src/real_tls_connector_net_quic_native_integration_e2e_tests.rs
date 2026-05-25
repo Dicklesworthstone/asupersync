@@ -12,21 +12,24 @@
 
 use crate::{
     cx::{Cx, Scope},
-    net::quic_native::{QuicConnection, QuicEndpoint, QuicConfig, QuicError},
-    tls::{
-        connector::{TlsConnector, TlsConfig, ConnectorError},
-        stream::{TlsStream, TlsHandshake},
-        error::TlsError,
-    },
-    sync::{Mutex, RwLock},
-    types::{Budget, Outcome},
     error::Error,
+    net::quic_native::{QuicConfig, QuicConnection, QuicEndpoint, QuicError},
+    sync::{Mutex, RwLock},
+    tls::{
+        connector::{ConnectorError, TlsConfig, TlsConnector},
+        error::TlsError,
+        stream::{TlsHandshake, TlsStream},
+    },
+    types::{Budget, Outcome},
 };
 use std::{
-    sync::{Arc, atomic::{AtomicU64, AtomicBool, Ordering}},
-    time::Duration,
     collections::HashMap,
     net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 
 /// Controllable QUIC endpoint that simulates various network conditions
@@ -108,7 +111,10 @@ impl ControllableQuicEndpoint {
 
         // Simulate certificate validation delay
         if conditions.certificate_validation_delay_ms > 0 {
-            crate::time::Sleep::new(Duration::from_millis(conditions.certificate_validation_delay_ms)).await;
+            crate::time::Sleep::new(Duration::from_millis(
+                conditions.certificate_validation_delay_ms,
+            ))
+            .await;
         }
 
         // Simulate certificate errors
@@ -127,7 +133,10 @@ impl ControllableQuicEndpoint {
         };
 
         // Perform TLS handshake over QUIC
-        let tls_stream = match tls_connector.connect(cx, server_name, quic_connection.clone()).await {
+        let tls_stream = match tls_connector
+            .connect(cx, server_name, quic_connection.clone())
+            .await
+        {
             Ok(stream) => stream,
             Err(e) => {
                 self.connection_stats.lock().unwrap().handshake_failures += 1;
@@ -135,7 +144,10 @@ impl ControllableQuicEndpoint {
             }
         };
 
-        let connection_id = format!("conn_{}", self.connection_stats.lock().unwrap().connections_attempted);
+        let connection_id = format!(
+            "conn_{}",
+            self.connection_stats.lock().unwrap().connections_attempted
+        );
         let connection_info = QuicConnectionInfo {
             connection_id: connection_id.clone(),
             remote_addr,
@@ -144,8 +156,14 @@ impl ControllableQuicEndpoint {
             certificate_fingerprint: tls_stream.peer_certificate_fingerprint(),
         };
 
-        self.active_connections.lock().unwrap().insert(connection_id.clone(), connection_info);
-        self.connection_stats.lock().unwrap().connections_established += 1;
+        self.active_connections
+            .lock()
+            .unwrap()
+            .insert(connection_id.clone(), connection_info);
+        self.connection_stats
+            .lock()
+            .unwrap()
+            .connections_established += 1;
 
         Ok(SecureQuicConnection {
             connection_id,
@@ -167,7 +185,13 @@ impl ControllableQuicEndpoint {
         // Perform TLS handshake on accepted connection
         let tls_stream = tls_connector.accept(cx, quic_connection.clone()).await?;
 
-        let connection_id = format!("accepted_{}", self.connection_stats.lock().unwrap().connections_established);
+        let connection_id = format!(
+            "accepted_{}",
+            self.connection_stats
+                .lock()
+                .unwrap()
+                .connections_established
+        );
         let connection_info = QuicConnectionInfo {
             connection_id: connection_id.clone(),
             remote_addr,
@@ -176,8 +200,14 @@ impl ControllableQuicEndpoint {
             certificate_fingerprint: tls_stream.peer_certificate_fingerprint(),
         };
 
-        self.active_connections.lock().unwrap().insert(connection_id.clone(), connection_info);
-        self.connection_stats.lock().unwrap().connections_established += 1;
+        self.active_connections
+            .lock()
+            .unwrap()
+            .insert(connection_id.clone(), connection_info);
+        self.connection_stats
+            .lock()
+            .unwrap()
+            .connections_established += 1;
 
         Ok(SecureQuicConnection {
             connection_id,
@@ -196,7 +226,12 @@ impl ControllableQuicEndpoint {
     }
 
     fn get_active_connections(&self) -> Vec<QuicConnectionInfo> {
-        self.active_connections.lock().unwrap().values().cloned().collect()
+        self.active_connections
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect()
     }
 }
 
@@ -230,7 +265,10 @@ impl SecureQuicConnection {
         self.tls_stream.read(cx, buffer).await
     }
 
-    async fn verify_connection_security(&self, cx: &Cx) -> Result<SecurityVerificationResult, Error> {
+    async fn verify_connection_security(
+        &self,
+        cx: &Cx,
+    ) -> Result<SecurityVerificationResult, Error> {
         let peer_cert = self.tls_stream.peer_certificate();
         let cipher_suite = self.tls_stream.negotiated_cipher_suite();
         let protocol_version = self.tls_stream.protocol_version();
@@ -254,7 +292,11 @@ impl SecureQuicConnection {
         self.quic_connection.close(cx, 0, b"Normal closure").await?;
 
         // Remove from active connections
-        self.endpoint.active_connections.lock().unwrap().remove(&self.connection_id);
+        self.endpoint
+            .active_connections
+            .lock()
+            .unwrap()
+            .remove(&self.connection_id);
 
         Ok(())
     }
@@ -306,7 +348,10 @@ impl QuicAwareTlsConnector {
             verify_peer: true,
             enable_sni: true,
             min_protocol_version: Some("TLSv1.3".to_string()),
-            cipher_suites: vec!["TLS_AES_256_GCM_SHA384".to_string(), "TLS_AES_128_GCM_SHA256".to_string()],
+            cipher_suites: vec![
+                "TLS_AES_256_GCM_SHA384".to_string(),
+                "TLS_AES_128_GCM_SHA256".to_string(),
+            ],
         };
 
         let connector = TlsConnector::new(tls_config)?;
@@ -336,10 +381,24 @@ impl QuicAwareTlsConnector {
             if let Some(session_info) = self.session_cache.lock().unwrap().get(server_name) {
                 if session_info.last_used.elapsed() < Duration::from_hours(24) {
                     // Attempt session resumption
-                    match self.connector.connect_with_session(cx, server_name, quic_connection.clone(), &session_info.session_id).await {
+                    match self
+                        .connector
+                        .connect_with_session(
+                            cx,
+                            server_name,
+                            quic_connection.clone(),
+                            &session_info.session_id,
+                        )
+                        .await
+                    {
                         Ok(stream) => {
                             // Update last used time
-                            self.session_cache.lock().unwrap().get_mut(server_name).unwrap().last_used = std::time::Instant::now();
+                            self.session_cache
+                                .lock()
+                                .unwrap()
+                                .get_mut(server_name)
+                                .unwrap()
+                                .last_used = std::time::Instant::now();
                             return Ok(stream);
                         }
                         Err(_) => {
@@ -355,7 +414,10 @@ impl QuicAwareTlsConnector {
         handshake_config.alpn_protocols = config.alpn_protocols;
         handshake_config.early_data_enabled = config.early_data_enabled;
 
-        let tls_stream = self.connector.connect_with_config(cx, server_name, quic_connection, handshake_config).await?;
+        let tls_stream = self
+            .connector
+            .connect_with_config(cx, server_name, quic_connection, handshake_config)
+            .await?;
 
         // Cache session for future resumption
         if config.enable_session_resumption {
@@ -366,7 +428,10 @@ impl QuicAwareTlsConnector {
                     established_at: std::time::Instant::now(),
                     last_used: std::time::Instant::now(),
                 };
-                self.session_cache.lock().unwrap().insert(server_name.to_string(), session_info);
+                self.session_cache
+                    .lock()
+                    .unwrap()
+                    .insert(server_name.to_string(), session_info);
             }
         }
 
@@ -384,7 +449,9 @@ impl QuicAwareTlsConnector {
         let mut accept_config = self.connector.config().clone();
         accept_config.alpn_protocols = config.alpn_protocols;
 
-        self.connector.accept_with_config(cx, quic_connection, accept_config).await
+        self.connector
+            .accept_with_config(cx, quic_connection, accept_config)
+            .await
     }
 
     fn configure_quic_integration(&self, config: QuicTlsIntegrationConfig) {
@@ -394,7 +461,8 @@ impl QuicAwareTlsConnector {
     fn get_session_cache_stats(&self) -> (usize, usize) {
         let cache = self.session_cache.lock().unwrap();
         let total_sessions = cache.len();
-        let recent_sessions = cache.values()
+        let recent_sessions = cache
+            .values()
             .filter(|session| session.last_used.elapsed() < Duration::from_hours(1))
             .count();
         (total_sessions, recent_sessions)
@@ -456,21 +524,20 @@ impl TlsQuicIntegrationCoordinator {
         let server_endpoint = self.server_endpoint.clone();
         let tls_connector = &self.tls_connector;
 
-        let server_handle = cx.spawn(move |cx| async move {
-            server_endpoint.accept_with_tls(cx, tls_connector).await
-        });
+        let server_handle =
+            cx.spawn(
+                move |cx| async move { server_endpoint.accept_with_tls(cx, tls_connector).await },
+            );
 
         // Wait a bit for server to start listening
         crate::time::Sleep::new(Duration::from_millis(100)).await;
 
         // Connect client with TLS over QUIC
         let server_addr = self.server_endpoint.endpoint.local_address();
-        let mut client_connection = self.client_endpoint.connect_with_tls(
-            cx,
-            server_addr,
-            "localhost",
-            &self.tls_connector,
-        ).await?;
+        let mut client_connection = self
+            .client_endpoint
+            .connect_with_tls(cx, server_addr, "localhost", &self.tls_connector)
+            .await?;
 
         let handshake_duration = start_time.elapsed();
 
@@ -488,7 +555,8 @@ impl TlsQuicIntegrationCoordinator {
         let performance_metrics = PerformanceMetrics {
             handshake_duration_ms: handshake_duration.as_secs_f64() * 1000.0,
             first_byte_latency_ms: first_byte_latency.as_secs_f64() * 1000.0,
-            throughput_mbps: (bytes_sent as f64 * 8.0) / (first_byte_latency.as_secs_f64() * 1_000_000.0),
+            throughput_mbps: (bytes_sent as f64 * 8.0)
+                / (first_byte_latency.as_secs_f64() * 1_000_000.0),
             connection_overhead_bytes: 64, // Estimated TLS+QUIC overhead
         };
 
@@ -522,12 +590,10 @@ impl TlsQuicIntegrationCoordinator {
     ) -> Result<IntegrationTestResult, Error> {
         // First connection to establish session
         let server_addr = self.server_endpoint.endpoint.local_address();
-        let mut first_connection = self.client_endpoint.connect_with_tls(
-            cx,
-            server_addr,
-            "localhost",
-            &self.tls_connector,
-        ).await?;
+        let mut first_connection = self
+            .client_endpoint
+            .connect_with_tls(cx, server_addr, "localhost", &self.tls_connector)
+            .await?;
 
         let first_security = first_connection.verify_connection_security(cx).await?;
         first_connection.close_secure_connection(cx).await?;
@@ -537,12 +603,10 @@ impl TlsQuicIntegrationCoordinator {
 
         // Second connection should resume session
         let resume_start = std::time::Instant::now();
-        let mut second_connection = self.client_endpoint.connect_with_tls(
-            cx,
-            server_addr,
-            "localhost",
-            &self.tls_connector,
-        ).await?;
+        let mut second_connection = self
+            .client_endpoint
+            .connect_with_tls(cx, server_addr, "localhost", &self.tls_connector)
+            .await?;
 
         let resume_duration = resume_start.elapsed();
         let second_security = second_connection.verify_connection_security(cx).await?;
@@ -563,8 +627,7 @@ impl TlsQuicIntegrationCoordinator {
             performance_metrics,
             details: format!(
                 "Session resumed: {}, Resume time: {:.1}ms",
-                second_security.session_resumed,
-                performance_metrics.handshake_duration_ms
+                second_security.session_resumed, performance_metrics.handshake_duration_ms
             ),
         };
 
@@ -580,23 +643,22 @@ impl TlsQuicIntegrationCoordinator {
         test_case: &str,
     ) -> Result<IntegrationTestResult, Error> {
         // Configure to simulate certificate errors
-        self.server_endpoint.configure_network_conditions(NetworkConditionConfig {
-            packet_loss_percentage: 0.0,
-            connection_delay_ms: 0,
-            certificate_validation_delay_ms: 0,
-            handshake_timeout_ms: 5000,
-            simulate_certificate_errors: true,
-        });
+        self.server_endpoint
+            .configure_network_conditions(NetworkConditionConfig {
+                packet_loss_percentage: 0.0,
+                connection_delay_ms: 0,
+                certificate_validation_delay_ms: 0,
+                handshake_timeout_ms: 5000,
+                simulate_certificate_errors: true,
+            });
 
         let server_addr = self.server_endpoint.endpoint.local_address();
 
         // This should fail due to certificate error
-        let connection_result = self.client_endpoint.connect_with_tls(
-            cx,
-            server_addr,
-            "localhost",
-            &self.tls_connector,
-        ).await;
+        let connection_result = self
+            .client_endpoint
+            .connect_with_tls(cx, server_addr, "localhost", &self.tls_connector)
+            .await;
 
         let handshake_failed = connection_result.is_err();
         let stats = self.server_endpoint.get_connection_stats();
@@ -620,13 +682,14 @@ impl TlsQuicIntegrationCoordinator {
         };
 
         // Reset network conditions
-        self.server_endpoint.configure_network_conditions(NetworkConditionConfig {
-            packet_loss_percentage: 0.0,
-            connection_delay_ms: 0,
-            certificate_validation_delay_ms: 0,
-            handshake_timeout_ms: 5000,
-            simulate_certificate_errors: false,
-        });
+        self.server_endpoint
+            .configure_network_conditions(NetworkConditionConfig {
+                packet_loss_percentage: 0.0,
+                connection_delay_ms: 0,
+                certificate_validation_delay_ms: 0,
+                handshake_timeout_ms: 5000,
+                simulate_certificate_errors: false,
+            });
 
         self.validation_results.lock().unwrap().push(result.clone());
 
@@ -650,12 +713,9 @@ impl TlsQuicIntegrationCoordinator {
             let tls_connector = &self.tls_connector;
 
             let handle = cx.spawn(move |cx| async move {
-                let mut connection = client_endpoint.connect_with_tls(
-                    cx,
-                    server_addr,
-                    "localhost",
-                    tls_connector,
-                ).await?;
+                let mut connection = client_endpoint
+                    .connect_with_tls(cx, server_addr, "localhost", tls_connector)
+                    .await?;
 
                 let test_data = format!("Concurrent test data {}", i).into_bytes();
                 let bytes_sent = connection.send_secure_data(cx, &test_data).await?;
@@ -688,7 +748,8 @@ impl TlsQuicIntegrationCoordinator {
         let performance_metrics = PerformanceMetrics {
             handshake_duration_ms: total_duration.as_secs_f64() * 1000.0 / connection_count as f64,
             first_byte_latency_ms: 0.0,
-            throughput_mbps: (total_bytes_sent as f64 * 8.0) / (total_duration.as_secs_f64() * 1_000_000.0),
+            throughput_mbps: (total_bytes_sent as f64 * 8.0)
+                / (total_duration.as_secs_f64() * 1_000_000.0),
             connection_overhead_bytes: 64 * connection_count as u64,
         };
 
@@ -701,7 +762,9 @@ impl TlsQuicIntegrationCoordinator {
             performance_metrics,
             details: format!(
                 "Concurrent connections: {}/{}, Total bytes: {}, Avg handshake: {:.1}ms",
-                successful_connections, connection_count, total_bytes_sent,
+                successful_connections,
+                connection_count,
+                total_bytes_sent,
                 performance_metrics.handshake_duration_ms
             ),
         };
@@ -719,11 +782,7 @@ impl TlsQuicIntegrationCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        runtime::test_rt,
-        cx::region,
-        types::Budget,
-    };
+    use crate::{cx::region, runtime::test_rt, types::Budget};
 
     #[test]
     fn test_basic_tls_quic_handshake() {
@@ -731,15 +790,30 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(30)), |cx| async move {
                 let coordinator = TlsQuicIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_basic_tls_quic_handshake(cx, "basic_handshake").await?;
+                let result = coordinator
+                    .validate_basic_tls_quic_handshake(cx, "basic_handshake")
+                    .await?;
 
-                assert!(result.handshake_success, "TLS handshake over QUIC should succeed");
-                assert!(result.certificate_validation, "Certificate validation should pass");
-                assert!(result.data_integrity, "Data transmission should be accurate");
-                assert!(result.performance_metrics.handshake_duration_ms < 5000.0, "Handshake should complete within 5 seconds");
+                assert!(
+                    result.handshake_success,
+                    "TLS handshake over QUIC should succeed"
+                );
+                assert!(
+                    result.certificate_validation,
+                    "Certificate validation should pass"
+                );
+                assert!(
+                    result.data_integrity,
+                    "Data transmission should be accurate"
+                );
+                assert!(
+                    result.performance_metrics.handshake_duration_ms < 5000.0,
+                    "Handshake should complete within 5 seconds"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 
@@ -749,14 +823,23 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(45)), |cx| async move {
                 let coordinator = TlsQuicIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_session_resumption(cx, "session_resumption").await?;
+                let result = coordinator
+                    .validate_session_resumption(cx, "session_resumption")
+                    .await?;
 
-                assert!(result.handshake_success, "Session resumption handshake should succeed");
+                assert!(
+                    result.handshake_success,
+                    "Session resumption handshake should succeed"
+                );
                 assert!(result.session_resumption, "TLS session should be resumed");
-                assert!(result.performance_metrics.handshake_duration_ms < 1000.0, "Session resumption should be faster");
+                assert!(
+                    result.performance_metrics.handshake_duration_ms < 1000.0,
+                    "Session resumption should be faster"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 
@@ -766,13 +849,22 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(30)), |cx| async move {
                 let coordinator = TlsQuicIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_certificate_validation_failure(cx, "cert_validation_failure").await?;
+                let result = coordinator
+                    .validate_certificate_validation_failure(cx, "cert_validation_failure")
+                    .await?;
 
-                assert!(!result.handshake_success, "Handshake should fail with invalid certificate");
-                assert!(!result.certificate_validation, "Certificate validation should fail as expected");
+                assert!(
+                    !result.handshake_success,
+                    "Handshake should fail with invalid certificate"
+                );
+                assert!(
+                    !result.certificate_validation,
+                    "Certificate validation should fail as expected"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 
@@ -782,18 +874,30 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(60)), |cx| async move {
                 let coordinator = TlsQuicIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_concurrent_secure_connections(
-                    cx,
-                    "concurrent_connections",
-                    5, // 5 concurrent connections
-                ).await?;
+                let result = coordinator
+                    .validate_concurrent_secure_connections(
+                        cx,
+                        "concurrent_connections",
+                        5, // 5 concurrent connections
+                    )
+                    .await?;
 
-                assert!(result.handshake_success, "At least some concurrent connections should succeed");
-                assert!(result.data_integrity, "All concurrent connections should transmit data correctly");
-                assert!(result.performance_metrics.throughput_mbps > 0.0, "Should achieve measurable throughput");
+                assert!(
+                    result.handshake_success,
+                    "At least some concurrent connections should succeed"
+                );
+                assert!(
+                    result.data_integrity,
+                    "All concurrent connections should transmit data correctly"
+                );
+                assert!(
+                    result.performance_metrics.throughput_mbps > 0.0,
+                    "Should achieve measurable throughput"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 }

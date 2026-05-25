@@ -942,7 +942,8 @@ impl StreamManifest {
 
     /// Check if large streams require explicit prefix policy.
     pub fn requires_explicit_prefix_policy(&self) -> bool {
-        self.expected_total_bytes().map_or(false, |size| size > 10_000_000) // 10MB threshold
+        self.expected_total_bytes()
+            .map_or(false, |size| size > 10_000_000) // 10MB threshold
     }
 
     /// Check if consumption policy allows reading a given range.
@@ -963,7 +964,10 @@ impl StreamManifest {
         let cancellation_epoch = StreamEpoch::new(
             self.epochs.len() as u64 + 1,
             self.object_id.clone(),
-            ByteRange::new(self.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly), self.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly)),
+            ByteRange::new(
+                self.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly),
+                self.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly),
+            ),
             EpochState::Invalidated,
             vec![],
         );

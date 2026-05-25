@@ -14,24 +14,26 @@
 use crate::{
     cx::{Cx, Scope},
     distributed::consistent_hash::{
-        ConsistentHashRing, HashRingConfig, HashFunction, VirtualNode, NodeWeight,
-        HashRingNode, RingPosition, ConsistentHashError, HashDistribution,
-        RingRebalancing, NodeFailureDetection,
+        ConsistentHashError, ConsistentHashRing, HashDistribution, HashFunction, HashRingConfig,
+        HashRingNode, NodeFailureDetection, NodeWeight, RingPosition, RingRebalancing, VirtualNode,
     },
+    error::Error,
     service::load_balance::{
-        LoadBalancer, LoadBalanceStrategy, LoadBalanceConfig, ServiceEndpoint,
-        LoadBalanceError, RequestMetrics, HealthCheck, ServiceDiscovery,
-        DistributionPolicy, TrafficSplitting, LoadBalanceDecision,
+        DistributionPolicy, HealthCheck, LoadBalanceConfig, LoadBalanceDecision, LoadBalanceError,
+        LoadBalanceStrategy, LoadBalancer, RequestMetrics, ServiceDiscovery, ServiceEndpoint,
+        TrafficSplitting,
     },
-    types::{Budget, Outcome, TaskId},
     sync::{Mutex, RwLock},
     time::{Duration, Instant},
-    error::Error,
+    types::{Budget, Outcome, TaskId},
 };
 use std::{
-    sync::{Arc, atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering}},
-    collections::{HashMap, HashSet, BTreeMap},
+    collections::{BTreeMap, HashMap, HashSet},
     net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
 };
 
 /// Controllable distributed system integrating consistent hashing with load balancing
@@ -243,46 +245,62 @@ impl ConsistentHashLoadBalanceSystem {
         // Phase 1: Consistent Hash Resolution
         let hash_result = match self.resolve_consistent_hash(cx, &request_key).await {
             Ok(result) => {
-                self.update_correlation_hash_resolved(&correlation_id, result.clone()).await;
+                self.update_correlation_hash_resolved(&correlation_id, result.clone())
+                    .await;
                 result
             }
             Err(e) => {
-                self.handle_routing_failure(&correlation_id, format!("Hash resolution failed: {}", e)).await;
-                return Outcome::Err(Error::msg(format!("Consistent hash resolution failed: {}", e)));
+                self.handle_routing_failure(
+                    &correlation_id,
+                    format!("Hash resolution failed: {}", e),
+                )
+                .await;
+                return Outcome::Err(Error::msg(format!(
+                    "Consistent hash resolution failed: {}",
+                    e
+                )));
             }
         };
 
         // Phase 2: Load Balance Integration
-        let load_balance_result = match self.integrate_load_balancing(
-            cx,
-            &hash_result,
-            &routing_options,
-        ).await {
+        let load_balance_result = match self
+            .integrate_load_balancing(cx, &hash_result, &routing_options)
+            .await
+        {
             Ok(result) => {
-                self.update_correlation_load_balance_applied(&correlation_id, result.clone()).await;
+                self.update_correlation_load_balance_applied(&correlation_id, result.clone())
+                    .await;
                 result
             }
             Err(e) => {
-                self.handle_routing_failure(&correlation_id, format!("Load balancing failed: {}", e)).await;
-                return Outcome::Err(Error::msg(format!("Load balancing integration failed: {}", e)));
+                self.handle_routing_failure(
+                    &correlation_id,
+                    format!("Load balancing failed: {}", e),
+                )
+                .await;
+                return Outcome::Err(Error::msg(format!(
+                    "Load balancing integration failed: {}",
+                    e
+                )));
             }
         };
 
         // Phase 3: Final Routing Decision
-        let routing_decision = self.make_routing_decision(
-            &hash_result,
-            &load_balance_result,
-            &routing_options,
-        ).await;
+        let routing_decision = self
+            .make_routing_decision(&hash_result, &load_balance_result, &routing_options)
+            .await;
 
-        self.update_correlation_completed(&correlation_id, routing_decision.clone()).await;
+        self.update_correlation_completed(&correlation_id, routing_decision.clone())
+            .await;
 
         let execution_time_ms = start_time.elapsed().as_millis() as u64;
         self.update_average_routing_time(execution_time_ms);
 
         // Track routing strategy statistics
         match routing_decision.routing_strategy {
-            RoutingStrategy::ConsistentHashPrimary => self.increment_stat("consistent_hash_routes", 1),
+            RoutingStrategy::ConsistentHashPrimary => {
+                self.increment_stat("consistent_hash_routes", 1)
+            }
             RoutingStrategy::LoadBalanceWeighted => self.increment_stat("load_balance_routes", 1),
             RoutingStrategy::AdaptiveHybrid => self.increment_stat("hybrid_routes", 1),
             _ => {}
@@ -314,7 +332,10 @@ impl ConsistentHashLoadBalanceSystem {
         let selected_node = self.hash_ring.get_node_for_position(ring_position).await?;
 
         // Get virtual nodes for load distribution
-        let virtual_nodes = self.hash_ring.get_virtual_nodes_for_key(request_key).await?;
+        let virtual_nodes = self
+            .hash_ring
+            .get_virtual_nodes_for_key(request_key)
+            .await?;
 
         Ok(ConsistentHashResult {
             request_key: request_key.to_string(),
@@ -333,26 +354,33 @@ impl ConsistentHashLoadBalanceSystem {
         routing_options: &RoutingOptions,
     ) -> Result<LoadBalanceIntegrationResult, LoadBalanceError> {
         // Get service endpoints for the hash-selected node
-        let primary_endpoints = self.load_balancer
+        let primary_endpoints = self
+            .load_balancer
             .get_endpoints_for_node(cx, &hash_result.primary_node)
             .await?;
 
         // Apply load balancing strategy
-        let load_balance_decision = self.load_balancer
-            .make_routing_decision(cx, &primary_endpoints, routing_options.load_balance_strategy)
+        let load_balance_decision = self
+            .load_balancer
+            .make_routing_decision(
+                cx,
+                &primary_endpoints,
+                routing_options.load_balance_strategy,
+            )
             .await?;
 
         // Get backup endpoints for fault tolerance
-        let backup_endpoints = self.get_backup_endpoints_from_virtual_nodes(
-            cx,
-            &hash_result.virtual_nodes,
-        ).await?;
+        let backup_endpoints = self
+            .get_backup_endpoints_from_virtual_nodes(cx, &hash_result.virtual_nodes)
+            .await?;
 
         Ok(LoadBalanceIntegrationResult {
             primary_endpoints,
             backup_endpoints,
             load_balance_decision,
-            distribution_weights: self.calculate_distribution_weights(&hash_result.virtual_nodes).await,
+            distribution_weights: self
+                .calculate_distribution_weights(&hash_result.virtual_nodes)
+                .await,
             health_status: self.load_balancer.health_check_status().await,
         })
     }
@@ -366,20 +394,24 @@ impl ConsistentHashLoadBalanceSystem {
         let config = self.integration_coordinator.read().unwrap().clone();
 
         let routing_strategy = if config.adaptive_load_balancing {
-            self.choose_adaptive_routing_strategy(hash_result, load_balance_result).await
+            self.choose_adaptive_routing_strategy(hash_result, load_balance_result)
+                .await
         } else {
             routing_options.preferred_strategy
         };
 
         let primary_endpoint = match routing_strategy {
-            RoutingStrategy::ConsistentHashPrimary => {
-                load_balance_result.load_balance_decision.selected_endpoint.clone()
-            }
+            RoutingStrategy::ConsistentHashPrimary => load_balance_result
+                .load_balance_decision
+                .selected_endpoint
+                .clone(),
             RoutingStrategy::LoadBalanceWeighted => {
-                self.select_weighted_endpoint(&load_balance_result.distribution_weights).await
+                self.select_weighted_endpoint(&load_balance_result.distribution_weights)
+                    .await
             }
             RoutingStrategy::AdaptiveHybrid => {
-                self.select_hybrid_endpoint(hash_result, load_balance_result).await
+                self.select_hybrid_endpoint(hash_result, load_balance_result)
+                    .await
             }
             RoutingStrategy::FailoverCascade => {
                 self.select_failover_endpoint(load_balance_result).await
@@ -422,9 +454,13 @@ impl ConsistentHashLoadBalanceSystem {
         }
     }
 
-    async fn select_weighted_endpoint(&self, weights: &HashMap<ServiceEndpoint, f64>) -> ServiceEndpoint {
+    async fn select_weighted_endpoint(
+        &self,
+        weights: &HashMap<ServiceEndpoint, f64>,
+    ) -> ServiceEndpoint {
         // Select endpoint based on weights (simplified implementation)
-        weights.iter()
+        weights
+            .iter()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(endpoint, _)| endpoint.clone())
             .unwrap_or_default()
@@ -437,7 +473,9 @@ impl ConsistentHashLoadBalanceSystem {
     ) -> ServiceEndpoint {
         // Hybrid selection combining hash consistency and load balancing
         let hash_preferred = &load_balance_result.load_balance_decision.selected_endpoint;
-        let load_balanced = self.select_weighted_endpoint(&load_balance_result.distribution_weights).await;
+        let load_balanced = self
+            .select_weighted_endpoint(&load_balance_result.distribution_weights)
+            .await;
 
         // Choose based on load difference
         if load_balance_result.load_balance_decision.current_load < 0.6 {
@@ -447,12 +485,21 @@ impl ConsistentHashLoadBalanceSystem {
         }
     }
 
-    async fn select_failover_endpoint(&self, load_balance_result: &LoadBalanceIntegrationResult) -> ServiceEndpoint {
+    async fn select_failover_endpoint(
+        &self,
+        load_balance_result: &LoadBalanceIntegrationResult,
+    ) -> ServiceEndpoint {
         // Select from backup endpoints
-        load_balance_result.backup_endpoints
+        load_balance_result
+            .backup_endpoints
             .first()
             .cloned()
-            .unwrap_or_else(|| load_balance_result.load_balance_decision.selected_endpoint.clone())
+            .unwrap_or_else(|| {
+                load_balance_result
+                    .load_balance_decision
+                    .selected_endpoint
+                    .clone()
+            })
     }
 
     async fn calculate_load_weight(&self, strategy: &RoutingStrategy) -> f64 {
@@ -471,8 +518,10 @@ impl ConsistentHashLoadBalanceSystem {
     ) -> Result<Vec<ServiceEndpoint>, LoadBalanceError> {
         let mut backup_endpoints = Vec::new();
 
-        for virtual_node in virtual_nodes.iter().take(3) { // Limit to 3 backups
-            if let Ok(endpoints) = self.load_balancer
+        for virtual_node in virtual_nodes.iter().take(3) {
+            // Limit to 3 backups
+            if let Ok(endpoints) = self
+                .load_balancer
                 .get_endpoints_for_virtual_node(cx, virtual_node)
                 .await
             {
@@ -483,7 +532,10 @@ impl ConsistentHashLoadBalanceSystem {
         Ok(backup_endpoints)
     }
 
-    async fn calculate_distribution_weights(&self, virtual_nodes: &[VirtualNode]) -> HashMap<ServiceEndpoint, f64> {
+    async fn calculate_distribution_weights(
+        &self,
+        virtual_nodes: &[VirtualNode],
+    ) -> HashMap<ServiceEndpoint, f64> {
         let mut weights = HashMap::new();
 
         for (i, virtual_node) in virtual_nodes.iter().enumerate() {
@@ -498,7 +550,10 @@ impl ConsistentHashLoadBalanceSystem {
         weights
     }
 
-    async fn get_endpoints_for_virtual_node(&self, virtual_node: &VirtualNode) -> Result<Vec<ServiceEndpoint>, Error> {
+    async fn get_endpoints_for_virtual_node(
+        &self,
+        virtual_node: &VirtualNode,
+    ) -> Result<Vec<ServiceEndpoint>, Error> {
         // Simplified endpoint resolution for virtual nodes
         Ok(vec![ServiceEndpoint::from_virtual_node(virtual_node)])
     }
@@ -542,10 +597,15 @@ impl ConsistentHashLoadBalanceSystem {
         self.increment_stat("topology_changes", 1);
 
         // Trigger hash ring rebalancing
-        let rebalance_result = self.hash_ring.rebalance_after_node_failure(cx, &failed_node).await?;
+        let rebalance_result = self
+            .hash_ring
+            .rebalance_after_node_failure(cx, &failed_node)
+            .await?;
 
         // Update load balancer with topology changes
-        self.load_balancer.handle_node_failure(cx, &failed_node).await?;
+        self.load_balancer
+            .handle_node_failure(cx, &failed_node)
+            .await?;
 
         // Update coordinator
         {
@@ -566,7 +626,11 @@ impl ConsistentHashLoadBalanceSystem {
         })
     }
 
-    async fn update_correlation_hash_resolved(&self, correlation_id: &str, hash_result: ConsistentHashResult) {
+    async fn update_correlation_hash_resolved(
+        &self,
+        correlation_id: &str,
+        hash_result: ConsistentHashResult,
+    ) {
         let mut correlations = self.hash_balance_correlation.lock().unwrap();
         if let Some(correlation) = correlations.get_mut(correlation_id) {
             correlation.hash_value = hash_result.hash_value;
@@ -576,7 +640,11 @@ impl ConsistentHashLoadBalanceSystem {
         }
     }
 
-    async fn update_correlation_load_balance_applied(&self, correlation_id: &str, lb_result: LoadBalanceIntegrationResult) {
+    async fn update_correlation_load_balance_applied(
+        &self,
+        correlation_id: &str,
+        lb_result: LoadBalanceIntegrationResult,
+    ) {
         let mut correlations = self.hash_balance_correlation.lock().unwrap();
         if let Some(correlation) = correlations.get_mut(correlation_id) {
             correlation.load_balance_decision = Some(lb_result.load_balance_decision);
@@ -585,7 +653,11 @@ impl ConsistentHashLoadBalanceSystem {
         }
     }
 
-    async fn update_correlation_completed(&self, correlation_id: &str, routing_decision: RoutingDecision) {
+    async fn update_correlation_completed(
+        &self,
+        correlation_id: &str,
+        routing_decision: RoutingDecision,
+    ) {
         let mut correlations = self.hash_balance_correlation.lock().unwrap();
         if let Some(correlation) = correlations.get_mut(correlation_id) {
             correlation.routing_decision = routing_decision;
@@ -605,22 +677,32 @@ impl ConsistentHashLoadBalanceSystem {
     fn increment_stat(&self, stat_name: &str, count: u64) {
         let stats = self.routing_stats.lock().unwrap();
         match stat_name {
-            "total_routing_requests" => stats.total_routing_requests.fetch_add(count, Ordering::SeqCst),
-            "consistent_hash_routes" => stats.consistent_hash_routes.fetch_add(count, Ordering::SeqCst),
+            "total_routing_requests" => stats
+                .total_routing_requests
+                .fetch_add(count, Ordering::SeqCst),
+            "consistent_hash_routes" => stats
+                .consistent_hash_routes
+                .fetch_add(count, Ordering::SeqCst),
             "load_balance_routes" => stats.load_balance_routes.fetch_add(count, Ordering::SeqCst),
             "hybrid_routes" => stats.hybrid_routes.fetch_add(count, Ordering::SeqCst),
             "failed_routes" => stats.failed_routes.fetch_add(count, Ordering::SeqCst),
             "topology_changes" => stats.topology_changes.fetch_add(count, Ordering::SeqCst),
             "rebalancing_events" => stats.rebalancing_events.fetch_add(count, Ordering::SeqCst),
-            "node_failures_detected" => stats.node_failures_detected.fetch_add(count, Ordering::SeqCst),
-            "consistency_violations" => stats.consistency_violations.fetch_add(count, Ordering::SeqCst),
+            "node_failures_detected" => stats
+                .node_failures_detected
+                .fetch_add(count, Ordering::SeqCst),
+            "consistency_violations" => stats
+                .consistency_violations
+                .fetch_add(count, Ordering::SeqCst),
             _ => 0,
         };
     }
 
     fn update_average_routing_time(&self, time_ms: u64) {
         let stats = self.routing_stats.lock().unwrap();
-        stats.average_routing_time_ms.store(time_ms, Ordering::SeqCst);
+        stats
+            .average_routing_time_ms
+            .store(time_ms, Ordering::SeqCst);
     }
 
     /// Get comprehensive distributed routing statistics
@@ -770,8 +852,14 @@ mod tests {
                 .expect("Routing should succeed");
 
             assert_eq!(routing_result.request_key, request_key);
-            assert_eq!(routing_result.routing_decision.routing_strategy, RoutingStrategy::ConsistentHashPrimary);
-            assert_eq!(routing_result.consistency_level, ConsistencyLevel::StrictConsistent);
+            assert_eq!(
+                routing_result.routing_decision.routing_strategy,
+                RoutingStrategy::ConsistentHashPrimary
+            );
+            assert_eq!(
+                routing_result.consistency_level,
+                ConsistencyLevel::StrictConsistent
+            );
             assert!(!routing_result.execution_time.is_zero());
 
             // Verify statistics
@@ -781,7 +869,9 @@ mod tests {
             assert_eq!(stats.failed_routes, 0);
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 
     #[tokio::test]
@@ -835,7 +925,9 @@ mod tests {
 
                 let system_ref = &routing_system;
                 let task = scope.spawn(&format!("route_{}", i), async move {
-                    system_ref.route_request(cx, request_key, routing_options).await
+                    system_ref
+                        .route_request(cx, request_key, routing_options)
+                        .await
                 })?;
 
                 routing_tasks.push(task);
@@ -877,7 +969,9 @@ mod tests {
             println!("- Recovery time: {:?}", failure_result.recovery_time);
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 
     #[tokio::test]
@@ -941,7 +1035,9 @@ mod tests {
 
                     let system_ref = &routing_system;
                     let task = scope.spawn(&format!("adaptive_{}_{}", i, j), async move {
-                        system_ref.route_request(cx, request_key, routing_options).await
+                        system_ref
+                            .route_request(cx, request_key, routing_options)
+                            .await
                     })?;
 
                     strategy_tasks.push(task);
@@ -964,7 +1060,8 @@ mod tests {
             assert!(stats.total_routing_requests >= 12);
 
             // Should have used multiple routing strategies
-            let total_strategic_routes = stats.consistent_hash_routes + stats.load_balance_routes + stats.hybrid_routes;
+            let total_strategic_routes =
+                stats.consistent_hash_routes + stats.load_balance_routes + stats.hybrid_routes;
             assert!(total_strategic_routes > 0);
 
             println!("Adaptive routing results:");
@@ -977,6 +1074,8 @@ mod tests {
             println!("- Hybrid routes: {}", stats.hybrid_routes);
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 }

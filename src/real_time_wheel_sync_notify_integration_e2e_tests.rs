@@ -88,7 +88,8 @@ mod tests {
                         _ => Err(crate::error::Error::Other("Notify failed")),
                     }
                 }
-            }).await;
+            })
+            .await;
 
             // Wait for readiness
             while !self.ready_flag.load(Ordering::Acquire) {
@@ -109,15 +110,20 @@ mod tests {
                     // Notify waiters (simulates timer expiration triggering notification)
                     notify.notify_waiters();
 
-                    stats.successful_integrations.fetch_add(1, Ordering::Relaxed);
+                    stats
+                        .successful_integrations
+                        .fetch_add(1, Ordering::Relaxed);
                     Ok(())
                 }
-            }).await;
+            })
+            .await;
 
             // Both tasks should complete successfully
             match (waiter_task, timer_task) {
                 (Ok(()), Ok(())) => Ok(()),
-                _ => Err(crate::error::Error::Other("Timer-notify integration failed")),
+                _ => Err(crate::error::Error::Other(
+                    "Timer-notify integration failed",
+                )),
             }
         }
 
@@ -135,7 +141,6 @@ mod tests {
     // Actual Test Cases
     // ────────────────────────────────────────────────────────────────────────────────
 
-
     #[test]
     #[cfg_attr(miri, ignore)]
     async fn test_timer_wheel_notify_basic_integration() -> Result<()> {
@@ -150,10 +155,7 @@ mod tests {
             let (timers_started, notifications_received, cancelled_ops, successful_integrations) =
                 integration.get_stats();
 
-            assert!(
-                timers_started > 0,
-                "Should have started timers"
-            );
+            assert!(timers_started > 0, "Should have started timers");
             assert!(
                 notifications_received > 0,
                 "Should have received notifications"
@@ -190,11 +192,14 @@ mod tests {
                     integration.test_timer_notify_coordination(&cx).await?;
 
                     let (timers, notifications, _cancelled, successful) = integration.get_stats();
-                    println!("  Task {}: {} timers, {} notifications, {} successful",
-                        i, timers, notifications, successful);
+                    println!(
+                        "  Task {}: {} timers, {} notifications, {} successful",
+                        i, timers, notifications, successful
+                    );
 
                     Ok(())
-                }).await;
+                })
+                .await;
 
                 tasks.push(task);
             }
@@ -233,8 +238,10 @@ mod tests {
                         }
                         _ => Err(crate::error::Error::Other("Expected cancellation")),
                     }
-                }).await
-            }).await?;
+                })
+                .await
+            })
+            .await?;
 
             let (_timers, _notifications, cancelled, _successful) = integration.get_stats();
 

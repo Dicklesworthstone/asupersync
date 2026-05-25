@@ -12,30 +12,33 @@
 
 use crate::{
     cx::{Cx, Scope},
+    error::Error,
     lab::{
-        runtime::{LabRuntime, LabRuntimeConfig, LabTime, VirtualTime},
         oracle::{
-            Oracle, OracleConfig, OracleEvent, OracleState, OracleVerification,
-            TaskLeakOracle, ObligationLeakOracle, DeadlockOracle, RaceOracle,
-            CancellationOracle, QuiescenceOracle, InvariantViolation,
+            CancellationOracle, DeadlockOracle, InvariantViolation, ObligationLeakOracle, Oracle,
+            OracleConfig, OracleEvent, OracleState, OracleVerification, QuiescenceOracle,
+            RaceOracle, TaskLeakOracle,
         },
+        runtime::{LabRuntime, LabRuntimeConfig, LabTime, VirtualTime},
     },
     plan::{
+        analysis::{ExecutionAnalysis, PlanAnalysis, TraceAnalysis},
         certificate::{
-            Certificate, CertificateConfig, CertificateValidation, CertificateError,
+            Certificate, CertificateConfig, CertificateError, CertificateValidation,
             ExecutionCertificate, PlanCertificate, TraceCertificate,
         },
-        latency_algebra::{LatencyPlan, LatencyConstraint, LatencyBound, LatencyProof},
-        analysis::{PlanAnalysis, ExecutionAnalysis, TraceAnalysis},
+        latency_algebra::{LatencyBound, LatencyConstraint, LatencyPlan, LatencyProof},
     },
-    types::{Budget, Outcome, TaskId, RegionId},
     sync::{Mutex, RwLock},
-    error::Error,
+    types::{Budget, Outcome, RegionId, TaskId},
 };
 use std::{
-    sync::{Arc, atomic::{AtomicU64, AtomicUsize, Ordering}},
-    time::Duration,
     collections::{HashMap, VecDeque},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 /// Controllable lab oracle that coordinates with plan certificates
@@ -328,7 +331,8 @@ impl CertificateAwareLabOracle {
         }
 
         // Phase 1: Event Collection
-        self.set_execution_phase(&execution_id, ExecutionPhase::EventCollection).await;
+        self.set_execution_phase(&execution_id, ExecutionPhase::EventCollection)
+            .await;
 
         let mut collected_events = Vec::new();
         match self.collect_oracle_events(cx, &test_scenario).await {
@@ -345,9 +349,13 @@ impl CertificateAwareLabOracle {
         }
 
         // Phase 2: Certificate Generation
-        self.set_execution_phase(&execution_id, ExecutionPhase::CertificateGeneration).await;
+        self.set_execution_phase(&execution_id, ExecutionPhase::CertificateGeneration)
+            .await;
 
-        let certificate = match self.generate_execution_certificate(cx, &execution_id, &collected_events).await {
+        let certificate = match self
+            .generate_execution_certificate(cx, &execution_id, &collected_events)
+            .await
+        {
             Outcome::Ok(cert) => {
                 self.increment_stat("certificate_generations", 1);
                 cert
@@ -361,9 +369,13 @@ impl CertificateAwareLabOracle {
         };
 
         // Phase 3: Validation
-        self.set_execution_phase(&execution_id, ExecutionPhase::Validation).await;
+        self.set_execution_phase(&execution_id, ExecutionPhase::Validation)
+            .await;
 
-        let validation_result = match self.validate_certificate_with_oracles(cx, &execution_id, &certificate).await {
+        let validation_result = match self
+            .validate_certificate_with_oracles(cx, &execution_id, &certificate)
+            .await
+        {
             Outcome::Ok(result) => {
                 if matches!(result.result, ValidationStatus::Valid) {
                     self.increment_stat("successful_validations", 1);
@@ -382,18 +394,24 @@ impl CertificateAwareLabOracle {
         };
 
         // Phase 4: Invariant Check
-        self.set_execution_phase(&execution_id, ExecutionPhase::InvariantCheck).await;
+        self.set_execution_phase(&execution_id, ExecutionPhase::InvariantCheck)
+            .await;
 
-        let invariant_violations = self.check_invariants_with_certificate(cx, &execution_id, &certificate).await;
+        let invariant_violations = self
+            .check_invariants_with_certificate(cx, &execution_id, &certificate)
+            .await;
 
         // Phase 5: Completion
-        self.set_execution_phase(&execution_id, ExecutionPhase::Completion).await;
+        self.set_execution_phase(&execution_id, ExecutionPhase::Completion)
+            .await;
 
         let execution_time_ms = start_time.elapsed().as_millis() as u64;
         self.increment_stat("total_validations", 1);
 
         let stats = self.validation_stats.lock().unwrap();
-        stats.average_validation_time_ms.store(execution_time_ms, Ordering::SeqCst);
+        stats
+            .average_validation_time_ms
+            .store(execution_time_ms, Ordering::SeqCst);
 
         Outcome::Ok(TestExecutionResult {
             execution_id,
@@ -403,7 +421,10 @@ impl CertificateAwareLabOracle {
             validation_result: validation_result.result,
             invariant_violations: invariant_violations.len(),
             execution_time_ms,
-            oracle_coordination_success: matches!(validation_result.result, ValidationStatus::Valid),
+            oracle_coordination_success: matches!(
+                validation_result.result,
+                ValidationStatus::Valid
+            ),
         })
     }
 
@@ -422,7 +443,9 @@ impl CertificateAwareLabOracle {
                     events.extend(task_events);
                 }
                 "obligation_leak" => {
-                    let obligation_events = self.collect_obligation_leak_events(cx, &test_scenario).await?;
+                    let obligation_events = self
+                        .collect_obligation_leak_events(cx, &test_scenario)
+                        .await?;
                     events.extend(obligation_events);
                 }
                 "deadlock" => {
@@ -434,7 +457,8 @@ impl CertificateAwareLabOracle {
                     events.extend(race_events);
                 }
                 "quiescence" => {
-                    let quiescence_events = self.collect_quiescence_events(cx, &test_scenario).await?;
+                    let quiescence_events =
+                        self.collect_quiescence_events(cx, &test_scenario).await?;
                     events.extend(quiescence_events);
                 }
                 _ => {
@@ -449,7 +473,11 @@ impl CertificateAwareLabOracle {
         Outcome::Ok(events)
     }
 
-    async fn collect_task_leak_events(&self, cx: &Cx, test_scenario: &TestScenario) -> Outcome<Vec<OracleEvent>, Error> {
+    async fn collect_task_leak_events(
+        &self,
+        cx: &Cx,
+        test_scenario: &TestScenario,
+    ) -> Outcome<Vec<OracleEvent>, Error> {
         // Simulate task leak oracle event collection
         let mut events = Vec::new();
 
@@ -468,7 +496,11 @@ impl CertificateAwareLabOracle {
         Outcome::Ok(events)
     }
 
-    async fn collect_obligation_leak_events(&self, cx: &Cx, test_scenario: &TestScenario) -> Outcome<Vec<OracleEvent>, Error> {
+    async fn collect_obligation_leak_events(
+        &self,
+        cx: &Cx,
+        test_scenario: &TestScenario,
+    ) -> Outcome<Vec<OracleEvent>, Error> {
         let mut events = Vec::new();
 
         for i in 0..test_scenario.expected_events {
@@ -486,7 +518,11 @@ impl CertificateAwareLabOracle {
         Outcome::Ok(events)
     }
 
-    async fn collect_deadlock_events(&self, cx: &Cx, test_scenario: &TestScenario) -> Outcome<Vec<OracleEvent>, Error> {
+    async fn collect_deadlock_events(
+        &self,
+        cx: &Cx,
+        test_scenario: &TestScenario,
+    ) -> Outcome<Vec<OracleEvent>, Error> {
         let mut events = Vec::new();
 
         for i in 0..test_scenario.expected_events {
@@ -504,7 +540,11 @@ impl CertificateAwareLabOracle {
         Outcome::Ok(events)
     }
 
-    async fn collect_race_events(&self, cx: &Cx, test_scenario: &TestScenario) -> Outcome<Vec<OracleEvent>, Error> {
+    async fn collect_race_events(
+        &self,
+        cx: &Cx,
+        test_scenario: &TestScenario,
+    ) -> Outcome<Vec<OracleEvent>, Error> {
         let mut events = Vec::new();
 
         for i in 0..test_scenario.expected_events {
@@ -522,7 +562,11 @@ impl CertificateAwareLabOracle {
         Outcome::Ok(events)
     }
 
-    async fn collect_quiescence_events(&self, cx: &Cx, test_scenario: &TestScenario) -> Outcome<Vec<OracleEvent>, Error> {
+    async fn collect_quiescence_events(
+        &self,
+        cx: &Cx,
+        test_scenario: &TestScenario,
+    ) -> Outcome<Vec<OracleEvent>, Error> {
         let mut events = Vec::new();
 
         for i in 0..test_scenario.expected_events {
@@ -589,7 +633,9 @@ impl CertificateAwareLabOracle {
         // Store in certificate manager
         {
             let mut manager = self.certificate_manager.lock().unwrap();
-            manager.generated_certificates.insert(certificate.certificate_id.clone(), certificate.clone());
+            manager
+                .generated_certificates
+                .insert(certificate.certificate_id.clone(), certificate.clone());
         }
 
         Outcome::Ok(certificate)
@@ -608,11 +654,15 @@ impl CertificateAwareLabOracle {
         let mut failure_reason = String::new();
 
         for requirement in &certificate.validation_requirements {
-            match self.validate_requirement(cx, certificate, requirement).await {
+            match self
+                .validate_requirement(cx, certificate, requirement)
+                .await
+            {
                 Ok(true) => continue,
                 Ok(false) => {
                     all_valid = false;
-                    failure_reason = format!("Requirement {:?} failed", requirement.requirement_type);
+                    failure_reason =
+                        format!("Requirement {:?} failed", requirement.requirement_type);
                     break;
                 }
                 Err(e) => {
@@ -660,47 +710,68 @@ impl CertificateAwareLabOracle {
         // Simulate requirement validation based on execution trace
         match requirement.requirement_type {
             RequirementType::TaskLeak => {
-                let leak_events = certificate.execution_trace
+                let leak_events = certificate
+                    .execution_trace
                     .iter()
                     .filter(|event| {
-                        event.event_type == "task_leak" &&
-                        event.data.get("leak_detected").and_then(|v| v.as_bool()).unwrap_or(false)
+                        event.event_type == "task_leak"
+                            && event
+                                .data
+                                .get("leak_detected")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
                     })
                     .count();
 
                 match requirement.expected_outcome {
                     ExpectedOutcome::NoViolations => Ok(leak_events == 0),
-                    ExpectedOutcome::SpecificViolationCount(expected) => Ok(leak_events == expected),
+                    ExpectedOutcome::SpecificViolationCount(expected) => {
+                        Ok(leak_events == expected)
+                    }
                     _ => Err("Unsupported outcome for task leak requirement".to_string()),
                 }
             }
             RequirementType::ObligationLeak => {
-                let leak_events = certificate.execution_trace
+                let leak_events = certificate
+                    .execution_trace
                     .iter()
                     .filter(|event| {
-                        event.event_type == "obligation_leak" &&
-                        event.data.get("leak_detected").and_then(|v| v.as_bool()).unwrap_or(false)
+                        event.event_type == "obligation_leak"
+                            && event
+                                .data
+                                .get("leak_detected")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
                     })
                     .count();
 
                 match requirement.expected_outcome {
                     ExpectedOutcome::NoViolations => Ok(leak_events == 0),
-                    ExpectedOutcome::SpecificViolationCount(expected) => Ok(leak_events == expected),
+                    ExpectedOutcome::SpecificViolationCount(expected) => {
+                        Ok(leak_events == expected)
+                    }
                     _ => Err("Unsupported outcome for obligation leak requirement".to_string()),
                 }
             }
             RequirementType::Deadlock => {
-                let deadlock_events = certificate.execution_trace
+                let deadlock_events = certificate
+                    .execution_trace
                     .iter()
                     .filter(|event| {
-                        event.event_type == "deadlock" &&
-                        event.data.get("deadlock_detected").and_then(|v| v.as_bool()).unwrap_or(false)
+                        event.event_type == "deadlock"
+                            && event
+                                .data
+                                .get("deadlock_detected")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
                     })
                     .count();
 
                 match requirement.expected_outcome {
                     ExpectedOutcome::NoViolations => Ok(deadlock_events == 0),
-                    ExpectedOutcome::SpecificViolationCount(expected) => Ok(deadlock_events == expected),
+                    ExpectedOutcome::SpecificViolationCount(expected) => {
+                        Ok(deadlock_events == expected)
+                    }
                     _ => Err("Unsupported outcome for deadlock requirement".to_string()),
                 }
             }
@@ -722,11 +793,18 @@ impl CertificateAwareLabOracle {
         // Simulate invariant checking based on certificate data
         for trace_event in &certificate.execution_trace {
             // Check for specific invariant violations based on trace events
-            if let Some(leak_detected) = trace_event.data.get("leak_detected").and_then(|v| v.as_bool()) {
+            if let Some(leak_detected) = trace_event
+                .data
+                .get("leak_detected")
+                .and_then(|v| v.as_bool())
+            {
                 if leak_detected {
                     violations.push(InvariantViolation {
                         violation_type: format!("{}_leak", trace_event.event_type),
-                        description: format!("Leak detected in {} event {}", trace_event.event_type, trace_event.event_id),
+                        description: format!(
+                            "Leak detected in {} event {}",
+                            trace_event.event_type, trace_event.event_id
+                        ),
                         severity: "HIGH".to_string(),
                         detected_at: trace_event.virtual_time,
                     });
@@ -750,11 +828,19 @@ impl CertificateAwareLabOracle {
         let stats = self.validation_stats.lock().unwrap();
         match stat_name {
             "total_validations" => stats.total_validations.fetch_add(count, Ordering::SeqCst),
-            "successful_validations" => stats.successful_validations.fetch_add(count, Ordering::SeqCst),
+            "successful_validations" => stats
+                .successful_validations
+                .fetch_add(count, Ordering::SeqCst),
             "failed_validations" => stats.failed_validations.fetch_add(count, Ordering::SeqCst),
-            "certificate_generations" => stats.certificate_generations.fetch_add(count, Ordering::SeqCst),
-            "oracle_events_collected" => stats.oracle_events_collected.fetch_add(count, Ordering::SeqCst),
-            "invariant_violations" => stats.invariant_violations.fetch_add(count, Ordering::SeqCst),
+            "certificate_generations" => stats
+                .certificate_generations
+                .fetch_add(count, Ordering::SeqCst),
+            "oracle_events_collected" => stats
+                .oracle_events_collected
+                .fetch_add(count, Ordering::SeqCst),
+            "invariant_violations" => stats
+                .invariant_violations
+                .fetch_add(count, Ordering::SeqCst),
             _ => 0,
         };
     }
@@ -829,13 +915,10 @@ mod tests {
             };
             let certificate_config = CertificateConfig::default();
 
-            let oracle_system = CertificateAwareLabOracle::new(
-                lab_config,
-                oracle_config,
-                certificate_config,
-            )
-            .await
-            .expect("Failed to create oracle system");
+            let oracle_system =
+                CertificateAwareLabOracle::new(lab_config, oracle_config, certificate_config)
+                    .await
+                    .expect("Failed to create oracle system");
 
             // Define test scenario
             let test_scenario = TestScenario {
@@ -846,13 +929,11 @@ mod tests {
                     "deadlock".to_string(),
                 ],
                 expected_events: 10,
-                validation_requirements: vec![
-                    ValidationRequirement {
-                        requirement_type: RequirementType::TaskLeak,
-                        constraint: "no_leaks".to_string(),
-                        expected_outcome: ExpectedOutcome::NoViolations,
-                    },
-                ],
+                validation_requirements: vec![ValidationRequirement {
+                    requirement_type: RequirementType::TaskLeak,
+                    constraint: "no_leaks".to_string(),
+                    expected_outcome: ExpectedOutcome::NoViolations,
+                }],
                 expected_violations: 0,
             };
 
@@ -872,7 +953,9 @@ mod tests {
             assert!(stats.oracle_events_collected > 0);
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 
     #[tokio::test]
@@ -891,29 +974,21 @@ mod tests {
             };
             let certificate_config = CertificateConfig::default();
 
-            let oracle_system = CertificateAwareLabOracle::new(
-                lab_config,
-                oracle_config,
-                certificate_config,
-            )
-            .await
-            .expect("Failed to create oracle system");
+            let oracle_system =
+                CertificateAwareLabOracle::new(lab_config, oracle_config, certificate_config)
+                    .await
+                    .expect("Failed to create oracle system");
 
             // Test scenario designed to trigger violations
             let test_scenario = TestScenario {
                 name: "violation_detection_test".to_string(),
-                oracle_types: vec![
-                    "task_leak".to_string(),
-                    "obligation_leak".to_string(),
-                ],
+                oracle_types: vec!["task_leak".to_string(), "obligation_leak".to_string()],
                 expected_events: 25, // Larger number to increase violation probability
-                validation_requirements: vec![
-                    ValidationRequirement {
-                        requirement_type: RequirementType::TaskLeak,
-                        constraint: "detect_leaks".to_string(),
-                        expected_outcome: ExpectedOutcome::SpecificViolationCount(5), // Expect some violations
-                    },
-                ],
+                validation_requirements: vec![ValidationRequirement {
+                    requirement_type: RequirementType::TaskLeak,
+                    constraint: "detect_leaks".to_string(),
+                    expected_outcome: ExpectedOutcome::SpecificViolationCount(5), // Expect some violations
+                }],
                 expected_violations: 5,
             };
 
@@ -930,11 +1005,16 @@ mod tests {
             assert!(stats.oracle_events_collected > 0);
 
             // Violation detection depends on the simulated event patterns
-            println!("Invariant violations detected: {}", result.invariant_violations);
+            println!(
+                "Invariant violations detected: {}",
+                result.invariant_violations
+            );
             println!("Oracle events collected: {}", stats.oracle_events_collected);
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 
     #[tokio::test]
@@ -953,13 +1033,10 @@ mod tests {
             };
             let certificate_config = CertificateConfig::default();
 
-            let oracle_system = CertificateAwareLabOracle::new(
-                lab_config,
-                oracle_config,
-                certificate_config,
-            )
-            .await
-            .expect("Failed to create oracle system");
+            let oracle_system =
+                CertificateAwareLabOracle::new(lab_config, oracle_config, certificate_config)
+                    .await
+                    .expect("Failed to create oracle system");
 
             // Comprehensive multi-oracle test
             let test_scenario = TestScenario {
@@ -1011,9 +1088,14 @@ mod tests {
             println!("- Events collected: {}", result.events_collected);
             println!("- Validation result: {:?}", result.validation_result);
             println!("- Execution time: {}ms", result.execution_time_ms);
-            println!("- Coordination success: {}", result.oracle_coordination_success);
+            println!(
+                "- Coordination success: {}",
+                result.oracle_coordination_success
+            );
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 }

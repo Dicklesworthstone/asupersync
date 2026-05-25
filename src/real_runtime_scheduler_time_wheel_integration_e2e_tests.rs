@@ -12,22 +12,25 @@
 
 use crate::{
     cx::{Cx, Scope},
+    error::Error,
     runtime::{
-        scheduler::{Scheduler, SchedulerConfig, Priority},
+        scheduler::{Priority, Scheduler, SchedulerConfig},
         task_handle::TaskHandle,
     },
-    time::{
-        wheel::{TimerWheel, WheelConfig, TimerEntry},
-        Sleep, Deadline, Instant, Duration,
-    },
     sync::{Mutex, RwLock},
+    time::{
+        Deadline, Duration, Instant, Sleep,
+        wheel::{TimerEntry, TimerWheel, WheelConfig},
+    },
     types::{Budget, Outcome, TaskId},
-    error::Error,
 };
 use std::{
-    sync::{Arc, atomic::{AtomicU64, AtomicBool, AtomicUsize, Ordering}},
-    time::Duration as StdDuration,
     collections::{HashMap, VecDeque},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
+    time::Duration as StdDuration,
 };
 
 /// Controllable scheduler that simulates various load conditions
@@ -131,14 +134,19 @@ impl ControllableScheduler {
             timer_wheel_entry: None,
         };
 
-        self.scheduled_tasks.lock().unwrap().insert(task_id, task_info);
+        self.scheduled_tasks
+            .lock()
+            .unwrap()
+            .insert(task_id, task_info);
         self.timing_stats.lock().unwrap().tasks_scheduled += 1;
 
         // Schedule with the actual scheduler
-        let handle = self.scheduler.spawn_with_priority(cx, priority, move |task_cx| async move {
-            let result = task_fn(task_cx);
-            result
-        })?;
+        let handle =
+            self.scheduler
+                .spawn_with_priority(cx, priority, move |task_cx| async move {
+                    let result = task_fn(task_cx);
+                    result
+                })?;
 
         Ok(handle)
     }
@@ -270,7 +278,11 @@ impl SchedulerAwareTimerWheel {
             scheduler_notified: false,
         };
 
-        self.scheduler_coordination.lock().unwrap().active_timers.insert(timer_id, entry);
+        self.scheduler_coordination
+            .lock()
+            .unwrap()
+            .active_timers
+            .insert(timer_id, entry);
 
         Ok(timer_id)
     }
@@ -299,7 +311,12 @@ impl SchedulerAwareTimerWheel {
     }
 
     async fn handle_timer_wheel_overflow(&self, cx: &Cx) -> Result<(), Error> {
-        let strategy = self.timing_precision_config.read().unwrap().overflow_handling_strategy.clone();
+        let strategy = self
+            .timing_precision_config
+            .read()
+            .unwrap()
+            .overflow_handling_strategy
+            .clone();
 
         match strategy {
             OverflowStrategy::DropOldest => {
@@ -387,26 +404,23 @@ impl SchedulerTimerWheelIntegrationCoordinator {
         // Schedule multiple tasks with varying deadlines
         for i in 0..task_count {
             let priority = Priority::from(i % 5);
-            let deadline = start_time + StdDuration::from_millis(deadline_spread_ms * (i as u64 + 1) / task_count as u64);
+            let deadline = start_time
+                + StdDuration::from_millis(deadline_spread_ms * (i as u64 + 1) / task_count as u64);
 
-            let handle = self.scheduler.schedule_task_with_deadline(
-                cx,
-                priority,
-                Some(deadline),
-                move |task_cx| {
+            let handle = self
+                .scheduler
+                .schedule_task_with_deadline(cx, priority, Some(deadline), move |task_cx| {
                     // Simulate some work
                     std::thread::sleep(StdDuration::from_millis(10));
                     format!("Task {} completed", i)
-                },
-            ).await?;
+                })
+                .await?;
 
             // Register deadline with timer wheel
-            let timer_id = self.timer_wheel.schedule_task_timeout(
-                cx,
-                TaskId::new(),
-                deadline,
-                priority,
-            ).await?;
+            let timer_id = self
+                .timer_wheel
+                .schedule_task_timeout(cx, TaskId::new(), deadline, priority)
+                .await?;
 
             task_handles.push((handle, timer_id, deadline));
         }
@@ -428,7 +442,9 @@ impl SchedulerTimerWheelIntegrationCoordinator {
             }
 
             // Check if timer wheel notified scheduler appropriately
-            self.timer_wheel.notify_scheduler_on_timeout(cx, timer_id).await?;
+            self.timer_wheel
+                .notify_scheduler_on_timeout(cx, timer_id)
+                .await?;
         }
 
         let timing_precision = (completed_on_time as f64) / (task_count as f64) > 0.8;
@@ -449,7 +465,10 @@ impl SchedulerTimerWheelIntegrationCoordinator {
             performance_impact,
             details: format!(
                 "Completed on time: {}/{}, Deadline misses: {}, Performance impact: {:.2}%",
-                completed_on_time, task_count, deadline_misses, performance_impact * 100.0
+                completed_on_time,
+                task_count,
+                deadline_misses,
+                performance_impact * 100.0
             ),
         };
 
@@ -465,15 +484,18 @@ impl SchedulerTimerWheelIntegrationCoordinator {
         overload_factor: f64,
     ) -> Result<IntegrationValidationResult, Error> {
         // Configure timer wheel for overflow simulation
-        self.timer_wheel.configure_timing_precision(TimingPrecisionConfig {
-            wheel_resolution_ms: 50, // Coarser resolution to trigger overflow sooner
-            scheduler_notification_threshold_ms: 10,
-            overflow_handling_strategy: OverflowStrategy::EscalateToScheduler,
-            precision_degradation_factor: overload_factor,
-        });
+        self.timer_wheel
+            .configure_timing_precision(TimingPrecisionConfig {
+                wheel_resolution_ms: 50, // Coarser resolution to trigger overflow sooner
+                scheduler_notification_threshold_ms: 10,
+                overflow_handling_strategy: OverflowStrategy::EscalateToScheduler,
+                precision_degradation_factor: overload_factor,
+            });
 
         // Apply scheduler pressure
-        self.scheduler.simulate_deadline_pressure(cx, overload_factor).await?;
+        self.scheduler
+            .simulate_deadline_pressure(cx, overload_factor)
+            .await?;
 
         // Schedule many concurrent tasks to trigger overflow
         let task_count = (1000.0 * overload_factor) as usize;
@@ -483,12 +505,11 @@ impl SchedulerTimerWheelIntegrationCoordinator {
         for i in 0..task_count {
             let deadline = Instant::now() + StdDuration::from_millis(100);
 
-            match self.timer_wheel.schedule_task_timeout(
-                cx,
-                TaskId::new(),
-                deadline,
-                Priority::Medium,
-            ).await {
+            match self
+                .timer_wheel
+                .schedule_task_timeout(cx, TaskId::new(), deadline, Priority::Medium)
+                .await
+            {
                 Ok(_) => tasks_scheduled += 1,
                 Err(_) => {
                     // Overflow occurred, test handling
@@ -510,7 +531,10 @@ impl SchedulerTimerWheelIntegrationCoordinator {
             performance_impact: (tasks_scheduled as f64) / (task_count as f64),
             details: format!(
                 "Tasks scheduled: {}/{}, Overflow events: {}, Notifications: {}",
-                tasks_scheduled, task_count, coordination_state.overflow_events, coordination_state.scheduler_notifications
+                tasks_scheduled,
+                task_count,
+                coordination_state.overflow_events,
+                coordination_state.scheduler_notifications
             ),
         };
 
@@ -532,12 +556,12 @@ impl SchedulerTimerWheelIntegrationCoordinator {
         for i in 0..task_count_per_priority {
             let deadline = Instant::now() + StdDuration::from_millis(200);
 
-            let handle = self.scheduler.schedule_task_with_deadline(
-                cx,
-                Priority::High,
-                Some(deadline),
-                move |_| format!("High priority task {}", i),
-            ).await?;
+            let handle = self
+                .scheduler
+                .schedule_task_with_deadline(cx, Priority::High, Some(deadline), move |_| {
+                    format!("High priority task {}", i)
+                })
+                .await?;
 
             if matches!(handle.join().await, Outcome::Ok(_)) {
                 high_priority_completions += 1;
@@ -548,31 +572,35 @@ impl SchedulerTimerWheelIntegrationCoordinator {
         for i in 0..task_count_per_priority {
             let deadline = Instant::now() + StdDuration::from_millis(300);
 
-            let handle = self.scheduler.schedule_task_with_deadline(
-                cx,
-                Priority::Low,
-                Some(deadline),
-                move |_| format!("Low priority task {}", i),
-            ).await?;
+            let handle = self
+                .scheduler
+                .schedule_task_with_deadline(cx, Priority::Low, Some(deadline), move |_| {
+                    format!("Low priority task {}", i)
+                })
+                .await?;
 
             if matches!(handle.join().await, Outcome::Ok(_)) {
                 low_priority_completions += 1;
             }
         }
 
-        let priority_coordination = (high_priority_completions as f64) / (task_count_per_priority as f64) >
-                                   (low_priority_completions as f64) / (task_count_per_priority as f64);
+        let priority_coordination = (high_priority_completions as f64)
+            / (task_count_per_priority as f64)
+            > (low_priority_completions as f64) / (task_count_per_priority as f64);
 
         let result = IntegrationValidationResult {
             test_case: test_case.to_string(),
             timing_precision: true,
             deadline_coordination: priority_coordination,
             overflow_handling: true,
-            performance_impact: (high_priority_completions + low_priority_completions) as f64 / (task_count_per_priority * 2) as f64,
+            performance_impact: (high_priority_completions + low_priority_completions) as f64
+                / (task_count_per_priority * 2) as f64,
             details: format!(
                 "High priority: {}/{}, Low priority: {}/{}",
-                high_priority_completions, task_count_per_priority,
-                low_priority_completions, task_count_per_priority
+                high_priority_completions,
+                task_count_per_priority,
+                low_priority_completions,
+                task_count_per_priority
             ),
         };
 
@@ -589,109 +617,159 @@ impl SchedulerTimerWheelIntegrationCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        runtime::test_rt,
-        cx::region,
-        types::Budget,
-    };
+    use crate::{cx::region, runtime::test_rt, types::Budget};
 
     #[test]
     fn test_basic_scheduler_timer_wheel_coordination() {
         test_rt(|rt| async move {
-            region(&rt, Budget::new(StdDuration::from_secs(30)), |cx| async move {
-                let coordinator = SchedulerTimerWheelIntegrationCoordinator::new(cx).await?;
+            region(
+                &rt,
+                Budget::new(StdDuration::from_secs(30)),
+                |cx| async move {
+                    let coordinator = SchedulerTimerWheelIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_deadline_coordination(
-                    cx,
-                    "basic_coordination",
-                    20, // 20 tasks
-                    1000, // 1 second deadline spread
-                ).await?;
+                    let result = coordinator
+                        .validate_deadline_coordination(
+                            cx,
+                            "basic_coordination",
+                            20,   // 20 tasks
+                            1000, // 1 second deadline spread
+                        )
+                        .await?;
 
-                assert!(result.timing_precision, "Timer wheel should provide precise timing");
-                assert!(result.deadline_coordination, "Scheduler should coordinate with timer wheel deadlines");
-                assert!(result.performance_impact > 0.7, "Performance should not be severely impacted");
+                    assert!(
+                        result.timing_precision,
+                        "Timer wheel should provide precise timing"
+                    );
+                    assert!(
+                        result.deadline_coordination,
+                        "Scheduler should coordinate with timer wheel deadlines"
+                    );
+                    assert!(
+                        result.performance_impact > 0.7,
+                        "Performance should not be severely impacted"
+                    );
 
-                Ok(())
-            }).await
+                    Ok(())
+                },
+            )
+            .await
         });
     }
 
     #[test]
     fn test_timer_wheel_overflow_handling() {
         test_rt(|rt| async move {
-            region(&rt, Budget::new(StdDuration::from_secs(45)), |cx| async move {
-                let coordinator = SchedulerTimerWheelIntegrationCoordinator::new(cx).await?;
+            region(
+                &rt,
+                Budget::new(StdDuration::from_secs(45)),
+                |cx| async move {
+                    let coordinator = SchedulerTimerWheelIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_overflow_handling(
-                    cx,
-                    "overflow_handling",
-                    2.0, // 200% overload factor
-                ).await?;
+                    let result = coordinator
+                        .validate_overflow_handling(
+                            cx,
+                            "overflow_handling",
+                            2.0, // 200% overload factor
+                        )
+                        .await?;
 
-                assert!(result.overflow_handling, "Timer wheel should handle overflow gracefully");
-                assert!(result.deadline_coordination, "Scheduler should still receive notifications during overflow");
+                    assert!(
+                        result.overflow_handling,
+                        "Timer wheel should handle overflow gracefully"
+                    );
+                    assert!(
+                        result.deadline_coordination,
+                        "Scheduler should still receive notifications during overflow"
+                    );
 
-                Ok(())
-            }).await
+                    Ok(())
+                },
+            )
+            .await
         });
     }
 
     #[test]
     fn test_priority_based_timer_coordination() {
         test_rt(|rt| async move {
-            region(&rt, Budget::new(StdDuration::from_secs(60)), |cx| async move {
-                let coordinator = SchedulerTimerWheelIntegrationCoordinator::new(cx).await?;
+            region(
+                &rt,
+                Budget::new(StdDuration::from_secs(60)),
+                |cx| async move {
+                    let coordinator = SchedulerTimerWheelIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_priority_based_timing(cx, "priority_timing").await?;
+                    let result = coordinator
+                        .validate_priority_based_timing(cx, "priority_timing")
+                        .await?;
 
-                assert!(result.deadline_coordination, "Higher priority tasks should complete more reliably");
-                assert!(result.performance_impact > 0.6, "Priority coordination should not severely impact overall performance");
+                    assert!(
+                        result.deadline_coordination,
+                        "Higher priority tasks should complete more reliably"
+                    );
+                    assert!(
+                        result.performance_impact > 0.6,
+                        "Priority coordination should not severely impact overall performance"
+                    );
 
-                Ok(())
-            }).await
+                    Ok(())
+                },
+            )
+            .await
         });
     }
 
     #[test]
     fn test_concurrent_scheduler_timer_operations() {
         test_rt(|rt| async move {
-            region(&rt, Budget::new(StdDuration::from_secs(45)), |cx| async move {
-                let coordinator = SchedulerTimerWheelIntegrationCoordinator::new(cx).await?;
+            region(
+                &rt,
+                Budget::new(StdDuration::from_secs(45)),
+                |cx| async move {
+                    let coordinator = SchedulerTimerWheelIntegrationCoordinator::new(cx).await?;
 
-                let mut handles = Vec::new();
+                    let mut handles = Vec::new();
 
-                // Launch multiple concurrent validation operations
-                for i in 0..3 {
-                    let coordinator_clone = &coordinator;
+                    // Launch multiple concurrent validation operations
+                    for i in 0..3 {
+                        let coordinator_clone = &coordinator;
 
-                    let handle = cx.spawn(move |cx| async move {
-                        coordinator_clone.validate_deadline_coordination(
-                            cx,
-                            &format!("concurrent_test_{}", i),
-                            10, // 10 tasks per concurrent operation
-                            500, // 500ms deadline spread
-                        ).await
-                    });
+                        let handle = cx.spawn(move |cx| async move {
+                            coordinator_clone
+                                .validate_deadline_coordination(
+                                    cx,
+                                    &format!("concurrent_test_{}", i),
+                                    10,  // 10 tasks per concurrent operation
+                                    500, // 500ms deadline spread
+                                )
+                                .await
+                        });
 
-                    handles.push(handle);
-                }
-
-                // Wait for all concurrent operations to complete
-                let mut successful_validations = 0;
-                for handle in handles {
-                    match handle.join().await {
-                        Outcome::Ok(Ok(result)) if result.timing_precision && result.deadline_coordination => {
-                            successful_validations += 1;
-                        }
-                        _ => {}
+                        handles.push(handle);
                     }
-                }
 
-                assert!(successful_validations >= 2, "At least 2 concurrent operations should succeed");
+                    // Wait for all concurrent operations to complete
+                    let mut successful_validations = 0;
+                    for handle in handles {
+                        match handle.join().await {
+                            Outcome::Ok(Ok(result))
+                                if result.timing_precision && result.deadline_coordination =>
+                            {
+                                successful_validations += 1;
+                            }
+                            _ => {}
+                        }
+                    }
 
-                Ok(())
-            }).await
+                    assert!(
+                        successful_validations >= 2,
+                        "At least 2 concurrent operations should succeed"
+                    );
+
+                    Ok(())
+                },
+            )
+            .await
         });
     }
 }

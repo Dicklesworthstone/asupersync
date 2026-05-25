@@ -12,24 +12,26 @@
 
 use crate::{
     cx::{Cx, Scope},
+    error::Error,
     messaging::kafka::{
-        KafkaProducer, KafkaConsumer, KafkaConfig, KafkaMessage, KafkaError,
-        ProducerConfig, ConsumerConfig, TopicConfig, PartitionInfo,
-        ConsumerGroup, MessageMetadata, DeliveryReport,
+        ConsumerConfig, ConsumerGroup, DeliveryReport, KafkaConfig, KafkaConsumer, KafkaError,
+        KafkaMessage, KafkaProducer, MessageMetadata, PartitionInfo, ProducerConfig, TopicConfig,
     },
+    sync::{Barrier, Mutex, RwLock},
     trace::event::{
-        EventTracer, EventTracerConfig, TraceEvent, TraceEventType, EventCollector,
-        TraceCorrelation, TraceContext, DistributedTrace, TraceSpan,
-        EventFilter, TraceExporter, EventMetrics,
+        DistributedTrace, EventCollector, EventFilter, EventMetrics, EventTracer,
+        EventTracerConfig, TraceContext, TraceCorrelation, TraceEvent, TraceEventType,
+        TraceExporter, TraceSpan,
     },
     types::{Budget, Outcome, TaskId},
-    sync::{Mutex, RwLock, Barrier},
-    error::Error,
 };
 use std::{
-    sync::{Arc, atomic::{AtomicU64, AtomicUsize, Ordering}},
-    time::{Duration, Instant, SystemTime},
     collections::{HashMap, VecDeque},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant, SystemTime},
 };
 
 /// Controllable Kafka messaging system integrated with trace event collection
@@ -165,11 +167,14 @@ impl TraceAwareKafkaSystem {
         let start_time = Instant::now();
 
         // Create distributed trace span for this message
-        let trace_span = self.event_tracer.start_span(
-            cx,
-            &format!("kafka_produce_{}", topic),
-            trace_context.clone(),
-        ).await?;
+        let trace_span = self
+            .event_tracer
+            .start_span(
+                cx,
+                &format!("kafka_produce_{}", topic),
+                trace_context.clone(),
+            )
+            .await?;
 
         let correlation = MessageTraceCorrelation {
             message_id: message_id.clone(),
@@ -194,7 +199,8 @@ impl TraceAwareKafkaSystem {
                 "message_size": message_value.len(),
                 "has_key": message_key.is_some(),
             }),
-        ).await;
+        )
+        .await;
 
         // Store correlation for tracking
         {
@@ -251,7 +257,8 @@ impl TraceAwareKafkaSystem {
                         "offset": delivery_report.offset,
                         "timestamp": delivery_report.timestamp,
                     }),
-                ).await;
+                )
+                .await;
 
                 self.increment_tracing_stat("messages_produced", 1);
                 self.increment_tracing_stat("correlations_created", 1);
@@ -273,7 +280,8 @@ impl TraceAwareKafkaSystem {
                         "error_type": "produce_failure",
                         "error_message": e.to_string(),
                     }),
-                ).await;
+                )
+                .await;
 
                 self.increment_tracing_stat("trace_propagation_failures", 1);
 
@@ -290,7 +298,9 @@ impl TraceAwareKafkaSystem {
         let execution_time_ms = start_time.elapsed().as_millis() as u64;
         {
             let stats = self.system_stats.lock().unwrap();
-            stats.trace_overhead_ms.fetch_add(execution_time_ms, Ordering::SeqCst);
+            stats
+                .trace_overhead_ms
+                .fetch_add(execution_time_ms, Ordering::SeqCst);
         }
 
         Outcome::Ok(MessageProducerResult {
@@ -363,17 +373,21 @@ impl TraceAwareKafkaSystem {
 
         // Create or continue trace span
         let trace_span = if let Some(parent_context) = &trace_context {
-            self.event_tracer.start_span(
-                cx,
-                &format!("kafka_consume_{}", kafka_message.topic()),
-                Some(parent_context.clone()),
-            ).await?
+            self.event_tracer
+                .start_span(
+                    cx,
+                    &format!("kafka_consume_{}", kafka_message.topic()),
+                    Some(parent_context.clone()),
+                )
+                .await?
         } else {
-            self.event_tracer.start_span(
-                cx,
-                &format!("kafka_consume_{}", kafka_message.topic()),
-                None,
-            ).await?
+            self.event_tracer
+                .start_span(
+                    cx,
+                    &format!("kafka_consume_{}", kafka_message.topic()),
+                    None,
+                )
+                .await?
         };
 
         // Record consumer fetch event
@@ -389,7 +403,8 @@ impl TraceAwareKafkaSystem {
                 "message_size": kafka_message.payload().len(),
                 "has_trace_context": trace_context.is_some(),
             }),
-        ).await;
+        )
+        .await;
 
         // Simulate message processing
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -404,15 +419,16 @@ impl TraceAwareKafkaSystem {
                 "processing_duration_ms": 5,
                 "message_key": kafka_message.key().clone(),
             }),
-        ).await;
+        )
+        .await;
 
         // Update correlation if this message was previously produced through this system
         let correlation_found = {
             let mut correlations = self.message_trace_correlation.lock().unwrap();
             if let Some(correlation) = correlations.values_mut().find(|c| {
-                c.kafka_topic == kafka_message.topic() &&
-                c.kafka_partition == kafka_message.partition() &&
-                c.kafka_offset == kafka_message.offset()
+                c.kafka_topic == kafka_message.topic()
+                    && c.kafka_partition == kafka_message.partition()
+                    && c.kafka_offset == kafka_message.offset()
             }) {
                 correlation.consumer_trace_context = trace_context.clone();
                 true
@@ -435,10 +451,13 @@ impl TraceAwareKafkaSystem {
                 "ack_type": "sync_commit",
                 "consumer_group": "default",
             }),
-        ).await;
+        )
+        .await;
 
         // Commit message offset
-        self.kafka_consumer.commit_offset(cx, &kafka_message).await?;
+        self.kafka_consumer
+            .commit_offset(cx, &kafka_message)
+            .await?;
 
         // Record completion event
         self.record_trace_event(
@@ -449,7 +468,8 @@ impl TraceAwareKafkaSystem {
             serde_json::json!({
                 "total_processing_time_ms": start_time.elapsed().as_millis(),
             }),
-        ).await;
+        )
+        .await;
 
         // Finish trace span
         self.event_tracer.finish_span(cx, trace_span).await?;
@@ -532,13 +552,27 @@ impl TraceAwareKafkaSystem {
         match stat_name {
             "messages_produced" => stats.messages_produced.fetch_add(count, Ordering::SeqCst),
             "messages_consumed" => stats.messages_consumed.fetch_add(count, Ordering::SeqCst),
-            "trace_events_generated" => stats.trace_events_generated.fetch_add(count, Ordering::SeqCst),
-            "correlations_created" => stats.correlations_created.fetch_add(count, Ordering::SeqCst),
-            "correlations_completed" => stats.correlations_completed.fetch_add(count, Ordering::SeqCst),
-            "trace_propagation_successes" => stats.trace_propagation_successes.fetch_add(count, Ordering::SeqCst),
-            "trace_propagation_failures" => stats.trace_propagation_failures.fetch_add(count, Ordering::SeqCst),
-            "distributed_traces_started" => stats.distributed_traces_started.fetch_add(count, Ordering::SeqCst),
-            "distributed_traces_completed" => stats.distributed_traces_completed.fetch_add(count, Ordering::SeqCst),
+            "trace_events_generated" => stats
+                .trace_events_generated
+                .fetch_add(count, Ordering::SeqCst),
+            "correlations_created" => stats
+                .correlations_created
+                .fetch_add(count, Ordering::SeqCst),
+            "correlations_completed" => stats
+                .correlations_completed
+                .fetch_add(count, Ordering::SeqCst),
+            "trace_propagation_successes" => stats
+                .trace_propagation_successes
+                .fetch_add(count, Ordering::SeqCst),
+            "trace_propagation_failures" => stats
+                .trace_propagation_failures
+                .fetch_add(count, Ordering::SeqCst),
+            "distributed_traces_started" => stats
+                .distributed_traces_started
+                .fetch_add(count, Ordering::SeqCst),
+            "distributed_traces_completed" => stats
+                .distributed_traces_completed
+                .fetch_add(count, Ordering::SeqCst),
             _ => 0,
         };
     }
@@ -557,7 +591,9 @@ impl TraceAwareKafkaSystem {
             trace_propagation_successes: tracing.trace_propagation_successes.load(Ordering::SeqCst),
             trace_propagation_failures: tracing.trace_propagation_failures.load(Ordering::SeqCst),
             distributed_traces_started: tracing.distributed_traces_started.load(Ordering::SeqCst),
-            distributed_traces_completed: tracing.distributed_traces_completed.load(Ordering::SeqCst),
+            distributed_traces_completed: tracing
+                .distributed_traces_completed
+                .load(Ordering::SeqCst),
             total_message_throughput: system.total_message_throughput.load(Ordering::SeqCst),
             trace_overhead_ms: system.trace_overhead_ms.load(Ordering::SeqCst),
             integration_duration_ms: system.integration_start_time.elapsed().as_millis() as u64,
@@ -639,13 +675,10 @@ mod tests {
                 event_sampling_rate: 1.0,
             };
 
-            let kafka_system = TraceAwareKafkaSystem::new(
-                kafka_config,
-                tracer_config,
-                coordinator_config,
-            )
-            .await
-            .expect("Failed to create Kafka trace system");
+            let kafka_system =
+                TraceAwareKafkaSystem::new(kafka_config, tracer_config, coordinator_config)
+                    .await
+                    .expect("Failed to create Kafka trace system");
 
             // Test message production with tracing
             let topic = "test_topic_basic_integration";
@@ -664,7 +697,10 @@ mod tests {
                 .expect("Message production should succeed");
 
             assert!(produce_result.trace_correlation_created);
-            assert!(matches!(produce_result.produce_result, ProduceResult::Success(_)));
+            assert!(matches!(
+                produce_result.produce_result,
+                ProduceResult::Success(_)
+            ));
 
             // Test message consumption with tracing
             let topics = vec![topic.to_string()];
@@ -686,7 +722,9 @@ mod tests {
             assert!(stats.trace_propagation_successes > 0);
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 
     #[tokio::test]
@@ -717,13 +755,10 @@ mod tests {
                 event_sampling_rate: 1.0,
             };
 
-            let kafka_system = TraceAwareKafkaSystem::new(
-                kafka_config,
-                tracer_config,
-                coordinator_config,
-            )
-            .await
-            .expect("Failed to create Kafka trace system");
+            let kafka_system =
+                TraceAwareKafkaSystem::new(kafka_config, tracer_config, coordinator_config)
+                    .await
+                    .expect("Failed to create Kafka trace system");
 
             // Create a distributed trace context
             let root_trace_context = TraceContext::new();
@@ -734,7 +769,8 @@ mod tests {
 
             for i in 0..message_count {
                 let message_data = format!("Traced message {}", i).into_bytes();
-                let child_trace_context = root_trace_context.create_child_context(&format!("message_{}", i));
+                let child_trace_context =
+                    root_trace_context.create_child_context(&format!("message_{}", i));
 
                 let produce_result = kafka_system
                     .produce_with_tracing(
@@ -778,7 +814,9 @@ mod tests {
             assert!(stats.trace_propagation_successes >= message_count as u64);
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 
     #[tokio::test]
@@ -809,13 +847,10 @@ mod tests {
                 event_sampling_rate: 0.1, // Reduced sampling for performance
             };
 
-            let kafka_system = TraceAwareKafkaSystem::new(
-                kafka_config,
-                tracer_config,
-                coordinator_config,
-            )
-            .await
-            .expect("Failed to create Kafka trace system");
+            let kafka_system =
+                TraceAwareKafkaSystem::new(kafka_config, tracer_config, coordinator_config)
+                    .await
+                    .expect("Failed to create Kafka trace system");
 
             // High throughput test parameters
             let topic = "test_topic_high_throughput";
@@ -828,18 +863,21 @@ mod tests {
                 let mut batch_tasks = Vec::new();
 
                 for i in 0..batch_size {
-                    let message_data = format!("High throughput message {}", batch * batch_size + i).into_bytes();
+                    let message_data =
+                        format!("High throughput message {}", batch * batch_size + i).into_bytes();
                     let trace_context = TraceContext::new();
 
                     let system_ref = &kafka_system;
                     let task = scope.spawn(&format!("produce_msg_{}", i), async move {
-                        system_ref.produce_with_tracing(
-                            cx,
-                            topic,
-                            Some(&format!("batch_{}_key_{}", batch, i)),
-                            &message_data,
-                            Some(trace_context),
-                        ).await
+                        system_ref
+                            .produce_with_tracing(
+                                cx,
+                                topic,
+                                Some(&format!("batch_{}_key_{}", batch, i)),
+                                &message_data,
+                                Some(trace_context),
+                            )
+                            .await
                     })?;
 
                     batch_tasks.push(task);
@@ -867,12 +905,14 @@ mod tests {
                 let system_ref = &kafka_system;
                 let topics_clone = topics.clone();
                 async move {
-                    system_ref.consume_with_tracing(
-                        cx,
-                        &topics_clone,
-                        &consumer_group_1,
-                        total_produced / 2,
-                    ).await
+                    system_ref
+                        .consume_with_tracing(
+                            cx,
+                            &topics_clone,
+                            &consumer_group_1,
+                            total_produced / 2,
+                        )
+                        .await
                 }
             })?;
 
@@ -880,21 +920,27 @@ mod tests {
                 let system_ref = &kafka_system;
                 let topics_clone = topics.clone();
                 async move {
-                    system_ref.consume_with_tracing(
-                        cx,
-                        &topics_clone,
-                        &consumer_group_2,
-                        total_produced / 2,
-                    ).await
+                    system_ref
+                        .consume_with_tracing(
+                            cx,
+                            &topics_clone,
+                            &consumer_group_2,
+                            total_produced / 2,
+                        )
+                        .await
                 }
             })?;
 
             // Wait for consumption completion
-            let consumer_1_results = consumer_1_task.join(cx).await
+            let consumer_1_results = consumer_1_task
+                .join(cx)
+                .await
                 .expect("Consumer 1 task should complete")
                 .expect("Consumer 1 should succeed");
 
-            let consumer_2_results = consumer_2_task.join(cx).await
+            let consumer_2_results = consumer_2_task
+                .join(cx)
+                .await
                 .expect("Consumer 2 task should complete")
                 .expect("Consumer 2 should succeed");
 
@@ -908,7 +954,10 @@ mod tests {
             assert!(stats.trace_events_generated > 0);
 
             // Verify performance characteristics
-            assert!(stats.trace_overhead_ms < 1000, "Trace overhead should be reasonable");
+            assert!(
+                stats.trace_overhead_ms < 1000,
+                "Trace overhead should be reasonable"
+            );
 
             println!("High throughput test results:");
             println!("- Messages produced: {}", stats.messages_produced);
@@ -918,6 +967,8 @@ mod tests {
             println!("- Trace overhead: {}ms", stats.trace_overhead_ms);
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 }

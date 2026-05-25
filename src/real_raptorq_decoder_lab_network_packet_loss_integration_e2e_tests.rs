@@ -12,13 +12,13 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod integration_tests {
-    use crate::raptorq::decoder::{RaptorQDecoder, DecoderConfig, RecoveryStats, RepairOverhead};
-    use crate::lab::network::{LabNetwork, PacketLossConfig, NetworkSimulator, PacketLossPattern};
-    use crate::lab::runtime::{LabRuntime, VirtualTime};
-    use crate::runtime::{RuntimeBuilder, Runtime};
-    use crate::types::{TaskId, Budget, Outcome};
-    use crate::net::packet::{Packet, PacketId, EncodingSymbol};
     use crate::error::AsupersyncError;
+    use crate::lab::network::{LabNetwork, NetworkSimulator, PacketLossConfig, PacketLossPattern};
+    use crate::lab::runtime::{LabRuntime, VirtualTime};
+    use crate::net::packet::{EncodingSymbol, Packet, PacketId};
+    use crate::raptorq::decoder::{DecoderConfig, RaptorQDecoder, RecoveryStats, RepairOverhead};
+    use crate::runtime::{Runtime, RuntimeBuilder};
+    use crate::types::{Budget, Outcome, TaskId};
     use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -80,13 +80,19 @@ mod integration_tests {
             // Generate source symbols
             for i in 0..self.block_size {
                 let symbol_data = vec![0xAA + (i as u8); self.symbol_size];
-                symbols.push(EncodingSymbol::source(PacketId::new(self.sequence, i), symbol_data));
+                symbols.push(EncodingSymbol::source(
+                    PacketId::new(self.sequence, i),
+                    symbol_data,
+                ));
             }
 
             // Generate repair symbols
             for i in 0..repair_symbols {
                 let symbol_data = vec![0xBB + (i as u8); self.symbol_size];
-                symbols.push(EncodingSymbol::repair(PacketId::new(self.sequence, self.block_size + i), symbol_data));
+                symbols.push(EncodingSymbol::repair(
+                    PacketId::new(self.sequence, self.block_size + i),
+                    symbol_data,
+                ));
             }
 
             self.sequence += 1;
@@ -109,43 +115,70 @@ mod integration_tests {
             })
         }
 
-        fn create_decoder(&mut self, decoder_id: &str, config: DecoderConfig) -> Result<(), AsupersyncError> {
+        fn create_decoder(
+            &mut self,
+            decoder_id: &str,
+            config: DecoderConfig,
+        ) -> Result<(), AsupersyncError> {
             let decoder = Arc::new(RaptorQDecoder::new(config)?);
             self.decoders.insert(decoder_id.to_string(), decoder);
 
             {
                 let mut stats = self.stats.lock().unwrap();
                 stats.decoders_created += 1;
-                stats.peak_concurrent_decoders = stats.peak_concurrent_decoders.max(self.decoders.len() as u64);
+                stats.peak_concurrent_decoders = stats
+                    .peak_concurrent_decoders
+                    .max(self.decoders.len() as u64);
             }
 
             Ok(())
         }
 
-        fn create_packet_generator(&mut self, gen_id: &str, block_size: usize, symbol_size: usize, encoding_overhead: f32) {
+        fn create_packet_generator(
+            &mut self,
+            gen_id: &str,
+            block_size: usize,
+            symbol_size: usize,
+            encoding_overhead: f32,
+        ) {
             let generator = PacketGenerator::new(block_size, symbol_size, encoding_overhead);
             self.packet_generators.insert(gen_id.to_string(), generator);
         }
 
-        fn configure_packet_loss(&mut self, config_id: &str, loss_rate: f32, pattern: PacketLossPattern) -> Result<(), AsupersyncError> {
+        fn configure_packet_loss(
+            &mut self,
+            config_id: &str,
+            loss_rate: f32,
+            pattern: PacketLossPattern,
+        ) -> Result<(), AsupersyncError> {
             let loss_config = PacketLossConfig {
                 loss_rate,
                 pattern,
                 burst_length: Some(3), // 3-packet bursts
-                correlation: 0.1, // Low correlation for realistic loss
-                seed: 12345, // Deterministic seed
+                correlation: 0.1,      // Low correlation for realistic loss
+                seed: 12345,           // Deterministic seed
             };
 
-            self.lab_network.configure_packet_loss(config_id, loss_config.clone())?;
+            self.lab_network
+                .configure_packet_loss(config_id, loss_config.clone())?;
             self.loss_configs.insert(config_id.to_string(), loss_config);
 
             Ok(())
         }
 
-        fn simulate_transmission_with_loss(&mut self, gen_id: &str, decoder_id: &str, loss_config_id: &str, num_blocks: usize) -> Result<RecoveryStats, AsupersyncError> {
-            let generator = self.packet_generators.get_mut(gen_id)
-                .ok_or_else(|| AsupersyncError::InvalidState("Packet generator not found".into()))?;
-            let decoder = self.decoders.get(decoder_id)
+        fn simulate_transmission_with_loss(
+            &mut self,
+            gen_id: &str,
+            decoder_id: &str,
+            loss_config_id: &str,
+            num_blocks: usize,
+        ) -> Result<RecoveryStats, AsupersyncError> {
+            let generator = self.packet_generators.get_mut(gen_id).ok_or_else(|| {
+                AsupersyncError::InvalidState("Packet generator not found".into())
+            })?;
+            let decoder = self
+                .decoders
+                .get(decoder_id)
                 .ok_or_else(|| AsupersyncError::InvalidState("Decoder not found".into()))?;
 
             let mut total_recovery_stats = RecoveryStats::default();
@@ -167,7 +200,10 @@ mod integration_tests {
                     let packet = Packet::new(symbol.packet_id(), symbol.data().clone());
 
                     // Apply network loss simulation
-                    if self.lab_network.should_deliver_packet(loss_config_id, &packet)? {
+                    if self
+                        .lab_network
+                        .should_deliver_packet(loss_config_id, &packet)?
+                    {
                         received_symbols.push(symbol);
                     } else {
                         let mut stats = self.stats.lock().unwrap();
@@ -187,7 +223,9 @@ mod integration_tests {
                     let mut stats = self.stats.lock().unwrap();
                     stats.packets_recovered += block_stats.symbols_recovered;
                     stats.repair_operations += block_stats.repair_operations;
-                    stats.total_repair_overhead.add(&block_stats.repair_overhead);
+                    stats
+                        .total_repair_overhead
+                        .add(&block_stats.repair_overhead);
 
                     if loss_rate >= 0.30 && block_stats.recovery_successful {
                         stats.high_loss_recoveries += 1;
@@ -208,7 +246,10 @@ mod integration_tests {
             Ok(total_recovery_stats)
         }
 
-        fn measure_repair_overhead_bounds(&self, recovery_stats: &RecoveryStats) -> Result<bool, AsupersyncError> {
+        fn measure_repair_overhead_bounds(
+            &self,
+            recovery_stats: &RecoveryStats,
+        ) -> Result<bool, AsupersyncError> {
             // Define bounded overhead limits
             const MAX_CPU_CYCLES_PER_SYMBOL: u64 = 10000;
             const MAX_MEMORY_BYTES_PER_SYMBOL: u64 = 4096;
@@ -221,11 +262,12 @@ mod integration_tests {
 
             let cpu_per_symbol = recovery_stats.repair_overhead.cpu_cycles / symbols_processed;
             let memory_per_symbol = recovery_stats.repair_overhead.memory_bytes / symbols_processed;
-            let network_ratio = recovery_stats.repair_overhead.network_bytes as f32 / recovery_stats.original_bytes as f32;
+            let network_ratio = recovery_stats.repair_overhead.network_bytes as f32
+                / recovery_stats.original_bytes as f32;
 
-            let within_bounds = cpu_per_symbol <= MAX_CPU_CYCLES_PER_SYMBOL &&
-                               memory_per_symbol <= MAX_MEMORY_BYTES_PER_SYMBOL &&
-                               network_ratio <= MAX_NETWORK_OVERHEAD_RATIO;
+            let within_bounds = cpu_per_symbol <= MAX_CPU_CYCLES_PER_SYMBOL
+                && memory_per_symbol <= MAX_MEMORY_BYTES_PER_SYMBOL
+                && network_ratio <= MAX_NETWORK_OVERHEAD_RATIO;
 
             Ok(within_bounds)
         }
@@ -242,7 +284,7 @@ mod integration_tests {
         // Configure decoder for 30% loss tolerance
         let decoder_config = DecoderConfig {
             max_source_symbols: 1000,
-            symbol_size: 1316, // Standard MTU-friendly size
+            symbol_size: 1316,      // Standard MTU-friendly size
             repair_threshold: 0.35, // Handle up to 35% loss
             max_repair_iterations: 100,
             bounded_overhead: true,
@@ -259,19 +301,31 @@ mod integration_tests {
             "test-gen",
             "test-decoder",
             "loss-30",
-            10 // 10 blocks
+            10, // 10 blocks
         )?;
 
         // Verify successful recovery
-        assert!(recovery_stats.recovery_successful, "Should recover from 30% packet loss");
-        assert!(recovery_stats.symbols_recovered >= recovery_stats.symbols_processed * 70 / 100, "Should recover at least 70% of symbols");
+        assert!(
+            recovery_stats.recovery_successful,
+            "Should recover from 30% packet loss"
+        );
+        assert!(
+            recovery_stats.symbols_recovered >= recovery_stats.symbols_processed * 70 / 100,
+            "Should recover at least 70% of symbols"
+        );
 
         // Verify bounded overhead
         let within_bounds = harness.measure_repair_overhead_bounds(&recovery_stats)?;
-        assert!(within_bounds, "Repair overhead should be within bounded limits");
+        assert!(
+            within_bounds,
+            "Repair overhead should be within bounded limits"
+        );
 
         let stats = harness.get_stats();
-        assert!(stats.high_loss_recoveries > 0, "Should have successful high-loss recoveries");
+        assert!(
+            stats.high_loss_recoveries > 0,
+            "Should have successful high-loss recoveries"
+        );
         assert_eq!(stats.recovery_failures, 0);
 
         println!("30% Loss Recovery Stats: {:?}", recovery_stats);
@@ -300,7 +354,7 @@ mod integration_tests {
             "high-loss-gen",
             "high-loss-decoder",
             "loss-40",
-            5
+            5,
         )?;
 
         // Test 50% loss rate
@@ -309,23 +363,41 @@ mod integration_tests {
             "high-loss-gen",
             "high-loss-decoder",
             "loss-50",
-            5
+            5,
         )?;
 
         // Verify recovery at both rates
-        assert!(recovery_stats_40.recovery_successful, "Should recover from 40% packet loss");
-        assert!(recovery_stats_50.recovery_successful, "Should recover from 50% packet loss");
+        assert!(
+            recovery_stats_40.recovery_successful,
+            "Should recover from 40% packet loss"
+        );
+        assert!(
+            recovery_stats_50.recovery_successful,
+            "Should recover from 50% packet loss"
+        );
 
         // Verify bounded overhead for both
-        assert!(harness.measure_repair_overhead_bounds(&recovery_stats_40)?, "40% loss repair should be bounded");
-        assert!(harness.measure_repair_overhead_bounds(&recovery_stats_50)?, "50% loss repair should be bounded");
+        assert!(
+            harness.measure_repair_overhead_bounds(&recovery_stats_40)?,
+            "40% loss repair should be bounded"
+        );
+        assert!(
+            harness.measure_repair_overhead_bounds(&recovery_stats_50)?,
+            "50% loss repair should be bounded"
+        );
 
         // Verify repair overhead increases with loss rate (but remains bounded)
-        assert!(recovery_stats_50.repair_overhead.cpu_cycles >= recovery_stats_40.repair_overhead.cpu_cycles,
-                "Higher loss should require more CPU for repair");
+        assert!(
+            recovery_stats_50.repair_overhead.cpu_cycles
+                >= recovery_stats_40.repair_overhead.cpu_cycles,
+            "Higher loss should require more CPU for repair"
+        );
 
         let stats = harness.get_stats();
-        assert!(stats.high_loss_recoveries >= 10, "Should have multiple high-loss recoveries");
+        assert!(
+            stats.high_loss_recoveries >= 10,
+            "Should have multiple high-loss recoveries"
+        );
 
         println!("40% Loss Stats: {:?}", recovery_stats_40);
         println!("50% Loss Stats: {:?}", recovery_stats_50);
@@ -350,20 +422,24 @@ mod integration_tests {
         // Configure 35% loss with burst pattern (more challenging than random)
         harness.configure_packet_loss("burst-35", 0.35, PacketLossPattern::BurstLoss)?;
 
-        let recovery_stats = harness.simulate_transmission_with_loss(
-            "burst-gen",
-            "burst-decoder",
-            "burst-35",
-            8
-        )?;
+        let recovery_stats =
+            harness.simulate_transmission_with_loss("burst-gen", "burst-decoder", "burst-35", 8)?;
 
         // Burst losses are harder to recover from, but should still succeed
-        assert!(recovery_stats.recovery_successful, "Should recover from 35% burst packet loss");
-        assert!(recovery_stats.repair_operations > 0, "Should perform repair operations for burst losses");
+        assert!(
+            recovery_stats.recovery_successful,
+            "Should recover from 35% burst packet loss"
+        );
+        assert!(
+            recovery_stats.repair_operations > 0,
+            "Should perform repair operations for burst losses"
+        );
 
         // Verify bounded overhead despite challenging loss pattern
-        assert!(harness.measure_repair_overhead_bounds(&recovery_stats)?,
-                "Burst loss repair should maintain bounded overhead");
+        assert!(
+            harness.measure_repair_overhead_bounds(&recovery_stats)?,
+            "Burst loss repair should maintain bounded overhead"
+        );
 
         println!("Burst Loss Recovery Stats: {:?}", recovery_stats);
         Ok(())
@@ -400,7 +476,7 @@ mod integration_tests {
                 &format!("gen-{}", i),
                 &format!("decoder-{}", i),
                 "concurrent-35",
-                3 // Smaller blocks for concurrent test
+                3, // Smaller blocks for concurrent test
             )?;
             recovery_results.push(recovery_stats);
         }
@@ -408,21 +484,31 @@ mod integration_tests {
         let total_duration = harness.lab_runtime.now().duration_since(start_time);
 
         // Verify all decoders succeeded
-        let successful_recoveries = recovery_results.iter().filter(|r| r.recovery_successful).count();
-        assert!(successful_recoveries >= num_decoders * 80 / 100,
-                "At least 80% of concurrent decoders should succeed");
+        let successful_recoveries = recovery_results
+            .iter()
+            .filter(|r| r.recovery_successful)
+            .count();
+        assert!(
+            successful_recoveries >= num_decoders * 80 / 100,
+            "At least 80% of concurrent decoders should succeed"
+        );
 
         // Verify bounded overhead across all decoders
         for (i, recovery_stats) in recovery_results.iter().enumerate() {
-            assert!(harness.measure_repair_overhead_bounds(recovery_stats)?,
-                    "Decoder {} should maintain bounded overhead under concurrency", i);
+            assert!(
+                harness.measure_repair_overhead_bounds(recovery_stats)?,
+                "Decoder {} should maintain bounded overhead under concurrency",
+                i
+            );
         }
 
         let stats = harness.get_stats();
         assert_eq!(stats.peak_concurrent_decoders, num_decoders as u64);
 
-        println!("Concurrent Recovery - {} decoders completed in {:?}",
-                 successful_recoveries, total_duration);
+        println!(
+            "Concurrent Recovery - {} decoders completed in {:?}",
+            successful_recoveries, total_duration
+        );
         Ok(())
     }
 
@@ -451,29 +537,49 @@ mod integration_tests {
             "stress-gen",
             "stress-decoder",
             "sustained-40",
-            50 // Large number of blocks
+            50, // Large number of blocks
         )?;
 
         let total_duration = harness.lab_runtime.now().duration_since(start_time);
 
         // Verify sustained recovery capability
-        assert!(recovery_stats.recovery_successful, "Should sustain recovery over long duration");
-        assert!(recovery_stats.symbols_recovered >= recovery_stats.symbols_processed * 60 / 100,
-                "Should recover majority of symbols under sustained loss");
+        assert!(
+            recovery_stats.recovery_successful,
+            "Should sustain recovery over long duration"
+        );
+        assert!(
+            recovery_stats.symbols_recovered >= recovery_stats.symbols_processed * 60 / 100,
+            "Should recover majority of symbols under sustained loss"
+        );
 
         // Verify overhead remains bounded throughout stress test
-        assert!(harness.measure_repair_overhead_bounds(&recovery_stats)?,
-                "Sustained stress should maintain bounded repair overhead");
+        assert!(
+            harness.measure_repair_overhead_bounds(&recovery_stats)?,
+            "Sustained stress should maintain bounded repair overhead"
+        );
 
         let stats = harness.get_stats();
-        assert!(stats.repair_operations > 100, "Should perform many repair operations under sustained loss");
+        assert!(
+            stats.repair_operations > 100,
+            "Should perform many repair operations under sustained loss"
+        );
 
         // Verify efficiency metrics
-        let recovery_efficiency = recovery_stats.symbols_recovered as f32 / recovery_stats.repair_operations as f32;
-        assert!(recovery_efficiency > 0.5, "Recovery should maintain reasonable efficiency");
+        let recovery_efficiency =
+            recovery_stats.symbols_recovered as f32 / recovery_stats.repair_operations as f32;
+        assert!(
+            recovery_efficiency > 0.5,
+            "Recovery should maintain reasonable efficiency"
+        );
 
-        println!("Sustained Stress - {} blocks recovered in {:?}", 50, total_duration);
-        println!("Recovery efficiency: {:.2} symbols per repair operation", recovery_efficiency);
+        println!(
+            "Sustained Stress - {} blocks recovered in {:?}",
+            50, total_duration
+        );
+        println!(
+            "Recovery efficiency: {:.2} symbols per repair operation",
+            recovery_efficiency
+        );
         Ok(())
     }
 
@@ -506,22 +612,35 @@ mod integration_tests {
                 "selective-gen",
                 "selective-decoder",
                 config_id,
-                6
+                6,
             )?;
 
             // Each pattern should be recoverable, though with different efficiency
-            assert!(recovery_stats.recovery_successful || recovery_stats.partial_recovery_ratio > 0.8,
-                    "Pattern {} should achieve recovery or high partial recovery", config_id);
+            assert!(
+                recovery_stats.recovery_successful || recovery_stats.partial_recovery_ratio > 0.8,
+                "Pattern {} should achieve recovery or high partial recovery",
+                config_id
+            );
 
-            assert!(harness.measure_repair_overhead_bounds(&recovery_stats)?,
-                    "Pattern {} should maintain bounded overhead", config_id);
+            assert!(
+                harness.measure_repair_overhead_bounds(&recovery_stats)?,
+                "Pattern {} should maintain bounded overhead",
+                config_id
+            );
 
-            println!("Pattern {} - Success: {}, Partial Ratio: {:.2}",
-                     config_id, recovery_stats.recovery_successful, recovery_stats.partial_recovery_ratio);
+            println!(
+                "Pattern {} - Success: {}, Partial Ratio: {:.2}",
+                config_id,
+                recovery_stats.recovery_successful,
+                recovery_stats.partial_recovery_ratio
+            );
         }
 
         let stats = harness.get_stats();
-        println!("Selective Loss Edge Cases - Total high-loss recoveries: {}", stats.high_loss_recoveries);
+        println!(
+            "Selective Loss Edge Cases - Total high-loss recoveries: {}",
+            stats.high_loss_recoveries
+        );
         Ok(())
     }
 }

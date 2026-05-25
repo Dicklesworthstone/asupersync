@@ -7,9 +7,9 @@
 #[cfg(test)]
 mod tests {
     use super::super::{
-        config::{AtpGovernanceConfig, AtpCustomLimits},
         AtpFairnessCoordinator, AtpFairnessPolicy, AtpResourceBudget, AtpResourceDemand,
         AtpResourceGovernor, AtpTransferId,
+        config::{AtpCustomLimits, AtpGovernanceConfig},
     };
     use crate::atp::profiles::{AtpPowerProfile, AtpResourceProfile};
     use std::collections::BTreeMap;
@@ -26,9 +26,8 @@ mod tests {
         ];
 
         for (profile, expected_bandwidth) in test_cases {
-            let governor = AtpResourceGovernor::from_profile(
-                AtpResourceProfile::for_power_profile(profile)
-            );
+            let governor =
+                AtpResourceGovernor::from_profile(AtpResourceProfile::for_power_profile(profile));
 
             // Test a high bandwidth demand
             let high_demand = AtpResourceDemand {
@@ -41,14 +40,23 @@ mod tests {
             match expected_bandwidth {
                 None => {
                     // MaxSpeed should allow high bandwidth
-                    assert!(decision.allowed, "Profile {profile:?} should allow high bandwidth");
+                    assert!(
+                        decision.allowed,
+                        "Profile {profile:?} should allow high bandwidth"
+                    );
                 }
                 Some(limit) => {
                     if high_demand.bandwidth_bytes_per_second > limit {
-                        assert!(decision.rejected(), "Profile {profile:?} should reject bandwidth over {limit}");
+                        assert!(
+                            decision.rejected(),
+                            "Profile {profile:?} should reject bandwidth over {limit}"
+                        );
                         assert!(!decision.violations.is_empty());
                     } else {
-                        assert!(decision.allowed, "Profile {profile:?} should allow bandwidth under {limit}");
+                        assert!(
+                            decision.allowed,
+                            "Profile {profile:?} should allow bandwidth under {limit}"
+                        );
                     }
                 }
             }
@@ -58,9 +66,9 @@ mod tests {
     /// Test fairness coordinator equal sharing with multiple transfers.
     #[test]
     fn e2e_fairness_equal_share_multiple_transfers() {
-        let budget = AtpResourceBudget::from_profile(
-            AtpResourceProfile::for_power_profile(AtpPowerProfile::Balanced)
-        );
+        let budget = AtpResourceBudget::from_profile(AtpResourceProfile::for_power_profile(
+            AtpPowerProfile::Balanced,
+        ));
         let mut coordinator = AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::EqualShare);
 
         // Register three transfers with different demands
@@ -117,10 +125,11 @@ mod tests {
     /// Test first-come-first-served fairness policy prioritizes first transfer.
     #[test]
     fn e2e_fairness_fcfs_prioritizes_first_transfer() {
-        let budget = AtpResourceBudget::from_profile(
-            AtpResourceProfile::for_power_profile(AtpPowerProfile::Balanced)
-        );
-        let mut coordinator = AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::FirstComeFirstServed);
+        let budget = AtpResourceBudget::from_profile(AtpResourceProfile::for_power_profile(
+            AtpPowerProfile::Balanced,
+        ));
+        let mut coordinator =
+            AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::FirstComeFirstServed);
 
         // Register transfers in specific order (BTreeMap maintains order)
         coordinator.register_transfer("first".into(), AtpResourceDemand::default());
@@ -147,10 +156,11 @@ mod tests {
     /// Test size proportional fairness allocates by transfer size.
     #[test]
     fn e2e_fairness_size_proportional_allocation() {
-        let budget = AtpResourceBudget::from_profile(
-            AtpResourceProfile::for_power_profile(AtpPowerProfile::Balanced)
-        );
-        let mut coordinator = AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::SizeProportional);
+        let budget = AtpResourceBudget::from_profile(AtpResourceProfile::for_power_profile(
+            AtpPowerProfile::Balanced,
+        ));
+        let mut coordinator =
+            AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::SizeProportional);
 
         // Small transfer: 10 MiB
         coordinator.register_transfer(
@@ -183,9 +193,18 @@ mod tests {
         assert_eq!(allocations.len(), 3);
 
         // Total size: 100 MiB, so proportions are 10%, 30%, 60%
-        let small_alloc = allocations.iter().find(|a| a.transfer_id.0 == "small").unwrap();
-        let medium_alloc = allocations.iter().find(|a| a.transfer_id.0 == "medium").unwrap();
-        let large_alloc = allocations.iter().find(|a| a.transfer_id.0 == "large").unwrap();
+        let small_alloc = allocations
+            .iter()
+            .find(|a| a.transfer_id.0 == "small")
+            .unwrap();
+        let medium_alloc = allocations
+            .iter()
+            .find(|a| a.transfer_id.0 == "medium")
+            .unwrap();
+        let large_alloc = allocations
+            .iter()
+            .find(|a| a.transfer_id.0 == "large")
+            .unwrap();
 
         assert!((small_alloc.share_ratio - 0.1).abs() < 0.01);
         assert!((medium_alloc.share_ratio - 0.3).abs() < 0.01);
@@ -198,14 +217,17 @@ mod tests {
         let config = AtpGovernanceConfig::from_power_profile(AtpPowerProfile::Balanced)
             .with_custom_limits(AtpCustomLimits {
                 max_bandwidth_bytes_per_second: Some(64 * 1_048_576), // Override to 64 MiB/s
-                background_priority: Some(true), // Override to background
+                background_priority: Some(true),                      // Override to background
                 ..AtpCustomLimits::default()
             });
 
         let resolved_budget = config.resolve_budget();
 
         // Custom override should take precedence
-        assert_eq!(resolved_budget.max_bandwidth_bytes_per_second, Some(64 * 1_048_576));
+        assert_eq!(
+            resolved_budget.max_bandwidth_bytes_per_second,
+            Some(64 * 1_048_576)
+        );
         assert!(resolved_budget.background_priority);
 
         // Non-overridden values should come from balanced profile
@@ -225,7 +247,7 @@ mod tests {
         // Make a demand that should be rejected by battery saver
         let high_demand = AtpResourceDemand {
             bandwidth_bytes_per_second: 100 * 1_048_576, // Much higher than 16 MiB/s limit
-            repair_symbols_per_second: 2_048, // Higher than 512 limit
+            repair_symbols_per_second: 2_048,            // Higher than 512 limit
             ..AtpResourceDemand::default()
         };
 
@@ -244,9 +266,9 @@ mod tests {
     /// Test concurrent transfer lifecycle with fairness coordinator.
     #[test]
     fn e2e_fairness_coordinator_transfer_lifecycle() {
-        let budget = AtpResourceBudget::from_profile(
-            AtpResourceProfile::for_power_profile(AtpPowerProfile::Balanced)
-        );
+        let budget = AtpResourceBudget::from_profile(AtpResourceProfile::for_power_profile(
+            AtpPowerProfile::Balanced,
+        ));
         let mut coordinator = AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::EqualShare);
 
         // Start with no transfers
@@ -291,9 +313,9 @@ mod tests {
     /// Benchmark governance evaluation performance for high-frequency decisions.
     #[test]
     fn e2e_governance_performance_benchmark() {
-        let governor = AtpResourceGovernor::from_profile(
-            AtpResourceProfile::for_power_profile(AtpPowerProfile::Balanced)
-        );
+        let governor = AtpResourceGovernor::from_profile(AtpResourceProfile::for_power_profile(
+            AtpPowerProfile::Balanced,
+        ));
 
         let demand = AtpResourceDemand {
             bandwidth_bytes_per_second: 64 * 1_048_576,
@@ -311,6 +333,9 @@ mod tests {
         let duration = start.elapsed();
 
         // Should complete 10k evaluations in well under 1 second
-        assert!(duration.as_millis() < 1000, "Governance evaluation too slow: {duration:?}");
+        assert!(
+            duration.as_millis() < 1000,
+            "Governance evaluation too slow: {duration:?}"
+        );
     }
 }

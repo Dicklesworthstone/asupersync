@@ -7,10 +7,10 @@
 //! Exposes evidence with uncertainty, not omniscience.
 
 use crate::observability::metrics::{Counter, Gauge, Histogram};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
 
 /// Custom serde module for SystemTime serialization.
 mod system_time_serde {
@@ -78,44 +78,53 @@ impl NetworkTruthMetrics {
     pub fn new() -> Self {
         // RTT buckets: 0.1ms to 5s
         let rtt_buckets = vec![
-            0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05,
-            0.1, 0.25, 0.5, 1.0, 2.5, 5.0
+            0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
         ];
 
         // Latency buckets: 10μs to 1s
         let latency_buckets = vec![
-            0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01,
-            0.025, 0.05, 0.1, 0.25, 0.5, 1.0
+            0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0,
         ];
 
         // Delta buckets: -90% to +1000% (relay worse/better than direct)
         let delta_buckets = vec![
-            -0.9, -0.5, -0.2, -0.1, -0.05, 0.0, 0.05, 0.1, 0.2, 0.5,
-            1.0, 2.0, 5.0, 10.0
+            -0.9, -0.5, -0.2, -0.1, -0.05, 0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0,
         ];
 
         // ROI buckets: 0.1x to 100x
         let roi_buckets = vec![
-            0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0, 100.0
+            0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0, 100.0,
         ];
 
         Self {
             rtt: Arc::new(Histogram::new("atp_network_rtt_seconds", rtt_buckets)),
-            ack_delay: Arc::new(Histogram::new("atp_network_ack_delay_seconds", latency_buckets.clone())),
+            ack_delay: Arc::new(Histogram::new(
+                "atp_network_ack_delay_seconds",
+                latency_buckets.clone(),
+            )),
             loss_events: Arc::new(Counter::new("atp_network_loss_events_total")),
             pto_events: Arc::new(Counter::new("atp_network_pto_events_total")),
             congestion_window: Arc::new(Gauge::new("atp_network_cwnd_bytes")),
             bytes_in_flight: Arc::new(Gauge::new("atp_network_bytes_in_flight")),
             send_buffer_pressure: Arc::new(Gauge::new("atp_network_send_buffer_pressure_ratio")),
             recv_buffer_pressure: Arc::new(Gauge::new("atp_network_recv_buffer_pressure_ratio")),
-            disk_latency: Arc::new(Histogram::new("atp_disk_latency_seconds", latency_buckets.clone())),
+            disk_latency: Arc::new(Histogram::new(
+                "atp_disk_latency_seconds",
+                latency_buckets.clone(),
+            )),
             cpu_encode_pressure: Arc::new(Gauge::new("atp_cpu_encode_pressure_ratio")),
             cpu_decode_pressure: Arc::new(Gauge::new("atp_cpu_decode_pressure_ratio")),
             repair_roi: Arc::new(Histogram::new("atp_repair_roi_ratio", roi_buckets)),
-            relay_direct_delta: Arc::new(Histogram::new("atp_relay_direct_delta_ratio", delta_buckets)),
+            relay_direct_delta: Arc::new(Histogram::new(
+                "atp_relay_direct_delta_ratio",
+                delta_buckets,
+            )),
             migration_events: Arc::new(Counter::new("atp_path_migration_events_total")),
             cancellation_pressure: Arc::new(Gauge::new("atp_cancellation_pressure_ratio")),
-            obligation_drain_latency: Arc::new(Histogram::new("atp_obligation_drain_latency_seconds", latency_buckets)),
+            obligation_drain_latency: Arc::new(Histogram::new(
+                "atp_obligation_drain_latency_seconds",
+                latency_buckets,
+            )),
         }
     }
 }
@@ -307,7 +316,9 @@ impl NetworkTruthCollector {
 
     /// Records obligation drain latency.
     pub fn record_obligation_drain_latency(&self, latency: Duration) {
-        self.metrics.obligation_drain_latency.observe(latency.as_secs_f64());
+        self.metrics
+            .obligation_drain_latency
+            .observe(latency.as_secs_f64());
     }
 
     /// Updates path quality assessment.
@@ -319,11 +330,7 @@ impl NetworkTruthCollector {
 
     /// Gets current path quality for a given path.
     pub fn get_path_quality(&self, path_id: &str) -> Option<PathQuality> {
-        self.path_qualities
-            .lock()
-            .ok()?
-            .get(path_id)
-            .cloned()
+        self.path_qualities.lock().ok()?.get(path_id).cloned()
     }
 
     /// Updates the pressure model.

@@ -8,7 +8,7 @@ pub mod handoff_verifier;
 pub mod release_proof_aggregator;
 
 pub use handoff_verifier::{
-    BlockerInfo, BlockerType, BeadClaim, BeadStatus, CommitInfo, ConflictInfo, ConflictSeverity,
+    BeadClaim, BeadStatus, BlockerInfo, BlockerType, CommitInfo, ConflictInfo, ConflictSeverity,
     CoordinationRequirement, CoordinationType, DirtyPathSummary, DocReceipt, FileReservation,
     GitState, HandoffCapsule, HandoffDecision, HandoffVerifier, InboxState, MessagePriority,
     MessageRef, ProofCommand, ProofCommandType, RefreshTarget, RiskAssessment, RiskCategory,

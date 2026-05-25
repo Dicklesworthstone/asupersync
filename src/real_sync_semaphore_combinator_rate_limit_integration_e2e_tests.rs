@@ -12,22 +12,25 @@
 //! - Throughput regulation with multi-layer resource protection
 
 use crate::{
-    cx::{Cx, Scope},
-    sync::{
-        Semaphore, SemaphoreConfig, SemaphorePermit, SemaphoreStats,
-        WaitingStrategy, PermitAcquisition, ResourcePool,
-    },
     combinator::rate_limit::{
-        RateLimit, RateLimitConfig, RateLimitStrategy, TokenBucket, SlidingWindow,
-        RateLimitResult, RateLimitError, ThrottleConfig, BackpressureStrategy,
+        BackpressureStrategy, RateLimit, RateLimitConfig, RateLimitError, RateLimitResult,
+        RateLimitStrategy, SlidingWindow, ThrottleConfig, TokenBucket,
     },
-    types::{Budget, Outcome, TaskId},
-    time::{Duration, Instant, Sleep},
+    cx::{Cx, Scope},
     error::Error,
+    sync::{
+        PermitAcquisition, ResourcePool, Semaphore, SemaphoreConfig, SemaphorePermit,
+        SemaphoreStats, WaitingStrategy,
+    },
+    time::{Duration, Instant, Sleep},
+    types::{Budget, Outcome, TaskId},
 };
 use std::{
-    sync::{Arc, atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering}},
     collections::{HashMap, VecDeque},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
 };
 
 /// Controllable semaphore system integrated with rate limiting combinators
@@ -196,7 +199,9 @@ impl RateLimitedSemaphoreSystem {
             let current_waiting = tracker.waiting_task_count.fetch_add(1, Ordering::SeqCst);
 
             if current_waiting >= config.max_waiting_tasks {
-                tracker.max_waiting_tasks_reached.fetch_add(1, Ordering::SeqCst);
+                tracker
+                    .max_waiting_tasks_reached
+                    .fetch_add(1, Ordering::SeqCst);
                 self.decrement_waiting_count();
                 return Outcome::Err(Error::msg("Maximum waiting tasks limit reached"));
             }
@@ -204,16 +209,30 @@ impl RateLimitedSemaphoreSystem {
 
         let result = match strategy {
             AcquisitionStrategy::SemaphoreFirst => {
-                self.acquire_semaphore_then_rate_limit(cx, &correlation_id, tokens_required, timeout).await
+                self.acquire_semaphore_then_rate_limit(
+                    cx,
+                    &correlation_id,
+                    tokens_required,
+                    timeout,
+                )
+                .await
             }
             AcquisitionStrategy::RateLimitFirst => {
-                self.acquire_rate_limit_then_semaphore(cx, &correlation_id, tokens_required, timeout).await
+                self.acquire_rate_limit_then_semaphore(
+                    cx,
+                    &correlation_id,
+                    tokens_required,
+                    timeout,
+                )
+                .await
             }
             AcquisitionStrategy::Concurrent => {
-                self.acquire_concurrent(cx, &correlation_id, tokens_required, timeout).await
+                self.acquire_concurrent(cx, &correlation_id, tokens_required, timeout)
+                    .await
             }
             AcquisitionStrategy::Adaptive => {
-                self.acquire_adaptive(cx, &correlation_id, tokens_required, timeout).await
+                self.acquire_adaptive(cx, &correlation_id, tokens_required, timeout)
+                    .await
             }
         };
 
@@ -230,7 +249,9 @@ impl RateLimitedSemaphoreSystem {
                     Ok(_) => {
                         self.increment_stat("successful_acquisitions", 1);
                         let tracker = self.backpressure_tracker.lock().unwrap();
-                        tracker.successful_coordinations.fetch_add(1, Ordering::SeqCst);
+                        tracker
+                            .successful_coordinations
+                            .fetch_add(1, Ordering::SeqCst);
                         CorrelationStatus::BothAcquired
                     }
                     Err(_) => {
@@ -256,7 +277,8 @@ impl RateLimitedSemaphoreSystem {
         let start_time = Instant::now();
 
         // Phase 1: Acquire semaphore permit
-        let semaphore_permit = match self.resource_semaphore
+        let semaphore_permit = match self
+            .resource_semaphore
             .acquire_timeout(cx, timeout / 2)
             .await
         {
@@ -279,7 +301,8 @@ impl RateLimitedSemaphoreSystem {
 
         // Phase 2: Acquire rate limit token
         let remaining_timeout = timeout.saturating_sub(semaphore_time);
-        let rate_limit_token = match self.rate_limiter
+        let rate_limit_token = match self
+            .rate_limiter
             .acquire_tokens(cx, tokens_required, remaining_timeout)
             .await
         {
@@ -319,7 +342,8 @@ impl RateLimitedSemaphoreSystem {
         let start_time = Instant::now();
 
         // Phase 1: Acquire rate limit token
-        let rate_limit_token = match self.rate_limiter
+        let rate_limit_token = match self
+            .rate_limiter
             .acquire_tokens(cx, tokens_required, timeout / 2)
             .await
         {
@@ -339,7 +363,8 @@ impl RateLimitedSemaphoreSystem {
 
         // Phase 2: Acquire semaphore permit
         let remaining_timeout = timeout.saturating_sub(rate_limit_time);
-        let semaphore_permit = match self.resource_semaphore
+        let semaphore_permit = match self
+            .resource_semaphore
             .acquire_timeout(cx, remaining_timeout)
             .await
         {
@@ -384,13 +409,13 @@ impl RateLimitedSemaphoreSystem {
 
         // Launch both acquisitions concurrently
         let semaphore_future = self.resource_semaphore.acquire_timeout(cx, timeout);
-        let rate_limit_future = self.rate_limiter.acquire_tokens(cx, tokens_required, timeout);
+        let rate_limit_future = self
+            .rate_limiter
+            .acquire_tokens(cx, tokens_required, timeout);
 
         // Wait for both to complete
-        let (semaphore_result, rate_limit_result) = tokio::join!(
-            semaphore_future,
-            rate_limit_future
-        );
+        let (semaphore_result, rate_limit_result) =
+            tokio::join!(semaphore_future, rate_limit_future);
 
         let semaphore_permit = match semaphore_result {
             Outcome::Ok(permit) => {
@@ -400,7 +425,10 @@ impl RateLimitedSemaphoreSystem {
             Outcome::Err(e) => {
                 let tracker = self.backpressure_tracker.lock().unwrap();
                 tracker.semaphore_denials.fetch_add(1, Ordering::SeqCst);
-                return Err(Error::msg(format!("Concurrent semaphore acquisition failed: {}", e)));
+                return Err(Error::msg(format!(
+                    "Concurrent semaphore acquisition failed: {}",
+                    e
+                )));
             }
             Outcome::Cancelled => {
                 return Err(Error::msg("Concurrent semaphore acquisition cancelled"));
@@ -418,7 +446,10 @@ impl RateLimitedSemaphoreSystem {
                 let tracker = self.backpressure_tracker.lock().unwrap();
                 tracker.rate_limit_denials.fetch_add(1, Ordering::SeqCst);
                 tracker.combined_denials.fetch_add(1, Ordering::SeqCst);
-                return Err(Error::msg(format!("Concurrent rate limit acquisition failed: {}", e)));
+                return Err(Error::msg(format!(
+                    "Concurrent rate limit acquisition failed: {}",
+                    e
+                )));
             }
         };
 
@@ -446,26 +477,35 @@ impl RateLimitedSemaphoreSystem {
         let strategy = self.choose_adaptive_strategy().await;
 
         let tracker = self.backpressure_tracker.lock().unwrap();
-        tracker.adaptive_strategy_changes.fetch_add(1, Ordering::SeqCst);
+        tracker
+            .adaptive_strategy_changes
+            .fetch_add(1, Ordering::SeqCst);
 
         match strategy {
             AcquisitionStrategy::SemaphoreFirst => {
-                self.acquire_semaphore_then_rate_limit(cx, correlation_id, tokens_required, timeout).await
+                self.acquire_semaphore_then_rate_limit(cx, correlation_id, tokens_required, timeout)
+                    .await
             }
             AcquisitionStrategy::RateLimitFirst => {
-                self.acquire_rate_limit_then_semaphore(cx, correlation_id, tokens_required, timeout).await
+                self.acquire_rate_limit_then_semaphore(cx, correlation_id, tokens_required, timeout)
+                    .await
             }
             AcquisitionStrategy::Concurrent => {
-                self.acquire_concurrent(cx, correlation_id, tokens_required, timeout).await
+                self.acquire_concurrent(cx, correlation_id, tokens_required, timeout)
+                    .await
             }
             AcquisitionStrategy::Adaptive => {
                 // Fallback to concurrent if adaptive recursion
-                self.acquire_concurrent(cx, correlation_id, tokens_required, timeout).await
+                self.acquire_concurrent(cx, correlation_id, tokens_required, timeout)
+                    .await
             }
         }
     }
 
-    async fn determine_acquisition_strategy(&self, config: &CoordinationConfig) -> AcquisitionStrategy {
+    async fn determine_acquisition_strategy(
+        &self,
+        config: &CoordinationConfig,
+    ) -> AcquisitionStrategy {
         if config.adaptive_strategy_enabled {
             AcquisitionStrategy::Adaptive
         } else if config.enforce_semaphore_before_rate {
@@ -531,27 +571,39 @@ impl RateLimitedSemaphoreSystem {
     fn increment_stat(&self, stat_name: &str, count: u64) {
         let stats = self.integration_stats.lock().unwrap();
         match stat_name {
-            "total_acquisition_attempts" => stats.total_acquisition_attempts.fetch_add(count, Ordering::SeqCst),
-            "successful_acquisitions" => stats.successful_acquisitions.fetch_add(count, Ordering::SeqCst),
+            "total_acquisition_attempts" => stats
+                .total_acquisition_attempts
+                .fetch_add(count, Ordering::SeqCst),
+            "successful_acquisitions" => stats
+                .successful_acquisitions
+                .fetch_add(count, Ordering::SeqCst),
             "failed_acquisitions" => stats.failed_acquisitions.fetch_add(count, Ordering::SeqCst),
-            "timeout_acquisitions" => stats.timeout_acquisitions.fetch_add(count, Ordering::SeqCst),
+            "timeout_acquisitions" => stats
+                .timeout_acquisitions
+                .fetch_add(count, Ordering::SeqCst),
             _ => 0,
         };
     }
 
     fn add_semaphore_contention_time(&self, time_ms: u64) {
         let stats = self.integration_stats.lock().unwrap();
-        stats.semaphore_contention_time_ms.fetch_add(time_ms, Ordering::SeqCst);
+        stats
+            .semaphore_contention_time_ms
+            .fetch_add(time_ms, Ordering::SeqCst);
     }
 
     fn add_rate_limit_wait_time(&self, time_ms: u64) {
         let stats = self.integration_stats.lock().unwrap();
-        stats.rate_limit_wait_time_ms.fetch_add(time_ms, Ordering::SeqCst);
+        stats
+            .rate_limit_wait_time_ms
+            .fetch_add(time_ms, Ordering::SeqCst);
     }
 
     fn update_average_coordination_time(&self, time_ms: u64) {
         let stats = self.integration_stats.lock().unwrap();
-        stats.average_coordination_time_ms.store(time_ms, Ordering::SeqCst);
+        stats
+            .average_coordination_time_ms
+            .store(time_ms, Ordering::SeqCst);
     }
 
     /// Get comprehensive coordination statistics
@@ -560,13 +612,19 @@ impl RateLimitedSemaphoreSystem {
         let tracker = self.backpressure_tracker.lock().unwrap();
 
         SemaphoreRateLimitCoordinationStats {
-            total_acquisition_attempts: integration.total_acquisition_attempts.load(Ordering::SeqCst),
+            total_acquisition_attempts: integration
+                .total_acquisition_attempts
+                .load(Ordering::SeqCst),
             successful_acquisitions: integration.successful_acquisitions.load(Ordering::SeqCst),
             failed_acquisitions: integration.failed_acquisitions.load(Ordering::SeqCst),
             timeout_acquisitions: integration.timeout_acquisitions.load(Ordering::SeqCst),
-            semaphore_contention_time_ms: integration.semaphore_contention_time_ms.load(Ordering::SeqCst),
+            semaphore_contention_time_ms: integration
+                .semaphore_contention_time_ms
+                .load(Ordering::SeqCst),
             rate_limit_wait_time_ms: integration.rate_limit_wait_time_ms.load(Ordering::SeqCst),
-            average_coordination_time_ms: integration.average_coordination_time_ms.load(Ordering::SeqCst),
+            average_coordination_time_ms: integration
+                .average_coordination_time_ms
+                .load(Ordering::SeqCst),
             semaphore_denials: tracker.semaphore_denials.load(Ordering::SeqCst),
             rate_limit_denials: tracker.rate_limit_denials.load(Ordering::SeqCst),
             combined_denials: tracker.combined_denials.load(Ordering::SeqCst),
@@ -668,7 +726,10 @@ mod tests {
                 .await
                 .expect("Coordinated acquisition should succeed");
 
-            assert_eq!(coordinated_access.acquisition_strategy, AcquisitionStrategy::SemaphoreFirst);
+            assert_eq!(
+                coordinated_access.acquisition_strategy,
+                AcquisitionStrategy::SemaphoreFirst
+            );
             assert!(coordinated_access.total_acquisition_time < Duration::from_secs(1));
 
             // Access should work with both permit and token
@@ -684,7 +745,9 @@ mod tests {
             assert_eq!(stats.failed_acquisitions, 0);
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 
     #[tokio::test]
@@ -737,12 +800,14 @@ mod tests {
                 let request_id = format!("concurrent_test_{}", i);
 
                 let task = scope.spawn(&format!("acquire_{}", i), async move {
-                    system_ref.acquire_coordinated_access(
-                        cx,
-                        request_id,
-                        1, // Single token per request
-                        Duration::from_secs(5),
-                    ).await
+                    system_ref
+                        .acquire_coordinated_access(
+                            cx,
+                            request_id,
+                            1, // Single token per request
+                            Duration::from_secs(5),
+                        )
+                        .await
                 })?;
 
                 acquisition_tasks.push(task);
@@ -776,8 +841,14 @@ mod tests {
             }
 
             // Should have some successful acquisitions and some backpressure failures
-            assert!(successful_acquisitions > 0, "Should have some successful acquisitions");
-            assert!(failed_acquisitions > 0, "Should have some backpressure failures");
+            assert!(
+                successful_acquisitions > 0,
+                "Should have some successful acquisitions"
+            );
+            assert!(
+                failed_acquisitions > 0,
+                "Should have some backpressure failures"
+            );
 
             // Release acquired accesses
             for access in coordinated_accesses {
@@ -787,7 +858,10 @@ mod tests {
             // Verify backpressure coordination statistics
             let stats = coordination_system.get_coordination_stats();
             assert_eq!(stats.total_acquisition_attempts, attempt_count as u64);
-            assert_eq!(stats.successful_acquisitions, successful_acquisitions as u64);
+            assert_eq!(
+                stats.successful_acquisitions,
+                successful_acquisitions as u64
+            );
             assert_eq!(stats.failed_acquisitions, failed_acquisitions as u64);
 
             // Should have experienced some form of denial due to limited resources
@@ -801,7 +875,9 @@ mod tests {
             println!("- Combined denials: {}", stats.combined_denials);
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 
     #[tokio::test]
@@ -855,12 +931,14 @@ mod tests {
                 let request_id = format!("warmup_{}", i);
 
                 let handle = scope.spawn(&format!("warmup_{}", i), async move {
-                    let result = system_ref.acquire_coordinated_access(
-                        cx,
-                        request_id,
-                        2, // Higher token requirement to create rate limit pressure
-                        Duration::from_secs(3),
-                    ).await;
+                    let result = system_ref
+                        .acquire_coordinated_access(
+                            cx,
+                            request_id,
+                            2, // Higher token requirement to create rate limit pressure
+                            Duration::from_secs(3),
+                        )
+                        .await;
 
                     // Hold access briefly to create contention
                     if result.is_ok() {
@@ -888,12 +966,14 @@ mod tests {
                 let request_id = format!("adaptive_test_{}", i);
 
                 let task = scope.spawn(&format!("adaptive_{}", i), async move {
-                    system_ref.acquire_coordinated_access(
-                        cx,
-                        request_id,
-                        1, // Lower token requirement
-                        Duration::from_secs(4),
-                    ).await
+                    system_ref
+                        .acquire_coordinated_access(
+                            cx,
+                            request_id,
+                            1, // Lower token requirement
+                            Duration::from_secs(4),
+                        )
+                        .await
                 })?;
 
                 adaptive_tasks.push(task);
@@ -914,17 +994,28 @@ mod tests {
 
             // Verify adaptive strategy behavior
             let stats = coordination_system.get_coordination_stats();
-            assert!(stats.adaptive_strategy_changes > 0, "Should have triggered adaptive strategy changes");
-            assert!(adaptive_successful > 0, "Should have some successful adaptive acquisitions");
+            assert!(
+                stats.adaptive_strategy_changes > 0,
+                "Should have triggered adaptive strategy changes"
+            );
+            assert!(
+                adaptive_successful > 0,
+                "Should have some successful adaptive acquisitions"
+            );
 
             println!("Adaptive strategy test results:");
             println!("- Adaptive successful: {}", adaptive_successful);
             println!("- Adaptive failed: {}", adaptive_failed);
             println!("- Strategy changes: {}", stats.adaptive_strategy_changes);
             println!("- Total attempts: {}", stats.total_acquisition_attempts);
-            println!("- Successful coordinations: {}", stats.successful_coordinations);
+            println!(
+                "- Successful coordinations: {}",
+                stats.successful_coordinations
+            );
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 }

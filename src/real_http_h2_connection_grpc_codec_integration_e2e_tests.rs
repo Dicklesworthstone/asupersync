@@ -39,28 +39,28 @@
 #![allow(dead_code, unused_variables, unused_imports)]
 
 use crate::{
+    bytes::{BufMut, Bytes, BytesMut},
+    codec::{Decoder, Encoder},
     cx::{Cx, Scope},
-    http::h2::{
-        connection::{FrameCodec, ConnectionState, CLIENT_PREFACE},
-        frame::{Frame, FrameType, DataFrame, FrameHeader, StreamId},
-        error::H2Error,
-    },
+    error::Error,
     grpc::{
-        codec::{GrpcCodec, GrpcMessage, MESSAGE_HEADER_SIZE, DEFAULT_MAX_MESSAGE_SIZE},
+        codec::{DEFAULT_MAX_MESSAGE_SIZE, GrpcCodec, GrpcMessage, MESSAGE_HEADER_SIZE},
         status::GrpcError,
     },
-    codec::{Decoder, Encoder},
-    bytes::{Bytes, BytesMut, BufMut},
-    runtime::{Runtime, LabRuntime},
-    time::{sleep, timeout, Duration, Instant},
-    types::{Outcome, Budget},
-    error::Error,
+    http::h2::{
+        connection::{CLIENT_PREFACE, ConnectionState, FrameCodec},
+        error::H2Error,
+        frame::{DataFrame, Frame, FrameHeader, FrameType, StreamId},
+    },
+    runtime::{LabRuntime, Runtime},
     test_utils::{TestResult, with_test_runtime},
+    time::{Duration, Instant, sleep, timeout},
+    types::{Budget, Outcome},
 };
 use std::{
     collections::{HashMap, VecDeque},
-    sync::atomic::{AtomicU64, AtomicU32, AtomicUsize, AtomicBool, Ordering},
     fmt,
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 
 /// Types of HTTP/2 ↔ gRPC integration scenarios
@@ -179,7 +179,10 @@ impl TranscodingTestHarness {
     }
 
     /// Encode gRPC messages into HTTP/2 DATA frames
-    pub fn encode_messages_to_frames(&mut self, messages: Vec<Bytes>) -> Result<Vec<Frame>, Box<dyn std::error::Error>> {
+    pub fn encode_messages_to_frames(
+        &mut self,
+        messages: Vec<Bytes>,
+    ) -> Result<Vec<Frame>, Box<dyn std::error::Error>> {
         let start_time = Instant::now();
         let mut frames = Vec::new();
         let mut frame_buffer = BytesMut::new();
@@ -262,7 +265,9 @@ impl TranscodingTestHarness {
         }
 
         // Handle remaining buffer for multi-message scenario
-        if matches!(self.config.scenario, TranscodingScenario::MultiMessageFrame) && !frame_buffer.is_empty() {
+        if matches!(self.config.scenario, TranscodingScenario::MultiMessageFrame)
+            && !frame_buffer.is_empty()
+        {
             let frame = Frame::Data(DataFrame {
                 stream_id: self.config.stream_id,
                 data: frame_buffer.freeze(),
@@ -278,7 +283,10 @@ impl TranscodingTestHarness {
     }
 
     /// Decode HTTP/2 frames back to gRPC messages
-    pub fn decode_frames_to_messages(&mut self, frames: Vec<Frame>) -> Result<Vec<GrpcMessage>, Box<dyn std::error::Error>> {
+    pub fn decode_frames_to_messages(
+        &mut self,
+        frames: Vec<Frame>,
+    ) -> Result<Vec<GrpcMessage>, Box<dyn std::error::Error>> {
         let mut messages = Vec::new();
         let mut accumulated_data = BytesMut::new();
 
@@ -319,7 +327,8 @@ impl TranscodingTestHarness {
         let original_total_size: usize = original_messages.iter().map(|m| m.len()).sum();
 
         // Encode messages to HTTP/2 frames
-        let frames = self.encode_messages_to_frames(original_messages.clone())
+        let frames = self
+            .encode_messages_to_frames(original_messages.clone())
             .map_err(|e| format!("Failed to encode messages to frames: {e}"))?;
 
         // Verify frame structure
@@ -328,14 +337,18 @@ impl TranscodingTestHarness {
         for frame in &frames {
             if let Frame::Data(data_frame) = frame {
                 assert_eq!(data_frame.stream_id, self.config.stream_id);
-                assert!(!data_frame.data.is_empty(), "Frame data should not be empty");
+                assert!(
+                    !data_frame.data.is_empty(),
+                    "Frame data should not be empty"
+                );
             }
         }
 
         // Simulate HTTP/2 frame codec round-trip
         let mut frame_bytes = BytesMut::new();
         for frame in &frames {
-            self.frame_codec.encode(frame, &mut frame_bytes)
+            self.frame_codec
+                .encode(frame, &mut frame_bytes)
                 .map_err(|e| format!("Failed to encode frame: {e}"))?;
         }
 
@@ -343,15 +356,19 @@ impl TranscodingTestHarness {
         let mut frame_decode_buffer = frame_bytes.clone();
 
         while !frame_decode_buffer.is_empty() {
-            match self.frame_codec.decode(&mut frame_decode_buffer)
-                .map_err(|e| format!("Failed to decode frame: {e}"))? {
+            match self
+                .frame_codec
+                .decode(&mut frame_decode_buffer)
+                .map_err(|e| format!("Failed to decode frame: {e}"))?
+            {
                 Some(frame) => decoded_frames.push(frame),
                 None => break, // Need more data
             }
         }
 
         // Decode frames back to gRPC messages
-        let decoded_messages = self.decode_frames_to_messages(decoded_frames)
+        let decoded_messages = self
+            .decode_frames_to_messages(decoded_frames)
             .map_err(|e| format!("Failed to decode frames to messages: {e}"))?;
 
         // Verify round-trip integrity
@@ -361,16 +378,18 @@ impl TranscodingTestHarness {
             "Message count should be preserved"
         );
 
-        for (i, (original, decoded)) in original_messages.iter().zip(decoded_messages.iter()).enumerate() {
+        for (i, (original, decoded)) in original_messages
+            .iter()
+            .zip(decoded_messages.iter())
+            .enumerate()
+        {
             assert_eq!(
-                original,
-                &decoded.data,
+                original, &decoded.data,
                 "Message {i} data should be preserved"
             );
 
             assert_eq!(
-                decoded.compressed,
-                self.config.enable_compression,
+                decoded.compressed, self.config.enable_compression,
                 "Message {i} compression flag should match config"
             );
         }
@@ -378,15 +397,18 @@ impl TranscodingTestHarness {
         // Calculate compression ratio if compression was enabled
         if self.config.enable_compression {
             let compressed_size = self.result.total_bytes;
-            self.result.compression_ratio = Some(compressed_size as f64 / original_total_size as f64);
+            self.result.compression_ratio =
+                Some(compressed_size as f64 / original_total_size as f64);
         }
 
         println!("✓ HTTP/2 ↔ gRPC transcoding test passed");
         println!("  Scenario: {:?}", self.config.scenario);
-        println!("  Messages: {} → {} frames → {} messages",
-                 self.result.messages_encoded,
-                 self.result.frames_generated,
-                 self.result.messages_decoded);
+        println!(
+            "  Messages: {} → {} frames → {} messages",
+            self.result.messages_encoded,
+            self.result.frames_generated,
+            self.result.messages_decoded
+        );
         println!("  Total bytes: {}", self.result.total_bytes);
         println!("  Timing: {:?}", self.result.timing);
 
@@ -422,7 +444,10 @@ pub async fn test_error_boundaries() -> TestResult {
         let frames = vec![frame];
         let result = harness.decode_frames_to_messages(frames);
 
-        assert!(result.is_err(), "Should fail on invalid gRPC compression flag");
+        assert!(
+            result.is_err(),
+            "Should fail on invalid gRPC compression flag"
+        );
         println!("✓ Error boundary test 1 passed: Invalid compression flag rejected");
     }
 
@@ -445,7 +470,10 @@ pub async fn test_error_boundaries() -> TestResult {
         let mut accumulated_data = BytesMut::from(frame_data.as_ref());
         let result = small_codec.decode(&mut accumulated_data);
 
-        assert!(result.is_err(), "Should fail on message size exceeding codec limit");
+        assert!(
+            result.is_err(),
+            "Should fail on message size exceeding codec limit"
+        );
         println!("✓ Error boundary test 2 passed: Oversized message rejected");
     }
 
@@ -585,7 +613,15 @@ mod tests {
             // Verify gRPC encoding structure
             assert_eq!(grpc_buffer.len(), MESSAGE_HEADER_SIZE + test_data.len());
             assert_eq!(grpc_buffer[0], 0); // Uncompressed flag
-            assert_eq!(u32::from_be_bytes([grpc_buffer[1], grpc_buffer[2], grpc_buffer[3], grpc_buffer[4]]), test_data.len() as u32);
+            assert_eq!(
+                u32::from_be_bytes([
+                    grpc_buffer[1],
+                    grpc_buffer[2],
+                    grpc_buffer[3],
+                    grpc_buffer[4]
+                ]),
+                test_data.len() as u32
+            );
 
             // Wrap in HTTP/2 DATA frame
             let frame = Frame::Data(DataFrame {
@@ -636,7 +672,9 @@ mod tests {
             let mut combined_buffer = BytesMut::new();
             for msg_data in &messages {
                 let grpc_message = GrpcMessage::new(msg_data.clone());
-                grpc_codec.encode(grpc_message, &mut combined_buffer).unwrap();
+                grpc_codec
+                    .encode(grpc_message, &mut combined_buffer)
+                    .unwrap();
             }
 
             // Decode messages from combined buffer
@@ -652,7 +690,8 @@ mod tests {
 
             // Verify all messages were correctly segmented
             assert_eq!(decoded_messages.len(), messages.len());
-            for (i, (original, decoded)) in messages.iter().zip(decoded_messages.iter()).enumerate() {
+            for (i, (original, decoded)) in messages.iter().zip(decoded_messages.iter()).enumerate()
+            {
                 assert_eq!(original, &decoded.data, "Message {i} should match");
             }
 

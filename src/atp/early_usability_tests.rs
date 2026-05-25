@@ -3,13 +3,13 @@
 //! Tests prefix range tracking, gap rejection, invalidation after manifest mismatch,
 //! cancellation, resume, sparse ranges, and consumer API invariants per ATP-E4 acceptance criteria.
 
+use crate::atp::sdk::{DirectoryHandle, StreamHandle};
 use crate::atp::stream_object::{
     ConsumptionPolicy, StreamObject, StreamPrefixProofArtifact, StreamPrefixRecord,
 };
 use crate::atp::sync::{
     DirectoryEarlyUsabilityPolicy, DirectoryFinalCommitState, DirectoryManifest, DirectoryPath,
 };
-use crate::atp::sdk::{DirectoryHandle, StreamHandle};
 use crate::types::{Time, TraceId};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,7 +30,11 @@ fn test_verified_prefix_tracking() {
 
     // Gap should stop prefix growth
     stream.mark_chunk_verified(256, 64);
-    assert_eq!(stream.verified_prefix_end(), 128, "Gap should prevent prefix extension");
+    assert_eq!(
+        stream.verified_prefix_end(),
+        128,
+        "Gap should prevent prefix extension"
+    );
 }
 
 /// Test gap rejection in prefix exposure
@@ -39,7 +43,7 @@ fn test_gap_rejection_in_prefix() {
     let mut stream = StreamObject::new("test-stream", 1000);
 
     // Create verified chunks with gaps
-    stream.mark_chunk_verified(0, 100);   // 0-100
+    stream.mark_chunk_verified(0, 100); // 0-100
     stream.mark_chunk_verified(200, 100); // 200-300 (gap 100-200)
     stream.mark_chunk_verified(400, 100); // 400-500 (gap 300-400)
 
@@ -51,7 +55,10 @@ fn test_gap_rejection_in_prefix() {
     assert_eq!(stream.verified_prefix_end(), 300);
 
     // Still gap at 300-400
-    assert_eq!(stream.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly), 300);
+    assert_eq!(
+        stream.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly),
+        300
+    );
 
     // Fill final gap
     stream.mark_chunk_verified(300, 100);
@@ -104,7 +111,10 @@ fn test_cancellation_preserves_prefix_state() {
     let result = std::panic::catch_unwind(|| {
         stream.mark_chunk_verified(200, 100);
     });
-    assert!(result.is_err(), "Should not allow new verifications after cancellation");
+    assert!(
+        result.is_err(),
+        "Should not allow new verifications after cancellation"
+    );
 }
 
 /// Test resume scenarios maintain prefix safety
@@ -141,10 +151,10 @@ fn test_sparse_range_handling() {
 
     // Create sparse verified ranges
     let ranges = vec![
-        (0, 100),       // Start
-        (500, 200),     // Middle gap
-        (1500, 300),    // Larger gap
-        (9000, 500),    // Near end
+        (0, 100),    // Start
+        (500, 200),  // Middle gap
+        (1500, 300), // Larger gap
+        (9000, 500), // Near end
     ];
 
     for (offset, size) in ranges {
@@ -156,7 +166,10 @@ fn test_sparse_range_handling() {
 
     // Policy should not allow gaps to be exposed as contiguous
     let safe_end = stream.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly);
-    assert_eq!(safe_end, 100, "Sparse ranges should not be exposed as contiguous");
+    assert_eq!(
+        safe_end, 100,
+        "Sparse ranges should not be exposed as contiguous"
+    );
 
     // Fill gaps sequentially
     stream.mark_chunk_verified(100, 400); // Fill to connect with 500-700
@@ -172,12 +185,20 @@ fn test_directory_small_file_early_exposure() {
     let mut manifest = DirectoryManifest::new();
 
     // Add mixed file sizes
-    manifest.add_file("small.txt", "content1", Some(50)).unwrap();
-    manifest.add_file("medium.txt", "content2", Some(5000)).unwrap();
-    manifest.add_file("large.bin", "content3", Some(50000)).unwrap();
+    manifest
+        .add_file("small.txt", "content1", Some(50))
+        .unwrap();
+    manifest
+        .add_file("medium.txt", "content2", Some(5000))
+        .unwrap();
+    manifest
+        .add_file("large.bin", "content3", Some(50000))
+        .unwrap();
 
-    let verified_content = vec!["content1", "content2"].into_iter()
-        .map(String::from).collect::<BTreeSet<_>>();
+    let verified_content = vec!["content1", "content2"]
+        .into_iter()
+        .map(String::from)
+        .collect::<BTreeSet<_>>();
 
     let policy = DirectoryEarlyUsabilityPolicy {
         expose_metadata_before_final: true,
@@ -193,24 +214,36 @@ fn test_directory_small_file_early_exposure() {
     );
 
     // Small verified file should be exposed early
-    assert!(report.entries.iter().any(|e|
-        e.path.to_string() == "small.txt" && e.content_visible
-    ));
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|e| e.path.to_string() == "small.txt" && e.content_visible)
+    );
 
     // Medium verified file should be withheld (above threshold)
-    assert!(report.entries.iter().any(|e|
-        e.path.to_string() == "medium.txt" && !e.content_visible
-    ));
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|e| e.path.to_string() == "medium.txt" && !e.content_visible)
+    );
 
     // Large unverified file should be withheld
-    assert!(report.entries.iter().any(|e|
-        e.path.to_string() == "large.bin" && !e.content_visible
-    ));
+    assert!(
+        report
+            .entries
+            .iter()
+            .any(|e| e.path.to_string() == "large.bin" && !e.content_visible)
+    );
 
     // Safety caveat should warn about pending final commit
-    assert!(report.safety_caveats.iter().any(|c|
-        c.contains("final directory commit not complete")
-    ));
+    assert!(
+        report
+            .safety_caveats
+            .iter()
+            .any(|c| c.contains("final directory commit not complete"))
+    );
 }
 
 /// Test consumer API invariants
@@ -229,8 +262,14 @@ fn test_consumer_api_invariants() {
     assert!(verified_end <= provisional_end);
 
     // Multiple calls should be consistent
-    assert_eq!(verified_end, stream.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly));
-    assert_eq!(provisional_end, stream.consumable_prefix_end(ConsumptionPolicy::AllowProvisional));
+    assert_eq!(
+        verified_end,
+        stream.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly)
+    );
+    assert_eq!(
+        provisional_end,
+        stream.consumable_prefix_end(ConsumptionPolicy::AllowProvisional)
+    );
 
     // API should be safe under concurrent access (within single thread test)
     for _ in 0..100 {
@@ -265,8 +304,8 @@ fn test_stream_prefix_proof_artifact_serialization() {
 
     // Test serialization round-trip
     let json = serde_json::to_string(&artifact).expect("serialize artifact");
-    let deserialized: StreamPrefixProofArtifact = serde_json::from_str(&json)
-        .expect("deserialize artifact");
+    let deserialized: StreamPrefixProofArtifact =
+        serde_json::from_str(&json).expect("deserialize artifact");
 
     assert_eq!(artifact.schema_version, deserialized.schema_version);
     assert_eq!(artifact.records.len(), deserialized.records.len());
@@ -299,16 +338,21 @@ fn test_large_stream_policy_enforcement() {
     assert!(provisional_end >= verified_end);
 
     // Large files should have explicit policy checks
-    assert!(stream.requires_explicit_prefix_policy(),
-        "Large streams should require explicit policy");
+    assert!(
+        stream.requires_explicit_prefix_policy(),
+        "Large streams should require explicit policy"
+    );
 
     // Policy should prevent accidental exposure of unverified gaps
     let consumption_allowed = stream.check_consumption_policy(
         0,
         2_000_000, // Request more than verified
-        ConsumptionPolicy::VerifiedOnly
+        ConsumptionPolicy::VerifiedOnly,
     );
-    assert!(!consumption_allowed, "Should reject consumption beyond verified range");
+    assert!(
+        !consumption_allowed,
+        "Should reject consumption beyond verified range"
+    );
 }
 
 /// Test directory metadata exposure with final commit separation
@@ -316,9 +360,13 @@ fn test_large_stream_policy_enforcement() {
 fn test_directory_metadata_final_commit_separation() {
     let mut manifest = DirectoryManifest::new();
     manifest.add_file("doc.md", "content1", Some(1000)).unwrap();
-    manifest.add_file("config.json", "content2", Some(200)).unwrap();
+    manifest
+        .add_file("config.json", "content2", Some(200))
+        .unwrap();
 
-    let verified = vec!["content1".to_string()].into_iter().collect::<BTreeSet<_>>();
+    let verified = vec!["content1".to_string()]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
 
     let policy = DirectoryEarlyUsabilityPolicy {
         expose_metadata_before_final: true,
@@ -343,16 +391,24 @@ fn test_directory_metadata_final_commit_separation() {
     );
 
     // Both reports should separate early usable state from final commit state
-    assert!(pending_report.safety_caveats.iter().any(|c|
-        c.contains("final directory commit not complete")
-    ));
+    assert!(
+        pending_report
+            .safety_caveats
+            .iter()
+            .any(|c| c.contains("final directory commit not complete"))
+    );
 
-    assert!(!committed_report.safety_caveats.iter().any(|c|
-        c.contains("final directory commit not complete")
-    ));
+    assert!(
+        !committed_report
+            .safety_caveats
+            .iter()
+            .any(|c| c.contains("final directory commit not complete"))
+    );
 
     // Verified small file should be exposed in committed state
-    let config_entry_committed = committed_report.entries.iter()
+    let config_entry_committed = committed_report
+        .entries
+        .iter()
         .find(|e| e.path.to_string() == "config.json");
     assert!(config_entry_committed.is_some());
 
@@ -370,10 +426,15 @@ fn test_directory_metadata_final_commit_separation() {
         "test-strict",
     );
 
-    let config_entry_strict = strict_pending.entries.iter()
+    let config_entry_strict = strict_pending
+        .entries
+        .iter()
         .find(|e| e.path.to_string() == "config.json");
     if let Some(entry) = config_entry_strict {
-        assert!(!entry.content_visible, "Strict policy should withhold content when pending");
+        assert!(
+            !entry.content_visible,
+            "Strict policy should withhold content when pending"
+        );
     }
 }
 
@@ -381,8 +442,8 @@ fn test_directory_metadata_final_commit_separation() {
 mod integration_tests {
     use super::*;
     use crate::atp::sdk::{DirectoryHandle, StreamHandle};
-    use tempfile::TempDir;
     use std::fs;
+    use tempfile::TempDir;
 
     /// Integration test for directory handle early usability reporting
     #[test]
@@ -396,20 +457,23 @@ mod integration_tests {
         let handle = DirectoryHandle::new(temp_dir.path()).expect("create directory handle");
 
         // Test early usability report
-        let report = handle.early_usability_report(
-            ConsumptionPolicy::VerifiedOnly,
-            "integration-test-replay",
-        );
+        let report = handle
+            .early_usability_report(ConsumptionPolicy::VerifiedOnly, "integration-test-replay");
 
-        assert!(!report.metadata_paths.is_empty(), "Should have metadata paths");
-        assert!(report.replay_pointer.contains("integration-test"), "Should include replay pointer");
+        assert!(
+            !report.metadata_paths.is_empty(),
+            "Should have metadata paths"
+        );
+        assert!(
+            report.replay_pointer.contains("integration-test"),
+            "Should include replay pointer"
+        );
     }
 
     /// Integration test for stream handle prefix consumption
     #[test]
     fn test_stream_handle_prefix_consumption_integration() {
-        let handle = StreamHandle::new("test-stream", 10000)
-            .expect("create stream handle");
+        let handle = StreamHandle::new("test-stream", 10000).expect("create stream handle");
 
         // Build verified prefix
         handle.mark_chunk_verified(0, 1000);
@@ -420,10 +484,17 @@ mod integration_tests {
         assert_eq!(verified_end, 2000, "Should have 2KB verified prefix");
 
         // Test consumption policy enforcement
-        let can_consume_verified = handle.can_consume_range(0, 2000, ConsumptionPolicy::VerifiedOnly);
-        assert!(can_consume_verified, "Should allow consumption of verified range");
+        let can_consume_verified =
+            handle.can_consume_range(0, 2000, ConsumptionPolicy::VerifiedOnly);
+        assert!(
+            can_consume_verified,
+            "Should allow consumption of verified range"
+        );
 
         let can_consume_beyond = handle.can_consume_range(0, 3000, ConsumptionPolicy::VerifiedOnly);
-        assert!(!can_consume_beyond, "Should reject consumption beyond verified range");
+        assert!(
+            !can_consume_beyond,
+            "Should reject consumption beyond verified range"
+        );
     }
 }

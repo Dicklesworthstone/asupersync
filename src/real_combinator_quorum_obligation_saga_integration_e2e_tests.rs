@@ -27,20 +27,20 @@ mod tests {
     )]
 
     use crate::{
-        combinator::quorum::{QuorumError},
+        combinator::quorum::QuorumError,
         cx::Cx,
         error::Result,
         obligation::{
-            saga::{Lattice, SagaPlan, SagaStep, SagaBatch, MonotoneSagaExecutor},
             calm::Monotonicity,
+            saga::{Lattice, MonotoneSagaExecutor, SagaBatch, SagaPlan, SagaStep},
         },
         runtime::{Runtime, spawn},
         sync::Arc,
         time::{Duration, sleep},
         types::{Budget, Outcome},
     };
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     // ────────────────────────────────────────────────────────────────────────────────
     // Quorum + Saga Integration Test Framework
@@ -122,7 +122,8 @@ mod tests {
             let success = random_value < self.operation_success_rate;
 
             if success {
-                let new_value = self.state.fetch_add(operation_value, Ordering::Relaxed) + operation_value;
+                let new_value =
+                    self.state.fetch_add(operation_value, Ordering::Relaxed) + operation_value;
                 ReplicaOperationResult {
                     replica_id: self.id,
                     success: true,
@@ -139,14 +140,21 @@ mod tests {
             }
         }
 
-        async fn compensate_operation(&self, compensation_token: &str, original_value: u64) -> Result<()> {
+        async fn compensate_operation(
+            &self,
+            compensation_token: &str,
+            original_value: u64,
+        ) -> Result<()> {
             // Reverse the operation
             self.state.fetch_sub(original_value, Ordering::Relaxed);
 
             // Log the compensation
             {
                 let mut log = self.compensation_log.lock().unwrap();
-                log.push(format!("COMPENSATED: {} (value: {})", compensation_token, original_value));
+                log.push(format!(
+                    "COMPENSATED: {} (value: {})",
+                    compensation_token, original_value
+                ));
             }
 
             Ok(())
@@ -182,7 +190,9 @@ mod tests {
             cx: &Cx,
             operation_value: u64,
         ) -> Result<Outcome<ReplicaResultLattice, String>> {
-            self.stats.quorum_votes_attempted.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .quorum_votes_attempted
+                .fetch_add(1, Ordering::Relaxed);
 
             // Execute operations on all replicas concurrently
             let mut replica_tasks = Vec::new();
@@ -191,7 +201,8 @@ mod tests {
                 let task = spawn(cx, async move {
                     let result = replica_clone.execute_operation(operation_value).await;
                     (replica_clone, result)
-                }).await;
+                })
+                .await;
                 replica_tasks.push(task);
             }
 
@@ -205,9 +216,13 @@ mod tests {
                         results.push((replica, result.clone()));
                         if result.success {
                             successful_operations.push(result);
-                            self.stats.replica_partial_successes.fetch_add(1, Ordering::Relaxed);
+                            self.stats
+                                .replica_partial_successes
+                                .fetch_add(1, Ordering::Relaxed);
                         }
-                        self.stats.replica_operations_attempted.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .replica_operations_attempted
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                     Err(_) => {
                         // Task failed
@@ -230,10 +245,13 @@ mod tests {
             } else {
                 // Quorum failed - trigger saga compensation
                 self.stats.quorum_failures.fetch_add(1, Ordering::Relaxed);
-                self.stats.saga_compensations_triggered.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .saga_compensations_triggered
+                    .fetch_add(1, Ordering::Relaxed);
 
                 // Compensate all successful operations
-                let compensation_tasks = results.into_iter()
+                let compensation_tasks = results
+                    .into_iter()
                     .filter_map(|(replica, result)| {
                         if result.success && result.compensation_token.is_some() {
                             Some((replica, result.compensation_token.unwrap(), operation_value))
@@ -250,12 +268,16 @@ mod tests {
                             // Compensation successful
                         }
                         Err(_) => {
-                            self.stats.consistency_violations.fetch_add(1, Ordering::Relaxed);
+                            self.stats
+                                .consistency_violations
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
 
-                self.stats.saga_compensations_completed.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .saga_compensations_completed
+                    .fetch_add(1, Ordering::Relaxed);
 
                 Ok(Outcome::Err(format!(
                     "Quorum failed: {}/{} successes, compensated partial results",
@@ -265,16 +287,15 @@ mod tests {
             }
         }
 
-        async fn test_saga_compensation_ordering(
-            &self,
-            cx: &Cx,
-        ) -> Result<Vec<String>> {
+        async fn test_saga_compensation_ordering(&self, cx: &Cx) -> Result<Vec<String>> {
             // Test that compensation occurs in the correct order (reverse of execution)
             let operation_sequence = vec![10, 20, 30];
             let mut compensation_logs = Vec::new();
 
             for &op_value in &operation_sequence {
-                let _ = self.execute_quorum_with_saga_compensation(cx, op_value).await?;
+                let _ = self
+                    .execute_quorum_with_saga_compensation(cx, op_value)
+                    .await?;
 
                 // Brief pause to allow compensation to complete
                 sleep(Duration::from_millis(10)).await;
@@ -296,16 +317,25 @@ mod tests {
                 self.stats.quorum_votes_attempted.load(Ordering::Relaxed),
                 self.stats.quorum_successes.load(Ordering::Relaxed),
                 self.stats.quorum_failures.load(Ordering::Relaxed),
-                self.stats.replica_operations_attempted.load(Ordering::Relaxed),
+                self.stats
+                    .replica_operations_attempted
+                    .load(Ordering::Relaxed),
                 self.stats.replica_partial_successes.load(Ordering::Relaxed),
-                self.stats.saga_compensations_triggered.load(Ordering::Relaxed),
-                self.stats.saga_compensations_completed.load(Ordering::Relaxed),
+                self.stats
+                    .saga_compensations_triggered
+                    .load(Ordering::Relaxed),
+                self.stats
+                    .saga_compensations_completed
+                    .load(Ordering::Relaxed),
                 self.stats.consistency_violations.load(Ordering::Relaxed),
             )
         }
 
         fn get_replica_states(&self) -> Vec<u64> {
-            self.replicas.iter().map(|r| r.get_current_value()).collect()
+            self.replicas
+                .iter()
+                .map(|r| r.get_current_value())
+                .collect()
         }
     }
 
@@ -325,10 +355,20 @@ mod tests {
             let coordinator = QuorumSagaCoordinator::new(5, 3, 0.4);
 
             // Test case where quorum might fail and saga compensation is needed
-            let result = coordinator.execute_quorum_with_saga_compensation(&cx, 100).await?;
+            let result = coordinator
+                .execute_quorum_with_saga_compensation(&cx, 100)
+                .await?;
 
-            let (attempts, successes, failures, operations, partials, comp_triggered, comp_completed, violations) =
-                coordinator.get_stats();
+            let (
+                attempts,
+                successes,
+                failures,
+                operations,
+                partials,
+                comp_triggered,
+                comp_completed,
+                violations,
+            ) = coordinator.get_stats();
 
             println!("✓ Basic quorum ↔ saga integration verified");
             println!("  Quorum attempts: {}", attempts);
@@ -343,8 +383,10 @@ mod tests {
             // Verify either success or proper compensation
             match result {
                 Outcome::Ok(lattice) => {
-                    println!("  ✓ Quorum achieved: {} operations, value: {}",
-                        lattice.successful_operations, lattice.total_value);
+                    println!(
+                        "  ✓ Quorum achieved: {} operations, value: {}",
+                        lattice.successful_operations, lattice.total_value
+                    );
                     assert!(lattice.successful_operations >= 3);
                 }
                 Outcome::Err(msg) => {
@@ -378,7 +420,9 @@ mod tests {
 
             for i in 0..3 {
                 let operation_value = 50 + i * 10;
-                let result = coordinator.execute_quorum_with_saga_compensation(&cx, operation_value).await?;
+                let result = coordinator
+                    .execute_quorum_with_saga_compensation(&cx, operation_value)
+                    .await?;
 
                 match result {
                     Outcome::Err(_) => total_failures += 1,
@@ -397,14 +441,23 @@ mod tests {
 
             // Verify that failures trigger compensations when there are partial successes
             if partials > 0 {
-                assert!(comp_triggered > 0, "Partial successes should trigger compensations");
+                assert!(
+                    comp_triggered > 0,
+                    "Partial successes should trigger compensations"
+                );
             }
 
             // Verify compensation completion
-            assert_eq!(comp_triggered, comp_completed, "All triggered compensations should complete");
+            assert_eq!(
+                comp_triggered, comp_completed,
+                "All triggered compensations should complete"
+            );
 
             // Verify consistency
-            assert_eq!(violations, 0, "Should maintain consistency through compensation");
+            assert_eq!(
+                violations, 0,
+                "Should maintain consistency through compensation"
+            );
 
             Ok(())
         })
@@ -433,7 +486,10 @@ mod tests {
 
             // If compensations occurred, verify they were logged
             if comp_triggered > 0 {
-                assert!(!compensation_logs.is_empty(), "Should have compensation logs");
+                assert!(
+                    !compensation_logs.is_empty(),
+                    "Should have compensation logs"
+                );
 
                 for log_entry in &compensation_logs {
                     println!("  Compensation: {}", log_entry);
@@ -460,7 +516,9 @@ mod tests {
             println!("Initial replica states: {:?}", initial_states);
 
             // Execute operation that might trigger compensation
-            let result = coordinator.execute_quorum_with_saga_compensation(&cx, 200).await?;
+            let result = coordinator
+                .execute_quorum_with_saga_compensation(&cx, 200)
+                .await?;
 
             // Brief pause to ensure compensation completes
             sleep(Duration::from_millis(50)).await;
@@ -479,18 +537,30 @@ mod tests {
                 Outcome::Ok(_) => {
                     println!("  ✓ Quorum succeeded - states should reflect operation");
                     // At least some replicas should have increased values
-                    let state_increases = final_states.iter().zip(&initial_states)
+                    let state_increases = final_states
+                        .iter()
+                        .zip(&initial_states)
                         .filter(|(&final_val, &initial_val)| final_val > initial_val)
                         .count();
-                    assert!(state_increases >= 3, "At least 3 replicas should have increased values");
+                    assert!(
+                        state_increases >= 3,
+                        "At least 3 replicas should have increased values"
+                    );
                 }
                 Outcome::Err(_) => {
                     println!("  ✓ Quorum failed - states should be compensated back to initial");
                     if comp_triggered > 0 {
                         // After compensation, states should be back to initial (or close, due to async)
-                        for (i, (&final_val, &initial_val)) in final_states.iter().zip(&initial_states).enumerate() {
-                            println!("    Replica {}: {} -> {} (diff: {})", i, initial_val, final_val,
-                                final_val as i64 - initial_val as i64);
+                        for (i, (&final_val, &initial_val)) in
+                            final_states.iter().zip(&initial_states).enumerate()
+                        {
+                            println!(
+                                "    Replica {}: {} -> {} (diff: {})",
+                                i,
+                                initial_val,
+                                final_val,
+                                final_val as i64 - initial_val as i64
+                            );
                         }
                     }
                 }
@@ -499,7 +569,10 @@ mod tests {
 
             // Verify no consistency violations occurred
             assert_eq!(violations, 0, "Should maintain consistency");
-            assert_eq!(comp_triggered, comp_completed, "All compensations should complete");
+            assert_eq!(
+                comp_triggered, comp_completed,
+                "All compensations should complete"
+            );
 
             Ok(())
         })
@@ -521,7 +594,9 @@ mod tests {
 
                 cx.with_budget(budget, async {
                     // This might be cancelled due to budget timeout
-                    let result = coordinator.execute_quorum_with_saga_compensation(&cx, 75).await?;
+                    let result = coordinator
+                        .execute_quorum_with_saga_compensation(&cx, 75)
+                        .await?;
 
                     match result {
                         Outcome::Ok(_) => Ok(()),
@@ -529,8 +604,10 @@ mod tests {
                         Outcome::Cancelled => Outcome::Cancelled,
                         _ => Err(crate::error::Error::Other("Unexpected outcome")),
                     }
-                }).await
-            }).await;
+                })
+                .await
+            })
+            .await;
 
             match cancel_task {
                 Ok(()) => {
@@ -540,7 +617,9 @@ mod tests {
                     println!("✓ Quorum ↔ saga cancellation integration verified");
                 }
                 _ => {
-                    return Err(crate::error::Error::Other("Unexpected cancellation outcome"));
+                    return Err(crate::error::Error::Other(
+                        "Unexpected cancellation outcome",
+                    ));
                 }
             }
 

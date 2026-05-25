@@ -674,7 +674,10 @@ impl BaselineAdapter for CurlAdapter {
                     // For HTTP/3, also check if it's compiled with HTTP/3 support
                     if self.enable_http3 {
                         let features_text = String::from_utf8_lossy(&output.stdout);
-                        if features_text.contains("HTTP3") || features_text.contains("quiche") || features_text.contains("ngtcp2") {
+                        if features_text.contains("HTTP3")
+                            || features_text.contains("quiche")
+                            || features_text.contains("ngtcp2")
+                        {
                             ToolAvailability::Available(version)
                         } else {
                             ToolAvailability::IncompatibleVersion(version)
@@ -748,7 +751,7 @@ impl BaselineAdapter for CurlAdapter {
                 total_metrics.push(metrics);
             } else {
                 return Err(BenchmarkError::ExecutionFailed(
-                    "Curl did not create output file".to_string()
+                    "Curl did not create output file".to_string(),
                 ));
             }
 
@@ -787,8 +790,8 @@ impl BaselineAdapter for CurlAdapter {
             wall_time: Duration::ZERO, // Will be filled by caller
             cpu_time: None,
             memory_peak: None,
-            bytes_transferred: 0, // Will be filled by caller
-            bytes_on_wire: None, // Curl doesn't easily provide this
+            bytes_transferred: 0,       // Will be filled by caller
+            bytes_on_wire: None,        // Curl doesn't easily provide this
             verified_completion: false, // Will be filled by caller
             first_usable_output,
             resume_time: None,

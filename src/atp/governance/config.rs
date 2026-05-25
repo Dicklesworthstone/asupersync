@@ -140,19 +140,33 @@ impl AtpGovernanceConfig {
         let profile = AtpResourceProfile::for_power_profile(self.power_profile);
 
         AtpResourceBudget {
-            max_bandwidth_bytes_per_second: self.custom_limits.max_bandwidth_bytes_per_second
+            max_bandwidth_bytes_per_second: self
+                .custom_limits
+                .max_bandwidth_bytes_per_second
                 .or(profile.max_bandwidth_bytes_per_second),
-            max_in_flight_bytes: self.custom_limits.max_in_flight_bytes
+            max_in_flight_bytes: self
+                .custom_limits
+                .max_in_flight_bytes
                 .or(profile.max_in_flight_bytes),
-            max_repair_symbols_per_second: self.custom_limits.max_repair_symbols_per_second
+            max_repair_symbols_per_second: self
+                .custom_limits
+                .max_repair_symbols_per_second
                 .or(profile.max_repair_symbols_per_second),
-            max_disk_write_concurrency: self.custom_limits.max_disk_write_concurrency
+            max_disk_write_concurrency: self
+                .custom_limits
+                .max_disk_write_concurrency
                 .or(profile.max_disk_write_concurrency),
-            max_relay_cost_micros_per_mib: self.custom_limits.max_relay_cost_micros_per_mib
+            max_relay_cost_micros_per_mib: self
+                .custom_limits
+                .max_relay_cost_micros_per_mib
                 .or(profile.max_relay_cost_micros_per_mib),
-            background_priority: self.custom_limits.background_priority
+            background_priority: self
+                .custom_limits
+                .background_priority
                 .unwrap_or(profile.background_priority),
-            metered_network: self.custom_limits.metered_network
+            metered_network: self
+                .custom_limits
+                .metered_network
                 .unwrap_or(profile.metered_network),
         }
     }
@@ -306,7 +320,9 @@ fn parse_power_profile(name: &str) -> Result<AtpPowerProfile, String> {
         "battery-saver" | "battery_saver" | "battery" => Ok(AtpPowerProfile::BatterySaver),
         "ci-deterministic" | "ci_deterministic" | "ci" => Ok(AtpPowerProfile::CiDeterministic),
         "custom" => Ok(AtpPowerProfile::Custom),
-        _ => Err(format!("Unknown power profile: {name}. Available: max-speed, balanced, background, metered, relay-conservative, battery-saver, ci-deterministic, custom")),
+        _ => Err(format!(
+            "Unknown power profile: {name}. Available: max-speed, balanced, background, metered, relay-conservative, battery-saver, ci-deterministic, custom"
+        )),
     }
 }
 
@@ -314,10 +330,18 @@ fn parse_power_profile(name: &str) -> Result<AtpPowerProfile, String> {
 fn parse_fairness_policy(name: &str) -> Result<AtpFairnessPolicy, String> {
     match name.to_lowercase().as_str() {
         "equal-share" | "equal_share" | "equal" => Ok(AtpFairnessPolicy::EqualShare),
-        "priority-weighted" | "priority_weighted" | "priority" => Ok(AtpFairnessPolicy::PriorityWeighted),
-        "first-come-first-served" | "first_come_first_served" | "fcfs" => Ok(AtpFairnessPolicy::FirstComeFirstServed),
-        "size-proportional" | "size_proportional" | "size" => Ok(AtpFairnessPolicy::SizeProportional),
-        _ => Err(format!("Unknown fairness policy: {name}. Available: equal-share, priority-weighted, first-come-first-served, size-proportional")),
+        "priority-weighted" | "priority_weighted" | "priority" => {
+            Ok(AtpFairnessPolicy::PriorityWeighted)
+        }
+        "first-come-first-served" | "first_come_first_served" | "fcfs" => {
+            Ok(AtpFairnessPolicy::FirstComeFirstServed)
+        }
+        "size-proportional" | "size_proportional" | "size" => {
+            Ok(AtpFairnessPolicy::SizeProportional)
+        }
+        _ => Err(format!(
+            "Unknown fairness policy: {name}. Available: equal-share, priority-weighted, first-come-first-served, size-proportional"
+        )),
     }
 }
 
@@ -330,7 +354,8 @@ fn parse_size_string(size: &str) -> Result<u64, String> {
         (size.as_str(), "")
     };
 
-    let number: u64 = number_part.parse()
+    let number: u64 = number_part
+        .parse()
         .map_err(|_| format!("Invalid number in size string: {number_part}"))?;
 
     let multiplier = match suffix {
@@ -339,7 +364,11 @@ fn parse_size_string(size: &str) -> Result<u64, String> {
         "m" | "mb" => 1_048_576,
         "g" | "gb" => 1_073_741_824,
         "t" | "tb" => 1_099_511_627_776,
-        _ => return Err(format!("Unknown size suffix: {suffix}. Use B, K, M, G, or T")),
+        _ => {
+            return Err(format!(
+                "Unknown size suffix: {suffix}. Use B, K, M, G, or T"
+            ));
+        }
     };
 
     Ok(number * multiplier)
@@ -377,19 +406,40 @@ mod tests {
 
     #[test]
     fn parse_power_profile_handles_variations() {
-        assert_eq!(parse_power_profile("max-speed").unwrap(), AtpPowerProfile::MaxSpeed);
-        assert_eq!(parse_power_profile("Max_Speed").unwrap(), AtpPowerProfile::MaxSpeed);
-        assert_eq!(parse_power_profile("BALANCED").unwrap(), AtpPowerProfile::Balanced);
-        assert_eq!(parse_power_profile("battery").unwrap(), AtpPowerProfile::BatterySaver);
+        assert_eq!(
+            parse_power_profile("max-speed").unwrap(),
+            AtpPowerProfile::MaxSpeed
+        );
+        assert_eq!(
+            parse_power_profile("Max_Speed").unwrap(),
+            AtpPowerProfile::MaxSpeed
+        );
+        assert_eq!(
+            parse_power_profile("BALANCED").unwrap(),
+            AtpPowerProfile::Balanced
+        );
+        assert_eq!(
+            parse_power_profile("battery").unwrap(),
+            AtpPowerProfile::BatterySaver
+        );
 
         assert!(parse_power_profile("invalid").is_err());
     }
 
     #[test]
     fn parse_fairness_policy_handles_variations() {
-        assert_eq!(parse_fairness_policy("equal").unwrap(), AtpFairnessPolicy::EqualShare);
-        assert_eq!(parse_fairness_policy("Priority_Weighted").unwrap(), AtpFairnessPolicy::PriorityWeighted);
-        assert_eq!(parse_fairness_policy("fcfs").unwrap(), AtpFairnessPolicy::FirstComeFirstServed);
+        assert_eq!(
+            parse_fairness_policy("equal").unwrap(),
+            AtpFairnessPolicy::EqualShare
+        );
+        assert_eq!(
+            parse_fairness_policy("Priority_Weighted").unwrap(),
+            AtpFairnessPolicy::PriorityWeighted
+        );
+        assert_eq!(
+            parse_fairness_policy("fcfs").unwrap(),
+            AtpFairnessPolicy::FirstComeFirstServed
+        );
 
         assert!(parse_fairness_policy("invalid").is_err());
     }
@@ -419,8 +469,14 @@ mod tests {
 
         let config = args.parse_config().unwrap();
         assert_eq!(config.power_profile, AtpPowerProfile::BatterySaver);
-        assert_eq!(config.custom_limits.max_bandwidth_bytes_per_second, Some(32 * 1_048_576));
-        assert_eq!(config.fairness_policy, AtpFairnessPolicy::FirstComeFirstServed);
+        assert_eq!(
+            config.custom_limits.max_bandwidth_bytes_per_second,
+            Some(32 * 1_048_576)
+        );
+        assert_eq!(
+            config.fairness_policy,
+            AtpFairnessPolicy::FirstComeFirstServed
+        );
         assert_eq!(config.custom_limits.background_priority, Some(true));
         assert!(config.dry_run);
         assert_eq!(config.metadata.source, "cli");

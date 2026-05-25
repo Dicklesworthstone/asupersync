@@ -12,23 +12,26 @@
 
 use crate::{
     cx::{Cx, Scope},
-    fs::uring::{UringFile, UringConfig, UringError},
+    error::Error,
+    fs::uring::{UringConfig, UringError, UringFile},
     raptorq::{
-        decoder::{RaptorQDecoder, DecoderConfig, DecodingResult},
-        encoder::{RaptorQEncoder, EncoderConfig},
-        types::{SourceBlock, EncodingPacket, ObjectTransmissionInfo},
+        decoder::{DecoderConfig, DecodingResult, RaptorQDecoder},
+        encoder::{EncoderConfig, RaptorQEncoder},
         error::RaptorQError,
+        types::{EncodingPacket, ObjectTransmissionInfo, SourceBlock},
     },
     sync::{Mutex, RwLock},
     types::{Budget, Outcome},
-    error::Error,
 };
 use std::{
-    sync::{Arc, atomic::{AtomicU64, AtomicUsize, Ordering}},
-    time::Duration,
     collections::HashMap,
-    path::{Path, PathBuf},
     fs,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 /// Controllable io_uring file system that simulates various I/O conditions
@@ -93,10 +96,10 @@ impl ControllableUringFilesystem {
         let uring_file = UringFile::create(cx, &file_path, self.uring_config.clone()).await?;
 
         // Initialize operation stats
-        self.file_operations.lock().unwrap().insert(
-            file_path.clone(),
-            FileOperationStats::default(),
-        );
+        self.file_operations
+            .lock()
+            .unwrap()
+            .insert(file_path.clone(), FileOperationStats::default());
 
         Ok(uring_file)
     }
@@ -302,13 +305,15 @@ impl FileAwareRaptorQDecoder {
         loop {
             let mut read_buffer = vec![0u8; chunk_size];
 
-            let bytes_read = filesystem.read_with_simulation(
-                cx,
-                &mut encoded_file,
-                file_offset,
-                &mut read_buffer,
-                &encoded_file_path,
-            ).await?;
+            let bytes_read = filesystem
+                .read_with_simulation(
+                    cx,
+                    &mut encoded_file,
+                    file_offset,
+                    &mut read_buffer,
+                    &encoded_file_path,
+                )
+                .await?;
 
             if bytes_read == 0 {
                 break; // End of file
@@ -326,13 +331,15 @@ impl FileAwareRaptorQDecoder {
                     recovered_blocks += decoding_result.blocks_recovered;
 
                     // Write decoded data to output file
-                    let bytes_written = filesystem.write_with_simulation(
-                        cx,
-                        &mut output_file,
-                        file_offset,
-                        &decoded_data,
-                        &output_file_path,
-                    ).await?;
+                    let bytes_written = filesystem
+                        .write_with_simulation(
+                            cx,
+                            &mut output_file,
+                            file_offset,
+                            &decoded_data,
+                            &output_file_path,
+                        )
+                        .await?;
 
                     total_bytes_processed += bytes_written;
                 }
@@ -348,13 +355,17 @@ impl FileAwareRaptorQDecoder {
 
         // Verify integrity if enabled
         let integrity_verified = if config.verify_integrity_after_decode {
-            self.verify_decoded_file_integrity(cx, filesystem, output_filename).await?
+            self.verify_decoded_file_integrity(cx, filesystem, output_filename)
+                .await?
         } else {
             true
         };
 
         if !integrity_verified {
-            self.decoding_stats.lock().unwrap().integrity_verification_failures += 1;
+            self.decoding_stats
+                .lock()
+                .unwrap()
+                .integrity_verification_failures += 1;
         }
 
         let decode_duration = decode_start.elapsed();
@@ -362,7 +373,8 @@ impl FileAwareRaptorQDecoder {
         // Update statistics
         let mut stats = self.decoding_stats.lock().unwrap();
         stats.recovered_blocks += recovered_blocks;
-        stats.average_decode_time_ms = (stats.average_decode_time_ms + decode_duration.as_secs_f64() * 1000.0) / 2.0;
+        stats.average_decode_time_ms =
+            (stats.average_decode_time_ms + decode_duration.as_secs_f64() * 1000.0) / 2.0;
 
         Ok(FileDecodingResult {
             input_filename: encoded_filename.to_string(),
@@ -413,13 +425,15 @@ impl FileAwareRaptorQDecoder {
         loop {
             let mut read_buffer = vec![0u8; chunk_size];
 
-            let bytes_read = filesystem.read_with_simulation(
-                cx,
-                &mut input_file,
-                file_offset,
-                &mut read_buffer,
-                &input_file_path,
-            ).await?;
+            let bytes_read = filesystem
+                .read_with_simulation(
+                    cx,
+                    &mut input_file,
+                    file_offset,
+                    &mut read_buffer,
+                    &input_file_path,
+                )
+                .await?;
 
             if bytes_read == 0 {
                 break; // End of file
@@ -432,16 +446,19 @@ impl FileAwareRaptorQDecoder {
             source_blocks_generated += encoding_result.source_blocks.len();
 
             // Convert encoded packets to file format
-            let encoded_file_data = self.convert_packets_to_file_data(&encoding_result.encoding_packets)?;
+            let encoded_file_data =
+                self.convert_packets_to_file_data(&encoding_result.encoding_packets)?;
 
             // Write encoded data to file
-            let bytes_written = filesystem.write_with_simulation(
-                cx,
-                &mut encoded_file,
-                file_offset,
-                &encoded_file_data,
-                &encoded_file_path,
-            ).await?;
+            let bytes_written = filesystem
+                .write_with_simulation(
+                    cx,
+                    &mut encoded_file,
+                    file_offset,
+                    &encoded_file_data,
+                    &encoded_file_path,
+                )
+                .await?;
 
             total_bytes_encoded += bytes_written;
             file_offset += bytes_read as u64;
@@ -470,7 +487,9 @@ impl FileAwareRaptorQDecoder {
         let file_path = filesystem.temp_directory.join(filename);
 
         let mut buffer = vec![0u8; 4096];
-        let bytes_read = filesystem.read_with_simulation(cx, &mut file, 0, &mut buffer, &file_path).await?;
+        let bytes_read = filesystem
+            .read_with_simulation(cx, &mut file, 0, &mut buffer, &file_path)
+            .await?;
 
         Ok(bytes_read > 0)
     }
@@ -596,12 +615,16 @@ impl UringRaptorQIntegrationCoordinator {
         filename: &str,
         size_bytes: usize,
     ) -> Result<TestFileInfo, Error> {
-        let test_data = (0..size_bytes).map(|i| (i % 256) as u8).collect::<Vec<u8>>();
+        let test_data = (0..size_bytes)
+            .map(|i| (i % 256) as u8)
+            .collect::<Vec<u8>>();
 
         let mut file = self.filesystem.create_uring_file(cx, filename).await?;
         let file_path = self.filesystem.temp_directory.join(filename);
 
-        self.filesystem.write_with_simulation(cx, &mut file, 0, &test_data, &file_path).await?;
+        self.filesystem
+            .write_with_simulation(cx, &mut file, 0, &test_data, &file_path)
+            .await?;
 
         // Simple hash for content verification
         let content_hash = format!("{:x}", fastrand::u64(..));
@@ -613,7 +636,10 @@ impl UringRaptorQIntegrationCoordinator {
             created_at: std::time::Instant::now(),
         };
 
-        self.test_files.lock().unwrap().insert(filename.to_string(), file_info.clone());
+        self.test_files
+            .lock()
+            .unwrap()
+            .insert(filename.to_string(), file_info.clone());
 
         Ok(file_info)
     }
@@ -628,17 +654,22 @@ impl UringRaptorQIntegrationCoordinator {
 
         // Create test file
         let input_filename = format!("test_input_{}.dat", file_size_kb);
-        let test_file = self.create_test_file(cx, &input_filename, file_size_kb * 1024).await?;
+        let test_file = self
+            .create_test_file(cx, &input_filename, file_size_kb * 1024)
+            .await?;
 
         // Encode file with RaptorQ
         let encoded_filename = format!("test_encoded_{}.rq", file_size_kb);
-        let encoding_result = self.raptorq_decoder.encode_file_with_uring(
-            cx,
-            &self.filesystem,
-            &input_filename,
-            &encoded_filename,
-            0.2, // 20% redundancy
-        ).await?;
+        let encoding_result = self
+            .raptorq_decoder
+            .encode_file_with_uring(
+                cx,
+                &self.filesystem,
+                &input_filename,
+                &encoded_filename,
+                0.2, // 20% redundancy
+            )
+            .await?;
 
         // Create OTI for decoding
         let oti = ObjectTransmissionInfo {
@@ -649,13 +680,16 @@ impl UringRaptorQIntegrationCoordinator {
 
         // Decode file back
         let decoded_filename = format!("test_decoded_{}.dat", file_size_kb);
-        let decoding_result = self.raptorq_decoder.decode_file_with_uring(
-            cx,
-            &self.filesystem,
-            &encoded_filename,
-            &decoded_filename,
-            oti,
-        ).await?;
+        let decoding_result = self
+            .raptorq_decoder
+            .decode_file_with_uring(
+                cx,
+                &self.filesystem,
+                &encoded_filename,
+                &decoded_filename,
+                oti,
+            )
+            .await?;
 
         let total_duration = test_start.elapsed();
 
@@ -665,14 +699,16 @@ impl UringRaptorQIntegrationCoordinator {
 
         let performance_metrics = FilePerformanceMetrics {
             file_io_throughput_mbps: (total_bytes * 2.0) / (total_seconds * 1_000_000.0), // Read + write
-            raptorq_decode_throughput_mbps: total_bytes / (decoding_result.decode_duration_ms / 1000.0 * 1_000_000.0),
+            raptorq_decode_throughput_mbps: total_bytes
+                / (decoding_result.decode_duration_ms / 1000.0 * 1_000_000.0),
             end_to_end_latency_ms: total_duration.as_secs_f64() * 1000.0,
             io_operations_per_second: 3.0 / total_seconds, // Create, encode, decode
         };
 
         let result = IntegrationValidationResult {
             test_case: test_case.to_string(),
-            file_io_success: encoding_result.bytes_encoded > 0 && decoding_result.bytes_processed > 0,
+            file_io_success: encoding_result.bytes_encoded > 0
+                && decoding_result.bytes_processed > 0,
             raptorq_processing_success: decoding_result.decoding_successful,
             data_integrity_verified: decoding_result.integrity_verified,
             error_recovery_effective: decoding_result.blocks_recovered > 0,
@@ -708,17 +744,23 @@ impl UringRaptorQIntegrationCoordinator {
 
         let file_size_kb = 128;
         let input_filename = format!("error_test_input.dat");
-        let test_file = self.create_test_file(cx, &input_filename, file_size_kb * 1024).await?;
+        let test_file = self
+            .create_test_file(cx, &input_filename, file_size_kb * 1024)
+            .await?;
 
         // Try encoding with potential I/O errors
         let encoded_filename = format!("error_test_encoded.rq");
-        let encoding_result = match self.raptorq_decoder.encode_file_with_uring(
-            cx,
-            &self.filesystem,
-            &input_filename,
-            &encoded_filename,
-            0.3, // Higher redundancy for error recovery
-        ).await {
+        let encoding_result = match self
+            .raptorq_decoder
+            .encode_file_with_uring(
+                cx,
+                &self.filesystem,
+                &input_filename,
+                &encoded_filename,
+                0.3, // Higher redundancy for error recovery
+            )
+            .await
+        {
             Ok(result) => result,
             Err(_) => {
                 // Reset I/O conditions and return failure result
@@ -766,30 +808,35 @@ impl UringRaptorQIntegrationCoordinator {
         };
 
         let decoded_filename = format!("error_test_decoded.dat");
-        let decoding_result = self.raptorq_decoder.decode_file_with_uring(
-            cx,
-            &self.filesystem,
-            &encoded_filename,
-            &decoded_filename,
-            oti,
-        ).await?;
+        let decoding_result = self
+            .raptorq_decoder
+            .decode_file_with_uring(
+                cx,
+                &self.filesystem,
+                &encoded_filename,
+                &decoded_filename,
+                oti,
+            )
+            .await?;
 
         let result = IntegrationValidationResult {
             test_case: test_case.to_string(),
             file_io_success: true,
             raptorq_processing_success: decoding_result.decoding_successful,
             data_integrity_verified: decoding_result.integrity_verified,
-            error_recovery_effective: decoding_result.blocks_recovered > 0 && encoding_result.bytes_encoded > 0,
+            error_recovery_effective: decoding_result.blocks_recovered > 0
+                && encoding_result.bytes_encoded > 0,
             performance_metrics: FilePerformanceMetrics {
                 file_io_throughput_mbps: 1.0, // Reduced due to errors
-                raptorq_decode_throughput_mbps: (test_file.size_bytes as f64) / (decoding_result.decode_duration_ms / 1000.0 * 1_000_000.0),
-                end_to_end_latency_ms: encoding_result.encode_duration_ms + decoding_result.decode_duration_ms,
+                raptorq_decode_throughput_mbps: (test_file.size_bytes as f64)
+                    / (decoding_result.decode_duration_ms / 1000.0 * 1_000_000.0),
+                end_to_end_latency_ms: encoding_result.encode_duration_ms
+                    + decoding_result.decode_duration_ms,
                 io_operations_per_second: 2.0, // Encode and decode operations
             },
             details: format!(
                 "Error recovery test - Blocks recovered: {}, Integrity: {}",
-                decoding_result.blocks_recovered,
-                decoding_result.integrity_verified
+                decoding_result.blocks_recovered, decoding_result.integrity_verified
             ),
         };
 
@@ -821,16 +868,14 @@ impl UringRaptorQIntegrationCoordinator {
                 let test_data = vec![i as u8; 4096]; // Small files for concurrency test
                 let mut file = filesystem.create_uring_file(cx, &input_filename).await?;
                 let file_path = filesystem.temp_directory.join(&input_filename);
-                filesystem.write_with_simulation(cx, &mut file, 0, &test_data, &file_path).await?;
+                filesystem
+                    .write_with_simulation(cx, &mut file, 0, &test_data, &file_path)
+                    .await?;
 
                 // Encode
-                let encoding_result = raptorq_decoder.encode_file_with_uring(
-                    cx,
-                    filesystem,
-                    &input_filename,
-                    &encoded_filename,
-                    0.2,
-                ).await?;
+                let encoding_result = raptorq_decoder
+                    .encode_file_with_uring(cx, filesystem, &input_filename, &encoded_filename, 0.2)
+                    .await?;
 
                 // Decode
                 let oti = ObjectTransmissionInfo {
@@ -839,15 +884,20 @@ impl UringRaptorQIntegrationCoordinator {
                     source_blocks: encoding_result.source_blocks_generated as u32,
                 };
 
-                let decoding_result = raptorq_decoder.decode_file_with_uring(
-                    cx,
-                    filesystem,
-                    &encoded_filename,
-                    &decoded_filename,
-                    oti,
-                ).await?;
+                let decoding_result = raptorq_decoder
+                    .decode_file_with_uring(
+                        cx,
+                        filesystem,
+                        &encoded_filename,
+                        &decoded_filename,
+                        oti,
+                    )
+                    .await?;
 
-                Ok::<(FileEncodingResult, FileDecodingResult), Error>((encoding_result, decoding_result))
+                Ok::<(FileEncodingResult, FileDecodingResult), Error>((
+                    encoding_result,
+                    decoding_result,
+                ))
             });
 
             handles.push(handle);
@@ -872,10 +922,13 @@ impl UringRaptorQIntegrationCoordinator {
         let total_duration = start_time.elapsed();
 
         let performance_metrics = FilePerformanceMetrics {
-            file_io_throughput_mbps: (total_bytes_processed as f64) / (total_duration.as_secs_f64() * 1_000_000.0),
-            raptorq_decode_throughput_mbps: (total_bytes_processed as f64 / 2.0) / (total_duration.as_secs_f64() * 1_000_000.0),
+            file_io_throughput_mbps: (total_bytes_processed as f64)
+                / (total_duration.as_secs_f64() * 1_000_000.0),
+            raptorq_decode_throughput_mbps: (total_bytes_processed as f64 / 2.0)
+                / (total_duration.as_secs_f64() * 1_000_000.0),
             end_to_end_latency_ms: total_duration.as_secs_f64() * 1000.0,
-            io_operations_per_second: (successful_operations as f64 * 3.0) / total_duration.as_secs_f64(), // Create, encode, decode per file
+            io_operations_per_second: (successful_operations as f64 * 3.0)
+                / total_duration.as_secs_f64(), // Create, encode, decode per file
         };
 
         let result = IntegrationValidationResult {
@@ -887,7 +940,10 @@ impl UringRaptorQIntegrationCoordinator {
             performance_metrics,
             details: format!(
                 "Concurrent operations: {}/{}, Total bytes: {}, Blocks recovered: {}",
-                successful_operations, concurrent_files, total_bytes_processed, total_blocks_recovered
+                successful_operations,
+                concurrent_files,
+                total_bytes_processed,
+                total_blocks_recovered
             ),
         };
 
@@ -909,11 +965,7 @@ impl UringRaptorQIntegrationCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        runtime::test_rt,
-        cx::region,
-        types::Budget,
-    };
+    use crate::{cx::region, runtime::test_rt, types::Budget};
 
     #[test]
     fn test_basic_uring_raptorq_integration() {
@@ -921,21 +973,33 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(45)), |cx| async move {
                 let coordinator = UringRaptorQIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_basic_uring_raptorq_integration(
-                    cx,
-                    "basic_integration",
-                    64, // 64KB file
-                ).await?;
+                let result = coordinator
+                    .validate_basic_uring_raptorq_integration(
+                        cx,
+                        "basic_integration",
+                        64, // 64KB file
+                    )
+                    .await?;
 
                 assert!(result.file_io_success, "File I/O operations should succeed");
-                assert!(result.raptorq_processing_success, "RaptorQ processing should succeed");
-                assert!(result.data_integrity_verified, "Data integrity should be verified");
-                assert!(result.performance_metrics.end_to_end_latency_ms < 10000.0, "Should complete within 10 seconds");
+                assert!(
+                    result.raptorq_processing_success,
+                    "RaptorQ processing should succeed"
+                );
+                assert!(
+                    result.data_integrity_verified,
+                    "Data integrity should be verified"
+                );
+                assert!(
+                    result.performance_metrics.end_to_end_latency_ms < 10000.0,
+                    "Should complete within 10 seconds"
+                );
 
                 coordinator.cleanup().await?;
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 
@@ -945,18 +1009,21 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(60)), |cx| async move {
                 let coordinator = UringRaptorQIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_error_recovery_with_io_failures(
-                    cx,
-                    "error_recovery"
-                ).await?;
+                let result = coordinator
+                    .validate_error_recovery_with_io_failures(cx, "error_recovery")
+                    .await?;
 
-                assert!(result.error_recovery_effective, "Error recovery should be effective");
+                assert!(
+                    result.error_recovery_effective,
+                    "Error recovery should be effective"
+                );
                 // Allow for some I/O failures during the error simulation
 
                 coordinator.cleanup().await?;
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 
@@ -966,20 +1033,32 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(60)), |cx| async move {
                 let coordinator = UringRaptorQIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_concurrent_file_operations_with_raptorq(
-                    cx,
-                    "concurrent_operations",
-                    4, // 4 concurrent files
-                ).await?;
+                let result = coordinator
+                    .validate_concurrent_file_operations_with_raptorq(
+                        cx,
+                        "concurrent_operations",
+                        4, // 4 concurrent files
+                    )
+                    .await?;
 
-                assert!(result.file_io_success, "Concurrent file operations should succeed");
-                assert!(result.raptorq_processing_success, "Concurrent RaptorQ processing should succeed");
-                assert!(result.performance_metrics.io_operations_per_second > 1.0, "Should achieve reasonable I/O throughput");
+                assert!(
+                    result.file_io_success,
+                    "Concurrent file operations should succeed"
+                );
+                assert!(
+                    result.raptorq_processing_success,
+                    "Concurrent RaptorQ processing should succeed"
+                );
+                assert!(
+                    result.performance_metrics.io_operations_per_second > 1.0,
+                    "Should achieve reasonable I/O throughput"
+                );
 
                 coordinator.cleanup().await?;
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 }

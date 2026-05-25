@@ -5,17 +5,17 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod tests {
-    use crate::channel::broadcast::{channel, Receiver, Sender};
-    use crate::time::wheel::{TimerWheel, TimerHandle, TimerKind};
-    use crate::time::{Duration, Instant};
+    use crate::channel::broadcast::{Receiver, Sender, channel};
     use crate::cx::{Cx, Scope};
-    use crate::runtime::{Runtime, RuntimeBuilder};
-    use crate::types::{Budget, Outcome, TaskId, RegionId};
     use crate::error::AsupersyncError;
+    use crate::runtime::{Runtime, RuntimeBuilder};
+    use crate::time::wheel::{TimerHandle, TimerKind, TimerWheel};
+    use crate::time::{Duration, Instant};
+    use crate::types::{Budget, Outcome, RegionId, TaskId};
 
     use std::collections::{HashMap, VecDeque};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     /// Configuration for timed broadcast coordination system
     #[derive(Debug, Clone)]
@@ -104,7 +104,10 @@ mod tests {
 
     impl TimedBroadcastSystem {
         /// Create new timed broadcast system with configuration
-        fn new(config: TimedBroadcastConfig, strategy: CoordinationStrategy) -> Result<Self, AsupersyncError> {
+        fn new(
+            config: TimedBroadcastConfig,
+            strategy: CoordinationStrategy,
+        ) -> Result<Self, AsupersyncError> {
             let timer_wheel = TimerWheel::new(config.wheel_slots, config.tick_interval)?;
             let (sender, receiver) = channel(config.channel_capacity);
 
@@ -126,19 +129,19 @@ mod tests {
             self.is_running.store(true, Ordering::SeqCst);
 
             // Start timer wheel processing
-            let wheel_handle = cx.spawn(|cx| async move {
-                self.run_timer_wheel(cx).await
-            }).await?;
+            let wheel_handle = cx
+                .spawn(|cx| async move { self.run_timer_wheel(cx).await })
+                .await?;
 
             // Start broadcast processing
-            let broadcast_handle = cx.spawn(|cx| async move {
-                self.run_broadcast_processor(cx).await
-            }).await?;
+            let broadcast_handle = cx
+                .spawn(|cx| async move { self.run_broadcast_processor(cx).await })
+                .await?;
 
             // Start coordination loop
-            let coordination_handle = cx.spawn(|cx| async move {
-                self.run_coordination_loop(cx).await
-            }).await?;
+            let coordination_handle = cx
+                .spawn(|cx| async move { self.run_coordination_loop(cx).await })
+                .await?;
 
             Ok(())
         }
@@ -157,13 +160,16 @@ mod tests {
                     self.schedule_individual_message(message, delay, cx).await
                 }
                 CoordinationStrategy::BatchScheduling { batch_size } => {
-                    self.schedule_batch_message(message, delay, *batch_size, cx).await
+                    self.schedule_batch_message(message, delay, *batch_size, cx)
+                        .await
                 }
                 CoordinationStrategy::AdaptiveScheduling { load_threshold } => {
-                    self.schedule_adaptive_message(message, delay, *load_threshold, cx).await
+                    self.schedule_adaptive_message(message, delay, *load_threshold, cx)
+                        .await
                 }
                 CoordinationStrategy::PriorityScheduling { max_priorities } => {
-                    self.schedule_priority_message(message, delay, *max_priorities, cx).await
+                    self.schedule_priority_message(message, delay, *max_priorities, cx)
+                        .await
                 }
             }
         }
@@ -175,11 +181,10 @@ mod tests {
             delay: Duration,
             cx: &Cx,
         ) -> Result<TimerHandle, AsupersyncError> {
-            let timer_handle = self.timer_wheel.schedule(
-                delay,
-                TimerKind::OneShot,
-                cx,
-            ).await?;
+            let timer_handle = self
+                .timer_wheel
+                .schedule(delay, TimerKind::OneShot, cx)
+                .await?;
 
             self.active_timers.insert(timer_handle, message);
             self.stats.messages_scheduled.fetch_add(1, Ordering::SeqCst);
@@ -224,7 +229,8 @@ mod tests {
                 delay
             };
 
-            self.schedule_individual_message(message, adjusted_delay, cx).await
+            self.schedule_individual_message(message, adjusted_delay, cx)
+                .await
         }
 
         /// Schedule priority message with ordering
@@ -248,7 +254,8 @@ mod tests {
                 Duration::from_millis(1)
             };
 
-            self.schedule_individual_message(message, adjusted_delay, cx).await
+            self.schedule_individual_message(message, adjusted_delay, cx)
+                .await
         }
 
         /// Process batch of messages together
@@ -283,15 +290,16 @@ mod tests {
             for batch in batches {
                 if !batch.is_empty() {
                     let batch_delay = batch[0].scheduled_at.duration_since(Instant::now());
-                    let timer_handle = self.timer_wheel.schedule(
-                        batch_delay,
-                        TimerKind::OneShot,
-                        cx,
-                    ).await?;
+                    let timer_handle = self
+                        .timer_wheel
+                        .schedule(batch_delay, TimerKind::OneShot, cx)
+                        .await?;
 
                     // Store first message as representative
                     self.active_timers.insert(timer_handle, batch[0].clone());
-                    self.stats.messages_scheduled.fetch_add(batch.len() as u64, Ordering::SeqCst);
+                    self.stats
+                        .messages_scheduled
+                        .fetch_add(batch.len() as u64, Ordering::SeqCst);
                 }
             }
 
@@ -356,19 +364,30 @@ mod tests {
             }
 
             // Perform actual broadcast
-            self.stats.broadcasts_completed.fetch_add(1, Ordering::SeqCst);
+            self.stats
+                .broadcasts_completed
+                .fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
         /// Deliver message via broadcast channel
-        async fn deliver_message(&mut self, message: TimedMessage, cx: &Cx) -> Result<(), AsupersyncError> {
+        async fn deliver_message(
+            &mut self,
+            message: TimedMessage,
+            cx: &Cx,
+        ) -> Result<(), AsupersyncError> {
             match self.broadcast_sender.send(message, cx).await {
                 Ok(()) => {
                     self.stats.messages_delivered.fetch_add(1, Ordering::SeqCst);
                 }
                 Err(e) => {
-                    self.stats.coordination_errors.fetch_add(1, Ordering::SeqCst);
-                    return Err(AsupersyncError::ChannelError(format!("Broadcast failed: {:?}", e)));
+                    self.stats
+                        .coordination_errors
+                        .fetch_add(1, Ordering::SeqCst);
+                    return Err(AsupersyncError::ChannelError(format!(
+                        "Broadcast failed: {:?}",
+                        e
+                    )));
                 }
             }
 
@@ -397,7 +416,8 @@ mod tests {
         /// Cleanup expired timer handles
         async fn cleanup_expired_timers(&mut self) -> Result<(), AsupersyncError> {
             let now = Instant::now();
-            let expired_keys: Vec<_> = self.active_timers
+            let expired_keys: Vec<_> = self
+                .active_timers
                 .iter()
                 .filter(|(_, msg)| now > msg.scheduled_at + self.config.max_delay)
                 .map(|(k, _)| *k)
@@ -460,12 +480,20 @@ mod tests {
         /// Get coordination statistics
         fn get_stats(&self) -> TimedBroadcastStats {
             TimedBroadcastStats {
-                messages_scheduled: AtomicU64::new(self.stats.messages_scheduled.load(Ordering::SeqCst)),
-                messages_delivered: AtomicU64::new(self.stats.messages_delivered.load(Ordering::SeqCst)),
+                messages_scheduled: AtomicU64::new(
+                    self.stats.messages_scheduled.load(Ordering::SeqCst),
+                ),
+                messages_delivered: AtomicU64::new(
+                    self.stats.messages_delivered.load(Ordering::SeqCst),
+                ),
                 messages_late: AtomicU64::new(self.stats.messages_late.load(Ordering::SeqCst)),
                 wheel_ticks: AtomicU64::new(self.stats.wheel_ticks.load(Ordering::SeqCst)),
-                broadcasts_completed: AtomicU64::new(self.stats.broadcasts_completed.load(Ordering::SeqCst)),
-                coordination_errors: AtomicU64::new(self.stats.coordination_errors.load(Ordering::SeqCst)),
+                broadcasts_completed: AtomicU64::new(
+                    self.stats.broadcasts_completed.load(Ordering::SeqCst),
+                ),
+                coordination_errors: AtomicU64::new(
+                    self.stats.coordination_errors.load(Ordering::SeqCst),
+                ),
             }
         }
     }
@@ -530,7 +558,8 @@ mod tests {
             assert_eq!(stats.coordination_errors.load(Ordering::SeqCst), 0);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test batch scheduling coordination
@@ -550,13 +579,15 @@ mod tests {
             let now = Instant::now();
             let base_time = now + Duration::from_millis(200);
 
-            let batch_messages = (0..5).map(|i| TimedMessage {
-                payload: format!("Batch Message {}", i),
-                scheduled_at: base_time + Duration::from_millis(i * 10),
-                priority: 1,
-                correlation_id: 2000 + i as u64,
-                group_id: Some("batch_group".to_string()),
-            }).collect::<Vec<_>>();
+            let batch_messages = (0..5)
+                .map(|i| TimedMessage {
+                    payload: format!("Batch Message {}", i),
+                    scheduled_at: base_time + Duration::from_millis(i * 10),
+                    priority: 1,
+                    correlation_id: 2000 + i as u64,
+                    group_id: Some("batch_group".to_string()),
+                })
+                .collect::<Vec<_>>();
 
             // Schedule batch messages
             for message in batch_messages {
@@ -575,7 +606,8 @@ mod tests {
             assert!(stats.coordination_errors.load(Ordering::SeqCst) == 0);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test adaptive coordination under varying load
@@ -589,20 +621,24 @@ mod tests {
                 channel_capacity: 100, // Smaller capacity to test load
                 ..TimedBroadcastConfig::default()
             };
-            let strategy = CoordinationStrategy::AdaptiveScheduling { load_threshold: 0.6 };
+            let strategy = CoordinationStrategy::AdaptiveScheduling {
+                load_threshold: 0.6,
+            };
             let mut system = TimedBroadcastSystem::new(config, strategy)?;
 
             system.start(cx).await?;
 
             // Create high load scenario
             let now = Instant::now();
-            let high_load_messages = (0..80).map(|i| TimedMessage {
-                payload: format!("Load Message {}", i),
-                scheduled_at: now + Duration::from_millis(50 + i * 5),
-                priority: i % 4,
-                correlation_id: 3000 + i as u64,
-                group_id: Some(format!("load_group_{}", i % 10)),
-            }).collect::<Vec<_>>();
+            let high_load_messages = (0..80)
+                .map(|i| TimedMessage {
+                    payload: format!("Load Message {}", i),
+                    scheduled_at: now + Duration::from_millis(50 + i * 5),
+                    priority: i % 4,
+                    correlation_id: 3000 + i as u64,
+                    group_id: Some(format!("load_group_{}", i % 10)),
+                })
+                .collect::<Vec<_>>();
 
             // Schedule high load
             for message in high_load_messages {
@@ -627,7 +663,8 @@ mod tests {
             assert!(error_rate < 0.1, "Error rate too high: {}", error_rate);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test priority-based coordination
@@ -685,6 +722,7 @@ mod tests {
             // This is tested by the coordination system's priority logic
 
             Ok(())
-        }).await
+        })
+        .await
     }
 }

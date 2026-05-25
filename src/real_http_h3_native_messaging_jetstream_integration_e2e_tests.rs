@@ -41,10 +41,10 @@ mod tests {
         },
         messaging::{
             jetstream::{
-                JetStreamContext, StreamConfig, ConsumerConfig, Message as JsMessage, JsError,
-                AckPolicy, DeliverPolicy, RetentionPolicy, StorageType,
+                AckPolicy, ConsumerConfig, DeliverPolicy, JetStreamContext, JsError,
+                Message as JsMessage, RetentionPolicy, StorageType, StreamConfig,
             },
-            nats::{NatsClient, Message as NatsMessage},
+            nats::{Message as NatsMessage, NatsClient},
         },
         net::{
             SocketAddr,
@@ -65,8 +65,8 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr},
-        sync::{Arc, Mutex, RwLock},
         sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        sync::{Arc, Mutex, RwLock},
     };
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -380,12 +380,7 @@ mod tests {
             }
         }
 
-        fn track_redelivery(
-            &self,
-            message_id: u64,
-            new_sequence: u64,
-            cause: RedeliveryCause,
-        ) {
+        fn track_redelivery(&self, message_id: u64, new_sequence: u64, cause: RedeliveryCause) {
             let redelivery_event = RedeliveryEvent {
                 message_id,
                 original_sequence: 0, // Would be filled from message state
@@ -477,7 +472,9 @@ mod tests {
                 .retention(RetentionPolicy::Limits)
                 .storage(StorageType::File);
 
-            self.jetstream_ctx.create_stream(cx, stream_config).await
+            self.jetstream_ctx
+                .create_stream(cx, stream_config)
+                .await
                 .map_err(|e| Error::Other(&format!("Failed to create stream: {:?}", e)))?;
 
             // Create pull consumer with explicit ack policy
@@ -487,7 +484,9 @@ mod tests {
                 .ack_wait(Duration::from_secs(30))
                 .deliver_policy(DeliverPolicy::All);
 
-            self.jetstream_ctx.create_consumer(cx, &self.stream_name, consumer_config).await
+            self.jetstream_ctx
+                .create_consumer(cx, &self.stream_name, consumer_config)
+                .await
                 .map_err(|e| Error::Other(&format!("Failed to create consumer: {:?}", e)))?;
 
             // Update stats
@@ -517,7 +516,10 @@ mod tests {
             ];
 
             for (subject, payload) in &test_messages {
-                let ack = self.jetstream_ctx.publish(cx, subject, payload).await
+                let ack = self
+                    .jetstream_ctx
+                    .publish(cx, subject, payload)
+                    .await
                     .map_err(|e| Error::Other(&format!("Failed to publish message: {:?}", e)))?;
 
                 {
@@ -536,16 +538,22 @@ mod tests {
             }
 
             // Consume messages via H3-enabled consumer
-            let consumer = self.jetstream_ctx.get_consumer(&self.stream_name, &self.consumer_name).await
+            let consumer = self
+                .jetstream_ctx
+                .get_consumer(&self.stream_name, &self.consumer_name)
+                .await
                 .map_err(|e| Error::Other(&format!("Failed to get consumer: {:?}", e)))?;
 
-            let messages = consumer.pull(cx, test_messages.len()).await
+            let messages = consumer
+                .pull(cx, test_messages.len())
+                .await
                 .map_err(|e| Error::Other(&format!("Failed to pull messages: {:?}", e)))?;
 
             for msg in messages {
                 // Simulate H3 delivery
                 let h3_stream_id = H3StreamId::new(msg.sequence() as u64);
-                self.simulate_h3_delivery(msg.sequence(), h3_stream_id, &msg.payload).await?;
+                self.simulate_h3_delivery(msg.sequence(), h3_stream_id, &msg.payload)
+                    .await?;
 
                 // Track delivery for ack/redelivery verification
                 self.ack_redelivery_tracker.track_message_delivery(
@@ -556,10 +564,12 @@ mod tests {
                 );
 
                 // Acknowledge the message
-                msg.ack(cx).await
+                msg.ack(cx)
+                    .await
                     .map_err(|e| Error::Other(&format!("Failed to ack message: {:?}", e)))?;
 
-                self.ack_redelivery_tracker.track_ack_received(msg.sequence());
+                self.ack_redelivery_tracker
+                    .track_ack_received(msg.sequence());
 
                 {
                     let mut stats = self.stats.lock();
@@ -573,7 +583,9 @@ mod tests {
 
         async fn test_packet_loss_resilience(&self, cx: &Cx) -> Result<()> {
             // Start packet loss simulation
-            let simulation_id = self.packet_loss_simulator.simulate_packet_loss(0.3, Duration::from_secs(10));
+            let simulation_id = self
+                .packet_loss_simulator
+                .simulate_packet_loss(0.3, Duration::from_secs(10));
 
             {
                 let mut stats = self.stats.lock();
@@ -581,8 +593,13 @@ mod tests {
             }
 
             // Publish message during packet loss
-            let ack = self.jetstream_ctx.publish(cx, "h3.messages.test_loss", b"Test packet loss").await
-                .map_err(|e| Error::Other(&format!("Failed to publish during packet loss: {:?}", e)))?;
+            let ack = self
+                .jetstream_ctx
+                .publish(cx, "h3.messages.test_loss", b"Test packet loss")
+                .await
+                .map_err(|e| {
+                    Error::Other(&format!("Failed to publish during packet loss: {:?}", e))
+                })?;
 
             // Attempt delivery with packet loss
             let h3_stream_id = H3StreamId::new(ack.sequence as u64);
@@ -590,7 +607,8 @@ mod tests {
             // First attempt - should fail due to packet loss
             if self.packet_loss_simulator.should_drop_packet() {
                 // Simulate H3 stream reset due to packet loss
-                self.simulate_h3_stream_reset(h3_stream_id, ResetReason::ConnectionError).await?;
+                self.simulate_h3_stream_reset(h3_stream_id, ResetReason::ConnectionError)
+                    .await?;
 
                 {
                     let mut stats = self.stats.lock();
@@ -602,11 +620,17 @@ mod tests {
             self.packet_loss_simulator.stop_simulation(simulation_id);
 
             // Verify message is redelivered after stream reset
-            let consumer = self.jetstream_ctx.get_consumer(&self.stream_name, &self.consumer_name).await
-                .map_err(|e| Error::Other(&format!("Failed to get consumer for redelivery: {:?}", e)))?;
+            let consumer = self
+                .jetstream_ctx
+                .get_consumer(&self.stream_name, &self.consumer_name)
+                .await
+                .map_err(|e| {
+                    Error::Other(&format!("Failed to get consumer for redelivery: {:?}", e))
+                })?;
 
-            let redelivered_messages = consumer.pull(cx, 1).await
-                .map_err(|e| Error::Other(&format!("Failed to pull redelivered message: {:?}", e)))?;
+            let redelivered_messages = consumer.pull(cx, 1).await.map_err(|e| {
+                Error::Other(&format!("Failed to pull redelivered message: {:?}", e))
+            })?;
 
             for msg in redelivered_messages {
                 // Track redelivery
@@ -622,10 +646,12 @@ mod tests {
                 }
 
                 // Acknowledge redelivered message
-                msg.ack(cx).await
-                    .map_err(|e| Error::Other(&format!("Failed to ack redelivered message: {:?}", e)))?;
+                msg.ack(cx).await.map_err(|e| {
+                    Error::Other(&format!("Failed to ack redelivered message: {:?}", e))
+                })?;
 
-                self.ack_redelivery_tracker.track_ack_received(msg.sequence());
+                self.ack_redelivery_tracker
+                    .track_ack_received(msg.sequence());
             }
 
             Ok(())
@@ -650,7 +676,12 @@ mod tests {
             Ok(())
         }
 
-        async fn simulate_h3_delivery(&self, message_id: u64, h3_stream_id: H3StreamId, payload: &[u8]) -> Result<()> {
+        async fn simulate_h3_delivery(
+            &self,
+            message_id: u64,
+            h3_stream_id: H3StreamId,
+            payload: &[u8],
+        ) -> Result<()> {
             // Simulate H3 stream delivery (in real implementation, this would use actual H3 connection)
 
             // Check for packet loss simulation
@@ -675,7 +706,11 @@ mod tests {
             Ok(())
         }
 
-        async fn simulate_h3_stream_reset(&self, h3_stream_id: H3StreamId, reason: ResetReason) -> Result<()> {
+        async fn simulate_h3_stream_reset(
+            &self,
+            h3_stream_id: H3StreamId,
+            reason: ResetReason,
+        ) -> Result<()> {
             // Simulate H3 stream reset (in real implementation, this would trigger QUIC STOP_SENDING)
 
             self.record_integration_event(IntegrationEvent {
@@ -698,7 +733,11 @@ mod tests {
             }
         }
 
-        async fn run_integration_test(&self, cx: &Cx, test_duration: Duration) -> Result<H3JetStreamTestResult> {
+        async fn run_integration_test(
+            &self,
+            cx: &Cx,
+            test_duration: Duration,
+        ) -> Result<H3JetStreamTestResult> {
             let test_start = Instant::now();
 
             // Setup JetStream infrastructure
@@ -762,10 +801,22 @@ mod tests {
 
                 // Validate results
                 assert!(result.success, "Integration test should succeed");
-                assert!(result.integration_stats.messages_published > 0, "Messages should be published");
-                assert!(result.integration_stats.messages_delivered_via_h3 > 0, "Messages should be delivered via H3");
-                assert!(result.integration_stats.messages_acked > 0, "Messages should be acknowledged");
-                assert!(framework.validate_ack_redelivery_semantics(), "Ack/redelivery semantics should be preserved");
+                assert!(
+                    result.integration_stats.messages_published > 0,
+                    "Messages should be published"
+                );
+                assert!(
+                    result.integration_stats.messages_delivered_via_h3 > 0,
+                    "Messages should be delivered via H3"
+                );
+                assert!(
+                    result.integration_stats.messages_acked > 0,
+                    "Messages should be acknowledged"
+                );
+                assert!(
+                    framework.validate_ack_redelivery_semantics(),
+                    "Ack/redelivery semantics should be preserved"
+                );
 
                 Ok(())
             })
@@ -788,9 +839,18 @@ mod tests {
 
                 // Verify redelivery occurred
                 let stats = framework.stats.lock().clone();
-                assert!(stats.packet_loss_simulations > 0, "Packet loss should be simulated");
-                assert!(stats.messages_redelivered > 0, "Messages should be redelivered after packet loss");
-                assert!(stats.exactly_once_violations == 0, "No exactly-once violations should occur");
+                assert!(
+                    stats.packet_loss_simulations > 0,
+                    "Packet loss should be simulated"
+                );
+                assert!(
+                    stats.messages_redelivered > 0,
+                    "Messages should be redelivered after packet loss"
+                );
+                assert!(
+                    stats.exactly_once_violations == 0,
+                    "No exactly-once violations should occur"
+                );
 
                 Ok(())
             })
@@ -809,25 +869,39 @@ mod tests {
                 framework.setup_jetstream_infrastructure(cx).await?;
 
                 // Publish a message
-                let ack = framework.jetstream_ctx.publish(cx, "h3.messages.reset_test", b"Reset test data").await
+                let ack = framework
+                    .jetstream_ctx
+                    .publish(cx, "h3.messages.reset_test", b"Reset test data")
+                    .await
                     .map_err(|e| Error::Other(&format!("Failed to publish: {:?}", e)))?;
 
                 // Simulate H3 stream reset
                 let h3_stream_id = H3StreamId::new(ack.sequence as u64);
-                framework.simulate_h3_stream_reset(h3_stream_id, ResetReason::ApplicationError).await?;
+                framework
+                    .simulate_h3_stream_reset(h3_stream_id, ResetReason::ApplicationError)
+                    .await?;
 
                 // Verify redelivery semantics are triggered
-                let consumer = framework.jetstream_ctx.get_consumer(&framework.stream_name, &framework.consumer_name).await
+                let consumer = framework
+                    .jetstream_ctx
+                    .get_consumer(&framework.stream_name, &framework.consumer_name)
+                    .await
                     .map_err(|e| Error::Other(&format!("Failed to get consumer: {:?}", e)))?;
 
-                let redelivered = consumer.pull(cx, 1).await
+                let redelivered = consumer
+                    .pull(cx, 1)
+                    .await
                     .map_err(|e| Error::Other(&format!("Failed to pull after reset: {:?}", e)))?;
 
-                assert!(redelivered.len() > 0, "Message should be redelivered after H3 stream reset");
+                assert!(
+                    redelivered.len() > 0,
+                    "Message should be redelivered after H3 stream reset"
+                );
 
                 for msg in redelivered {
-                    msg.ack(cx).await
-                        .map_err(|e| Error::Other(&format!("Failed to ack after reset: {:?}", e)))?;
+                    msg.ack(cx).await.map_err(|e| {
+                        Error::Other(&format!("Failed to ack after reset: {:?}", e))
+                    })?;
                 }
 
                 Ok(())
@@ -851,8 +925,13 @@ mod tests {
                 framework.test_exactly_once_semantics(cx).await?;
 
                 // Validate exactly-once guarantees held
-                let violations = framework.ack_redelivery_tracker.check_exactly_once_guarantees();
-                assert_eq!(violations, 0, "Exactly-once delivery should be maintained despite H3 transport issues");
+                let violations = framework
+                    .ack_redelivery_tracker
+                    .check_exactly_once_guarantees();
+                assert_eq!(
+                    violations, 0,
+                    "Exactly-once delivery should be maintained despite H3 transport issues"
+                );
 
                 Ok(())
             })

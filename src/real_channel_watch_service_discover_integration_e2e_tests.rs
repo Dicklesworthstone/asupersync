@@ -40,8 +40,8 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet, VecDeque},
         net::SocketAddr,
-        sync::{Arc, Mutex, RwLock},
         sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        sync::{Arc, Mutex, RwLock},
     };
 
     // ────────────────────────────────────────────────────────────────────────────────
@@ -317,12 +317,16 @@ mod tests {
 
                         // Check for missed updates
                         let last_version = self.last_seen_version.load(Ordering::Acquire);
-                        if state.version > 0 && last_version > 0 && state.version != last_version + 1 {
+                        if state.version > 0
+                            && last_version > 0
+                            && state.version != last_version + 1
+                        {
                             let missed = state.version - last_version - 1;
                             self.missed_updates.fetch_add(missed, Ordering::Relaxed);
                         }
 
-                        self.last_seen_version.store(state.version, Ordering::Release);
+                        self.last_seen_version
+                            .store(state.version, Ordering::Release);
                         self.update_count.fetch_add(1, Ordering::Relaxed);
 
                         {
@@ -598,7 +602,9 @@ mod tests {
                 let discovery = Arc::clone(&self.discovery_service);
                 let sender = Arc::clone(&self.watch_sender);
                 spawn(cx, async move |cx| {
-                    coordinator.run_coordination_loop(cx, discovery, sender).await
+                    coordinator
+                        .run_coordination_loop(cx, discovery, sender)
+                        .await
                 })
             };
 
@@ -607,10 +613,9 @@ mod tests {
             {
                 let mut subscribers = self.subscribers.lock();
                 for subscriber in subscribers.iter_mut() {
-                    let mut sub = WatchSubscriber::new(subscriber.id, self.watch_sender.subscribe());
-                    let task = spawn(cx, async move |cx| {
-                        sub.run_subscription_loop(cx).await
-                    });
+                    let mut sub =
+                        WatchSubscriber::new(subscriber.id, self.watch_sender.subscribe());
+                    let task = spawn(cx, async move |cx| sub.run_subscription_loop(cx).await);
                     subscriber_tasks.push(task);
                 }
             }
@@ -714,7 +719,10 @@ mod tests {
                 ];
 
                 // Trigger endpoint additions
-                let changes = test_endpoints.iter().map(|addr| (*addr, true)).collect::<Vec<_>>();
+                let changes = test_endpoints
+                    .iter()
+                    .map(|addr| (*addr, true))
+                    .collect::<Vec<_>>();
                 framework.trigger_endpoint_changes(&changes);
 
                 // Run integration test
@@ -722,11 +730,20 @@ mod tests {
                 let result = framework.run_integration_test(cx, test_duration).await?;
 
                 // Validate results
-                assert!(framework.validate_no_missed_updates(), "No updates should be missed");
-                assert!(framework.validate_consistent_subscriber_state(), "Subscriber states should be consistent");
+                assert!(
+                    framework.validate_no_missed_updates(),
+                    "No updates should be missed"
+                );
+                assert!(
+                    framework.validate_consistent_subscriber_state(),
+                    "Subscriber states should be consistent"
+                );
                 assert!(result.success, "Integration test should succeed");
                 assert!(result.integration_stats.subscribers_registered >= subscriber_count);
-                assert!(result.integration_stats.endpoint_changes_propagated >= test_endpoints.len() as u64);
+                assert!(
+                    result.integration_stats.endpoint_changes_propagated
+                        >= test_endpoints.len() as u64
+                );
 
                 Ok(())
             })
@@ -759,11 +776,19 @@ mod tests {
                 framework.trigger_endpoint_changes(&batch_changes);
 
                 // Run test
-                let result = framework.run_integration_test(cx, Duration::from_millis(300)).await?;
+                let result = framework
+                    .run_integration_test(cx, Duration::from_millis(300))
+                    .await?;
 
                 // Validate batched update processing
-                assert!(result.integration_stats.batched_updates_processed > 0, "Should process batched updates");
-                assert!(framework.validate_no_missed_updates(), "No updates should be missed in batch processing");
+                assert!(
+                    result.integration_stats.batched_updates_processed > 0,
+                    "Should process batched updates"
+                );
+                assert!(
+                    framework.validate_no_missed_updates(),
+                    "No updates should be missed in batch processing"
+                );
 
                 Ok(())
             })
@@ -789,7 +814,10 @@ mod tests {
                     "192.168.1.2:9000".parse::<SocketAddr>().unwrap(),
                 ];
 
-                let endpoint_changes = endpoints.iter().map(|addr| (*addr, true)).collect::<Vec<_>>();
+                let endpoint_changes = endpoints
+                    .iter()
+                    .map(|addr| (*addr, true))
+                    .collect::<Vec<_>>();
                 framework.trigger_endpoint_changes(&endpoint_changes);
 
                 // Register additional subscribers during updates
@@ -798,7 +826,9 @@ mod tests {
                 }
 
                 // Run test
-                let result = framework.run_integration_test(cx, Duration::from_millis(400)).await?;
+                let result = framework
+                    .run_integration_test(cx, Duration::from_millis(400))
+                    .await?;
 
                 // Validate concurrent operations
                 assert!(result.integration_stats.subscribers_registered >= 5);
@@ -824,18 +854,35 @@ mod tests {
                 }
 
                 // Queue multiple discovery updates
-                framework.discovery_service.add_endpoint("10.0.0.1:3000".parse().unwrap());
-                framework.discovery_service.add_endpoint("10.0.0.2:3000".parse().unwrap());
-                framework.discovery_service.remove_endpoint("10.0.0.1:3000".parse().unwrap());
+                framework
+                    .discovery_service
+                    .add_endpoint("10.0.0.1:3000".parse().unwrap());
+                framework
+                    .discovery_service
+                    .add_endpoint("10.0.0.2:3000".parse().unwrap());
+                framework
+                    .discovery_service
+                    .remove_endpoint("10.0.0.1:3000".parse().unwrap());
 
                 // Run integration test with longer duration to see polling
-                let result = framework.run_integration_test(cx, Duration::from_millis(600)).await?;
+                let result = framework
+                    .run_integration_test(cx, Duration::from_millis(600))
+                    .await?;
 
                 // Validate discovery polling worked
-                assert!(framework.discovery_service.poll_count() > 0, "Discovery should have been polled");
+                assert!(
+                    framework.discovery_service.poll_count() > 0,
+                    "Discovery should have been polled"
+                );
                 let coordination_stats = framework.integration_coordinator.coordination_stats();
-                assert!(coordination_stats.discovery_polls > 0, "Coordination should track discovery polls");
-                assert!(coordination_stats.coordination_cycles > 0, "Coordination cycles should have occurred");
+                assert!(
+                    coordination_stats.discovery_polls > 0,
+                    "Coordination should track discovery polls"
+                );
+                assert!(
+                    coordination_stats.coordination_cycles > 0,
+                    "Coordination cycles should have occurred"
+                );
 
                 Ok(())
             })
@@ -857,11 +904,15 @@ mod tests {
                 // to simulate a scenario where updates might be missed
                 let mut test_state = ServiceEndpointState::new("test-missed-updates");
                 test_state.version = 5; // Skip versions 1-4
-                test_state.endpoints.insert("127.0.0.1:7000".parse().unwrap());
+                test_state
+                    .endpoints
+                    .insert("127.0.0.1:7000".parse().unwrap());
 
                 // This test validates the missed update detection mechanism exists
                 // In a real scenario, missed updates should be very rare due to watch channel semantics
-                let result = framework.run_integration_test(cx, Duration::from_millis(200)).await?;
+                let result = framework
+                    .run_integration_test(cx, Duration::from_millis(200))
+                    .await?;
 
                 // The framework should be able to detect missed updates if they occur
                 assert!(result.success);
@@ -893,12 +944,12 @@ mod tests {
                 let subscriber2 = framework.register_subscriber(cx);
 
                 // Add more endpoints
-                framework.trigger_endpoint_changes(&[
-                    ("172.16.0.3:4000".parse().unwrap(), true),
-                ]);
+                framework.trigger_endpoint_changes(&[("172.16.0.3:4000".parse().unwrap(), true)]);
 
                 // Run test
-                let result = framework.run_integration_test(cx, Duration::from_millis(300)).await?;
+                let result = framework
+                    .run_integration_test(cx, Duration::from_millis(300))
+                    .await?;
 
                 // Each subscriber should track independently
                 assert!(result.integration_stats.subscribers_registered >= 2);

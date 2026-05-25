@@ -257,7 +257,11 @@ impl NetworkDiagnosticReporter {
             .unwrap_or(LimitingFactor::None)
     }
 
-    fn calculate_health_score(&self, pressure: &PressureModel, _metrics: &NetworkMetricSnapshots) -> f64 {
+    fn calculate_health_score(
+        &self,
+        pressure: &PressureModel,
+        _metrics: &NetworkMetricSnapshots,
+    ) -> f64 {
         // Simple health score based on pressure levels
         // Higher pressure = lower health score
         let pressure_impact = 1.0 - pressure.overall;
@@ -305,59 +309,87 @@ impl NetworkDiagnosticCli {
         let mut explanation = String::new();
         explanation.push_str(&format!("=== ATP Network Diagnostics ===\n\n"));
 
-        explanation.push_str(&format!("Overall Health: {}/100\n", (report.summary.health_score * 100.0) as u8));
-        explanation.push_str(&format!("Pressure Level: {}\n", report.summary.pressure_level));
-        explanation.push_str(&format!("Primary Bottleneck: {}\n\n", report.summary.limiting_factor));
+        explanation.push_str(&format!(
+            "Overall Health: {}/100\n",
+            (report.summary.health_score * 100.0) as u8
+        ));
+        explanation.push_str(&format!(
+            "Pressure Level: {}\n",
+            report.summary.pressure_level
+        ));
+        explanation.push_str(&format!(
+            "Primary Bottleneck: {}\n\n",
+            report.summary.limiting_factor
+        ));
 
         explanation.push_str("Network Metrics:\n");
-        explanation.push_str(&format!("  RTT: {:.1}ms average", report.summary.avg_rtt_ms));
+        explanation.push_str(&format!(
+            "  RTT: {:.1}ms average",
+            report.summary.avg_rtt_ms
+        ));
         if let Some(p95) = report.metrics.rtt_stats.p95 {
             explanation.push_str(&format!(", {:.1}ms p95", p95 * 1000.0));
         }
         explanation.push_str("\n");
 
-        explanation.push_str(&format!("  Loss: {} events\n", report.summary.recent_loss_events));
-        explanation.push_str(&format!("  Congestion window: {} bytes\n", report.metrics.congestion_window));
-        explanation.push_str(&format!("  Bytes in flight: {}\n\n", report.metrics.bytes_in_flight));
+        explanation.push_str(&format!(
+            "  Loss: {} events\n",
+            report.summary.recent_loss_events
+        ));
+        explanation.push_str(&format!(
+            "  Congestion window: {} bytes\n",
+            report.metrics.congestion_window
+        ));
+        explanation.push_str(&format!(
+            "  Bytes in flight: {}\n\n",
+            report.metrics.bytes_in_flight
+        ));
 
         explanation.push_str("Pressure Breakdown:\n");
-        explanation.push_str(&format!("  Network: {:.1}%\n", report.pressure.network * 100.0));
+        explanation.push_str(&format!(
+            "  Network: {:.1}%\n",
+            report.pressure.network * 100.0
+        ));
         explanation.push_str(&format!("  Disk: {:.1}%\n", report.pressure.disk * 100.0));
         explanation.push_str(&format!("  CPU: {:.1}%\n", report.pressure.cpu * 100.0));
-        explanation.push_str(&format!("  Memory: {:.1}%\n", report.pressure.memory * 100.0));
+        explanation.push_str(&format!(
+            "  Memory: {:.1}%\n",
+            report.pressure.memory * 100.0
+        ));
 
         // Add recommendations based on limiting factor
         explanation.push_str("\nRecommendations:\n");
         match report.summary.limiting_factor {
             LimitingFactor::Network => {
-                explanation.push_str("  • Consider relay paths if direct connection is congested\n");
+                explanation
+                    .push_str("  • Consider relay paths if direct connection is congested\n");
                 explanation.push_str("  • Check for competing network traffic\n");
                 explanation.push_str("  • Monitor path migration events\n");
-            },
+            }
             LimitingFactor::Disk => {
                 explanation.push_str("  • Consider faster storage for ATP cache\n");
                 explanation.push_str("  • Check for competing disk I/O\n");
                 explanation.push_str("  • Monitor disk space availability\n");
-            },
+            }
             LimitingFactor::Cpu => {
                 explanation.push_str("  • Consider hardware acceleration for encoding/decoding\n");
                 explanation.push_str("  • Check for competing CPU-intensive processes\n");
                 explanation.push_str("  • Monitor thermal throttling\n");
-            },
+            }
             LimitingFactor::Memory => {
                 explanation.push_str("  • Consider increasing system memory\n");
                 explanation.push_str("  • Check for memory leaks in other processes\n");
                 explanation.push_str("  • Monitor swap usage\n");
-            },
+            }
             LimitingFactor::Instability => {
                 explanation.push_str("  • Check network stability and path selection\n");
                 explanation.push_str("  • Consider different relay servers\n");
                 explanation.push_str("  • Monitor connection quality\n");
-            },
+            }
             LimitingFactor::None => {
                 explanation.push_str("  • System operating within normal parameters\n");
                 explanation.push_str("  • Monitor trends for early detection\n");
-            },
+            }
         }
 
         explanation
@@ -416,11 +448,17 @@ mod tests {
 
         // Test low pressure
         pressure.overall = 0.1;
-        assert!(matches!(reporter.classify_pressure_level(&pressure), PressureLevel::Low));
+        assert!(matches!(
+            reporter.classify_pressure_level(&pressure),
+            PressureLevel::Low
+        ));
 
         // Test high pressure
         pressure.overall = 0.8;
-        assert!(matches!(reporter.classify_pressure_level(&pressure), PressureLevel::Critical));
+        assert!(matches!(
+            reporter.classify_pressure_level(&pressure),
+            PressureLevel::Critical
+        ));
     }
 
     #[test]
@@ -436,7 +474,10 @@ mod tests {
         pressure.cpu = 0.1;
         pressure.memory = 0.1;
 
-        assert!(matches!(reporter.determine_limiting_factor(&pressure), LimitingFactor::Network));
+        assert!(matches!(
+            reporter.determine_limiting_factor(&pressure),
+            LimitingFactor::Network
+        ));
 
         // Test no bottleneck
         pressure.network = 0.1;
@@ -444,6 +485,9 @@ mod tests {
         pressure.cpu = 0.1;
         pressure.memory = 0.1;
 
-        assert!(matches!(reporter.determine_limiting_factor(&pressure), LimitingFactor::None));
+        assert!(matches!(
+            reporter.determine_limiting_factor(&pressure),
+            LimitingFactor::None
+        ));
     }
 }

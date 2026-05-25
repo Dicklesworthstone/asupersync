@@ -44,19 +44,19 @@ mod tests {
 
     use crate::{
         cx::{Cx, Registry},
-        distributed::snapshot::{RegionSnapshot, TaskSnapshot, TaskState, BudgetSnapshot},
+        distributed::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState},
         obligation::{
             crdt::CrdtObligationLedger,
             saga::{
-                Lattice, MonotoneSagaExecutor, SagaBatch, SagaExecutionPlan, SagaOpKind,
-                SagaPlan, SagaStep, SagaStepExecutor
+                Lattice, MonotoneSagaExecutor, SagaBatch, SagaExecutionPlan, SagaOpKind, SagaPlan,
+                SagaStep, SagaStepExecutor,
             },
         },
         record::region::RegionState,
         runtime::Runtime,
         time::{Duration, Instant},
-        types::{Budget, ObligationId, Outcome, RegionId, TaskId, Time},
         trace::distributed::lattice::LatticeState,
+        types::{Budget, ObligationId, Outcome, RegionId, TaskId, Time},
     };
     use std::{
         collections::{BTreeMap, HashMap, VecDeque},
@@ -173,21 +173,32 @@ mod tests {
             step: &SagaStep,
         ) -> Pin<Box<dyn std::future::Future<Output = LatticeState> + Send + '_>> {
             Box::pin(async move {
-                let result = self.step_results.pop_front().unwrap_or(LatticeState::Unknown);
+                let result = self
+                    .step_results
+                    .pop_front()
+                    .unwrap_or(LatticeState::Unknown);
 
                 // Track execution for rollback context
-                if let (Ok(mut log), Ok(mut context)) = (
-                    self.execution_log.lock(),
-                    self.rollback_context.lock(),
-                ) {
+                if let (Ok(mut log), Ok(mut context)) =
+                    (self.execution_log.lock(), self.rollback_context.lock())
+                {
                     log.push((step.label.clone(), result, Instant::now()));
 
                     // Build compensation chain
                     let compensation_step = match step.op {
-                        SagaOpKind::Reserve => SagaStep::new(SagaOpKind::Release, format!("compensate_{}", step.label)),
-                        SagaOpKind::Commit => SagaStep::new(SagaOpKind::Abort, format!("compensate_{}", step.label)),
-                        SagaOpKind::Send => SagaStep::new(SagaOpKind::CancelDrain, format!("compensate_{}", step.label)),
-                        SagaOpKind::Acquire => SagaStep::new(SagaOpKind::Release, format!("compensate_{}", step.label)),
+                        SagaOpKind::Reserve => {
+                            SagaStep::new(SagaOpKind::Release, format!("compensate_{}", step.label))
+                        }
+                        SagaOpKind::Commit => {
+                            SagaStep::new(SagaOpKind::Abort, format!("compensate_{}", step.label))
+                        }
+                        SagaOpKind::Send => SagaStep::new(
+                            SagaOpKind::CancelDrain,
+                            format!("compensate_{}", step.label),
+                        ),
+                        SagaOpKind::Acquire => {
+                            SagaStep::new(SagaOpKind::Release, format!("compensate_{}", step.label))
+                        }
                         _ => SagaStep::new(SagaOpKind::Abort, format!("compensate_{}", step.label)),
                     };
 
@@ -314,13 +325,13 @@ mod tests {
 
             // Create a partial execution plan with only the first N steps
             let partial_steps = saga_state.plan.steps[..steps_to_execute].to_vec();
-            let partial_plan = SagaPlan::new(
-                format!("{}_partial", saga_state.saga_id),
-                partial_steps,
-            );
+            let partial_plan =
+                SagaPlan::new(format!("{}_partial", saga_state.saga_id), partial_steps);
             let partial_exec_plan = SagaExecutionPlan::from_plan(&partial_plan);
 
-            let result = self.executor.execute(&partial_exec_plan, &mut step_executor);
+            let result = self
+                .executor
+                .execute(&partial_exec_plan, &mut step_executor);
 
             // Update saga state
             saga_state.current_lattice_state = result.final_state;
@@ -329,7 +340,9 @@ mod tests {
             // Record completed steps
             for (i, step) in saga_state.plan.steps.iter().enumerate() {
                 if i < steps_to_execute {
-                    saga_state.completed_steps.push((step.clone(), result.final_state));
+                    saga_state
+                        .completed_steps
+                        .push((step.clone(), result.final_state));
                 }
             }
 
@@ -487,13 +500,12 @@ mod tests {
                 monotone_batch_state: HashMap::new(),
             }));
 
-            let mut compensation_executor = TrackingStepExecutor::new(
-                compensation_results,
-                execution_log,
-                rollback_context,
-            );
+            let mut compensation_executor =
+                TrackingStepExecutor::new(compensation_results, execution_log, rollback_context);
 
-            let result = self.executor.execute(&compensation_exec_plan, &mut compensation_executor);
+            let result = self
+                .executor
+                .execute(&compensation_exec_plan, &mut compensation_executor);
 
             if let Ok(mut stats) = self.saga_stats.lock() {
                 stats.sagas_rolled_back += 1;
@@ -511,25 +523,29 @@ mod tests {
         ) -> bool {
             // Verify compensation chain is preserved
             if original.rollback_context.compensation_chain.len()
-                != restored.rollback_context.compensation_chain.len() {
+                != restored.rollback_context.compensation_chain.len()
+            {
                 return false;
             }
 
             // Verify rollback sequence is preserved
             if original.rollback_context.rollback_sequence
-                != restored.rollback_context.rollback_sequence {
+                != restored.rollback_context.rollback_sequence
+            {
                 return false;
             }
 
             // Verify execution log structure is preserved
             if original.rollback_context.execution_log.len()
-                != restored.rollback_context.execution_log.len() {
+                != restored.rollback_context.execution_log.len()
+            {
                 return false;
             }
 
             // Verify state checkpoints are preserved
             if original.rollback_context.state_checkpoints.len()
-                != restored.rollback_context.state_checkpoints.len() {
+                != restored.rollback_context.state_checkpoints.len()
+            {
                 return false;
             }
 
@@ -555,31 +571,58 @@ mod tests {
 
             // Create and partially execute a saga
             let mut saga_state = harness.create_test_saga("basic_saga", 1);
-            harness.execute_saga_partially(&mut saga_state, 2).await.unwrap();
+            harness
+                .execute_saga_partially(&mut saga_state, 2)
+                .await
+                .unwrap();
 
             // Capture snapshot while saga is in-flight
             let snapshot = harness.capture_snapshot_with_saga(&saga_state).unwrap();
 
             // Restore saga from snapshot
-            let restored_saga = harness.restore_saga_from_snapshot(&snapshot, "basic_saga_restored").unwrap();
+            let restored_saga = harness
+                .restore_saga_from_snapshot(&snapshot, "basic_saga_restored")
+                .unwrap();
 
             // Verify rollback context is preserved
-            let context_preserved = harness.verify_rollback_context_preservation(&saga_state, &restored_saga);
+            let context_preserved =
+                harness.verify_rollback_context_preservation(&saga_state, &restored_saga);
 
             // Execute compensation to verify rollback works
             let compensation_result = harness.execute_compensation(&restored_saga).await.unwrap();
 
             let (snapshot_stats, saga_stats) = harness.get_stats_snapshot();
 
-            assert!(context_preserved, "Rollback context should be preserved across snapshot");
-            assert!(saga_stats.rollback_context_verified > 0, "Rollback context should be verified");
-            assert!(snapshot_stats.snapshots_captured > 0, "Should have captured snapshots");
-            assert!(snapshot_stats.snapshots_restored > 0, "Should have restored snapshots");
-            assert!(saga_stats.compensation_steps_executed > 0, "Compensation should have executed");
-            assert_eq!(compensation_result, LatticeState::Unknown, "Compensation should return to unknown state");
+            assert!(
+                context_preserved,
+                "Rollback context should be preserved across snapshot"
+            );
+            assert!(
+                saga_stats.rollback_context_verified > 0,
+                "Rollback context should be verified"
+            );
+            assert!(
+                snapshot_stats.snapshots_captured > 0,
+                "Should have captured snapshots"
+            );
+            assert!(
+                snapshot_stats.snapshots_restored > 0,
+                "Should have restored snapshots"
+            );
+            assert!(
+                saga_stats.compensation_steps_executed > 0,
+                "Compensation should have executed"
+            );
+            assert_eq!(
+                compensation_result,
+                LatticeState::Unknown,
+                "Compensation should return to unknown state"
+            );
 
-            println!("✓ Basic in-flight saga snapshot: snapshot_stats={:?}, saga_stats={:?}",
-                snapshot_stats, saga_stats);
+            println!(
+                "✓ Basic in-flight saga snapshot: snapshot_stats={:?}, saga_stats={:?}",
+                snapshot_stats, saga_stats
+            );
         });
     }
 
@@ -591,32 +634,55 @@ mod tests {
 
             // Create complex saga with multiple batches
             let mut saga_state = harness.create_test_saga("multi_batch_saga", 2);
-            harness.execute_saga_partially(&mut saga_state, 4).await.unwrap();
+            harness
+                .execute_saga_partially(&mut saga_state, 4)
+                .await
+                .unwrap();
 
             // Capture snapshot mid-execution
             let snapshot = harness.capture_snapshot_with_saga(&saga_state).unwrap();
 
             // Continue execution
-            harness.execute_saga_partially(&mut saga_state, 6).await.unwrap();
+            harness
+                .execute_saga_partially(&mut saga_state, 6)
+                .await
+                .unwrap();
 
             // Restore from earlier snapshot
-            let restored_saga = harness.restore_saga_from_snapshot(&snapshot, "multi_batch_restored").unwrap();
+            let restored_saga = harness
+                .restore_saga_from_snapshot(&snapshot, "multi_batch_restored")
+                .unwrap();
 
             // Verify preservation
-            let context_preserved = harness.verify_rollback_context_preservation(&saga_state, &restored_saga);
+            let context_preserved =
+                harness.verify_rollback_context_preservation(&saga_state, &restored_saga);
 
             // Execute compensation
             let compensation_result = harness.execute_compensation(&restored_saga).await.unwrap();
 
             let (snapshot_stats, saga_stats) = harness.get_stats_snapshot();
 
-            assert!(context_preserved, "Complex saga rollback context should be preserved");
-            assert!(saga_stats.monotone_batches_preserved > 0 || true, "Monotone batches should be tracked");
-            assert!(saga_stats.final_state_consistency, "Final state should be consistent");
-            assert!(compensation_result == LatticeState::Unknown, "Compensation should succeed");
+            assert!(
+                context_preserved,
+                "Complex saga rollback context should be preserved"
+            );
+            assert!(
+                saga_stats.monotone_batches_preserved > 0 || true,
+                "Monotone batches should be tracked"
+            );
+            assert!(
+                saga_stats.final_state_consistency,
+                "Final state should be consistent"
+            );
+            assert!(
+                compensation_result == LatticeState::Unknown,
+                "Compensation should succeed"
+            );
 
-            println!("✓ Multi-batch saga preservation: snapshot_stats={:?}, saga_stats={:?}",
-                snapshot_stats, saga_stats);
+            println!(
+                "✓ Multi-batch saga preservation: snapshot_stats={:?}, saga_stats={:?}",
+                snapshot_stats, saga_stats
+            );
         });
     }
 
@@ -628,17 +694,24 @@ mod tests {
 
             // Create saga with complex compensation requirements
             let mut saga_state = harness.create_test_saga("compensation_saga", 3);
-            harness.execute_saga_partially(&mut saga_state, 5).await.unwrap();
+            harness
+                .execute_saga_partially(&mut saga_state, 5)
+                .await
+                .unwrap();
 
             // Verify compensation chain was built
-            assert!(!saga_state.rollback_context.compensation_chain.is_empty(),
-                "Compensation chain should be built during execution");
+            assert!(
+                !saga_state.rollback_context.compensation_chain.is_empty(),
+                "Compensation chain should be built during execution"
+            );
 
             // Capture snapshot with built compensation chain
             let snapshot = harness.capture_snapshot_with_saga(&saga_state).unwrap();
 
             // Restore and verify compensation chain integrity
-            let restored_saga = harness.restore_saga_from_snapshot(&snapshot, "compensation_restored").unwrap();
+            let restored_saga = harness
+                .restore_saga_from_snapshot(&snapshot, "compensation_restored")
+                .unwrap();
 
             assert_eq!(
                 saga_state.rollback_context.compensation_chain.len(),
@@ -650,16 +723,22 @@ mod tests {
             let original_compensation = harness.execute_compensation(&saga_state).await.unwrap();
             let restored_compensation = harness.execute_compensation(&restored_saga).await.unwrap();
 
-            assert_eq!(original_compensation, restored_compensation,
-                "Compensation results should be identical");
+            assert_eq!(
+                original_compensation, restored_compensation,
+                "Compensation results should be identical"
+            );
 
             let (snapshot_stats, saga_stats) = harness.get_stats_snapshot();
 
-            assert!(saga_stats.compensation_steps_executed >= 10,
-                "Multiple compensation executions should be tracked");
+            assert!(
+                saga_stats.compensation_steps_executed >= 10,
+                "Multiple compensation executions should be tracked"
+            );
 
-            println!("✓ Compensation sequence restoration: original={:?}, restored={:?}",
-                original_compensation, restored_compensation);
+            println!(
+                "✓ Compensation sequence restoration: original={:?}, restored={:?}",
+                original_compensation, restored_compensation
+            );
         });
     }
 
@@ -675,9 +754,18 @@ mod tests {
             let mut saga_c = harness.create_test_saga("saga_c", 3);
 
             // Execute them partially
-            harness.execute_saga_partially(&mut saga_a, 2).await.unwrap();
-            harness.execute_saga_partially(&mut saga_b, 3).await.unwrap();
-            harness.execute_saga_partially(&mut saga_c, 4).await.unwrap();
+            harness
+                .execute_saga_partially(&mut saga_a, 2)
+                .await
+                .unwrap();
+            harness
+                .execute_saga_partially(&mut saga_b, 3)
+                .await
+                .unwrap();
+            harness
+                .execute_saga_partially(&mut saga_c, 4)
+                .await
+                .unwrap();
 
             // Capture snapshots of all
             let snapshot_a = harness.capture_snapshot_with_saga(&saga_a).unwrap();
@@ -685,29 +773,45 @@ mod tests {
             let snapshot_c = harness.capture_snapshot_with_saga(&saga_c).unwrap();
 
             // Restore all
-            let restored_a = harness.restore_saga_from_snapshot(&snapshot_a, "restored_a").unwrap();
-            let restored_b = harness.restore_saga_from_snapshot(&snapshot_b, "restored_b").unwrap();
-            let restored_c = harness.restore_saga_from_snapshot(&snapshot_c, "restored_c").unwrap();
+            let restored_a = harness
+                .restore_saga_from_snapshot(&snapshot_a, "restored_a")
+                .unwrap();
+            let restored_b = harness
+                .restore_saga_from_snapshot(&snapshot_b, "restored_b")
+                .unwrap();
+            let restored_c = harness
+                .restore_saga_from_snapshot(&snapshot_c, "restored_c")
+                .unwrap();
 
             // Verify each maintains independent rollback context
             let context_a_ok = harness.verify_rollback_context_preservation(&saga_a, &restored_a);
             let context_b_ok = harness.verify_rollback_context_preservation(&saga_b, &restored_b);
             let context_c_ok = harness.verify_rollback_context_preservation(&saga_c, &restored_c);
 
-            assert!(context_a_ok && context_b_ok && context_c_ok,
-                "All concurrent sagas should preserve rollback context");
+            assert!(
+                context_a_ok && context_b_ok && context_c_ok,
+                "All concurrent sagas should preserve rollback context"
+            );
 
             let (snapshot_stats, saga_stats) = harness.get_stats_snapshot();
 
-            assert_eq!(snapshot_stats.snapshots_captured, 3,
-                "Should have captured 3 concurrent snapshots");
-            assert_eq!(snapshot_stats.snapshots_restored, 3,
-                "Should have restored 3 concurrent snapshots");
-            assert!(saga_stats.sagas_created >= 3,
-                "Should have created multiple sagas");
+            assert_eq!(
+                snapshot_stats.snapshots_captured, 3,
+                "Should have captured 3 concurrent snapshots"
+            );
+            assert_eq!(
+                snapshot_stats.snapshots_restored, 3,
+                "Should have restored 3 concurrent snapshots"
+            );
+            assert!(
+                saga_stats.sagas_created >= 3,
+                "Should have created multiple sagas"
+            );
 
-            println!("✓ Concurrent saga snapshot: {} sagas captured and restored",
-                snapshot_stats.snapshots_captured);
+            println!(
+                "✓ Concurrent saga snapshot: {} sagas captured and restored",
+                snapshot_stats.snapshots_captured
+            );
         });
     }
 
@@ -719,36 +823,57 @@ mod tests {
 
             // Create saga and execute partially
             let mut saga_state = harness.create_test_saga("recovery_saga", 2);
-            harness.execute_saga_partially(&mut saga_state, 3).await.unwrap();
+            harness
+                .execute_saga_partially(&mut saga_state, 3)
+                .await
+                .unwrap();
 
             // Capture snapshot at partial state
             let partial_snapshot = harness.capture_snapshot_with_saga(&saga_state).unwrap();
 
             // Continue execution to completion
-            harness.execute_saga_partially(&mut saga_state, 6).await.unwrap();
+            harness
+                .execute_saga_partially(&mut saga_state, 6)
+                .await
+                .unwrap();
 
             // Now restore from partial snapshot and continue
-            let mut restored_saga = harness.restore_saga_from_snapshot(&partial_snapshot, "recovery_restored").unwrap();
+            let mut restored_saga = harness
+                .restore_saga_from_snapshot(&partial_snapshot, "recovery_restored")
+                .unwrap();
 
             // Verify we can continue execution from restored state
-            harness.execute_saga_partially(&mut restored_saga, 6).await.unwrap();
+            harness
+                .execute_saga_partially(&mut restored_saga, 6)
+                .await
+                .unwrap();
 
             // Both should have valid rollback contexts
             let original_compensation = harness.execute_compensation(&saga_state).await.unwrap();
             let restored_compensation = harness.execute_compensation(&restored_saga).await.unwrap();
 
             // Both should be able to rollback successfully
-            assert_eq!(original_compensation, LatticeState::Unknown,
-                "Original saga should rollback successfully");
-            assert_eq!(restored_compensation, LatticeState::Unknown,
-                "Restored saga should rollback successfully");
+            assert_eq!(
+                original_compensation,
+                LatticeState::Unknown,
+                "Original saga should rollback successfully"
+            );
+            assert_eq!(
+                restored_compensation,
+                LatticeState::Unknown,
+                "Restored saga should rollback successfully"
+            );
 
             let (snapshot_stats, saga_stats) = harness.get_stats_snapshot();
 
-            assert!(saga_stats.final_state_consistency,
-                "Final state should be consistent after recovery");
-            assert!(snapshot_stats.integrity_verified,
-                "Snapshot integrity should be verified");
+            assert!(
+                saga_stats.final_state_consistency,
+                "Final state should be consistent after recovery"
+            );
+            assert!(
+                snapshot_stats.integrity_verified,
+                "Snapshot integrity should be verified"
+            );
 
             println!("✓ Partial execution recovery: both paths rolled back successfully");
         });
@@ -764,19 +889,34 @@ mod tests {
             let mut saga_state = harness.create_test_saga("comprehensive_saga", 3);
 
             // Execute in phases with snapshots
-            harness.execute_saga_partially(&mut saga_state, 3).await.unwrap();
+            harness
+                .execute_saga_partially(&mut saga_state, 3)
+                .await
+                .unwrap();
             let snapshot_1 = harness.capture_snapshot_with_saga(&saga_state).unwrap();
 
-            harness.execute_saga_partially(&mut saga_state, 6).await.unwrap();
+            harness
+                .execute_saga_partially(&mut saga_state, 6)
+                .await
+                .unwrap();
             let snapshot_2 = harness.capture_snapshot_with_saga(&saga_state).unwrap();
 
-            harness.execute_saga_partially(&mut saga_state, 10).await.unwrap();
+            harness
+                .execute_saga_partially(&mut saga_state, 10)
+                .await
+                .unwrap();
             let snapshot_3 = harness.capture_snapshot_with_saga(&saga_state).unwrap();
 
             // Restore from each snapshot and verify rollback
-            let restored_1 = harness.restore_saga_from_snapshot(&snapshot_1, "restored_1").unwrap();
-            let restored_2 = harness.restore_saga_from_snapshot(&snapshot_2, "restored_2").unwrap();
-            let restored_3 = harness.restore_saga_from_snapshot(&snapshot_3, "restored_3").unwrap();
+            let restored_1 = harness
+                .restore_saga_from_snapshot(&snapshot_1, "restored_1")
+                .unwrap();
+            let restored_2 = harness
+                .restore_saga_from_snapshot(&snapshot_2, "restored_2")
+                .unwrap();
+            let restored_3 = harness
+                .restore_saga_from_snapshot(&snapshot_3, "restored_3")
+                .unwrap();
 
             // Execute compensation on all
             let comp_1 = harness.execute_compensation(&restored_1).await.unwrap();
@@ -784,35 +924,69 @@ mod tests {
             let comp_3 = harness.execute_compensation(&restored_3).await.unwrap();
 
             // All should successfully compensate
-            assert_eq!(comp_1, LatticeState::Unknown, "Snapshot 1 compensation should succeed");
-            assert_eq!(comp_2, LatticeState::Unknown, "Snapshot 2 compensation should succeed");
-            assert_eq!(comp_3, LatticeState::Unknown, "Snapshot 3 compensation should succeed");
+            assert_eq!(
+                comp_1,
+                LatticeState::Unknown,
+                "Snapshot 1 compensation should succeed"
+            );
+            assert_eq!(
+                comp_2,
+                LatticeState::Unknown,
+                "Snapshot 2 compensation should succeed"
+            );
+            assert_eq!(
+                comp_3,
+                LatticeState::Unknown,
+                "Snapshot 3 compensation should succeed"
+            );
 
             // Verify rollback context preservation at each stage
-            let preserved_1 = harness.verify_rollback_context_preservation(&saga_state, &restored_1);
-            let preserved_2 = harness.verify_rollback_context_preservation(&saga_state, &restored_2);
-            let preserved_3 = harness.verify_rollback_context_preservation(&saga_state, &restored_3);
+            let preserved_1 =
+                harness.verify_rollback_context_preservation(&saga_state, &restored_1);
+            let preserved_2 =
+                harness.verify_rollback_context_preservation(&saga_state, &restored_2);
+            let preserved_3 =
+                harness.verify_rollback_context_preservation(&saga_state, &restored_3);
 
-            assert!(preserved_1 || true, "Context preservation verified (or would be with full metadata)");
-            assert!(preserved_2 || true, "Context preservation verified (or would be with full metadata)");
-            assert!(preserved_3 || true, "Context preservation verified (or would be with full metadata)");
+            assert!(
+                preserved_1 || true,
+                "Context preservation verified (or would be with full metadata)"
+            );
+            assert!(
+                preserved_2 || true,
+                "Context preservation verified (or would be with full metadata)"
+            );
+            assert!(
+                preserved_3 || true,
+                "Context preservation verified (or would be with full metadata)"
+            );
 
             let (snapshot_stats, saga_stats) = harness.get_stats_snapshot();
 
             // Verify comprehensive statistics
-            assert_eq!(snapshot_stats.snapshots_captured, 3,
-                "Should have captured 3 progressive snapshots");
-            assert_eq!(snapshot_stats.snapshots_restored, 3,
-                "Should have restored 3 snapshots");
-            assert!(saga_stats.compensation_steps_executed >= 15,
-                "Should have executed many compensation steps");
-            assert!(saga_stats.final_state_consistency,
-                "Final state should maintain consistency");
+            assert_eq!(
+                snapshot_stats.snapshots_captured, 3,
+                "Should have captured 3 progressive snapshots"
+            );
+            assert_eq!(
+                snapshot_stats.snapshots_restored, 3,
+                "Should have restored 3 snapshots"
+            );
+            assert!(
+                saga_stats.compensation_steps_executed >= 15,
+                "Should have executed many compensation steps"
+            );
+            assert!(
+                saga_stats.final_state_consistency,
+                "Final state should maintain consistency"
+            );
 
-            println!("✓ Comprehensive integration test: snapshots={}, compensations={}, consistent={}",
+            println!(
+                "✓ Comprehensive integration test: snapshots={}, compensations={}, consistent={}",
                 snapshot_stats.snapshots_captured,
                 saga_stats.compensation_steps_executed,
-                saga_stats.final_state_consistency);
+                saga_stats.final_state_consistency
+            );
         });
     }
 }

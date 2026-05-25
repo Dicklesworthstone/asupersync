@@ -14,16 +14,16 @@
 #![cfg(test)]
 
 use super::*;
-use crate::lab::config::LabConfig;
-use crate::lab::runtime::{LabRuntime, VirtualTimeReport, AutoAdvanceTermination};
-use crate::lab::scenario::{Scenario, SCENARIO_SCHEMA_VERSION};
 use crate::lab::chaos::{ChaosConfig, ChaosStats};
+use crate::lab::config::LabConfig;
 use crate::lab::oracle::OracleSuite;
-use crate::types::{Budget, Time};
+use crate::lab::runtime::{AutoAdvanceTermination, LabRuntime, VirtualTimeReport};
+use crate::lab::scenario::{SCENARIO_SCHEMA_VERSION, Scenario};
 use crate::runtime::RuntimeState;
+use crate::types::{Budget, Time};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::time::Duration;
-use serde_json::{json, Value};
 
 // Test constants for deterministic validation
 const TEST_SEED: u64 = 0x1234_5678_9abc_def0;
@@ -181,9 +181,11 @@ fn test_deterministic_scheduling_consistency() {
     // Simple deterministic task
     let task_fn = || async { 42u32 };
 
-    let (task_id1, _handle1) = runtime1.create_task(region1, Budget::INFINITE, task_fn())
+    let (task_id1, _handle1) = runtime1
+        .create_task(region1, Budget::INFINITE, task_fn())
         .expect("create task 1");
-    let (task_id2, _handle2) = runtime2.create_task(region2, Budget::INFINITE, task_fn())
+    let (task_id2, _handle2) = runtime2
+        .create_task(region2, Budget::INFINITE, task_fn())
         .expect("create task 2");
 
     // Schedule and run
@@ -247,7 +249,8 @@ fn test_auto_advance_termination_conditions() {
         42
     };
 
-    let (task_id, _handle) = runtime.create_task(region, Budget::INFINITE, busy_task)
+    let (task_id, _handle) = runtime
+        .create_task(region, Budget::INFINITE, busy_task)
         .expect("create busy task");
 
     runtime.schedule(task_id, 0);
@@ -275,7 +278,8 @@ fn test_virtual_time_report_consistency() {
         "timer_done"
     };
 
-    let (task_id, _handle) = runtime.create_task(region, Budget::INFINITE, timer_task)
+    let (task_id, _handle) = runtime
+        .create_task(region, Budget::INFINITE, timer_task)
         .expect("create timer task");
 
     runtime.schedule(task_id, 0);
@@ -302,7 +306,10 @@ fn test_scenario_schema_validation() {
     let scenario_json = create_test_scenario();
 
     // Schema version should be correct
-    assert_eq!(scenario_json["schema_version"], json!(SCENARIO_SCHEMA_VERSION));
+    assert_eq!(
+        scenario_json["schema_version"],
+        json!(SCENARIO_SCHEMA_VERSION)
+    );
 
     // Required fields should be present
     assert!(scenario_json["id"].is_string());
@@ -396,7 +403,8 @@ fn test_trace_certificate_determinism() {
             42
         };
 
-        let (task_id, _handle) = runtime.create_task(region, Budget::INFINITE, task)
+        let (task_id, _handle) = runtime
+            .create_task(region, Budget::INFINITE, task)
             .expect("create task");
 
         runtime.schedule(task_id, 0);
@@ -444,7 +452,8 @@ fn test_chaos_injection_bounds() {
             i * 2
         };
 
-        let (task_id, _handle) = runtime.create_task(region, Budget::INFINITE, task)
+        let (task_id, _handle) = runtime
+            .create_task(region, Budget::INFINITE, task)
             .expect("create chaos task");
 
         runtime.schedule(task_id, 0);
@@ -487,7 +496,8 @@ fn test_oracle_suite_integration() {
         "completed_successfully"
     };
 
-    let (task_id, _handle) = runtime.create_task(region, Budget::INFINITE, well_behaved_task)
+    let (task_id, _handle) = runtime
+        .create_task(region, Budget::INFINITE, well_behaved_task)
         .expect("create well-behaved task");
 
     runtime.schedule(task_id, 0);
@@ -564,7 +574,8 @@ fn test_deterministic_entropy_separation() {
             rng.next_u32() % 100
         };
 
-        let (task_id, handle) = runtime.create_task(region, Budget::INFINITE, task)
+        let (task_id, handle) = runtime
+            .create_task(region, Budget::INFINITE, task)
             .expect("create entropy task");
 
         runtime.schedule(task_id, 0);
@@ -596,7 +607,8 @@ fn test_trace_capacity_bounds() {
     // Create many tasks to exceed trace capacity
     for i in 0..20 {
         let task = async move { i };
-        let (task_id, _handle) = runtime.create_task(region, Budget::INFINITE, task)
+        let (task_id, _handle) = runtime
+            .create_task(region, Budget::INFINITE, task)
             .expect("create task");
         runtime.schedule(task_id, 0);
     }
@@ -617,9 +629,21 @@ fn test_memory_usage_bounds_in_lab_runtime() {
     use std::mem::size_of;
 
     // Core structures should be reasonably sized
-    assert!(size_of::<LabConfig>() < 1024, "LabConfig too large: {} bytes", size_of::<LabConfig>());
-    assert!(size_of::<VirtualTimeReport>() < 256, "VirtualTimeReport too large: {} bytes", size_of::<VirtualTimeReport>());
-    assert!(size_of::<AutoAdvanceTermination>() < 32, "AutoAdvanceTermination too large: {} bytes", size_of::<AutoAdvanceTermination>());
+    assert!(
+        size_of::<LabConfig>() < 1024,
+        "LabConfig too large: {} bytes",
+        size_of::<LabConfig>()
+    );
+    assert!(
+        size_of::<VirtualTimeReport>() < 256,
+        "VirtualTimeReport too large: {} bytes",
+        size_of::<VirtualTimeReport>()
+    );
+    assert!(
+        size_of::<AutoAdvanceTermination>() < 32,
+        "AutoAdvanceTermination too large: {} bytes",
+        size_of::<AutoAdvanceTermination>()
+    );
 
     // Create a runtime and verify it doesn't use excessive memory
     let config = create_test_lab_config();
@@ -646,7 +670,8 @@ fn test_cross_platform_determinism_validation() {
         let region = runtime.create_root_region(Budget::INFINITE);
         let task = async { 42u32 };
 
-        let (task_id, _handle) = runtime.create_task(region, Budget::INFINITE, task)
+        let (task_id, _handle) = runtime
+            .create_task(region, Budget::INFINITE, task)
             .expect("create simple task");
 
         runtime.schedule(task_id, 0);

@@ -13,19 +13,19 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod integration_tests {
-    use crate::http::h1::server::{H1Server, ServerConfig, RequestHandler, ChunkedResponse};
-    use crate::http::h1::client::{H1Client, ClientConfig, ResponseDecoder, ChunkedDecoder};
-    use crate::http::{Method, StatusCode, HeaderMap, HeaderName, HeaderValue};
-    use crate::net::tcp::{TcpListener, TcpStream};
-    use crate::runtime::{RuntimeBuilder, Runtime};
+    use crate::bytes::{Buf, BufMut, Bytes, BytesMut};
     use crate::cx::Cx;
-    use crate::types::{TaskId, Budget, Outcome};
-    use crate::bytes::{Bytes, BytesMut, Buf, BufMut};
-    use crate::io::{AsyncRead, AsyncWrite, AsyncBufRead, BufWriter};
     use crate::error::AsupersyncError;
+    use crate::http::h1::client::{ChunkedDecoder, ClientConfig, H1Client, ResponseDecoder};
+    use crate::http::h1::server::{ChunkedResponse, H1Server, RequestHandler, ServerConfig};
+    use crate::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+    use crate::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufWriter};
+    use crate::net::tcp::{TcpListener, TcpStream};
+    use crate::runtime::{Runtime, RuntimeBuilder};
+    use crate::types::{Budget, Outcome, TaskId};
     use std::collections::{HashMap, VecDeque};
+    use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};
-    use std::net::{SocketAddr, Ipv4Addr};
     use std::time::{Duration, Instant};
     use tokio::time::sleep;
 
@@ -74,7 +74,13 @@ mod integration_tests {
     }
 
     impl ChunkedTestHandler {
-        fn new(chunk_size: usize, total_size: usize, delay_between_chunks: Duration, include_trailers: bool, stats: Arc<Mutex<H1ChunkedStats>>) -> Self {
+        fn new(
+            chunk_size: usize,
+            total_size: usize,
+            delay_between_chunks: Duration,
+            include_trailers: bool,
+            stats: Arc<Mutex<H1ChunkedStats>>,
+        ) -> Self {
             Self {
                 chunk_size,
                 total_size,
@@ -87,10 +93,23 @@ mod integration_tests {
 
     #[async_trait::async_trait]
     impl RequestHandler for ChunkedTestHandler {
-        async fn handle_request(&self, cx: &Cx, method: Method, path: &str, headers: HeaderMap, body: Bytes) -> Result<ChunkedResponse, AsupersyncError> {
+        async fn handle_request(
+            &self,
+            cx: &Cx,
+            method: Method,
+            path: &str,
+            headers: HeaderMap,
+            body: Bytes,
+        ) -> Result<ChunkedResponse, AsupersyncError> {
             let mut response_headers = HeaderMap::new();
-            response_headers.insert(HeaderName::from_static("transfer-encoding"), HeaderValue::from_static("chunked"));
-            response_headers.insert(HeaderName::from_static("content-type"), HeaderValue::from_static("application/octet-stream"));
+            response_headers.insert(
+                HeaderName::from_static("transfer-encoding"),
+                HeaderValue::from_static("chunked"),
+            );
+            response_headers.insert(
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/octet-stream"),
+            );
 
             // Generate chunked response body
             let mut chunks = VecDeque::new();
@@ -120,8 +139,14 @@ mod integration_tests {
             // Add trailer headers if requested
             let mut trailer_headers = HeaderMap::new();
             if self.include_trailers {
-                trailer_headers.insert(HeaderName::from_static("x-total-chunks"), HeaderValue::from_str(&chunk_index.to_string()).unwrap());
-                trailer_headers.insert(HeaderName::from_static("x-content-hash"), HeaderValue::from_static("sha256:abcd1234"));
+                trailer_headers.insert(
+                    HeaderName::from_static("x-total-chunks"),
+                    HeaderValue::from_str(&chunk_index.to_string()).unwrap(),
+                );
+                trailer_headers.insert(
+                    HeaderName::from_static("x-content-hash"),
+                    HeaderValue::from_static("sha256:abcd1234"),
+                );
             }
 
             {
@@ -129,7 +154,12 @@ mod integration_tests {
                 stats.chunked_responses_sent += 1;
             }
 
-            Ok(ChunkedResponse::new(StatusCode::OK, response_headers, chunks, trailer_headers))
+            Ok(ChunkedResponse::new(
+                StatusCode::OK,
+                response_headers,
+                chunks,
+                trailer_headers,
+            ))
         }
     }
 
@@ -139,7 +169,7 @@ mod integration_tests {
                 RuntimeBuilder::new()
                     .with_network_stack()
                     .with_http_support()
-                    .build()?
+                    .build()?,
             );
 
             Ok(Self {
@@ -171,7 +201,8 @@ mod integration_tests {
                 server_clone.serve(cx).await.unwrap_or_else(|e| {
                     eprintln!("Server error: {}", e);
                 });
-            }).await?;
+            })
+            .await?;
 
             self.server = Some(server);
             self.server_addr = Some(addr);
@@ -201,10 +232,18 @@ mod integration_tests {
             }
         }
 
-        async fn send_chunked_request(&mut self, cx: &Cx, client_id: &str, path: &str) -> Result<ChunkedTestResponse, AsupersyncError> {
-            let client = self.clients.get(client_id)
+        async fn send_chunked_request(
+            &mut self,
+            cx: &Cx,
+            client_id: &str,
+            path: &str,
+        ) -> Result<ChunkedTestResponse, AsupersyncError> {
+            let client = self
+                .clients
+                .get(client_id)
                 .ok_or_else(|| AsupersyncError::InvalidState("Client not found".into()))?;
-            let server_addr = self.server_addr
+            let server_addr = self
+                .server_addr
                 .ok_or_else(|| AsupersyncError::InvalidState("Server not started".into()))?;
 
             let url = format!("http://{}{}", server_addr, path);
@@ -254,12 +293,18 @@ mod integration_tests {
             })
         }
 
-        async fn send_concurrent_requests(&mut self, cx: &Cx, num_concurrent: usize, path: &str) -> Result<Vec<ChunkedTestResponse>, AsupersyncError> {
+        async fn send_concurrent_requests(
+            &mut self,
+            cx: &Cx,
+            num_concurrent: usize,
+            path: &str,
+        ) -> Result<Vec<ChunkedTestResponse>, AsupersyncError> {
             let mut tasks = Vec::new();
 
             {
                 let mut stats = self.stats.lock().unwrap();
-                stats.peak_concurrent_connections = stats.peak_concurrent_connections.max(num_concurrent as u64);
+                stats.peak_concurrent_connections =
+                    stats.peak_concurrent_connections.max(num_concurrent as u64);
             }
 
             for i in 0..num_concurrent {
@@ -334,46 +379,53 @@ mod integration_tests {
         let mut harness = H1ChunkedEncodingTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            // Start server on available port
-            harness.start_server(cx, 0).await?; // 0 = auto-assign port
+        runtime
+            .region(Budget::default(), |cx| async move {
+                // Start server on available port
+                harness.start_server(cx, 0).await?; // 0 = auto-assign port
 
-            // Create chunked response handler
-            let handler = Arc::new(ChunkedTestHandler::new(
-                1024,                          // 1KB chunks
-                5120,                          // 5KB total (5 chunks)
-                Duration::from_millis(10),     // 10ms delay between chunks
-                false,                         // No trailers
-                harness.stats.clone(),
-            ));
-            harness.register_handler("/chunked-test", handler);
+                // Create chunked response handler
+                let handler = Arc::new(ChunkedTestHandler::new(
+                    1024,                      // 1KB chunks
+                    5120,                      // 5KB total (5 chunks)
+                    Duration::from_millis(10), // 10ms delay between chunks
+                    false,                     // No trailers
+                    harness.stats.clone(),
+                ));
+                harness.register_handler("/chunked-test", handler);
 
-            // Create client and send request
-            harness.create_client("test-client")?;
-            let response = harness.send_chunked_request(cx, "test-client", "/chunked-test").await?;
+                // Create client and send request
+                harness.create_client("test-client")?;
+                let response = harness
+                    .send_chunked_request(cx, "test-client", "/chunked-test")
+                    .await?;
 
-            // Verify response
-            assert_eq!(response.status, StatusCode::OK);
-            assert_eq!(response.body.len(), 5120, "Response body should be 5KB");
-            assert_eq!(response.chunks_decoded, 5, "Should decode 5 chunks");
+                // Verify response
+                assert_eq!(response.status, StatusCode::OK);
+                assert_eq!(response.body.len(), 5120, "Response body should be 5KB");
+                assert_eq!(response.chunks_decoded, 5, "Should decode 5 chunks");
 
-            // Verify transfer-encoding header
-            assert_eq!(
-                response.headers.get("transfer-encoding").unwrap(),
-                &HeaderValue::from_static("chunked")
-            );
+                // Verify transfer-encoding header
+                assert_eq!(
+                    response.headers.get("transfer-encoding").unwrap(),
+                    &HeaderValue::from_static("chunked")
+                );
 
-            let stats = harness.get_stats();
-            assert_eq!(stats.chunked_responses_sent, 1);
-            assert_eq!(stats.chunked_responses_decoded, 1);
-            assert_eq!(stats.total_chunks_sent, 5);
-            assert_eq!(stats.total_chunks_decoded, 5);
-            assert_eq!(stats.successful_roundtrips, 1);
-            assert_eq!(stats.chunked_encoding_errors, 0);
+                let stats = harness.get_stats();
+                assert_eq!(stats.chunked_responses_sent, 1);
+                assert_eq!(stats.chunked_responses_decoded, 1);
+                assert_eq!(stats.total_chunks_sent, 5);
+                assert_eq!(stats.total_chunks_decoded, 5);
+                assert_eq!(stats.successful_roundtrips, 1);
+                assert_eq!(stats.chunked_encoding_errors, 0);
 
-            println!("Basic chunked roundtrip completed in {:?}", response.roundtrip_duration);
-            Ok(())
-        }).await
+                println!(
+                    "Basic chunked roundtrip completed in {:?}",
+                    response.roundtrip_duration
+                );
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -381,43 +433,55 @@ mod integration_tests {
         let mut harness = H1ChunkedEncodingTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            harness.start_server(cx, 0).await?;
+        runtime
+            .region(Budget::default(), |cx| async move {
+                harness.start_server(cx, 0).await?;
 
-            // Create handler for large payload (1MB in 8KB chunks)
-            let handler = Arc::new(ChunkedTestHandler::new(
-                8192,                          // 8KB chunks
-                1048576,                       // 1MB total (128 chunks)
-                Duration::from_millis(1),      // 1ms delay between chunks
-                true,                          // Include trailers
-                harness.stats.clone(),
-            ));
-            harness.register_handler("/large-chunked", handler);
+                // Create handler for large payload (1MB in 8KB chunks)
+                let handler = Arc::new(ChunkedTestHandler::new(
+                    8192,                     // 8KB chunks
+                    1048576,                  // 1MB total (128 chunks)
+                    Duration::from_millis(1), // 1ms delay between chunks
+                    true,                     // Include trailers
+                    harness.stats.clone(),
+                ));
+                harness.register_handler("/large-chunked", handler);
 
-            harness.create_client("large-client")?;
-            let start_time = Instant::now();
-            let response = harness.send_chunked_request(cx, "large-client", "/large-chunked").await?;
-            let total_duration = start_time.elapsed();
+                harness.create_client("large-client")?;
+                let start_time = Instant::now();
+                let response = harness
+                    .send_chunked_request(cx, "large-client", "/large-chunked")
+                    .await?;
+                let total_duration = start_time.elapsed();
 
-            // Verify large response
-            assert_eq!(response.status, StatusCode::OK);
-            assert_eq!(response.body.len(), 1048576, "Response body should be 1MB");
-            assert_eq!(response.chunks_decoded, 128, "Should decode 128 chunks");
+                // Verify large response
+                assert_eq!(response.status, StatusCode::OK);
+                assert_eq!(response.body.len(), 1048576, "Response body should be 1MB");
+                assert_eq!(response.chunks_decoded, 128, "Should decode 128 chunks");
 
-            // Verify trailer headers
-            assert!(response.trailer_headers.contains_key("x-total-chunks"));
-            assert_eq!(response.trailer_headers.get("x-total-chunks").unwrap(), &HeaderValue::from_static("128"));
+                // Verify trailer headers
+                assert!(response.trailer_headers.contains_key("x-total-chunks"));
+                assert_eq!(
+                    response.trailer_headers.get("x-total-chunks").unwrap(),
+                    &HeaderValue::from_static("128")
+                );
 
-            let stats = harness.get_stats();
-            assert_eq!(stats.total_chunks_sent, 128);
-            assert_eq!(stats.total_bytes_chunked, 1048576);
+                let stats = harness.get_stats();
+                assert_eq!(stats.total_chunks_sent, 128);
+                assert_eq!(stats.total_bytes_chunked, 1048576);
 
-            println!("Large payload (1MB) streamed in {} chunks over {:?}",
-                     response.chunks_decoded, total_duration);
-            assert!(total_duration < Duration::from_secs(5), "Large payload should stream efficiently");
+                println!(
+                    "Large payload (1MB) streamed in {} chunks over {:?}",
+                    response.chunks_decoded, total_duration
+                );
+                assert!(
+                    total_duration < Duration::from_secs(5),
+                    "Large payload should stream efficiently"
+                );
 
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -425,44 +489,62 @@ mod integration_tests {
         let mut harness = H1ChunkedEncodingTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            harness.start_server(cx, 0).await?;
+        runtime
+            .region(Budget::default(), |cx| async move {
+                harness.start_server(cx, 0).await?;
 
-            // Create handler for concurrent test
-            let handler = Arc::new(ChunkedTestHandler::new(
-                2048,                          // 2KB chunks
-                10240,                         // 10KB total (5 chunks per connection)
-                Duration::from_millis(5),      // 5ms delay
-                false,                         // No trailers
-                harness.stats.clone(),
-            ));
-            harness.register_handler("/concurrent-chunked", handler);
+                // Create handler for concurrent test
+                let handler = Arc::new(ChunkedTestHandler::new(
+                    2048,                     // 2KB chunks
+                    10240,                    // 10KB total (5 chunks per connection)
+                    Duration::from_millis(5), // 5ms delay
+                    false,                    // No trailers
+                    harness.stats.clone(),
+                ));
+                harness.register_handler("/concurrent-chunked", handler);
 
-            // Send 10 concurrent chunked requests
-            let num_concurrent = 10;
-            let start_time = Instant::now();
-            let responses = harness.send_concurrent_requests(cx, num_concurrent, "/concurrent-chunked").await?;
-            let concurrent_duration = start_time.elapsed();
+                // Send 10 concurrent chunked requests
+                let num_concurrent = 10;
+                let start_time = Instant::now();
+                let responses = harness
+                    .send_concurrent_requests(cx, num_concurrent, "/concurrent-chunked")
+                    .await?;
+                let concurrent_duration = start_time.elapsed();
 
-            // Verify all responses
-            assert_eq!(responses.len(), num_concurrent);
-            for (i, response) in responses.iter().enumerate() {
-                assert_eq!(response.status, StatusCode::OK, "Response {} should be OK", i);
-                assert_eq!(response.body.len(), 10240, "Response {} should be 10KB", i);
-                assert_eq!(response.chunks_decoded, 5, "Response {} should have 5 chunks", i);
-            }
+                // Verify all responses
+                assert_eq!(responses.len(), num_concurrent);
+                for (i, response) in responses.iter().enumerate() {
+                    assert_eq!(
+                        response.status,
+                        StatusCode::OK,
+                        "Response {} should be OK",
+                        i
+                    );
+                    assert_eq!(response.body.len(), 10240, "Response {} should be 10KB", i);
+                    assert_eq!(
+                        response.chunks_decoded, 5,
+                        "Response {} should have 5 chunks",
+                        i
+                    );
+                }
 
-            let stats = harness.get_stats();
-            assert_eq!(stats.peak_concurrent_connections, num_concurrent as u64);
-            assert_eq!(stats.successful_roundtrips, num_concurrent as u64);
-            assert_eq!(stats.total_chunks_sent, (num_concurrent * 5) as u64);
+                let stats = harness.get_stats();
+                assert_eq!(stats.peak_concurrent_connections, num_concurrent as u64);
+                assert_eq!(stats.successful_roundtrips, num_concurrent as u64);
+                assert_eq!(stats.total_chunks_sent, (num_concurrent * 5) as u64);
 
-            println!("Concurrent test: {} connections completed in {:?}",
-                     num_concurrent, concurrent_duration);
-            assert!(concurrent_duration < Duration::from_secs(3), "Concurrent requests should complete efficiently");
+                println!(
+                    "Concurrent test: {} connections completed in {:?}",
+                    num_concurrent, concurrent_duration
+                );
+                assert!(
+                    concurrent_duration < Duration::from_secs(3),
+                    "Concurrent requests should complete efficiently"
+                );
 
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -470,78 +552,100 @@ mod integration_tests {
         let mut harness = H1ChunkedEncodingTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            harness.start_server(cx, 0).await?;
+        runtime
+            .region(Budget::default(), |cx| async move {
+                harness.start_server(cx, 0).await?;
 
-            // Custom handler for edge cases
-            let stats_clone = harness.stats.clone();
-            let edge_case_handler = Arc::new(move |cx: &Cx, method: Method, path: &str, headers: HeaderMap, body: Bytes| {
-                let stats = stats_clone.clone();
-                async move {
-                    let mut response_headers = HeaderMap::new();
-                    response_headers.insert(HeaderName::from_static("transfer-encoding"), HeaderValue::from_static("chunked"));
+                // Custom handler for edge cases
+                let stats_clone = harness.stats.clone();
+                let edge_case_handler = Arc::new(
+                    move |cx: &Cx, method: Method, path: &str, headers: HeaderMap, body: Bytes| {
+                        let stats = stats_clone.clone();
+                        async move {
+                            let mut response_headers = HeaderMap::new();
+                            response_headers.insert(
+                                HeaderName::from_static("transfer-encoding"),
+                                HeaderValue::from_static("chunked"),
+                            );
 
-                    let mut chunks = VecDeque::new();
-                    match path {
-                        "/empty-chunks" => {
-                            // Add empty chunk followed by data chunk
-                            chunks.push_back(Bytes::new());
-                            chunks.push_back(Bytes::from_static(b"data after empty"));
-                            chunks.push_back(Bytes::new()); // Another empty
-                            chunks.push_back(Bytes::from_static(b"final data"));
-                        }
-                        "/single-large-chunk" => {
-                            // Single very large chunk
-                            let large_data = vec![0xFF; 65536]; // 64KB
-                            chunks.push_back(Bytes::from(large_data));
-                        }
-                        "/many-tiny-chunks" => {
-                            // Many 1-byte chunks
-                            for i in 0..100 {
-                                chunks.push_back(Bytes::from(vec![i as u8]));
+                            let mut chunks = VecDeque::new();
+                            match path {
+                                "/empty-chunks" => {
+                                    // Add empty chunk followed by data chunk
+                                    chunks.push_back(Bytes::new());
+                                    chunks.push_back(Bytes::from_static(b"data after empty"));
+                                    chunks.push_back(Bytes::new()); // Another empty
+                                    chunks.push_back(Bytes::from_static(b"final data"));
+                                }
+                                "/single-large-chunk" => {
+                                    // Single very large chunk
+                                    let large_data = vec![0xFF; 65536]; // 64KB
+                                    chunks.push_back(Bytes::from(large_data));
+                                }
+                                "/many-tiny-chunks" => {
+                                    // Many 1-byte chunks
+                                    for i in 0..100 {
+                                        chunks.push_back(Bytes::from(vec![i as u8]));
+                                    }
+                                }
+                                _ => {
+                                    chunks.push_back(Bytes::from_static(b"default response"));
+                                }
                             }
+
+                            {
+                                let mut stats = stats.lock().unwrap();
+                                stats.chunked_responses_sent += 1;
+                                stats.total_chunks_sent += chunks.len() as u64;
+                            }
+
+                            Ok(ChunkedResponse::new(
+                                StatusCode::OK,
+                                response_headers,
+                                chunks,
+                                HeaderMap::new(),
+                            ))
                         }
-                        _ => {
-                            chunks.push_back(Bytes::from_static(b"default response"));
-                        }
-                    }
+                    },
+                );
 
-                    {
-                        let mut stats = stats.lock().unwrap();
-                        stats.chunked_responses_sent += 1;
-                        stats.total_chunks_sent += chunks.len() as u64;
-                    }
+                harness.register_handler("/empty-chunks", edge_case_handler.clone());
+                harness.register_handler("/single-large-chunk", edge_case_handler.clone());
+                harness.register_handler("/many-tiny-chunks", edge_case_handler.clone());
 
-                    Ok(ChunkedResponse::new(StatusCode::OK, response_headers, chunks, HeaderMap::new()))
-                }
-            });
+                // Test empty chunks
+                harness.create_client("edge-client")?;
+                let empty_response = harness
+                    .send_chunked_request(cx, "edge-client", "/empty-chunks")
+                    .await?;
+                assert_eq!(empty_response.status, StatusCode::OK);
+                let expected_data = b"data after emptyfinal data";
+                assert_eq!(empty_response.body.as_ref(), expected_data);
 
-            harness.register_handler("/empty-chunks", edge_case_handler.clone());
-            harness.register_handler("/single-large-chunk", edge_case_handler.clone());
-            harness.register_handler("/many-tiny-chunks", edge_case_handler.clone());
+                // Test single large chunk
+                let large_response = harness
+                    .send_chunked_request(cx, "edge-client", "/single-large-chunk")
+                    .await?;
+                assert_eq!(large_response.body.len(), 65536);
 
-            // Test empty chunks
-            harness.create_client("edge-client")?;
-            let empty_response = harness.send_chunked_request(cx, "edge-client", "/empty-chunks").await?;
-            assert_eq!(empty_response.status, StatusCode::OK);
-            let expected_data = b"data after emptyfinal data";
-            assert_eq!(empty_response.body.as_ref(), expected_data);
+                // Test many tiny chunks
+                let tiny_response = harness
+                    .send_chunked_request(cx, "edge-client", "/many-tiny-chunks")
+                    .await?;
+                assert_eq!(tiny_response.body.len(), 100);
+                assert_eq!(tiny_response.chunks_decoded, 100);
 
-            // Test single large chunk
-            let large_response = harness.send_chunked_request(cx, "edge-client", "/single-large-chunk").await?;
-            assert_eq!(large_response.body.len(), 65536);
+                let stats = harness.get_stats();
+                println!(
+                    "Edge cases - Empty chunks: {}, Large chunk: {}, Tiny chunks: {}",
+                    empty_response.chunks_decoded,
+                    large_response.chunks_decoded,
+                    tiny_response.chunks_decoded
+                );
 
-            // Test many tiny chunks
-            let tiny_response = harness.send_chunked_request(cx, "edge-client", "/many-tiny-chunks").await?;
-            assert_eq!(tiny_response.body.len(), 100);
-            assert_eq!(tiny_response.chunks_decoded, 100);
-
-            let stats = harness.get_stats();
-            println!("Edge cases - Empty chunks: {}, Large chunk: {}, Tiny chunks: {}",
-                     empty_response.chunks_decoded, large_response.chunks_decoded, tiny_response.chunks_decoded);
-
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -549,73 +653,104 @@ mod integration_tests {
         let mut harness = H1ChunkedEncodingTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            harness.start_server(cx, 0).await?;
+        runtime
+            .region(Budget::default(), |cx| async move {
+                harness.start_server(cx, 0).await?;
 
-            // Handler that simulates malformed chunks (for error testing)
-            let stats_clone = harness.stats.clone();
-            let error_handler = Arc::new(move |cx: &Cx, method: Method, path: &str, headers: HeaderMap, body: Bytes| {
-                let stats = stats_clone.clone();
-                async move {
-                    let mut response_headers = HeaderMap::new();
-                    response_headers.insert(HeaderName::from_static("transfer-encoding"), HeaderValue::from_static("chunked"));
+                // Handler that simulates malformed chunks (for error testing)
+                let stats_clone = harness.stats.clone();
+                let error_handler = Arc::new(
+                    move |cx: &Cx, method: Method, path: &str, headers: HeaderMap, body: Bytes| {
+                        let stats = stats_clone.clone();
+                        async move {
+                            let mut response_headers = HeaderMap::new();
+                            response_headers.insert(
+                                HeaderName::from_static("transfer-encoding"),
+                                HeaderValue::from_static("chunked"),
+                            );
 
-                    match path {
-                        "/normal-chunked" => {
-                            // Normal chunked response for baseline
-                            let chunks = VecDeque::from(vec![
-                                Bytes::from_static(b"chunk1"),
-                                Bytes::from_static(b"chunk2"),
-                                Bytes::from_static(b"chunk3"),
-                            ]);
-                            Ok(ChunkedResponse::new(StatusCode::OK, response_headers, chunks, HeaderMap::new()))
-                        }
-                        "/interrupted-chunked" => {
-                            // Simulate connection interruption during chunking
-                            let chunks = VecDeque::from(vec![
-                                Bytes::from_static(b"chunk1"),
-                                Bytes::from_static(b"chunk2"),
-                                // Connection would be interrupted here in real scenario
-                            ]);
+                            match path {
+                                "/normal-chunked" => {
+                                    // Normal chunked response for baseline
+                                    let chunks = VecDeque::from(vec![
+                                        Bytes::from_static(b"chunk1"),
+                                        Bytes::from_static(b"chunk2"),
+                                        Bytes::from_static(b"chunk3"),
+                                    ]);
+                                    Ok(ChunkedResponse::new(
+                                        StatusCode::OK,
+                                        response_headers,
+                                        chunks,
+                                        HeaderMap::new(),
+                                    ))
+                                }
+                                "/interrupted-chunked" => {
+                                    // Simulate connection interruption during chunking
+                                    let chunks = VecDeque::from(vec![
+                                        Bytes::from_static(b"chunk1"),
+                                        Bytes::from_static(b"chunk2"),
+                                        // Connection would be interrupted here in real scenario
+                                    ]);
 
-                            {
-                                let mut stats = stats.lock().unwrap();
-                                stats.chunked_encoding_errors += 1;
+                                    {
+                                        let mut stats = stats.lock().unwrap();
+                                        stats.chunked_encoding_errors += 1;
+                                    }
+
+                                    Ok(ChunkedResponse::new(
+                                        StatusCode::PARTIAL_CONTENT,
+                                        response_headers,
+                                        chunks,
+                                        HeaderMap::new(),
+                                    ))
+                                }
+                                _ => Ok(ChunkedResponse::new(
+                                    StatusCode::NOT_FOUND,
+                                    HeaderMap::new(),
+                                    VecDeque::new(),
+                                    HeaderMap::new(),
+                                )),
                             }
-
-                            Ok(ChunkedResponse::new(StatusCode::PARTIAL_CONTENT, response_headers, chunks, HeaderMap::new()))
                         }
-                        _ => {
-                            Ok(ChunkedResponse::new(StatusCode::NOT_FOUND, HeaderMap::new(), VecDeque::new(), HeaderMap::new()))
-                        }
-                    }
-                }
-            });
+                    },
+                );
 
-            harness.register_handler("/normal-chunked", error_handler.clone());
-            harness.register_handler("/interrupted-chunked", error_handler.clone());
+                harness.register_handler("/normal-chunked", error_handler.clone());
+                harness.register_handler("/interrupted-chunked", error_handler.clone());
 
-            harness.create_client("error-client")?;
+                harness.create_client("error-client")?;
 
-            // Test normal chunked response
-            let normal_response = harness.send_chunked_request(cx, "error-client", "/normal-chunked").await?;
-            assert_eq!(normal_response.status, StatusCode::OK);
-            assert_eq!(normal_response.chunks_decoded, 3);
-            assert_eq!(normal_response.body.as_ref(), b"chunk1chunk2chunk3");
+                // Test normal chunked response
+                let normal_response = harness
+                    .send_chunked_request(cx, "error-client", "/normal-chunked")
+                    .await?;
+                assert_eq!(normal_response.status, StatusCode::OK);
+                assert_eq!(normal_response.chunks_decoded, 3);
+                assert_eq!(normal_response.body.as_ref(), b"chunk1chunk2chunk3");
 
-            // Test interrupted/partial response
-            let interrupted_response = harness.send_chunked_request(cx, "error-client", "/interrupted-chunked").await?;
-            assert_eq!(interrupted_response.status, StatusCode::PARTIAL_CONTENT);
-            assert_eq!(interrupted_response.body.as_ref(), b"chunk1chunk2");
+                // Test interrupted/partial response
+                let interrupted_response = harness
+                    .send_chunked_request(cx, "error-client", "/interrupted-chunked")
+                    .await?;
+                assert_eq!(interrupted_response.status, StatusCode::PARTIAL_CONTENT);
+                assert_eq!(interrupted_response.body.as_ref(), b"chunk1chunk2");
 
-            let stats = harness.get_stats();
-            assert!(stats.chunked_encoding_errors > 0, "Should record chunked encoding errors");
+                let stats = harness.get_stats();
+                assert!(
+                    stats.chunked_encoding_errors > 0,
+                    "Should record chunked encoding errors"
+                );
 
-            println!("Error handling - Normal: {} chunks, Interrupted: {} chunks, Errors: {}",
-                     normal_response.chunks_decoded, interrupted_response.chunks_decoded, stats.chunked_encoding_errors);
+                println!(
+                    "Error handling - Normal: {} chunks, Interrupted: {} chunks, Errors: {}",
+                    normal_response.chunks_decoded,
+                    interrupted_response.chunks_decoded,
+                    stats.chunked_encoding_errors
+                );
 
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -623,57 +758,75 @@ mod integration_tests {
         let mut harness = H1ChunkedEncodingTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            harness.start_server(cx, 0).await?;
+        runtime
+            .region(Budget::default(), |cx| async move {
+                harness.start_server(cx, 0).await?;
 
-            // Performance test handler - large streaming response with minimal delay
-            let handler = Arc::new(ChunkedTestHandler::new(
-                16384,                         // 16KB chunks
-                2097152,                       // 2MB total (128 chunks)
-                Duration::from_micros(100),    // Very small delay (100μs)
-                true,                          // Include performance trailers
-                harness.stats.clone(),
-            ));
-            harness.register_handler("/performance-chunked", handler);
+                // Performance test handler - large streaming response with minimal delay
+                let handler = Arc::new(ChunkedTestHandler::new(
+                    16384,                      // 16KB chunks
+                    2097152,                    // 2MB total (128 chunks)
+                    Duration::from_micros(100), // Very small delay (100μs)
+                    true,                       // Include performance trailers
+                    harness.stats.clone(),
+                ));
+                harness.register_handler("/performance-chunked", handler);
 
-            harness.create_client("perf-client")?;
+                harness.create_client("perf-client")?;
 
-            // Measure performance over multiple requests
-            let num_requests = 5;
-            let mut total_duration = Duration::ZERO;
-            let mut total_throughput = 0.0;
+                // Measure performance over multiple requests
+                let num_requests = 5;
+                let mut total_duration = Duration::ZERO;
+                let mut total_throughput = 0.0;
 
-            for i in 0..num_requests {
-                let start_time = Instant::now();
-                let response = harness.send_chunked_request(cx, "perf-client", "/performance-chunked").await?;
-                let request_duration = start_time.elapsed();
+                for i in 0..num_requests {
+                    let start_time = Instant::now();
+                    let response = harness
+                        .send_chunked_request(cx, "perf-client", "/performance-chunked")
+                        .await?;
+                    let request_duration = start_time.elapsed();
 
-                assert_eq!(response.status, StatusCode::OK);
-                assert_eq!(response.body.len(), 2097152);
-                assert_eq!(response.chunks_decoded, 128);
+                    assert_eq!(response.status, StatusCode::OK);
+                    assert_eq!(response.body.len(), 2097152);
+                    assert_eq!(response.chunks_decoded, 128);
 
-                let throughput_mbps = (response.body.len() as f64 * 8.0) / (request_duration.as_secs_f64() * 1_000_000.0);
-                total_throughput += throughput_mbps;
-                total_duration += request_duration;
+                    let throughput_mbps = (response.body.len() as f64 * 8.0)
+                        / (request_duration.as_secs_f64() * 1_000_000.0);
+                    total_throughput += throughput_mbps;
+                    total_duration += request_duration;
 
-                println!("Request {}: 2MB in {:?} ({:.2} Mbps)", i + 1, request_duration, throughput_mbps);
-            }
+                    println!(
+                        "Request {}: 2MB in {:?} ({:.2} Mbps)",
+                        i + 1,
+                        request_duration,
+                        throughput_mbps
+                    );
+                }
 
-            let avg_duration = total_duration / num_requests;
-            let avg_throughput = total_throughput / num_requests as f64;
+                let avg_duration = total_duration / num_requests;
+                let avg_throughput = total_throughput / num_requests as f64;
 
-            let stats = harness.get_stats();
-            assert_eq!(stats.successful_roundtrips, num_requests as u64);
-            assert_eq!(stats.total_chunks_sent, (num_requests * 128) as u64);
+                let stats = harness.get_stats();
+                assert_eq!(stats.successful_roundtrips, num_requests as u64);
+                assert_eq!(stats.total_chunks_sent, (num_requests * 128) as u64);
 
-            println!("Performance summary: Avg duration {:?}, Avg throughput {:.2} Mbps",
-                     avg_duration, avg_throughput);
+                println!(
+                    "Performance summary: Avg duration {:?}, Avg throughput {:.2} Mbps",
+                    avg_duration, avg_throughput
+                );
 
-            // Performance assertions
-            assert!(avg_duration < Duration::from_secs(2), "Average response time should be under 2s");
-            assert!(avg_throughput > 1.0, "Should achieve at least 1 Mbps throughput");
+                // Performance assertions
+                assert!(
+                    avg_duration < Duration::from_secs(2),
+                    "Average response time should be under 2s"
+                );
+                assert!(
+                    avg_throughput > 1.0,
+                    "Should achieve at least 1 Mbps throughput"
+                );
 
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 }

@@ -40,32 +40,32 @@
 
 use crate::{
     cx::{Cx, Scope},
+    error::Error,
     net::{
+        TcpListener, TcpStream,
         dns::{
-            cache::{DnsCache, CacheConfig, CacheStats, DnsCacheEntry},
-            resolver::{Resolver, ResolverConfig},
-            lookup::LookupIp,
+            cache::{CacheConfig, CacheStats, DnsCache, DnsCacheEntry},
             error::DnsError,
+            lookup::LookupIp,
+            resolver::{Resolver, ResolverConfig},
         },
         happy_eyeballs::{HappyEyeballsConfig, connect as happy_eyeballs_connect},
-        TcpStream, TcpListener,
     },
-    runtime::{Runtime, LabRuntime},
-    time::{sleep, timeout, Duration, Instant},
-    types::{Outcome, Budget, Time, CancelReason},
-    error::Error,
-    test_utils::{TestResult, with_test_runtime},
+    runtime::{LabRuntime, Runtime},
     sync::{Arc, Mutex, RwLock},
+    test_utils::{TestResult, with_test_runtime},
+    time::{Duration, Instant, sleep, timeout},
+    types::{Budget, CancelReason, Outcome, Time},
     util::{EntropySource, OsEntropy},
 };
+use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, VecDeque, BTreeMap},
-    sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    time::SystemTime,
+    collections::{BTreeMap, HashMap, VecDeque},
     fmt,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    time::SystemTime,
 };
-use serde::{Serialize, Deserialize};
 
 /// Types of DNS cache ↔ Happy Eyeballs integration scenarios
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,12 +164,15 @@ impl MockDnsCache {
 
     pub fn insert(&self, hostname: &str, addrs: Vec<IpAddr>, ttl: Duration) {
         let mut cache = self.cache.lock().unwrap();
-        cache.insert(hostname.to_string(), MockCacheEntry {
-            addrs,
-            cached_at: Instant::now(),
-            ttl,
-            hits: 0,
-        });
+        cache.insert(
+            hostname.to_string(),
+            MockCacheEntry {
+                addrs,
+                cached_at: Instant::now(),
+                ttl,
+                hits: 0,
+            },
+        );
     }
 
     pub fn lookup(&self, hostname: &str) -> Option<Vec<IpAddr>> {
@@ -182,8 +185,7 @@ impl MockDnsCache {
         if let Some(entry) = cache.get_mut(hostname) {
             // Check TTL expiration
             let age = Instant::now().duration_since(entry.cached_at);
-            let effective_ttl = self.ttl_override.lock().unwrap()
-                .unwrap_or(entry.ttl);
+            let effective_ttl = self.ttl_override.lock().unwrap().unwrap_or(entry.ttl);
 
             if age < effective_ttl {
                 entry.hits += 1;
@@ -240,13 +242,24 @@ impl MockHappyEyeballs {
         }
     }
 
-    pub async fn connect_with_timing(&self, addrs: Vec<SocketAddr>) -> Result<MockTcpConnection, std::io::Error> {
+    pub async fn connect_with_timing(
+        &self,
+        addrs: Vec<SocketAddr>,
+    ) -> Result<MockTcpConnection, std::io::Error> {
         let start_time = Instant::now();
         self.connection_attempts.fetch_add(1, Ordering::Relaxed);
 
         // Simulate Happy Eyeballs algorithm with proper timing
-        let ipv6_addrs: Vec<_> = addrs.iter().filter(|addr| addr.is_ipv6()).cloned().collect();
-        let ipv4_addrs: Vec<_> = addrs.iter().filter(|addr| addr.is_ipv4()).cloned().collect();
+        let ipv6_addrs: Vec<_> = addrs
+            .iter()
+            .filter(|addr| addr.is_ipv6())
+            .cloned()
+            .collect();
+        let ipv4_addrs: Vec<_> = addrs
+            .iter()
+            .filter(|addr| addr.is_ipv4())
+            .cloned()
+            .collect();
 
         // Simulate IPv6 head start per RFC 8305
         let mut connection_delay = Duration::from_millis(0);
@@ -256,7 +269,8 @@ impl MockHappyEyeballs {
             sleep(Duration::from_millis(50)).await; // Simulate connection attempt
             connection_delay += Duration::from_millis(50);
 
-            if rand::random::<f64>() > 0.3 { // 70% success rate for IPv6
+            if rand::random::<f64>() > 0.3 {
+                // 70% success rate for IPv6
                 let elapsed = start_time.elapsed();
                 self.connection_timings.lock().unwrap().push(elapsed);
                 self.successful_connections.fetch_add(1, Ordering::Relaxed);
@@ -293,7 +307,10 @@ impl MockHappyEyeballs {
             });
         }
 
-        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "No addresses available"))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "No addresses available",
+        ))
     }
 
     pub fn get_stats(&self) -> (usize, usize, bool) {
@@ -371,16 +388,24 @@ impl CacheTimingTestHarness {
         sleep(Duration::from_millis(100)).await; // DNS lookup delay
 
         // Generate mock addresses based on hostname
-        let ipv6_addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0,
-            hostname.as_bytes().iter().map(|&b| b as u16).sum::<u16>());
-        let ipv4_addr = Ipv4Addr::new(192, 0, 2,
-            (hostname.len() % 254 + 1) as u8);
+        let ipv6_addr = Ipv6Addr::new(
+            0x2001,
+            0xdb8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            hostname.as_bytes().iter().map(|&b| b as u16).sum::<u16>(),
+        );
+        let ipv4_addr = Ipv4Addr::new(192, 0, 2, (hostname.len() % 254 + 1) as u8);
 
         let addrs = vec![IpAddr::V6(ipv6_addr), IpAddr::V4(ipv4_addr)];
 
         // Cache the result
         if self.config.cache_enabled {
-            self.dns_cache.insert(hostname, addrs.clone(), self.config.initial_cache_ttl);
+            self.dns_cache
+                .insert(hostname, addrs.clone(), self.config.initial_cache_ttl);
         }
 
         Ok(addrs)
@@ -392,13 +417,21 @@ impl CacheTimingTestHarness {
 
         // Pre-populate cache for fast startup
         for hostname in &self.config.target_hosts {
-            let ipv6_addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0,
-                hostname.as_bytes().iter().map(|&b| b as u16).sum::<u16>());
-            let ipv4_addr = Ipv4Addr::new(192, 0, 2,
-                (hostname.len() % 254 + 1) as u8);
+            let ipv6_addr = Ipv6Addr::new(
+                0x2001,
+                0xdb8,
+                0,
+                0,
+                0,
+                0,
+                0,
+                hostname.as_bytes().iter().map(|&b| b as u16).sum::<u16>(),
+            );
+            let ipv4_addr = Ipv4Addr::new(192, 0, 2, (hostname.len() % 254 + 1) as u8);
             let addrs = vec![IpAddr::V6(ipv6_addr), IpAddr::V4(ipv4_addr)];
 
-            self.dns_cache.insert(hostname, addrs, self.config.initial_cache_ttl);
+            self.dns_cache
+                .insert(hostname, addrs, self.config.initial_cache_ttl);
         }
 
         let start_time = Instant::now();
@@ -408,18 +441,20 @@ impl CacheTimingTestHarness {
             let addrs = self.resolve_with_cache(hostname).await?;
 
             // Convert to socket addresses
-            let socket_addrs: Vec<SocketAddr> = addrs.iter()
-                .map(|ip| SocketAddr::new(*ip, 80))
-                .collect();
+            let socket_addrs: Vec<SocketAddr> =
+                addrs.iter().map(|ip| SocketAddr::new(*ip, 80)).collect();
 
             // Happy Eyeballs connection with cached addresses
             match self.happy_eyeballs.connect_with_timing(socket_addrs).await {
                 Ok(connection) => {
-                    println!("  ✓ Connected to {} via {} ({})",
-                        hostname, connection.family, connection.addr);
+                    println!(
+                        "  ✓ Connected to {} via {} ({})",
+                        hostname, connection.family, connection.addr
+                    );
                 }
                 Err(e) => {
-                    self.errors.push(format!("Connection to {} failed: {}", hostname, e));
+                    self.errors
+                        .push(format!("Connection to {} failed: {}", hostname, e));
                 }
             }
         }
@@ -427,17 +462,28 @@ impl CacheTimingTestHarness {
         self.result.total_timing = start_time.elapsed();
 
         // Verify cache hit efficiency
-        assert!(self.result.cache_hits > 0, "Should have cache hits for pre-populated entries");
-        assert_eq!(self.result.cache_misses, 0, "Should have no cache misses with pre-populated cache");
+        assert!(
+            self.result.cache_hits > 0,
+            "Should have cache hits for pre-populated entries"
+        );
+        assert_eq!(
+            self.result.cache_misses, 0,
+            "Should have no cache misses with pre-populated cache"
+        );
 
         let (attempts, successes, timing_ok) = self.happy_eyeballs.get_stats();
         self.result.happy_eyeballs_attempts = attempts;
         self.result.successful_connections = successes;
         self.result.connection_timing_preserved = timing_ok;
 
-        println!("  ✓ Cache hits: {}, Cache misses: {}",
-            self.result.cache_hits, self.result.cache_misses);
-        println!("  ✓ Happy Eyeballs attempts: {}, Successes: {}", attempts, successes);
+        println!(
+            "  ✓ Cache hits: {}, Cache misses: {}",
+            self.result.cache_hits, self.result.cache_misses
+        );
+        println!(
+            "  ✓ Happy Eyeballs attempts: {}, Successes: {}",
+            attempts, successes
+        );
         println!("  ✓ Timing preserved: {}", timing_ok);
 
         Ok(())
@@ -456,17 +502,19 @@ impl CacheTimingTestHarness {
         for hostname in &self.config.target_hosts {
             let addrs = self.resolve_with_cache(hostname).await?;
 
-            let socket_addrs: Vec<SocketAddr> = addrs.iter()
-                .map(|ip| SocketAddr::new(*ip, 443))
-                .collect();
+            let socket_addrs: Vec<SocketAddr> =
+                addrs.iter().map(|ip| SocketAddr::new(*ip, 443)).collect();
 
             match self.happy_eyeballs.connect_with_timing(socket_addrs).await {
                 Ok(connection) => {
-                    println!("  ✓ Connected to {} via {} ({})",
-                        hostname, connection.family, connection.addr);
+                    println!(
+                        "  ✓ Connected to {} via {} ({})",
+                        hostname, connection.family, connection.addr
+                    );
                 }
                 Err(e) => {
-                    self.errors.push(format!("Connection to {} failed: {}", hostname, e));
+                    self.errors
+                        .push(format!("Connection to {} failed: {}", hostname, e));
                 }
             }
         }
@@ -474,8 +522,14 @@ impl CacheTimingTestHarness {
         self.result.total_timing = start_time.elapsed();
 
         // Verify cache miss behavior
-        assert!(self.result.cache_misses > 0, "Should have cache misses when forced");
-        assert_eq!(self.result.cache_hits, 0, "Should have no cache hits when forced miss");
+        assert!(
+            self.result.cache_misses > 0,
+            "Should have cache misses when forced"
+        );
+        assert_eq!(
+            self.result.cache_hits, 0,
+            "Should have no cache hits when forced miss"
+        );
 
         let (attempts, successes, timing_ok) = self.happy_eyeballs.get_stats();
         self.result.happy_eyeballs_attempts = attempts;
@@ -483,7 +537,10 @@ impl CacheTimingTestHarness {
         self.result.connection_timing_preserved = timing_ok;
 
         // Timing should still be preserved despite cache misses
-        assert!(timing_ok, "Happy Eyeballs timing should be preserved despite cache misses");
+        assert!(
+            timing_ok,
+            "Happy Eyeballs timing should be preserved despite cache misses"
+        );
 
         println!("  ✓ Cache behavior verified under forced misses");
         println!("  ✓ Happy Eyeballs timing preserved: {}", timing_ok);
@@ -515,25 +572,36 @@ impl CacheTimingTestHarness {
 
         // Second lookup should miss cache due to TTL expiry
         let second_addrs = self.resolve_with_cache(hostname).await?;
-        assert!(self.result.cache_misses > 0, "Second lookup should miss expired cache");
+        assert!(
+            self.result.cache_misses > 0,
+            "Second lookup should miss expired cache"
+        );
 
         // Start Happy Eyeballs connection
-        let socket_addrs: Vec<SocketAddr> = second_addrs.iter()
+        let socket_addrs: Vec<SocketAddr> = second_addrs
+            .iter()
             .map(|ip| SocketAddr::new(*ip, 80))
             .collect();
 
         match self.happy_eyeballs.connect_with_timing(socket_addrs).await {
             Ok(connection) => {
-                println!("  ✓ Connection succeeded despite TTL expiration: {}", connection.addr);
+                println!(
+                    "  ✓ Connection succeeded despite TTL expiration: {}",
+                    connection.addr
+                );
                 self.result.ttl_expiry_handled = true;
             }
             Err(e) => {
-                self.errors.push(format!("Connection failed after TTL expiry: {}", e));
+                self.errors
+                    .push(format!("Connection failed after TTL expiry: {}", e));
             }
         }
 
         let (_, _, timing_ok) = self.happy_eyeballs.get_stats();
-        assert!(timing_ok, "Happy Eyeballs timing should be preserved during TTL expiry");
+        assert!(
+            timing_ok,
+            "Happy Eyeballs timing should be preserved during TTL expiry"
+        );
 
         println!("  ✓ TTL expiration handled correctly during connection racing");
 
@@ -550,7 +618,8 @@ impl CacheTimingTestHarness {
         let ipv6_addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x1);
         let ipv4_addr = Ipv4Addr::new(192, 0, 2, 1);
         let addrs = vec![IpAddr::V6(ipv6_addr), IpAddr::V4(ipv4_addr)];
-        self.dns_cache.insert(hostname, addrs.clone(), self.config.initial_cache_ttl);
+        self.dns_cache
+            .insert(hostname, addrs.clone(), self.config.initial_cache_ttl);
 
         let start_time = Instant::now();
 
@@ -558,7 +627,8 @@ impl CacheTimingTestHarness {
         let mut connection_futures = Vec::new();
 
         for i in 0..self.config.concurrent_connections {
-            let socket_addrs: Vec<SocketAddr> = addrs.iter()
+            let socket_addrs: Vec<SocketAddr> = addrs
+                .iter()
                 .map(|ip| SocketAddr::new(*ip, 80 + i as u16))
                 .collect();
 
@@ -574,10 +644,14 @@ impl CacheTimingTestHarness {
             match future.await {
                 Ok(connection) => {
                     successful_concurrent += 1;
-                    println!("  ✓ Concurrent connection {} succeeded: {}", i, connection.addr);
+                    println!(
+                        "  ✓ Concurrent connection {} succeeded: {}",
+                        i, connection.addr
+                    );
                 }
                 Err(e) => {
-                    self.errors.push(format!("Concurrent connection {} failed: {}", i, e));
+                    self.errors
+                        .push(format!("Concurrent connection {} failed: {}", i, e));
                 }
             }
         }
@@ -589,12 +663,23 @@ impl CacheTimingTestHarness {
         self.result.cache_coherency_maintained = final_cache_size >= 1; // Should still have our entry
 
         let (attempts, successes, timing_ok) = self.happy_eyeballs.get_stats();
-        assert!(timing_ok, "Timing should be preserved during concurrent access");
-        assert_eq!(successful_concurrent, self.config.concurrent_connections,
-            "All concurrent connections should succeed");
+        assert!(
+            timing_ok,
+            "Timing should be preserved during concurrent access"
+        );
+        assert_eq!(
+            successful_concurrent, self.config.concurrent_connections,
+            "All concurrent connections should succeed"
+        );
 
-        println!("  ✓ Concurrent connections: {} successful", successful_concurrent);
-        println!("  ✓ Cache coherency maintained: {}", self.result.cache_coherency_maintained);
+        println!(
+            "  ✓ Concurrent connections: {} successful",
+            successful_concurrent
+        );
+        println!(
+            "  ✓ Cache coherency maintained: {}",
+            self.result.cache_coherency_maintained
+        );
 
         Ok(())
     }
@@ -604,7 +689,10 @@ impl CacheTimingTestHarness {
         println!("🧪 Running DNS cache ↔ Happy Eyeballs timing integration test...");
         println!("  Scenario: {:?}", self.config.scenario);
         println!("  Cache enabled: {}", self.config.cache_enabled);
-        println!("  Happy Eyeballs delay: {:?}", self.config.happy_eyeballs_delay);
+        println!(
+            "  Happy Eyeballs delay: {:?}",
+            self.config.happy_eyeballs_delay
+        );
 
         let start_time = Instant::now();
 
@@ -642,12 +730,27 @@ impl CacheTimingTestHarness {
         println!("    DNS lookups: {}", self.result.dns_lookups_performed);
         println!("    Cache hits: {}", self.result.cache_hits);
         println!("    Cache misses: {}", self.result.cache_misses);
-        println!("    Happy Eyeballs attempts: {}", self.result.happy_eyeballs_attempts);
-        println!("    Successful connections: {}", self.result.successful_connections);
-        println!("    Connection timing preserved: {}", self.result.connection_timing_preserved);
-        println!("    Cache coherency maintained: {}", self.result.cache_coherency_maintained);
+        println!(
+            "    Happy Eyeballs attempts: {}",
+            self.result.happy_eyeballs_attempts
+        );
+        println!(
+            "    Successful connections: {}",
+            self.result.successful_connections
+        );
+        println!(
+            "    Connection timing preserved: {}",
+            self.result.connection_timing_preserved
+        );
+        println!(
+            "    Cache coherency maintained: {}",
+            self.result.cache_coherency_maintained
+        );
         println!("    TTL expiry handled: {}", self.result.ttl_expiry_handled);
-        println!("    Average connection time: {:?}", self.result.average_connection_time);
+        println!(
+            "    Average connection time: {:?}",
+            self.result.average_connection_time
+        );
         println!("    Total timing: {:?}", self.result.total_timing);
 
         Ok(())
@@ -759,7 +862,9 @@ mod tests {
             let ipv4_addr = Ipv4Addr::new(192, 0, 2, 100);
             let addrs = vec![IpAddr::V6(ipv6_addr), IpAddr::V4(ipv4_addr)];
 
-            harness.dns_cache.insert(hostname, addrs.clone(), Duration::from_secs(30));
+            harness
+                .dns_cache
+                .insert(hostname, addrs.clone(), Duration::from_secs(30));
 
             // Test cache hit provides fast resolution
             let start_time = Instant::now();
@@ -767,8 +872,10 @@ mod tests {
             let resolution_time = start_time.elapsed();
 
             // Cache hit should be very fast (< 10ms since no network lookup)
-            assert!(resolution_time < Duration::from_millis(50),
-                "Cache hit should provide fast resolution");
+            assert!(
+                resolution_time < Duration::from_millis(50),
+                "Cache hit should provide fast resolution"
+            );
 
             // Verify addresses match cached data
             assert_eq!(resolved_addrs.len(), 2);
@@ -776,21 +883,33 @@ mod tests {
             assert!(resolved_addrs.contains(&IpAddr::V4(ipv4_addr)));
 
             // Test Happy Eyeballs with cached addresses
-            let socket_addrs: Vec<SocketAddr> = resolved_addrs.iter()
+            let socket_addrs: Vec<SocketAddr> = resolved_addrs
+                .iter()
                 .map(|ip| SocketAddr::new(*ip, 443))
                 .collect();
 
-            let connection_result = harness.happy_eyeballs.connect_with_timing(socket_addrs).await;
-            assert!(connection_result.is_ok(), "Happy Eyeballs should succeed with cached addresses");
+            let connection_result = harness
+                .happy_eyeballs
+                .connect_with_timing(socket_addrs)
+                .await;
+            assert!(
+                connection_result.is_ok(),
+                "Happy Eyeballs should succeed with cached addresses"
+            );
 
             let connection = connection_result.unwrap();
-            assert!(connection.timing < Duration::from_secs(1),
-                "Connection should be fast with cached DNS");
+            assert!(
+                connection.timing < Duration::from_secs(1),
+                "Connection should be fast with cached DNS"
+            );
 
             println!("✓ DNS cache coordination with Happy Eyeballs timing verified");
             println!("  Resolution time: {:?}", resolution_time);
             println!("  Connection time: {:?}", connection.timing);
-            println!("  Connected via: {} to {}", connection.family, connection.addr);
+            println!(
+                "  Connected via: {} to {}",
+                connection.family, connection.addr
+            );
         });
     }
 
@@ -812,7 +931,9 @@ mod tests {
             ];
 
             // Insert with short TTL
-            harness.dns_cache.insert(hostname, addrs.clone(), Duration::from_millis(100));
+            harness
+                .dns_cache
+                .insert(hostname, addrs.clone(), Duration::from_millis(100));
 
             // First lookup hits cache
             let first_lookup = harness.resolve_with_cache(hostname).await.unwrap();
@@ -824,17 +945,28 @@ mod tests {
 
             // Second lookup should trigger fresh DNS resolution
             let second_lookup = harness.resolve_with_cache(hostname).await.unwrap();
-            assert!(harness.result.cache_misses > 0, "Should have cache miss after TTL expiry");
+            assert!(
+                harness.result.cache_misses > 0,
+                "Should have cache miss after TTL expiry"
+            );
 
             // Happy Eyeballs should still work correctly
-            let socket_addrs: Vec<SocketAddr> = second_lookup.iter()
+            let socket_addrs: Vec<SocketAddr> = second_lookup
+                .iter()
                 .map(|ip| SocketAddr::new(*ip, 80))
                 .collect();
 
-            let connection = harness.happy_eyeballs.connect_with_timing(socket_addrs).await.unwrap();
+            let connection = harness
+                .happy_eyeballs
+                .connect_with_timing(socket_addrs)
+                .await
+                .unwrap();
 
             let (_, _, timing_preserved) = harness.happy_eyeballs.get_stats();
-            assert!(timing_preserved, "Happy Eyeballs timing should be preserved during TTL expiry");
+            assert!(
+                timing_preserved,
+                "Happy Eyeballs timing should be preserved during TTL expiry"
+            );
 
             println!("✓ Cache TTL expiration coordination verified");
             println!("  Cache hits: {}", harness.result.cache_hits);

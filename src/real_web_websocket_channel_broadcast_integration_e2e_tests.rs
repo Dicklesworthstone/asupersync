@@ -11,24 +11,27 @@
 //! - Concurrent WebSocket connections with broadcast message fanout
 
 use crate::{
-    cx::{Cx, Scope},
-    web::websocket::{
-        WebSocketServer, WebSocketClient, WebSocketConfig, WebSocketMessage,
-        WebSocketConnection, ConnectionState, WebSocketError,
-    },
     channel::broadcast::{
-        BroadcastSender, BroadcastReceiver, BroadcastChannel, BroadcastConfig,
-        BroadcastMessage, SubscriptionId, BroadcastError,
+        BroadcastChannel, BroadcastConfig, BroadcastError, BroadcastMessage, BroadcastReceiver,
+        BroadcastSender, SubscriptionId,
     },
+    cx::{Cx, Scope},
+    error::Error,
     sync::{Mutex, RwLock},
     types::{Budget, Outcome},
-    error::Error,
+    web::websocket::{
+        ConnectionState, WebSocketClient, WebSocketConfig, WebSocketConnection, WebSocketError,
+        WebSocketMessage, WebSocketServer,
+    },
 };
 use std::{
-    sync::{Arc, atomic::{AtomicU64, AtomicUsize, Ordering}},
-    time::Duration,
     collections::HashMap,
     net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 /// Controllable WebSocket server that coordinates with broadcast channels
@@ -129,7 +132,8 @@ impl BroadcastAwareWebSocketServer {
                     connection_id.clone(),
                     ws_connection.clone(),
                     receiver,
-                ).await?;
+                )
+                .await?;
             }
         }
 
@@ -142,7 +146,10 @@ impl BroadcastAwareWebSocketServer {
             last_activity: std::time::Instant::now(),
         };
 
-        self.connection_subscriptions.lock().unwrap().insert(connection_id.clone(), subscription_mapping);
+        self.connection_subscriptions
+            .lock()
+            .unwrap()
+            .insert(connection_id.clone(), subscription_mapping);
         self.server_stats.lock().unwrap().connections_established += 1;
 
         Ok(WebSocketBroadcastConnection {
@@ -171,7 +178,10 @@ impl BroadcastAwareWebSocketServer {
 
                         match websocket_connection.send_message(cx, &ws_message).await {
                             Ok(_) => {
-                                message_routing.lock().unwrap().broadcast_to_websocket_messages += 1;
+                                message_routing
+                                    .lock()
+                                    .unwrap()
+                                    .broadcast_to_websocket_messages += 1;
                                 server_stats.lock().unwrap().messages_sent += 1;
                             }
                             Err(_) => {
@@ -217,11 +227,19 @@ impl BroadcastAwareWebSocketServer {
         if let Some(broadcast_sender) = broadcast_channels.get(channel_name) {
             match broadcast_sender.send(cx, message.clone()).await {
                 Ok(subscriber_count) => {
-                    self.message_routing.lock().unwrap().websocket_to_broadcast_messages += 1;
+                    self.message_routing
+                        .lock()
+                        .unwrap()
+                        .websocket_to_broadcast_messages += 1;
                     self.server_stats.lock().unwrap().messages_received += 1;
 
                     // Update connection stats
-                    if let Some(mapping) = self.connection_subscriptions.lock().unwrap().get_mut(connection_id) {
+                    if let Some(mapping) = self
+                        .connection_subscriptions
+                        .lock()
+                        .unwrap()
+                        .get_mut(connection_id)
+                    {
                         mapping.message_count_sent += 1;
                         mapping.last_activity = std::time::Instant::now();
                     }
@@ -239,7 +257,10 @@ impl BroadcastAwareWebSocketServer {
                 }
             }
         } else {
-            Err(Error::custom(&format!("Broadcast channel '{}' not found", channel_name)))
+            Err(Error::custom(&format!(
+                "Broadcast channel '{}' not found",
+                channel_name
+            )))
         }
     }
 
@@ -258,7 +279,9 @@ impl BroadcastAwareWebSocketServer {
                 return Ok(SubscriptionResult {
                     success: false,
                     subscription_id: None,
-                    error_message: Some("Maximum subscriptions per connection exceeded".to_string()),
+                    error_message: Some(
+                        "Maximum subscriptions per connection exceeded".to_string(),
+                    ),
                 });
             }
 
@@ -279,9 +302,12 @@ impl BroadcastAwareWebSocketServer {
                 connection_id.to_string(),
                 mapping.websocket_connection.clone(),
                 receiver,
-            ).await?;
+            )
+            .await?;
 
-            mapping.subscribed_channels.insert(channel_name.to_string(), subscription_id);
+            mapping
+                .subscribed_channels
+                .insert(channel_name.to_string(), subscription_id);
             self.message_routing.lock().unwrap().subscription_events += 1;
 
             Ok(SubscriptionResult {
@@ -294,13 +320,23 @@ impl BroadcastAwareWebSocketServer {
         }
     }
 
-    async fn close_connection_with_cleanup(&self, cx: &Cx, connection_id: &str) -> Result<(), Error> {
-        if let Some(mapping) = self.connection_subscriptions.lock().unwrap().remove(connection_id) {
+    async fn close_connection_with_cleanup(
+        &self,
+        cx: &Cx,
+        connection_id: &str,
+    ) -> Result<(), Error> {
+        if let Some(mapping) = self
+            .connection_subscriptions
+            .lock()
+            .unwrap()
+            .remove(connection_id)
+        {
             // Close WebSocket connection
             mapping.websocket_connection.close(cx).await?;
 
             // Cleanup subscriptions (receivers will be dropped automatically)
-            self.message_routing.lock().unwrap().unsubscription_events += mapping.subscribed_channels.len() as u64;
+            self.message_routing.lock().unwrap().unsubscription_events +=
+                mapping.subscribed_channels.len() as u64;
             self.server_stats.lock().unwrap().connections_closed += 1;
         }
 
@@ -320,7 +356,12 @@ impl BroadcastAwareWebSocketServer {
     }
 
     fn get_active_connections(&self) -> Vec<String> {
-        self.connection_subscriptions.lock().unwrap().keys().cloned().collect()
+        self.connection_subscriptions
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
     }
 }
 
@@ -366,13 +407,15 @@ impl WebSocketBroadcastConnection {
         broadcast_channels: &HashMap<String, BroadcastSender<WebSocketMessage>>,
         target_channel: Option<&str>,
     ) -> Result<BroadcastRoutingResult, Error> {
-        self.server.route_websocket_message_to_broadcast(
-            cx,
-            &self.connection_id,
-            message,
-            broadcast_channels,
-            target_channel,
-        ).await
+        self.server
+            .route_websocket_message_to_broadcast(
+                cx,
+                &self.connection_id,
+                message,
+                broadcast_channels,
+                target_channel,
+            )
+            .await
     }
 
     async fn subscribe_to_channel(
@@ -381,24 +424,32 @@ impl WebSocketBroadcastConnection {
         channel_name: &str,
         broadcast_sender: &BroadcastSender<WebSocketMessage>,
     ) -> Result<SubscriptionResult, Error> {
-        self.server.subscribe_connection_to_channel(
-            cx,
-            &self.connection_id,
-            channel_name,
-            broadcast_sender,
-        ).await
+        self.server
+            .subscribe_connection_to_channel(
+                cx,
+                &self.connection_id,
+                channel_name,
+                broadcast_sender,
+            )
+            .await
     }
 
     async fn receive_websocket_message(&self, cx: &Cx) -> Result<WebSocketMessage, Error> {
         self.websocket_connection.receive_message(cx).await
     }
 
-    async fn send_websocket_message(&self, cx: &Cx, message: &WebSocketMessage) -> Result<(), Error> {
+    async fn send_websocket_message(
+        &self,
+        cx: &Cx,
+        message: &WebSocketMessage,
+    ) -> Result<(), Error> {
         self.websocket_connection.send_message(cx, message).await
     }
 
     async fn close(&self, cx: &Cx) -> Result<(), Error> {
-        self.server.close_connection_with_cleanup(cx, &self.connection_id).await
+        self.server
+            .close_connection_with_cleanup(cx, &self.connection_id)
+            .await
     }
 
     fn connection_id(&self) -> &str {
@@ -465,7 +516,10 @@ impl WebSocketIntegratedBroadcastSystem {
         let (sender, _initial_receiver) = BroadcastChannel::new(broadcast_config);
 
         channels.insert(channel_name.to_string(), sender.clone());
-        self.channel_stats.lock().unwrap().insert(channel_name.to_string(), ChannelStatistics::default());
+        self.channel_stats
+            .lock()
+            .unwrap()
+            .insert(channel_name.to_string(), ChannelStatistics::default());
 
         Ok(sender)
     }
@@ -507,7 +561,11 @@ impl WebSocketIntegratedBroadcastSystem {
     }
 
     fn get_channel_statistics(&self, channel_name: &str) -> Option<ChannelStatistics> {
-        self.channel_stats.lock().unwrap().get(channel_name).cloned()
+        self.channel_stats
+            .lock()
+            .unwrap()
+            .get(channel_name)
+            .cloned()
     }
 
     fn get_all_channel_names(&self) -> Vec<String> {
@@ -568,37 +626,36 @@ impl WebSocketBroadcastIntegrationCoordinator {
 
         // Create broadcast channels
         let channel_name = "test_channel";
-        let broadcast_sender = self.broadcast_system.create_or_get_channel(cx, channel_name).await?;
+        let broadcast_sender = self
+            .broadcast_system
+            .create_or_get_channel(cx, channel_name)
+            .await?;
         let mut broadcast_channels = HashMap::new();
         broadcast_channels.insert(channel_name.to_string(), broadcast_sender.clone());
 
         // Create WebSocket client connections
         let mut websocket_connections = Vec::new();
         for i in 0..client_count {
-            let connection = self.websocket_server.accept_connection_with_broadcast_setup(
-                cx,
-                &broadcast_channels,
-            ).await?;
+            let connection = self
+                .websocket_server
+                .accept_connection_with_broadcast_setup(cx, &broadcast_channels)
+                .await?;
 
             websocket_connections.push(connection);
         }
 
         // Test WebSocket to broadcast routing
         let test_message = WebSocketMessage::Text("Hello from WebSocket".to_string());
-        let routing_result = websocket_connections[0].send_to_broadcast_channel(
-            cx,
-            &test_message,
-            &broadcast_channels,
-            Some(channel_name),
-        ).await?;
+        let routing_result = websocket_connections[0]
+            .send_to_broadcast_channel(cx, &test_message, &broadcast_channels, Some(channel_name))
+            .await?;
 
         // Test broadcast to WebSocket delivery
         let broadcast_message = WebSocketMessage::Text("Hello from broadcast".to_string());
-        let subscribers_reached = self.broadcast_system.send_message_to_channel(
-            cx,
-            channel_name,
-            broadcast_message,
-        ).await?;
+        let subscribers_reached = self
+            .broadcast_system
+            .send_message_to_channel(cx, channel_name, broadcast_message)
+            .await?;
 
         // Collect performance metrics
         let total_duration = test_start.elapsed();
@@ -606,7 +663,10 @@ impl WebSocketBroadcastIntegrationCoordinator {
         let routing_stats = self.websocket_server.get_routing_stats();
 
         let performance_metrics = WebSocketBroadcastPerformanceMetrics {
-            message_throughput_per_sec: (routing_stats.websocket_to_broadcast_messages + routing_stats.broadcast_to_websocket_messages) as f64 / total_duration.as_secs_f64(),
+            message_throughput_per_sec: (routing_stats.websocket_to_broadcast_messages
+                + routing_stats.broadcast_to_websocket_messages)
+                as f64
+                / total_duration.as_secs_f64(),
             websocket_to_broadcast_latency_ms: 1.0, // Simulated
             broadcast_to_websocket_latency_ms: 1.0, // Simulated
             concurrent_connection_capacity: client_count,
@@ -648,24 +708,30 @@ impl WebSocketBroadcastIntegrationCoordinator {
         let mut broadcast_channels = HashMap::new();
 
         for channel_name in &channel_names {
-            let sender = self.broadcast_system.create_or_get_channel(cx, channel_name).await?;
+            let sender = self
+                .broadcast_system
+                .create_or_get_channel(cx, channel_name)
+                .await?;
             broadcast_channels.insert(channel_name.to_string(), sender);
         }
 
         // Create WebSocket connection
-        let ws_connection = self.websocket_server.accept_connection_with_broadcast_setup(
-            cx,
-            &broadcast_channels,
-        ).await?;
+        let ws_connection = self
+            .websocket_server
+            .accept_connection_with_broadcast_setup(cx, &broadcast_channels)
+            .await?;
 
         // Subscribe to additional channels
         let mut subscription_results = Vec::new();
-        for channel_name in &channel_names[1..] { // Skip first channel (auto-subscribed)
-            let result = ws_connection.subscribe_to_channel(
-                cx,
-                channel_name,
-                broadcast_channels.get(*channel_name).unwrap(),
-            ).await?;
+        for channel_name in &channel_names[1..] {
+            // Skip first channel (auto-subscribed)
+            let result = ws_connection
+                .subscribe_to_channel(
+                    cx,
+                    channel_name,
+                    broadcast_channels.get(*channel_name).unwrap(),
+                )
+                .await?;
 
             subscription_results.push(result);
         }
@@ -674,9 +740,13 @@ impl WebSocketBroadcastIntegrationCoordinator {
         let mut messages_sent = 0;
         for channel_name in &channel_names {
             let message = WebSocketMessage::Text(format!("Message for {}", channel_name));
-            match self.broadcast_system.send_message_to_channel(cx, channel_name, message).await {
+            match self
+                .broadcast_system
+                .send_message_to_channel(cx, channel_name, message)
+                .await
+            {
                 Ok(_) => messages_sent += 1,
-                Err(_) => {},
+                Err(_) => {}
             }
         }
 
@@ -721,7 +791,10 @@ impl WebSocketBroadcastIntegrationCoordinator {
 
         // Create broadcast channel
         let channel_name = "high_throughput";
-        let broadcast_sender = self.broadcast_system.create_or_get_channel(cx, channel_name).await?;
+        let broadcast_sender = self
+            .broadcast_system
+            .create_or_get_channel(cx, channel_name)
+            .await?;
         let mut broadcast_channels = HashMap::new();
         broadcast_channels.insert(channel_name.to_string(), broadcast_sender.clone());
 
@@ -729,10 +802,10 @@ impl WebSocketBroadcastIntegrationCoordinator {
         let connection_count = 5;
         let mut websocket_connections = Vec::new();
         for i in 0..connection_count {
-            let connection = self.websocket_server.accept_connection_with_broadcast_setup(
-                cx,
-                &broadcast_channels,
-            ).await?;
+            let connection = self
+                .websocket_server
+                .accept_connection_with_broadcast_setup(cx, &broadcast_channels)
+                .await?;
             websocket_connections.push(connection);
         }
 
@@ -742,14 +815,12 @@ impl WebSocketBroadcastIntegrationCoordinator {
             let message = WebSocketMessage::Text(format!("High throughput message {}", i));
             let connection_idx = i % websocket_connections.len();
 
-            match websocket_connections[connection_idx].send_to_broadcast_channel(
-                cx,
-                &message,
-                &broadcast_channels,
-                Some(channel_name),
-            ).await {
+            match websocket_connections[connection_idx]
+                .send_to_broadcast_channel(cx, &message, &broadcast_channels, Some(channel_name))
+                .await
+            {
                 Ok(result) if result.routing_success => successful_routes += 1,
-                _ => {},
+                _ => {}
             }
         }
 
@@ -758,7 +829,8 @@ impl WebSocketBroadcastIntegrationCoordinator {
 
         let performance_metrics = WebSocketBroadcastPerformanceMetrics {
             message_throughput_per_sec: successful_routes as f64 / total_duration.as_secs_f64(),
-            websocket_to_broadcast_latency_ms: total_duration.as_secs_f64() * 1000.0 / message_count as f64,
+            websocket_to_broadcast_latency_ms: total_duration.as_secs_f64() * 1000.0
+                / message_count as f64,
             broadcast_to_websocket_latency_ms: 1.0,
             concurrent_connection_capacity: connection_count,
         };
@@ -797,11 +869,7 @@ impl WebSocketBroadcastIntegrationCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        runtime::test_rt,
-        cx::region,
-        types::Budget,
-    };
+    use crate::{cx::region, runtime::test_rt, types::Budget};
 
     #[test]
     fn test_basic_websocket_broadcast_integration() {
@@ -809,19 +877,34 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(30)), |cx| async move {
                 let coordinator = WebSocketBroadcastIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_basic_websocket_broadcast_integration(
-                    cx,
-                    "basic_integration",
-                    3, // 3 WebSocket connections
-                ).await?;
+                let result = coordinator
+                    .validate_basic_websocket_broadcast_integration(
+                        cx,
+                        "basic_integration",
+                        3, // 3 WebSocket connections
+                    )
+                    .await?;
 
-                assert!(result.websocket_connectivity, "WebSocket connections should be established");
-                assert!(result.broadcast_delivery, "Broadcast messages should be delivered");
-                assert!(result.message_routing_success, "Message routing should succeed");
-                assert!(result.subscription_management, "Subscription management should work");
+                assert!(
+                    result.websocket_connectivity,
+                    "WebSocket connections should be established"
+                );
+                assert!(
+                    result.broadcast_delivery,
+                    "Broadcast messages should be delivered"
+                );
+                assert!(
+                    result.message_routing_success,
+                    "Message routing should succeed"
+                );
+                assert!(
+                    result.subscription_management,
+                    "Subscription management should work"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 
@@ -831,17 +914,26 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(45)), |cx| async move {
                 let coordinator = WebSocketBroadcastIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_multi_channel_subscription(
-                    cx,
-                    "multi_channel_subscription"
-                ).await?;
+                let result = coordinator
+                    .validate_multi_channel_subscription(cx, "multi_channel_subscription")
+                    .await?;
 
-                assert!(result.websocket_connectivity, "WebSocket should connect successfully");
-                assert!(result.broadcast_delivery, "Messages should be delivered to all channels");
-                assert!(result.subscription_management, "Multi-channel subscriptions should be managed correctly");
+                assert!(
+                    result.websocket_connectivity,
+                    "WebSocket should connect successfully"
+                );
+                assert!(
+                    result.broadcast_delivery,
+                    "Messages should be delivered to all channels"
+                );
+                assert!(
+                    result.subscription_management,
+                    "Multi-channel subscriptions should be managed correctly"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 
@@ -851,18 +943,30 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(60)), |cx| async move {
                 let coordinator = WebSocketBroadcastIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_high_throughput_message_routing(
-                    cx,
-                    "high_throughput_routing",
-                    100, // 100 messages
-                ).await?;
+                let result = coordinator
+                    .validate_high_throughput_message_routing(
+                        cx,
+                        "high_throughput_routing",
+                        100, // 100 messages
+                    )
+                    .await?;
 
-                assert!(result.message_routing_success, "High throughput routing should succeed");
-                assert!(result.performance_metrics.message_throughput_per_sec > 10.0, "Should achieve reasonable throughput");
-                assert!(result.performance_metrics.concurrent_connection_capacity > 1, "Should handle multiple concurrent connections");
+                assert!(
+                    result.message_routing_success,
+                    "High throughput routing should succeed"
+                );
+                assert!(
+                    result.performance_metrics.message_throughput_per_sec > 10.0,
+                    "Should achieve reasonable throughput"
+                );
+                assert!(
+                    result.performance_metrics.concurrent_connection_capacity > 1,
+                    "Should handle multiple concurrent connections"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 }

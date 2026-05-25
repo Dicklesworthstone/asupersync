@@ -30,15 +30,17 @@ mod tests {
         channel::broadcast::{self, BroadcastReceiver, BroadcastSender, RecvError, SendError},
         cx::Cx,
         error::Result,
-        messaging::jetstream::{JetStreamContext, StreamConfig, ConsumerConfig, Message as JsMessage},
-        messaging::nats::{NatsClient, Message as NatsMessage},
+        messaging::jetstream::{
+            ConsumerConfig, JetStreamContext, Message as JsMessage, StreamConfig,
+        },
+        messaging::nats::{Message as NatsMessage, NatsClient},
         runtime::{Runtime, spawn},
         sync::Arc,
         time::{Duration, sleep},
         types::{Budget, Outcome},
     };
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     // ────────────────────────────────────────────────────────────────────────────────
     // JetStream + Broadcast Integration Test Framework
@@ -84,8 +86,9 @@ mod tests {
             broadcast_capacity: usize,
         ) -> Result<Self> {
             // Connect to NATS for JetStream
-            let nats_client = NatsClient::connect(cx, nats_url).await
-                .map_err(|e| crate::error::Error::Other(&format!("Failed to connect to NATS: {:?}", e)))?;
+            let nats_client = NatsClient::connect(cx, nats_url).await.map_err(|e| {
+                crate::error::Error::Other(&format!("Failed to connect to NATS: {:?}", e))
+            })?;
 
             let jetstream_ctx = Arc::new(JetStreamContext::new(nats_client));
 
@@ -105,11 +108,16 @@ mod tests {
 
         async fn setup_stream(&self, cx: &Cx) -> Result<()> {
             // Create JetStream stream for testing
-            let stream_config = StreamConfig::new(&self.stream_name)
-                .subjects(&[&self.subject_pattern]);
+            let stream_config =
+                StreamConfig::new(&self.stream_name).subjects(&[&self.subject_pattern]);
 
-            let _stream = self.jetstream_ctx.create_stream(cx, stream_config).await
-                .map_err(|e| crate::error::Error::Other(&format!("Failed to create stream: {:?}", e)))?;
+            let _stream = self
+                .jetstream_ctx
+                .create_stream(cx, stream_config)
+                .await
+                .map_err(|e| {
+                    crate::error::Error::Other(&format!("Failed to create stream: {:?}", e))
+                })?;
 
             Ok(())
         }
@@ -117,8 +125,13 @@ mod tests {
         async fn start_message_bridge(&self, cx: &Cx) -> Result<()> {
             // Create consumer for the stream
             let consumer_config = ConsumerConfig::new("bridge_consumer");
-            let consumer = self.jetstream_ctx.create_consumer(cx, &self.stream_name, consumer_config).await
-                .map_err(|e| crate::error::Error::Other(&format!("Failed to create consumer: {:?}", e)))?;
+            let consumer = self
+                .jetstream_ctx
+                .create_consumer(cx, &self.stream_name, consumer_config)
+                .await
+                .map_err(|e| {
+                    crate::error::Error::Other(&format!("Failed to create consumer: {:?}", e))
+                })?;
 
             // Start background task to bridge messages
             let bridge_task = spawn(cx, {
@@ -132,7 +145,9 @@ mod tests {
                         match consumer.pull(cx, 1).await {
                             Ok(messages) => {
                                 for msg in messages {
-                                    stats.jetstream_messages_consumed.fetch_add(1, Ordering::Relaxed);
+                                    stats
+                                        .jetstream_messages_consumed
+                                        .fetch_add(1, Ordering::Relaxed);
 
                                     // Convert to string and send via broadcast
                                     let payload = String::from_utf8_lossy(&msg.payload);
@@ -141,7 +156,9 @@ mod tests {
                                     match broadcast_tx.reserve(cx).await {
                                         Ok(permit) => {
                                             permit.send(payload.to_string());
-                                            stats.broadcast_messages_sent.fetch_add(1, Ordering::Relaxed);
+                                            stats
+                                                .broadcast_messages_sent
+                                                .fetch_add(1, Ordering::Relaxed);
 
                                             // Acknowledge the JetStream message
                                             let _ = msg.ack(cx).await;
@@ -165,16 +182,22 @@ mod tests {
                     }
                     Ok(())
                 }
-            }).await;
+            })
+            .await;
 
             Ok(())
         }
 
         async fn publish_test_message(&self, cx: &Cx, routing: &MessageRouting) -> Result<()> {
-            let ack = self.jetstream_ctx.publish(cx, &routing.jetstream_subject, routing.payload.as_bytes()).await
+            let ack = self
+                .jetstream_ctx
+                .publish(cx, &routing.jetstream_subject, routing.payload.as_bytes())
+                .await
                 .map_err(|e| crate::error::Error::Other(&format!("Failed to publish: {:?}", e)))?;
 
-            self.stats.jetstream_messages_published.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .jetstream_messages_published
+                .fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
 
@@ -186,10 +209,16 @@ mod tests {
 
         fn get_stats(&self) -> (u64, u64, u64, u64, usize, u64, u64, u64) {
             (
-                self.stats.jetstream_messages_published.load(Ordering::Relaxed),
-                self.stats.jetstream_messages_consumed.load(Ordering::Relaxed),
+                self.stats
+                    .jetstream_messages_published
+                    .load(Ordering::Relaxed),
+                self.stats
+                    .jetstream_messages_consumed
+                    .load(Ordering::Relaxed),
                 self.stats.broadcast_messages_sent.load(Ordering::Relaxed),
-                self.stats.broadcast_messages_received.load(Ordering::Relaxed),
+                self.stats
+                    .broadcast_messages_received
+                    .load(Ordering::Relaxed),
                 self.stats.fanout_receivers.load(Ordering::Relaxed),
                 self.stats.lagged_receivers.load(Ordering::Relaxed),
                 self.stats.integration_cycles.load(Ordering::Relaxed),
@@ -229,13 +258,16 @@ mod tests {
                             permit.send(msg);
                             Ok(())
                         }
-                        Err(SendError::Closed(_)) => Err(crate::error::Error::Other("Broadcast closed")),
+                        Err(SendError::Closed(_)) => {
+                            Err(crate::error::Error::Other("Broadcast closed"))
+                        }
                         Err(SendError::Cancelled(_)) => Outcome::Cancelled,
                     }
                 } else {
                     Err(crate::error::Error::Other("No JetStream message"))
                 }
-            }).await?;
+            })
+            .await?;
 
             // Test broadcast message reception
             match broadcast_rx.recv(&cx).await {
@@ -245,9 +277,14 @@ mod tests {
                     println!("  Message: '{}'", received);
                     Ok(())
                 }
-                Err(RecvError::Closed) => Err(crate::error::Error::Other("Broadcast channel closed")),
+                Err(RecvError::Closed) => {
+                    Err(crate::error::Error::Other("Broadcast channel closed"))
+                }
                 Err(RecvError::Cancelled) => Outcome::Cancelled,
-                Err(err) => Err(crate::error::Error::Other(&format!("Recv error: {:?}", err))),
+                Err(err) => Err(crate::error::Error::Other(&format!(
+                    "Recv error: {:?}",
+                    err
+                ))),
             }
         })
     }
@@ -284,7 +321,8 @@ mod tests {
                     sleep(Duration::from_millis(10)).await;
                 }
                 Ok(())
-            }).await?;
+            })
+            .await?;
 
             // Verify all receivers get all messages
             let mut receive_tasks = Vec::new();
@@ -306,7 +344,8 @@ mod tests {
 
                     println!("  Receiver {}: {} messages", i, received_count);
                     (received_count, received_messages)
-                }).await;
+                })
+                .await;
 
                 receive_tasks.push(task);
             }
@@ -366,7 +405,8 @@ mod tests {
                     }
                 }
                 Ok(())
-            }).await;
+            })
+            .await;
 
             // Verify ordered delivery
             let mut received_order = Vec::new();
@@ -380,13 +420,23 @@ mod tests {
             // Verify ordering
             for (i, msg) in received_order.iter().enumerate() {
                 let expected = format!("ordered-{:03}", i);
-                assert_eq!(msg, &expected, "Message ordering violated at position {}", i);
+                assert_eq!(
+                    msg, &expected,
+                    "Message ordering violated at position {}",
+                    i
+                );
             }
 
             println!("✓ JetStream ↔ broadcast ordering integration verified");
             println!("  Ordered messages: {}", received_order.len());
-            println!("  First: {}", received_order.first().unwrap_or(&"None".to_string()));
-            println!("  Last: {}", received_order.last().unwrap_or(&"None".to_string()));
+            println!(
+                "  First: {}",
+                received_order.first().unwrap_or(&"None".to_string())
+            );
+            println!(
+                "  Last: {}",
+                received_order.last().unwrap_or(&"None".to_string())
+            );
 
             Ok(())
         })
@@ -415,10 +465,14 @@ mod tests {
                             Err(crate::error::Error::Other("Expected cancellation"))
                         }
                         Err(SendError::Cancelled(_)) => Ok(()),
-                        Err(SendError::Closed(_)) => Err(crate::error::Error::Other("Channel closed")),
+                        Err(SendError::Closed(_)) => {
+                            Err(crate::error::Error::Other("Channel closed"))
+                        }
                     }
-                }).await
-            }).await;
+                })
+                .await
+            })
+            .await;
 
             // Test cancelled receive operation
             let cancel_recv_task = spawn(&cx, async move {
@@ -430,10 +484,15 @@ mod tests {
                         Ok(_) => Err(crate::error::Error::Other("Expected cancellation")),
                         Err(RecvError::Cancelled) => Ok(()),
                         Err(RecvError::Closed) => Err(crate::error::Error::Other("Channel closed")),
-                        Err(err) => Err(crate::error::Error::Other(&format!("Unexpected error: {:?}", err))),
+                        Err(err) => Err(crate::error::Error::Other(&format!(
+                            "Unexpected error: {:?}",
+                            err
+                        ))),
                     }
-                }).await
-            }).await;
+                })
+                .await
+            })
+            .await;
 
             match (cancel_send_task, cancel_recv_task) {
                 (Ok(()), Ok(())) => {
@@ -473,7 +532,8 @@ mod tests {
                     }
                 }
                 Ok(())
-            }).await;
+            })
+            .await;
 
             // Fast receiver consumes normally
             let fast_task = spawn(&cx, async move {
@@ -490,7 +550,8 @@ mod tests {
                     }
                 }
                 received
-            }).await;
+            })
+            .await;
 
             // Slow receiver should experience lagging
             sleep(Duration::from_millis(100)).await; // Let messages accumulate

@@ -12,23 +12,26 @@
 
 use crate::{
     cx::{Cx, Scope},
+    error::Error,
     observability::otel::{
-        OtelCollector, OtelConfig, MetricDefinition, MetricType,
-        SpanProcessor, TraceExporter, OtelError,
-    },
-    trace::distributed::{
-        span::{DistributedSpan, SpanContext, SpanBuilder, SpanKind},
-        context::{TraceContext, TraceId, SpanId},
-        sampling::{SamplingDecision, SamplingStrategy},
+        MetricDefinition, MetricType, OtelCollector, OtelConfig, OtelError, SpanProcessor,
+        TraceExporter,
     },
     sync::{Mutex, RwLock},
+    trace::distributed::{
+        context::{SpanId, TraceContext, TraceId},
+        sampling::{SamplingDecision, SamplingStrategy},
+        span::{DistributedSpan, SpanBuilder, SpanContext, SpanKind},
+    },
     types::{Budget, Outcome},
-    error::Error,
 };
 use std::{
-    sync::{Arc, atomic::{AtomicU64, AtomicUsize, Ordering}},
-    time::Duration,
     collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 /// Controllable OpenTelemetry collector that simulates various monitoring conditions
@@ -130,7 +133,11 @@ impl ControllableOtelCollector {
 
         // Store metric for correlation
         self.metric_storage.lock().unwrap().insert(
-            format!("{}_{}", metric_name, metric_data.timestamp.elapsed().as_nanos()),
+            format!(
+                "{}_{}",
+                metric_name,
+                metric_data.timestamp.elapsed().as_nanos()
+            ),
             metric_data.clone(),
         );
 
@@ -140,7 +147,12 @@ impl ControllableOtelCollector {
                 self.collection_stats.lock().unwrap().correlation_hits += 1;
 
                 // Update span metrics
-                if let Some(span_metrics) = self.span_correlation.lock().unwrap().get_mut(&span_ctx.span_id()) {
+                if let Some(span_metrics) = self
+                    .span_correlation
+                    .lock()
+                    .unwrap()
+                    .get_mut(&span_ctx.span_id())
+                {
                     span_metrics.metrics_collected.push(metric_name.to_string());
                 }
             }
@@ -156,7 +168,9 @@ impl ControllableOtelCollector {
             metric_type: MetricType::Counter,
         };
 
-        self.collector.record_metric(cx, &metric_def, value, labels).await?;
+        self.collector
+            .record_metric(cx, &metric_def, value, labels)
+            .await?;
         self.collection_stats.lock().unwrap().metrics_collected += 1;
 
         Ok(())
@@ -196,14 +210,20 @@ impl ControllableOtelCollector {
             error_count: if span.has_errors() { 1 } else { 0 },
         };
 
-        self.span_correlation.lock().unwrap().insert(span.context().span_id(), span_metrics);
+        self.span_correlation
+            .lock()
+            .unwrap()
+            .insert(span.context().span_id(), span_metrics);
 
         // Collect operation metrics correlated with span
         let mut metrics_collected = 0;
         for (metric_name, value) in operation_metrics {
             let labels = HashMap::from([
                 ("span_id".to_string(), span.context().span_id().to_string()),
-                ("trace_id".to_string(), span.context().trace_id().to_string()),
+                (
+                    "trace_id".to_string(),
+                    span.context().trace_id().to_string(),
+                ),
                 ("operation".to_string(), span.operation_name().to_string()),
             ]);
 
@@ -213,17 +233,24 @@ impl ControllableOtelCollector {
                 value,
                 labels,
                 Some(&span.context()),
-            ).await?;
+            )
+            .await?;
 
             metrics_collected += 1;
         }
 
         // Record span timing metrics
         let span_duration = span.duration().as_secs_f64() * 1000.0;
-        self.record_span_timing_metrics(cx, span, span_duration).await?;
+        self.record_span_timing_metrics(cx, span, span_duration)
+            .await?;
 
         // Update span metrics
-        if let Some(mut span_metrics) = self.span_correlation.lock().unwrap().get_mut(&span.context().span_id()) {
+        if let Some(mut span_metrics) = self
+            .span_correlation
+            .lock()
+            .unwrap()
+            .get_mut(&span.context().span_id())
+        {
             span_metrics.duration_ms = span_duration;
         }
 
@@ -258,7 +285,8 @@ impl ControllableOtelCollector {
             duration_ms,
             labels.clone(),
             Some(&span.context()),
-        ).await?;
+        )
+        .await?;
 
         // Record child span count
         self.record_metric_with_span_correlation(
@@ -267,7 +295,8 @@ impl ControllableOtelCollector {
             span.child_count() as f64,
             labels.clone(),
             Some(&span.context()),
-        ).await?;
+        )
+        .await?;
 
         // Record error count if any
         if span.has_errors() {
@@ -277,7 +306,8 @@ impl ControllableOtelCollector {
                 1.0,
                 labels,
                 Some(&span.context()),
-            ).await?;
+            )
+            .await?;
         }
 
         Ok(())
@@ -303,20 +333,28 @@ impl ControllableOtelCollector {
     async fn flush_and_export_batch(&self, cx: &Cx) -> Result<BatchExportResult, Error> {
         let config = self.monitoring_config.read().unwrap().clone();
 
-        let metrics_to_export: Vec<_> = self.metric_storage.lock().unwrap()
+        let metrics_to_export: Vec<_> = self
+            .metric_storage
+            .lock()
+            .unwrap()
             .values()
             .take(config.trace_export_batch_size)
             .cloned()
             .collect();
 
-        let spans_to_export: Vec<_> = self.span_correlation.lock().unwrap()
+        let spans_to_export: Vec<_> = self
+            .span_correlation
+            .lock()
+            .unwrap()
             .values()
             .take(config.trace_export_batch_size)
             .cloned()
             .collect();
 
         // Export batch to OTel
-        self.collector.export_batch(cx, &metrics_to_export, &spans_to_export).await?;
+        self.collector
+            .export_batch(cx, &metrics_to_export, &spans_to_export)
+            .await?;
 
         self.collection_stats.lock().unwrap().export_batches_sent += 1;
 
@@ -391,21 +429,37 @@ impl OtelIntegratedSpanSystem {
         kind: SpanKind,
         parent_span_id: Option<SpanId>,
     ) -> Result<DistributedSpan, Error> {
-        let span = self.span_builder.create_span(
-            cx,
-            operation_name,
-            kind,
-            parent_span_id.map(|id| {
-                self.active_spans.lock().unwrap().get(&id).unwrap().context().clone()
-            }).as_ref(),
-        ).await?;
+        let span = self
+            .span_builder
+            .create_span(
+                cx,
+                operation_name,
+                kind,
+                parent_span_id
+                    .map(|id| {
+                        self.active_spans
+                            .lock()
+                            .unwrap()
+                            .get(&id)
+                            .unwrap()
+                            .context()
+                            .clone()
+                    })
+                    .as_ref(),
+            )
+            .await?;
 
         // Track in active spans
-        self.active_spans.lock().unwrap().insert(span.context().span_id(), span.clone());
+        self.active_spans
+            .lock()
+            .unwrap()
+            .insert(span.context().span_id(), span.clone());
 
         // Update hierarchy
         if let Some(parent_id) = parent_span_id {
-            self.span_hierarchy.lock().unwrap()
+            self.span_hierarchy
+                .lock()
+                .unwrap()
                 .entry(parent_id)
                 .or_insert_with(Vec::new)
                 .push(span.context().span_id());
@@ -445,14 +499,21 @@ impl OtelIntegratedSpanSystem {
     }
 
     async fn finish_child_spans(&self, cx: &Cx, parent_span_id: SpanId) -> Result<usize, Error> {
-        let child_spans = self.span_hierarchy.lock().unwrap()
+        let child_spans = self
+            .span_hierarchy
+            .lock()
+            .unwrap()
             .get(&parent_span_id)
             .cloned()
             .unwrap_or_default();
 
         let mut finished_count = 0;
         for child_span_id in child_spans {
-            if self.finish_span_with_metrics(cx, child_span_id, vec![]).await.is_ok() {
+            if self
+                .finish_span_with_metrics(cx, child_span_id, vec![])
+                .await
+                .is_ok()
+            {
                 finished_count += 1;
             }
         }
@@ -532,12 +593,15 @@ impl OtelSpanIntegrationCoordinator {
             let operation_name = format!("test_operation_{}", i);
 
             // Create distributed span
-            let span = self.span_system.create_distributed_span(
-                cx,
-                &operation_name,
-                SpanKind::Internal,
-                None, // No parent
-            ).await?;
+            let span = self
+                .span_system
+                .create_distributed_span(
+                    cx,
+                    &operation_name,
+                    SpanKind::Internal,
+                    None, // No parent
+                )
+                .await?;
 
             // Define operation metrics for this span
             let operation_metrics = vec![
@@ -547,20 +611,18 @@ impl OtelSpanIntegrationCoordinator {
             ];
 
             // Process span with OTel collector
-            let processing_result = self.otel_collector.process_distributed_span(
-                cx,
-                &span,
-                operation_metrics.clone(),
-            ).await?;
+            let processing_result = self
+                .otel_collector
+                .process_distributed_span(cx, &span, operation_metrics.clone())
+                .await?;
 
             span_processing_results.push(processing_result);
 
             // Finish span
-            let _completion_result = self.span_system.finish_span_with_metrics(
-                cx,
-                span.context().span_id(),
-                operation_metrics,
-            ).await?;
+            let _completion_result = self
+                .span_system
+                .finish_span_with_metrics(cx, span.context().span_id(), operation_metrics)
+                .await?;
         }
 
         // Export batch
@@ -572,15 +634,23 @@ impl OtelSpanIntegrationCoordinator {
         // Calculate performance metrics
         let performance_metrics = OtelSpanPerformanceMetrics {
             span_processing_throughput_per_sec: span_count as f64 / total_duration.as_secs_f64(),
-            metric_collection_latency_ms: span_processing_results.iter()
+            metric_collection_latency_ms: span_processing_results
+                .iter()
                 .map(|r| r.processing_duration_ms)
-                .sum::<f64>() / span_count as f64,
-            correlation_hit_rate: if collection_stats.correlation_hits + collection_stats.correlation_misses > 0 {
-                collection_stats.correlation_hits as f64 / (collection_stats.correlation_hits + collection_stats.correlation_misses) as f64
+                .sum::<f64>()
+                / span_count as f64,
+            correlation_hit_rate: if collection_stats.correlation_hits
+                + collection_stats.correlation_misses
+                > 0
+            {
+                collection_stats.correlation_hits as f64
+                    / (collection_stats.correlation_hits + collection_stats.correlation_misses)
+                        as f64
             } else {
                 0.0
             },
-            batch_export_efficiency: batch_result.metrics_exported as f64 / span_count.max(1) as f64,
+            batch_export_efficiency: batch_result.metrics_exported as f64
+                / span_count.max(1) as f64,
         };
 
         let result = IntegrationValidationResult {
@@ -588,7 +658,9 @@ impl OtelSpanIntegrationCoordinator {
             otel_collection_success: collection_stats.metrics_collected > 0,
             span_processing_success: span_processing_results.iter().all(|r| r.processed),
             metric_span_correlation_effective: performance_metrics.correlation_hit_rate > 0.8,
-            sampling_coordination: span_processing_results.iter().any(|r| r.sampling_decision.should_sample),
+            sampling_coordination: span_processing_results
+                .iter()
+                .any(|r| r.sampling_decision.should_sample),
             performance_metrics,
             details: format!(
                 "Spans: {}, Metrics: {}, Correlations: {}/{}, Batch exported: {}/{}",
@@ -628,18 +700,20 @@ impl OtelSpanIntegrationCoordinator {
 
         // Create many spans to test sampling
         for i in 0..span_count {
-            let span = self.span_system.create_distributed_span(
-                cx,
-                &format!("sampling_test_{}", i),
-                SpanKind::Internal,
-                None,
-            ).await?;
+            let span = self
+                .span_system
+                .create_distributed_span(
+                    cx,
+                    &format!("sampling_test_{}", i),
+                    SpanKind::Internal,
+                    None,
+                )
+                .await?;
 
-            let processing_result = self.otel_collector.process_distributed_span(
-                cx,
-                &span,
-                vec![("test_metric", i as f64)],
-            ).await?;
+            let processing_result = self
+                .otel_collector
+                .process_distributed_span(cx, &span, vec![("test_metric", i as f64)])
+                .await?;
 
             if processing_result.processed {
                 sampled_spans += 1;
@@ -647,11 +721,9 @@ impl OtelSpanIntegrationCoordinator {
                 dropped_spans += 1;
             }
 
-            self.span_system.finish_span_with_metrics(
-                cx,
-                span.context().span_id(),
-                vec![],
-            ).await?;
+            self.span_system
+                .finish_span_with_metrics(cx, span.context().span_id(), vec![])
+                .await?;
         }
 
         let actual_sampling_rate = sampled_spans as f64 / span_count as f64;
@@ -689,12 +761,10 @@ impl OtelSpanIntegrationCoordinator {
         test_case: &str,
     ) -> Result<IntegrationValidationResult, Error> {
         // Create hierarchical span structure: parent -> multiple children
-        let parent_span = self.span_system.create_distributed_span(
-            cx,
-            "parent_operation",
-            SpanKind::Server,
-            None,
-        ).await?;
+        let parent_span = self
+            .span_system
+            .create_distributed_span(cx, "parent_operation", SpanKind::Server, None)
+            .await?;
 
         let parent_span_id = parent_span.context().span_id();
 
@@ -703,63 +773,68 @@ impl OtelSpanIntegrationCoordinator {
 
         // Create child spans
         for i in 0..child_count {
-            let child_span = self.span_system.create_distributed_span(
-                cx,
-                &format!("child_operation_{}", i),
-                SpanKind::Internal,
-                Some(parent_span_id),
-            ).await?;
+            let child_span = self
+                .span_system
+                .create_distributed_span(
+                    cx,
+                    &format!("child_operation_{}", i),
+                    SpanKind::Internal,
+                    Some(parent_span_id),
+                )
+                .await?;
 
             child_spans.push(child_span);
         }
 
         // Process parent span with metrics
-        let parent_processing = self.otel_collector.process_distributed_span(
-            cx,
-            &parent_span,
-            vec![
-                ("parent_operation_count", 1.0),
-                ("total_children", child_count as f64),
-            ],
-        ).await?;
+        let parent_processing = self
+            .otel_collector
+            .process_distributed_span(
+                cx,
+                &parent_span,
+                vec![
+                    ("parent_operation_count", 1.0),
+                    ("total_children", child_count as f64),
+                ],
+            )
+            .await?;
 
         // Process each child span
         let mut child_processing_results = Vec::new();
         for (i, child_span) in child_spans.iter().enumerate() {
-            let child_result = self.otel_collector.process_distributed_span(
-                cx,
-                child_span,
-                vec![
-                    ("child_operation_count", 1.0),
-                    ("child_index", i as f64),
-                ],
-            ).await?;
+            let child_result = self
+                .otel_collector
+                .process_distributed_span(
+                    cx,
+                    child_span,
+                    vec![("child_operation_count", 1.0), ("child_index", i as f64)],
+                )
+                .await?;
 
             child_processing_results.push(child_result);
         }
 
         // Finish child spans first
         for child_span in &child_spans {
-            self.span_system.finish_span_with_metrics(
-                cx,
-                child_span.context().span_id(),
-                vec![],
-            ).await?;
+            self.span_system
+                .finish_span_with_metrics(cx, child_span.context().span_id(), vec![])
+                .await?;
         }
 
         // Finish parent span
-        let parent_completion = self.span_system.finish_span_with_metrics(
-            cx,
-            parent_span_id,
-            vec![],
-        ).await?;
+        let parent_completion = self
+            .span_system
+            .finish_span_with_metrics(cx, parent_span_id, vec![])
+            .await?;
 
         // Verify span hierarchy correlation
-        let parent_span_metrics = self.otel_collector.get_span_metric_correlation(parent_span_id);
+        let parent_span_metrics = self
+            .otel_collector
+            .get_span_metric_correlation(parent_span_id);
 
-        let hierarchy_correlation_effective = parent_span_metrics.is_some() &&
-            child_processing_results.iter().all(|r| r.processed) &&
-            parent_completion.child_spans_finished == 0; // Already finished manually
+        let hierarchy_correlation_effective = parent_span_metrics.is_some()
+            && child_processing_results.iter().all(|r| r.processed)
+            && parent_completion.child_spans_finished == 0; // Already finished manually
 
         let result = IntegrationValidationResult {
             test_case: test_case.to_string(),
@@ -776,7 +851,10 @@ impl OtelSpanIntegrationCoordinator {
             details: format!(
                 "Parent processed: {}, Children processed: {}/{}, Hierarchy depth: {}",
                 parent_processing.processed,
-                child_processing_results.iter().filter(|r| r.processed).count(),
+                child_processing_results
+                    .iter()
+                    .filter(|r| r.processed)
+                    .count(),
                 child_count,
                 self.span_system.get_span_hierarchy_depth()
             ),
@@ -795,11 +873,7 @@ impl OtelSpanIntegrationCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        runtime::test_rt,
-        cx::region,
-        types::Budget,
-    };
+    use crate::{cx::region, runtime::test_rt, types::Budget};
 
     #[test]
     fn test_basic_otel_span_coordination() {
@@ -807,19 +881,37 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(30)), |cx| async move {
                 let coordinator = OtelSpanIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_basic_otel_span_coordination(
-                    cx,
-                    "basic_coordination",
-                    10, // 10 spans
-                ).await?;
+                let result = coordinator
+                    .validate_basic_otel_span_coordination(
+                        cx,
+                        "basic_coordination",
+                        10, // 10 spans
+                    )
+                    .await?;
 
-                assert!(result.otel_collection_success, "OTel collection should succeed");
-                assert!(result.span_processing_success, "Span processing should succeed");
-                assert!(result.metric_span_correlation_effective, "Metric-span correlation should be effective");
-                assert!(result.performance_metrics.span_processing_throughput_per_sec > 5.0, "Should achieve reasonable throughput");
+                assert!(
+                    result.otel_collection_success,
+                    "OTel collection should succeed"
+                );
+                assert!(
+                    result.span_processing_success,
+                    "Span processing should succeed"
+                );
+                assert!(
+                    result.metric_span_correlation_effective,
+                    "Metric-span correlation should be effective"
+                );
+                assert!(
+                    result
+                        .performance_metrics
+                        .span_processing_throughput_per_sec
+                        > 5.0,
+                    "Should achieve reasonable throughput"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 
@@ -829,18 +921,30 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(45)), |cx| async move {
                 let coordinator = OtelSpanIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_sampling_coordination(
-                    cx,
-                    "sampling_coordination",
-                    0.5, // 50% sampling rate
-                ).await?;
+                let result = coordinator
+                    .validate_sampling_coordination(
+                        cx,
+                        "sampling_coordination",
+                        0.5, // 50% sampling rate
+                    )
+                    .await?;
 
-                assert!(result.sampling_coordination, "Sampling should coordinate with OTel collection");
-                assert!(result.performance_metrics.batch_export_efficiency > 0.3, "Should achieve reasonable sampling efficiency");
-                assert!(result.performance_metrics.batch_export_efficiency < 0.7, "Should respect sampling rate limits");
+                assert!(
+                    result.sampling_coordination,
+                    "Sampling should coordinate with OTel collection"
+                );
+                assert!(
+                    result.performance_metrics.batch_export_efficiency > 0.3,
+                    "Should achieve reasonable sampling efficiency"
+                );
+                assert!(
+                    result.performance_metrics.batch_export_efficiency < 0.7,
+                    "Should respect sampling rate limits"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 
@@ -850,18 +954,30 @@ mod tests {
             region(&rt, Budget::new(Duration::from_secs(60)), |cx| async move {
                 let coordinator = OtelSpanIntegrationCoordinator::new(cx).await?;
 
-                let result = coordinator.validate_hierarchical_span_metrics(
-                    cx,
-                    "hierarchical_spans"
-                ).await?;
+                let result = coordinator
+                    .validate_hierarchical_span_metrics(cx, "hierarchical_spans")
+                    .await?;
 
-                assert!(result.otel_collection_success, "OTel should collect hierarchical span metrics");
-                assert!(result.span_processing_success, "All spans in hierarchy should be processed");
-                assert!(result.metric_span_correlation_effective, "Parent-child span correlation should work");
-                assert!(result.performance_metrics.correlation_hit_rate > 0.9, "Should achieve high correlation rate");
+                assert!(
+                    result.otel_collection_success,
+                    "OTel should collect hierarchical span metrics"
+                );
+                assert!(
+                    result.span_processing_success,
+                    "All spans in hierarchy should be processed"
+                );
+                assert!(
+                    result.metric_span_correlation_effective,
+                    "Parent-child span correlation should work"
+                );
+                assert!(
+                    result.performance_metrics.correlation_hit_rate > 0.9,
+                    "Should achieve high correlation rate"
+                );
 
                 Ok(())
-            }).await
+            })
+            .await
         });
     }
 }

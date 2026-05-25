@@ -14,16 +14,23 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod integration_tests {
-    use crate::obligation::calm::{CalmOperation, CalmContext, IdempotentOp, MonotonicState};
-    use crate::distributed::distribution::{DistributionManager, ReplicaId, ReplicaState, ReconciliationEngine};
-    use crate::distributed::consistency::{ConsistencyModel, EventualConsistency, ConflictResolution};
-    use crate::obligation::{ObligationId, ObligationLedger, ObligationRecord, ObligationStatus};
-    use crate::runtime::{RuntimeBuilder, Runtime};
     use crate::cx::Cx;
-    use crate::types::{TaskId, Budget, Outcome};
+    use crate::distributed::consistency::{
+        ConflictResolution, ConsistencyModel, EventualConsistency,
+    };
+    use crate::distributed::distribution::{
+        DistributionManager, ReconciliationEngine, ReplicaId, ReplicaState,
+    };
     use crate::error::AsupersyncError;
-    use std::collections::{HashMap, HashSet, BTreeMap};
-    use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicBool, Ordering}};
+    use crate::obligation::calm::{CalmContext, CalmOperation, IdempotentOp, MonotonicState};
+    use crate::obligation::{ObligationId, ObligationLedger, ObligationRecord, ObligationStatus};
+    use crate::runtime::{Runtime, RuntimeBuilder};
+    use crate::types::{Budget, Outcome, TaskId};
+    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    };
     use std::time::{Duration, Instant};
 
     /// Test harness for CALM-distributed distribution integration testing.
@@ -83,7 +90,11 @@ mod integration_tests {
             }
         }
 
-        async fn apply_calm_operation(&self, cx: &Cx, operation: CalmOperation) -> Result<(), AsupersyncError> {
+        async fn apply_calm_operation(
+            &self,
+            cx: &Cx,
+            operation: CalmOperation,
+        ) -> Result<(), AsupersyncError> {
             // CALM operations are idempotent and monotonic
             let mut state = self.state.lock().unwrap();
             let mut log = self.operation_log.lock().unwrap();
@@ -115,7 +126,11 @@ mod integration_tests {
             Ok(())
         }
 
-        async fn reconcile_with(&self, cx: &Cx, other: &CalmReplica) -> Result<ReconciliationResult, AsupersyncError> {
+        async fn reconcile_with(
+            &self,
+            cx: &Cx,
+            other: &CalmReplica,
+        ) -> Result<ReconciliationResult, AsupersyncError> {
             if self.network_partition_status.load(Ordering::Acquire) {
                 return Err(AsupersyncError::NetworkPartition);
             }
@@ -130,7 +145,8 @@ mod integration_tests {
 
             // Find operations in other that are not in self
             let self_op_ids: HashSet<_> = self_ops.iter().map(|op| op.id()).collect();
-            let missing_ops: Vec<_> = other_ops.into_iter()
+            let missing_ops: Vec<_> = other_ops
+                .into_iter()
                 .filter(|op| !self_op_ids.contains(&op.id()))
                 .collect();
 
@@ -171,7 +187,8 @@ mod integration_tests {
         }
 
         fn simulate_network_partition(&self, partitioned: bool) {
-            self.network_partition_status.store(partitioned, Ordering::Release);
+            self.network_partition_status
+                .store(partitioned, Ordering::Release);
             if partitioned {
                 let mut stats = self.stats.lock().unwrap();
                 stats.network_partitions += 1;
@@ -251,13 +268,24 @@ mod integration_tests {
 
         fn is_partitioned(&self, replica_a: ReplicaId, replica_b: ReplicaId) -> bool {
             let partitions = self.partitions.lock().unwrap();
-            partitions.get(&(replica_a, replica_b)).copied().unwrap_or(false)
+            partitions
+                .get(&(replica_a, replica_b))
+                .copied()
+                .unwrap_or(false)
         }
 
-        async fn simulate_network_delay(&self, cx: &Cx, replica_a: ReplicaId, replica_b: ReplicaId) {
+        async fn simulate_network_delay(
+            &self,
+            cx: &Cx,
+            replica_a: ReplicaId,
+            replica_b: ReplicaId,
+        ) {
             let latency = {
                 let latency_map = self.latency_map.lock().unwrap();
-                latency_map.get(&(replica_a, replica_b)).copied().unwrap_or(Duration::ZERO)
+                latency_map
+                    .get(&(replica_a, replica_b))
+                    .copied()
+                    .unwrap_or(Duration::ZERO)
             };
 
             if latency > Duration::ZERO {
@@ -272,7 +300,7 @@ mod integration_tests {
                 RuntimeBuilder::new()
                     .with_distributed_processing()
                     .with_obligation_tracking()
-                    .build()?
+                    .build()?,
             );
 
             let distribution_manager = Arc::new(DistributionManager::new()?);
@@ -305,31 +333,52 @@ mod integration_tests {
             replica
         }
 
-        async fn apply_operation_to_replica(&self, cx: &Cx, replica_id: ReplicaId,
-                                          operation: CalmOperation) -> Result<(), AsupersyncError> {
-            let replica = self.replicas.get(&replica_id)
+        async fn apply_operation_to_replica(
+            &self,
+            cx: &Cx,
+            replica_id: ReplicaId,
+            operation: CalmOperation,
+        ) -> Result<(), AsupersyncError> {
+            let replica = self
+                .replicas
+                .get(&replica_id)
                 .ok_or_else(|| AsupersyncError::InvalidState("Replica not found".into()))?;
 
             replica.apply_calm_operation(cx, operation).await
         }
 
-        async fn reconcile_replicas(&self, cx: &Cx, replica_a: ReplicaId, replica_b: ReplicaId) -> Result<ReconciliationResult, AsupersyncError> {
+        async fn reconcile_replicas(
+            &self,
+            cx: &Cx,
+            replica_a: ReplicaId,
+            replica_b: ReplicaId,
+        ) -> Result<ReconciliationResult, AsupersyncError> {
             if self.network_simulator.is_partitioned(replica_a, replica_b) {
                 return Err(AsupersyncError::NetworkPartition);
             }
 
             // Simulate network latency
-            self.network_simulator.simulate_network_delay(cx, replica_a, replica_b).await;
+            self.network_simulator
+                .simulate_network_delay(cx, replica_a, replica_b)
+                .await;
 
-            let replica_a_ref = self.replicas.get(&replica_a)
+            let replica_a_ref = self
+                .replicas
+                .get(&replica_a)
                 .ok_or_else(|| AsupersyncError::InvalidState("Replica A not found".into()))?;
-            let replica_b_ref = self.replicas.get(&replica_b)
+            let replica_b_ref = self
+                .replicas
+                .get(&replica_b)
                 .ok_or_else(|| AsupersyncError::InvalidState("Replica B not found".into()))?;
 
             replica_a_ref.reconcile_with(cx, replica_b_ref).await
         }
 
-        async fn full_reconciliation_round(&self, cx: &Cx) -> Result<HashMap<(ReplicaId, ReplicaId), ReconciliationResult>, AsupersyncError> {
+        async fn full_reconciliation_round(
+            &self,
+            cx: &Cx,
+        ) -> Result<HashMap<(ReplicaId, ReplicaId), ReconciliationResult>, AsupersyncError>
+        {
             let replica_ids: Vec<_> = self.replicas.keys().copied().collect();
             let mut results = HashMap::new();
 
@@ -350,7 +399,8 @@ mod integration_tests {
         }
 
         fn create_network_partition(&self, replica_a: ReplicaId, replica_b: ReplicaId) {
-            self.network_simulator.create_partition(replica_a, replica_b);
+            self.network_simulator
+                .create_partition(replica_a, replica_b);
             if let Some(replica_a_ref) = self.replicas.get(&replica_a) {
                 replica_a_ref.simulate_network_partition(true);
             }
@@ -384,7 +434,9 @@ mod integration_tests {
             true
         }
 
-        fn check_idempotence_across_replicas(&self) -> Result<(), Vec<(ReplicaId, IdempotenceViolation)>> {
+        fn check_idempotence_across_replicas(
+            &self,
+        ) -> Result<(), Vec<(ReplicaId, IdempotenceViolation)>> {
             let mut violations = Vec::new();
 
             for (replica_id, replica) in &self.replicas {
@@ -414,43 +466,56 @@ mod integration_tests {
         let mut harness = CalmDistributionTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            // Create two replicas
-            let replica_a = harness.create_replica(ReplicaId::new(1));
-            let replica_b = harness.create_replica(ReplicaId::new(2));
+        runtime
+            .region(Budget::default(), |cx| async move {
+                // Create two replicas
+                let replica_a = harness.create_replica(ReplicaId::new(1));
+                let replica_b = harness.create_replica(ReplicaId::new(2));
 
-            // Create CALM operations
-            let operations = vec![
-                CalmOperation::new(1, "increment_counter", Some(ObligationId::new())),
-                CalmOperation::new(2, "add_element", Some(ObligationId::new())),
-                CalmOperation::new(3, "set_flag", None),
-            ];
+                // Create CALM operations
+                let operations = vec![
+                    CalmOperation::new(1, "increment_counter", Some(ObligationId::new())),
+                    CalmOperation::new(2, "add_element", Some(ObligationId::new())),
+                    CalmOperation::new(3, "set_flag", None),
+                ];
 
-            // Apply operations to both replicas
-            for operation in operations {
-                harness.apply_operation_to_replica(cx, ReplicaId::new(1), operation.clone()).await?;
-                harness.apply_operation_to_replica(cx, ReplicaId::new(2), operation).await?;
-            }
+                // Apply operations to both replicas
+                for operation in operations {
+                    harness
+                        .apply_operation_to_replica(cx, ReplicaId::new(1), operation.clone())
+                        .await?;
+                    harness
+                        .apply_operation_to_replica(cx, ReplicaId::new(2), operation)
+                        .await?;
+                }
 
-            // Check idempotence
-            harness.check_idempotence_across_replicas().expect("Should maintain idempotence");
+                // Check idempotence
+                harness
+                    .check_idempotence_across_replicas()
+                    .expect("Should maintain idempotence");
 
-            // Verify both replicas have same operation count
-            assert_eq!(replica_a.get_operation_count(), 3);
-            assert_eq!(replica_b.get_operation_count(), 3);
+                // Verify both replicas have same operation count
+                assert_eq!(replica_a.get_operation_count(), 3);
+                assert_eq!(replica_b.get_operation_count(), 3);
 
-            // Verify convergence
-            assert!(replica_a.check_convergence_with(&replica_b), "Replicas should converge");
+                // Verify convergence
+                assert!(
+                    replica_a.check_convergence_with(&replica_b),
+                    "Replicas should converge"
+                );
 
-            let stats = harness.get_stats();
-            assert_eq!(stats.replicas_created, 2);
-            assert_eq!(stats.calm_operations_executed, 6); // 3 ops × 2 replicas
-            assert_eq!(stats.idempotence_violations, 0);
+                let stats = harness.get_stats();
+                assert_eq!(stats.replicas_created, 2);
+                assert_eq!(stats.calm_operations_executed, 6); // 3 ops × 2 replicas
+                assert_eq!(stats.idempotence_violations, 0);
 
-            println!("Basic CALM operations: {} operations across {} replicas",
-                     stats.calm_operations_executed, stats.replicas_created);
-            Ok(())
-        }).await
+                println!(
+                    "Basic CALM operations: {} operations across {} replicas",
+                    stats.calm_operations_executed, stats.replicas_created
+                );
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -458,67 +523,88 @@ mod integration_tests {
         let mut harness = CalmDistributionTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            // Create three replicas
-            let replica_a = harness.create_replica(ReplicaId::new(1));
-            let replica_b = harness.create_replica(ReplicaId::new(2));
-            let replica_c = harness.create_replica(ReplicaId::new(3));
+        runtime
+            .region(Budget::default(), |cx| async move {
+                // Create three replicas
+                let replica_a = harness.create_replica(ReplicaId::new(1));
+                let replica_b = harness.create_replica(ReplicaId::new(2));
+                let replica_c = harness.create_replica(ReplicaId::new(3));
 
-            // Apply different operations to each replica (creating divergence)
-            let ops_a = vec![
-                CalmOperation::new(1, "op_a1", Some(ObligationId::new())),
-                CalmOperation::new(2, "op_a2", Some(ObligationId::new())),
-            ];
-            let ops_b = vec![
-                CalmOperation::new(1, "op_a1", Some(ObligationId::new())), // Duplicate (idempotent)
-                CalmOperation::new(3, "op_b1", Some(ObligationId::new())),
-            ];
-            let ops_c = vec![
-                CalmOperation::new(4, "op_c1", None),
-                CalmOperation::new(5, "op_c2", Some(ObligationId::new())),
-            ];
+                // Apply different operations to each replica (creating divergence)
+                let ops_a = vec![
+                    CalmOperation::new(1, "op_a1", Some(ObligationId::new())),
+                    CalmOperation::new(2, "op_a2", Some(ObligationId::new())),
+                ];
+                let ops_b = vec![
+                    CalmOperation::new(1, "op_a1", Some(ObligationId::new())), // Duplicate (idempotent)
+                    CalmOperation::new(3, "op_b1", Some(ObligationId::new())),
+                ];
+                let ops_c = vec![
+                    CalmOperation::new(4, "op_c1", None),
+                    CalmOperation::new(5, "op_c2", Some(ObligationId::new())),
+                ];
 
-            // Apply operations to create divergence
-            for op in ops_a {
-                harness.apply_operation_to_replica(cx, ReplicaId::new(1), op).await?;
-            }
-            for op in ops_b {
-                harness.apply_operation_to_replica(cx, ReplicaId::new(2), op).await?;
-            }
-            for op in ops_c {
-                harness.apply_operation_to_replica(cx, ReplicaId::new(3), op).await?;
-            }
+                // Apply operations to create divergence
+                for op in ops_a {
+                    harness
+                        .apply_operation_to_replica(cx, ReplicaId::new(1), op)
+                        .await?;
+                }
+                for op in ops_b {
+                    harness
+                        .apply_operation_to_replica(cx, ReplicaId::new(2), op)
+                        .await?;
+                }
+                for op in ops_c {
+                    harness
+                        .apply_operation_to_replica(cx, ReplicaId::new(3), op)
+                        .await?;
+                }
 
-            // Verify divergence
-            assert!(!harness.check_global_convergence(), "Replicas should be diverged initially");
+                // Verify divergence
+                assert!(
+                    !harness.check_global_convergence(),
+                    "Replicas should be diverged initially"
+                );
 
-            let mut stats = harness.stats.lock().unwrap();
-            stats.divergence_events += 1;
-            drop(stats);
+                let mut stats = harness.stats.lock().unwrap();
+                stats.divergence_events += 1;
+                drop(stats);
 
-            // Perform reconciliation round
-            let reconciliation_results = harness.full_reconciliation_round(cx).await?;
+                // Perform reconciliation round
+                let reconciliation_results = harness.full_reconciliation_round(cx).await?;
 
-            // Verify reconciliation happened
-            assert!(!reconciliation_results.is_empty(), "Should have reconciliation results");
+                // Verify reconciliation happened
+                assert!(
+                    !reconciliation_results.is_empty(),
+                    "Should have reconciliation results"
+                );
 
-            // Check final convergence
-            assert!(harness.check_global_convergence(), "Should converge after reconciliation");
+                // Check final convergence
+                assert!(
+                    harness.check_global_convergence(),
+                    "Should converge after reconciliation"
+                );
 
-            // Verify idempotence maintained
-            harness.check_idempotence_across_replicas().expect("Should maintain idempotence after reconciliation");
+                // Verify idempotence maintained
+                harness
+                    .check_idempotence_across_replicas()
+                    .expect("Should maintain idempotence after reconciliation");
 
-            // All replicas should have all unique operations
-            assert_eq!(replica_a.get_operation_count(), 4); // 2 original + 2 from others
-            assert_eq!(replica_b.get_operation_count(), 4); // 2 original + 2 from others
-            assert_eq!(replica_c.get_operation_count(), 4); // 2 original + 2 from others
+                // All replicas should have all unique operations
+                assert_eq!(replica_a.get_operation_count(), 4); // 2 original + 2 from others
+                assert_eq!(replica_b.get_operation_count(), 4); // 2 original + 2 from others
+                assert_eq!(replica_c.get_operation_count(), 4); // 2 original + 2 from others
 
-            let stats = harness.get_stats();
-            println!("Divergence and reconciliation: {} reconciliation rounds, {} operations total",
-                     stats.reconciliation_rounds, stats.calm_operations_executed);
+                let stats = harness.get_stats();
+                println!(
+                    "Divergence and reconciliation: {} reconciliation rounds, {} operations total",
+                    stats.reconciliation_rounds, stats.calm_operations_executed
+                );
 
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -526,74 +612,94 @@ mod integration_tests {
         let mut harness = CalmDistributionTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            // Create four replicas
-            let replicas = [
-                harness.create_replica(ReplicaId::new(1)),
-                harness.create_replica(ReplicaId::new(2)),
-                harness.create_replica(ReplicaId::new(3)),
-                harness.create_replica(ReplicaId::new(4)),
-            ];
+        runtime
+            .region(Budget::default(), |cx| async move {
+                // Create four replicas
+                let replicas = [
+                    harness.create_replica(ReplicaId::new(1)),
+                    harness.create_replica(ReplicaId::new(2)),
+                    harness.create_replica(ReplicaId::new(3)),
+                    harness.create_replica(ReplicaId::new(4)),
+                ];
 
-            // Create network partition: {1,2} vs {3,4}
-            harness.create_network_partition(ReplicaId::new(1), ReplicaId::new(3));
-            harness.create_network_partition(ReplicaId::new(1), ReplicaId::new(4));
-            harness.create_network_partition(ReplicaId::new(2), ReplicaId::new(3));
-            harness.create_network_partition(ReplicaId::new(2), ReplicaId::new(4));
+                // Create network partition: {1,2} vs {3,4}
+                harness.create_network_partition(ReplicaId::new(1), ReplicaId::new(3));
+                harness.create_network_partition(ReplicaId::new(1), ReplicaId::new(4));
+                harness.create_network_partition(ReplicaId::new(2), ReplicaId::new(3));
+                harness.create_network_partition(ReplicaId::new(2), ReplicaId::new(4));
 
-            // Apply operations to each partition
-            let partition_a_ops = vec![
-                CalmOperation::new(1, "partition_a_op1", Some(ObligationId::new())),
-                CalmOperation::new(2, "partition_a_op2", Some(ObligationId::new())),
-            ];
-            let partition_b_ops = vec![
-                CalmOperation::new(3, "partition_b_op1", Some(ObligationId::new())),
-                CalmOperation::new(4, "partition_b_op2", None),
-            ];
+                // Apply operations to each partition
+                let partition_a_ops = vec![
+                    CalmOperation::new(1, "partition_a_op1", Some(ObligationId::new())),
+                    CalmOperation::new(2, "partition_a_op2", Some(ObligationId::new())),
+                ];
+                let partition_b_ops = vec![
+                    CalmOperation::new(3, "partition_b_op1", Some(ObligationId::new())),
+                    CalmOperation::new(4, "partition_b_op2", None),
+                ];
 
-            // Apply to partition A (replicas 1,2)
-            for op in &partition_a_ops {
-                harness.apply_operation_to_replica(cx, ReplicaId::new(1), op.clone()).await?;
-                harness.apply_operation_to_replica(cx, ReplicaId::new(2), op.clone()).await?;
-            }
+                // Apply to partition A (replicas 1,2)
+                for op in &partition_a_ops {
+                    harness
+                        .apply_operation_to_replica(cx, ReplicaId::new(1), op.clone())
+                        .await?;
+                    harness
+                        .apply_operation_to_replica(cx, ReplicaId::new(2), op.clone())
+                        .await?;
+                }
 
-            // Apply to partition B (replicas 3,4)
-            for op in &partition_b_ops {
-                harness.apply_operation_to_replica(cx, ReplicaId::new(3), op.clone()).await?;
-                harness.apply_operation_to_replica(cx, ReplicaId::new(4), op.clone()).await?;
-            }
+                // Apply to partition B (replicas 3,4)
+                for op in &partition_b_ops {
+                    harness
+                        .apply_operation_to_replica(cx, ReplicaId::new(3), op.clone())
+                        .await?;
+                    harness
+                        .apply_operation_to_replica(cx, ReplicaId::new(4), op.clone())
+                        .await?;
+                }
 
-            // Verify partitions cannot reconcile
-            let partition_reconcile_result = harness.reconcile_replicas(cx, ReplicaId::new(1), ReplicaId::new(3)).await;
-            assert!(partition_reconcile_result.is_err(), "Partitioned replicas should not reconcile");
+                // Verify partitions cannot reconcile
+                let partition_reconcile_result = harness
+                    .reconcile_replicas(cx, ReplicaId::new(1), ReplicaId::new(3))
+                    .await;
+                assert!(
+                    partition_reconcile_result.is_err(),
+                    "Partitioned replicas should not reconcile"
+                );
 
-            // Heal network partition
-            harness.heal_network_partition(ReplicaId::new(1), ReplicaId::new(3));
-            harness.heal_network_partition(ReplicaId::new(1), ReplicaId::new(4));
-            harness.heal_network_partition(ReplicaId::new(2), ReplicaId::new(3));
-            harness.heal_network_partition(ReplicaId::new(2), ReplicaId::new(4));
+                // Heal network partition
+                harness.heal_network_partition(ReplicaId::new(1), ReplicaId::new(3));
+                harness.heal_network_partition(ReplicaId::new(1), ReplicaId::new(4));
+                harness.heal_network_partition(ReplicaId::new(2), ReplicaId::new(3));
+                harness.heal_network_partition(ReplicaId::new(2), ReplicaId::new(4));
 
-            // Perform full reconciliation after healing
-            let reconciliation_results = harness.full_reconciliation_round(cx).await?;
+                // Perform full reconciliation after healing
+                let reconciliation_results = harness.full_reconciliation_round(cx).await?;
 
-            // Verify reconciliation succeeded
-            assert!(!reconciliation_results.is_empty());
-            assert!(harness.check_global_convergence(), "Should converge after partition healing");
+                // Verify reconciliation succeeded
+                assert!(!reconciliation_results.is_empty());
+                assert!(
+                    harness.check_global_convergence(),
+                    "Should converge after partition healing"
+                );
 
-            // All replicas should have all operations
-            for replica in &replicas {
-                assert_eq!(replica.get_operation_count(), 4); // 2 from each partition
-            }
+                // All replicas should have all operations
+                for replica in &replicas {
+                    assert_eq!(replica.get_operation_count(), 4); // 2 from each partition
+                }
 
-            let stats = harness.get_stats();
-            assert!(stats.network_partitions > 0);
-            assert!(stats.successful_convergence > 0);
+                let stats = harness.get_stats();
+                assert!(stats.network_partitions > 0);
+                assert!(stats.successful_convergence > 0);
 
-            println!("Partition healing: {} partitions, {} successful convergences",
-                     stats.network_partitions, stats.successful_convergence);
+                println!(
+                    "Partition healing: {} partitions, {} successful convergences",
+                    stats.network_partitions, stats.successful_convergence
+                );
 
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -601,68 +707,82 @@ mod integration_tests {
         let mut harness = CalmDistributionTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            // Create replicas
-            let num_replicas = 5;
-            let mut replica_ids = Vec::new();
-            for i in 1..=num_replicas {
-                harness.create_replica(ReplicaId::new(i));
-                replica_ids.push(ReplicaId::new(i));
-            }
-
-            // Apply concurrent operations to different replicas
-            let mut tasks = Vec::new();
-            for (i, &replica_id) in replica_ids.iter().enumerate() {
-                let harness_ref = &harness; // Borrow for async block
-                let task = cx.spawn(async move {
-                    let mut operations = Vec::new();
-                    for j in 0..3 {
-                        let op = CalmOperation::new(
-                            (i * 10 + j) as u64,
-                            &format!("concurrent_op_{}_{}", i, j),
-                            Some(ObligationId::new()),
-                        );
-                        harness_ref.apply_operation_to_replica(cx, replica_id, op).await?;
-                        operations.push((i, j));
-                    }
-                    Ok::<Vec<(usize, usize)>, AsupersyncError>(operations)
-                });
-                tasks.push(task);
-            }
-
-            // Wait for all concurrent operations to complete
-            let mut total_operations = 0;
-            for task in tasks {
-                let ops = task.await??;
-                total_operations += ops.len();
-            }
-
-            // Verify divergence initially
-            assert!(!harness.check_global_convergence(), "Should be diverged after concurrent operations");
-
-            // Perform multiple reconciliation rounds
-            for round in 0..3 {
-                let _results = harness.full_reconciliation_round(cx).await?;
-                cx.sleep(Duration::from_millis(10)).await; // Brief pause between rounds
-
-                if harness.check_global_convergence() {
-                    println!("Converged after {} reconciliation rounds", round + 1);
-                    break;
+        runtime
+            .region(Budget::default(), |cx| async move {
+                // Create replicas
+                let num_replicas = 5;
+                let mut replica_ids = Vec::new();
+                for i in 1..=num_replicas {
+                    harness.create_replica(ReplicaId::new(i));
+                    replica_ids.push(ReplicaId::new(i));
                 }
-            }
 
-            // Verify final convergence
-            assert!(harness.check_global_convergence(), "Should eventually converge");
+                // Apply concurrent operations to different replicas
+                let mut tasks = Vec::new();
+                for (i, &replica_id) in replica_ids.iter().enumerate() {
+                    let harness_ref = &harness; // Borrow for async block
+                    let task = cx.spawn(async move {
+                        let mut operations = Vec::new();
+                        for j in 0..3 {
+                            let op = CalmOperation::new(
+                                (i * 10 + j) as u64,
+                                &format!("concurrent_op_{}_{}", i, j),
+                                Some(ObligationId::new()),
+                            );
+                            harness_ref
+                                .apply_operation_to_replica(cx, replica_id, op)
+                                .await?;
+                            operations.push((i, j));
+                        }
+                        Ok::<Vec<(usize, usize)>, AsupersyncError>(operations)
+                    });
+                    tasks.push(task);
+                }
 
-            // Verify idempotence maintained despite concurrency
-            harness.check_idempotence_across_replicas().expect("Should maintain idempotence");
+                // Wait for all concurrent operations to complete
+                let mut total_operations = 0;
+                for task in tasks {
+                    let ops = task.await??;
+                    total_operations += ops.len();
+                }
 
-            let stats = harness.get_stats();
-            println!("Concurrent operations: {} total operations, {} reconciliation rounds",
-                     total_operations, stats.reconciliation_rounds);
+                // Verify divergence initially
+                assert!(
+                    !harness.check_global_convergence(),
+                    "Should be diverged after concurrent operations"
+                );
 
-            Ok(())
-        }).await
+                // Perform multiple reconciliation rounds
+                for round in 0..3 {
+                    let _results = harness.full_reconciliation_round(cx).await?;
+                    cx.sleep(Duration::from_millis(10)).await; // Brief pause between rounds
+
+                    if harness.check_global_convergence() {
+                        println!("Converged after {} reconciliation rounds", round + 1);
+                        break;
+                    }
+                }
+
+                // Verify final convergence
+                assert!(
+                    harness.check_global_convergence(),
+                    "Should eventually converge"
+                );
+
+                // Verify idempotence maintained despite concurrency
+                harness
+                    .check_idempotence_across_replicas()
+                    .expect("Should maintain idempotence");
+
+                let stats = harness.get_stats();
+                println!(
+                    "Concurrent operations: {} total operations, {} reconciliation rounds",
+                    total_operations, stats.reconciliation_rounds
+                );
+
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -670,79 +790,91 @@ mod integration_tests {
         let mut harness = CalmDistributionTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            // Create 6 replicas in different "regions"
-            let regions = vec![
-                vec![ReplicaId::new(1), ReplicaId::new(2)], // Region A
-                vec![ReplicaId::new(3), ReplicaId::new(4)], // Region B
-                vec![ReplicaId::new(5), ReplicaId::new(6)], // Region C
-            ];
+        runtime
+            .region(Budget::default(), |cx| async move {
+                // Create 6 replicas in different "regions"
+                let regions = vec![
+                    vec![ReplicaId::new(1), ReplicaId::new(2)], // Region A
+                    vec![ReplicaId::new(3), ReplicaId::new(4)], // Region B
+                    vec![ReplicaId::new(5), ReplicaId::new(6)], // Region C
+                ];
 
-            for region in &regions {
-                for &replica_id in region {
-                    harness.create_replica(replica_id);
+                for region in &regions {
+                    for &replica_id in region {
+                        harness.create_replica(replica_id);
+                    }
                 }
-            }
 
-            // Set up network latencies between regions
-            for region_a in &regions {
-                for region_b in &regions {
-                    if region_a != region_b {
-                        for &replica_a in region_a {
-                            for &replica_b in region_b {
-                                harness.network_simulator.set_latency(
-                                    replica_a,
-                                    replica_b,
-                                    Duration::from_millis(50) // Inter-region latency
-                                );
+                // Set up network latencies between regions
+                for region_a in &regions {
+                    for region_b in &regions {
+                        if region_a != region_b {
+                            for &replica_a in region_a {
+                                for &replica_b in region_b {
+                                    harness.network_simulator.set_latency(
+                                        replica_a,
+                                        replica_b,
+                                        Duration::from_millis(50), // Inter-region latency
+                                    );
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            // Apply region-specific operations
-            for (region_idx, region) in regions.iter().enumerate() {
-                for (replica_idx, &replica_id) in region.iter().enumerate() {
-                    let ops = vec![
-                        CalmOperation::new(
-                            (region_idx * 10 + replica_idx * 2) as u64,
-                            &format!("region_{}_op_{}", region_idx, replica_idx * 2),
-                            Some(ObligationId::new()),
-                        ),
-                        CalmOperation::new(
-                            (region_idx * 10 + replica_idx * 2 + 1) as u64,
-                            &format!("region_{}_op_{}", region_idx, replica_idx * 2 + 1),
-                            Some(ObligationId::new()),
-                        ),
-                    ];
+                // Apply region-specific operations
+                for (region_idx, region) in regions.iter().enumerate() {
+                    for (replica_idx, &replica_id) in region.iter().enumerate() {
+                        let ops = vec![
+                            CalmOperation::new(
+                                (region_idx * 10 + replica_idx * 2) as u64,
+                                &format!("region_{}_op_{}", region_idx, replica_idx * 2),
+                                Some(ObligationId::new()),
+                            ),
+                            CalmOperation::new(
+                                (region_idx * 10 + replica_idx * 2 + 1) as u64,
+                                &format!("region_{}_op_{}", region_idx, replica_idx * 2 + 1),
+                                Some(ObligationId::new()),
+                            ),
+                        ];
 
-                    for op in ops {
-                        harness.apply_operation_to_replica(cx, replica_id, op).await?;
+                        for op in ops {
+                            harness
+                                .apply_operation_to_replica(cx, replica_id, op)
+                                .await?;
+                        }
                     }
                 }
-            }
 
-            // Perform gradual reconciliation with latency
-            let mut reconciliation_rounds = 0;
-            while !harness.check_global_convergence() && reconciliation_rounds < 10 {
-                let _results = harness.full_reconciliation_round(cx).await?;
-                reconciliation_rounds += 1;
+                // Perform gradual reconciliation with latency
+                let mut reconciliation_rounds = 0;
+                while !harness.check_global_convergence() && reconciliation_rounds < 10 {
+                    let _results = harness.full_reconciliation_round(cx).await?;
+                    reconciliation_rounds += 1;
 
-                // Simulate processing time between rounds
-                cx.sleep(Duration::from_millis(20)).await;
-            }
+                    // Simulate processing time between rounds
+                    cx.sleep(Duration::from_millis(20)).await;
+                }
 
-            // Verify eventual convergence despite complex topology
-            assert!(harness.check_global_convergence(), "Complex topology should converge");
-            assert!(reconciliation_rounds > 1, "Should require multiple rounds due to latency");
+                // Verify eventual convergence despite complex topology
+                assert!(
+                    harness.check_global_convergence(),
+                    "Complex topology should converge"
+                );
+                assert!(
+                    reconciliation_rounds > 1,
+                    "Should require multiple rounds due to latency"
+                );
 
-            let stats = harness.get_stats();
-            println!("Complex distribution: {} replicas across 3 regions, {} rounds to convergence",
-                     stats.replicas_created, reconciliation_rounds);
+                let stats = harness.get_stats();
+                println!(
+                    "Complex distribution: {} replicas across 3 regions, {} rounds to convergence",
+                    stats.replicas_created, reconciliation_rounds
+                );
 
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]

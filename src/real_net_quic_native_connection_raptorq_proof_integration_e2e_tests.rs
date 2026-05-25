@@ -14,19 +14,22 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod integration_tests {
-    use crate::net::quic_native::connection::{QuicConnection, QuicConfig, QuicStream, StreamId};
-    use crate::raptorq::proof::{ProofGenerator, ProofVerifier, IntegrityProof, ProofError};
-    use crate::raptorq::{EncodingSymbol, SourceBlock, RepairSymbol, EncoderId, DecoderId};
-    use crate::net::quic_native::transport::{QuicTransport, QuicEndpoint};
-    use crate::runtime::{RuntimeBuilder, Runtime};
+    use crate::bytes::{Buf, BufMut, Bytes, BytesMut};
     use crate::cx::Cx;
-    use crate::types::{TaskId, Budget, Outcome};
-    use crate::bytes::{Bytes, BytesMut, Buf, BufMut};
-    use crate::io::{AsyncRead, AsyncWrite};
     use crate::error::AsupersyncError;
+    use crate::io::{AsyncRead, AsyncWrite};
+    use crate::net::quic_native::connection::{QuicConfig, QuicConnection, QuicStream, StreamId};
+    use crate::net::quic_native::transport::{QuicEndpoint, QuicTransport};
+    use crate::raptorq::proof::{IntegrityProof, ProofError, ProofGenerator, ProofVerifier};
+    use crate::raptorq::{DecoderId, EncoderId, EncodingSymbol, RepairSymbol, SourceBlock};
+    use crate::runtime::{Runtime, RuntimeBuilder};
+    use crate::types::{Budget, Outcome, TaskId};
     use std::collections::{HashMap, VecDeque};
-    use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicBool, Ordering}};
-    use std::net::{SocketAddr, IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    };
     use std::time::{Duration, Instant};
 
     /// Test harness for QUIC-RaptorQ proof integration testing - MILESTONE 200.
@@ -75,9 +78,14 @@ mod integration_tests {
     }
 
     impl RaptorQEncoder {
-        fn new(encoder_id: EncoderId, block_size: usize, symbol_size: usize,
-               repair_overhead: f32, proof_generator: Arc<ProofGenerator>,
-               stats: Arc<Mutex<QuicRaptorQProofStats>>) -> Self {
+        fn new(
+            encoder_id: EncoderId,
+            block_size: usize,
+            symbol_size: usize,
+            repair_overhead: f32,
+            proof_generator: Arc<ProofGenerator>,
+            stats: Arc<Mutex<QuicRaptorQProofStats>>,
+        ) -> Self {
             Self {
                 encoder_id,
                 block_size,
@@ -88,7 +96,10 @@ mod integration_tests {
             }
         }
 
-        fn encode_block_with_proof(&self, data: &[u8]) -> Result<EncodedBlockWithProof, AsupersyncError> {
+        fn encode_block_with_proof(
+            &self,
+            data: &[u8],
+        ) -> Result<EncodedBlockWithProof, AsupersyncError> {
             // Create source symbols from data
             let mut source_symbols = Vec::new();
             for (i, chunk) in data.chunks(self.symbol_size).enumerate() {
@@ -105,7 +116,7 @@ mod integration_tests {
                 let repair_data = self.generate_repair_symbol(&source_symbols, i)?;
                 repair_symbols.push(EncodingSymbol::repair(
                     (source_symbols.len() + i) as u64,
-                    Bytes::from(repair_data)
+                    Bytes::from(repair_data),
                 ));
             }
 
@@ -132,7 +143,11 @@ mod integration_tests {
             })
         }
 
-        fn generate_repair_symbol(&self, source_symbols: &[EncodingSymbol], repair_index: usize) -> Result<Vec<u8>, AsupersyncError> {
+        fn generate_repair_symbol(
+            &self,
+            source_symbols: &[EncodingSymbol],
+            repair_index: usize,
+        ) -> Result<Vec<u8>, AsupersyncError> {
             // Simplified repair symbol generation (in real implementation, would use RaptorQ math)
             let mut repair_data = vec![0u8; self.symbol_size];
 
@@ -149,7 +164,11 @@ mod integration_tests {
             Ok(repair_data)
         }
 
-        fn compute_block_hash(&self, source_symbols: &[EncodingSymbol], repair_symbols: &[EncodingSymbol]) -> u64 {
+        fn compute_block_hash(
+            &self,
+            source_symbols: &[EncodingSymbol],
+            repair_symbols: &[EncodingSymbol],
+        ) -> u64 {
             // Simplified hash computation (in real implementation, would use SHA256 or similar)
             let mut hash = 0u64;
             for symbol in source_symbols.iter().chain(repair_symbols.iter()) {
@@ -192,7 +211,7 @@ mod integration_tests {
                 RuntimeBuilder::new()
                     .with_network_stack()
                     .with_quic_support()
-                    .build()?
+                    .build()?,
             );
 
             let quic_transport = Arc::new(QuicTransport::new(QuicConfig::default())?);
@@ -212,22 +231,34 @@ mod integration_tests {
             })
         }
 
-        async fn establish_quic_connection(&mut self, cx: &Cx, conn_id: &str,
-                                         server_addr: SocketAddr) -> Result<(), AsupersyncError> {
+        async fn establish_quic_connection(
+            &mut self,
+            cx: &Cx,
+            conn_id: &str,
+            server_addr: SocketAddr,
+        ) -> Result<(), AsupersyncError> {
             let connection = self.quic_transport.connect(cx, server_addr).await?;
-            self.quic_connections.insert(conn_id.to_string(), Arc::new(connection));
+            self.quic_connections
+                .insert(conn_id.to_string(), Arc::new(connection));
 
             {
                 let mut stats = self.stats.lock().unwrap();
                 stats.quic_connections_established += 1;
-                stats.peak_concurrent_connections = stats.peak_concurrent_connections.max(self.quic_connections.len() as u64);
+                stats.peak_concurrent_connections = stats
+                    .peak_concurrent_connections
+                    .max(self.quic_connections.len() as u64);
             }
 
             Ok(())
         }
 
-        fn create_raptorq_encoder(&mut self, encoder_id: EncoderId, block_size: usize,
-                                symbol_size: usize, repair_overhead: f32) -> Arc<RaptorQEncoder> {
+        fn create_raptorq_encoder(
+            &mut self,
+            encoder_id: EncoderId,
+            block_size: usize,
+            symbol_size: usize,
+            repair_overhead: f32,
+        ) -> Arc<RaptorQEncoder> {
             let encoder = Arc::new(RaptorQEncoder::new(
                 encoder_id,
                 block_size,
@@ -241,9 +272,15 @@ mod integration_tests {
             encoder
         }
 
-        async fn transmit_raptorq_block(&mut self, cx: &Cx, conn_id: &str,
-                                      block: EncodedBlockWithProof) -> Result<TransportedBlock, AsupersyncError> {
-            let connection = self.quic_connections.get(conn_id)
+        async fn transmit_raptorq_block(
+            &mut self,
+            cx: &Cx,
+            conn_id: &str,
+            block: EncodedBlockWithProof,
+        ) -> Result<TransportedBlock, AsupersyncError> {
+            let connection = self
+                .quic_connections
+                .get(conn_id)
                 .ok_or_else(|| AsupersyncError::InvalidState("Connection not found".into()))?;
 
             let stream = connection.open_stream(cx).await?;
@@ -288,8 +325,14 @@ mod integration_tests {
             })
         }
 
-        async fn receive_and_verify_block(&self, cx: &Cx, conn_id: &str) -> Result<VerificationResult, AsupersyncError> {
-            let connection = self.quic_connections.get(conn_id)
+        async fn receive_and_verify_block(
+            &self,
+            cx: &Cx,
+            conn_id: &str,
+        ) -> Result<VerificationResult, AsupersyncError> {
+            let connection = self
+                .quic_connections
+                .get(conn_id)
                 .ok_or_else(|| AsupersyncError::InvalidState("Connection not found".into()))?;
 
             // Simulate receiving from a stream (in real implementation, would listen for incoming streams)
@@ -298,13 +341,16 @@ mod integration_tests {
 
             // Verify integrity proof
             let verification_start = Instant::now();
-            let verification_result = self.proof_verifier.verify_proof(
-                &block_with_proof.integrity_proof,
-                block_with_proof.encoder_id,
-                block_with_proof.block_hash,
-                block_with_proof.source_symbols.len(),
-                block_with_proof.repair_symbols.len(),
-            ).await?;
+            let verification_result = self
+                .proof_verifier
+                .verify_proof(
+                    &block_with_proof.integrity_proof,
+                    block_with_proof.encoder_id,
+                    block_with_proof.block_hash,
+                    block_with_proof.source_symbols.len(),
+                    block_with_proof.repair_symbols.len(),
+                )
+                .await?;
 
             let verification_duration = verification_start.elapsed();
 
@@ -326,8 +372,12 @@ mod integration_tests {
             })
         }
 
-        async fn transmit_concurrent_blocks(&mut self, cx: &Cx, conn_id: &str,
-                                          blocks: Vec<EncodedBlockWithProof>) -> Result<Vec<TransportedBlock>, AsupersyncError> {
+        async fn transmit_concurrent_blocks(
+            &mut self,
+            cx: &Cx,
+            conn_id: &str,
+            blocks: Vec<EncodedBlockWithProof>,
+        ) -> Result<Vec<TransportedBlock>, AsupersyncError> {
             let mut tasks = Vec::new();
 
             for (i, block) in blocks.into_iter().enumerate() {
@@ -385,11 +435,16 @@ mod integration_tests {
             Ok(results)
         }
 
-        fn serialize_block_with_proof(&self, block: &EncodedBlockWithProof) -> Result<Vec<u8>, AsupersyncError> {
+        fn serialize_block_with_proof(
+            &self,
+            block: &EncodedBlockWithProof,
+        ) -> Result<Vec<u8>, AsupersyncError> {
             Self::serialize_block_static(block)
         }
 
-        fn serialize_block_static(block: &EncodedBlockWithProof) -> Result<Vec<u8>, AsupersyncError> {
+        fn serialize_block_static(
+            block: &EncodedBlockWithProof,
+        ) -> Result<Vec<u8>, AsupersyncError> {
             let mut buffer = Vec::new();
 
             // Header: encoder_id, block_hash, symbol counts
@@ -418,28 +473,34 @@ mod integration_tests {
             Ok(buffer)
         }
 
-        fn deserialize_block_with_proof(&self, data: &[u8]) -> Result<EncodedBlockWithProof, AsupersyncError> {
+        fn deserialize_block_with_proof(
+            &self,
+            data: &[u8],
+        ) -> Result<EncodedBlockWithProof, AsupersyncError> {
             let mut cursor = 0;
 
             // Read header
-            let encoder_id = EncoderId::from_bytes(&data[cursor..cursor+8])?;
+            let encoder_id = EncoderId::from_bytes(&data[cursor..cursor + 8])?;
             cursor += 8;
 
-            let block_hash = u64::from_le_bytes(data[cursor..cursor+8].try_into().unwrap());
+            let block_hash = u64::from_le_bytes(data[cursor..cursor + 8].try_into().unwrap());
             cursor += 8;
 
-            let source_count = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap()) as usize;
+            let source_count =
+                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
             cursor += 4;
 
-            let repair_count = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap()) as usize;
+            let repair_count =
+                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
             cursor += 4;
 
             // Read source symbols
             let mut source_symbols = Vec::new();
             for i in 0..source_count {
-                let symbol_len = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap()) as usize;
+                let symbol_len =
+                    u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
                 cursor += 4;
-                let symbol_data = data[cursor..cursor+symbol_len].to_vec();
+                let symbol_data = data[cursor..cursor + symbol_len].to_vec();
                 cursor += symbol_len;
                 source_symbols.push(EncodingSymbol::source(i as u64, Bytes::from(symbol_data)));
             }
@@ -447,17 +508,22 @@ mod integration_tests {
             // Read repair symbols
             let mut repair_symbols = Vec::new();
             for i in 0..repair_count {
-                let symbol_len = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap()) as usize;
+                let symbol_len =
+                    u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
                 cursor += 4;
-                let symbol_data = data[cursor..cursor+symbol_len].to_vec();
+                let symbol_data = data[cursor..cursor + symbol_len].to_vec();
                 cursor += symbol_len;
-                repair_symbols.push(EncodingSymbol::repair((source_count + i) as u64, Bytes::from(symbol_data)));
+                repair_symbols.push(EncodingSymbol::repair(
+                    (source_count + i) as u64,
+                    Bytes::from(symbol_data),
+                ));
             }
 
             // Read integrity proof
-            let proof_len = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap()) as usize;
+            let proof_len =
+                u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
             cursor += 4;
-            let proof_data = &data[cursor..cursor+proof_len];
+            let proof_data = &data[cursor..cursor + proof_len];
             let integrity_proof = IntegrityProof::deserialize(proof_data)?;
 
             Ok(EncodedBlockWithProof {
@@ -469,7 +535,10 @@ mod integration_tests {
             })
         }
 
-        async fn simulate_block_reception(&self, _connection: &QuicConnection) -> Result<Vec<u8>, AsupersyncError> {
+        async fn simulate_block_reception(
+            &self,
+            _connection: &QuicConnection,
+        ) -> Result<Vec<u8>, AsupersyncError> {
             // Simplified simulation - in real implementation would read from QUIC stream
             // For testing, we'll use data from the proof cache
             Ok(vec![0u8; 1024]) // Placeholder
@@ -477,11 +546,16 @@ mod integration_tests {
 
         fn check_transport_integrity(&self, block: &EncodedBlockWithProof) -> bool {
             // Verify that the transported block maintains integrity
-            let computed_hash = self.compute_hash_for_verification(&block.source_symbols, &block.repair_symbols);
+            let computed_hash =
+                self.compute_hash_for_verification(&block.source_symbols, &block.repair_symbols);
             computed_hash == block.block_hash
         }
 
-        fn compute_hash_for_verification(&self, source_symbols: &[EncodingSymbol], repair_symbols: &[EncodingSymbol]) -> u64 {
+        fn compute_hash_for_verification(
+            &self,
+            source_symbols: &[EncodingSymbol],
+            repair_symbols: &[EncodingSymbol],
+        ) -> u64 {
             let mut hash = 0u64;
             for symbol in source_symbols.iter().chain(repair_symbols.iter()) {
                 for &byte in symbol.data() {
@@ -511,142 +585,171 @@ mod integration_tests {
         let mut harness = QuicRaptorQProofTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            // Set up QUIC connection
-            let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
-            harness.establish_quic_connection(cx, "test-conn", server_addr).await?;
+        runtime
+            .region(Budget::default(), |cx| async move {
+                // Set up QUIC connection
+                let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+                harness
+                    .establish_quic_connection(cx, "test-conn", server_addr)
+                    .await?;
 
-            // Create RaptorQ encoder
-            let encoder = harness.create_raptorq_encoder(
-                EncoderId::new(1),
-                1024,  // 1KB block size
-                256,   // 256 byte symbols
-                0.25,  // 25% repair overhead
-            );
+                // Create RaptorQ encoder
+                let encoder = harness.create_raptorq_encoder(
+                    EncoderId::new(1),
+                    1024, // 1KB block size
+                    256,  // 256 byte symbols
+                    0.25, // 25% repair overhead
+                );
 
-            // Create test data
-            let test_data = vec![0xAA; 1024]; // 1KB of test data
-            let encoded_block = encoder.encode_block_with_proof(&test_data)?;
+                // Create test data
+                let test_data = vec![0xAA; 1024]; // 1KB of test data
+                let encoded_block = encoder.encode_block_with_proof(&test_data)?;
 
-            // Transmit over QUIC
-            let transmitted_block = harness.transmit_raptorq_block(
-                cx,
-                "test-conn",
-                encoded_block,
-            ).await?;
+                // Transmit over QUIC
+                let transmitted_block = harness
+                    .transmit_raptorq_block(cx, "test-conn", encoded_block)
+                    .await?;
 
-            // Verify the block was transported
-            assert!(transmitted_block.transport_metadata.bytes_transmitted > 0);
-            assert!(transmitted_block.transport_metadata.transmission_time < Duration::from_secs(1));
+                // Verify the block was transported
+                assert!(transmitted_block.transport_metadata.bytes_transmitted > 0);
+                assert!(
+                    transmitted_block.transport_metadata.transmission_time < Duration::from_secs(1)
+                );
 
-            // Simulate verification on receiver side
-            let verification = harness.receive_and_verify_block(cx, "test-conn").await?;
-            assert!(verification.proof_valid, "Integrity proof should be valid");
-            assert!(verification.transport_integrity, "Transport integrity should be maintained");
+                // Simulate verification on receiver side
+                let verification = harness.receive_and_verify_block(cx, "test-conn").await?;
+                assert!(verification.proof_valid, "Integrity proof should be valid");
+                assert!(
+                    verification.transport_integrity,
+                    "Transport integrity should be maintained"
+                );
 
-            let stats = harness.get_stats();
-            assert_eq!(stats.quic_connections_established, 1);
-            assert_eq!(stats.raptorq_blocks_transmitted, 1);
-            assert_eq!(stats.integrity_proofs_generated, 1);
-            assert_eq!(stats.integrity_proofs_verified, 1);
+                let stats = harness.get_stats();
+                assert_eq!(stats.quic_connections_established, 1);
+                assert_eq!(stats.raptorq_blocks_transmitted, 1);
+                assert_eq!(stats.integrity_proofs_generated, 1);
+                assert_eq!(stats.integrity_proofs_verified, 1);
 
-            println!("🎯 MILESTONE 200 - Basic transport: {} bytes in {:?}",
-                     stats.total_bytes_transmitted, stats.total_transport_latency);
-            Ok(())
-        }).await
+                println!(
+                    "🎯 MILESTONE 200 - Basic transport: {} bytes in {:?}",
+                    stats.total_bytes_transmitted, stats.total_transport_latency
+                );
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
-    async fn test_concurrent_quic_connections_with_proof_validation() -> Result<(), AsupersyncError> {
+    async fn test_concurrent_quic_connections_with_proof_validation() -> Result<(), AsupersyncError>
+    {
         let mut harness = QuicRaptorQProofTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            let num_connections = 5;
-            let mut connection_ids = Vec::new();
+        runtime
+            .region(Budget::default(), |cx| async move {
+                let num_connections = 5;
+                let mut connection_ids = Vec::new();
 
-            // Establish multiple QUIC connections
-            for i in 0..num_connections {
-                let conn_id = format!("concurrent-conn-{}", i);
-                let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080 + i as u16);
-                harness.establish_quic_connection(cx, &conn_id, server_addr).await?;
-                connection_ids.push(conn_id);
-            }
+                // Establish multiple QUIC connections
+                for i in 0..num_connections {
+                    let conn_id = format!("concurrent-conn-{}", i);
+                    let server_addr =
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080 + i as u16);
+                    harness
+                        .establish_quic_connection(cx, &conn_id, server_addr)
+                        .await?;
+                    connection_ids.push(conn_id);
+                }
 
-            // Create encoders for each connection
-            let mut encoders = Vec::new();
-            for i in 0..num_connections {
-                let encoder = harness.create_raptorq_encoder(
-                    EncoderId::new(i as u64 + 10),
-                    512 * (i + 1),    // Varying block sizes
-                    128,              // Fixed symbol size
-                    0.3,              // 30% repair overhead
+                // Create encoders for each connection
+                let mut encoders = Vec::new();
+                for i in 0..num_connections {
+                    let encoder = harness.create_raptorq_encoder(
+                        EncoderId::new(i as u64 + 10),
+                        512 * (i + 1), // Varying block sizes
+                        128,           // Fixed symbol size
+                        0.3,           // 30% repair overhead
+                    );
+                    encoders.push(encoder);
+                }
+
+                // Prepare blocks for concurrent transmission
+                let mut transmission_tasks = Vec::new();
+                for (i, (conn_id, encoder)) in
+                    connection_ids.iter().zip(encoders.iter()).enumerate()
+                {
+                    let test_data = vec![0xBB + i as u8; 512 * (i + 1)]; // Varying data patterns
+                    let encoded_block = encoder.encode_block_with_proof(&test_data)?;
+
+                    let conn_id_clone = conn_id.clone();
+                    let task = cx.spawn(async move {
+                        // Simulate some concurrency
+                        cx.sleep(Duration::from_millis((i * 10) as u64)).await;
+                        Ok::<(String, EncodedBlockWithProof), AsupersyncError>((
+                            conn_id_clone,
+                            encoded_block,
+                        ))
+                    });
+
+                    transmission_tasks.push(task);
+                }
+
+                // Execute concurrent transmissions
+                let mut transmitted_blocks = Vec::new();
+                for task in transmission_tasks {
+                    let (conn_id, block) = task.await??;
+                    let transmitted = harness.transmit_raptorq_block(cx, &conn_id, block).await?;
+                    transmitted_blocks.push(transmitted);
+                }
+
+                // Verify all transmissions
+                assert_eq!(transmitted_blocks.len(), num_connections);
+                for (i, block) in transmitted_blocks.iter().enumerate() {
+                    assert!(block.transport_metadata.bytes_transmitted > 0);
+                    assert_eq!(
+                        block.transport_metadata.connection_id,
+                        format!("concurrent-conn-{}", i)
+                    );
+                }
+
+                // Perform concurrent proof verifications
+                let mut verification_tasks = Vec::new();
+                for conn_id in &connection_ids {
+                    let conn_id_clone = conn_id.clone();
+                    let task = cx.spawn(async move {
+                        harness.receive_and_verify_block(cx, &conn_id_clone).await
+                    });
+                    verification_tasks.push(task);
+                }
+
+                let mut verification_results = Vec::new();
+                for task in verification_tasks {
+                    let result = task.await??;
+                    verification_results.push(result);
+                }
+
+                // Verify all proofs are valid
+                for (i, result) in verification_results.iter().enumerate() {
+                    assert!(result.proof_valid, "Proof {} should be valid", i);
+                    assert!(
+                        result.transport_integrity,
+                        "Transport integrity {} should be maintained",
+                        i
+                    );
+                }
+
+                let stats = harness.get_stats();
+                assert_eq!(stats.peak_concurrent_connections, num_connections as u64);
+                assert_eq!(stats.integrity_proofs_verified, num_connections as u64);
+                assert_eq!(stats.proof_verification_failures, 0);
+
+                println!(
+                    "Concurrent connections: {} connections, {} proofs verified, {} total bytes",
+                    num_connections, stats.integrity_proofs_verified, stats.total_bytes_transmitted
                 );
-                encoders.push(encoder);
-            }
-
-            // Prepare blocks for concurrent transmission
-            let mut transmission_tasks = Vec::new();
-            for (i, (conn_id, encoder)) in connection_ids.iter().zip(encoders.iter()).enumerate() {
-                let test_data = vec![0xBB + i as u8; 512 * (i + 1)]; // Varying data patterns
-                let encoded_block = encoder.encode_block_with_proof(&test_data)?;
-
-                let conn_id_clone = conn_id.clone();
-                let task = cx.spawn(async move {
-                    // Simulate some concurrency
-                    cx.sleep(Duration::from_millis((i * 10) as u64)).await;
-                    Ok::<(String, EncodedBlockWithProof), AsupersyncError>((conn_id_clone, encoded_block))
-                });
-
-                transmission_tasks.push(task);
-            }
-
-            // Execute concurrent transmissions
-            let mut transmitted_blocks = Vec::new();
-            for task in transmission_tasks {
-                let (conn_id, block) = task.await??;
-                let transmitted = harness.transmit_raptorq_block(cx, &conn_id, block).await?;
-                transmitted_blocks.push(transmitted);
-            }
-
-            // Verify all transmissions
-            assert_eq!(transmitted_blocks.len(), num_connections);
-            for (i, block) in transmitted_blocks.iter().enumerate() {
-                assert!(block.transport_metadata.bytes_transmitted > 0);
-                assert_eq!(block.transport_metadata.connection_id, format!("concurrent-conn-{}", i));
-            }
-
-            // Perform concurrent proof verifications
-            let mut verification_tasks = Vec::new();
-            for conn_id in &connection_ids {
-                let conn_id_clone = conn_id.clone();
-                let task = cx.spawn(async move {
-                    harness.receive_and_verify_block(cx, &conn_id_clone).await
-                });
-                verification_tasks.push(task);
-            }
-
-            let mut verification_results = Vec::new();
-            for task in verification_tasks {
-                let result = task.await??;
-                verification_results.push(result);
-            }
-
-            // Verify all proofs are valid
-            for (i, result) in verification_results.iter().enumerate() {
-                assert!(result.proof_valid, "Proof {} should be valid", i);
-                assert!(result.transport_integrity, "Transport integrity {} should be maintained", i);
-            }
-
-            let stats = harness.get_stats();
-            assert_eq!(stats.peak_concurrent_connections, num_connections as u64);
-            assert_eq!(stats.integrity_proofs_verified, num_connections as u64);
-            assert_eq!(stats.proof_verification_failures, 0);
-
-            println!("Concurrent connections: {} connections, {} proofs verified, {} total bytes",
-                     num_connections, stats.integrity_proofs_verified, stats.total_bytes_transmitted);
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -654,51 +757,63 @@ mod integration_tests {
         let mut harness = QuicRaptorQProofTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081);
-            harness.establish_quic_connection(cx, "large-block-conn", server_addr).await?;
+        runtime
+            .region(Budget::default(), |cx| async move {
+                let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8081);
+                harness
+                    .establish_quic_connection(cx, "large-block-conn", server_addr)
+                    .await?;
 
-            // Create encoder for large blocks
-            let encoder = harness.create_raptorq_encoder(
-                EncoderId::new(100),
-                65536,  // 64KB blocks
-                1024,   // 1KB symbols
-                0.2,    // 20% repair overhead
-            );
+                // Create encoder for large blocks
+                let encoder = harness.create_raptorq_encoder(
+                    EncoderId::new(100),
+                    65536, // 64KB blocks
+                    1024,  // 1KB symbols
+                    0.2,   // 20% repair overhead
+                );
 
-            // Create large test data (64KB)
-            let large_data = (0..65536).map(|i| (i % 256) as u8).collect::<Vec<_>>();
-            let large_block = encoder.encode_block_with_proof(&large_data)?;
+                // Create large test data (64KB)
+                let large_data = (0..65536).map(|i| (i % 256) as u8).collect::<Vec<_>>();
+                let large_block = encoder.encode_block_with_proof(&large_data)?;
 
-            // Verify block structure before transmission
-            assert_eq!(large_block.source_symbols.len(), 64); // 64KB / 1KB = 64 symbols
-            assert_eq!(large_block.repair_symbols.len(), 12); // 20% of 64 = ~13 symbols
+                // Verify block structure before transmission
+                assert_eq!(large_block.source_symbols.len(), 64); // 64KB / 1KB = 64 symbols
+                assert_eq!(large_block.repair_symbols.len(), 12); // 20% of 64 = ~13 symbols
 
-            let transmission_start = Instant::now();
-            let transmitted_block = harness.transmit_raptorq_block(
-                cx,
-                "large-block-conn",
-                large_block,
-            ).await?;
-            let transmission_duration = transmission_start.elapsed();
+                let transmission_start = Instant::now();
+                let transmitted_block = harness
+                    .transmit_raptorq_block(cx, "large-block-conn", large_block)
+                    .await?;
+                let transmission_duration = transmission_start.elapsed();
 
-            // Verify large block transmission
-            assert!(transmitted_block.transport_metadata.bytes_transmitted > 65536);
-            assert!(transmission_duration < Duration::from_secs(5), "Large block should transmit in reasonable time");
+                // Verify large block transmission
+                assert!(transmitted_block.transport_metadata.bytes_transmitted > 65536);
+                assert!(
+                    transmission_duration < Duration::from_secs(5),
+                    "Large block should transmit in reasonable time"
+                );
 
-            // Verify proof for large block
-            let verification = harness.receive_and_verify_block(cx, "large-block-conn").await?;
-            assert!(verification.proof_valid, "Large block proof should be valid");
-            assert_eq!(verification.source_symbol_count, 64);
-            assert_eq!(verification.repair_symbol_count, 12);
+                // Verify proof for large block
+                let verification = harness
+                    .receive_and_verify_block(cx, "large-block-conn")
+                    .await?;
+                assert!(
+                    verification.proof_valid,
+                    "Large block proof should be valid"
+                );
+                assert_eq!(verification.source_symbol_count, 64);
+                assert_eq!(verification.repair_symbol_count, 12);
 
-            let stats = harness.get_stats();
-            assert!(stats.total_bytes_transmitted > 65536);
+                let stats = harness.get_stats();
+                assert!(stats.total_bytes_transmitted > 65536);
 
-            println!("Large block delivery: {} bytes transmitted in {:?}",
-                     stats.total_bytes_transmitted, transmission_duration);
-            Ok(())
-        }).await
+                println!(
+                    "Large block delivery: {} bytes transmitted in {:?}",
+                    stats.total_bytes_transmitted, transmission_duration
+                );
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -706,67 +821,79 @@ mod integration_tests {
         let mut harness = QuicRaptorQProofTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            // Set up connection
-            let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8082);
-            harness.establish_quic_connection(cx, "stress-conn", server_addr).await?;
+        runtime
+            .region(Budget::default(), |cx| async move {
+                // Set up connection
+                let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8082);
+                harness
+                    .establish_quic_connection(cx, "stress-conn", server_addr)
+                    .await?;
 
-            // Create encoder
-            let encoder = harness.create_raptorq_encoder(
-                EncoderId::new(200),
-                2048,   // 2KB blocks
-                256,    // 256 byte symbols
-                0.4,    // 40% repair overhead for resilience
-            );
+                // Create encoder
+                let encoder = harness.create_raptorq_encoder(
+                    EncoderId::new(200),
+                    2048, // 2KB blocks
+                    256,  // 256 byte symbols
+                    0.4,  // 40% repair overhead for resilience
+                );
 
-            // Generate multiple blocks for stress test
-            let num_blocks = 20;
-            let mut blocks = Vec::new();
+                // Generate multiple blocks for stress test
+                let num_blocks = 20;
+                let mut blocks = Vec::new();
 
-            for i in 0..num_blocks {
-                let test_data = vec![0xCC + (i % 16) as u8; 2048];
-                let block = encoder.encode_block_with_proof(&test_data)?;
-                blocks.push(block);
-            }
+                for i in 0..num_blocks {
+                    let test_data = vec![0xCC + (i % 16) as u8; 2048];
+                    let block = encoder.encode_block_with_proof(&test_data)?;
+                    blocks.push(block);
+                }
 
-            // Transmit blocks with simulated network stress
-            let stress_start = Instant::now();
-            let transmitted_blocks = harness.transmit_concurrent_blocks(
-                cx,
-                "stress-conn",
-                blocks,
-            ).await?;
-            let stress_duration = stress_start.elapsed();
+                // Transmit blocks with simulated network stress
+                let stress_start = Instant::now();
+                let transmitted_blocks = harness
+                    .transmit_concurrent_blocks(cx, "stress-conn", blocks)
+                    .await?;
+                let stress_duration = stress_start.elapsed();
 
-            // Verify all blocks under stress
-            assert_eq!(transmitted_blocks.len(), num_blocks);
+                // Verify all blocks under stress
+                assert_eq!(transmitted_blocks.len(), num_blocks);
 
-            let mut successful_verifications = 0;
-            for (i, _block) in transmitted_blocks.iter().enumerate() {
-                match harness.receive_and_verify_block(cx, "stress-conn").await {
-                    Ok(verification) if verification.proof_valid => successful_verifications += 1,
-                    Ok(_) => {
-                        println!("Block {} failed proof verification", i);
-                    }
-                    Err(e) => {
-                        println!("Block {} verification error: {}", i, e);
+                let mut successful_verifications = 0;
+                for (i, _block) in transmitted_blocks.iter().enumerate() {
+                    match harness.receive_and_verify_block(cx, "stress-conn").await {
+                        Ok(verification) if verification.proof_valid => {
+                            successful_verifications += 1
+                        }
+                        Ok(_) => {
+                            println!("Block {} failed proof verification", i);
+                        }
+                        Err(e) => {
+                            println!("Block {} verification error: {}", i, e);
+                        }
                     }
                 }
-            }
 
-            // Should have high success rate even under stress
-            let success_rate = successful_verifications as f64 / num_blocks as f64;
-            assert!(success_rate >= 0.8, "Should maintain >80% success rate under stress, got {:.2}%", success_rate * 100.0);
+                // Should have high success rate even under stress
+                let success_rate = successful_verifications as f64 / num_blocks as f64;
+                assert!(
+                    success_rate >= 0.8,
+                    "Should maintain >80% success rate under stress, got {:.2}%",
+                    success_rate * 100.0
+                );
 
-            let stats = harness.get_stats();
-            println!("Network stress: {}/{} blocks verified successfully in {:?}",
-                     successful_verifications, num_blocks, stress_duration);
-            println!("Average latency: {:?}, Total bytes: {}",
-                     stats.total_transport_latency / stats.raptorq_blocks_transmitted.max(1) as u32,
-                     stats.total_bytes_transmitted);
+                let stats = harness.get_stats();
+                println!(
+                    "Network stress: {}/{} blocks verified successfully in {:?}",
+                    successful_verifications, num_blocks, stress_duration
+                );
+                println!(
+                    "Average latency: {:?}, Total bytes: {}",
+                    stats.total_transport_latency / stats.raptorq_blocks_transmitted.max(1) as u32,
+                    stats.total_bytes_transmitted
+                );
 
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -774,71 +901,85 @@ mod integration_tests {
         let mut harness = QuicRaptorQProofTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8083);
-            harness.establish_quic_connection(cx, "corruption-conn", server_addr).await?;
+        runtime
+            .region(Budget::default(), |cx| async move {
+                let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8083);
+                harness
+                    .establish_quic_connection(cx, "corruption-conn", server_addr)
+                    .await?;
 
-            let encoder = harness.create_raptorq_encoder(
-                EncoderId::new(300),
-                1024,
-                256,
-                0.25,
-            );
+                let encoder = harness.create_raptorq_encoder(EncoderId::new(300), 1024, 256, 0.25);
 
-            // Create valid block
-            let test_data = vec![0xDD; 1024];
-            let mut valid_block = encoder.encode_block_with_proof(&test_data)?;
+                // Create valid block
+                let test_data = vec![0xDD; 1024];
+                let mut valid_block = encoder.encode_block_with_proof(&test_data)?;
 
-            // Test 1: Valid block should verify successfully
-            let transmitted_valid = harness.transmit_raptorq_block(
-                cx,
-                "corruption-conn",
-                valid_block.clone(),
-            ).await?;
-            let valid_verification = harness.receive_and_verify_block(cx, "corruption-conn").await?;
-            assert!(valid_verification.proof_valid, "Valid block should verify");
+                // Test 1: Valid block should verify successfully
+                let transmitted_valid = harness
+                    .transmit_raptorq_block(cx, "corruption-conn", valid_block.clone())
+                    .await?;
+                let valid_verification = harness
+                    .receive_and_verify_block(cx, "corruption-conn")
+                    .await?;
+                assert!(valid_verification.proof_valid, "Valid block should verify");
 
-            // Test 2: Corrupt a source symbol
-            if let Some(source_symbol) = valid_block.source_symbols.first_mut() {
-                // Flip some bits in the source symbol data
-                let mut corrupted_data = source_symbol.data().to_vec();
-                corrupted_data[10] ^= 0xFF; // Flip bits
-                *source_symbol = EncodingSymbol::source(0, Bytes::from(corrupted_data));
-            }
+                // Test 2: Corrupt a source symbol
+                if let Some(source_symbol) = valid_block.source_symbols.first_mut() {
+                    // Flip some bits in the source symbol data
+                    let mut corrupted_data = source_symbol.data().to_vec();
+                    corrupted_data[10] ^= 0xFF; // Flip bits
+                    *source_symbol = EncodingSymbol::source(0, Bytes::from(corrupted_data));
+                }
 
-            let _transmitted_corrupt = harness.transmit_raptorq_block(
-                cx,
-                "corruption-conn",
-                valid_block.clone(),
-            ).await?;
+                let _transmitted_corrupt = harness
+                    .transmit_raptorq_block(cx, "corruption-conn", valid_block.clone())
+                    .await?;
 
-            // This should fail verification due to corruption
-            let corrupt_verification = harness.receive_and_verify_block(cx, "corruption-conn").await?;
-            assert!(!corrupt_verification.proof_valid, "Corrupted block should fail verification");
+                // This should fail verification due to corruption
+                let corrupt_verification = harness
+                    .receive_and_verify_block(cx, "corruption-conn")
+                    .await?;
+                assert!(
+                    !corrupt_verification.proof_valid,
+                    "Corrupted block should fail verification"
+                );
 
-            // Test 3: Invalid proof should be detected
-            let mut invalid_proof_block = encoder.encode_block_with_proof(&test_data)?;
-            // Corrupt the proof itself
-            invalid_proof_block.integrity_proof = IntegrityProof::invalid_proof_for_testing();
+                // Test 3: Invalid proof should be detected
+                let mut invalid_proof_block = encoder.encode_block_with_proof(&test_data)?;
+                // Corrupt the proof itself
+                invalid_proof_block.integrity_proof = IntegrityProof::invalid_proof_for_testing();
 
-            let _transmitted_invalid_proof = harness.transmit_raptorq_block(
-                cx,
-                "corruption-conn",
-                invalid_proof_block,
-            ).await?;
+                let _transmitted_invalid_proof = harness
+                    .transmit_raptorq_block(cx, "corruption-conn", invalid_proof_block)
+                    .await?;
 
-            let invalid_proof_verification = harness.receive_and_verify_block(cx, "corruption-conn").await?;
-            assert!(!invalid_proof_verification.proof_valid, "Invalid proof should be rejected");
+                let invalid_proof_verification = harness
+                    .receive_and_verify_block(cx, "corruption-conn")
+                    .await?;
+                assert!(
+                    !invalid_proof_verification.proof_valid,
+                    "Invalid proof should be rejected"
+                );
 
-            let stats = harness.get_stats();
-            assert!(stats.proof_verification_failures >= 2, "Should detect corruption and invalid proofs");
-            assert!(stats.corruption_events_detected >= 1, "Should detect corruption events");
+                let stats = harness.get_stats();
+                assert!(
+                    stats.proof_verification_failures >= 2,
+                    "Should detect corruption and invalid proofs"
+                );
+                assert!(
+                    stats.corruption_events_detected >= 1,
+                    "Should detect corruption events"
+                );
 
-            println!("Corruption detection: {} failures detected out of {} total verifications",
-                     stats.proof_verification_failures, stats.integrity_proofs_verified + stats.proof_verification_failures);
+                println!(
+                    "Corruption detection: {} failures detected out of {} total verifications",
+                    stats.proof_verification_failures,
+                    stats.integrity_proofs_verified + stats.proof_verification_failures
+                );
 
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 
     #[tokio::test]
@@ -846,60 +987,85 @@ mod integration_tests {
         let mut harness = QuicRaptorQProofTestHarness::new()?;
         let runtime = harness.runtime.clone();
 
-        runtime.region(Budget::default(), |cx| async move {
-            // Test various conditions: different block sizes, repair rates, data patterns
-            let test_scenarios = vec![
-                (512, 128, 0.1),   // Small blocks, low repair
-                (2048, 256, 0.25), // Medium blocks, medium repair
-                (8192, 512, 0.5),  // Large blocks, high repair
-                (1024, 64, 0.75),  // Medium blocks, very high repair
-            ];
+        runtime
+            .region(Budget::default(), |cx| async move {
+                // Test various conditions: different block sizes, repair rates, data patterns
+                let test_scenarios = vec![
+                    (512, 128, 0.1),   // Small blocks, low repair
+                    (2048, 256, 0.25), // Medium blocks, medium repair
+                    (8192, 512, 0.5),  // Large blocks, high repair
+                    (1024, 64, 0.75),  // Medium blocks, very high repair
+                ];
 
-            let mut total_scenarios_passed = 0;
+                let mut total_scenarios_passed = 0;
 
-            for (i, (block_size, symbol_size, repair_overhead)) in test_scenarios.iter().enumerate() {
-                let conn_id = format!("scenario-conn-{}", i);
-                let server_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8090 + i as u16);
-                harness.establish_quic_connection(cx, &conn_id, server_addr).await?;
+                for (i, (block_size, symbol_size, repair_overhead)) in
+                    test_scenarios.iter().enumerate()
+                {
+                    let conn_id = format!("scenario-conn-{}", i);
+                    let server_addr =
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8090 + i as u16);
+                    harness
+                        .establish_quic_connection(cx, &conn_id, server_addr)
+                        .await?;
 
-                let encoder = harness.create_raptorq_encoder(
-                    EncoderId::new(400 + i as u64),
-                    *block_size,
-                    *symbol_size,
-                    *repair_overhead,
+                    let encoder = harness.create_raptorq_encoder(
+                        EncoderId::new(400 + i as u64),
+                        *block_size,
+                        *symbol_size,
+                        *repair_overhead,
+                    );
+
+                    // Create test data with pattern
+                    let test_data = (0..*block_size)
+                        .map(|j| (j % 256) as u8)
+                        .collect::<Vec<_>>();
+                    let block = encoder.encode_block_with_proof(&test_data)?;
+
+                    // Transmit and verify
+                    let transmitted = harness.transmit_raptorq_block(cx, &conn_id, block).await?;
+                    let verification = harness.receive_and_verify_block(cx, &conn_id).await?;
+
+                    if verification.proof_valid && verification.transport_integrity {
+                        total_scenarios_passed += 1;
+                        println!(
+                            "Scenario {}: PASSED - {} bytes, {:.0}% repair, {} symbols",
+                            i + 1,
+                            block_size,
+                            repair_overhead * 100.0,
+                            verification.source_symbol_count
+                        );
+                    } else {
+                        println!(
+                            "Scenario {}: FAILED - proof_valid: {}, transport_integrity: {}",
+                            i + 1,
+                            verification.proof_valid,
+                            verification.transport_integrity
+                        );
+                    }
+                }
+
+                assert_eq!(
+                    total_scenarios_passed,
+                    test_scenarios.len(),
+                    "All scenarios should pass end-to-end integrity verification"
                 );
 
-                // Create test data with pattern
-                let test_data = (0..*block_size).map(|j| (j % 256) as u8).collect::<Vec<_>>();
-                let block = encoder.encode_block_with_proof(&test_data)?;
+                let stats = harness.get_stats();
+                println!(
+                    "🎯 MILESTONE 200 COMPLETE - End-to-end integrity verified across {} scenarios",
+                    test_scenarios.len()
+                );
+                println!(
+                    "Final stats: {} connections, {} blocks, {} proofs verified, {} bytes total",
+                    stats.quic_connections_established,
+                    stats.raptorq_blocks_transmitted,
+                    stats.integrity_proofs_verified,
+                    stats.total_bytes_transmitted
+                );
 
-                // Transmit and verify
-                let transmitted = harness.transmit_raptorq_block(cx, &conn_id, block).await?;
-                let verification = harness.receive_and_verify_block(cx, &conn_id).await?;
-
-                if verification.proof_valid && verification.transport_integrity {
-                    total_scenarios_passed += 1;
-                    println!("Scenario {}: PASSED - {} bytes, {:.0}% repair, {} symbols",
-                             i + 1, block_size, repair_overhead * 100.0, verification.source_symbol_count);
-                } else {
-                    println!("Scenario {}: FAILED - proof_valid: {}, transport_integrity: {}",
-                             i + 1, verification.proof_valid, verification.transport_integrity);
-                }
-            }
-
-            assert_eq!(total_scenarios_passed, test_scenarios.len(),
-                      "All scenarios should pass end-to-end integrity verification");
-
-            let stats = harness.get_stats();
-            println!("🎯 MILESTONE 200 COMPLETE - End-to-end integrity verified across {} scenarios",
-                     test_scenarios.len());
-            println!("Final stats: {} connections, {} blocks, {} proofs verified, {} bytes total",
-                     stats.quic_connections_established,
-                     stats.raptorq_blocks_transmitted,
-                     stats.integrity_proofs_verified,
-                     stats.total_bytes_transmitted);
-
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 }

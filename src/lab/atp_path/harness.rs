@@ -708,10 +708,10 @@ mod tests {
         assert_eq!(result.candidates_evaluated, 2);
 
         // Verify migration trace events
-        let migration_event = result.trace_events.iter().find(|event| matches!(
-            &event.event,
-            AtpPathEventKind::MigrationTriggered { .. }
-        ));
+        let migration_event = result
+            .trace_events
+            .iter()
+            .find(|event| matches!(&event.event, AtpPathEventKind::MigrationTriggered { .. }));
         assert!(migration_event.is_some());
 
         if let Some(event) = migration_event {
@@ -726,8 +726,8 @@ mod tests {
     async fn test_hard_symmetric_nat_behavior() {
         let mut harness = AtpPathLabHarness::new(AtpPathTestConfig::nat_stress());
 
-        let scenario = AtpLabScenario::new("hard-nat", 0xA7F0_0009)
-            .with_regime(AtpLabRegime::SymmetricNat);
+        let scenario =
+            AtpLabScenario::new("hard-nat", 0xA7F0_0009).with_regime(AtpLabRegime::SymmetricNat);
 
         let result = harness.execute_scenario(&scenario).await.unwrap();
 
@@ -739,13 +739,15 @@ mod tests {
         assert!(!result.path_validation.has_direct_path());
 
         // Verify failure trace event for NAT punching
-        let failure_event = result.trace_events.iter().find(|event| matches!(
-            &event.event,
-            AtpPathEventKind::PathFailed {
-                path_kind: PathKind::NatPunchedUdp,
-                reason,
-            } if reason.contains("Hard or symmetric NAT prevented hole punching")
-        ));
+        let failure_event = result.trace_events.iter().find(|event| {
+            matches!(
+                &event.event,
+                AtpPathEventKind::PathFailed {
+                    path_kind: PathKind::NatPunchedUdp,
+                    reason,
+                } if reason.contains("Hard or symmetric NAT prevented hole punching")
+            )
+        });
         assert!(failure_event.is_some());
     }
 
@@ -753,8 +755,8 @@ mod tests {
     async fn test_relay_tcp_tls_443_fallback() {
         let mut harness = AtpPathLabHarness::new(AtpPathTestConfig::relay_only());
 
-        let scenario = AtpLabScenario::new("relay-tls", 0xA7F0_000A)
-            .with_regime(AtpLabRegime::RelayTcpTls443);
+        let scenario =
+            AtpLabScenario::new("relay-tls", 0xA7F0_000A).with_regime(AtpLabRegime::RelayTcpTls443);
 
         let result = harness.execute_scenario(&scenario).await.unwrap();
 
@@ -766,13 +768,15 @@ mod tests {
         );
 
         // Verify connection attempt to correct path
-        let connection_attempt = result.trace_events.iter().find(|event| matches!(
-            &event.event,
-            AtpPathEventKind::ConnectionAttempt {
-                path_kind: PathKind::AtpRelayTcpTls443,
-                ..
-            }
-        ));
+        let connection_attempt = result.trace_events.iter().find(|event| {
+            matches!(
+                &event.event,
+                AtpPathEventKind::ConnectionAttempt {
+                    path_kind: PathKind::AtpRelayTcpTls443,
+                    ..
+                }
+            )
+        });
         assert!(connection_attempt.is_some());
     }
 
@@ -810,13 +814,15 @@ mod tests {
         );
 
         // Verify transfer completion event
-        let transfer_complete = result.trace_events.iter().find(|event| matches!(
-            &event.event,
-            AtpPathEventKind::TransferCompleted {
-                selected_path: PathKind::OfflineMailbox,
-                bytes_transferred: 1048576, // 1MB
-            }
-        ));
+        let transfer_complete = result.trace_events.iter().find(|event| {
+            matches!(
+                &event.event,
+                AtpPathEventKind::TransferCompleted {
+                    selected_path: PathKind::OfflineMailbox,
+                    bytes_transferred: 1048576, // 1MB
+                }
+            )
+        });
         assert!(transfer_complete.is_some());
     }
 
@@ -853,25 +859,29 @@ mod tests {
         assert!(result.path_validation.relay_succeeded);
 
         // Verify fallback selection event
-        let fallback_event = result.trace_events.iter().find(|event| matches!(
-            &event.event,
-            AtpPathEventKind::FallbackSelected {
-                from_path: PathKind::NatPunchedUdp,
-                to_path: PathKind::AtpRelayUdp,
-                reason,
-                relay_cost_micros: Some(55_000),
-            } if reason == "udp_blocked_direct_datagrams"
-        ));
+        let fallback_event = result.trace_events.iter().find(|event| {
+            matches!(
+                &event.event,
+                AtpPathEventKind::FallbackSelected {
+                    from_path: PathKind::NatPunchedUdp,
+                    to_path: PathKind::AtpRelayUdp,
+                    reason,
+                    relay_cost_micros: Some(55_000),
+                } if reason == "udp_blocked_direct_datagrams"
+            )
+        });
         assert!(fallback_event.is_some());
 
         // Verify loser drain event
-        let drain_event = result.trace_events.iter().find(|event| matches!(
-            &event.event,
-            AtpPathEventKind::LoserPathDrained {
-                path_kind: PathKind::NatPunchedUdp,
-                reason,
-            } if reason == "direct_udp_candidate_failed_before_relay_selection"
-        ));
+        let drain_event = result.trace_events.iter().find(|event| {
+            matches!(
+                &event.event,
+                AtpPathEventKind::LoserPathDrained {
+                    path_kind: PathKind::NatPunchedUdp,
+                    reason,
+                } if reason == "direct_udp_candidate_failed_before_relay_selection"
+            )
+        });
         assert!(drain_event.is_some());
     }
 
@@ -987,22 +997,28 @@ mod tests {
         assert!(event_kinds.len() >= 6);
 
         // Verify we have discovery started events
-        assert!(result.trace_events.iter().any(|e| matches!(
-            &e.event,
-            AtpPathEventKind::DiscoveryStarted { .. }
-        )));
+        assert!(
+            result
+                .trace_events
+                .iter()
+                .any(|e| matches!(&e.event, AtpPathEventKind::DiscoveryStarted { .. }))
+        );
 
         // Verify we have connection attempt events
-        assert!(result.trace_events.iter().any(|e| matches!(
-            &e.event,
-            AtpPathEventKind::ConnectionAttempt { .. }
-        )));
+        assert!(
+            result
+                .trace_events
+                .iter()
+                .any(|e| matches!(&e.event, AtpPathEventKind::ConnectionAttempt { .. }))
+        );
 
         // Verify we have path failed events
-        assert!(result.trace_events.iter().any(|e| matches!(
-            &e.event,
-            AtpPathEventKind::PathFailed { .. }
-        )));
+        assert!(
+            result
+                .trace_events
+                .iter()
+                .any(|e| matches!(&e.event, AtpPathEventKind::PathFailed { .. }))
+        );
     }
 
     #[tokio::test]

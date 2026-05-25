@@ -13,23 +13,26 @@
 
 use crate::{
     cx::{Cx, Scope},
+    error::Error,
     security::authenticated::{
-        AuthenticatedContext, AuthenticationConfig, SecurityToken, AuthenticationError,
-        AuthenticationProvider, AuthenticationState, SessionManager, AccessControl,
-        AuthenticatedOperation, SecurityPolicy, CredentialManager,
+        AccessControl, AuthenticatedContext, AuthenticatedOperation, AuthenticationConfig,
+        AuthenticationError, AuthenticationProvider, AuthenticationState, CredentialManager,
+        SecurityPolicy, SecurityToken, SessionManager,
     },
-    types::cancel::{
-        CancelToken, CancelError, CancelReason, CancelScope, CancelationProtocol,
-        CancelledReason, CancelSignal, CancelHandle, CancelRegistry,
-    },
-    types::{Budget, Outcome, TaskId},
     sync::{Mutex, RwLock},
     time::{Duration, Instant},
-    error::Error,
+    types::cancel::{
+        CancelError, CancelHandle, CancelReason, CancelRegistry, CancelScope, CancelSignal,
+        CancelToken, CancelationProtocol, CancelledReason,
+    },
+    types::{Budget, Outcome, TaskId},
 };
 use std::{
-    sync::{Arc, atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering}},
     collections::{HashMap, VecDeque},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
 };
 
 /// Controllable authentication system integrated with cancellation protocols
@@ -190,12 +193,18 @@ impl CancelAwareAuthenticationSystem {
 
         // Register cancel handler for this operation
         let cleanup_handler = self.create_security_cleanup_handler(correlation_id.clone());
-        self.cancel_registry.register_cancel_handler(cancel_token.clone(), cleanup_handler).await?;
+        self.cancel_registry
+            .register_cancel_handler(cancel_token.clone(), cleanup_handler)
+            .await?;
 
         // Phase 1: Authentication
-        let auth_context = match self.authenticate_with_cancel(cx, &credentials, &cancel_token).await {
+        let auth_context = match self
+            .authenticate_with_cancel(cx, &credentials, &cancel_token)
+            .await
+        {
             Ok(context) => {
-                self.update_correlation_authenticated(&correlation_id, context.clone()).await;
+                self.update_correlation_authenticated(&correlation_id, context.clone())
+                    .await;
                 context
             }
             Err(e) => {
@@ -206,22 +215,28 @@ impl CancelAwareAuthenticationSystem {
 
         // Check for cancellation before proceeding
         if cancel_token.is_cancelled() {
-            self.handle_operation_cancellation(&correlation_id, CancelReason::RequestedByUser).await?;
+            self.handle_operation_cancellation(&correlation_id, CancelReason::RequestedByUser)
+                .await?;
             return Outcome::Cancelled;
         }
 
         // Phase 2: Operation execution with cancel monitoring
-        self.update_correlation_status(&correlation_id, AuthCancelStatus::OperationActive).await;
+        self.update_correlation_status(&correlation_id, AuthCancelStatus::OperationActive)
+            .await;
 
-        let operation_result = match self.execute_operation_with_cancel_monitoring(
-            cx,
-            &auth_context,
-            operation_type,
-            &cancel_token,
-        ).await {
+        let operation_result = match self
+            .execute_operation_with_cancel_monitoring(
+                cx,
+                &auth_context,
+                operation_type,
+                &cancel_token,
+            )
+            .await
+        {
             Ok(result) => result,
             Err(e) if cancel_token.is_cancelled() => {
-                self.handle_operation_cancellation(&correlation_id, CancelReason::RequestedByUser).await?;
+                self.handle_operation_cancellation(&correlation_id, CancelReason::RequestedByUser)
+                    .await?;
                 return Outcome::Cancelled;
             }
             Err(e) => {
@@ -232,7 +247,8 @@ impl CancelAwareAuthenticationSystem {
 
         // Phase 3: Completion with security verification
         let completion_time = start_time.elapsed();
-        self.update_correlation_completed(&correlation_id, completion_time).await;
+        self.update_correlation_completed(&correlation_id, completion_time)
+            .await;
 
         Outcome::Ok(AuthenticatedOperationResult {
             correlation_id,
@@ -257,7 +273,9 @@ impl CancelAwareAuthenticationSystem {
         }
 
         // Simulate authentication process with cancel monitoring
-        let auth_future = self.authentication_provider.authenticate(cx, credentials.clone());
+        let auth_future = self
+            .authentication_provider
+            .authenticate(cx, credentials.clone());
         let cancel_future = cancel_token.wait_for_cancellation();
 
         tokio::select! {
@@ -330,7 +348,8 @@ impl CancelAwareAuthenticationSystem {
         let cleanup_start = Instant::now();
 
         // Update correlation status
-        self.update_correlation_status(correlation_id, AuthCancelStatus::CancelRequested).await;
+        self.update_correlation_status(correlation_id, AuthCancelStatus::CancelRequested)
+            .await;
         {
             let mut correlations = self.auth_cancel_correlation.lock().unwrap();
             if let Some(correlation) = correlations.get_mut(correlation_id) {
@@ -363,7 +382,9 @@ impl CancelAwareAuthenticationSystem {
             let cleanup_time = cleanup_start.elapsed().as_millis() as u64;
             {
                 let stats = self.security_stats.lock().unwrap();
-                stats.average_cleanup_time_ms.store(cleanup_time, Ordering::SeqCst);
+                stats
+                    .average_cleanup_time_ms
+                    .store(cleanup_time, Ordering::SeqCst);
             }
 
             self.increment_stat("successful_cleanups", 1);
@@ -372,7 +393,10 @@ impl CancelAwareAuthenticationSystem {
         Ok(())
     }
 
-    async fn execute_security_cleanup(&self, correlation: &AuthCancelCorrelation) -> Vec<SecurityCleanupAction> {
+    async fn execute_security_cleanup(
+        &self,
+        correlation: &AuthCancelCorrelation,
+    ) -> Vec<SecurityCleanupAction> {
         let mut cleanup_actions = Vec::new();
         let config = self.security_coordinator.read().unwrap().clone();
 
@@ -440,16 +464,24 @@ impl CancelAwareAuthenticationSystem {
         CancelHandle::new(Box::new(move |reason| {
             // This would be an async closure in real implementation
             // For simulation, we'll track that cleanup was initiated
-            println!("Security cleanup initiated for correlation: {}", correlation_id_clone);
+            println!(
+                "Security cleanup initiated for correlation: {}",
+                correlation_id_clone
+            );
         }))
     }
 
     async fn cleanup_failed_operation(&self, correlation_id: &str) {
-        self.update_correlation_status(correlation_id, AuthCancelStatus::Failed).await;
+        self.update_correlation_status(correlation_id, AuthCancelStatus::Failed)
+            .await;
         self.increment_stat("failed_cleanups", 1);
     }
 
-    async fn update_correlation_authenticated(&self, correlation_id: &str, auth_context: AuthenticatedContext) {
+    async fn update_correlation_authenticated(
+        &self,
+        correlation_id: &str,
+        auth_context: AuthenticatedContext,
+    ) {
         let mut correlations = self.auth_cancel_correlation.lock().unwrap();
         if let Some(correlation) = correlations.get_mut(correlation_id) {
             correlation.authentication_context = Some(auth_context);
@@ -490,13 +522,15 @@ impl CancelAwareAuthenticationSystem {
 
             let system_ref = self; // In real implementation, this would be Arc reference
             let handle = cx.spawn(&format!("auth_op_{}", i), async move {
-                system_ref.execute_authenticated_operation(
-                    cx,
-                    operation_id,
-                    AuthenticatedOperationType::OperationExecution,
-                    credentials,
-                    child_cancel_token,
-                ).await
+                system_ref
+                    .execute_authenticated_operation(
+                        cx,
+                        operation_id,
+                        AuthenticatedOperationType::OperationExecution,
+                        credentials,
+                        child_cancel_token,
+                    )
+                    .await
             })?;
 
             operation_handles.push(handle);
@@ -543,11 +577,17 @@ impl CancelAwareAuthenticationSystem {
     fn increment_stat(&self, stat_name: &str, count: u64) {
         let stats = self.security_stats.lock().unwrap();
         match stat_name {
-            "total_auth_operations" => stats.total_auth_operations.fetch_add(count, Ordering::SeqCst),
-            "cancelled_auth_operations" => stats.cancelled_auth_operations.fetch_add(count, Ordering::SeqCst),
+            "total_auth_operations" => stats
+                .total_auth_operations
+                .fetch_add(count, Ordering::SeqCst),
+            "cancelled_auth_operations" => stats
+                .cancelled_auth_operations
+                .fetch_add(count, Ordering::SeqCst),
             "successful_cleanups" => stats.successful_cleanups.fetch_add(count, Ordering::SeqCst),
             "failed_cleanups" => stats.failed_cleanups.fetch_add(count, Ordering::SeqCst),
-            "session_invalidations" => stats.session_invalidations.fetch_add(count, Ordering::SeqCst),
+            "session_invalidations" => stats
+                .session_invalidations
+                .fetch_add(count, Ordering::SeqCst),
             "token_revocations" => stats.token_revocations.fetch_add(count, Ordering::SeqCst),
             "credential_cleanups" => stats.credential_cleanups.fetch_add(count, Ordering::SeqCst),
             "cancel_propagations" => stats.cancel_propagations.fetch_add(count, Ordering::SeqCst),
@@ -664,12 +704,9 @@ mod tests {
                 strict_security_on_cancel: true,
             };
 
-            let auth_system = CancelAwareAuthenticationSystem::new(
-                auth_config,
-                coordinator_config,
-            )
-            .await
-            .expect("Failed to create authentication system");
+            let auth_system = CancelAwareAuthenticationSystem::new(auth_config, coordinator_config)
+                .await
+                .expect("Failed to create authentication system");
 
             // Test basic authenticated operation
             let operation_id = "basic_auth_test_001".to_string();
@@ -688,7 +725,10 @@ mod tests {
 
             match result {
                 Outcome::Ok(operation_result) => {
-                    assert_eq!(operation_result.operation_type, AuthenticatedOperationType::Login);
+                    assert_eq!(
+                        operation_result.operation_type,
+                        AuthenticatedOperationType::Login
+                    );
                     assert!(operation_result.operation_result.success);
                     assert!(!operation_result.operation_result.execution_time.is_zero());
                 }
@@ -702,7 +742,9 @@ mod tests {
             assert_eq!(stats.cancelled_auth_operations, 0);
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 
     #[tokio::test]
@@ -721,12 +763,9 @@ mod tests {
                 strict_security_on_cancel: true,
             };
 
-            let auth_system = CancelAwareAuthenticationSystem::new(
-                auth_config,
-                coordinator_config,
-            )
-            .await
-            .expect("Failed to create authentication system");
+            let auth_system = CancelAwareAuthenticationSystem::new(auth_config, coordinator_config)
+                .await
+                .expect("Failed to create authentication system");
 
             // Start a long-running operation and cancel it
             let operation_id = "cancel_test_001".to_string();
@@ -738,13 +777,15 @@ mod tests {
             let operation_task = scope.spawn("long_operation", {
                 let system_ref = &auth_system;
                 async move {
-                    system_ref.execute_authenticated_operation(
-                        cx,
-                        operation_id,
-                        AuthenticatedOperationType::SecurityAudit, // Long-running operation
-                        credentials,
-                        cancel_token_clone,
-                    ).await
+                    system_ref
+                        .execute_authenticated_operation(
+                            cx,
+                            operation_id,
+                            AuthenticatedOperationType::SecurityAudit, // Long-running operation
+                            credentials,
+                            cancel_token_clone,
+                        )
+                        .await
                 }
             })?;
 
@@ -781,7 +822,9 @@ mod tests {
             assert!(stats.successful_cleanups > 0 || stats.cancelled_auth_operations > 0);
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 
     #[tokio::test]
@@ -800,12 +843,9 @@ mod tests {
                 strict_security_on_cancel: false, // More lenient for propagation test
             };
 
-            let auth_system = CancelAwareAuthenticationSystem::new(
-                auth_config,
-                coordinator_config,
-            )
-            .await
-            .expect("Failed to create authentication system");
+            let auth_system = CancelAwareAuthenticationSystem::new(auth_config, coordinator_config)
+                .await
+                .expect("Failed to create authentication system");
 
             // Test cancellation propagation across multiple operations
             let operation_count = 5;
@@ -835,9 +875,14 @@ mod tests {
             println!("- Completed: {}", propagation_result.completed_operations);
             println!("- Cancelled: {}", propagation_result.cancelled_operations);
             println!("- Failed: {}", propagation_result.failed_operations);
-            println!("- Propagation time: {:?}", propagation_result.propagation_time);
+            println!(
+                "- Propagation time: {:?}",
+                propagation_result.propagation_time
+            );
 
             Outcome::Ok(())
-        }).await.expect("Region should complete successfully");
+        })
+        .await
+        .expect("Region should complete successfully");
     }
 }

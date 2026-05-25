@@ -7,9 +7,9 @@
 //!
 //! It intentionally stays runtime-agnostic and does not perform socket I/O.
 
+use crate::bytes::BytesMut;
 use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::{QuicFrame, QuicFrameError};
-use crate::bytes::BytesMut;
 use std::fmt;
 
 use super::streams::{QuicStreamError, StreamId, StreamRole, StreamTable, StreamTableError};
@@ -791,7 +791,8 @@ impl NativeQuicConnection {
         frame: &QuicFrame,
         _space: PacketNumberSpace,
     ) -> Result<(), NativeQuicConnectionError> {
-        cx.checkpoint().map_err(|_| NativeQuicConnectionError::Cancelled)?;
+        cx.checkpoint()
+            .map_err(|_| NativeQuicConnectionError::Cancelled)?;
 
         match frame {
             QuicFrame::Ping => {
@@ -851,7 +852,8 @@ impl NativeQuicConnection {
         _space: PacketNumberSpace,
         _max_frame_bytes: usize,
     ) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
-        cx.checkpoint().map_err(|_| NativeQuicConnectionError::Cancelled)?;
+        cx.checkpoint()
+            .map_err(|_| NativeQuicConnectionError::Cancelled)?;
 
         // For now, return an empty frame set
         // TODO: Generate ACK, STREAM, and control frames as APIs stabilize

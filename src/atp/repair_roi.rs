@@ -245,7 +245,7 @@ impl NetworkRegime {
                 self.swarm_peer_count as u16
             } else {
                 0
-            }
+            },
         }
     }
 }
@@ -383,7 +383,8 @@ impl RepairRoiSimulator {
                         let coordinator = AtpRepairCoordinator::new(*policy);
                         let decision = coordinator.decide(&roi_inputs);
 
-                        let repair_recommended = !matches!(decision.action, AtpRepairAction::NoRepair);
+                        let repair_recommended =
+                            !matches!(decision.action, AtpRepairAction::NoRepair);
 
                         let mut result = RepairRoiSimulationResult {
                             regime: regime.clone(),

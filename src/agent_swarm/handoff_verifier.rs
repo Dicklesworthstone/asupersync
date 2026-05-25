@@ -391,10 +391,10 @@ pub struct StalenessThresholds {
 impl Default for StalenessThresholds {
     fn default() -> Self {
         Self {
-            docs_max_age: Duration::from_secs(3600), // 1 hour
-            inbox_max_age: Duration::from_secs(300),  // 5 minutes
+            docs_max_age: Duration::from_secs(3600),          // 1 hour
+            inbox_max_age: Duration::from_secs(300),          // 5 minutes
             proof_command_timeout: Duration::from_secs(1800), // 30 minutes
-            git_sync_max_age: Duration::from_secs(600), // 10 minutes
+            git_sync_max_age: Duration::from_secs(600),       // 10 minutes
         }
     }
 }
@@ -450,8 +450,10 @@ impl HandoffVerifier {
             violations.push(SafetyViolation {
                 category: ViolationCategory::CriticalUnacknowledgedMessages,
                 reason: "Critical messages require immediate attention".to_string(),
-                evidence: format!("{} critical unacknowledged messages",
-                                capsule.inbox_state.critical_unacked.len()),
+                evidence: format!(
+                    "{} critical unacknowledged messages",
+                    capsule.inbox_state.critical_unacked.len()
+                ),
             });
         } else if self.is_inbox_stale(&capsule.inbox_state) {
             refresh_targets.insert(RefreshTarget::InboxMessages);
@@ -576,17 +578,18 @@ impl HandoffVerifier {
             > self.staleness_thresholds.inbox_max_age
     }
 
-    fn check_file_reservations(&self, reservations: &[FileReservation]) -> Option<CoordinationRequirement> {
+    fn check_file_reservations(
+        &self,
+        reservations: &[FileReservation],
+    ) -> Option<CoordinationRequirement> {
         let now = SystemTime::now();
-        let expired_count = reservations.iter()
-            .filter(|r| r.expires_at < now)
-            .count();
+        let expired_count = reservations.iter().filter(|r| r.expires_at < now).count();
 
         if expired_count > 0 {
             Some(CoordinationRequirement {
                 requirement_type: CoordinationType::FileReservationHandoff,
                 target_agents: vec!["system".to_string()], // Placeholder
-                estimated_time: Duration::from_secs(300), // 5 minutes
+                estimated_time: Duration::from_secs(300),  // 5 minutes
             })
         } else {
             None
@@ -621,11 +624,16 @@ impl HandoffVerifier {
         !commands.is_empty() // Any in-flight commands need refresh
     }
 
-    fn check_file_conflicts(&self, dirty_paths: &DirtyPathSummary) -> Option<CoordinationRequirement> {
+    fn check_file_conflicts(
+        &self,
+        dirty_paths: &DirtyPathSummary,
+    ) -> Option<CoordinationRequirement> {
         if !dirty_paths.potential_conflicts.is_empty() {
             Some(CoordinationRequirement {
                 requirement_type: CoordinationType::ConflictResolution,
-                target_agents: dirty_paths.potential_conflicts.iter()
+                target_agents: dirty_paths
+                    .potential_conflicts
+                    .iter()
                     .flat_map(|c| c.competing_agents.clone())
                     .collect(),
                 estimated_time: Duration::from_secs(600), // 10 minutes
@@ -695,7 +703,7 @@ mod tests {
         let capsule = create_test_capsule();
 
         match verifier.verify_handoff(&capsule) {
-            HandoffDecision::Continue => {},
+            HandoffDecision::Continue => {}
             other => panic!("Expected Continue, got {:?}", other),
         }
     }
@@ -712,7 +720,7 @@ mod tests {
         match verifier.verify_handoff(&capsule) {
             HandoffDecision::NarrowRefreshRequired { refresh_targets } => {
                 assert!(refresh_targets.contains(&RefreshTarget::Documentation));
-            },
+            }
             other => panic!("Expected NarrowRefreshRequired, got {:?}", other),
         }
     }
@@ -726,8 +734,12 @@ mod tests {
 
         match verifier.verify_handoff(&capsule) {
             HandoffDecision::UnsafeToContinue { reasons } => {
-                assert!(reasons.iter().any(|r| matches!(r.category, ViolationCategory::StaleGitState)));
-            },
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|r| matches!(r.category, ViolationCategory::StaleGitState))
+                );
+            }
             other => panic!("Expected UnsafeToContinue, got {:?}", other),
         }
     }
@@ -746,8 +758,11 @@ mod tests {
 
         match verifier.verify_handoff(&capsule) {
             HandoffDecision::UnsafeToContinue { reasons } => {
-                assert!(reasons.iter().any(|r| matches!(r.category, ViolationCategory::CriticalUnacknowledgedMessages)));
-            },
+                assert!(reasons.iter().any(|r| matches!(
+                    r.category,
+                    ViolationCategory::CriticalUnacknowledgedMessages
+                )));
+            }
             other => panic!("Expected UnsafeToContinue, got {:?}", other),
         }
     }
@@ -766,9 +781,14 @@ mod tests {
         });
 
         match verifier.verify_handoff(&capsule) {
-            HandoffDecision::CoordinateFirst { coordination_needed } => {
-                assert!(coordination_needed.iter().any(|c| matches!(c.requirement_type, CoordinationType::FileReservationHandoff)));
-            },
+            HandoffDecision::CoordinateFirst {
+                coordination_needed,
+            } => {
+                assert!(coordination_needed.iter().any(|c| matches!(
+                    c.requirement_type,
+                    CoordinationType::FileReservationHandoff
+                )));
+            }
             other => panic!("Expected CoordinateFirst, got {:?}", other),
         }
     }
@@ -785,9 +805,16 @@ mod tests {
         });
 
         match verifier.verify_handoff(&capsule) {
-            HandoffDecision::CoordinateFirst { coordination_needed } => {
-                assert!(coordination_needed.iter().any(|c| matches!(c.requirement_type, CoordinationType::ConflictResolution)));
-            },
+            HandoffDecision::CoordinateFirst {
+                coordination_needed,
+            } => {
+                assert!(
+                    coordination_needed.iter().any(|c| matches!(
+                        c.requirement_type,
+                        CoordinationType::ConflictResolution
+                    ))
+                );
+            }
             other => panic!("Expected CoordinateFirst, got {:?}", other),
         }
     }
@@ -801,8 +828,12 @@ mod tests {
 
         match verifier.verify_handoff(&capsule) {
             HandoffDecision::UnsafeToContinue { reasons } => {
-                assert!(reasons.iter().any(|r| matches!(r.category, ViolationCategory::IntegrityCheckFailure)));
-            },
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|r| matches!(r.category, ViolationCategory::IntegrityCheckFailure))
+                );
+            }
             other => panic!("Expected UnsafeToContinue, got {:?}", other),
         }
     }
@@ -822,8 +853,12 @@ mod tests {
 
         match verifier.verify_handoff(&capsule) {
             HandoffDecision::UnsafeToContinue { reasons } => {
-                assert!(reasons.iter().any(|r| matches!(r.category, ViolationCategory::FailedProofCommands)));
-            },
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|r| matches!(r.category, ViolationCategory::FailedProofCommands))
+                );
+            }
             other => panic!("Expected UnsafeToContinue, got {:?}", other),
         }
     }
@@ -836,7 +871,13 @@ mod tests {
         let json = serde_json::to_string(&capsule).unwrap();
         let deserialized: HandoffCapsule = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(capsule.session_meta.agent_id, deserialized.session_meta.agent_id);
-        assert_eq!(capsule.git_state.current_branch, deserialized.git_state.current_branch);
+        assert_eq!(
+            capsule.session_meta.agent_id,
+            deserialized.session_meta.agent_id
+        );
+        assert_eq!(
+            capsule.git_state.current_branch,
+            deserialized.git_state.current_branch
+        );
     }
 }

@@ -365,16 +365,24 @@ impl AtpFairnessCoordinator {
         for (transfer_id, _demand) in &self.active_transfers {
             allocations.push(AtpFairShareAllocation {
                 transfer_id: transfer_id.clone(),
-                bandwidth_bytes_per_second: self.budget.max_bandwidth_bytes_per_second
+                bandwidth_bytes_per_second: self
+                    .budget
+                    .max_bandwidth_bytes_per_second
                     .map(|b| b / transfer_count as u64)
                     .unwrap_or(u64::MAX),
-                in_flight_bytes: self.budget.max_in_flight_bytes
+                in_flight_bytes: self
+                    .budget
+                    .max_in_flight_bytes
                     .map(|b| b / transfer_count as u64)
                     .unwrap_or(u64::MAX),
-                repair_symbols_per_second: self.budget.max_repair_symbols_per_second
+                repair_symbols_per_second: self
+                    .budget
+                    .max_repair_symbols_per_second
                     .map(|r| r / transfer_count as u32)
                     .unwrap_or(u32::MAX),
-                disk_write_concurrency: self.budget.max_disk_write_concurrency
+                disk_write_concurrency: self
+                    .budget
+                    .max_disk_write_concurrency
                     .map(|d| d.max(1) / transfer_count as u16)
                     .unwrap_or(u16::MAX),
                 share_ratio,
@@ -382,9 +390,13 @@ impl AtpFairnessCoordinator {
         }
     }
 
-    fn calculate_priority_weighted_allocations(&self, allocations: &mut Vec<AtpFairShareAllocation>) {
+    fn calculate_priority_weighted_allocations(
+        &self,
+        allocations: &mut Vec<AtpFairShareAllocation>,
+    ) {
         // Background transfers get 0.25 weight, foreground get 1.0 weight
-        let total_weight: f64 = self.active_transfers
+        let total_weight: f64 = self
+            .active_transfers
             .values()
             .map(|_demand| {
                 // For now, assume all transfers are foreground (weight = 1.0)
@@ -399,16 +411,24 @@ impl AtpFairnessCoordinator {
 
             allocations.push(AtpFairShareAllocation {
                 transfer_id: transfer_id.clone(),
-                bandwidth_bytes_per_second: self.budget.max_bandwidth_bytes_per_second
+                bandwidth_bytes_per_second: self
+                    .budget
+                    .max_bandwidth_bytes_per_second
                     .map(|b| ((b as f64) * share_ratio) as u64)
                     .unwrap_or(u64::MAX),
-                in_flight_bytes: self.budget.max_in_flight_bytes
+                in_flight_bytes: self
+                    .budget
+                    .max_in_flight_bytes
                     .map(|b| ((b as f64) * share_ratio) as u64)
                     .unwrap_or(u64::MAX),
-                repair_symbols_per_second: self.budget.max_repair_symbols_per_second
+                repair_symbols_per_second: self
+                    .budget
+                    .max_repair_symbols_per_second
                     .map(|r| ((r as f64) * share_ratio) as u32)
                     .unwrap_or(u32::MAX),
-                disk_write_concurrency: self.budget.max_disk_write_concurrency
+                disk_write_concurrency: self
+                    .budget
+                    .max_disk_write_concurrency
                     .map(|d| (((d as f64) * share_ratio) as u16).max(1))
                     .unwrap_or(u16::MAX),
                 share_ratio,
@@ -432,16 +452,24 @@ impl AtpFairnessCoordinator {
 
             allocations.push(AtpFairShareAllocation {
                 transfer_id: transfer_id.clone(),
-                bandwidth_bytes_per_second: self.budget.max_bandwidth_bytes_per_second
+                bandwidth_bytes_per_second: self
+                    .budget
+                    .max_bandwidth_bytes_per_second
                     .map(|b| ((b as f64) * share_ratio) as u64)
                     .unwrap_or(u64::MAX),
-                in_flight_bytes: self.budget.max_in_flight_bytes
+                in_flight_bytes: self
+                    .budget
+                    .max_in_flight_bytes
                     .map(|b| ((b as f64) * share_ratio) as u64)
                     .unwrap_or(u64::MAX),
-                repair_symbols_per_second: self.budget.max_repair_symbols_per_second
+                repair_symbols_per_second: self
+                    .budget
+                    .max_repair_symbols_per_second
                     .map(|r| ((r as f64) * share_ratio) as u32)
                     .unwrap_or(u32::MAX),
-                disk_write_concurrency: self.budget.max_disk_write_concurrency
+                disk_write_concurrency: self
+                    .budget
+                    .max_disk_write_concurrency
                     .map(|d| (((d as f64) * share_ratio) as u16).max(1))
                     .unwrap_or(u16::MAX),
                 share_ratio,
@@ -451,9 +479,13 @@ impl AtpFairnessCoordinator {
         }
     }
 
-    fn calculate_size_proportional_allocations(&self, allocations: &mut Vec<AtpFairShareAllocation>) {
+    fn calculate_size_proportional_allocations(
+        &self,
+        allocations: &mut Vec<AtpFairShareAllocation>,
+    ) {
         // Use in_flight_bytes as a proxy for transfer size
-        let total_size: u64 = self.active_transfers
+        let total_size: u64 = self
+            .active_transfers
             .values()
             .map(|demand| demand.in_flight_bytes.max(1))
             .sum();
@@ -464,16 +496,24 @@ impl AtpFairnessCoordinator {
 
             allocations.push(AtpFairShareAllocation {
                 transfer_id: transfer_id.clone(),
-                bandwidth_bytes_per_second: self.budget.max_bandwidth_bytes_per_second
+                bandwidth_bytes_per_second: self
+                    .budget
+                    .max_bandwidth_bytes_per_second
                     .map(|b| ((b as f64) * share_ratio) as u64)
                     .unwrap_or(u64::MAX),
-                in_flight_bytes: self.budget.max_in_flight_bytes
+                in_flight_bytes: self
+                    .budget
+                    .max_in_flight_bytes
                     .map(|b| ((b as f64) * share_ratio) as u64)
                     .unwrap_or(u64::MAX),
-                repair_symbols_per_second: self.budget.max_repair_symbols_per_second
+                repair_symbols_per_second: self
+                    .budget
+                    .max_repair_symbols_per_second
                     .map(|r| ((r as f64) * share_ratio) as u32)
                     .unwrap_or(u32::MAX),
-                disk_write_concurrency: self.budget.max_disk_write_concurrency
+                disk_write_concurrency: self
+                    .budget
+                    .max_disk_write_concurrency
                     .map(|d| (((d as f64) * share_ratio) as u16).max(1))
                     .unwrap_or(u16::MAX),
                 share_ratio,
@@ -623,7 +663,8 @@ mod tests {
         let budget = AtpResourceBudget::from_profile(AtpResourceProfile::for_power_profile(
             AtpPowerProfile::Balanced,
         ));
-        let mut coordinator = AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::FirstComeFirstServed);
+        let mut coordinator =
+            AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::FirstComeFirstServed);
 
         // Register transfers in order
         coordinator.register_transfer("first".into(), AtpResourceDemand::default());
@@ -648,7 +689,8 @@ mod tests {
         let budget = AtpResourceBudget::from_profile(AtpResourceProfile::for_power_profile(
             AtpPowerProfile::Balanced,
         ));
-        let mut coordinator = AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::SizeProportional);
+        let mut coordinator =
+            AtpFairnessCoordinator::new(budget, AtpFairnessPolicy::SizeProportional);
 
         // Small transfer: 1 MiB
         coordinator.register_transfer(
@@ -672,11 +714,17 @@ mod tests {
         assert_eq!(allocations.len(), 2);
 
         // Small transfer should get ~10% (1/10)
-        let small_alloc = allocations.iter().find(|a| a.transfer_id.0 == "small").unwrap();
+        let small_alloc = allocations
+            .iter()
+            .find(|a| a.transfer_id.0 == "small")
+            .unwrap();
         assert!((small_alloc.share_ratio - 0.1).abs() < 0.01);
 
         // Large transfer should get ~90% (9/10)
-        let large_alloc = allocations.iter().find(|a| a.transfer_id.0 == "large").unwrap();
+        let large_alloc = allocations
+            .iter()
+            .find(|a| a.transfer_id.0 == "large")
+            .unwrap();
         assert!((large_alloc.share_ratio - 0.9).abs() < 0.01);
     }
 
@@ -697,13 +745,17 @@ mod tests {
     #[test]
     fn fairness_coordinator_budget_and_policy_updates() {
         let initial_budget = AtpResourceBudget::default();
-        let mut coordinator = AtpFairnessCoordinator::new(initial_budget, AtpFairnessPolicy::EqualShare);
+        let mut coordinator =
+            AtpFairnessCoordinator::new(initial_budget, AtpFairnessPolicy::EqualShare);
 
         assert_eq!(coordinator.policy(), AtpFairnessPolicy::EqualShare);
 
         // Update policy
         coordinator.update_policy(AtpFairnessPolicy::FirstComeFirstServed);
-        assert_eq!(coordinator.policy(), AtpFairnessPolicy::FirstComeFirstServed);
+        assert_eq!(
+            coordinator.policy(),
+            AtpFairnessPolicy::FirstComeFirstServed
+        );
 
         // Update budget
         let new_budget = AtpResourceBudget::from_profile(AtpResourceProfile::for_power_profile(

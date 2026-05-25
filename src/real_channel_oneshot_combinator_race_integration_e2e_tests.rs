@@ -5,18 +5,18 @@
 
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod tests {
-    use crate::channel::oneshot::{channel as oneshot_channel, Receiver, Sender};
-    use crate::combinator::race::{race, race_3, race_4, RaceOutcome};
+    use crate::cancel::{CancelReason, CancelToken};
+    use crate::channel::oneshot::{Receiver, Sender, channel as oneshot_channel};
+    use crate::combinator::race::{RaceOutcome, race, race_3, race_4};
     use crate::cx::{Cx, Scope};
+    use crate::error::AsupersyncError;
     use crate::runtime::{Runtime, RuntimeBuilder};
     use crate::time::{Duration, Instant, sleep};
-    use crate::types::{Budget, Outcome, TaskId, RegionId};
-    use crate::error::AsupersyncError;
-    use crate::cancel::{CancelToken, CancelReason};
+    use crate::types::{Budget, Outcome, RegionId, TaskId};
 
     use std::collections::{HashMap, VecDeque};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     /// Configuration for oneshot race coordination
     #[derive(Debug, Clone)]
@@ -177,7 +177,10 @@ mod tests {
                     let (tx, rx) = oneshot_channel();
                     system.channel_pool.push_back((tx, rx));
                 }
-                system.stats.channels_created.fetch_add(*pool_size as u64, Ordering::SeqCst);
+                system
+                    .stats
+                    .channels_created
+                    .fetch_add(*pool_size as u64, Ordering::SeqCst);
             }
 
             Ok(system)
@@ -188,34 +191,36 @@ mod tests {
             self.is_running.store(true, Ordering::SeqCst);
 
             // Start race processing loop
-            let race_handle = cx.spawn(|cx| async move {
-                self.run_race_processor(cx).await
-            }).await?;
+            let race_handle = cx
+                .spawn(|cx| async move { self.run_race_processor(cx).await })
+                .await?;
 
             // Start cleanup monitoring
-            let cleanup_handle = cx.spawn(|cx| async move {
-                self.run_cleanup_monitor(cx).await
-            }).await?;
+            let cleanup_handle = cx
+                .spawn(|cx| async move { self.run_cleanup_monitor(cx).await })
+                .await?;
 
             // Start statistics collection
-            let stats_handle = cx.spawn(|cx| async move {
-                self.run_stats_collector(cx).await
-            }).await?;
+            let stats_handle = cx
+                .spawn(|cx| async move { self.run_stats_collector(cx).await })
+                .await?;
 
             Ok(())
         }
 
         /// Create new race with entries
-        async fn create_race(&mut self, entries: Vec<RaceEntry>, cx: &Cx) -> Result<u64, AsupersyncError> {
+        async fn create_race(
+            &mut self,
+            entries: Vec<RaceEntry>,
+            cx: &Cx,
+        ) -> Result<u64, AsupersyncError> {
             let race_id = self.next_race_id.fetch_add(1, Ordering::SeqCst);
 
             // Allocate channels based on mode
             let channels = self.allocate_channels(entries.len()).await?;
 
             // Create cancel tokens for coordination
-            let cancel_tokens: Vec<_> = (0..entries.len())
-                .map(|_| CancelToken::new())
-                .collect();
+            let cancel_tokens: Vec<_> = (0..entries.len()).map(|_| CancelToken::new()).collect();
 
             let coordinator = RaceCoordinator {
                 race_id,
@@ -233,7 +238,10 @@ mod tests {
         }
 
         /// Allocate channels based on coordination mode
-        async fn allocate_channels(&mut self, count: usize) -> Result<Vec<(Sender<RaceEntry>, Receiver<RaceEntry>)>, AsupersyncError> {
+        async fn allocate_channels(
+            &mut self,
+            count: usize,
+        ) -> Result<Vec<(Sender<RaceEntry>, Receiver<RaceEntry>)>, AsupersyncError> {
             let mut channels = Vec::new();
 
             match &self.channel_mode {
@@ -267,9 +275,12 @@ mod tests {
                         }
                     }
                 }
-                ChannelMode::Adaptive { allocation_threshold } => {
+                ChannelMode::Adaptive {
+                    allocation_threshold,
+                } => {
                     // Adaptive allocation based on load
-                    let load_factor = self.active_races.len() as f64 / self.config.max_concurrent_races as f64;
+                    let load_factor =
+                        self.active_races.len() as f64 / self.config.max_concurrent_races as f64;
 
                     if load_factor > *allocation_threshold {
                         // High load: use shared channels
@@ -294,56 +305,81 @@ mod tests {
         }
 
         /// Execute race with oneshot channel coordination
-        async fn execute_race(&mut self, race_id: u64, cx: &Cx) -> Result<RaceResult, AsupersyncError> {
-            let coordinator = self.active_races.get_mut(&race_id)
+        async fn execute_race(
+            &mut self,
+            race_id: u64,
+            cx: &Cx,
+        ) -> Result<RaceResult, AsupersyncError> {
+            let coordinator = self
+                .active_races
+                .get_mut(&race_id)
                 .ok_or_else(|| AsupersyncError::InvalidState("Race not found".to_string()))?;
 
             let start_time = Instant::now();
 
             // Create race futures with channel coordination
-            let race_futures = coordinator.entries.iter().enumerate().map(|(i, entry)| {
-                let entry = entry.clone();
-                let (tx, rx) = &coordinator.channels[i];
-                let cancel_token = coordinator.cancel_tokens[i].clone();
+            let race_futures = coordinator
+                .entries
+                .iter()
+                .enumerate()
+                .map(|(i, entry)| {
+                    let entry = entry.clone();
+                    let (tx, rx) = &coordinator.channels[i];
+                    let cancel_token = coordinator.cancel_tokens[i].clone();
 
-                async move {
-                    // Simulate work with expected duration
-                    let work_result = cx.scope(|cx| async move {
-                        // Race between actual work and cancellation
-                        let work_future = async {
-                            sleep(entry.expected_duration, cx).await?;
-                            Ok::<RaceEntry, AsupersyncError>(entry.clone())
-                        };
+                    async move {
+                        // Simulate work with expected duration
+                        let work_result = cx
+                            .scope(|cx| async move {
+                                // Race between actual work and cancellation
+                                let work_future = async {
+                                    sleep(entry.expected_duration, cx).await?;
+                                    Ok::<RaceEntry, AsupersyncError>(entry.clone())
+                                };
 
-                        let cancel_future = async {
-                            cancel_token.cancelled().await;
-                            Err(AsupersyncError::Cancelled("Race entry cancelled".to_string()))
-                        };
+                                let cancel_future = async {
+                                    cancel_token.cancelled().await;
+                                    Err(AsupersyncError::Cancelled(
+                                        "Race entry cancelled".to_string(),
+                                    ))
+                                };
 
-                        race(work_future, cancel_future, cx).await
-                    }).await;
+                                race(work_future, cancel_future, cx).await
+                            })
+                            .await;
 
-                    match work_result {
-                        Ok(Outcome::Ok(RaceOutcome::First(entry))) => Ok(entry),
-                        Ok(Outcome::Ok(RaceOutcome::Second(_))) => Err(AsupersyncError::Cancelled("Cancelled".to_string())),
-                        _ => Err(AsupersyncError::Cancelled("Failed".to_string())),
+                        match work_result {
+                            Ok(Outcome::Ok(RaceOutcome::First(entry))) => Ok(entry),
+                            Ok(Outcome::Ok(RaceOutcome::Second(_))) => {
+                                Err(AsupersyncError::Cancelled("Cancelled".to_string()))
+                            }
+                            _ => Err(AsupersyncError::Cancelled("Failed".to_string())),
+                        }
                     }
-                }
-            }).collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>();
 
             // Execute race based on strategy
             let race_outcome = match &coordinator.strategy {
-                RaceStrategy::FirstWins => {
-                    self.execute_first_wins_race(race_futures, cx).await?
-                }
+                RaceStrategy::FirstWins => self.execute_first_wins_race(race_futures, cx).await?,
                 RaceStrategy::PriorityBased { time_window } => {
-                    self.execute_priority_race(race_futures, *time_window, coordinator, cx).await?
+                    self.execute_priority_race(race_futures, *time_window, coordinator, cx)
+                        .await?
                 }
                 RaceStrategy::FastestHighPriority { min_priority } => {
-                    self.execute_fastest_high_priority_race(race_futures, *min_priority, coordinator, cx).await?
+                    self.execute_fastest_high_priority_race(
+                        race_futures,
+                        *min_priority,
+                        coordinator,
+                        cx,
+                    )
+                    .await?
                 }
-                RaceStrategy::Adaptive { performance_history } => {
-                    self.execute_adaptive_race(race_futures, *performance_history, coordinator, cx).await?
+                RaceStrategy::Adaptive {
+                    performance_history,
+                } => {
+                    self.execute_adaptive_race(race_futures, *performance_history, coordinator, cx)
+                        .await?
                 }
             };
 
@@ -367,7 +403,9 @@ mod tests {
 
             self.stats.races_completed.fetch_add(1, Ordering::SeqCst);
             self.stats.winners_identified.fetch_add(1, Ordering::SeqCst);
-            self.stats.losers_cancelled.fetch_add(cancelled_count as u64, Ordering::SeqCst);
+            self.stats
+                .losers_cancelled
+                .fetch_add(cancelled_count as u64, Ordering::SeqCst);
 
             Ok(result)
         }
@@ -375,7 +413,9 @@ mod tests {
         /// Execute first-wins race strategy
         async fn execute_first_wins_race(
             &self,
-            race_futures: Vec<impl std::future::Future<Output = Result<RaceEntry, AsupersyncError>> + Send>,
+            race_futures: Vec<
+                impl std::future::Future<Output = Result<RaceEntry, AsupersyncError>> + Send,
+            >,
             cx: &Cx,
         ) -> Result<RaceOutcome, AsupersyncError> {
             // Use race combinator to find first completion
@@ -395,12 +435,10 @@ mod tests {
                             losers: Vec::new(), // Would track actual losers in full implementation
                         })
                     }
-                    RaceOutcome::Second(winner) => {
-                        Ok(RaceOutcome {
-                            winner: Some(winner),
-                            losers: Vec::new(),
-                        })
-                    }
+                    RaceOutcome::Second(winner) => Ok(RaceOutcome {
+                        winner: Some(winner),
+                        losers: Vec::new(),
+                    }),
                 }
             } else {
                 // Single future, just await it
@@ -415,7 +453,9 @@ mod tests {
         /// Execute priority-based race strategy
         async fn execute_priority_race(
             &self,
-            race_futures: Vec<impl std::future::Future<Output = Result<RaceEntry, AsupersyncError>> + Send>,
+            race_futures: Vec<
+                impl std::future::Future<Output = Result<RaceEntry, AsupersyncError>> + Send,
+            >,
             time_window: Duration,
             coordinator: &RaceCoordinator,
             cx: &Cx,
@@ -424,12 +464,16 @@ mod tests {
             sleep(time_window, cx).await?;
 
             // Find highest priority entry (simplified implementation)
-            let highest_priority_entry = coordinator.entries.iter()
+            let highest_priority_entry = coordinator
+                .entries
+                .iter()
                 .max_by_key(|entry| entry.priority)
                 .cloned();
 
             if let Some(winner) = highest_priority_entry {
-                let losers = coordinator.entries.iter()
+                let losers = coordinator
+                    .entries
+                    .iter()
                     .filter(|e| e.id != winner.id)
                     .cloned()
                     .collect();
@@ -449,24 +493,31 @@ mod tests {
         /// Execute fastest high priority race strategy
         async fn execute_fastest_high_priority_race(
             &self,
-            race_futures: Vec<impl std::future::Future<Output = Result<RaceEntry, AsupersyncError>> + Send>,
+            race_futures: Vec<
+                impl std::future::Future<Output = Result<RaceEntry, AsupersyncError>> + Send,
+            >,
             min_priority: u32,
             coordinator: &RaceCoordinator,
             cx: &Cx,
         ) -> Result<RaceOutcome, AsupersyncError> {
             // Filter high priority entries and race them
-            let high_priority_entries: Vec<_> = coordinator.entries.iter()
+            let high_priority_entries: Vec<_> = coordinator
+                .entries
+                .iter()
                 .filter(|e| e.priority >= min_priority)
                 .cloned()
                 .collect();
 
             if !high_priority_entries.is_empty() {
                 // Simulate racing high priority entries
-                let winner = high_priority_entries.into_iter()
+                let winner = high_priority_entries
+                    .into_iter()
                     .min_by_key(|e| e.expected_duration)
                     .unwrap();
 
-                let losers = coordinator.entries.iter()
+                let losers = coordinator
+                    .entries
+                    .iter()
                     .filter(|e| e.id != winner.id)
                     .cloned()
                     .collect();
@@ -484,27 +535,39 @@ mod tests {
         /// Execute adaptive race strategy
         async fn execute_adaptive_race(
             &self,
-            race_futures: Vec<impl std::future::Future<Output = Result<RaceEntry, AsupersyncError>> + Send>,
+            race_futures: Vec<
+                impl std::future::Future<Output = Result<RaceEntry, AsupersyncError>> + Send,
+            >,
             performance_history: usize,
             coordinator: &RaceCoordinator,
             cx: &Cx,
         ) -> Result<RaceOutcome, AsupersyncError> {
             // Use historical performance to predict best strategy
-            let recent_results: Vec<_> = self.completion_history.iter()
+            let recent_results: Vec<_> = self
+                .completion_history
+                .iter()
                 .take(performance_history)
                 .collect();
 
             if recent_results.len() > 5 {
-                let avg_completion_time: Duration = recent_results.iter()
+                let avg_completion_time: Duration = recent_results
+                    .iter()
                     .map(|r| r.completion_time)
-                    .sum::<Duration>() / recent_results.len() as u32;
+                    .sum::<Duration>()
+                    / recent_results.len() as u32;
 
                 if avg_completion_time < Duration::from_millis(100) {
                     // Fast completions: use first-wins
                     self.execute_first_wins_race(race_futures, cx).await
                 } else {
                     // Slower completions: use priority-based
-                    self.execute_priority_race(race_futures, Duration::from_millis(50), coordinator, cx).await
+                    self.execute_priority_race(
+                        race_futures,
+                        Duration::from_millis(50),
+                        coordinator,
+                        cx,
+                    )
+                    .await
                 }
             } else {
                 // Insufficient history: default to first-wins
@@ -513,7 +576,11 @@ mod tests {
         }
 
         /// Cancel loser race entries
-        async fn cancel_losers(&self, race_outcome: &RaceOutcome, coordinator: &RaceCoordinator) -> Result<usize, AsupersyncError> {
+        async fn cancel_losers(
+            &self,
+            race_outcome: &RaceOutcome,
+            coordinator: &RaceCoordinator,
+        ) -> Result<usize, AsupersyncError> {
             let mut cancelled_count = 0;
 
             // Cancel all entries that didn't win
@@ -547,7 +614,9 @@ mod tests {
                     }
                 } else {
                     // Close individual channels
-                    self.stats.channels_closed.fetch_add(coordinator.channels.len() as u64, Ordering::SeqCst);
+                    self.stats
+                        .channels_closed
+                        .fetch_add(coordinator.channels.len() as u64, Ordering::SeqCst);
                 }
 
                 self.stats.cleanups_performed.fetch_add(1, Ordering::SeqCst);
@@ -578,7 +647,11 @@ mod tests {
         }
 
         /// Handle race timeout
-        async fn handle_race_timeout(&mut self, race_id: u64, cx: &Cx) -> Result<(), AsupersyncError> {
+        async fn handle_race_timeout(
+            &mut self,
+            race_id: u64,
+            cx: &Cx,
+        ) -> Result<(), AsupersyncError> {
             if let Some(coordinator) = self.active_races.remove(&race_id) {
                 // Cancel all entries
                 for cancel_token in &coordinator.cancel_tokens {
@@ -751,7 +824,8 @@ mod tests {
             assert!(result.cancelled_count >= 1);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test priority-based race strategy
@@ -762,8 +836,12 @@ mod tests {
 
         cx.scope(|cx| async move {
             let config = OneshotRaceConfig::default();
-            let strategy = RaceStrategy::PriorityBased { time_window: Duration::from_millis(50) };
-            let channel_mode = ChannelMode::Shared { multiplexer_count: 2 };
+            let strategy = RaceStrategy::PriorityBased {
+                time_window: Duration::from_millis(50),
+            };
+            let channel_mode = ChannelMode::Shared {
+                multiplexer_count: 2,
+            };
             let mut system = OneshotRaceSystem::new(config, strategy, channel_mode)?;
 
             system.start(cx).await?;
@@ -815,7 +893,8 @@ mod tests {
             }
 
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Test adaptive coordination under load
@@ -829,8 +908,12 @@ mod tests {
                 max_concurrent_races: 5,
                 ..OneshotRaceConfig::default()
             };
-            let strategy = RaceStrategy::Adaptive { performance_history: 10 };
-            let channel_mode = ChannelMode::Adaptive { allocation_threshold: 0.6 };
+            let strategy = RaceStrategy::Adaptive {
+                performance_history: 10,
+            };
+            let channel_mode = ChannelMode::Adaptive {
+                allocation_threshold: 0.6,
+            };
             let mut system = OneshotRaceSystem::new(config, strategy, channel_mode)?;
 
             system.start(cx).await?;
@@ -880,13 +963,15 @@ mod tests {
             assert!(stats.losers_cancelled.load(Ordering::SeqCst) >= 3);
 
             // Should have good cleanup ratio
-            let cleanup_ratio = stats.cleanups_performed.load(Ordering::SeqCst) as f64 / stats.races_completed.load(Ordering::SeqCst) as f64;
+            let cleanup_ratio = stats.cleanups_performed.load(Ordering::SeqCst) as f64
+                / stats.races_completed.load(Ordering::SeqCst) as f64;
             assert!(cleanup_ratio >= 1.0, "Cleanup ratio: {}", cleanup_ratio);
 
             // Should maintain low error rate
             assert_eq!(stats.coordination_errors.load(Ordering::SeqCst), 0);
 
             Ok(())
-        }).await
+        })
+        .await
     }
 }

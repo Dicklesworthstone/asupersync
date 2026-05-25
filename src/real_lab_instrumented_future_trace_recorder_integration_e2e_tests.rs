@@ -176,11 +176,7 @@ mod tests {
 
             // Log the poll event
             if let Ok(mut log) = self.event_log.lock() {
-                log.push((
-                    self.poll_count,
-                    now,
-                    format!("poll_{}", self.poll_count),
-                ));
+                log.push((self.poll_count, now, format!("poll_{}", self.poll_count)));
             }
 
             // Check if we should yield frequently (for testing)
@@ -300,7 +296,9 @@ mod tests {
             })
         }
 
-        pub async fn test_basic_poll_recording(&self) -> Result<FutureRecorderTestResult, Box<dyn std::error::Error>> {
+        pub async fn test_basic_poll_recording(
+            &self,
+        ) -> Result<FutureRecorderTestResult, Box<dyn std::error::Error>> {
             let test_start = Instant::now();
             let mut result = FutureRecorderTestResult {
                 test_name: "basic_poll_recording".to_string(),
@@ -331,11 +329,8 @@ mod tests {
             let mock_future = ConfigurableMockFuture::slow_polling(Arc::clone(&event_log));
 
             let injector = CancellationInjector::new(InjectionStrategy::Never);
-            let instrumented_future = InstrumentedFuture::new(
-                mock_future,
-                injector,
-                Some(TaskId::from_raw(1)),
-            );
+            let instrumented_future =
+                InstrumentedFuture::new(mock_future, injector, Some(TaskId::from_raw(1)));
 
             // Phase 3: Execute future and record poll events
             result.phase = FutureRecorderTestPhase::PollEventGeneration;
@@ -347,10 +342,11 @@ mod tests {
 
             // Create a simple executor context
             let waker = futures_lite::future::block_on(async {
-                std::task::Context::from_waker(futures_lite::future::poll_fn(|cx| {
-                    Poll::Ready(cx.waker().clone())
-                }).await)
-            }).clone();
+                std::task::Context::from_waker(
+                    futures_lite::future::poll_fn(|cx| Poll::Ready(cx.waker().clone())).await,
+                )
+            })
+            .clone();
             let mut cx = Context::from_waker(&waker);
 
             while let Poll::Pending = pinned_future.as_mut().poll(&mut cx) {
@@ -403,7 +399,9 @@ mod tests {
             Ok(result)
         }
 
-        pub async fn test_high_frequency_polling(&self) -> Result<FutureRecorderTestResult, Box<dyn std::error::Error>> {
+        pub async fn test_high_frequency_polling(
+            &self,
+        ) -> Result<FutureRecorderTestResult, Box<dyn std::error::Error>> {
             let test_start = Instant::now();
             let mut result = FutureRecorderTestResult {
                 test_name: "high_frequency_polling".to_string(),
@@ -439,11 +437,8 @@ mod tests {
             let rapid_future = ConfigurableMockFuture::rapid_polling(Arc::clone(&event_log));
 
             let injector = CancellationInjector::new(InjectionStrategy::Never);
-            let instrumented_future = InstrumentedFuture::new(
-                rapid_future,
-                injector,
-                Some(TaskId::from_raw(2)),
-            );
+            let instrumented_future =
+                InstrumentedFuture::new(rapid_future, injector, Some(TaskId::from_raw(2)));
 
             // Execute with rapid polling
             result.phase = FutureRecorderTestPhase::RateLimitingTest;
@@ -451,10 +446,11 @@ mod tests {
             let mut pinned_future = Box::pin(instrumented_future);
 
             let waker = futures_lite::future::block_on(async {
-                std::task::Context::from_waker(futures_lite::future::poll_fn(|cx| {
-                    Poll::Ready(cx.waker().clone())
-                }).await)
-            }).clone();
+                std::task::Context::from_waker(
+                    futures_lite::future::poll_fn(|cx| Poll::Ready(cx.waker().clone())).await,
+                )
+            })
+            .clone();
             let mut cx = Context::from_waker(&waker);
 
             let execution_start = Instant::now();
@@ -507,7 +503,9 @@ mod tests {
             Ok(result)
         }
 
-        pub async fn test_concurrent_futures(&self) -> Result<FutureRecorderTestResult, Box<dyn std::error::Error>> {
+        pub async fn test_concurrent_futures(
+            &self,
+        ) -> Result<FutureRecorderTestResult, Box<dyn std::error::Error>> {
             let test_start = Instant::now();
             let mut result = FutureRecorderTestResult {
                 test_name: "concurrent_futures".to_string(),
@@ -540,11 +538,8 @@ mod tests {
                 let mock_future = ConfigurableMockFuture::burst_polling(Arc::clone(&event_log));
 
                 let injector = CancellationInjector::new(InjectionStrategy::Never);
-                let instrumented_future = InstrumentedFuture::new(
-                    mock_future,
-                    injector,
-                    Some(TaskId::from_raw(10 + i)),
-                );
+                let instrumented_future =
+                    InstrumentedFuture::new(mock_future, injector, Some(TaskId::from_raw(10 + i)));
 
                 instrumented_futures.push(Box::pin(instrumented_future));
             }
@@ -554,10 +549,11 @@ mod tests {
             let execution_start = Instant::now();
 
             let waker = futures_lite::future::block_on(async {
-                std::task::Context::from_waker(futures_lite::future::poll_fn(|cx| {
-                    Poll::Ready(cx.waker().clone())
-                }).await)
-            }).clone();
+                std::task::Context::from_waker(
+                    futures_lite::future::poll_fn(|cx| Poll::Ready(cx.waker().clone())).await,
+                )
+            })
+            .clone();
             let mut cx = Context::from_waker(&waker);
 
             let mut total_polls = 0u64;
@@ -628,9 +624,12 @@ mod tests {
     impl FuturePollRecording for TraceRecorder {
         fn record_future_poll(&mut self, task_id: TaskId, sequence: u64, location: String) {
             // Record as a custom event with await point information
-            self.record_custom_event(
-                format!("future_poll:{}:{}:{}", task_id.as_raw(), sequence, location)
-            );
+            self.record_custom_event(format!(
+                "future_poll:{}:{}:{}",
+                task_id.as_raw(),
+                sequence,
+                location
+            ));
         }
     }
 
@@ -647,15 +646,32 @@ mod tests {
             let result = harness.test_basic_poll_recording().await.unwrap();
 
             assert!(result.success, "Basic poll recording should succeed");
-            assert!(result.trace_completeness_verified, "Trace should be complete");
-            assert!(result.instrumentation_stats.futures_instrumented > 0, "Should have instrumented futures");
-            assert!(result.instrumentation_stats.total_polls_executed > 0, "Should have executed polls");
-            assert!(result.recorder_stats.events_recorded > 0, "Should have recorded events");
-            assert_eq!(result.recorder_stats.events_dropped, 0, "Should not drop events in basic test");
+            assert!(
+                result.trace_completeness_verified,
+                "Trace should be complete"
+            );
+            assert!(
+                result.instrumentation_stats.futures_instrumented > 0,
+                "Should have instrumented futures"
+            );
+            assert!(
+                result.instrumentation_stats.total_polls_executed > 0,
+                "Should have executed polls"
+            );
+            assert!(
+                result.recorder_stats.events_recorded > 0,
+                "Should have recorded events"
+            );
+            assert_eq!(
+                result.recorder_stats.events_dropped, 0,
+                "Should not drop events in basic test"
+            );
 
-            println!("✓ Basic poll recording: {} polls, {} events recorded",
+            println!(
+                "✓ Basic poll recording: {} polls, {} events recorded",
                 result.instrumentation_stats.total_polls_executed,
-                result.recorder_stats.events_recorded);
+                result.recorder_stats.events_recorded
+            );
         });
     }
 
@@ -690,16 +706,33 @@ mod tests {
 
             let result = harness.test_concurrent_futures().await.unwrap();
 
-            assert!(result.success, "Concurrent futures recording should succeed");
-            assert!(result.instrumentation_stats.futures_instrumented >= 5, "Should have multiple instrumented futures");
-            assert!(result.instrumentation_stats.concurrent_futures_peak >= 5, "Should track concurrent peak");
-            assert!(result.recorder_stats.events_recorded > 0, "Should record events from concurrent futures");
-            assert!(result.trace_completeness_verified, "Trace should be complete for concurrent execution");
+            assert!(
+                result.success,
+                "Concurrent futures recording should succeed"
+            );
+            assert!(
+                result.instrumentation_stats.futures_instrumented >= 5,
+                "Should have multiple instrumented futures"
+            );
+            assert!(
+                result.instrumentation_stats.concurrent_futures_peak >= 5,
+                "Should track concurrent peak"
+            );
+            assert!(
+                result.recorder_stats.events_recorded > 0,
+                "Should record events from concurrent futures"
+            );
+            assert!(
+                result.trace_completeness_verified,
+                "Trace should be complete for concurrent execution"
+            );
 
-            println!("✓ Concurrent futures: {} futures, {} polls, {} events",
+            println!(
+                "✓ Concurrent futures: {} futures, {} polls, {} events",
                 result.instrumentation_stats.futures_instrumented,
                 result.instrumentation_stats.total_polls_executed,
-                result.recorder_stats.events_recorded);
+                result.recorder_stats.events_recorded
+            );
         });
     }
 
@@ -715,14 +748,23 @@ mod tests {
             // Then run basic test to verify recovery
             let basic_result = harness.test_basic_poll_recording().await.unwrap();
 
-            assert!(high_freq_result.rate_limiting_effective, "Should trigger back pressure");
+            assert!(
+                high_freq_result.rate_limiting_effective,
+                "Should trigger back pressure"
+            );
             assert!(basic_result.success, "Should recover after back pressure");
 
             let (final_recorder_stats, final_inst_stats) = harness.get_final_stats();
 
             // Verify overall system health
-            assert!(final_recorder_stats.events_recorded > 0, "Should maintain some recording capability");
-            assert!(final_inst_stats.futures_instrumented > 1, "Should handle multiple test phases");
+            assert!(
+                final_recorder_stats.events_recorded > 0,
+                "Should maintain some recording capability"
+            );
+            assert!(
+                final_inst_stats.futures_instrumented > 1,
+                "Should handle multiple test phases"
+            );
 
             println!("✓ Back pressure handling: rate limiting triggered, recording recovered");
         });
@@ -775,7 +817,10 @@ mod tests {
             let result = harness.test_basic_poll_recording().await.unwrap();
 
             assert!(result.success, "Poll recording should succeed");
-            assert!(result.trace_completeness_verified, "Trace should be complete");
+            assert!(
+                result.trace_completeness_verified,
+                "Trace should be complete"
+            );
 
             // Verify that poll sequence can be reconstructed
             // In a real implementation, this would validate that the trace
@@ -786,14 +831,21 @@ mod tests {
 
             // Should have reasonable correlation between polls and recorded events
             assert!(recorded_events > 0, "Should have some recorded events");
-            assert!(poll_count >= recorded_events, "Poll count should be at least as many as recorded events");
+            assert!(
+                poll_count >= recorded_events,
+                "Poll count should be at least as many as recorded events"
+            );
 
             // Verify no excessive dropping in basic scenario
-            assert_eq!(result.recorder_stats.events_dropped, 0,
-                "Basic scenario should not drop events");
+            assert_eq!(
+                result.recorder_stats.events_dropped, 0,
+                "Basic scenario should not drop events"
+            );
 
-            println!("✓ Poll sequence reconstruction: {} polls -> {} events, sequence preserved",
-                poll_count, recorded_events);
+            println!(
+                "✓ Poll sequence reconstruction: {} polls -> {} events, sequence preserved",
+                poll_count, recorded_events
+            );
         });
     }
 }

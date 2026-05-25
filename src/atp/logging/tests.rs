@@ -304,7 +304,7 @@ fn test_concurrent_logging_thread_safety() {
                         }),
                         context: EventContext::deterministic(
                             &format!("session-thread-{}", thread_id),
-                            &format!("trace-{}-{}", thread_id, event_id)
+                            &format!("trace-{}-{}", thread_id, event_id),
                         ),
                         redacted_fields: Vec::new(),
                     };
@@ -345,7 +345,9 @@ fn test_large_payload_handling_and_memory_bounds() {
     };
 
     // Should handle large payloads without crashing
-    let rendered = logger.render_event(&large_event).expect("Large event should render");
+    let rendered = logger
+        .render_event(&large_event)
+        .expect("Large event should render");
     assert!(rendered.len() > 5000);
     assert!(rendered.contains("large_object_transfer"));
 
@@ -376,7 +378,9 @@ fn test_large_payload_handling_and_memory_bounds() {
         redacted_fields: Vec::new(),
     };
 
-    let nested_rendered = logger.render_event(&nested_event).expect("Nested event should render");
+    let nested_rendered = logger
+        .render_event(&nested_event)
+        .expect("Nested event should render");
     assert!(nested_rendered.contains("deep_value"));
 }
 
@@ -397,7 +401,9 @@ fn test_invalid_data_error_resilience() {
     };
 
     // Should handle null data gracefully
-    let rendered = logger.render_event(&null_data_event).expect("Null data should render");
+    let rendered = logger
+        .render_event(&null_data_event)
+        .expect("Null data should render");
     assert!(rendered.contains("null"));
 
     // Test with invalid UTF-8 scenarios (simulated with replacement chars)
@@ -415,7 +421,9 @@ fn test_invalid_data_error_resilience() {
         redacted_fields: Vec::new(),
     };
 
-    let utf8_rendered = logger.render_event(&invalid_utf8_event).expect("Invalid UTF-8 should render");
+    let utf8_rendered = logger
+        .render_event(&invalid_utf8_event)
+        .expect("Invalid UTF-8 should render");
     assert!(utf8_rendered.contains("encoding_issue"));
 
     // Test with circular reference prevention (JSON serialization should handle this)
@@ -437,7 +445,9 @@ fn test_invalid_data_error_resilience() {
         redacted_fields: Vec::new(),
     };
 
-    let circular_rendered = logger.render_event(&circular_event).expect("Circular data should render");
+    let circular_rendered = logger
+        .render_event(&circular_event)
+        .expect("Circular data should render");
     assert!(circular_rendered.contains("circular_detection"));
 }
 
@@ -498,7 +508,7 @@ fn test_advanced_redaction_scenarios() {
     assert!(!rendered.contains("/Users/bob/.gnupg"));
 
     // Safe values should remain
-    assert!(rendered.contains("alice"));  // nickname is safe
+    assert!(rendered.contains("alice")); // nickname is safe
     assert!(rendered.contains("this_should_remain"));
     assert!(rendered.contains("1.0"));
     assert!(rendered.contains("/tmp/safe_temp_file.txt")); // /tmp is generally safe
@@ -506,7 +516,12 @@ fn test_advanced_redaction_scenarios() {
     // Verify redaction field tracking
     let parsed: AtpEvent = serde_json::from_str(&rendered).expect("Should parse back to event");
     assert!(parsed.redacted_fields.len() > 0);
-    assert!(parsed.redacted_fields.iter().any(|f| f.contains("credentials")));
+    assert!(
+        parsed
+            .redacted_fields
+            .iter()
+            .any(|f| f.contains("credentials"))
+    );
     assert!(parsed.redacted_fields.iter().any(|f| f.contains("peer_id")));
     assert!(parsed.redacted_fields.iter().any(|f| f.contains("paths")));
 }
@@ -571,11 +586,26 @@ fn test_format_compatibility_edge_cases() {
     let edge_cases = vec![
         ("empty_string", json!({"value": ""})),
         ("just_whitespace", json!({"value": "   \t\n\r   "})),
-        ("unicode_emoji", json!({"message": "Transfer completed 🎉✨"})),
-        ("special_chars", json!({"path": "file with spaces & symbols!@#$%^&*()"})),
-        ("numbers_as_strings", json!({"port": "8080", "timeout": "30.5"})),
-        ("boolean_variants", json!({"enabled": true, "disabled": false, "maybe": null})),
-        ("mixed_array", json!({"items": [1, "two", true, null, {"nested": "value"}]})),
+        (
+            "unicode_emoji",
+            json!({"message": "Transfer completed 🎉✨"}),
+        ),
+        (
+            "special_chars",
+            json!({"path": "file with spaces & symbols!@#$%^&*()"}),
+        ),
+        (
+            "numbers_as_strings",
+            json!({"port": "8080", "timeout": "30.5"}),
+        ),
+        (
+            "boolean_variants",
+            json!({"enabled": true, "disabled": false, "maybe": null}),
+        ),
+        (
+            "mixed_array",
+            json!({"items": [1, "two", true, null, {"nested": "value"}]}),
+        ),
     ];
 
     for (test_name, test_data) in edge_cases {
@@ -591,9 +621,11 @@ fn test_format_compatibility_edge_cases() {
         };
 
         // Both formats should handle edge cases without panic
-        let json_rendered = logger_json.render_event(&event)
+        let json_rendered = logger_json
+            .render_event(&event)
             .expect(&format!("JSON format should handle {}", test_name));
-        let human_rendered = logger_human.render_event(&event)
+        let human_rendered = logger_human
+            .render_event(&event)
             .expect(&format!("Human format should handle {}", test_name));
 
         assert!(json_rendered.contains("format_edge_case"));
@@ -669,7 +701,11 @@ fn test_performance_under_load() {
         let event = AtpEvent {
             schema_version: ATP_LOG_EVENT_SCHEMA_VERSION.to_string(),
             timestamp: format_system_time_rfc3339(std::time::SystemTime::now()),
-            level: if i % 4 == 0 { Level::Error } else { Level::Info },
+            level: if i % 4 == 0 {
+                Level::Error
+            } else {
+                Level::Info
+            },
             subsystem: match i % 6 {
                 0 => AtpSubsystem::Path,
                 1 => AtpSubsystem::Quic,
@@ -706,16 +742,19 @@ fn test_performance_under_load() {
     let duration = start.elapsed();
 
     // Performance should be reasonable (less than 1ms per event on average)
-    assert!(duration.as_millis() < num_events,
-           "Performance too slow: {}ms for {} events",
-           duration.as_millis(), num_events);
+    assert!(
+        duration.as_millis() < num_events,
+        "Performance too slow: {}ms for {} events",
+        duration.as_millis(),
+        num_events
+    );
 }
 
 #[test]
 fn test_timestamp_edge_cases() {
     // Test various timestamp edge cases
     let edge_timestamps = vec![
-        UNIX_EPOCH,                                    // Epoch start
+        UNIX_EPOCH,                                        // Epoch start
         UNIX_EPOCH + Duration::from_secs(253_402_300_799), // Year 9999
         UNIX_EPOCH + Duration::from_nanos(999_999_999),    // Sub-second precision
     ];
@@ -729,7 +768,11 @@ fn test_timestamp_edge_cases() {
         assert_eq!(formatted.len(), 20); // YYYY-MM-DDTHH:MM:SSZ
 
         // Should be parseable by chrono or other RFC3339 parsers
-        assert!(formatted.chars().all(|c| c.is_ascii_digit() || "T-:Z".contains(c)));
+        assert!(
+            formatted
+                .chars()
+                .all(|c| c.is_ascii_digit() || "T-:Z".contains(c))
+        );
     }
 
     // Test current system time
@@ -759,11 +802,12 @@ fn test_error_recovery_scenarios() {
         Ok(rendered) => {
             // If it succeeds, should still contain the data
             assert!(rendered.contains("schema_error_test"));
-        },
+        }
         Err(err) => {
             // If it fails, should be a specific error type
-            assert!(format!("{:?}", err).contains("schema") ||
-                   format!("{:?}", err).contains("version"));
+            assert!(
+                format!("{:?}", err).contains("schema") || format!("{:?}", err).contains("version")
+            );
         }
     }
 
@@ -783,7 +827,7 @@ fn test_error_recovery_scenarios() {
     let result = logger.render_event(&malformed_time_event);
     match result {
         Ok(rendered) => assert!(rendered.contains("timestamp_error_test")),
-        Err(_) => {}, // Error is acceptable for malformed input
+        Err(_) => {} // Error is acceptable for malformed input
     }
 }
 
@@ -812,7 +856,7 @@ fn test_memory_cleanup_and_resource_management() {
                 }),
                 context: EventContext::deterministic(
                     &format!("memory-session-{}", cycle),
-                    &format!("memory-trace-{}-{}", cycle, i)
+                    &format!("memory-trace-{}-{}", cycle, i),
                 ),
                 redacted_fields: Vec::new(),
             };

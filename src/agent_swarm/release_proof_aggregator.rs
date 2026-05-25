@@ -274,7 +274,7 @@ pub struct AggregatorConfig {
 impl Default for AggregatorConfig {
     fn default() -> Self {
         Self {
-            max_evidence_age: Duration::from_secs(3600), // 1 hour
+            max_evidence_age: Duration::from_secs(3600),    // 1 hour
             max_commit_age: Duration::from_secs(3600 * 24), // 24 hours
             require_remote_rch: true,
             redact_sensitive: true,
@@ -403,10 +403,7 @@ impl ReleaseProofAggregator {
             ProofStatus::Blocked => "🚫 External blocker preventing completion".to_string(),
         };
 
-        let first_blocker = record
-            .first_blocker
-            .as_ref()
-            .map(|b| b.description.clone());
+        let first_blocker = record.first_blocker.as_ref().map(|b| b.description.clone());
 
         let remote_proofs_complete = record
             .rch_commands
@@ -419,7 +416,9 @@ impl ReleaseProofAggregator {
             .any(|r| r.ref_name.contains("master") && r.pushed);
 
         let freshness_score = self.calculate_freshness_score(record);
-        self.metrics.freshness_score.set((freshness_score * 100.0) as i64);
+        self.metrics
+            .freshness_score
+            .set((freshness_score * 100.0) as i64);
 
         ProofSummary {
             bead_id: record.bead_id.clone(),
@@ -445,7 +444,10 @@ impl ReleaseProofAggregator {
     }
 
     /// Collects file reservation evidence for the bead.
-    fn collect_reservation_evidence(&self, _bead_id: &str) -> Result<Vec<FileReservation>, AggregatorError> {
+    fn collect_reservation_evidence(
+        &self,
+        _bead_id: &str,
+    ) -> Result<Vec<FileReservation>, AggregatorError> {
         // TODO: Integrate with Agent Mail to collect reservation evidence
         // For now, return empty vec as placeholder
         Ok(vec![])
@@ -472,7 +474,10 @@ impl ReleaseProofAggregator {
     }
 
     /// Collects RCH command evidence for the bead.
-    fn collect_rch_evidence(&self, _bead_id: &str) -> Result<Vec<RchCommandRecord>, AggregatorError> {
+    fn collect_rch_evidence(
+        &self,
+        _bead_id: &str,
+    ) -> Result<Vec<RchCommandRecord>, AggregatorError> {
         // TODO: Query RCH logs or artifacts for command evidence
         Ok(vec![])
     }
@@ -489,12 +494,17 @@ impl ReleaseProofAggregator {
                 return Ok(Some(BlockerRecord {
                     blocker_type: if cmd.command.contains("cargo test") {
                         BlockerType::TestFailure
-                    } else if cmd.command.contains("cargo check") || cmd.command.contains("cargo clippy") {
+                    } else if cmd.command.contains("cargo check")
+                        || cmd.command.contains("cargo clippy")
+                    {
                         BlockerType::CompilationFailure
                     } else {
                         BlockerType::RemoteProofRequired
                     },
-                    description: format!("RCH command failed: {} (exit code {})", cmd.command, cmd.exit_code),
+                    description: format!(
+                        "RCH command failed: {} (exit code {})",
+                        cmd.command, cmd.exit_code
+                    ),
                     encountered_at: cmd.started_at,
                     external: false,
                 }));
@@ -504,7 +514,10 @@ impl ReleaseProofAggregator {
     }
 
     /// Collects lease receipts for the agent.
-    fn collect_lease_receipts(&self, _agent_name: &str) -> Result<Vec<LeaseReceipt>, AggregatorError> {
+    fn collect_lease_receipts(
+        &self,
+        _agent_name: &str,
+    ) -> Result<Vec<LeaseReceipt>, AggregatorError> {
         // TODO: Query lease system for agent receipts
         Ok(vec![])
     }
@@ -570,9 +583,7 @@ impl ReleaseProofAggregator {
         // Check if evidence is stale
         let now = SystemTime::now();
         let is_stale = commits.iter().any(|c| {
-            now.duration_since(c.timestamp)
-                .unwrap_or_default()
-                > self.config.max_commit_age
+            now.duration_since(c.timestamp).unwrap_or_default() > self.config.max_commit_age
         });
         if is_stale {
             return Ok(ProofStatus::Stale);
@@ -594,9 +605,7 @@ impl ReleaseProofAggregator {
         let now = SystemTime::now();
         let max_age = self.config.max_evidence_age;
 
-        let generated_age = now
-            .duration_since(record.generated_at)
-            .unwrap_or_default();
+        let generated_age = now.duration_since(record.generated_at).unwrap_or_default();
 
         let age_factor = if generated_age > max_age {
             0.0
@@ -709,7 +718,13 @@ mod tests {
         };
 
         let status = aggregator
-            .determine_proof_status(&commits, &rch_commands, &None, &handoff_status, &pushed_refs)
+            .determine_proof_status(
+                &commits,
+                &rch_commands,
+                &None,
+                &handoff_status,
+                &pushed_refs,
+            )
             .unwrap();
 
         assert_eq!(status, ProofStatus::Complete);
@@ -917,6 +932,10 @@ mod tests {
         let redacted = aggregator.redact_sensitive_information(&record);
         assert_eq!(redacted.agent_name, "[redacted]");
         assert_eq!(redacted.reservations[0].agent, "[redacted]");
-        assert!(redacted.rch_commands[0].output_summary.contains("[redacted]"));
+        assert!(
+            redacted.rch_commands[0]
+                .output_summary
+                .contains("[redacted]")
+        );
     }
 }

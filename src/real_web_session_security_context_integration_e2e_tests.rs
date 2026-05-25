@@ -40,36 +40,36 @@
 
 use crate::{
     cx::{Cx, Scope},
-    web::{
-        session::{
-            SessionLayer, SessionStore, Session, SessionData, MemoryStore,
-            SessionConfig, CsrfProtection, SessionIdGenerator,
-        },
-        extract::{Request, State},
-        response::{Response, StatusCode},
-        handler::Handler,
-    },
+    error::Error,
+    runtime::{LabRuntime, Runtime},
     security::{
-        context::{SecurityContext, AuthMode},
         authenticated::AuthenticatedSymbol,
+        context::{AuthMode, SecurityContext},
+        error::{AuthError, AuthErrorKind},
         key::AuthKey,
         tag::AuthenticationTag,
-        error::{AuthError, AuthErrorKind},
     },
-    types::{Symbol, Budget, Outcome, Time},
-    runtime::{Runtime, LabRuntime},
-    time::{sleep, timeout, Duration, Instant},
-    error::Error,
-    test_utils::{TestResult, with_test_runtime},
     sync::{Arc, Mutex, RwLock},
+    test_utils::{TestResult, with_test_runtime},
+    time::{Duration, Instant, sleep, timeout},
+    types::{Budget, Outcome, Symbol, Time},
+    web::{
+        extract::{Request, State},
+        handler::Handler,
+        response::{Response, StatusCode},
+        session::{
+            CsrfProtection, MemoryStore, Session, SessionConfig, SessionData, SessionIdGenerator,
+            SessionLayer, SessionStore,
+        },
+    },
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::atomic::{AtomicU64, AtomicUsize, AtomicBool, Ordering},
     fmt,
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     time::SystemTime,
 };
-use serde::{Serialize, Deserialize};
 
 /// Types of web session ↔ security context integration scenarios
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +149,10 @@ impl AuthenticatedSessionStore {
     }
 
     /// Authenticate session data before storage
-    pub fn authenticate_session_data(&self, data: &SessionData) -> Result<AuthenticationTag, AuthError> {
+    pub fn authenticate_session_data(
+        &self,
+        data: &SessionData,
+    ) -> Result<AuthenticationTag, AuthError> {
         self.auth_operations.fetch_add(1, Ordering::Relaxed);
 
         // Create a symbol representing the session data
@@ -162,7 +165,11 @@ impl AuthenticatedSessionStore {
     }
 
     /// Verify session data authentication
-    pub fn verify_session_data(&self, data: &SessionData, tag: &AuthenticationTag) -> Result<(), AuthError> {
+    pub fn verify_session_data(
+        &self,
+        data: &SessionData,
+        tag: &AuthenticationTag,
+    ) -> Result<(), AuthError> {
         self.auth_operations.fetch_add(1, Ordering::Relaxed);
 
         // Recreate the symbol from session data
@@ -219,11 +226,14 @@ impl SessionStore for AuthenticatedSessionStore {
                         AuthMode::Strict => Err(e),
                         AuthMode::Permissive => {
                             // Log but allow in permissive mode
-                            eprintln!("Session auth verification failed in permissive mode: {:?}", e);
+                            eprintln!(
+                                "Session auth verification failed in permissive mode: {:?}",
+                                e
+                            );
                             Ok(Some(data))
                         }
                         AuthMode::Disabled => Ok(Some(data)),
-                    }
+                    },
                 }
             } else {
                 // No auth metadata - handle according to security mode
@@ -252,25 +262,31 @@ impl SessionStore for AuthenticatedSessionStore {
                 // Create authentication tag for the session data
                 let auth_tag = self.authenticate_session_data(&data)?;
                 // Store the tag as metadata (simplified for testing)
-                authenticated_data.insert("__auth_tag".to_string(),
-                    String::from_utf8_lossy(&auth_tag.as_bytes()).to_string());
+                authenticated_data.insert(
+                    "__auth_tag".to_string(),
+                    String::from_utf8_lossy(&auth_tag.as_bytes()).to_string(),
+                );
             }
         }
 
         // Save to inner store
-        self.inner_store.save(session_id, authenticated_data)
-            .map_err(|_| AuthError::new(
-                AuthErrorKind::StorageError,
-                "Failed to save session data".to_string(),
-            ))
+        self.inner_store
+            .save(session_id, authenticated_data)
+            .map_err(|_| {
+                AuthError::new(
+                    AuthErrorKind::StorageError,
+                    "Failed to save session data".to_string(),
+                )
+            })
     }
 
     fn delete(&self, session_id: &str) -> Result<(), Self::Error> {
-        self.inner_store.delete(session_id)
-            .map_err(|_| AuthError::new(
+        self.inner_store.delete(session_id).map_err(|_| {
+            AuthError::new(
                 AuthErrorKind::StorageError,
                 "Failed to delete session".to_string(),
-            ))
+            )
+        })
     }
 }
 
@@ -318,16 +334,26 @@ impl SessionSecurityTestHarness {
         data.insert("user_id".to_string(), format!("user_{}", session_index));
         data.insert("username".to_string(), format!("testuser{}", session_index));
         data.insert("role".to_string(), "authenticated".to_string());
-        data.insert("login_time".to_string(),
-            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default().as_secs().to_string());
+        data.insert(
+            "login_time".to_string(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .to_string(),
+        );
 
         if self.config.csrf_enabled {
             // Add CSRF token
-            data.insert("__asupersync.csrf_token".to_string(),
-                format!("csrf_token_{}_{}_{}", session_index,
+            data.insert(
+                "__asupersync.csrf_token".to_string(),
+                format!(
+                    "csrf_token_{}_{}_{}",
+                    session_index,
                     self.security_context.mode() as u8,
-                    rand::random::<u32>()));
+                    rand::random::<u32>()
+                ),
+            );
         }
 
         data
@@ -342,13 +368,16 @@ impl SessionSecurityTestHarness {
             let session_data = self.create_test_session_data(i);
 
             // Test session creation
-            self.session_store.save(&session_id, session_data.clone())
+            self.session_store
+                .save(&session_id, session_data.clone())
                 .map_err(|e| format!("Failed to create session {}: {:?}", i, e))?;
 
             self.result.sessions_created += 1;
 
             // Test session retrieval
-            let loaded_data = self.session_store.load(&session_id)
+            let loaded_data = self
+                .session_store
+                .load(&session_id)
                 .map_err(|e| format!("Failed to load session {}: {:?}", i, e))?;
 
             assert!(loaded_data.is_some(), "Session {} should exist", i);
@@ -356,7 +385,10 @@ impl SessionSecurityTestHarness {
 
             // Verify core session data integrity
             assert_eq!(loaded_data.get("user_id").unwrap(), &format!("user_{}", i));
-            assert_eq!(loaded_data.get("username").unwrap(), &format!("testuser{}", i));
+            assert_eq!(
+                loaded_data.get("username").unwrap(),
+                &format!("testuser{}", i)
+            );
 
             self.result.data_integrity_checks += 1;
 
@@ -364,22 +396,34 @@ impl SessionSecurityTestHarness {
             if self.config.csrf_enabled {
                 let csrf_token = loaded_data.get("__asupersync.csrf_token");
                 assert!(csrf_token.is_some(), "CSRF token should be present");
-                assert!(csrf_token.unwrap().starts_with(&format!("csrf_token_{}", i)));
+                assert!(
+                    csrf_token
+                        .unwrap()
+                        .starts_with(&format!("csrf_token_{}", i))
+                );
 
                 self.result.csrf_tokens_validated += 1;
             }
 
             // Test session modification
             let mut modified_data = loaded_data.clone();
-            modified_data.insert("last_access".to_string(),
-                SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default().as_secs().to_string());
+            modified_data.insert(
+                "last_access".to_string(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .to_string(),
+            );
 
-            self.session_store.save(&session_id, modified_data)
+            self.session_store
+                .save(&session_id, modified_data)
                 .map_err(|e| format!("Failed to update session {}: {:?}", i, e))?;
 
             // Verify modification persisted
-            let updated_data = self.session_store.load(&session_id)
+            let updated_data = self
+                .session_store
+                .load(&session_id)
                 .map_err(|e| format!("Failed to reload session {}: {:?}", i, e))?;
 
             assert!(updated_data.is_some());
@@ -388,15 +432,25 @@ impl SessionSecurityTestHarness {
             self.result.data_integrity_checks += 1;
         }
 
-        self.result.auth_operations_performed = self.session_store.auth_operations.load(Ordering::Relaxed) as usize;
+        self.result.auth_operations_performed =
+            self.session_store.auth_operations.load(Ordering::Relaxed) as usize;
         self.result.timing = start_time.elapsed();
 
         println!("✓ Authenticated session lifecycle test passed");
         println!("  Sessions created: {}", self.result.sessions_created);
-        println!("  Data integrity checks: {}", self.result.data_integrity_checks);
-        println!("  Auth operations: {}", self.result.auth_operations_performed);
+        println!(
+            "  Data integrity checks: {}",
+            self.result.data_integrity_checks
+        );
+        println!(
+            "  Auth operations: {}",
+            self.result.auth_operations_performed
+        );
         if self.config.csrf_enabled {
-            println!("  CSRF tokens validated: {}", self.result.csrf_tokens_validated);
+            println!(
+                "  CSRF tokens validated: {}",
+                self.result.csrf_tokens_validated
+            );
         }
 
         Ok(())
@@ -412,10 +466,14 @@ impl SessionSecurityTestHarness {
         let session_data = self.create_test_session_data(999);
 
         // Create session in initial mode
-        self.session_store.save(session_id, session_data.clone())
+        self.session_store
+            .save(session_id, session_data.clone())
             .map_err(|e| format!("Failed to create transition test session: {:?}", e))?;
 
-        let initial_failures = self.session_store.validation_failures.load(Ordering::Relaxed);
+        let initial_failures = self
+            .session_store
+            .validation_failures
+            .load(Ordering::Relaxed);
 
         // Transition through different security modes
         let modes = [AuthMode::Strict, AuthMode::Permissive, AuthMode::Disabled];
@@ -431,7 +489,10 @@ impl SessionSecurityTestHarness {
                     let result = self.session_store.load(session_id);
                     match result {
                         Ok(data) => {
-                            assert!(data.is_some(), "Session should load in strict mode with valid auth");
+                            assert!(
+                                data.is_some(),
+                                "Session should load in strict mode with valid auth"
+                            );
                         }
                         Err(_) => {
                             // Expected if auth validation fails
@@ -448,15 +509,24 @@ impl SessionSecurityTestHarness {
                     // Should allow everything
                     let result = self.session_store.load(session_id);
                     assert!(result.is_ok(), "Session should load in disabled mode");
-                    assert!(result.unwrap().is_some(), "Session should exist in disabled mode");
+                    assert!(
+                        result.unwrap().is_some(),
+                        "Session should exist in disabled mode"
+                    );
                 }
             }
 
             self.result.security_transitions += 1;
         }
 
-        let final_failures = self.session_store.validation_failures.load(Ordering::Relaxed);
-        println!("  Validation failures during transitions: {}", final_failures - initial_failures);
+        let final_failures = self
+            .session_store
+            .validation_failures
+            .load(Ordering::Relaxed);
+        println!(
+            "  Validation failures during transitions: {}",
+            final_failures - initial_failures
+        );
 
         Ok(())
     }
@@ -468,23 +538,27 @@ impl SessionSecurityTestHarness {
         }
 
         // Create multiple sessions with different security properties
-        let session_ids = (0..3).map(|i| format!("concurrent_session_{}", i)).collect::<Vec<_>>();
+        let session_ids = (0..3)
+            .map(|i| format!("concurrent_session_{}", i))
+            .collect::<Vec<_>>();
 
         for (i, session_id) in session_ids.iter().enumerate() {
             let mut session_data = self.create_test_session_data(1000 + i);
 
             // Add different security metadata for each session
-            session_data.insert("security_level".to_string(),
-                format!("level_{}", i % 3));
+            session_data.insert("security_level".to_string(), format!("level_{}", i % 3));
             session_data.insert("concurrent_test".to_string(), "true".to_string());
 
-            self.session_store.save(session_id, session_data)
+            self.session_store
+                .save(session_id, session_data)
                 .map_err(|e| format!("Failed to create concurrent test session {}: {:?}", i, e))?;
         }
 
         // Simulate concurrent access (simplified - would use actual concurrency in real test)
         for session_id in &session_ids {
-            let loaded_data = self.session_store.load(session_id)
+            let loaded_data = self
+                .session_store
+                .load(session_id)
                 .map_err(|e| format!("Failed to load concurrent session: {:?}", e))?;
 
             assert!(loaded_data.is_some(), "Concurrent session should load");
@@ -532,10 +606,22 @@ impl SessionSecurityTestHarness {
         println!("🎯 Web session ↔ security context integration test completed!");
         println!("  Final metrics:");
         println!("    Sessions created: {}", self.result.sessions_created);
-        println!("    Auth operations: {}", self.result.auth_operations_performed);
-        println!("    Data integrity checks: {}", self.result.data_integrity_checks);
-        println!("    Security transitions: {}", self.result.security_transitions);
-        println!("    Policy violations caught: {}", self.result.policy_violations_caught);
+        println!(
+            "    Auth operations: {}",
+            self.result.auth_operations_performed
+        );
+        println!(
+            "    Data integrity checks: {}",
+            self.result.data_integrity_checks
+        );
+        println!(
+            "    Security transitions: {}",
+            self.result.security_transitions
+        );
+        println!(
+            "    Policy violations caught: {}",
+            self.result.policy_violations_caught
+        );
         println!("    Timing: {:?}", self.result.timing);
 
         Ok(())
@@ -646,13 +732,19 @@ mod tests {
             let original_data = harness.create_test_session_data(42);
 
             // Store session with authentication
-            harness.session_store.save(session_id, original_data.clone()).unwrap();
+            harness
+                .session_store
+                .save(session_id, original_data.clone())
+                .unwrap();
 
             // Retrieve and verify authentication is preserved
             let loaded_data = harness.session_store.load(session_id).unwrap().unwrap();
 
             // Should have authentication metadata
-            assert!(loaded_data.contains_key("__auth_tag"), "Authentication tag should be present");
+            assert!(
+                loaded_data.contains_key("__auth_tag"),
+                "Authentication tag should be present"
+            );
 
             // Verify core data integrity
             assert_eq!(loaded_data.get("user_id").unwrap(), "user_42");
@@ -688,7 +780,9 @@ mod tests {
                 let session_data = harness.create_test_session_data(100);
 
                 // Store session
-                let save_result = harness.session_store.save(&session_id, session_data.clone());
+                let save_result = harness
+                    .session_store
+                    .save(&session_id, session_data.clone());
                 match mode {
                     AuthMode::Disabled => {
                         // Should always succeed
@@ -696,13 +790,19 @@ mod tests {
                     }
                     _ => {
                         // Should succeed with proper authentication
-                        assert!(save_result.is_ok(), "Save should succeed with authentication");
+                        assert!(
+                            save_result.is_ok(),
+                            "Save should succeed with authentication"
+                        );
                     }
                 }
 
                 // Load session
                 let load_result = harness.session_store.load(&session_id);
-                assert!(load_result.is_ok(), "Load should succeed for valid sessions");
+                assert!(
+                    load_result.is_ok(),
+                    "Load should succeed for valid sessions"
+                );
 
                 let loaded_data = load_result.unwrap();
                 assert!(loaded_data.is_some(), "Session should exist");

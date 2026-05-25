@@ -54,13 +54,25 @@ impl AtpPowerProfile {
     #[must_use]
     pub const fn description(self) -> &'static str {
         match self {
-            Self::MaxSpeed => "Maximum speed, unlimited resources, saturate available bandwidth/CPU",
-            Self::Balanced => "Balanced resource usage, reasonable for most desktop/server scenarios",
-            Self::Background => "Background priority, yield to foreground work, conservative resource usage",
+            Self::MaxSpeed => {
+                "Maximum speed, unlimited resources, saturate available bandwidth/CPU"
+            }
+            Self::Balanced => {
+                "Balanced resource usage, reasonable for most desktop/server scenarios"
+            }
+            Self::Background => {
+                "Background priority, yield to foreground work, conservative resource usage"
+            }
             Self::Metered => "Metered network awareness, minimize data usage and relay costs",
-            Self::RelayConservative => "Relay-conservative, prefer direct paths, limit relay cost spending",
-            Self::BatterySaver => "Battery saver, minimize CPU/disk/network activity to preserve power",
-            Self::CiDeterministic => "CI-deterministic, predictable resource usage for reproducible builds",
+            Self::RelayConservative => {
+                "Relay-conservative, prefer direct paths, limit relay cost spending"
+            }
+            Self::BatterySaver => {
+                "Battery saver, minimize CPU/disk/network activity to preserve power"
+            }
+            Self::CiDeterministic => {
+                "CI-deterministic, predictable resource usage for reproducible builds"
+            }
             Self::Custom => "Custom profile, all limits configurable by user",
         }
     }
@@ -292,7 +304,10 @@ mod tests {
         let profile = AtpResourceProfile::for_power_profile(AtpPowerProfile::Balanced);
         assert_eq!(profile.profile, AtpPowerProfile::Balanced);
         assert!(profile.has_limits());
-        assert_eq!(profile.max_bandwidth_bytes_per_second, Some(128 * 1_048_576));
+        assert_eq!(
+            profile.max_bandwidth_bytes_per_second,
+            Some(128 * 1_048_576)
+        );
         assert_eq!(profile.max_in_flight_bytes, Some(128 * 1_048_576));
         assert_eq!(profile.max_repair_symbols_per_second, Some(4_096));
         assert_eq!(profile.max_disk_write_concurrency, Some(4));
