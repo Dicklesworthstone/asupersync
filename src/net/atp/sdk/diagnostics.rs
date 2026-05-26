@@ -319,16 +319,28 @@ impl AtpSdk {
             .unwrap_or_default()
             .as_nanos() as u64;
 
+        // Helper macro to extract Ok value or early return with the outcome error
+        macro_rules! try_outcome {
+            ($expr:expr) => {
+                match $expr {
+                    AtpOutcome::Ok(v) => v,
+                    AtpOutcome::Err(e) => return AtpOutcome::Err(e),
+                    AtpOutcome::Cancelled(r) => return AtpOutcome::Cancelled(r),
+                    AtpOutcome::Panicked(p) => return AtpOutcome::Panicked(p),
+                }
+            };
+        }
+
         // Simulate comprehensive path diagnosis
         let diagnosis = PathDiagnosis {
             peer_id: target_peer,
             timestamp_nanos,
-            connectivity: self.assess_connectivity(cx, target_peer).await?,
-            path_candidates: self.discover_path_candidates(cx, target_peer).await?,
-            nat_traversal: self.assess_nat_traversal(cx, target_peer).await?,
-            relay_info: self.assess_relay_availability(cx).await?,
-            stun_results: self.test_stun_servers(cx).await?,
-            network_quality: self.assess_network_quality(cx).await?,
+            connectivity: try_outcome!(self.assess_connectivity(cx, target_peer).await),
+            path_candidates: try_outcome!(self.discover_path_candidates(cx, target_peer).await),
+            nat_traversal: try_outcome!(self.assess_nat_traversal(cx, target_peer).await),
+            relay_info: try_outcome!(self.assess_relay_availability(cx).await),
+            stun_results: try_outcome!(self.test_stun_servers(cx).await),
+            network_quality: try_outcome!(self.assess_network_quality(cx).await),
             recommended_strategy: TransferStrategy::default(),
             warnings: Vec::new(),
         };

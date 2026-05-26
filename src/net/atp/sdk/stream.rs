@@ -7,6 +7,17 @@ use crate::channel::mpsc;
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::atp::protocol::{AtpError, AtpOutcome, PlatformError, ProtocolError};
+
+/// Helper macro to handle Result<T, E> in functions returning AtpOutcome<U>.
+/// Converts Result errors using the provided mapper and returns early on error.
+macro_rules! try_atp {
+    ($expr:expr, $error_mapper:expr) => {
+        match $expr {
+            Ok(v) => v,
+            Err(e) => return AtpOutcome::Err($error_mapper(e)),
+        }
+    };
+}
 use crate::obligation::graded::{GradedObligation, Resolution};
 use futures_lite::Stream;
 use serde::{Deserialize, Serialize};
@@ -141,16 +152,20 @@ enum ReaderState {
 impl AtpSession {
     /// Create an ATP writer for streaming large data to the remote peer.
     pub async fn create_writer(&self, cx: &Cx, config: StreamConfig) -> AtpOutcome<AtpWriter> {
-        cx.checkpoint()
-            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
+        try_atp!(
+            cx.checkpoint(),
+            |_| AtpError::Platform(PlatformError::OperatingSystemError)
+        );
         let _ = config;
         AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
     }
 
     /// Create an ATP reader for receiving streamed data from the remote peer.
     pub async fn create_reader(&self, cx: &Cx, config: StreamConfig) -> AtpOutcome<AtpReader> {
-        cx.checkpoint()
-            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
+        try_atp!(
+            cx.checkpoint(),
+            |_| AtpError::Platform(PlatformError::OperatingSystemError)
+        );
         let _ = config;
         AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
     }
@@ -184,9 +199,10 @@ impl AtpWriter {
 
         // Send final empty chunk to signal completion
         let final_chunk = StreamChunk::new(Vec::new(), 0, true);
-        self.data_tx
-            .try_send(final_chunk)
-            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
+        try_atp!(
+            self.data_tx.try_send(final_chunk),
+            |_| AtpError::Platform(PlatformError::OperatingSystemError)
+        );
 
         // Cancel the background task
         if let Some(cancel_tx) = self.cancel_tx.take() {
@@ -211,9 +227,10 @@ impl AtpWriter {
         self.state = WriterState::Writing;
 
         let chunk = StreamChunk::new(data, 0, false); // Sequence managed internally
-        self.data_tx
-            .try_send(chunk)
-            .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
+        try_atp!(
+            self.data_tx.try_send(chunk),
+            |_| AtpError::Platform(PlatformError::OperatingSystemError)
+        );
 
         self.state = WriterState::Ready;
         AtpOutcome::ok(())
@@ -288,7 +305,15 @@ impl AtpReader {
             }
 
             // Read next chunk
-            match self.read_chunk().await? {
+            let chunk_outcome = self.read_chunk().await;
+            let chunk_option = match chunk_outcome {
+                AtpOutcome::Ok(v) => v,
+                AtpOutcome::Err(e) => return AtpOutcome::Err(e),
+                AtpOutcome::Cancelled(r) => return AtpOutcome::Cancelled(r),
+                AtpOutcome::Panicked(p) => return AtpOutcome::Panicked(p),
+            };
+
+            match chunk_option {
                 Some(chunk) => {
                     let to_copy = std::cmp::min(chunk.data.len(), buf.len() - bytes_read);
                     buf[bytes_read..bytes_read + to_copy].copy_from_slice(&chunk.data[..to_copy]);

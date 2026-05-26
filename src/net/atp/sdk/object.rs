@@ -2,6 +2,17 @@
 
 use crate::cx::Cx;
 use crate::net::atp::protocol::{AtpError, AtpOutcome, DiskError, ManifestError, PlatformError};
+
+/// Helper macro to handle Result<T, E> in functions returning AtpOutcome<U>.
+/// Converts Result errors using the provided mapper and returns early on error.
+macro_rules! try_atp {
+    ($expr:expr, $error_mapper:expr) => {
+        match $expr {
+            Ok(v) => v,
+            Err(e) => return AtpOutcome::Err($error_mapper(e)),
+        }
+    };
+}
 use crate::sync::{LockError, Mutex, MutexGuard};
 use crate::types::CancelReason;
 use serde::{Deserialize, Serialize};
@@ -386,22 +397,27 @@ impl ObjectStore for FileSystemObjectStore {
 
         // Create parent directories
         if let Some(parent) = object_path.parent() {
-            crate::fs::create_dir_all(parent)
-                .await
-                .map_err(|_| AtpError::Disk(DiskError::IoError))?;
+            try_atp!(
+                crate::fs::create_dir_all(parent).await,
+                |_| AtpError::Disk(DiskError::IoError)
+            );
         }
 
         // Write object data
-        crate::fs::write(&object_path, &data)
-            .await
-            .map_err(|_| AtpError::Disk(DiskError::IoError))?;
+        try_atp!(
+            crate::fs::write(&object_path, &data).await,
+            |_| AtpError::Disk(DiskError::IoError)
+        );
 
         // Write object metadata
-        let metadata_json = serde_json::to_vec_pretty(&object)
-            .map_err(|_| AtpError::Manifest(ManifestError::InvalidFormat))?;
-        crate::fs::write(&metadata_path, metadata_json)
-            .await
-            .map_err(|_| AtpError::Disk(DiskError::IoError))?;
+        let metadata_json = try_atp!(
+            serde_json::to_vec_pretty(&object),
+            |_| AtpError::Manifest(ManifestError::InvalidFormat)
+        );
+        try_atp!(
+            crate::fs::write(&metadata_path, metadata_json).await,
+            |_| AtpError::Disk(DiskError::IoError)
+        );
 
         AtpOutcome::ok(object)
     }
@@ -413,9 +429,10 @@ impl ObjectStore for FileSystemObjectStore {
             return AtpOutcome::ok(None);
         }
 
-        let data = crate::fs::read(&object_path)
-            .await
-            .map_err(|_| AtpError::Disk(DiskError::IoError))?;
+        let data = try_atp!(
+            crate::fs::read(&object_path).await,
+            |_| AtpError::Disk(DiskError::IoError)
+        );
 
         // Verify hash matches
         let computed_hash = ObjectHash::from_data(&data);
@@ -433,12 +450,15 @@ impl ObjectStore for FileSystemObjectStore {
             return AtpOutcome::ok(None);
         }
 
-        let metadata_json = crate::fs::read(&metadata_path)
-            .await
-            .map_err(|_| AtpError::Disk(DiskError::IoError))?;
+        let metadata_json = try_atp!(
+            crate::fs::read(&metadata_path).await,
+            |_| AtpError::Disk(DiskError::IoError)
+        );
 
-        let object: AtpObject = serde_json::from_slice(&metadata_json)
-            .map_err(|_| AtpError::Manifest(ManifestError::InvalidFormat))?;
+        let object: AtpObject = try_atp!(
+            serde_json::from_slice(&metadata_json),
+            |_| AtpError::Manifest(ManifestError::InvalidFormat)
+        );
 
         AtpOutcome::ok(Some(object))
     }
@@ -466,14 +486,15 @@ impl ObjectStore for FileSystemObjectStore {
     async fn list_objects(&self, _cx: &Cx) -> AtpOutcome<Vec<ObjectHash>> {
         let mut hashes = Vec::new();
 
-        let mut read_dir = crate::fs::read_dir(&self.base_path)
-            .await
-            .map_err(|_| AtpError::Disk(DiskError::IoError))?;
+        let mut read_dir = try_atp!(
+            crate::fs::read_dir(&self.base_path).await,
+            |_| AtpError::Disk(DiskError::IoError)
+        );
 
-        while let Some(entry) = read_dir
-            .next_entry()
-            .await
-            .map_err(|_| AtpError::Disk(DiskError::IoError))?
+        while let Some(entry) = try_atp!(
+            read_dir.next_entry().await,
+            |_| AtpError::Disk(DiskError::IoError)
+        )
         {
             if let Some(name) = entry.file_name().to_str() {
                 if let Ok(hash) = ObjectHash::from_hex(name) {

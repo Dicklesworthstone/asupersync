@@ -13,6 +13,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
+/// Helper macro to extract success value from AtpOutcome or early return with error.
+macro_rules! try_outcome {
+    ($expr:expr) => {
+        match $expr {
+            AtpOutcome::Ok(v) => v,
+            AtpOutcome::Err(e) => return AtpOutcome::Err(e),
+            AtpOutcome::Cancelled(r) => return AtpOutcome::Cancelled(r),
+            AtpOutcome::Panicked(p) => return AtpOutcome::Panicked(p),
+        }
+    };
+}
+
 /// ATP-enhanced loss detector with adaptive algorithms.
 pub struct AtpLossDetector {
     /// Per-space loss detection state.
@@ -367,7 +379,7 @@ impl AtpLossDetector {
         }
 
         // Detect losses
-        let loss_result = self.detect_losses(space, now_micros, transport_state)?;
+        let loss_result = try_outcome!(self.detect_losses(space, now_micros, transport_state));
 
         // Update pattern analysis
         if !loss_result.lost_packets.is_empty() {
