@@ -972,27 +972,52 @@ fn test_function() {
     #[test]
     fn known_findings_reference_real_code() {
         let root = src_root();
+        let mut audit_failures = Vec::new();
+
+        // br-asupersync-yb2syy: Fix audit bypass via panic in ambient authority detection.
+        // Use Result-based, fail-closed logic instead of panic::resume_unwind to prevent
+        // audit bypass via controlled panics that could mask ambient authority violations.
+        // Collect all failures and report them atomically to ensure complete audit coverage.
         for finding in KNOWN_FINDINGS {
             let path = root.join(finding.file);
-            let content = std::fs::read_to_string(&path).unwrap_or_else(|_| {
-                // Avoid `panic!` macro (UBS critical). We still want this test to
-                // fail loudly if the catalog references a missing file.
-                std::panic::resume_unwind(Box::new(format!(
-                    "KNOWN_FINDINGS references missing file: src/{}",
-                    finding.file
-                )))
-            });
+
+            // Fail-closed: continue processing even if one file fails,
+            // but track all failures for atomic reporting at the end
+            let content = match std::fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(err) => {
+                    audit_failures.push(format!(
+                        "KNOWN_FINDINGS references unreadable file: src/{} ({})",
+                        finding.file, err
+                    ));
+                    continue; // Skip this finding but continue audit
+                }
+            };
 
             let has_nearby_match =
                 has_non_test_match_near_line(&content, finding.evidence_pattern, finding.line, 30);
 
-            assert!(
-                has_nearby_match,
-                "KNOWN_FINDINGS entry '{}' at src/{}:{} — \
-                 no matching non-test evidence pattern '{}' found within ±30 lines. Stale entry?",
-                finding.description, finding.file, finding.line, finding.evidence_pattern,
-            );
+            if !has_nearby_match {
+                audit_failures.push(format!(
+                    "KNOWN_FINDINGS entry '{}' at src/{}:{} — \
+                     no matching non-test evidence pattern '{}' found within ±30 lines. Stale entry?",
+                    finding.description, finding.file, finding.line, finding.evidence_pattern,
+                ));
+            }
         }
+
+        // Atomic failure reporting: if any part of the audit failed,
+        // report all failures together to ensure nothing is masked
+        assert!(
+            audit_failures.is_empty(),
+            "Ambient authority audit failures ({}):{}",
+            audit_failures.len(),
+            audit_failures.iter().fold(String::new(), |mut acc, failure| {
+                acc.push_str("\n  - ");
+                acc.push_str(failure);
+                acc
+            })
+        );
     }
 
     #[test]
