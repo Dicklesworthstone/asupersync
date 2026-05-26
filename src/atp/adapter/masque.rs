@@ -194,7 +194,8 @@ impl MasqueAdapter {
         let setup_latency = start_time.elapsed();
 
         // Check for overhead warnings before moving tunnel
-        if tunnel.overhead_ratio > self.config.overhead_warning_threshold {
+        let overhead_ratio = tunnel.overhead_ratio;
+        if overhead_ratio > self.config.overhead_warning_threshold {
             cx.trace("masque_overhead_warning");
         }
 
