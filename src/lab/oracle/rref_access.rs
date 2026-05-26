@@ -197,10 +197,14 @@ impl RRefAccessOracle {
         // via the lock and that the oracle should NOT flag based on
         // tick equality alone). The `>=` form fires false positives
         // in virtual-time scenarios where multiple events legitimately
-        // share a tick. Callers that genuinely need to assert on
-        // concurrent access should use `on_rref_access_with_witness`
-        // which is gated on observed concurrency rather than tick
-        // arithmetic.
+        // share a tick.
+        //
+        // br-asupersync-wq22bt: Fixed false positive where Oracle incorrectly
+        // flagged legitimate concurrent accesses in virtual-time scenarios.
+        // Oracle now uses strict tick comparison (>) rather than tick equality
+        // for post-close detection. Callers that genuinely need to assert on
+        // concurrent access should use `on_rref_access_with_witness` which is
+        // gated on observed concurrency rather than tick arithmetic.
         if let Some(&close_time) = self.closed_regions.get(&rref_region) {
             if time > close_time {
                 self.violations.push(RRefAccessViolation {
@@ -442,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn access_at_close_time_detected() {
+    fn access_at_close_time_no_violation() {
         let mut oracle = RRefAccessOracle::new();
         let r = region(0);
         let tid = task(1);
@@ -452,7 +456,12 @@ mod tests {
         oracle.on_region_close(r, t(50));
         oracle.on_rref_access(rref(0, 0), tid, t(50)); // Exactly at close time
 
-        assert!(oracle.check().is_err());
+        // br-asupersync-wq22bt: Access at close_time should be legal.
+        // In virtual time scenarios, multiple events can share the same tick.
+        // The runtime synchronizes this boundary with locks, so concurrent
+        // access at close_time is legitimate.
+        assert!(oracle.check().is_ok());
+        assert_eq!(oracle.violation_count(), 0);
     }
 
     // ================================================================
