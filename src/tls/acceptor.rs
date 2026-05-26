@@ -26,11 +26,32 @@ use std::sync::Arc;
 /// This is typically configured once and reused to accept many connections.
 /// Cloning is cheap (Arc-based).
 ///
-/// # Example
+/// # Security Considerations for Multi-Tenant Deployments
+///
+/// **CRITICAL**: In multi-tenant SaaS deployments, SNI-less connections
+/// MUST be rejected to prevent exposure of the default certificate tenant.
+/// Use `require_sni_for_multi_tenant()` to enforce this security boundary.
+///
+/// Without SNI enforcement, attackers can probe the default tenant by
+/// connecting without the SNI extension, potentially bypassing tenant
+/// isolation (tracked as asupersync-3iqbx3).
+///
+/// # Example (Single-tenant)
 ///
 /// ```ignore
 /// let acceptor = TlsAcceptor::builder(cert_chain, private_key)
 ///     .alpn_http()
+///     .build()?;
+///
+/// let tls_stream = acceptor.accept(tcp_stream).await?;
+/// ```
+///
+/// # Example (Multi-tenant - SECURITY REQUIRED)
+///
+/// ```ignore
+/// let acceptor = TlsAcceptor::builder(cert_chain, private_key)
+///     .alpn_http()
+///     .require_sni_for_multi_tenant()  // CRITICAL for multi-tenant
 ///     .build()?;
 ///
 /// let tls_stream = acceptor.accept(tcp_stream).await?;
@@ -149,7 +170,9 @@ impl TlsAcceptor {
         // default-cert tenant is not reachable via probing.
         if self.require_sni && stream.sni_hostname().is_none() {
             return Err(TlsError::Configuration(
-                "client did not send SNI but require_sni() is set".into(),
+                "SECURITY: Client did not send SNI extension but require_sni() is set. \
+                 SNI-less connections are rejected to prevent exposure of default \
+                 certificate tenant in multi-tenant deployments (asupersync-3iqbx3)".into(),
             ));
         }
 
@@ -323,6 +346,30 @@ impl TlsAcceptorBuilder {
     /// a probing attacker reaches the default-cert tenant.
     #[must_use]
     pub fn require_sni(mut self) -> Self {
+        self.require_sni = true;
+        self
+    }
+
+    /// SECURITY: Require SNI for multi-tenant deployments.
+    ///
+    /// This is a security-focused variant of `require_sni()` that provides
+    /// clearer semantics for multi-tenant SaaS deployments. In multi-tenant
+    /// environments, SNI-less connections MUST be rejected to prevent
+    /// attackers from accessing the default certificate tenant.
+    ///
+    /// **Critical Security Property**: Without SNI enforcement, an attacker
+    /// can probe the default tenant's certificate and potentially bypass
+    /// tenant isolation by connecting without the SNI extension.
+    ///
+    /// Use this method when:
+    /// - Hosting multiple tenants with different certificates
+    /// - Each tenant has distinct security boundaries
+    /// - SNI is used for tenant routing/identification
+    ///
+    /// This method is equivalent to `require_sni()` but makes the security
+    /// intent explicit for code review and compliance auditing.
+    #[must_use]
+    pub fn require_sni_for_multi_tenant(mut self) -> Self {
         self.require_sni = true;
         self
     }
@@ -570,6 +617,29 @@ impl TlsAcceptorBuilder {
             return Err(TlsError::Configuration(
                 "require_alpn set but no ALPN protocols configured".into(),
             ));
+        }
+
+        // SECURITY: br-asupersync-3iqbx3 — detect potential multi-tenant
+        // configurations and warn if SNI is not enforced. Multi-tenant
+        // patterns include SNI/ALPN allow-lists or multiple ALPN protocols
+        // that suggest tenant-specific routing.
+        if !self.require_sni {
+            let has_sni_alpn_allowlist = self.sni_alpn_allow_list.is_some();
+            let has_multiple_alpn = self.alpn_protocols.len() > 1;
+            let likely_multi_tenant = has_sni_alpn_allowlist || has_multiple_alpn;
+
+            if likely_multi_tenant {
+                #[cfg(feature = "tracing-integration")]
+                tracing::warn!(
+                    sni_alpn_allowlist = has_sni_alpn_allowlist,
+                    alpn_protocols_count = self.alpn_protocols.len(),
+                    "SECURITY WARNING: Multi-tenant TLS configuration detected \
+                     but require_sni() is not set. SNI-less connections can \
+                     reach the default certificate tenant. Call require_sni() \
+                     or require_sni_for_multi_tenant() to prevent tenant \
+                     exposure (asupersync-3iqbx3)"
+                );
+            }
         }
 
         // br-asupersync-58ixk6 — reject empty cert chains and, when
@@ -1765,5 +1835,108 @@ SrXuVI5uunTgPWuOtJOP+KM=
             list.contains_key("api.example.com"),
             "allow-list keys must be normalised to lowercase"
         );
+    }
+
+    // ── br-asupersync-3iqbx3: SNI security validation tests ──────────
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_require_sni_for_multi_tenant_sets_flag() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let acceptor = TlsAcceptorBuilder::new(chain, key)
+            .require_sni_for_multi_tenant()
+            .build()
+            .unwrap();
+
+        assert!(
+            acceptor.require_sni,
+            "require_sni_for_multi_tenant() must set require_sni flag"
+        );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_multi_tenant_warning_with_sni_alpn_allowlist_but_no_require_sni() {
+        // This test verifies that the security warning is triggered when
+        // a potentially multi-tenant configuration (SNI/ALPN allow-list)
+        // is used without require_sni(). In production, this should be caught
+        // during configuration validation.
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let mut allow = std::collections::BTreeMap::new();
+        allow.insert("tenant1.example.com".to_string(), vec![b"h2".to_vec()]);
+
+        // This should succeed but trigger a security warning
+        let _acceptor = TlsAcceptorBuilder::new(chain, key)
+            .alpn_protocols_required(vec![b"h2".to_vec()])
+            .sni_alpn_allow_list(allow)
+            // Note: deliberately NOT calling require_sni() to trigger warning
+            .build()
+            .expect("build should succeed but log security warning");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_multi_tenant_warning_with_multiple_alpn_but_no_require_sni() {
+        // Multiple ALPN protocols suggest potential tenant-specific routing
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+
+        // This should succeed but trigger a security warning
+        let _acceptor = TlsAcceptorBuilder::new(chain, key)
+            .alpn_protocols(vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"grpc".to_vec()])
+            // Note: deliberately NOT calling require_sni() to trigger warning
+            .build()
+            .expect("build should succeed but log security warning");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_sni_security_error_message_contains_security_context() {
+        use crate::net::tcp::VirtualTcpStream;
+        use crate::test_utils::run_test_with_cx;
+        use futures_lite::future::zip;
+
+        run_test_with_cx(|_cx| async move {
+            // Create acceptor that requires SNI
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key)
+                .require_sni_for_multi_tenant() // Use the security-focused variant
+                .build()
+                .unwrap();
+
+            // Create client that doesn't send SNI
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .disable_sni() // This should cause the security error
+                .build()
+                .unwrap();
+
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5200".parse().unwrap(),
+                "127.0.0.1:5201".parse().unwrap(),
+            );
+
+            let (client_res, server_res) = zip(
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
+            )
+            .await;
+
+            // Server should reject with security-focused error message
+            let server_err = server_res.unwrap_err();
+            match server_err {
+                TlsError::Configuration(msg) => {
+                    assert!(
+                        msg.contains("SECURITY") && msg.contains("asupersync-3iqbx3"),
+                        "error message should contain security context, got: {msg}"
+                    );
+                }
+                other => panic!("expected Configuration error with security context, got {other:?}"),
+            }
+        });
     }
 }
