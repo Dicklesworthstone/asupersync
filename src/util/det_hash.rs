@@ -3,30 +3,35 @@
 //! These types provide deterministic hashing and collection iteration
 //! for use in deterministic tests and lab runtime logic.
 //!
-//! # Security boundary (br-asupersync-yrwie0)
+//! # Security boundary (br-asupersync-yrwie0, br-asupersync-g8lqgh)
 //!
-//! `DetHasher` uses a **fixed published seed** so that schedule
-//! exploration in the lab runtime is byte-reproducible across runs.
-//! That same property makes it **trivially attackable** when used as
-//! the hasher for any `HashMap` whose keys are attacker-controlled:
-//! an attacker who reads this source can compute thousands of distinct
-//! keys that all hash to the same bucket and weaponize the resulting
-//! O(n²) HashMap collisions into a CPU-exhaustion DoS.
+//! `DetHasher` behavior depends on build configuration:
+//! - **Test builds** (with `test-internals` feature): Uses fixed published seed
+//!   for deterministic lab runtime and reproducible schedule exploration.
+//! - **Production builds** (without `test-internals`): Uses OS-derived random
+//!   seed to prevent hash collision DoS attacks.
 //!
-//! **Use `DetHashMap` / `DetHashSet` ONLY for**:
+//! The fixed seed in test builds makes collision attacks trivial - an attacker
+//! who reads this source can compute thousands of distinct keys that all hash
+//! to the same bucket and weaponize the resulting O(n²) HashMap collisions into
+//! CPU-exhaustion DoS. Production builds automatically use random seeding.
+//!
+//! **Use `DetHashMap` / `DetHashSet` for**:
 //!   * Internal-only key spaces (TaskId, RegionId, ModuleId, etc.) where
 //!     keys come from monotonic counters or trusted runtime sources.
 //!   * Lab-runtime / replay paths where determinism is REQUIRED for
 //!     reproducible execution and the keys are not externally supplied.
 //!
-//! **NEVER use `DetHashMap` / `DetHashSet` for**:
+//! **For attacker-controlled keys, prefer**:
+//!   * `ProductionHashMap` / `ProductionHashSet` for explicit random seeding
+//!   * `std::collections::HashMap` with its default `RandomState`
+//!   * `BTreeMap` / `BTreeSet` for deterministic ordered iteration
+//!
+//! **Avoid with attacker-controlled keys**:
 //!   * HTTP header names, query parameters, cookie names, or any other
 //!     value that arrives from a network peer.
 //!   * Cache keys derived from user input.
 //!   * JSON-object keys parsed from request bodies.
-//!
-//! For attacker-controlled keys, use `std::collections::HashMap` with
-//! its default `RandomState` (per-process random seed from OS entropy).
 
 use std::hash::{BuildHasher, Hasher};
 
@@ -98,14 +103,20 @@ impl DetHasher {
 }
 
 impl Default for DetHasher {
-    /// Default to lab mode for backward compatibility.
+    /// Default hasher selection based on build configuration.
     ///
-    /// **Security**: This preserves existing behavior but should only be used
-    /// in lab runtime or with trusted keys. For production use with potentially
-    /// attacker-controlled keys, explicitly use `DetHasher::for_production()`.
+    /// **Security**: Uses fixed seed only in test builds (test-internals feature).
+    /// Production builds default to random seeding for hash collision DoS protection.
     #[inline]
     fn default() -> Self {
-        Self::for_lab()
+        #[cfg(feature = "test-internals")]
+        {
+            Self::for_lab()
+        }
+        #[cfg(not(feature = "test-internals"))]
+        {
+            Self::for_production()
+        }
     }
 }
 
@@ -197,9 +208,19 @@ pub struct DetBuildHasher {
 }
 
 impl Default for DetBuildHasher {
-    /// Default to lab mode for backward compatibility.
+    /// Default hasher builder based on build configuration.
+    ///
+    /// **Security**: Uses fixed seed only in test builds (test-internals feature).
+    /// Production builds default to random seeding for hash collision DoS protection.
     fn default() -> Self {
-        Self::for_lab()
+        #[cfg(feature = "test-internals")]
+        {
+            Self::for_lab()
+        }
+        #[cfg(not(feature = "test-internals"))]
+        {
+            Self::for_production()
+        }
     }
 }
 
@@ -236,19 +257,23 @@ impl BuildHasher for DetBuildHasher {
     }
 }
 
-/// `HashMap` with deterministic hashing for lab runtime (fixed seed).
+/// `HashMap` with configuration-dependent hashing.
 ///
-/// **Security**: Only use with trusted keys (TaskId, RegionId, etc.).
-/// For potentially attacker-controlled keys, use `ProductionHashMap`.
+/// **Security**: Uses fixed seed in test builds, random seed in production.
+/// Safe for trusted keys (TaskId, RegionId, etc.) in both configurations.
+/// For explicit control over seeding, use `ProductionHashMap` (always random)
+/// or call `HashMap::with_hasher(DetBuildHasher::for_lab())` (always fixed).
 ///
 /// Note: iteration order is NOT guaranteed to be reproducible across runs or
 /// Rust versions. Use `BTreeMap` if deterministic iteration order is required.
 pub type DetHashMap<K, V> = std::collections::HashMap<K, V, DetBuildHasher>;
 
-/// `HashSet` with deterministic hashing for lab runtime (fixed seed).
+/// `HashSet` with configuration-dependent hashing.
 ///
-/// **Security**: Only use with trusted keys (TaskId, RegionId, etc.).
-/// For potentially attacker-controlled keys, use `ProductionHashSet`.
+/// **Security**: Uses fixed seed in test builds, random seed in production.
+/// Safe for trusted keys (TaskId, RegionId, etc.) in both configurations.
+/// For explicit control over seeding, use `ProductionHashSet` (always random)
+/// or call `HashSet::with_hasher(DetBuildHasher::for_lab())` (always fixed).
 ///
 /// Note: iteration order is NOT guaranteed to be reproducible across runs or
 /// Rust versions. Use `BTreeSet` if deterministic iteration order is required.

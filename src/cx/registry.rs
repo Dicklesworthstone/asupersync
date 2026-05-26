@@ -611,13 +611,13 @@ impl NameRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            leases: DetHashMap::with_capacity_and_hasher(32, DetBuildHasher),
-            pending: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher),
-            waiters: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher),
+            leases: DetHashMap::with_capacity_and_hasher(32, DetBuildHasher::default()),
+            pending: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher::default()),
+            waiters: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher::default()),
             granted: Vec::with_capacity(8),
-            watchers_by_ref: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher),
-            watchers_by_name: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher),
-            watchers_by_region: DetHashMap::with_capacity_and_hasher(8, DetBuildHasher),
+            watchers_by_ref: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher::default()),
+            watchers_by_name: DetHashMap::with_capacity_and_hasher(16, DetBuildHasher::default()),
+            watchers_by_region: DetHashMap::with_capacity_and_hasher(8, DetBuildHasher::default()),
             notifications: Vec::with_capacity(8),
             next_watch_ref: 1,
             next_permit_id: 1,
