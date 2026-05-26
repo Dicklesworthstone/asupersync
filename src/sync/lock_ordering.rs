@@ -1,8 +1,8 @@
 //! Runtime lock ordering enforcement for deadlock prevention.
 //!
 //! Implements the asupersync lock hierarchy: E(Config) -> D(Instrumentation) -> B(Regions) -> A(Tasks) -> C(Obligations).
-//! In debug builds, tracks lock acquisition order per thread and panics on violations.
-//! In release builds, all checks are compiled away for zero cost.
+//! In debug builds or with `lock-metrics` feature, tracks lock acquisition order per thread and panics on violations.
+//! In release builds without `lock-metrics`, all checks are compiled away for zero cost.
 //!
 //! # Cross-Module Enforcement
 //!
@@ -10,9 +10,9 @@
 //! to prevent deadlocks when operations span multiple asupersync modules. Each lock is
 //! tagged with both its rank and module, enabling detection of problematic cross-module patterns.
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use std::cell::RefCell;
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Lock rank categories following the asupersync hierarchy.
@@ -97,7 +97,7 @@ pub struct LockOrderAtlasSnapshot {
 }
 
 /// Information about an acquired lock for cross-module tracking.
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockInfo {
     /// Lock name recorded for ordering checks.
@@ -185,7 +185,7 @@ impl LockRank {
 
 /// Thread-local storage for tracking held lock ranks and modules.
 /// Only compiled in debug builds.
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 thread_local! {
     static HELD_RANKS: RefCell<BTreeSet<LockRank>> = const { RefCell::new(BTreeSet::new()) };
     static HELD_LOCKS: RefCell<BTreeMap<LockRank, Vec<LockInfo>>> = const { RefCell::new(BTreeMap::new()) };
@@ -197,7 +197,7 @@ thread_local! {
 /// In debug builds, panics on violations. In release builds, does nothing.
 #[inline]
 pub fn check_acquire(lock_name: &str, rank: LockRank) {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
         check_acquire_with_module(lock_name, rank, LockModule::from_name(lock_name));
     }
@@ -212,7 +212,7 @@ pub fn check_acquire(lock_name: &str, rank: LockRank) {
 /// This is the enhanced version that performs cross-module validation.
 #[inline]
 pub fn check_acquire_with_module(lock_name: &str, rank: LockRank, module: LockModule) {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
         HELD_RANKS.with(|held_ranks| {
             HELD_LOCKS.with(|held_locks| {
@@ -253,7 +253,7 @@ pub fn check_acquire_with_module(lock_name: &str, rank: LockRank, module: LockMo
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 fn record_order_edges(
     lock_name: &str,
     rank: LockRank,
@@ -277,7 +277,7 @@ fn record_order_edges(
     });
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 fn record_order_violation(
     lock_name: &str,
     rank: LockRank,
@@ -297,7 +297,7 @@ fn record_order_violation(
 }
 
 /// Validate cross-module lock acquisition patterns to prevent complex deadlocks.
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 fn validate_cross_module_pattern(
     lock_name: &str,
     rank: LockRank,
@@ -377,7 +377,7 @@ fn validate_cross_module_pattern(
 /// Only active in debug builds.
 #[inline]
 pub fn record_acquire(lock_name: &str, rank: LockRank) {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
         record_acquire_with_module(lock_name, rank, LockModule::from_name(lock_name));
     }
@@ -392,7 +392,7 @@ pub fn record_acquire(lock_name: &str, rank: LockRank) {
 /// This is the enhanced version that tracks cross-module relationships.
 #[inline]
 pub fn record_acquire_with_module(lock_name: &str, rank: LockRank, module: LockModule) {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
         HELD_RANKS.with(|held_ranks| {
             HELD_LOCKS.with(|held_locks| {
@@ -423,7 +423,7 @@ pub fn record_acquire_with_module(lock_name: &str, rank: LockRank, module: LockM
 /// Only active in debug builds.
 #[inline]
 pub fn record_release(lock_name: &str, rank: LockRank) {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
         record_release_with_module(lock_name, rank, LockModule::from_name(lock_name));
     }
@@ -438,7 +438,7 @@ pub fn record_release(lock_name: &str, rank: LockRank) {
 /// This is the enhanced version that maintains cross-module tracking accuracy.
 #[inline]
 pub fn record_release_with_module(lock_name: &str, rank: LockRank, module: LockModule) {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
         HELD_RANKS.with(|held_ranks| {
             HELD_LOCKS.with(|held_locks| {
@@ -466,7 +466,7 @@ pub fn record_release_with_module(lock_name: &str, rank: LockRank, module: LockM
 
 /// Get the currently held lock ranks for debugging.
 /// Only available in debug builds.
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 #[allow(dead_code)]
 pub fn current_held_ranks() -> Vec<LockRank> {
     HELD_RANKS.with(|held| held.borrow().iter().copied().collect())
@@ -474,7 +474,7 @@ pub fn current_held_ranks() -> Vec<LockRank> {
 
 /// Get detailed information about all currently held locks for debugging.
 /// Only available in debug builds.
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 #[allow(dead_code)]
 pub fn current_held_locks() -> BTreeMap<LockRank, Vec<LockInfo>> {
     HELD_LOCKS.with(|held| held.borrow().clone())
@@ -482,7 +482,7 @@ pub fn current_held_locks() -> BTreeMap<LockRank, Vec<LockInfo>> {
 
 /// Clear all held lock tracking (for testing purposes only).
 /// Only available in debug builds.
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 #[allow(dead_code)]
 pub fn clear_held_locks() {
     HELD_RANKS.with(|held_ranks| held_ranks.borrow_mut().clear());
@@ -493,7 +493,7 @@ pub fn clear_held_locks() {
 /// Return the current deterministic lock-order atlas snapshot.
 #[must_use]
 pub fn lock_order_atlas_snapshot() -> LockOrderAtlasSnapshot {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
         let order_edges_exercised =
             ORDER_EDGES.with(|edges| edges.borrow().iter().cloned().collect());
@@ -518,7 +518,7 @@ pub fn lock_order_atlas_snapshot() -> LockOrderAtlasSnapshot {
 
 /// Clear deterministic lock-order atlas state for the current thread.
 pub fn clear_lock_order_atlas() {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     {
         ORDER_EDGES.with(|edges| edges.borrow_mut().clear());
         ORDER_VIOLATIONS.with(|violations| violations.borrow_mut().clear());
@@ -611,7 +611,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn test_correct_lock_ordering() {
         // This should not panic - correct ordering
         check_acquire("config_test", LockRank::Config);
@@ -629,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[should_panic(expected = "Lock ordering violation")]
     fn test_incorrect_lock_ordering() {
         clear_held_locks(); // Start with clean state
@@ -657,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn test_cross_module_correct_patterns() {
         clear_held_locks(); // Start with clean state
 
@@ -674,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[should_panic(expected = "CROSS-MODULE DEADLOCK PREVENTION")]
     fn test_cross_module_obligation_cancel_violation() {
         clear_held_locks(); // Start with clean state
@@ -691,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[should_panic(expected = "CROSS-MODULE DEADLOCK PREVENTION")]
     fn test_cross_module_cx_cancel_violation() {
         clear_held_locks(); // Start with clean state
@@ -704,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[should_panic(expected = "CROSS-MODULE DEADLOCK PREVENTION")]
     fn test_cross_module_runtime_obligation_violation() {
         clear_held_locks(); // Start with clean state
@@ -721,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn test_detailed_lock_tracking() {
         clear_held_locks(); // Start with clean state
 

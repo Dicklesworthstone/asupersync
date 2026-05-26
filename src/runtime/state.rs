@@ -136,7 +136,6 @@ impl ReadBiasedDrainingRegionSnapshot {
         self.writes_since_last_read.store(0, Ordering::Release);
     }
 
-    #[allow(dead_code)]
     fn invalidate(&self) {
         if self.enabled.load(Ordering::Acquire) {
             self.valid.store(false, Ordering::Release);
@@ -3977,6 +3976,9 @@ impl RuntimeState {
                                 "region finalize transition",
                                 &validation_result,
                             );
+                            // Protocol violation detected - invalidate region snapshot cache
+                            // to ensure consistency is re-established via authoritative scan
+                            self.read_biased_draining_region_snapshot.invalidate();
                             // Continue with transition but log violation
                         }
 
@@ -4030,6 +4032,8 @@ impl RuntimeState {
                                         "region drain transition",
                                         &validation_result,
                                     );
+                                    // Protocol violation detected - invalidate region snapshot cache
+                                    self.read_biased_draining_region_snapshot.invalidate();
                                     // Continue with transition but log violation
                                 }
 
@@ -4123,6 +4127,8 @@ impl RuntimeState {
                                     "region close completion",
                                     &validation_result,
                                 );
+                                // Protocol violation detected - invalidate region snapshot cache
+                                self.read_biased_draining_region_snapshot.invalidate();
                                 // Continue with transition but log violation
                             }
 
@@ -11063,7 +11069,7 @@ mod tests {
         crate::test_complete!("shardguard_locking_patterns_exercised");
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn metamorphic_order_respecting_lock_sequences_remain_tarjan_scc_free() {
         use crate::runtime::ShardGuard;

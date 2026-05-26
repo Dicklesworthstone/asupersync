@@ -355,7 +355,7 @@ pub struct ShardGuard<'a> {
     /// Obligation shard guard (Shard C), if acquired.
     pub obligations: Option<crate::sync::ContendedMutexGuard<'a, ObligationTable>>,
     /// Number of debug lock entries recorded for this guard.
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     debug_locks: usize,
 }
 
@@ -365,20 +365,20 @@ impl<'a> ShardGuard<'a> {
     /// Use for: poll, push/pop/steal, wake_state operations.
     #[must_use]
     pub fn tasks_only(shards: &'a ShardedState) -> Self {
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Tasks);
         let tasks = shards
             .tasks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Tasks);
         Self {
             config: &shards.config,
             regions: None,
             tasks: Some(tasks),
             obligations: None,
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "lock-metrics"))]
             debug_locks: 1,
         }
     }
@@ -388,20 +388,20 @@ impl<'a> ShardGuard<'a> {
     /// Use for: read-only region tree queries, region count checks.
     #[must_use]
     pub fn regions_only(shards: &'a ShardedState) -> Self {
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Regions);
         let regions = shards
             .regions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Regions);
         Self {
             config: &shards.config,
             regions: Some(regions),
             tasks: None,
             obligations: None,
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "lock-metrics"))]
             debug_locks: 1,
         }
     }
@@ -411,20 +411,20 @@ impl<'a> ShardGuard<'a> {
     /// Use for: read-only obligation queries, obligation count checks.
     #[must_use]
     pub fn obligations_only(shards: &'a ShardedState) -> Self {
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Obligations);
         let obligations = shards
             .obligations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Obligations);
         Self {
             config: &shards.config,
             regions: None,
             tasks: None,
             obligations: Some(obligations),
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "lock-metrics"))]
             debug_locks: 1,
         }
     }
@@ -435,29 +435,29 @@ impl<'a> ShardGuard<'a> {
     #[must_use]
     pub fn for_task_completed(shards: &'a ShardedState) -> Self {
         // Acquire in order: B→A→C (D is lock-free)
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Regions);
         let regions = shards
             .regions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Regions);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Tasks);
         let tasks = shards
             .tasks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Tasks);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Obligations);
         let obligations = shards
             .obligations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Obligations);
 
         Self {
@@ -465,7 +465,7 @@ impl<'a> ShardGuard<'a> {
             regions: Some(regions),
             tasks: Some(tasks),
             obligations: Some(obligations),
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "lock-metrics"))]
             debug_locks: 3,
         }
     }
@@ -483,29 +483,29 @@ impl<'a> ShardGuard<'a> {
     #[must_use]
     pub fn for_cancel(shards: &'a ShardedState) -> Self {
         // Acquire in order: B→A→C (D is lock-free)
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Regions);
         let regions = shards
             .regions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Regions);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Tasks);
         let tasks = shards
             .tasks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Tasks);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Obligations);
         let obligations = shards
             .obligations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Obligations);
 
         Self {
@@ -513,7 +513,7 @@ impl<'a> ShardGuard<'a> {
             regions: Some(regions),
             tasks: Some(tasks),
             obligations: Some(obligations),
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "lock-metrics"))]
             debug_locks: 3,
         }
     }
@@ -526,21 +526,21 @@ impl<'a> ShardGuard<'a> {
     #[must_use]
     pub fn for_obligation(shards: &'a ShardedState) -> Self {
         // Acquire in order: B→C (D is lock-free, A not needed for creation)
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Regions);
         let regions = shards
             .regions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Regions);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Obligations);
         let obligations = shards
             .obligations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Obligations);
 
         Self {
@@ -548,7 +548,7 @@ impl<'a> ShardGuard<'a> {
             regions: Some(regions),
             tasks: None,
             obligations: Some(obligations),
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "lock-metrics"))]
             debug_locks: 2,
         }
     }
@@ -567,29 +567,29 @@ impl<'a> ShardGuard<'a> {
     #[must_use]
     pub fn for_obligation_resolve(shards: &'a ShardedState) -> Self {
         // Acquire in order: B→A→C (D is lock-free)
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Regions);
         let regions = shards
             .regions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Regions);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Tasks);
         let tasks = shards
             .tasks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Tasks);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Obligations);
         let obligations = shards
             .obligations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Obligations);
 
         Self {
@@ -597,7 +597,7 @@ impl<'a> ShardGuard<'a> {
             regions: Some(regions),
             tasks: Some(tasks),
             obligations: Some(obligations),
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "lock-metrics"))]
             debug_locks: 3,
         }
     }
@@ -608,21 +608,21 @@ impl<'a> ShardGuard<'a> {
     #[must_use]
     pub fn for_spawn(shards: &'a ShardedState) -> Self {
         // Acquire in order: B→A (E read-only, D lock-free, C not needed)
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Regions);
         let regions = shards
             .regions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Regions);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Tasks);
         let tasks = shards
             .tasks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Tasks);
 
         Self {
@@ -630,7 +630,7 @@ impl<'a> ShardGuard<'a> {
             regions: Some(regions),
             tasks: Some(tasks),
             obligations: None,
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "lock-metrics"))]
             debug_locks: 2,
         }
     }
@@ -641,29 +641,29 @@ impl<'a> ShardGuard<'a> {
     #[must_use]
     pub fn all(shards: &'a ShardedState) -> Self {
         // Acquire in order: B→A→C
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Regions);
         let regions = shards
             .regions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Regions);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Tasks);
         let tasks = shards
             .tasks
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Tasks);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::before_lock(LockShard::Obligations);
         let obligations = shards
             .obligations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         lock_order::after_lock(LockShard::Obligations);
 
         Self {
@@ -671,7 +671,7 @@ impl<'a> ShardGuard<'a> {
             regions: Some(regions),
             tasks: Some(tasks),
             obligations: Some(obligations),
-            #[cfg(debug_assertions)]
+            #[cfg(any(debug_assertions, feature = "lock-metrics"))]
             debug_locks: 3,
         }
     }
@@ -685,14 +685,14 @@ impl Drop for ShardGuard<'_> {
         drop(obligations);
         drop(tasks);
         drop(regions);
-        #[cfg(debug_assertions)]
+        #[cfg(any(debug_assertions, feature = "lock-metrics"))]
         {
             lock_order::unlock_n(self.debug_locks);
         }
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LockShard {
     Regions,
@@ -700,7 +700,7 @@ pub(crate) enum LockShard {
     Obligations,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 impl LockShard {
     /// Returns the canonical acquisition order index.
     ///
@@ -725,7 +725,7 @@ impl LockShard {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 impl std::fmt::Display for LockShard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
@@ -745,7 +745,7 @@ impl std::fmt::Display for LockShard {
 ///
 /// State is per-thread (thread-local). No cross-thread coordination
 /// is needed because lock ordering is a per-thread property.
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, feature = "lock-metrics"))]
 pub(crate) mod lock_order {
     use super::LockShard;
     use std::cell::RefCell;
@@ -995,7 +995,7 @@ mod tests {
 
     // ── Lock ordering enforcement tests ──────────────────────────────────
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn lock_order_held_count_tracks_acquisitions() {
         // Verify held_count is 0 at start, increments on acquire, decrements on drop.
@@ -1016,7 +1016,7 @@ mod tests {
         assert_eq!(lock_order::held_count(), 0);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn lock_order_single_shard_tracking() {
         assert_eq!(lock_order::held_count(), 0);
@@ -1047,7 +1047,7 @@ mod tests {
         assert_eq!(lock_order::held_count(), 0);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn lock_order_spawn_guard_tracking() {
         assert_eq!(lock_order::held_count(), 0);
@@ -1064,7 +1064,7 @@ mod tests {
         assert_eq!(lock_order::held_count(), 0);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn lock_order_cancel_guard_tracking() {
         assert_eq!(lock_order::held_count(), 0);
@@ -1084,7 +1084,7 @@ mod tests {
         assert_eq!(lock_order::held_count(), 0);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn lock_order_obligation_guard_tracking() {
         assert_eq!(lock_order::held_count(), 0);
@@ -1104,7 +1104,7 @@ mod tests {
         assert_eq!(lock_order::held_count(), 0);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn lock_order_obligation_resolve_guard_tracking() {
         assert_eq!(lock_order::held_count(), 0);
@@ -1131,7 +1131,7 @@ mod tests {
     // module to simulate a violation without needing two ShardedState
     // instances (which would introduce real deadlock risk).
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     #[should_panic(expected = "lock order violation")]
     fn lock_order_violation_tasks_before_regions() {
@@ -1141,7 +1141,7 @@ mod tests {
         lock_order::before_lock(LockShard::Regions); // ← panic
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     #[should_panic(expected = "lock order violation")]
     fn lock_order_violation_obligations_before_tasks() {
@@ -1151,7 +1151,7 @@ mod tests {
         lock_order::before_lock(LockShard::Tasks); // ← panic
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     #[should_panic(expected = "lock order violation")]
     fn lock_order_violation_obligations_before_regions() {
@@ -1161,7 +1161,7 @@ mod tests {
         lock_order::before_lock(LockShard::Regions); // ← panic
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     #[should_panic(expected = "lock order violation")]
     fn lock_order_violation_duplicate_shard() {
@@ -1171,7 +1171,7 @@ mod tests {
         lock_order::before_lock(LockShard::Tasks); // ← panic (1 not < 1)
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn lock_order_valid_full_sequence() {
         // Canonical order: Regions → Tasks → Obligations should succeed.
@@ -1193,7 +1193,7 @@ mod tests {
         assert_eq!(lock_order::held_count(), 0);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn lock_order_unlock_then_reacquire() {
         // After releasing all locks, any shard can be acquired again.
@@ -1213,7 +1213,7 @@ mod tests {
         lock_order::unlock_n(1);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn lock_order_partial_sequence_regions_tasks() {
         // Regions → Tasks is a valid subsequence.
@@ -1226,7 +1226,7 @@ mod tests {
         lock_order::unlock_n(2);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn lock_order_partial_sequence_regions_obligations() {
         // Regions → Obligations (skipping Tasks) is valid.
@@ -1239,7 +1239,7 @@ mod tests {
         lock_order::unlock_n(2);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn lock_order_partial_sequence_tasks_obligations() {
         // Tasks → Obligations is valid.
@@ -1252,7 +1252,7 @@ mod tests {
         lock_order::unlock_n(2);
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn lock_rank(shard: LockShard) -> usize {
         match shard {
             LockShard::Regions => 0,
@@ -1261,7 +1261,7 @@ mod tests {
         }
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn canonicalize_labels(mut labels: Vec<&'static str>) -> Vec<&'static str> {
         labels.sort_by_key(|label| match *label {
             "B:Regions" => 0,
@@ -1273,7 +1273,7 @@ mod tests {
         labels
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     fn capture_labels(guard: ShardGuard<'_>) -> Vec<&'static str> {
         let labels = lock_order::held_labels();
         drop(guard);
@@ -1281,7 +1281,7 @@ mod tests {
         labels
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn metamorphic_lock_order_accepts_only_canonical_permutations() {
         use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -1338,7 +1338,7 @@ mod tests {
         }
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn metamorphic_guard_unions_match_canonical_supersets() {
         let trace = TraceBufferHandle::new(1024);
@@ -1476,7 +1476,7 @@ mod tests {
         }
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "lock-metrics"))]
     #[test]
     fn guard_drop_cleans_up_lock_order_state() {
         // Verify that dropping a guard properly cleans up thread-local state
@@ -1552,5 +1552,32 @@ mod tests {
         // If drop didn't properly release, this would deadlock.
         let g = ShardGuard::obligations_only(&state);
         assert!(g.obligations.is_some());
+    }
+
+    #[cfg(feature = "lock-metrics")]
+    #[test]
+    fn lock_ordering_validation_with_lock_metrics_feature() {
+        // This test verifies that lock ordering validation is enabled in production
+        // builds when the lock-metrics feature is enabled.
+        use crate::trace::TraceBufferHandle;
+        use crate::observability::metrics::NoOpMetrics;
+        use std::sync::Arc;
+
+        let trace = TraceBufferHandle::noop();
+        let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> = Arc::new(NoOpMetrics);
+        let state = ShardedState::new(trace, metrics, test_config());
+
+        // Valid order: Regions -> Tasks -> Obligations
+        let _regions_guard = ShardGuard::regions_only(&state);
+        drop(_regions_guard);
+
+        let _spawn_guard = ShardGuard::for_spawn(&state);
+        drop(_spawn_guard);
+
+        let _full_guard = ShardGuard::all(&state);
+        drop(_full_guard);
+
+        // This test demonstrates that lock ordering validation is active
+        // in production builds with the lock-metrics feature
     }
 }

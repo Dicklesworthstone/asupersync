@@ -76,8 +76,9 @@ trace-compression = ["dep:lz4_flex"]
 debug-server = []
 # Enable TOML config file loading for RuntimeBuilder.
 config-file = ["dep:toml"]
-# Enable lock contention metrics for ContendedMutex (wait/hold time tracking).
-# Zero cost when disabled. Used for sharding before/after comparison.
+# Enable lock contention metrics for ContendedMutex (wait/hold time tracking) and
+# production lock ordering validation. Zero cost when disabled. Enables deadlock
+# prevention checks in production builds for enhanced runtime safety.
 lock-metrics = []
 # Enable real-time obligation leak detection with stack traces and region boundary checks.
 # Zero cost when disabled. Adds comprehensive tracking and attribution for debugging obligation leaks.
