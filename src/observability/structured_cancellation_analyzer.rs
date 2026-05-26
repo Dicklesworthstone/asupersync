@@ -369,6 +369,15 @@ impl StructuredCancellationAnalyzer {
         }
     }
 
+    /// Sanitizes user-controlled input for safe logging by removing newlines and control characters
+    /// that could enable log injection attacks.
+    fn sanitize_for_logging(input: &str) -> String {
+        input
+            .chars()
+            .filter(|&c| c != '\n' && c != '\r' && c != '\0' && !c.is_control())
+            .collect()
+    }
+
     /// Check for real-time performance alerts.
     fn check_real_time_alerts(&self, entity_id: &str) {
         let traces = self.tracer.completed_traces();
@@ -398,7 +407,8 @@ impl StructuredCancellationAnalyzer {
                 alert_type: AlertType::SlowPropagation,
                 severity: AlertSeverity::Warning,
                 message: format!(
-                    "Entity {entity_id} showing consistently slow cancellation propagation"
+                    "Entity {} showing consistently slow cancellation propagation",
+                    Self::sanitize_for_logging(entity_id)
                 ),
                 entity_id: Some(entity_id.to_string()),
                 metric_value: if entity_traces.is_empty() {
@@ -422,7 +432,10 @@ impl StructuredCancellationAnalyzer {
             self.trigger_alert(&CancellationAlert {
                 alert_type: AlertType::AnomalySpike,
                 severity: AlertSeverity::Error,
-                message: format!("High anomaly rate detected for entity {entity_id}"),
+                message: format!(
+                    "High anomaly rate detected for entity {}",
+                    Self::sanitize_for_logging(entity_id)
+                ),
                 entity_id: Some(entity_id.to_string()),
                 metric_value: if entity_traces.is_empty() {
                     0.0

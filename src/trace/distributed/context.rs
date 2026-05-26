@@ -5,6 +5,10 @@ use crate::types::Time;
 use crate::util::DetRng;
 use core::fmt;
 
+/// Maximum total size in bytes for all baggage items combined.
+/// Prevents memory exhaustion attacks via oversized baggage payloads.
+const MAX_TOTAL_BAGGAGE_SIZE: usize = 64 * 1024; // 64KB
+
 /// Trace flags controlling sampling and debug behavior.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct TraceFlags(u8);
@@ -264,6 +268,7 @@ impl SymbolTraceContext {
 
         let mut baggage = Vec::with_capacity(baggage_count);
         let mut offset = baggage_offset + 2;
+        let mut total_baggage_size = 0usize;
 
         for _ in 0..baggage_count {
             if data.len() < offset + 2 {
@@ -274,11 +279,21 @@ impl SymbolTraceContext {
             if data.len() < offset + k_len + 2 {
                 return None;
             }
+            // Check baggage size limit before allocating
+            total_baggage_size = total_baggage_size.saturating_add(k_len);
+            if total_baggage_size > MAX_TOTAL_BAGGAGE_SIZE {
+                return None;
+            }
             let k = String::from_utf8(data[offset..offset + k_len].to_vec()).ok()?;
             offset += k_len;
             let v_len = u16::from_be_bytes(data[offset..offset + 2].try_into().ok()?) as usize;
             offset += 2;
             if data.len() < offset + v_len {
+                return None;
+            }
+            // Check baggage size limit before allocating value
+            total_baggage_size = total_baggage_size.saturating_add(v_len);
+            if total_baggage_size > MAX_TOTAL_BAGGAGE_SIZE {
                 return None;
             }
             let v = String::from_utf8(data[offset..offset + v_len].to_vec()).ok()?;
