@@ -318,8 +318,9 @@ impl TraceMinimizer {
         let mut dependencies = HashMap::new();
         let mut task_events = HashMap::<TaskId, Vec<usize>>::new();
         let mut region_events = HashMap::<RegionId, Vec<usize>>::new();
+        let mut obligation_events = HashMap::<ObligationId, Vec<usize>>::new();
 
-        // Group events by task and region
+        // Group events by task, region, and obligation
         for (i, event) in events.iter().enumerate() {
             if let Some(task_id) = self.extract_task_id(event) {
                 task_events.entry(task_id).or_default().push(i);
@@ -327,9 +328,12 @@ impl TraceMinimizer {
             if let Some(region_id) = self.extract_region_id(event) {
                 region_events.entry(region_id).or_default().push(i);
             }
+            if let Some(obligation_id) = self.extract_obligation_id(event) {
+                obligation_events.entry(obligation_id).or_default().push(i);
+            }
         }
 
-        // Build dependencies within tasks and regions
+        // Build dependencies within tasks (task lifecycle ordering)
         for event_list in task_events.values() {
             for window in event_list.windows(2) {
                 let (first, second) = (window[0], window[1]);
@@ -337,12 +341,33 @@ impl TraceMinimizer {
             }
         }
 
+        // Build dependencies within regions (region lifecycle ordering)
         for event_list in region_events.values() {
             for window in event_list.windows(2) {
                 let (first, second) = (window[0], window[1]);
                 dependencies.entry(second).or_default().push(first);
             }
         }
+
+        // Build dependencies within obligations (obligation lifecycle ordering)
+        for event_list in obligation_events.values() {
+            for window in event_list.windows(2) {
+                let (first, second) = (window[0], window[1]);
+                dependencies.entry(second).or_default().push(first);
+            }
+        }
+
+        // Cross-event causal dependencies
+        for i in 0..events.len() {
+            for j in 0..i {
+                if self.has_causal_relationship(&events[j], &events[i]) {
+                    dependencies.entry(i).or_default().push(j);
+                }
+            }
+        }
+
+        // Additional semantic dependencies
+        self.add_semantic_dependencies(events, &mut dependencies);
 
         dependencies
     }
@@ -382,10 +407,39 @@ impl TraceMinimizer {
     }
 
     /// Check if event is a target for minimization
-    fn is_target_event(&self, _event: &TraceEvent) -> bool {
-        // This would be customized based on what we're trying to reproduce
-        // For now, just mark error events as targets
-        true // Placeholder
+    fn is_target_event(&self, event: &TraceEvent) -> bool {
+        use crate::trace::event::TraceEventKind::*;
+
+        match event.kind {
+            // Critical events that usually indicate problems
+            ObligationLeak | ObligationAbort | FuturelockDetected => true,
+
+            // Cancellation events - important for understanding failures
+            CancelRequest | CancelAck => true,
+
+            // Region lifecycle events that might indicate hangs or deadlocks
+            RegionCloseBegin | RegionCloseComplete | RegionCancelled => true,
+
+            // Worker events that might indicate cross-boundary issues
+            WorkerCancelRequested | WorkerDrainCompleted | WorkerFinalizeCompleted => true,
+
+            // Monitor/supervision events that indicate failures
+            DownDelivered | ExitDelivered => true,
+
+            // I/O errors are often important
+            IoError => true,
+
+            // User traces and checkpoints might mark important points
+            UserTrace | Checkpoint => true,
+
+            // Regular operational events are not targets by default
+            Spawn | Schedule | Yield | Wake | Poll | Complete |
+            RegionCreated | ObligationReserve | ObligationCommit |
+            TimeAdvance | TimerScheduled | TimerFired | TimerCancelled |
+            IoRequested | IoReady | IoResult | RngSeed | RngValue |
+            ChaosInjection | MonitorCreated | MonitorDropped | LinkCreated | LinkDropped |
+            WorkerCancelAcknowledged | WorkerDrainStarted => false,
+        }
     }
 
     /// Find target events in trace
@@ -397,21 +451,164 @@ impl TraceMinimizer {
     }
 
     /// Extract task ID from event
-    fn extract_task_id(&self, _event: &TraceEvent) -> Option<TaskId> {
-        // Implementation would depend on TraceEvent structure
-        None // Placeholder
+    fn extract_task_id(&self, event: &TraceEvent) -> Option<TaskId> {
+        use crate::trace::event::TraceData;
+
+        match &event.data {
+            TraceData::Task { task, .. } => Some(*task),
+            TraceData::Cancel { task, .. } => Some(*task),
+            TraceData::Obligation { task, .. } => Some(*task),
+            _ => None,
+        }
     }
 
     /// Extract region ID from event
-    fn extract_region_id(&self, _event: &TraceEvent) -> Option<RegionId> {
-        // Implementation would depend on TraceEvent structure
-        None // Placeholder
+    fn extract_region_id(&self, event: &TraceEvent) -> Option<RegionId> {
+        use crate::trace::event::TraceData;
+
+        match &event.data {
+            TraceData::Task { region, .. } => Some(*region),
+            TraceData::Region { region, .. } => Some(*region),
+            TraceData::Cancel { region, .. } => Some(*region),
+            TraceData::Obligation { region, .. } => Some(*region),
+            _ => None,
+        }
+    }
+
+    /// Extract obligation ID from event
+    fn extract_obligation_id(&self, event: &TraceEvent) -> Option<ObligationId> {
+        use crate::trace::event::TraceData;
+
+        match &event.data {
+            TraceData::Obligation { obligation, .. } => Some(*obligation),
+            _ => None,
+        }
+    }
+
+    /// Add semantic dependencies based on domain knowledge
+    fn add_semantic_dependencies(&self, events: &[TraceEvent], dependencies: &mut HashMap<usize, Vec<usize>>) {
+        use crate::trace::event::TraceEventKind::*;
+
+        // Find parent-child region relationships
+        for (child_idx, child_event) in events.iter().enumerate() {
+            if let Some(child_region) = self.extract_region_id(child_event) {
+                // Look for the parent region creation that this child depends on
+                for (parent_idx, parent_event) in events.iter().enumerate().take(child_idx) {
+                    if parent_event.kind == RegionCreated {
+                        if let Some(parent_region) = self.extract_region_id(parent_event) {
+                            // If child event references parent as its parent, add dependency
+                            if let crate::trace::event::TraceData::Region { parent: Some(p), .. } = &child_event.data {
+                                if *p == parent_region {
+                                    dependencies.entry(child_idx).or_default().push(parent_idx);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Timer dependencies: if timer events happen in sequence, they may be related
+        let mut timer_scheduled_indices = Vec::new();
+        for (i, event) in events.iter().enumerate() {
+            match event.kind {
+                TimerScheduled => timer_scheduled_indices.push(i),
+                TimerFired | TimerCancelled => {
+                    // Timer fire/cancel events depend on the most recent timer scheduled
+                    if let Some(&last_scheduled) = timer_scheduled_indices.last() {
+                        dependencies.entry(i).or_default().push(last_scheduled);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Monitor/link dependencies: down/exit events depend on monitor/link creation
+        let mut monitor_created_indices = Vec::new();
+        let mut link_created_indices = Vec::new();
+        for (i, event) in events.iter().enumerate() {
+            match event.kind {
+                MonitorCreated => monitor_created_indices.push(i),
+                LinkCreated => link_created_indices.push(i),
+                DownDelivered => {
+                    // Down events depend on monitor creation
+                    for &monitor_idx in &monitor_created_indices {
+                        if monitor_idx < i {
+                            dependencies.entry(i).or_default().push(monitor_idx);
+                        }
+                    }
+                }
+                ExitDelivered => {
+                    // Exit events depend on link creation
+                    for &link_idx in &link_created_indices {
+                        if link_idx < i {
+                            dependencies.entry(i).or_default().push(link_idx);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Check if two events have causal relationship
-    fn has_causal_relationship(&self, _first: &TraceEvent, _second: &TraceEvent) -> bool {
-        // Implementation would check for happens-before relationships
-        false // Placeholder
+    fn has_causal_relationship(&self, first: &TraceEvent, second: &TraceEvent) -> bool {
+        use crate::trace::event::{TraceEventKind::*, TraceData};
+
+        // Logical time ordering indicates causal dependency
+        if let (Some(first_time), Some(second_time)) = (&first.logical_time, &second.logical_time) {
+            if first_time < second_time {
+                return true;
+            }
+        }
+
+        // Check for specific causal patterns based on event kinds and data
+        match (&first.kind, &second.kind, &first.data, &second.data) {
+            // Task lifecycle: spawn -> schedule -> poll -> complete
+            (Spawn, Schedule, TraceData::Task { task: task1, .. }, TraceData::Task { task: task2, .. })
+            | (Schedule, Poll, TraceData::Task { task: task1, .. }, TraceData::Task { task: task2, .. })
+            | (Poll, Complete, TraceData::Task { task: task1, .. }, TraceData::Task { task: task2, .. })
+                if task1 == task2 => true,
+
+            // Wake -> Schedule relationship
+            (Wake, Schedule, TraceData::Task { task: task1, .. }, TraceData::Task { task: task2, .. })
+                if task1 == task2 => true,
+
+            // Cancellation protocol: request -> ack
+            (CancelRequest, CancelAck, TraceData::Cancel { task: task1, .. }, TraceData::Cancel { task: task2, .. })
+                if task1 == task2 => true,
+
+            // Region lifecycle: create -> close
+            (RegionCreated, RegionCloseBegin, TraceData::Region { region: region1, .. }, TraceData::Region { region: region2, .. })
+            | (RegionCloseBegin, RegionCloseComplete, TraceData::Region { region: region1, .. }, TraceData::Region { region: region2, .. })
+                if region1 == region2 => true,
+
+            // Parent-child region relationships
+            (RegionCreated, _, TraceData::Region { region: parent, .. }, TraceData::Region { parent: Some(child_parent), .. })
+                if parent == child_parent => true,
+
+            // Obligation lifecycle: reserve -> commit/abort
+            (ObligationReserve, ObligationCommit, TraceData::Obligation { obligation: obl1, .. }, TraceData::Obligation { obligation: obl2, .. })
+            | (ObligationReserve, ObligationAbort, TraceData::Obligation { obligation: obl1, .. }, TraceData::Obligation { obligation: obl2, .. })
+                if obl1 == obl2 => true,
+
+            // Timer lifecycle: schedule -> fire/cancel
+            (TimerScheduled, TimerFired, _, _) | (TimerScheduled, TimerCancelled, _, _) => true,
+
+            // I/O lifecycle: request -> ready -> result/error
+            (IoRequested, IoReady, _, _) | (IoReady, IoResult, _, _) | (IoReady, IoError, _, _) => true,
+
+            // Worker offload protocol
+            (WorkerCancelRequested, WorkerCancelAcknowledged, _, _)
+            | (WorkerCancelAcknowledged, WorkerDrainStarted, _, _)
+            | (WorkerDrainStarted, WorkerDrainCompleted, _, _)
+            | (WorkerDrainCompleted, WorkerFinalizeCompleted, _, _) => true,
+
+            // Monitor/link relationships
+            (MonitorCreated, DownDelivered, _, _) | (LinkCreated, ExitDelivered, _, _) => true,
+
+            _ => false,
+        }
     }
 }
 
@@ -474,9 +671,40 @@ impl ReplayOptimizer {
     }
 
     /// Compute state key for deduplication
-    fn compute_state_key(&self, _event: &TraceEvent) -> Result<String> {
-        // Implementation would create a key representing the essential state
-        Ok("placeholder".to_string())
+    fn compute_state_key(&self, event: &TraceEvent) -> Result<String> {
+        // Create key based on event kind and relevant data
+        use crate::trace::event::TraceEventKind;
+
+        let kind_str = match event.kind {
+            TraceEventKind::Spawn => "spawn",
+            TraceEventKind::Schedule => "schedule",
+            TraceEventKind::Poll => "poll",
+            TraceEventKind::Complete => "complete",
+            TraceEventKind::CancelRequest => "cancel_req",
+            TraceEventKind::CancelAck => "cancel_ack",
+            TraceEventKind::RegionCreated => "region_created",
+            TraceEventKind::RegionCloseBegin => "region_close_begin",
+            TraceEventKind::RegionCloseComplete => "region_close_complete",
+            TraceEventKind::ObligationReserve => "obl_reserve",
+            TraceEventKind::ObligationCommit => "obl_commit",
+            TraceEventKind::ObligationAbort => "obl_abort",
+            TraceEventKind::ObligationLeak => "obl_leak",
+            TraceEventKind::FuturelockDetected => "futurelock",
+            _ => "other",
+        };
+
+        // Include task/region/obligation IDs in the key for uniqueness
+        let task_id = self.extract_task_id(event)
+            .map(|id| format!("_t{}", id.as_u64()))
+            .unwrap_or_default();
+        let region_id = self.extract_region_id(event)
+            .map(|id| format!("_r{}", id.as_u64()))
+            .unwrap_or_default();
+        let obligation_id = self.extract_obligation_id(event)
+            .map(|id| format!("_o{}", id.as_u64()))
+            .unwrap_or_default();
+
+        Ok(format!("{}{}{}{}", kind_str, task_id, region_id, obligation_id))
     }
 }
 
