@@ -14,6 +14,7 @@ pub mod benchmark;
 pub mod cache;
 #[cfg(test)]
 pub mod cache_seeding_integration_tests;
+pub mod daemon_control;
 pub mod diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
@@ -50,6 +51,7 @@ pub mod transfer;
 #[cfg(feature = "tokio-compat")]
 pub mod transfer_actor;
 pub mod transfer_brain;
+pub mod upgrade_integration;
 pub mod verifier;
 pub mod verify;
 pub mod writer;
@@ -77,6 +79,10 @@ pub use autotune::{
 pub use cache::{
     AtpCache, CacheConfig, CacheEntry, CacheError, CacheKey, CacheMetrics, EvictionPolicy,
     StorageLocation, VerificationMetadata,
+};
+pub use daemon_control::{
+    DaemonControlCapability, DaemonControlResult, DaemonProcessInfo, DaemonState,
+    SecureDaemonController, create_atp_daemon_controller,
 };
 pub use diagnostics::{
     ATP_RUNTIME_EVIDENCE_DIAGNOSTIC_SCHEMA, ATP_RUNTIME_EVIDENCE_EXPLANATION_SCHEMA,
@@ -150,3 +156,4 @@ pub use transfer_brain::{
     ChunkId, DecisionFactors, ResourceUsage, ScheduledChunk, SchedulingDecision, SchedulingState,
     SystemPressure, TransferBrain, TransferBrainConfig, TransferMetrics, TransferPriority,
 };
+pub use upgrade_integration::{UpgradeDaemonController, create_upgrade_daemon_controller};
