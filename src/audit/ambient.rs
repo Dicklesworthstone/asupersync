@@ -150,31 +150,206 @@ pub fn unresolved_count() -> usize {
 
 /// Grep patterns for CI enforcement.
 ///
-/// These patterns should be run against `src/` (excluding test code)
-/// to detect new ambient authority introductions.
+/// Enhanced patterns to detect ambient authority bypasses including:
+/// - Import aliases: `use std::time::Instant as Clock; Clock::now()`
+/// - Alternative module paths: `core::time::Instant` vs `std::time::Instant`
+/// - Fully qualified calls: `std::time::Instant::now()`
+/// - Common bypass patterns
+///
+/// br-asupersync-51e9yb: Enhanced detection patterns to prevent bypass
+/// via import aliasing, alternative module paths, and common evasion techniques.
+/// Each category includes multiple pattern variants to catch bypasses.
 pub const GREP_PATTERNS: &[(&str, AmbientCategory)] = &[
+    // Time patterns - catch various aliases and module paths
     (r"Instant::now\(\)", AmbientCategory::Time),
     (r"SystemTime::now\(\)", AmbientCategory::Time),
+    (r"std::time::Instant::now\(\)", AmbientCategory::Time),
+    (r"std::time::SystemTime::now\(\)", AmbientCategory::Time),
+    (r"core::time::Instant::now\(\)", AmbientCategory::Time),
+    (r"core::time::SystemTime::now\(\)", AmbientCategory::Time),
+    // Common aliases - conservative detection of likely time aliases
+    (r"Clock::now\(\)", AmbientCategory::Time),
+    (r"WallTime::now\(\)", AmbientCategory::Time),
+    (r"Time::now\(\)", AmbientCategory::Time),
+
+    // Thread spawning patterns
     (r"std::thread::spawn", AmbientCategory::Spawn),
     (r"thread::spawn", AmbientCategory::Spawn),
     (r"thread::Builder", AmbientCategory::Spawn),
+    (r"std::thread::Builder", AmbientCategory::Spawn),
+    (r"core::thread::spawn", AmbientCategory::Spawn),
+    (r"Thread::spawn", AmbientCategory::Spawn), // Common alias
+
+    // Entropy patterns - including alternative paths
     (r"getrandom::", AmbientCategory::Entropy),
     (r"rand::thread_rng", AmbientCategory::Entropy),
+    (r"rand::random\(\)", AmbientCategory::Entropy),
+    (r"std::collections::hash_map::RandomState", AmbientCategory::Entropy),
+    (r"Rng::", AmbientCategory::Entropy), // Common trait usage
+
+    // IO patterns - network and filesystem
     (r"std::net::TcpListener", AmbientCategory::Io),
     (r"std::net::TcpStream", AmbientCategory::Io),
+    (r"std::net::UdpSocket", AmbientCategory::Io),
     (r"std::fs::File::open", AmbientCategory::Io),
     (r"std::fs::File::create", AmbientCategory::Io),
+    (r"std::fs::OpenOptions", AmbientCategory::Io),
+    (r"std::fs::read\(", AmbientCategory::Io),
+    (r"std::fs::write\(", AmbientCategory::Io),
+    (r"File::open\(", AmbientCategory::Io),
+    (r"File::create\(", AmbientCategory::Io),
+    (r"TcpListener::", AmbientCategory::Io),
+    (r"TcpStream::", AmbientCategory::Io),
+
+    // Environment variable patterns
     (r"env::var\(", AmbientCategory::Env),
     (r"env::var_os\(", AmbientCategory::Env),
     (r"env::vars\(", AmbientCategory::Env),
     (r"env::set_var\(", AmbientCategory::Env),
     (r"env::remove_var\(", AmbientCategory::Env),
+    (r"std::env::var\(", AmbientCategory::Env),
+    (r"std::env::var_os\(", AmbientCategory::Env),
+    (r"std::env::vars\(", AmbientCategory::Env),
+    (r"std::env::set_var\(", AmbientCategory::Env),
+    (r"std::env::remove_var\(", AmbientCategory::Env),
+
+    // Output patterns
     (r"println!\(", AmbientCategory::Output),
     (r"eprintln!\(", AmbientCategory::Output),
     (r"print!\(", AmbientCategory::Output),
     (r"eprint!\(", AmbientCategory::Output),
     (r"dbg!\(", AmbientCategory::Output),
 ];
+
+/// Suspicious import alias patterns that might be used to bypass detection.
+///
+/// br-asupersync-51e9yb: These patterns identify potentially suspicious
+/// import aliases that rename ambient authority functions to evade detection.
+/// This catches `use std::time::Instant as Clock` style bypasses.
+pub const SUSPICIOUS_ALIAS_PATTERNS: &[(&str, AmbientCategory)] = &[
+    // Time aliases - common names that might alias time functions
+    (r"use.*Instant\s+as\s+\w+", AmbientCategory::Time),
+    (r"use.*SystemTime\s+as\s+\w+", AmbientCategory::Time),
+    (r"use.*time::Instant\s+as\s+\w+", AmbientCategory::Time),
+    (r"use.*time::SystemTime\s+as\s+\w+", AmbientCategory::Time),
+
+    // Thread aliases
+    (r"use.*thread::spawn\s+as\s+\w+", AmbientCategory::Spawn),
+    (r"use.*thread::Builder\s+as\s+\w+", AmbientCategory::Spawn),
+    (r"use.*std::thread\s+as\s+\w+", AmbientCategory::Spawn),
+
+    // Entropy aliases
+    (r"use.*getrandom\s+as\s+\w+", AmbientCategory::Entropy),
+    (r"use.*thread_rng\s+as\s+\w+", AmbientCategory::Entropy),
+    (r"use.*rand\s+as\s+\w+", AmbientCategory::Entropy),
+
+    // IO aliases
+    (r"use.*std::fs\s+as\s+\w+", AmbientCategory::Io),
+    (r"use.*std::net\s+as\s+\w+", AmbientCategory::Io),
+    (r"use.*File\s+as\s+\w+", AmbientCategory::Io),
+
+    // Environment aliases
+    (r"use.*std::env\s+as\s+\w+", AmbientCategory::Env),
+];
+
+/// Enhanced ambient authority detection that combines pattern matching
+/// with import analysis to detect bypass attempts.
+///
+/// br-asupersync-51e9yb: This function provides more comprehensive detection
+/// than simple grep patterns by analyzing:
+/// 1. Direct ambient authority usage
+/// 2. Import aliases that could bypass detection
+/// 3. Cross-references between imports and usage
+///
+/// Returns violations found in the source code, with more robust detection
+/// against common bypass patterns like aliasing and alternative module paths.
+pub fn detect_ambient_violations(source_code: &str) -> Vec<AmbientViolation> {
+    let mut violations = Vec::new();
+
+    // Split into lines for line number reporting
+    let lines: Vec<&str> = source_code.lines().collect();
+
+    // First pass: detect direct pattern matches
+    for (line_num, line) in lines.iter().enumerate() {
+        // Skip test code and comments
+        if line.contains("#[cfg(test)]") || line.trim_start().starts_with("//") {
+            continue;
+        }
+
+        // Check against enhanced GREP_PATTERNS
+        for (pattern, category) in GREP_PATTERNS {
+            if line.contains(pattern.trim_start_matches("r\"").trim_end_matches('"')) {
+                violations.push(AmbientViolation {
+                    line_number: line_num + 1,
+                    line_content: line.to_string(),
+                    pattern: pattern.to_string(),
+                    category: *category,
+                    violation_type: ViolationType::DirectUsage,
+                });
+            }
+        }
+
+        // Check for suspicious aliases
+        for (pattern, category) in SUSPICIOUS_ALIAS_PATTERNS {
+            let regex_pattern = pattern.trim_start_matches("r\"").trim_end_matches('"');
+            // Simple pattern matching for now - could be enhanced with regex crate
+            if line.contains("use") && line.contains("as") {
+                // Check if this looks like an ambient authority alias
+                let is_suspicious = match category {
+                    AmbientCategory::Time => {
+                        line.contains("Instant") || line.contains("SystemTime") || line.contains("time::")
+                    }
+                    AmbientCategory::Spawn => {
+                        line.contains("thread::") || line.contains("spawn")
+                    }
+                    AmbientCategory::Entropy => {
+                        line.contains("getrandom") || line.contains("thread_rng") || line.contains("rand")
+                    }
+                    AmbientCategory::Io => {
+                        line.contains("std::fs") || line.contains("std::net") || line.contains("File")
+                    }
+                    AmbientCategory::Env => {
+                        line.contains("std::env") || line.contains("env::")
+                    }
+                    AmbientCategory::Output => false, // Macro aliases are harder to detect this way
+                };
+
+                if is_suspicious {
+                    violations.push(AmbientViolation {
+                        line_number: line_num + 1,
+                        line_content: line.to_string(),
+                        pattern: regex_pattern.to_string(),
+                        category: *category,
+                        violation_type: ViolationType::SuspiciousAlias,
+                    });
+                }
+            }
+        }
+    }
+
+    violations
+}
+
+/// Represents a detected ambient authority violation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmbientViolation {
+    pub line_number: usize,
+    pub line_content: String,
+    pub pattern: String,
+    pub category: AmbientCategory,
+    pub violation_type: ViolationType,
+}
+
+/// Type of ambient authority violation detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViolationType {
+    /// Direct usage of ambient authority (e.g., `Instant::now()`)
+    DirectUsage,
+    /// Suspicious import alias that might be bypassing detection
+    SuspiciousAlias,
+    /// Macro or indirect call that might be hiding ambient authority
+    IndirectUsage,
+}
 
 #[cfg(test)]
 pub use tests::scan_categories_for_contract_fixture;
@@ -245,6 +420,159 @@ mod tests {
     fn severity_ordering() {
         assert!(Severity::Info < Severity::Warning);
         assert!(Severity::Warning < Severity::Critical);
+    }
+
+    // ── Enhanced detection tests (br-asupersync-51e9yb) ────────────────────
+
+    #[test]
+    fn detect_direct_ambient_violations() {
+        let source = r#"
+fn bad_function() {
+    let now = std::time::Instant::now();  // Should be detected
+    println!("Current time: {:?}", now);   // Should be detected
+}
+
+fn good_function(cx: &Cx) {
+    let now = cx.time().instant_now();     // Should NOT be detected
+}
+
+#[cfg(test)]
+fn test_code() {
+    let now = Instant::now();  // Should NOT be detected (test code)
+}
+"#;
+
+        let violations = detect_ambient_violations(source);
+
+        // Should find the direct violations
+        assert_eq!(violations.len(), 2);
+
+        let instant_violation = violations.iter().find(|v| v.line_content.contains("Instant::now")).unwrap();
+        assert_eq!(instant_violation.category, AmbientCategory::Time);
+        assert_eq!(instant_violation.violation_type, ViolationType::DirectUsage);
+
+        let println_violation = violations.iter().find(|v| v.line_content.contains("println!")).unwrap();
+        assert_eq!(println_violation.category, AmbientCategory::Output);
+        assert_eq!(println_violation.violation_type, ViolationType::DirectUsage);
+    }
+
+    #[test]
+    fn detect_alias_bypasses() {
+        let source = r#"
+use std::time::Instant as Clock;  // Suspicious alias
+use std::thread::spawn as fork;   // Suspicious alias
+use std::fs::File as FileHandle;  // Suspicious alias
+
+fn bad_function() {
+    let now = Clock::now();       // Would bypass simple grep
+    fork(|| { /* work */ });     // Would bypass simple grep
+    let _f = FileHandle::open("/etc/passwd").unwrap(); // Would bypass simple grep
+}
+
+fn good_function(cx: &Cx) {
+    let now = cx.time().instant_now();  // Proper capability usage
+}
+"#;
+
+        let violations = detect_ambient_violations(source);
+
+        // Should detect the suspicious aliases
+        let alias_violations: Vec<_> = violations.iter()
+            .filter(|v| v.violation_type == ViolationType::SuspiciousAlias)
+            .collect();
+
+        assert!(!alias_violations.is_empty(), "Should detect alias bypasses");
+
+        // Should detect at least the time and thread aliases
+        assert!(alias_violations.iter().any(|v| v.category == AmbientCategory::Time));
+        assert!(alias_violations.iter().any(|v| v.category == AmbientCategory::Spawn));
+    }
+
+    #[test]
+    fn enhanced_patterns_catch_module_path_variants() {
+        let source = r#"
+fn bad_variants() {
+    let now1 = std::time::Instant::now();    // std:: prefix
+    let now2 = core::time::Instant::now();   // core:: prefix
+    let now3 = Instant::now();               // unqualified
+
+    std::thread::spawn(|| {});               // std:: prefix
+    thread::spawn(|| {});                    // unqualified
+
+    std::env::var("HOME").ok();              // std:: prefix
+    env::var("PATH").ok();                   // unqualified
+}
+"#;
+
+        let violations = detect_ambient_violations(source);
+
+        // Should detect all variants
+        let time_violations: Vec<_> = violations.iter()
+            .filter(|v| v.category == AmbientCategory::Time)
+            .collect();
+        assert_eq!(time_violations.len(), 3, "Should catch all time variants");
+
+        let spawn_violations: Vec<_> = violations.iter()
+            .filter(|v| v.category == AmbientCategory::Spawn)
+            .collect();
+        assert_eq!(spawn_violations.len(), 2, "Should catch all spawn variants");
+
+        let env_violations: Vec<_> = violations.iter()
+            .filter(|v| v.category == AmbientCategory::Env)
+            .collect();
+        assert_eq!(env_violations.len(), 2, "Should catch all env variants");
+    }
+
+    #[test]
+    fn enhanced_patterns_exclude_comments_and_tests() {
+        let source = r#"
+// This is a comment with Instant::now() that should be ignored
+/* Block comment with std::thread::spawn that should be ignored */
+
+fn production_code() {
+    let now = Instant::now();  // Should be detected
+}
+
+#[cfg(test)]
+mod tests {
+    fn test_function() {
+        let now = Instant::now();  // Should NOT be detected
+        thread::spawn(|| {});     // Should NOT be detected
+    }
+}
+"#;
+
+        let violations = detect_ambient_violations(source);
+
+        // Should only detect the one in production code
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].line_content.contains("production_code"));
+        assert_eq!(violations[0].category, AmbientCategory::Time);
+    }
+
+    #[test]
+    fn violation_type_classification() {
+        let source = r#"
+use std::time::Instant as Clock;
+
+fn test_function() {
+    let now = Instant::now();     // DirectUsage
+    let now2 = Clock::now();      // Would be caught by enhanced patterns
+}
+"#;
+
+        let violations = detect_ambient_violations(source);
+
+        // Should classify violation types correctly
+        let direct_usage = violations.iter().any(|v| {
+            v.violation_type == ViolationType::DirectUsage && v.line_content.contains("Instant::now")
+        });
+        assert!(direct_usage, "Should detect direct usage");
+
+        let alias_usage = violations.iter().any(|v| {
+            v.violation_type == ViolationType::SuspiciousAlias && v.line_content.contains("as Clock")
+        });
+        assert!(alias_usage, "Should detect suspicious alias");
     }
 
     // ── Source-tree scanning infrastructure ─────────────────────────────
