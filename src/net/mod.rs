@@ -14,6 +14,9 @@ pub mod atp;
 pub mod atp_udp;
 /// DNS resolution with caching and Happy Eyeballs support.
 pub mod dns;
+/// STUN protocol for NAT traversal and ICE candidate gathering.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stun;
 /// Happy Eyeballs v2 (RFC 8305) concurrent dual-stack connection racing.
 pub mod happy_eyeballs;
 /// Native QUIC protocol core codecs and types (Tokio-free, runtime-agnostic).
@@ -81,6 +84,8 @@ pub use quic_native::{
     StreamTable, StreamTableError, TransportError,
 };
 pub use resolve::{lookup_all, lookup_one};
+#[cfg(not(target_arch = "wasm32"))]
+pub use stun::{IceCandidate, IceCandidateType, StunClient, StunError, StunMessageType};
 #[cfg(target_os = "windows")]
 pub use sys::windows::{NamedPipeClient, NamedPipeClientOptions};
 pub use tcp::listener::{Incoming, TcpListener};
