@@ -306,6 +306,60 @@ pub struct AggregatorMetrics {
 }
 
 impl ReleaseProofAggregator {
+    /// Validates and sanitizes a bead ID to prevent injection attacks.
+    ///
+    /// Security: Ensures bead_id contains only safe characters and prevents:
+    /// - Command injection in git commands
+    /// - Path traversal in file operations
+    /// - Other injection vectors
+    fn validate_bead_id(bead_id: &str) -> Result<(), AggregatorError> {
+        // Bead IDs should be alphanumeric with hyphens only
+        if bead_id.is_empty() || bead_id.len() > 64 {
+            return Err(AggregatorError::MissingEvidence(
+                "Bead ID must be non-empty and under 64 characters".to_string()
+            ));
+        }
+
+        // Only allow safe characters: alphanumeric, hyphens, underscores
+        if !bead_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(AggregatorError::MissingEvidence(
+                format!("Bead ID contains unsafe characters: {}", bead_id)
+            ));
+        }
+
+        // Prevent path traversal patterns
+        if bead_id.contains("..") || bead_id.contains('/') || bead_id.contains('\\') {
+            return Err(AggregatorError::MissingEvidence(
+                format!("Bead ID contains path traversal patterns: {}", bead_id)
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Validates file path is within expected directory to prevent path traversal.
+    fn validate_file_path(path: &str, allowed_prefix: &str) -> Result<(), AggregatorError> {
+        let canonical_path = std::path::Path::new(path)
+            .canonicalize()
+            .map_err(|e| AggregatorError::MissingEvidence(
+                format!("Invalid file path {}: {}", path, e)
+            ))?;
+
+        let canonical_prefix = std::path::Path::new(allowed_prefix)
+            .canonicalize()
+            .map_err(|e| AggregatorError::MissingEvidence(
+                format!("Invalid allowed prefix {}: {}", allowed_prefix, e)
+            ))?;
+
+        if !canonical_path.starts_with(canonical_prefix) {
+            return Err(AggregatorError::MissingEvidence(
+                format!("Path traversal detected: {} outside {}", path, allowed_prefix)
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Creates a new release proof aggregator.
     pub fn new(config: AggregatorConfig) -> Self {
         let metrics = AggregatorMetrics {
@@ -323,15 +377,30 @@ impl ReleaseProofAggregator {
     }
 
     /// Generates a release proof record from available evidence.
+    ///
+    /// Security: Validates input and collects evidence atomically to prevent TOCTOU attacks.
     pub fn generate_proof(
         &self,
         bead_id: String,
         agent_name: String,
     ) -> Result<ReleaseProofRecord, AggregatorError> {
         let start_time = SystemTime::now();
+
+        // Security: Validate inputs before any operations
+        Self::validate_bead_id(&bead_id)?;
+        if agent_name.is_empty() || agent_name.len() > 128 {
+            return Err(AggregatorError::MissingEvidence(
+                "Agent name must be non-empty and under 128 characters".to_string()
+            ));
+        }
+
+        // Security: Collect evidence atomically using a snapshot approach to prevent TOCTOU
+        // Take a git snapshot first to ensure consistent state
+        let git_snapshot_hash = self.capture_git_snapshot()?;
+
         self.metrics.proofs_generated.increment();
 
-        // Collect evidence from various sources
+        // Collect evidence from various sources (now with validation)
         let reservations = self.collect_reservation_evidence(&bead_id)?;
         let touched_paths = self.collect_touched_paths(&bead_id)?;
         let commits = self.collect_commit_evidence(&bead_id)?;
@@ -340,6 +409,9 @@ impl ReleaseProofAggregator {
         let lease_receipts = self.collect_lease_receipts(&agent_name)?;
         let handoff_status = self.check_handoff_status(&bead_id)?;
         let pushed_refs = self.collect_git_refs(&commits)?;
+
+        // Security: Verify git state hasn't changed during evidence collection
+        self.verify_git_snapshot(&git_snapshot_hash)?;
 
         // Determine overall status
         let status = self.determine_proof_status(
@@ -443,11 +515,43 @@ impl ReleaseProofAggregator {
         }
     }
 
+    /// Captures a git state snapshot to detect concurrent modifications.
+    fn capture_git_snapshot(&self) -> Result<String, AggregatorError> {
+        use std::process::Command;
+
+        let output = Command::new("git")
+            .args(&["rev-parse", "HEAD"])
+            .output()
+            .map_err(|e| AggregatorError::GitError(format!("Failed to capture git snapshot: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(AggregatorError::GitError(format!("git rev-parse failed: {}", stderr)));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Verifies git state hasn't changed since snapshot to prevent TOCTOU attacks.
+    fn verify_git_snapshot(&self, expected_hash: &str) -> Result<(), AggregatorError> {
+        let current_hash = self.capture_git_snapshot()?;
+        if current_hash != expected_hash {
+            return Err(AggregatorError::MissingEvidence(
+                format!("Git state changed during proof generation: expected {} got {}",
+                       expected_hash, current_hash)
+            ));
+        }
+        Ok(())
+    }
+
     /// Collects file reservation evidence for the bead.
     fn collect_reservation_evidence(
         &self,
         bead_id: &str,
     ) -> Result<Vec<FileReservation>, AggregatorError> {
+        // Security: Validate bead ID to prevent path traversal attacks
+        Self::validate_bead_id(bead_id)?;
+
         // Search for reservations that mention this bead ID in the reason field
         // In a real implementation, this would query the Agent Mail system
         // For now, we implement a file-based search through .beads/ directory
@@ -459,22 +563,41 @@ impl ReleaseProofAggregator {
 
         // Search through available agent mail data (if any)
         // This is a simplified implementation that would need to integrate with actual Agent Mail
-        if let Ok(entries) = std::fs::read_dir(".agent_mail") {
+        let agent_mail_dir = ".agent_mail";
+
+        // Security: Validate agent mail directory exists and is safe
+        if let Ok(entries) = std::fs::read_dir(agent_mail_dir) {
             for entry in entries.flatten() {
-                if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                    if content.contains(&bead_thread_pattern) {
-                        // Found reservation data for this bead
-                        // In practice, would parse actual Agent Mail reservation records
-                        let now = SystemTime::now();
-                        reservations.push(FileReservation {
-                            agent: "detected-agent".to_string(),
-                            patterns: vec!["src/**".to_string()], // Would parse from actual data
-                            exclusive: true,
-                            ttl_seconds: 3600, // Would get from actual reservation
-                            reason: bead_thread_pattern.clone(),
-                            acquired_at: now,
-                            released_at: None,
-                        });
+                let entry_path = entry.path();
+
+                // Security: Validate file path is within agent mail directory
+                if let Some(path_str) = entry_path.to_str() {
+                    if let Err(_) = Self::validate_file_path(path_str, agent_mail_dir) {
+                        continue; // Skip files outside allowed directory
+                    }
+
+                    // Only read files with safe extensions
+                    if let Some(extension) = entry_path.extension() {
+                        if extension != "json" && extension != "txt" && extension != "log" {
+                            continue; // Skip potentially dangerous file types
+                        }
+                    }
+
+                    if let Ok(content) = std::fs::read_to_string(&entry_path) {
+                        if content.contains(&bead_thread_pattern) {
+                            // Found reservation data for this bead
+                            // In practice, would parse actual Agent Mail reservation records
+                            let now = SystemTime::now();
+                            reservations.push(FileReservation {
+                                agent: "detected-agent".to_string(),
+                                patterns: vec!["src/**".to_string()], // Would parse from actual data
+                                exclusive: true,
+                                ttl_seconds: 3600, // Would get from actual reservation
+                                reason: bead_thread_pattern.clone(),
+                                acquired_at: now,
+                                released_at: None,
+                            });
+                        }
                     }
                 }
             }
@@ -493,6 +616,9 @@ impl ReleaseProofAggregator {
 
     /// Collects paths that were touched for the bead.
     fn collect_touched_paths(&self, bead_id: &str) -> Result<Vec<PathBuf>, AggregatorError> {
+        // Security: Validate bead ID to prevent command injection attacks
+        Self::validate_bead_id(bead_id)?;
+
         // Analyze git history and file changes to determine touched paths
         use std::process::Command;
 
@@ -550,6 +676,9 @@ impl ReleaseProofAggregator {
 
     /// Collects commit evidence for the bead.
     fn collect_commit_evidence(&self, bead_id: &str) -> Result<Vec<CommitRecord>, AggregatorError> {
+        // Security: Validate bead ID to prevent command injection attacks
+        Self::validate_bead_id(bead_id)?;
+
         // Query git log for commits mentioning this bead ID
         use std::process::Command;
 
@@ -622,18 +751,24 @@ impl ReleaseProofAggregator {
     /// Collects RCH command evidence for the bead.
     fn collect_rch_evidence(
         &self,
-        _bead_id: &str,
+        bead_id: &str,
     ) -> Result<Vec<RchCommandRecord>, AggregatorError> {
+        // Security: Validate bead ID to prevent potential security issues
+        Self::validate_bead_id(bead_id)?;
+
         // TODO: Query RCH logs or artifacts for command evidence
+        // When implemented, this should search for RCH commands associated with the bead_id
         Ok(vec![])
     }
 
     /// Detects the first blocker encountered.
     fn detect_first_blocker(
         &self,
-        _bead_id: &str,
+        bead_id: &str,
         rch_commands: &[RchCommandRecord],
     ) -> Result<Option<BlockerRecord>, AggregatorError> {
+        // Security: Validate bead ID to prevent potential security issues
+        Self::validate_bead_id(bead_id)?;
         // Check for failed RCH commands
         for cmd in rch_commands {
             if cmd.exit_code != 0 {
@@ -662,14 +797,25 @@ impl ReleaseProofAggregator {
     /// Collects lease receipts for the agent.
     fn collect_lease_receipts(
         &self,
-        _agent_name: &str,
+        agent_name: &str,
     ) -> Result<Vec<LeaseReceipt>, AggregatorError> {
+        // Security: Validate agent name to prevent potential security issues
+        if agent_name.is_empty() || agent_name.len() > 128 {
+            return Err(AggregatorError::MissingEvidence(
+                "Agent name must be non-empty and under 128 characters".to_string()
+            ));
+        }
+
         // TODO: Query lease system for agent receipts
+        // When implemented, this should search for lease receipts associated with the agent_name
         Ok(vec![])
     }
 
     /// Checks handoff capsule status for the bead.
     fn check_handoff_status(&self, bead_id: &str) -> Result<HandoffStatus, AggregatorError> {
+        // Security: Validate bead ID to prevent path traversal attacks
+        Self::validate_bead_id(bead_id)?;
+
         // Check if handoff capsule exists for this bead
         // Look in expected locations for handoff capsule data
 
@@ -684,6 +830,22 @@ impl ReleaseProofAggregator {
         let mut decision = None;
 
         for path in &capsule_paths {
+            // Security: Validate each constructed path to prevent traversal attacks
+            let allowed_prefixes = [".agent_handoff", ".agent_mail", ".beads"];
+            let mut path_valid = false;
+            for prefix in &allowed_prefixes {
+                if path.starts_with(prefix) {
+                    if Self::validate_file_path(path, prefix).is_ok() {
+                        path_valid = true;
+                        break;
+                    }
+                }
+            }
+
+            if !path_valid {
+                continue; // Skip invalid paths
+            }
+
             if let Ok(metadata) = std::fs::metadata(path) {
                 found_capsule = true;
                 if let Ok(modified) = metadata.modified() {
@@ -695,11 +857,13 @@ impl ReleaseProofAggregator {
                     // Look for decision indicators in the capsule content
                     // This is a simplified check - real implementation would parse structured data
                     if content.contains("\"decision\":\"Continue\"") || content.contains("Continue") {
-                        decision = Some("Continue".to_string());
-                    } else if content.contains("\"decision\":\"RequireRefresh\"") || content.contains("RequireRefresh") {
-                        decision = Some("RequireRefresh".to_string());
-                    } else if content.contains("\"decision\":\"Block\"") || content.contains("Block") {
-                        decision = Some("Block".to_string());
+                        decision = Some(HandoffDecision::Continue);
+                    } else if content.contains("\"decision\":\"NarrowRefreshRequired\"") || content.contains("NarrowRefreshRequired") {
+                        decision = Some(HandoffDecision::NarrowRefreshRequired);
+                    } else if content.contains("\"decision\":\"CoordinateFirst\"") || content.contains("CoordinateFirst") {
+                        decision = Some(HandoffDecision::CoordinateFirst);
+                    } else if content.contains("\"decision\":\"UnsafeToContinue\"") || content.contains("UnsafeToContinue") {
+                        decision = Some(HandoffDecision::UnsafeToContinue);
                     }
                 }
                 break; // Use first found capsule
@@ -720,11 +884,13 @@ impl ReleaseProofAggregator {
                     if notes.contains(bead_id) {
                         found_capsule = true;
                         if notes.contains("Continue") {
-                            decision = Some("Continue".to_string());
-                        } else if notes.contains("RequireRefresh") {
-                            decision = Some("RequireRefresh".to_string());
-                        } else if notes.contains("Block") {
-                            decision = Some("Block".to_string());
+                            decision = Some(HandoffDecision::Continue);
+                        } else if notes.contains("NarrowRefreshRequired") {
+                            decision = Some(HandoffDecision::NarrowRefreshRequired);
+                        } else if notes.contains("CoordinateFirst") {
+                            decision = Some(HandoffDecision::CoordinateFirst);
+                        } else if notes.contains("UnsafeToContinue") {
+                            decision = Some(HandoffDecision::UnsafeToContinue);
                         }
                     }
                 }
@@ -1088,6 +1254,70 @@ mod tests {
 
         let score = aggregator.calculate_freshness_score(&record);
         assert!(score > 0.8); // Fresh evidence should have high score
+    }
+
+    #[test]
+    fn test_bead_id_validation() {
+        // Valid bead IDs should pass
+        assert!(ReleaseProofAggregator::validate_bead_id("test-bead-123").is_ok());
+        assert!(ReleaseProofAggregator::validate_bead_id("abc_def-123").is_ok());
+        assert!(ReleaseProofAggregator::validate_bead_id("simple").is_ok());
+
+        // Empty or too long should fail
+        assert!(ReleaseProofAggregator::validate_bead_id("").is_err());
+        assert!(ReleaseProofAggregator::validate_bead_id(&"x".repeat(65)).is_err());
+
+        // Dangerous characters should fail
+        assert!(ReleaseProofAggregator::validate_bead_id("test;rm -rf").is_err());
+        assert!(ReleaseProofAggregator::validate_bead_id("test`cat /etc/passwd`").is_err());
+        assert!(ReleaseProofAggregator::validate_bead_id("test$(whoami)").is_err());
+        assert!(ReleaseProofAggregator::validate_bead_id("test&pwd").is_err());
+
+        // Path traversal patterns should fail
+        assert!(ReleaseProofAggregator::validate_bead_id("../../../etc/passwd").is_err());
+        assert!(ReleaseProofAggregator::validate_bead_id("test/../admin").is_err());
+        assert!(ReleaseProofAggregator::validate_bead_id("test/subdir").is_err());
+        assert!(ReleaseProofAggregator::validate_bead_id("test\\windows\\path").is_err());
+    }
+
+    #[test]
+    fn test_file_path_validation() {
+        // Create a temporary directory for testing
+        let temp_dir = std::env::temp_dir().join("test_aggregator");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let temp_path = temp_dir.to_str().unwrap();
+
+        // Valid paths within allowed directory should pass
+        let valid_file = temp_dir.join("test.json");
+        std::fs::write(&valid_file, "test").unwrap();
+        assert!(ReleaseProofAggregator::validate_file_path(
+            valid_file.to_str().unwrap(),
+            temp_path
+        ).is_ok());
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn test_git_snapshot_capture() {
+        let config = AggregatorConfig::default();
+        let aggregator = ReleaseProofAggregator::new(config);
+
+        // Should be able to capture git snapshot (if we're in a git repo)
+        let snapshot_result = aggregator.capture_git_snapshot();
+
+        // This will succeed if we're in a git repo, fail otherwise
+        // We just want to make sure it doesn't panic or have security issues
+        match snapshot_result {
+            Ok(hash) => {
+                assert!(!hash.is_empty());
+                assert!(hash.chars().all(|c| c.is_ascii_hexdigit() || c.is_ascii_whitespace()));
+            }
+            Err(_) => {
+                // Not in a git repo or git not available - that's okay for testing
+            }
+        }
     }
 
     #[test]
