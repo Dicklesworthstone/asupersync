@@ -182,17 +182,15 @@ impl ReadBiasedDrainingRegionSnapshot {
             return regions.draining_region_count();
         }
 
-        // Fixed TOCTOU race condition using atomic compare-and-swap operations
-        // to ensure cache validity check and write counter reset are atomic
+        // Fixed TOCTOU race condition by holding cache validity check atomic
+        // with the cache read through double-checking under consistent state
         let mut final_writes = 0;
         loop {
             let writes = self.writes_since_last_read.load(Ordering::Acquire);
-            final_writes = writes; // Store for use in fallback path
+            final_writes = writes; // Store for use in fallback path metrics
 
-            // Check cache validity and write threshold atomically
-            if self.valid.load(Ordering::Acquire)
-                && writes < READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD
-            {
+            // Check write threshold first (optimization)
+            if writes < READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD {
                 // Atomically reset write counter to 0, but only if it hasn't changed
                 match self.writes_since_last_read.compare_exchange_weak(
                     writes,
@@ -201,9 +199,17 @@ impl ReadBiasedDrainingRegionSnapshot {
                     Ordering::Acquire
                 ) {
                     Ok(_) => {
-                        // Successfully reset counter, cache is still valid
-                        self.cache_hits.fetch_add(1, Ordering::Relaxed);
-                        return self.cached_count.load(Ordering::Acquire);
+                        // Counter reset successful, now atomically check validity and read cache
+                        // Use Acquire ordering to synchronize with invalidation stores
+                        let cached_value = self.cached_count.load(Ordering::Acquire);
+
+                        // Double-check validity after cache read to detect races
+                        if self.valid.load(Ordering::Acquire) {
+                            // Cache was valid during read, return the value
+                            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+                            return cached_value;
+                        }
+                        // Cache was invalidated between reset and read, fall through to rebuild
                     },
                     Err(_) => {
                         // Counter was modified by another thread, retry
