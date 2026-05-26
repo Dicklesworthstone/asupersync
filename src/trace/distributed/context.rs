@@ -494,6 +494,36 @@ mod tests {
     }
 
     #[test]
+    fn from_bytes_rejects_oversized_baggage() {
+        let mut rng = DetRng::new(42);
+        let mut ctx = SymbolTraceContext::new_for_encoding(
+            DistTraceId::new_for_test(1),
+            SymbolSpanId::new_for_test(2),
+            RegionTag::new("test"),
+            &mut rng,
+        );
+
+        // Add baggage items that together exceed MAX_TOTAL_BAGGAGE_SIZE (64KB)
+        // Each item is ~16KB, so 5 items = ~80KB > 64KB limit
+        let large_value = "x".repeat(16 * 1024); // 16KB
+        ctx = ctx
+            .with_baggage("key1", &large_value)
+            .with_baggage("key2", &large_value)
+            .with_baggage("key3", &large_value)
+            .with_baggage("key4", &large_value)
+            .with_baggage("key5", &large_value); // This should push us over the limit
+
+        let bytes = ctx.to_bytes();
+
+        // The serialized bytes should be created successfully
+        assert!(!bytes.is_empty());
+
+        // But deserialization should fail due to baggage size limit
+        let parsed = SymbolTraceContext::from_bytes(&bytes);
+        assert!(parsed.is_none(), "Should reject oversized baggage during deserialization");
+    }
+
+    #[test]
     fn region_tag_display() {
         let tag = RegionTag::new("us-east-1");
         assert_eq!(format!("{tag}"), "us-east-1");
