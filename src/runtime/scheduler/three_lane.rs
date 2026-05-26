@@ -1212,8 +1212,9 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
         let Some(local) = borrow.as_ref() else {
             return false;
         };
-        // LOCK ORDER: local_ready (B) then local (A)
-        // Matches order in inject_cancel: remove from ready queue first
+        // LOCK ORDER: local (A) then local_ready (B) - fixes E→D→B→A→C ordering violation
+        // br-asupersync-3hazwm: Corrected lock ordering to prevent deadlock
+        let mut local_guard = local.lock();
         CURRENT_LOCAL_READY.with(|lr_cell| {
             if let Some(queue) = lr_cell.borrow().as_ref() {
                 let mut local_ready_guard = queue.lock();
@@ -1221,11 +1222,10 @@ pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bo
                     local_ready_guard.remove(pos);
                 }
                 drop(local_ready_guard);
-                local.lock().move_to_cancel_lane(task, priority);
-            } else {
-                local.lock().move_to_cancel_lane(task, priority);
             }
         });
+        local_guard.move_to_cancel_lane(task, priority);
+        drop(local_guard);
         true
     })
 }
@@ -2036,16 +2036,18 @@ impl ThreeLaneScheduler {
         if is_local {
             if let Some(worker_id) = pinned_worker {
                 if let Some(local) = self.local_schedulers.get(worker_id) {
+                    // LOCK ORDER: local (A) then local_ready (B) - fixes E→D→B→A→C ordering
+                    // br-asupersync-3hazwm: Corrected lock ordering to prevent deadlock
+                    let mut local_guard = local.lock();
                     if let Some(local_ready) = self.local_ready.get(worker_id) {
                         let mut local_ready_guard = local_ready.lock();
                         if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
                             local_ready_guard.remove(pos);
                         }
                         drop(local_ready_guard);
-                        local.lock().move_to_cancel_lane(task, priority);
-                    } else {
-                        local.lock().move_to_cancel_lane(task, priority);
                     }
+                    local_guard.move_to_cancel_lane(task, priority);
+                    drop(local_guard);
                     self.record_scheduler_evidence_enqueue(task);
                     if let Some(parker) = self.parkers.get(worker_id) {
                         parker.unpark();
