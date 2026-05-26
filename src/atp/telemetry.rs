@@ -423,4 +423,154 @@ mod tests {
         assert_eq!(snapshot.errors.auth_rejections, 1);
         assert_eq!(snapshot.errors.bytes_rejected, 1024);
     }
+
+    // Golden Artifact Tests for ATP Telemetry Serialization Stability
+
+    #[test]
+    fn golden_telemetry_snapshot_serialization() {
+        use insta::assert_json_snapshot;
+
+        let snapshot = TelemetrySnapshot {
+            timestamp_micros: 1640995200000000, // Fixed timestamp: 2022-01-01 00:00:00 UTC
+            connections: ConnectionSnapshot {
+                active_reservations: 42,
+                total_reservations: 150,
+                total_packets_forwarded: 98765,
+                reservation_success_rate: 0.85,
+                average_reservation_latency_micros: 1500,
+            },
+            transport_udp: TransportSnapshot {
+                packets_forwarded: 75000,
+                bytes_forwarded: 512000000, // 512 MB
+                min_latency_micros: 500,
+                max_latency_micros: 5000,
+                average_latency_micros: 1200,
+                packet_loss_rate: 0.001,
+            },
+            transport_tcp_tls: TransportSnapshot {
+                packets_forwarded: 23765,
+                bytes_forwarded: 128000000, // 128 MB
+                min_latency_micros: 1000,
+                max_latency_micros: 8000,
+                average_latency_micros: 2500,
+                packet_loss_rate: 0.0005,
+            },
+            errors: ErrorSnapshot {
+                quota_rejections: 12,
+                auth_rejections: 3,
+                protocol_errors: 1,
+                bytes_rejected: 2048000, // 2 MB
+            },
+        };
+
+        assert_json_snapshot!("telemetry_snapshot_sample", snapshot);
+    }
+
+    #[test]
+    fn golden_relay_dashboard_data_serialization() {
+        use insta::assert_json_snapshot;
+
+        let current = TelemetrySnapshot {
+            timestamp_micros: 1640995200000000,
+            connections: ConnectionSnapshot {
+                active_reservations: 25,
+                total_reservations: 100,
+                total_packets_forwarded: 50000,
+                reservation_success_rate: 0.90,
+                average_reservation_latency_micros: 1200,
+            },
+            transport_udp: TransportSnapshot {
+                packets_forwarded: 45000,
+                bytes_forwarded: 256000000,
+                min_latency_micros: 400,
+                max_latency_micros: 4500,
+                average_latency_micros: 1000,
+                packet_loss_rate: 0.0008,
+            },
+            transport_tcp_tls: TransportSnapshot {
+                packets_forwarded: 5000,
+                bytes_forwarded: 32000000,
+                min_latency_micros: 800,
+                max_latency_micros: 6000,
+                average_latency_micros: 2000,
+                packet_loss_rate: 0.0003,
+            },
+            errors: ErrorSnapshot {
+                quota_rejections: 5,
+                auth_rejections: 1,
+                protocol_errors: 0,
+                bytes_rejected: 512000,
+            },
+        };
+
+        let dashboard = RelayDashboardData {
+            current: current.clone(),
+            historical: vec![
+                // Previous snapshot 1 hour ago
+                TelemetrySnapshot {
+                    timestamp_micros: 1640991600000000, // 1 hour earlier
+                    connections: ConnectionSnapshot {
+                        active_reservations: 20,
+                        total_reservations: 85,
+                        total_packets_forwarded: 42000,
+                        reservation_success_rate: 0.88,
+                        average_reservation_latency_micros: 1300,
+                    },
+                    transport_udp: TransportSnapshot {
+                        packets_forwarded: 38000,
+                        bytes_forwarded: 200000000,
+                        min_latency_micros: 450,
+                        max_latency_micros: 4800,
+                        average_latency_micros: 1100,
+                        packet_loss_rate: 0.001,
+                    },
+                    transport_tcp_tls: TransportSnapshot {
+                        packets_forwarded: 4000,
+                        bytes_forwarded: 25000000,
+                        min_latency_micros: 900,
+                        max_latency_micros: 6500,
+                        average_latency_micros: 2200,
+                        packet_loss_rate: 0.0004,
+                    },
+                    errors: ErrorSnapshot {
+                        quota_rejections: 3,
+                        auth_rejections: 0,
+                        protocol_errors: 1,
+                        bytes_rejected: 256000,
+                    },
+                },
+                current,
+            ],
+        };
+
+        assert_json_snapshot!("relay_dashboard_data_sample", dashboard);
+    }
+
+    #[test]
+    fn golden_relay_event_kind_serialization() {
+        use insta::assert_json_snapshot;
+
+        let events = vec![
+            RelayEventKind::ReservationAccepted,
+            RelayEventKind::ReservationRejected,
+            RelayEventKind::QuotaRejected,
+            RelayEventKind::AuthorizationRejected,
+            RelayEventKind::PacketForwarded,
+            RelayEventKind::ConnectionClosed,
+        ];
+
+        assert_json_snapshot!("relay_event_kinds", events);
+    }
+
+    #[test]
+    fn golden_relay_transport_serialization() {
+        use insta::assert_json_snapshot;
+
+        let transports = vec![
+            RelayTransport::Udp,
+            RelayTransport::TcpTls443,
+        ];
+
+        assert_json_snapshot!("relay_transports", transports);
+    }
 }
