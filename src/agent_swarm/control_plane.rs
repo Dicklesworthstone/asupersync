@@ -419,7 +419,7 @@ impl AgentSwarmControlPlane {
         }
 
         // Check resource availability
-        let can_admit = self.admission_controller.can_admit_agent(&request).await?;
+        let can_admit = self.admission_controller.can_admit_agent(cx, &request).await?;
 
         if !can_admit {
             return Ok(AgentAdmissionResult::Rejected {

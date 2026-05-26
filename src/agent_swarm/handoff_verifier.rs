@@ -426,6 +426,7 @@ pub enum ViolationCategory {
 }
 
 /// Handoff capsule verifier.
+#[derive(Debug)]
 pub struct HandoffVerifier {
     /// Maximum acceptable staleness for various components
     staleness_thresholds: StalenessThresholds,
