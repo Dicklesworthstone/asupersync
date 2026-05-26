@@ -110,10 +110,24 @@ impl TrustPolicy {
     }
 
     /// Check if content is explicitly marked as public.
-    fn is_explicitly_public_content(&self, _key: &CacheKey) -> bool {
-        // Placeholder implementation - would check against manifest metadata
-        // or explicit public content markers
-        self.allow_public_content
+    fn is_explicitly_public_content(&self, key: &CacheKey) -> bool {
+        // Only allow public content if the policy permits it
+        if !self.allow_public_content {
+            return false;
+        }
+
+        // Check if the grant scope explicitly indicates public content
+        match &key.grant_scope {
+            Some(scope) => {
+                // Public content must have explicit "public" scope
+                scope == "public" || scope == "public-read"
+            }
+            None => {
+                // Content without scope is NOT considered explicitly public
+                // This prevents privilege escalation via missing scope
+                false
+            }
+        }
     }
 
     /// Validate trust policy configuration.
@@ -304,5 +318,47 @@ mod tests {
         assert!(summary.encryption_required);
         assert!(!summary.public_content_allowed);
         assert_eq!(summary.authorized_scope_count, 0);
+    }
+
+    #[test]
+    fn is_explicitly_public_content_checks_cache_key() {
+        let mut policy = TrustPolicy::shared();
+        policy.allow_public_content = true;
+
+        // Content with "public" scope should be considered public
+        let public_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            Some("public".to_string()),
+        );
+        assert!(policy.is_explicitly_public_content(&public_key));
+
+        // Content with "public-read" scope should be considered public
+        let public_read_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            Some("public-read".to_string()),
+        );
+        assert!(policy.is_explicitly_public_content(&public_read_key));
+
+        // Content with private scope should NOT be considered public
+        let private_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            Some("private".to_string()),
+        );
+        assert!(!policy.is_explicitly_public_content(&private_key));
+
+        // Content with no scope should NOT be considered public
+        let no_scope_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            None,
+        );
+        assert!(!policy.is_explicitly_public_content(&no_scope_key));
+
+        // When global policy disallows public content, nothing should be public
+        policy.allow_public_content = false;
+        assert!(!policy.is_explicitly_public_content(&public_key));
     }
 }
