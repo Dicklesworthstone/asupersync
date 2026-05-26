@@ -144,6 +144,12 @@ pub struct DbPoolConfig {
     /// br-asupersync-gb3rck: When true, ensures connections authenticated for one user
     /// are not handed to another user, preventing privilege escalation.
     pub validate_authentication_state: bool,
+    /// Maximum retry attempts per client for connection acquisition.
+    /// br-asupersync-mlojr9: Prevents retry storm amplification DoS attacks.
+    pub max_retry_attempts_per_client: u32,
+    /// Minimum delay between retry attempts per client in milliseconds.
+    /// br-asupersync-mlojr9: Enforces per-client retry rate limiting.
+    pub min_retry_delay_per_client_ms: u64,
 }
 
 impl Default for DbPoolConfig {
@@ -160,6 +166,9 @@ impl Default for DbPoolConfig {
             enforce_client_quotas: true,         // Enable protection by default
             // br-asupersync-gb3rck: Security defaults for authentication state validation
             validate_authentication_state: true, // Enable authentication state validation by default
+            // br-asupersync-mlojr9: Retry storm amplification DoS protection defaults
+            max_retry_attempts_per_client: 5,    // Max 5 retry attempts per client
+            min_retry_delay_per_client_ms: 100,  // Min 100ms between retries per client
         }
     }
 }
@@ -250,6 +259,24 @@ impl DbPoolConfig {
         self.validate_authentication_state = validate;
         self
     }
+
+    /// Set the maximum retry attempts per client.
+    /// br-asupersync-mlojr9: Prevents retry storm amplification DoS attacks.
+    #[inline]
+    #[must_use]
+    pub fn max_retry_attempts_per_client(mut self, max_attempts: u32) -> Self {
+        self.max_retry_attempts_per_client = max_attempts;
+        self
+    }
+
+    /// Set the minimum delay between retry attempts per client.
+    /// br-asupersync-mlojr9: Enforces per-client retry rate limiting.
+    #[inline]
+    #[must_use]
+    pub fn min_retry_delay_per_client_ms(mut self, delay_ms: u64) -> Self {
+        self.min_retry_delay_per_client_ms = delay_ms;
+        self
+    }
 }
 
 // ─── Pool internals ─────────────────────────────────────────────────────────
@@ -289,6 +316,9 @@ struct PoolInner<C> {
     /// br-asupersync-qydi3j: Per-client connection count tracking.
     /// Maps client_id -> count of active connections for that client.
     client_connections: HashMap<String, usize>,
+    /// br-asupersync-mlojr9: Per-client retry attempt tracking.
+    /// Maps client_id -> (current_attempts, last_retry_time).
+    client_retry_state: HashMap<String, (u32, Time)>,
 }
 
 // ─── DbPool ─────────────────────────────────────────────────────────────────
@@ -313,6 +343,7 @@ struct PoolStatCounters {
     total_discards: AtomicU64,
     total_timeouts: AtomicU64,
     total_validation_failures: AtomicU64,
+    total_retry_limits_exceeded: AtomicU64,
 }
 
 impl fmt::Debug for PoolStatCounters {
@@ -334,6 +365,10 @@ impl fmt::Debug for PoolStatCounters {
             .field(
                 "total_validation_failures",
                 &self.total_validation_failures.load(Ordering::Relaxed),
+            )
+            .field(
+                "total_retry_limits_exceeded",
+                &self.total_retry_limits_exceeded.load(Ordering::Relaxed),
             )
             .finish()
     }
@@ -360,6 +395,9 @@ pub struct DbPoolStats {
     pub total_timeouts: u64,
     /// Total validation failures.
     pub total_validation_failures: u64,
+    /// Total retry limits exceeded.
+    /// br-asupersync-mlojr9: Tracks retry storm protection activations.
+    pub total_retry_limits_exceeded: u64,
 }
 
 /// Error returned by pool operations.
@@ -381,6 +419,9 @@ pub enum DbPoolError<E: std::error::Error> {
     /// Authentication state mismatch.
     /// br-asupersync-gb3rck: Prevents connections authenticated for one user being reused by another.
     AuthenticationMismatch { expected: String, found: String },
+    /// Client retry limit exceeded.
+    /// br-asupersync-mlojr9: Prevents retry storm amplification DoS attacks.
+    RetryLimitExceeded { client_id: String, attempts: u32, max_attempts: u32 },
 }
 
 impl<E: std::error::Error> fmt::Display for DbPoolError<E> {
@@ -393,6 +434,7 @@ impl<E: std::error::Error> fmt::Display for DbPoolError<E> {
             Self::ValidationFailed => write!(f, "connection validation failed"),
             Self::ClientQuotaExceeded(client) => write!(f, "client quota exceeded for '{client}'"),
             Self::AuthenticationMismatch { expected, found } => write!(f, "authentication state mismatch: expected '{expected}', found '{found}'"),
+            Self::RetryLimitExceeded { client_id, attempts, max_attempts } => write!(f, "retry limit exceeded for client '{client_id}': {attempts}/{max_attempts} attempts"),
         }
     }
 }
@@ -451,6 +493,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 total: 0,
                 closed: false,
                 client_connections: HashMap::new(), // br-asupersync-qydi3j
+                client_retry_state: HashMap::new(), // br-asupersync-mlojr9
             }),
             stats: PoolStatCounters::default(),
         }
@@ -481,6 +524,7 @@ impl<M: ConnectionManager> DbPool<M> {
             total_discards: self.stats.total_discards.load(Ordering::Relaxed),
             total_timeouts: self.stats.total_timeouts.load(Ordering::Relaxed),
             total_validation_failures: self.stats.total_validation_failures.load(Ordering::Relaxed),
+            total_retry_limits_exceeded: self.stats.total_retry_limits_exceeded.load(Ordering::Relaxed),
         }
     }
 
@@ -920,6 +964,144 @@ impl<M: ConnectionManager> DbPool<M> {
         }
     }
 
+    /// Acquire a connection with client-aware retry and amplification protection.
+    ///
+    /// br-asupersync-mlojr9: This method provides retry storm amplification DoS protection
+    /// by enforcing per-client retry limits and rate limiting.
+    ///
+    /// On transient failures (`Connect` error or `Full` pool), retries with exponential
+    /// backoff per the given policy, but additionally enforces:
+    /// 1. Maximum retry attempts per client (prevents amplification)
+    /// 2. Minimum delay between retries per client (prevents rapid retries)
+    /// 3. Per-client retry state tracking (isolation)
+    pub fn get_with_retry_for_client(
+        &self,
+        client_id: &str,
+        policy: &RetryPolicy,
+    ) -> Result<PooledConnection<'_, M>, DbPoolError<M::Error>> {
+        let client_id_owned = client_id.to_string();
+        let deadline: Time = crate::time::wall_now() + self.config.connection_timeout;
+        let now = crate::time::wall_now();
+
+        // br-asupersync-mlojr9: Check and update per-client retry state
+        let (current_attempts, should_delay) = {
+            let mut inner = self.inner.lock();
+            let (attempts, last_retry) = inner
+                .client_retry_state
+                .get(&client_id_owned)
+                .copied()
+                .unwrap_or((0, now));
+
+            // Check if client has exceeded maximum retry attempts
+            if attempts >= self.config.max_retry_attempts_per_client {
+                self.stats.total_retry_limits_exceeded.fetch_add(1, Ordering::Relaxed);
+                return Err(DbPoolError::RetryLimitExceeded {
+                    client_id: client_id_owned,
+                    attempts,
+                    max_attempts: self.config.max_retry_attempts_per_client,
+                });
+            }
+
+            // Check if minimum delay has elapsed since last retry
+            let min_delay_ms = self.config.min_retry_delay_per_client_ms;
+            let time_since_last_retry = now.duration_since(last_retry);
+            let should_delay = if min_delay_ms > 0 && time_since_last_retry < min_delay_ms * 1_000_000 {
+                Some(Duration::from_millis(min_delay_ms) - Duration::from_nanos(time_since_last_retry))
+            } else {
+                None
+            };
+
+            // Increment attempt counter and update last retry time
+            let new_attempts = attempts + 1;
+            inner.client_retry_state.insert(client_id_owned.clone(), (new_attempts, now));
+
+            (new_attempts, should_delay)
+        };
+
+        // Enforce minimum delay between retries if needed
+        if let Some(delay) = should_delay {
+            if !self.sleep_retry_backoff(delay) {
+                return Err(DbPoolError::Closed);
+            }
+        }
+
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+
+            match self.get_for_client(client_id) {
+                Ok(conn) => {
+                    // Success - reset client retry state
+                    let mut inner = self.inner.lock();
+                    inner.client_retry_state.remove(&client_id_owned);
+                    return Ok(conn);
+                }
+                Err(DbPoolError::Closed) => return Err(DbPoolError::Closed),
+                Err(DbPoolError::RetryLimitExceeded { .. }) => {
+                    // Don't retry if we've hit retry limits
+                    self.stats.total_retry_limits_exceeded.fetch_add(1, Ordering::Relaxed);
+                    return Err(DbPoolError::RetryLimitExceeded {
+                        client_id: client_id_owned,
+                        attempts: current_attempts,
+                        max_attempts: self.config.max_retry_attempts_per_client,
+                    });
+                }
+                Err(e) => {
+                    // Only retry on Connect, Full, and ClientQuotaExceeded errors
+                    if !matches!(e, DbPoolError::Connect(_) | DbPoolError::Full | DbPoolError::ClientQuotaExceeded(_)) {
+                        // Reset retry state on non-retryable error
+                        let mut inner = self.inner.lock();
+                        inner.client_retry_state.remove(&client_id_owned);
+                        return Err(e);
+                    }
+
+                    if attempt >= policy.max_attempts {
+                        // Reset retry state on final failure
+                        let mut inner = self.inner.lock();
+                        inner.client_retry_state.remove(&client_id_owned);
+                        return Err(e);
+                    }
+
+                    // Check if deadline already passed
+                    let remaining_nanos = deadline.duration_since(crate::time::wall_now());
+                    if remaining_nanos == 0 {
+                        let mut inner = self.inner.lock();
+                        inner.client_retry_state.remove(&client_id_owned);
+                        self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
+                        return Err(DbPoolError::Timeout);
+                    }
+                    let remaining = Duration::from_nanos(remaining_nanos);
+
+                    // Calculate backoff delay (no jitter in synchronous context)
+                    let backoff_delay = calculate_delay(policy, attempt, None);
+
+                    // Also enforce minimum per-client delay
+                    let client_delay = Duration::from_millis(self.config.min_retry_delay_per_client_ms);
+                    let total_delay = backoff_delay.max(client_delay);
+
+                    if !self.sleep_retry_backoff(total_delay.min(remaining)) {
+                        let mut inner = self.inner.lock();
+                        inner.client_retry_state.remove(&client_id_owned);
+                        return Err(DbPoolError::Closed);
+                    }
+
+                    // Re-check deadline after sleep
+                    if self.is_closed() {
+                        let mut inner = self.inner.lock();
+                        inner.client_retry_state.remove(&client_id_owned);
+                        return Err(DbPoolError::Closed);
+                    }
+                    if crate::time::wall_now() >= deadline {
+                        let mut inner = self.inner.lock();
+                        inner.client_retry_state.remove(&client_id_owned);
+                        self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
+                        return Err(DbPoolError::Timeout);
+                    }
+                }
+            }
+        }
+    }
+
     /// Try to acquire without blocking. Returns `None` if no connection available.
     #[must_use]
     pub fn try_get(&self) -> Option<PooledConnection<'_, M>> {
@@ -1003,6 +1185,7 @@ impl<M: ConnectionManager> DbPool<M> {
     ///
     /// Returns the number of connections evicted.
     pub fn evict_stale(&self) -> usize {
+        self.cleanup_stale_retry_state();
         let mut inner = self.inner.lock();
 
         // Drain all idle, keep only the valid ones.
@@ -1030,6 +1213,21 @@ impl<M: ConnectionManager> DbPool<M> {
             self.manager.disconnect(conn);
         }
         evicted
+    }
+
+    /// Clean up stale retry state entries.
+    ///
+    /// br-asupersync-mlojr9: Removes retry state entries that are older than 10 minutes
+    /// to prevent memory leaks from clients that never retry again.
+    fn cleanup_stale_retry_state(&self) {
+        let mut inner = self.inner.lock();
+        let now = crate::time::wall_now();
+        let stale_threshold = Duration::from_secs(600); // 10 minutes
+
+        inner.client_retry_state.retain(|_client_id, (_, last_retry)| {
+            let age = Duration::from_nanos(now.duration_since(*last_retry));
+            age < stale_threshold
+        });
     }
 
     /// Pre-warm the pool by creating connections up to min_idle.
@@ -1313,6 +1511,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             total_discards: self.stats.total_discards.load(Ordering::Relaxed),
             total_timeouts: self.stats.total_timeouts.load(Ordering::Relaxed),
             total_validation_failures: self.stats.total_validation_failures.load(Ordering::Relaxed),
+            total_retry_limits_exceeded: self.stats.total_retry_limits_exceeded.load(Ordering::Relaxed),
         }
     }
 
