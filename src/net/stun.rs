@@ -3,14 +3,14 @@
 //! Implements STUN client for ICE candidate gathering and NAT traversal.
 //! This is the foundation for ATP-F Path Graph Engine NAT traversal.
 
-use crate::types::Outcome;
 use crate::cx::Cx;
-use std::net::SocketAddr;
-use std::collections::HashMap;
+use crate::types::Outcome;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::net::SocketAddr;
 
 /// STUN message types (RFC 5389).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StunMessageType {
     /// Binding request to discover reflexive address.
     BindingRequest,
@@ -90,7 +90,8 @@ impl StunClient {
             candidate_type: IceCandidateType::Host,
             related_address: None,
         };
-        self.candidates.insert("host".to_string(), host_candidate.clone());
+        self.candidates
+            .insert("host".to_string(), host_candidate.clone());
 
         // Step 2: Discover server reflexive candidates via STUN
         // TODO: Implement STUN binding request/response
@@ -101,7 +102,11 @@ impl StunClient {
 
     /// Send STUN binding request to discover reflexive address.
     #[allow(dead_code)]
-    async fn send_binding_request(&self, _cx: &Cx, _server: SocketAddr) -> Outcome<SocketAddr, StunError> {
+    async fn send_binding_request(
+        &self,
+        _cx: &Cx,
+        _server: SocketAddr,
+    ) -> Outcome<SocketAddr, StunError> {
         // TODO: Implement STUN message encoding/decoding
         // TODO: Send UDP packet with STUN binding request
         // TODO: Parse response to extract XOR-MAPPED-ADDRESS
@@ -115,7 +120,7 @@ impl StunClient {
 }
 
 /// STUN protocol errors.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
 pub enum StunError {
     #[error("STUN not implemented yet")]
     NotImplemented,
@@ -154,5 +159,93 @@ mod tests {
 
         assert_eq!(client.stun_servers.len(), 1);
         assert_eq!(client.stun_servers[0], stun_server);
+    }
+
+    // Golden Artifact Tests for STUN/ICE Serialization Stability
+
+    #[test]
+    fn golden_stun_message_types_serialization() {
+        use insta::assert_json_snapshot;
+
+        let message_types = vec![
+            StunMessageType::BindingRequest,
+            StunMessageType::BindingResponse,
+            StunMessageType::BindingError,
+        ];
+        assert_json_snapshot!("stun_message_types", message_types);
+    }
+
+    #[test]
+    fn golden_ice_candidate_types_serialization() {
+        use insta::assert_json_snapshot;
+
+        let candidate_types = vec![
+            IceCandidateType::Host,
+            IceCandidateType::ServerReflexive,
+            IceCandidateType::PeerReflexive,
+            IceCandidateType::Relay,
+        ];
+        assert_json_snapshot!("ice_candidate_types", candidate_types);
+    }
+
+    #[test]
+    fn golden_ice_candidate_host_serialization() {
+        use insta::assert_json_snapshot;
+
+        let host_candidate = IceCandidate {
+            foundation: "1".to_string(),
+            component: 1,
+            protocol: "udp".to_string(),
+            priority: 126,
+            address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 5000)),
+            candidate_type: IceCandidateType::Host,
+            related_address: None,
+        };
+        assert_json_snapshot!("ice_candidate_host", host_candidate);
+    }
+
+    #[test]
+    fn golden_ice_candidate_server_reflexive_serialization() {
+        use insta::assert_json_snapshot;
+
+        let reflexive_candidate = IceCandidate {
+            foundation: "2".to_string(),
+            component: 1,
+            protocol: "udp".to_string(),
+            priority: 100,
+            address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 10), 54400)),
+            candidate_type: IceCandidateType::ServerReflexive,
+            related_address: Some(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 5000))),
+        };
+        assert_json_snapshot!("ice_candidate_server_reflexive", reflexive_candidate);
+    }
+
+    #[test]
+    fn golden_ice_candidate_relay_serialization() {
+        use insta::assert_json_snapshot;
+
+        let relay_candidate = IceCandidate {
+            foundation: "3".to_string(),
+            component: 1,
+            protocol: "udp".to_string(),
+            priority: 50,
+            address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 20), 49152)),
+            candidate_type: IceCandidateType::Relay,
+            related_address: Some(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 10), 54400))),
+        };
+        assert_json_snapshot!("ice_candidate_relay", relay_candidate);
+    }
+
+    #[test]
+    fn golden_stun_error_types_serialization() {
+        use insta::assert_json_snapshot;
+
+        let error_types = vec![
+            StunError::NotImplemented,
+            StunError::Timeout,
+            StunError::InvalidResponse,
+            StunError::Network("Connection refused".to_string()),
+        ];
+        assert_json_snapshot!("stun_error_types", error_types);
     }
 }
