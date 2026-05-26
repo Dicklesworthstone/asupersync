@@ -28,6 +28,7 @@ use nkeys::{KeyPair, KeyPairType};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fmt;
+use subtle::ConstantTimeEq;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -456,7 +457,14 @@ impl NatsConfig {
         if let Some(jwt) = user_jwt {
             let claims = parse_nats_jwt_claims(jwt)?;
             let public_key = key_pair.public_key();
-            if claims.subject != public_key {
+
+            // br-asupersync-090on8: P1 HIGH security fix - prevent timing attacks on JWT subject comparison
+            // Use constant-time comparison to prevent attackers from using timing side channels
+            // to guess valid public keys by measuring response times of string comparisons.
+            // Standard string comparison (!=) leaks timing information about where strings differ,
+            // allowing attackers to iteratively guess correct public key characters.
+            let subject_matches = claims.subject.as_bytes().ct_eq(public_key.as_bytes());
+            if subject_matches.into() == false {
                 return Err(NatsError::InvalidAuth(format!(
                     "JWT sub claim {} does not match seed public key {}",
                     claims.subject, public_key
