@@ -53,9 +53,9 @@ pub struct ReceivedSymbol {
     pub esi: u32,
     /// Whether this is a source symbol (ESI < K).
     pub is_source: bool,
-    /// Column indices that this symbol depends on (intermediate symbol indices).
-    /// For source symbols, legacy callers may leave this as `[esi]`; the decoder
-    /// derives the canonical RFC tuple equation from `esi`.
+    /// Column indices that this symbol depends on (intermediate symbol indices 0..L-1).
+    /// For source symbols, this should be empty; the decoder derives the canonical
+    /// RFC tuple equation from `esi`. Only repair symbols provide explicit columns.
     pub columns: Vec<usize>,
     /// GF(256) coefficients for each column (same length as `columns`).
     /// For XOR-based LT, all coefficients are 1.
@@ -2935,13 +2935,14 @@ fn blocked_elimination_dense(
 
 impl ReceivedSymbol {
     /// Create a source symbol (ESI < K).
+    /// The decoder will derive proper intermediate symbol indices from the ESI.
     #[must_use]
     pub fn source(esi: u32, data: Vec<u8>) -> Self {
         Self {
             esi,
             is_source: true,
-            columns: vec![esi as usize],
-            coefficients: vec![Gf256::ONE],
+            columns: vec![], // Empty - decoder derives from ESI using RFC equations
+            coefficients: vec![], // Empty - decoder derives from ESI using RFC equations
             data,
         }
     }

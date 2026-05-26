@@ -376,8 +376,8 @@ impl ArtifactCache {
         let mut evicted_count = 0;
         let mut evicted_bytes = 0u64;
 
-        // Collect eviction candidates based on policy
-        let mut candidates: Vec<_> = self.metadata.iter().collect();
+        // Collect eviction candidates based on policy - clone to avoid borrow checker issues
+        let mut candidates: Vec<_> = self.metadata.iter().map(|(id, meta)| (id.clone(), meta.clone())).collect();
 
         match self.config.eviction_policy {
             EvictionPolicy::LruWithTtl => {
@@ -404,7 +404,6 @@ impl ArtifactCache {
                 break;
             }
 
-            let id = id.clone();
             evicted_bytes += meta.size_bytes;
             self.remove_internal(&id);
             evicted_count += 1;
