@@ -1,10 +1,14 @@
-//! Distributed region encoding, symbol distribution, and recovery.
+//! Distributed region encoding, symbol distribution, recovery, and consensus.
 //!
 //! This module implements encoding of distributed region state into
 //! RaptorQ symbols, their distribution to replicas, and recovery of
 //! region state from collected symbols. It builds on the state model
 //! from [`crate::record::distributed_region`] and the symbol types
 //! from [`crate::types::symbol`].
+//!
+//! Additionally provides Byzantine fault tolerant consensus algorithms
+//! for distributed coordination with safety guarantees even under
+//! malicious replica behavior.
 //!
 //! # Modules
 //!
@@ -15,9 +19,11 @@
 //! - [`distribution`]: Quorum-based symbol distribution
 //! - [`recovery`]: Region recovery protocol
 //! - [`bridge`]: Local-to-distributed region bridge
+//! - [`consensus`]: Byzantine fault tolerant consensus algorithms
 
 pub mod assignment;
 pub mod bridge;
+pub mod consensus;
 pub mod consistent_hash;
 pub mod distribution;
 pub mod encoding;
@@ -28,6 +34,11 @@ pub use assignment::{AssignmentStrategy, ReplicaAssignment, SymbolAssigner};
 pub use bridge::{
     BridgeConfig, CloseResult, ConflictResolution, DistributedToLocal, EffectiveState,
     LocalToDistributed, RegionBridge, RegionMode, SyncMode, SyncResult, SyncState, UpgradeResult,
+};
+pub use consensus::{
+    PbftConsensus, PbftConfig, PbftNode, PbftState, ConsensusRequest, ConsensusResponse,
+    ConsensusBatch, ViewNumber, SequenceNumber, ReplicaId, PhaseKind, MessageDigest,
+    ConsensusError,
 };
 pub use consistent_hash::HashRing;
 pub use distribution::{
