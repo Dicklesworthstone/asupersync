@@ -2162,3 +2162,8 @@ mod tests {
         );
     }
 }
+
+// Include integration tests with real ATP transfer workflows
+#[cfg(test)]
+#[path = "../transfer_integration_tests.rs"]
+mod transfer_integration_tests;
