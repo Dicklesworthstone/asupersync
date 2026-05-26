@@ -292,10 +292,7 @@ impl RepairRoiE2eHarness {
 
         let end_time = self.lab_runtime.now();
 
-        let duration_micros = end_time.duration_since(start_time)
-            .as_micros()
-            .try_into()
-            .unwrap_or(u64::MAX);
+        let duration_micros = end_time.duration_since(start_time) / 1000;
 
         RepairRoiE2eResult {
             scenario: scenario.clone(),
