@@ -448,6 +448,13 @@ impl NatsConfig {
                     "server INFO nonce is required for nkey/JWT authentication".to_string(),
                 )
             })?;
+
+        // br-asupersync-0jcx5m: P2 MEDIUM security improvement - basic nonce validation
+        // Add lightweight nonce validation to prevent obviously malicious or weak nonces.
+        // Full replay protection requires server-side tracking, but we can validate
+        // basic nonce quality to reduce attack surface.
+        validate_nonce_quality(nonce)?;
+
         let key_pair = load_user_nkey(nkey_seed.expect("checked nkey_seed presence"))?;
         let signature = key_pair.sign(nonce.as_bytes()).map_err(|err| {
             NatsError::InvalidAuth(format!("failed to sign NATS server nonce: {err}"))
@@ -624,6 +631,70 @@ fn load_user_nkey(seed: &str) -> Result<KeyPair, NatsError> {
         )));
     }
     Ok(key_pair)
+}
+
+/// br-asupersync-0jcx5m: Validate basic nonce quality to reduce attack surface.
+///
+/// This provides lightweight protection against obviously weak or malicious nonces.
+/// Full replay protection requires server-side nonce tracking and is outside the
+/// scope of client-side validation.
+///
+/// Validation criteria:
+/// - Minimum length to ensure sufficient entropy
+/// - Maximum length to prevent DoS via oversized nonces
+/// - Base64 character set validation to ensure well-formed nonces
+/// - No obviously predictable patterns
+fn validate_nonce_quality(nonce: &str) -> Result<(), NatsError> {
+    // Minimum length: 16 characters (96 bits base64) for reasonable entropy
+    if nonce.len() < 16 {
+        return Err(NatsError::InvalidAuth(format!(
+            "server nonce too short: {} chars (minimum 16 for security)",
+            nonce.len()
+        )));
+    }
+
+    // Maximum length: 256 characters to prevent DoS attacks via oversized nonces
+    if nonce.len() > 256 {
+        return Err(NatsError::InvalidAuth(format!(
+            "server nonce too long: {} chars (maximum 256)",
+            nonce.len()
+        )));
+    }
+
+    // Ensure nonce contains only valid base64 characters (common NATS nonce format)
+    // Allow base64 + base64url character sets: A-Za-z0-9+/=-_
+    let is_valid_char = |c: char| c.is_ascii_alphanumeric() || "+=/-_".contains(c);
+    if !nonce.chars().all(is_valid_char) {
+        return Err(NatsError::InvalidAuth(
+            "server nonce contains invalid characters (expected base64/base64url)".to_string()
+        ));
+    }
+
+    // Prevent obviously predictable nonces (all same character, simple sequences)
+    let first_char = nonce.chars().next().unwrap(); // Safe: already checked non-empty
+    if nonce.chars().all(|c| c == first_char) {
+        return Err(NatsError::InvalidAuth(format!(
+            "server nonce appears non-random (all '{}' characters)",
+            first_char
+        )));
+    }
+
+    // Check for simple incrementing pattern (like "012345...")
+    let chars: Vec<char> = nonce.chars().collect();
+    let mut is_sequential = true;
+    for i in 1..chars.len().min(8) { // Check first 8 characters for sequence
+        if chars[i] as u8 != (chars[i-1] as u8).saturating_add(1) {
+            is_sequential = false;
+            break;
+        }
+    }
+    if is_sequential {
+        return Err(NatsError::InvalidAuth(
+            "server nonce appears non-random (sequential pattern detected)".to_string()
+        ));
+    }
+
+    Ok(())
 }
 
 fn decode_base64_url(input: &str, field_name: &str) -> Result<Vec<u8>, NatsError> {
