@@ -11,6 +11,66 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Validates a path to prevent directory traversal attacks.
+///
+/// Rejects paths containing:
+/// - Parent directory references (`..`)
+/// - Absolute paths (for relative path functions)
+/// - Null bytes
+/// - Empty paths
+///
+/// This is a security mitigation against path traversal attacks that could
+/// allow access to files outside the intended directory scope.
+fn validate_safe_path(path: &Path, allow_absolute: bool) -> io::Result<()> {
+    // Check for null bytes in path components
+    if path.as_os_str().as_encoded_bytes().contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains null bytes",
+        ));
+    }
+
+    // Check for empty path
+    if path.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path cannot be empty",
+        ));
+    }
+
+    // Reject absolute paths if not allowed
+    if !allow_absolute && path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "absolute paths not allowed in this context",
+        ));
+    }
+
+    // Check each component for parent directory references
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "path contains parent directory reference (..)",
+                ));
+            }
+            std::path::Component::CurDir => {
+                // Current directory references are generally safe but unnecessary
+                continue;
+            }
+            std::path::Component::Prefix(_) |
+            std::path::Component::RootDir |
+            std::path::Component::Normal(_) => {
+                // These are safe components
+                continue;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Get metadata for a path (follows symlinks).
 pub async fn metadata(path: impl AsRef<Path>) -> io::Result<Metadata> {
     let path = path.as_ref().to_owned();
@@ -45,8 +105,15 @@ pub async fn read_link(path: impl AsRef<Path>) -> io::Result<PathBuf> {
 
 /// Copy a file from `src` to `dst`.
 pub async fn copy(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<u64> {
-    let src = src.as_ref().to_owned();
-    let dst = dst.as_ref().to_owned();
+    let src_path = src.as_ref();
+    let dst_path = dst.as_ref();
+
+    // Validate paths to prevent directory traversal attacks
+    validate_safe_path(src_path, true)?;
+    validate_safe_path(dst_path, true)?;
+
+    let src = src_path.to_owned();
+    let dst = dst_path.to_owned();
     spawn_blocking_io(move || std::fs::copy(&src, &dst)).await
 }
 
@@ -54,8 +121,15 @@ pub async fn copy(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<u6
 ///
 /// On Linux with `io-uring`, uses `IORING_OP_RENAMEAT`.
 pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
-    let from = from.as_ref().to_owned();
-    let to = to.as_ref().to_owned();
+    let from_path = from.as_ref();
+    let to_path = to.as_ref();
+
+    // Validate paths to prevent directory traversal attacks
+    validate_safe_path(from_path, true)?;
+    validate_safe_path(to_path, true)?;
+
+    let from = from_path.to_owned();
+    let to = to_path.to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
         uring_renameat(&from, &to)
@@ -70,7 +144,12 @@ pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<
 ///
 /// On Linux with `io-uring`, uses `IORING_OP_UNLINKAT`.
 pub async fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
-    let path = path.as_ref().to_owned();
+    let path_ref = path.as_ref();
+
+    // Validate path to prevent directory traversal attacks
+    validate_safe_path(path_ref, true)?;
+
+    let path = path_ref.to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
         uring_unlinkat(&path)
@@ -135,7 +214,12 @@ pub async fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
 
 /// Write bytes to a file (creates or truncates).
 pub async fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
-    let path = path.as_ref().to_owned();
+    let path_ref = path.as_ref();
+
+    // Validate path to prevent directory traversal attacks
+    validate_safe_path(path_ref, true)?;
+
+    let path = path_ref.to_owned();
     let contents = contents.as_ref().to_owned();
     spawn_blocking_io(move || std::fs::write(&path, &contents)).await
 }
@@ -149,7 +233,12 @@ pub async fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Re
 ///
 /// If the operation fails before rename, the temporary file is cleaned up.
 pub async fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
-    let path = path.as_ref().to_owned();
+    let path_ref = path.as_ref();
+
+    // Validate path to prevent directory traversal attacks
+    validate_safe_path(path_ref, true)?;
+
+    let path = path_ref.to_owned();
     let contents = contents.as_ref().to_owned();
     spawn_blocking_io(move || write_atomic_blocking(&path, &contents)).await
 }
