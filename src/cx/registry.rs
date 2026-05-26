@@ -942,25 +942,28 @@ impl NameRegistry {
     /// matches the live pending entry.
     pub fn cancel_permit(&mut self, permit: &NamePermit, now: Time) -> Result<(), NameLeaseError> {
         let name = permit.name();
-        let Some(entry) = self.pending.get(name) else {
+        // SECURITY: Atomic remove-and-validate to fix TOCTOU race between identity
+        // check and entry removal. Previously, another thread could modify pending
+        // entries between validation and removal, leading to wrong permit cancellation.
+        let Some(removed_entry) = self.pending.remove(name) else {
             return Err(NameLeaseError::NotFound {
                 name: name.to_string(),
             });
         };
-        if permit.holder() != entry.holder
-            || permit.region() != entry.region
-            || permit.permit_id() != entry.identity_nonce
+
+        // Validate the atomically-removed entry's identity
+        if permit.holder() != removed_entry.holder
+            || permit.region() != removed_entry.region
+            || permit.permit_id() != removed_entry.identity_nonce
         // ubs:ignore - not a secret
         {
+            // Re-insert the entry on validation failure to maintain consistency
+            self.pending.insert(name.to_owned(), removed_entry);
             return Err(NameLeaseError::PermissionDenied {
                 name: name.to_string(),
             });
         }
-        let removed = self.pending.remove(name);
-        debug_assert!(
-            removed.is_some(),
-            "pending entry disappeared after permit identity check"
-        );
+
         self.try_grant_to_first_waiter(name, now);
         Ok(())
     }
