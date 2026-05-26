@@ -94,6 +94,27 @@ pub trait ConnectionManager: Send + Sync + 'static {
     /// Default implementation does nothing. Override for cleanup
     /// (e.g., sending disconnect protocol messages).
     fn disconnect(&self, _conn: Self::Connection) {}
+
+    /// Check if a connection has authentication state for a specific client.
+    ///
+    /// br-asupersync-gb3rck: Returns Some(client_id) if the connection is
+    /// authenticated for a specific client, None if it's in a clean/unauthenticated state.
+    /// Implementations should check connection-specific authentication state
+    /// (e.g., active sessions, user context, database roles).
+    fn authentication_state(&self, _conn: &Self::Connection) -> Option<String> {
+        // Default: no authentication state tracking
+        None
+    }
+
+    /// Clear authentication state from a connection.
+    ///
+    /// br-asupersync-gb3rck: Called to reset a connection to clean/unauthenticated state
+    /// before returning to pool for potential reuse by different clients.
+    /// Return true if successfully cleared, false if connection should be discarded.
+    fn clear_authentication_state(&self, _conn: &mut Self::Connection) -> bool {
+        // Default: assume no authentication state to clear
+        true
+    }
 }
 
 // ─── DbPoolConfig ───────────────────────────────────────────────────────────
@@ -119,6 +140,10 @@ pub struct DbPoolConfig {
     /// Enable per-client connection tracking and enforcement.
     /// br-asupersync-qydi3j: When true, tracks connection usage by client ID.
     pub enforce_client_quotas: bool,
+    /// Validate authentication state to prevent cross-user connection reuse.
+    /// br-asupersync-gb3rck: When true, ensures connections authenticated for one user
+    /// are not handed to another user, preventing privilege escalation.
+    pub validate_authentication_state: bool,
 }
 
 impl Default for DbPoolConfig {
@@ -133,6 +158,8 @@ impl Default for DbPoolConfig {
             // br-asupersync-qydi3j: Conservative defaults for DoS protection
             max_connections_per_client: Some(3), // Allow up to 3 connections per client by default
             enforce_client_quotas: true,         // Enable protection by default
+            // br-asupersync-gb3rck: Security defaults for authentication state validation
+            validate_authentication_state: true, // Enable authentication state validation by default
         }
     }
 }
@@ -213,6 +240,16 @@ impl DbPoolConfig {
         self.enforce_client_quotas = enforce;
         self
     }
+
+    /// Enable or disable authentication state validation.
+    /// br-asupersync-gb3rck: Controls whether connections with authentication state
+    /// are prevented from being reused by different clients.
+    #[inline]
+    #[must_use]
+    pub fn validate_authentication_state(mut self, validate: bool) -> Self {
+        self.validate_authentication_state = validate;
+        self
+    }
 }
 
 // ─── Pool internals ─────────────────────────────────────────────────────────
@@ -229,6 +266,9 @@ struct IdleConnection<C> {
     conn: C,
     created_at: Time,
     last_used: Time,
+    /// br-asupersync-gb3rck: Track authentication state to prevent cross-user reuse.
+    /// None means unauthenticated/clean state; Some(client_id) means authenticated for that client.
+    authenticated_for: Option<String>,
 }
 
 impl<C> IdleConnection<C> {
@@ -338,6 +378,9 @@ pub enum DbPoolError<E: std::error::Error> {
     /// Client quota exceeded.
     /// br-asupersync-qydi3j: DoS protection against connection exhaustion.
     ClientQuotaExceeded(String),
+    /// Authentication state mismatch.
+    /// br-asupersync-gb3rck: Prevents connections authenticated for one user being reused by another.
+    AuthenticationMismatch { expected: String, found: String },
 }
 
 impl<E: std::error::Error> fmt::Display for DbPoolError<E> {
@@ -349,6 +392,7 @@ impl<E: std::error::Error> fmt::Display for DbPoolError<E> {
             Self::Connect(e) => write!(f, "connection failed: {e}"),
             Self::ValidationFailed => write!(f, "connection validation failed"),
             Self::ClientQuotaExceeded(client) => write!(f, "client quota exceeded for '{client}'"),
+            Self::AuthenticationMismatch { expected, found } => write!(f, "authentication state mismatch: expected '{expected}', found '{found}'"),
         }
     }
 }
@@ -479,9 +523,17 @@ impl<M: ConnectionManager> DbPool<M> {
                     {
                         inner.total = inner.total.saturating_sub(1);
                         self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                        popped = Some((idle.conn, false, idle.created_at));
+                        popped = Some((idle.conn, false, idle.created_at, idle.authenticated_for));
                     } else {
-                        popped = Some((idle.conn, true, idle.created_at));
+                        // br-asupersync-gb3rck: For get() without client_id, only reuse clean connections
+                        // If authentication validation is enabled and connection has auth state, discard it
+                        if self.config.validate_authentication_state && idle.authenticated_for.is_some() {
+                            inner.total = inner.total.saturating_sub(1);
+                            self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                            popped = Some((idle.conn, false, idle.created_at, idle.authenticated_for));
+                        } else {
+                            popped = Some((idle.conn, true, idle.created_at, idle.authenticated_for));
+                        }
                     }
                 }
 
@@ -498,7 +550,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 popped
             };
 
-            if let Some((conn, needs_validation, created_at)) = conn_to_validate {
+            if let Some((conn, needs_validation, created_at, _authenticated_for)) = conn_to_validate {
                 if !needs_validation {
                     self.manager.disconnect(conn);
                     continue;
@@ -603,16 +655,36 @@ impl<M: ConnectionManager> DbPool<M> {
                     }
                 }
 
-                // Rest is similar to get() but with client tracking
+                // br-asupersync-gb3rck: Authentication state validation for client-specific connection acquisition
                 let mut popped = None;
                 if let Some(idle) = inner.idle.pop_front() {
                     let now = crate::time::wall_now();
                     if idle.is_expired(&self.config, now) || idle.is_idle_too_long(&self.config, now) {
                         inner.total = inner.total.saturating_sub(1);
                         self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                        popped = Some((idle.conn, false, idle.created_at));
+                        popped = Some((idle.conn, false, idle.created_at, idle.authenticated_for));
+                    } else if self.config.validate_authentication_state {
+                        // Authentication state validation: check for cross-user reuse
+                        match &idle.authenticated_for {
+                            None => {
+                                // Clean connection - safe to reuse for any client
+                                popped = Some((idle.conn, true, idle.created_at, idle.authenticated_for));
+                            }
+                            Some(auth_client) if auth_client == &client_id_owned => {
+                                // Connection authenticated for same client - safe to reuse
+                                popped = Some((idle.conn, true, idle.created_at, idle.authenticated_for));
+                            }
+                            Some(other_client) => {
+                                // SECURITY: Connection authenticated for different client - must not reuse
+                                // This prevents privilege escalation and cross-user data access
+                                inner.total = inner.total.saturating_sub(1);
+                                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                                popped = Some((idle.conn, false, idle.created_at, Some(other_client.clone())));
+                            }
+                        }
                     } else {
-                        popped = Some((idle.conn, true, idle.created_at));
+                        // Authentication validation disabled - reuse any connection
+                        popped = Some((idle.conn, true, idle.created_at, idle.authenticated_for));
                     }
                 }
 
@@ -631,7 +703,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 popped
             };
 
-            if let Some((conn, needs_validation, created_at)) = conn_to_validate {
+            if let Some((conn, needs_validation, created_at, authenticated_for)) = conn_to_validate {
                 if !needs_validation {
                     // Decrement client count since we're discarding this connection
                     let mut inner = self.inner.lock();
@@ -642,6 +714,14 @@ impl<M: ConnectionManager> DbPool<M> {
                         }
                     }
                     drop(inner);
+
+                    // br-asupersync-gb3rck: Log security event when discarding connection with mismatched auth state
+                    if let Some(auth_client) = authenticated_for {
+                        if auth_client != client_id_owned {
+                            // This is a security-relevant event - connection was authenticated for different client
+                            eprintln!("SECURITY: Discarding connection authenticated for '{}' requested by '{}'", auth_client, client_id_owned);
+                        }
+                    }
 
                     self.manager.disconnect(conn);
                     continue;
@@ -671,7 +751,55 @@ impl<M: ConnectionManager> DbPool<M> {
                         continue;
                     }
 
-                    let valid_conn = guard.conn.take().unwrap();
+                    let mut valid_conn = guard.conn.take().unwrap();
+
+                    // br-asupersync-gb3rck: Additional authentication state validation after basic validation
+                    if self.config.validate_authentication_state {
+                        let current_auth_state = self.manager.authentication_state(&valid_conn);
+                        match (&current_auth_state, &authenticated_for) {
+                            (Some(current_client), Some(expected_client)) if current_client != expected_client => {
+                                // Authentication state mismatch - connection shows different auth than expected
+                                // Decrement client count and return error
+                                let mut inner = self.inner.lock();
+                                if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                                    *count = count.saturating_sub(1);
+                                    if *count == 0 {
+                                        inner.client_connections.remove(&client_id_owned);
+                                    }
+                                }
+                                drop(inner);
+
+                                self.stats.total_validation_failures.fetch_add(1, Ordering::Relaxed);
+                                self.manager.disconnect(valid_conn);
+                                return Err(DbPoolError::AuthenticationMismatch {
+                                    expected: expected_client.clone(),
+                                    found: current_client.clone(),
+                                });
+                            }
+                            (Some(current_client), None) if current_client != &client_id_owned => {
+                                // Connection has unexpected authentication state - try to clear it
+                                if !self.manager.clear_authentication_state(&mut valid_conn) {
+                                    // Failed to clear auth state - discard connection
+                                    let mut inner = self.inner.lock();
+                                    if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                                        *count = count.saturating_sub(1);
+                                        if *count == 0 {
+                                            inner.client_connections.remove(&client_id_owned);
+                                        }
+                                    }
+                                    drop(inner);
+
+                                    self.stats.total_validation_failures.fetch_add(1, Ordering::Relaxed);
+                                    self.manager.disconnect(valid_conn);
+                                    continue;
+                                }
+                            }
+                            _ => {
+                                // Authentication state is acceptable (clean, same client, or validation disabled)
+                            }
+                        }
+                    }
+
                     self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
                     return Ok(PooledConnection {
                         conn: Some(valid_conn),
@@ -799,7 +927,16 @@ impl<M: ConnectionManager> DbPool<M> {
     }
 
     /// Return a connection to the pool, preserving its original creation time.
-    fn return_connection(&self, conn: M::Connection, created_at: Time) {
+    fn return_connection(&self, mut conn: M::Connection, created_at: Time, client_id: Option<String>) {
+        // br-asupersync-gb3rck: Determine authentication state for this connection
+        let authenticated_for = if self.config.validate_authentication_state {
+            // If authentication validation is enabled, check current auth state
+            self.manager.authentication_state(&conn)
+        } else {
+            // If validation disabled, preserve the client_id that was using this connection
+            client_id
+        };
+
         let conn_to_disconnect = {
             let mut inner = self.inner.lock();
             if inner.closed {
@@ -813,6 +950,7 @@ impl<M: ConnectionManager> DbPool<M> {
                     // has no Cx; wall_now() is the runtime-time
                     // abstraction.
                     last_used: crate::time::wall_now(),
+                    authenticated_for, // br-asupersync-gb3rck: Track authentication state
                 });
                 None
             }
@@ -909,7 +1047,7 @@ impl<M: ConnectionManager> DbPool<M> {
 
             if let Ok(conn) = self.manager.connect() {
                 self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                self.return_connection(conn, crate::time::wall_now());
+                self.return_connection(conn, crate::time::wall_now(), None); // br-asupersync-gb3rck: clean connection
                 created += 1;
             } else {
                 let mut inner = self.inner.lock();
@@ -971,7 +1109,7 @@ impl<M: ConnectionManager> PooledConnection<'_, M> {
     /// Explicitly return the connection to the pool.
     pub fn return_to_pool(mut self) {
         if let Some(conn) = self.conn.take() {
-            self.pool.return_connection(conn, self.created_at);
+            self.pool.return_connection(conn, self.created_at, self.client_id.clone());
         }
     }
 
@@ -1024,7 +1162,7 @@ impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
             // the connection through `discard_connection` so it's closed
             // rather than handed back to a fresh caller.
             if self.pool.manager.release_check(&mut conn) {
-                self.pool.return_connection(conn, self.created_at);
+                self.pool.return_connection(conn, self.created_at, self.client_id.clone());
             } else {
                 self.pool.discard_connection(conn);
             }
