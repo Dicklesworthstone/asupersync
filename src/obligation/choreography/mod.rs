@@ -1052,6 +1052,27 @@ pub struct ProtocolStats {
     pub non_monotone_comm_count: usize,
 }
 
+/// Analysis result for livelock detection in loop bodies.
+#[derive(Debug, Clone)]
+struct LoopProgressAnalysis {
+    /// Whether there's a path from the loop body that leads to Continue.
+    has_continue_path: bool,
+    /// Whether all paths to Continue are guaranteed to make progress.
+    has_progress_guarantee: bool,
+    /// Total number of communication actions found in the loop body.
+    comm_count: usize,
+}
+
+impl LoopProgressAnalysis {
+    fn new() -> Self {
+        Self {
+            has_continue_path: false,
+            has_progress_guarantee: false,
+            comm_count: 0,
+        }
+    }
+}
+
 impl GlobalProtocol {
     /// Compute summary statistics for this protocol.
     pub fn stats(&self) -> ProtocolStats {
@@ -2372,6 +2393,147 @@ mod tests {
             e,
             ValidationError::DuplicateLoopLabel { label } if label == "x"
         )));
+    }
+
+    // ------------------------------------------------------------------
+    // Livelock detection tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn immediate_livelock_detected() {
+        // Loop body is just "continue self" - immediate infinite recursion
+        let protocol = GlobalProtocol::builder("immediate_livelock")
+            .participant("a", "role")
+            .interaction(Interaction::loop_(
+                "loop1",
+                Interaction::continue_("loop1")
+            ))
+            .build();
+
+        let errors = protocol.validate();
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::Livelock { label, reason }
+            if label == "loop1" && reason.contains("immediate infinite recursion")
+        )), "Expected immediate livelock error, got: {errors:?}");
+    }
+
+    #[test]
+    fn progress_free_loop_detected() {
+        // Loop body has no communication but leads to continue
+        let protocol = GlobalProtocol::builder("progress_free_loop")
+            .participant("a", "role")
+            .interaction(Interaction::loop_(
+                "loop1",
+                Interaction::choice(
+                    "a",
+                    "condition",
+                    Interaction::continue_("loop1"), // no progress branch
+                    Interaction::end()
+                )
+            ))
+            .build();
+
+        let errors = protocol.validate();
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::Livelock { label, reason }
+            if label == "loop1" && reason.contains("no communication actions")
+        )), "Expected progress-free livelock error, got: {errors:?}");
+    }
+
+    #[test]
+    fn loop_with_progress_is_valid() {
+        // Loop body has communication before continue - this should be valid
+        let protocol = GlobalProtocol::builder("loop_with_progress")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::loop_(
+                "loop1",
+                Interaction::comm("a", "msg", "M", "b")
+                    .then(Interaction::choice(
+                        "a",
+                        "condition",
+                        Interaction::continue_("loop1"),
+                        Interaction::end()
+                    ))
+                    .expect("comm interactions accept continuations")
+            ))
+            .build();
+
+        let errors = protocol.validate();
+        let livelock_errors: Vec<_> = errors.iter().filter(|e| matches!(e, ValidationError::Livelock { .. })).collect();
+        assert!(livelock_errors.is_empty(), "Loop with communication should not trigger livelock: {livelock_errors:?}");
+    }
+
+    #[test]
+    fn nested_loop_livelock_detected() {
+        // Nested loop where inner loop has immediate livelock
+        let protocol = GlobalProtocol::builder("nested_loop_livelock")
+            .participant("a", "role")
+            .interaction(Interaction::loop_(
+                "outer",
+                Interaction::loop_(
+                    "inner",
+                    Interaction::continue_("inner") // immediate livelock in inner loop
+                )
+            ))
+            .build();
+
+        let errors = protocol.validate();
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::Livelock { label, .. } if label == "inner"
+        )), "Expected livelock in inner loop, got: {errors:?}");
+    }
+
+    #[test]
+    fn sequence_with_progress_then_continue_is_valid() {
+        // Sequence where we have progress before the continue
+        let protocol = GlobalProtocol::builder("seq_with_progress")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::loop_(
+                "loop1",
+                Interaction::seq(
+                    Interaction::comm("a", "work", "Work", "b"),
+                    Interaction::continue_("loop1")
+                )
+            ))
+            .build();
+
+        let errors = protocol.validate();
+        let livelock_errors: Vec<_> = errors.iter().filter(|e| matches!(e, ValidationError::Livelock { .. })).collect();
+        assert!(livelock_errors.is_empty(), "Sequential progress before continue should be valid: {livelock_errors:?}");
+    }
+
+    #[test]
+    fn choice_with_mixed_progress_detected() {
+        // Choice where one branch has progress but the other doesn't
+        let protocol = GlobalProtocol::builder("mixed_progress_choice")
+            .participant("a", "role")
+            .participant("b", "role")
+            .interaction(Interaction::loop_(
+                "loop1",
+                Interaction::choice(
+                    "a",
+                    "condition",
+                    // This branch has progress
+                    Interaction::comm("a", "work", "Work", "b")
+                        .then(Interaction::continue_("loop1"))
+                        .expect("comm interactions accept continuations"),
+                    // This branch has no progress - direct continue
+                    Interaction::continue_("loop1")
+                )
+            ))
+            .build();
+
+        let errors = protocol.validate();
+        assert!(errors.iter().any(|e| matches!(
+            e,
+            ValidationError::Livelock { label, reason }
+            if label == "loop1" && reason.contains("no guaranteed progress")
+        )), "Expected mixed progress livelock error, got: {errors:?}");
     }
 
     // ==================================================================

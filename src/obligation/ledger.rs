@@ -923,6 +923,12 @@ impl ObligationLedger {
                 Err(LedgerError::AlreadyResolved { .. }) => summary.already_resolved += 1,
                 Err(LedgerError::NotFound { .. }) => summary.missing += 1,
                 Err(LedgerError::RegionFinalized { .. }) => summary.finalized += 1,
+                Err(LedgerError::NotPending { .. }) => summary.already_resolved += 1,
+                Err(LedgerError::TokenMismatch { .. }) => summary.missing += 1,
+                Err(LedgerError::StatsUnderflow { .. }) => summary.missing += 1,
+                Err(LedgerError::AcquireAfterFinalize { .. }) => summary.finalized += 1,
+                Err(LedgerError::IndexOverflow { .. }) => summary.missing += 1,
+                Err(LedgerError::GenerationOverflow) => summary.missing += 1,
             }
         }
 

@@ -378,7 +378,7 @@ struct ObligationSnapshot {
 /// The checker tracks obligation state and detects violations of the basic
 /// and temporal logic contracts. It is designed to be run against marking events
 /// produced by [`super::marking::project_trace`] or constructed directly in tests.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ContractChecker {
     /// Tracked obligations: id → snapshot.
     obligations: BTreeMap<ObligationId, ObligationSnapshot>,
@@ -743,8 +743,8 @@ impl ContractChecker {
     fn check_always_eventually_resolved(&mut self, current_time: Time) {
         for (id, snap) in &self.obligations {
             if !snap.state.is_terminal() {
-                let elapsed = current_time.duration_since(snap.reserved_at);
-                if elapsed > self.resolution_time_bound.as_duration() {
+                let elapsed_nanos = current_time.duration_since(snap.reserved_at);
+                if elapsed_nanos > self.resolution_time_bound.as_nanos() {
                     self.violations.push(ContractViolation {
                         contract: DialecticaContract::AlwaysEventuallyResolved,
                         time: current_time,
@@ -753,7 +753,7 @@ impl ContractChecker {
                              {} (elapsed: {})",
                             snap.reserved_at,
                             self.resolution_time_bound,
-                            Time::from_duration(elapsed),
+                            Time::from_nanos(elapsed_nanos),
                         ),
                         obligation: Some(*id),
                         region: Some(snap.region),
