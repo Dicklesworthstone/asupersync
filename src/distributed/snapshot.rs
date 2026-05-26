@@ -841,6 +841,20 @@ pub enum SnapshotError {
     AuthenticationFailed,
     /// Zero authentication tag (unauthenticated sentinel).
     UnauthenticatedSnapshot,
+    /// Invalid RegionId arena index/generation values.
+    InvalidRegionId {
+        /// The invalid index value.
+        index: u32,
+        /// The invalid generation value.
+        generation: u32,
+    },
+    /// Invalid TaskId arena index/generation values.
+    InvalidTaskId {
+        /// The invalid index value.
+        index: u32,
+        /// The invalid generation value.
+        generation: u32,
+    },
 }
 
 impl std::fmt::Display for SnapshotError {
@@ -866,7 +880,13 @@ impl std::fmt::Display for SnapshotError {
             Self::AuthenticationFailed => write!(f, "snapshot authentication failed"),
             Self::UnauthenticatedSnapshot => {
                 write!(f, "snapshot contains unauthenticated zero tag")
-            }
+            },
+            Self::InvalidRegionId { index, generation } => {
+                write!(f, "invalid RegionId arena index={index}, generation={generation}")
+            },
+            Self::InvalidTaskId { index, generation } => {
+                write!(f, "invalid TaskId arena index={index}, generation={generation}")
+            },
         }
     }
 }
@@ -989,12 +1009,28 @@ impl<'a> Cursor<'a> {
     fn read_region_id(&mut self) -> Result<RegionId, SnapshotError> {
         let index = self.read_u32()?;
         let generation = self.read_u32()?;
+
+        // SECURITY: Basic bounds checking to prevent arena spoofing attacks
+        // where malicious snapshots contain arbitrary index/generation pairs.
+        // TODO: Add proper arena allocation validation in future iteration.
+        if index > 1_000_000 || generation > 10_000 {
+            return Err(SnapshotError::InvalidRegionId { index, generation });
+        }
+
         Ok(RegionId::from_arena(ArenaIndex::new(index, generation)))
     }
 
     fn read_task_id(&mut self) -> Result<TaskId, SnapshotError> {
         let index = self.read_u32()?;
         let generation = self.read_u32()?;
+
+        // SECURITY: Basic bounds checking to prevent arena spoofing attacks
+        // where malicious snapshots contain arbitrary index/generation pairs.
+        // TODO: Add proper arena allocation validation in future iteration.
+        if index > 1_000_000 || generation > 10_000 {
+            return Err(SnapshotError::InvalidTaskId { index, generation });
+        }
+
         Ok(TaskId::from_arena(ArenaIndex::new(index, generation)))
     }
 
