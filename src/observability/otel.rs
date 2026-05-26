@@ -646,6 +646,22 @@ impl OtlpLogRecord {
         record
     }
 
+    /// Build an OTLP log record from an Asupersync structured log entry with privacy filtering.
+    #[must_use]
+    pub fn from_log_entry_with_privacy(entry: &LogEntry, observed_time_unix_nano: u64, config: &SpanConfig) -> Self {
+        let mut record = Self::new(entry.level(), entry.message(), entry.timestamp().as_nanos())
+            .with_observed_time_unix_nano(observed_time_unix_nano);
+
+        if let Some(target) = entry.target() {
+            record = record.with_filtered_attribute("target", target, config);
+        }
+        for (key, value) in entry.fields() {
+            record = record.with_filtered_attribute(key, value, config);
+        }
+
+        record
+    }
+
     /// Set the observation timestamp.
     #[must_use]
     pub const fn with_observed_time_unix_nano(mut self, observed_time_unix_nano: u64) -> Self {
@@ -660,6 +676,30 @@ impl OtlpLogRecord {
             &mut self.attributes,
             &mut self.dropped_attributes_count,
             key.into(),
+            value.into(),
+        );
+        self
+    }
+
+    /// Add or replace an attribute with privacy filtering applied.
+    ///
+    /// **Security**: Attributes listed in `config.drop_attributes` are silently dropped
+    /// to prevent sensitive data from reaching OTLP collectors.
+    #[must_use]
+    pub fn with_filtered_attribute(mut self, key: impl Into<String>, value: impl Into<String>, config: &SpanConfig) -> Self {
+        let key_str = key.into();
+
+        // Privacy filtering: drop sensitive attributes before OTLP export
+        if config.drop_attributes.contains(&key_str) {
+            // Increment dropped count but don't add the attribute
+            self.dropped_attributes_count = self.dropped_attributes_count.saturating_add(1);
+            return self;
+        }
+
+        insert_log_attribute_bounded(
+            &mut self.attributes,
+            &mut self.dropped_attributes_count,
+            key_str,
             value.into(),
         );
         self
@@ -8899,5 +8939,71 @@ mod otlp_wire_format_tests {
         println!("  - Timestamp ordering: ✓");
         println!("  - Edge cases (zero, negative, extreme): ✓");
         println!("  - MetricsSnapshot exporter representation: ✓");
+    }
+
+    /// Test privacy filtering for OTLP log records.
+    ///
+    /// **Security Test**: Verifies that sensitive attributes listed in
+    /// `SpanConfig::drop_attributes` are properly filtered from OTLP exports
+    /// to prevent data leakage to observability collectors.
+    #[test]
+    fn otlp_log_privacy_filtering() {
+        use crate::observability::entry::LogEntry;
+        use crate::observability::level::LogLevel;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // Create a span config that drops sensitive attributes
+        let privacy_config = SpanConfig::new()
+            .with_drop_attribute("user.email")
+            .with_drop_attribute("api.key")
+            .with_drop_attribute("auth.token");
+
+        // Create a mock log entry with both safe and sensitive fields
+        let mock_entry = LogEntry::new(
+            LogLevel::Info,
+            "user action completed",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap(),
+        )
+        .with_field("action", "login")
+        .with_field("user.email", "sensitive@example.com")  // Should be filtered
+        .with_field("api.key", "secret-key-12345")         // Should be filtered
+        .with_field("auth.token", "bearer-token-xyz")      // Should be filtered
+        .with_field("user.id", "12345")                   // Should be kept
+        .with_field("request.path", "/api/login");        // Should be kept
+
+        let observed_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        // Test WITHOUT privacy filtering (baseline)
+        let unfiltered_record = OtlpLogRecord::from_log_entry(&mock_entry, observed_time);
+
+        // Verify all attributes are present in unfiltered record
+        assert_eq!(unfiltered_record.attributes.len(), 5, "Unfiltered record should contain all 5 attributes");
+        assert!(unfiltered_record.attributes.iter().any(|(k, _)| k == "user.email"), "user.email should be present without filtering");
+        assert!(unfiltered_record.attributes.iter().any(|(k, _)| k == "api.key"), "api.key should be present without filtering");
+        assert!(unfiltered_record.attributes.iter().any(|(k, _)| k == "auth.token"), "auth.token should be present without filtering");
+
+        // Test WITH privacy filtering (the fix)
+        let filtered_record = OtlpLogRecord::from_log_entry_with_privacy(&mock_entry, observed_time, &privacy_config);
+
+        // Verify sensitive attributes are filtered out
+        assert_eq!(filtered_record.attributes.len(), 2, "Filtered record should contain only 2 safe attributes");
+        assert!(filtered_record.attributes.iter().all(|(k, _)| k != "user.email"), "user.email should be filtered out");
+        assert!(filtered_record.attributes.iter().all(|(k, _)| k != "api.key"), "api.key should be filtered out");
+        assert!(filtered_record.attributes.iter().all(|(k, _)| k != "auth.token"), "auth.token should be filtered out");
+
+        // Verify safe attributes are preserved
+        assert!(filtered_record.attributes.iter().any(|(k, _)| k == "user.id"), "user.id should be preserved");
+        assert!(filtered_record.attributes.iter().any(|(k, _)| k == "request.path"), "request.path should be preserved");
+
+        // Verify dropped attributes are counted
+        assert_eq!(filtered_record.dropped_attributes_count, 3, "Should report 3 dropped sensitive attributes");
+
+        println!("✓ OTLP privacy filtering security test passed");
+        println!("  - Sensitive attributes filtered: ✓");
+        println!("  - Safe attributes preserved: ✓");
+        println!("  - Dropped count accurate: ✓");
     }
 }
