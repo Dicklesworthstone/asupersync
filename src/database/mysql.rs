@@ -2115,22 +2115,16 @@ impl MySqlConnection {
             .unwrap_or_default();
         let auth_response = match handshake.auth_plugin_name.as_str() {
             "mysql_native_password" => {
-                // br-asupersync-m6c35i: reject the legacy plugin
-                // unless the operator has explicitly opted in.
-                // mysql_native_password uses SHA1 over a server-
-                // supplied nonce — captured exchanges are
-                // offline-crackable and a MitM can downgrade a
-                // caching_sha2_password-configured client into this
-                // mode. Default-deny closes that door.
-                if !options.insecure_legacy_mysql_native_password {
-                    return Err(MySqlError::UnsupportedAuthPlugin(
-                        "mysql_native_password rejected by default — set \
-                         MySqlConnectOptions::insecure_legacy_mysql_native_password = true \
-                         to opt in (and prefer ssl_mode: Required to neutralise the offline-crack surface)"
-                            .to_string(),
-                    ));
-                }
-                mysql_native_auth(password, &handshake.auth_plugin_data)?
+                // SECURITY: mysql_native_password uses SHA1 which is cryptographically broken
+                // and vulnerable to offline password cracking attacks. This authentication
+                // method is permanently disabled to prevent password compromise.
+                return Err(MySqlError::UnsupportedAuthPlugin(
+                    "mysql_native_password is permanently disabled due to SHA1 cryptographic \
+                     weaknesses that enable offline password cracking from captured network \
+                     exchanges. Use MySQL 5.7+ with caching_sha2_password (default in MySQL 8.0+) \
+                     or configure your MySQL server to require secure authentication plugins."
+                        .to_string(),
+                ));
             }
             "caching_sha2_password" => caching_sha2_auth(password, &handshake.auth_plugin_data)?,
             plugin => {
@@ -2311,15 +2305,12 @@ impl MySqlConnection {
         validate_auth_plugin_switch(handshake.auth_plugin_name.as_str(), plugin_name, options)?;
         let auth_response = match plugin_name {
             "mysql_native_password" => {
-                if !options.insecure_legacy_mysql_native_password {
-                    return Err(MySqlError::UnsupportedAuthPlugin(
-                        "mysql_native_password rejected by default — set \
-                         MySqlConnectOptions::insecure_legacy_mysql_native_password = true \
-                         to opt in (and prefer ssl_mode: Required to neutralise the offline-crack surface)"
-                            .to_string(),
-                    ));
-                }
-                mysql_native_auth(password, auth_data)?
+                return Err(MySqlError::UnsupportedAuthPlugin(
+                    "mysql_native_password permanently blocked due to SHA1 cryptographic weakness. \
+                     SHA1 enables offline password cracking from captured network exchanges. \
+                     Use caching_sha2_password instead."
+                        .to_string(),
+                ));
             }
             "caching_sha2_password" => caching_sha2_auth(password, auth_data)?,
             plugin => {
