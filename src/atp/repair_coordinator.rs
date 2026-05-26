@@ -39,6 +39,14 @@ pub struct RepairCoordinatorConfig {
     pub enable_telemetry: bool,
     /// Repair decision logging level
     pub decision_logging_level: RepairLoggingLevel,
+    /// Maximum decisions per minute from any source
+    pub max_decisions_per_minute: u32,
+    /// Maximum telemetry entries per minute from any source
+    pub max_telemetry_per_minute: u32,
+    /// Maximum decision history size
+    pub max_decision_history: usize,
+    /// Maximum telemetry history size
+    pub max_telemetry_history: usize,
 }
 
 impl Default for RepairCoordinatorConfig {
@@ -50,6 +58,10 @@ impl Default for RepairCoordinatorConfig {
             max_memory_overhead_ratio: 0.1, // 10% memory overhead max
             enable_telemetry: true,
             decision_logging_level: RepairLoggingLevel::Normal,
+            max_decisions_per_minute: 60, // Limit to 1 decision per second
+            max_telemetry_per_minute: 120, // Limit to 2 telemetry entries per second
+            max_decision_history: 100, // Reduced from 1000 to prevent memory exhaustion
+            max_telemetry_history: 500, // Reduced from 10000 to prevent memory exhaustion
         }
     }
 }
@@ -316,6 +328,10 @@ pub struct RepairCoordinator {
     telemetry: Vec<RepairTelemetry>,
     /// Per-mode statistics for adaptive thresholds
     mode_statistics: HashMap<RepairMode, ModeStatistics>,
+    /// Rate limiter for decision requests
+    decision_rate_limiter: RateLimiter,
+    /// Rate limiter for telemetry submissions
+    telemetry_rate_limiter: RateLimiter,
 }
 
 /// Statistics for a particular repair mode
@@ -331,6 +347,48 @@ struct ModeStatistics {
     success_rate: f64,
     /// Last updated timestamp
     last_updated: SystemTime,
+}
+
+/// Rate limiter for preventing economic attacks
+#[derive(Debug)]
+struct RateLimiter {
+    /// Window start time
+    window_start: SystemTime,
+    /// Count of requests in current window
+    request_count: u32,
+    /// Requests per window limit
+    limit: u32,
+    /// Window duration (1 minute)
+    window_duration: Duration,
+}
+
+impl RateLimiter {
+    fn new(limit: u32) -> Self {
+        Self {
+            window_start: SystemTime::now(),
+            request_count: 0,
+            limit,
+            window_duration: Duration::from_secs(60), // 1 minute window
+        }
+    }
+
+    fn check_rate_limit(&mut self) -> bool {
+        let now = SystemTime::now();
+
+        // Reset window if expired
+        if now.duration_since(self.window_start).unwrap_or_default() >= self.window_duration {
+            self.window_start = now;
+            self.request_count = 0;
+        }
+
+        // Check if within limit
+        if self.request_count >= self.limit {
+            false
+        } else {
+            self.request_count += 1;
+            true
+        }
+    }
 }
 
 impl Default for ModeStatistics {
@@ -349,6 +407,8 @@ impl RepairCoordinator {
     /// Create a new repair coordinator
     pub fn new(config: RepairCoordinatorConfig) -> Self {
         Self {
+            decision_rate_limiter: RateLimiter::new(config.max_decisions_per_minute),
+            telemetry_rate_limiter: RateLimiter::new(config.max_telemetry_per_minute),
             config,
             multi_source_scheduler: None,
             decision_history: Vec::new(),
@@ -371,6 +431,10 @@ impl RepairCoordinator {
         transfer: &TransferState,
         trace_id: TraceId,
     ) -> Result<RepairDecision> {
+        // Rate limiting check to prevent economic attacks
+        if !self.decision_rate_limiter.check_rate_limit() {
+            return Err(crate::error::Error::msg("Rate limit exceeded for repair decisions"));
+        }
         // Calculate ROI for each applicable repair mode
         let mode_candidates = self.get_applicable_modes(path, transfer);
         let mut best_decision: Option<RepairDecision> = None;
@@ -440,16 +504,24 @@ impl RepairCoordinator {
         // Store decision for future learning
         self.decision_history.push(decision.clone());
 
-        // Keep history bounded
-        if self.decision_history.len() > 1000 {
-            self.decision_history.drain(0..100);
+        // Keep history bounded to prevent memory exhaustion attacks
+        if self.decision_history.len() > self.config.max_decision_history {
+            let drain_count = self.config.max_decision_history / 10; // Remove 10% when over limit
+            self.decision_history.drain(0..drain_count);
         }
 
         Ok(decision)
     }
 
     /// Record actual telemetry for a completed repair operation
-    pub fn record_telemetry(&mut self, telemetry: RepairTelemetry) {
+    pub fn record_telemetry(&mut self, telemetry: RepairTelemetry) -> Result<()> {
+        // Rate limiting check to prevent economic attacks
+        if !self.telemetry_rate_limiter.check_rate_limit() {
+            return Err(crate::error::Error::msg("Rate limit exceeded for telemetry submission"));
+        }
+
+        // Validate telemetry data authenticity to prevent fake data injection
+        self.validate_telemetry(&telemetry)?;
         // Update mode statistics
         let stats = self.mode_statistics.entry(telemetry.mode).or_default();
 
@@ -467,10 +539,13 @@ impl RepairCoordinator {
 
         self.telemetry.push(telemetry);
 
-        // Keep telemetry bounded
-        if self.telemetry.len() > 10000 {
-            self.telemetry.drain(0..1000);
+        // Keep telemetry bounded to prevent memory exhaustion attacks
+        if self.telemetry.len() > self.config.max_telemetry_history {
+            let drain_count = self.config.max_telemetry_history / 10; // Remove 10% when over limit
+            self.telemetry.drain(0..drain_count);
         }
+
+        Ok(())
     }
 
     /// Get repair mode statistics for analysis
@@ -714,6 +789,43 @@ impl RepairCoordinator {
         }
     }
 
+    fn validate_telemetry(&self, telemetry: &RepairTelemetry) -> Result<()> {
+        // Validate that telemetry data is plausible to prevent fake injection attacks
+
+        // Check for impossible values
+        if telemetry.actual_roi_ratio < 0.0 || telemetry.actual_roi_ratio > 1000.0 {
+            return Err(crate::error::Error::msg("Invalid ROI ratio in telemetry"));
+        }
+
+        if telemetry.predicted_roi.roi_ratio < 0.0 || telemetry.predicted_roi.roi_ratio > 1000.0 {
+            return Err(crate::error::Error::msg("Invalid predicted ROI in telemetry"));
+        }
+
+        // Validate repair symbols counts are reasonable
+        if telemetry.repair_symbols_sent == 0 && telemetry.success {
+            return Err(crate::error::Error::msg("Cannot have successful repair with zero symbols sent"));
+        }
+
+        if telemetry.repair_symbols_decoded > telemetry.repair_symbols_sent {
+            return Err(crate::error::Error::msg("Cannot decode more symbols than were sent"));
+        }
+
+        // Check for time-based anomalies
+        let now = SystemTime::now();
+        if telemetry.measured_at > now {
+            return Err(crate::error::Error::msg("Telemetry timestamp is in the future"));
+        }
+
+        // Check for excessively old telemetry (could be replay attack)
+        if let Ok(age) = now.duration_since(telemetry.measured_at) {
+            if age > Duration::from_secs(3600) { // 1 hour max age
+                return Err(crate::error::Error::msg("Telemetry data is too old"));
+            }
+        }
+
+        Ok(())
+    }
+
     fn log_decision(&self, decision: &RepairDecision) {
         match self.config.decision_logging_level {
             RepairLoggingLevel::Off => {}
@@ -910,7 +1022,7 @@ mod tests {
             measured_at: SystemTime::now(),
         };
 
-        coordinator.record_telemetry(telemetry);
+        coordinator.record_telemetry(telemetry).expect("Telemetry recording failed");
 
         assert_eq!(coordinator.telemetry.len(), 1);
         assert!(coordinator.mode_statistics.contains_key(&RepairMode::Tail));
