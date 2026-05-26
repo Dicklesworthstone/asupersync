@@ -108,6 +108,8 @@ http3 = ["quic"]
 tailscale-path-provider = []
 # Legacy Tokio-backed compatibility wrappers live in the separate
 # `asupersync-tokio-compat` crate, not in the core feature graph.
+# Enable tokio compatibility layer for transfer actors.
+tokio-compat = []
 # Enable Kafka client integration via rdkafka.
 kafka = ["dep:rdkafka"]
 # Enable HTTP response compression (gzip, deflate, Brotli).

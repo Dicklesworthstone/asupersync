@@ -291,7 +291,7 @@ fn test_stream_prefix_proof_artifact_serialization() {
         exposure_decision: "verified content within policy".to_string(),
         replay_pointer: "test-replay-ptr".to_string(),
         policy: ConsumptionPolicy::VerifiedOnly,
-        timestamp: Time::now(),
+        timestamp: std::time::SystemTime::now(),
         epoch: 42,
     };
 

@@ -267,7 +267,7 @@ impl ConnectionRouter {
             return Err(ConnectionRouterError::Cancelled);
         }
 
-        let mut outgoing_packets = Vec::new();
+        let outgoing_packets = Vec::new();
 
         for (connection_id, handle) in &mut self.connections {
             if let Some(deadline) = handle.next_timer_deadline {
@@ -416,7 +416,8 @@ impl QuicTimerScheduler {
 
         if should_reschedule {
             let duration = deadline.saturating_duration_since(now);
-            let time_deadline = crate::Time::from_instant(deadline);
+            let duration_from_now = deadline.saturating_duration_since(Instant::now());
+            let time_deadline = crate::Time::from_nanos(duration_from_now.as_nanos() as u64);
             self.current_sleep = Some(Sleep::new(time_deadline));
             self.current_deadline = Some(deadline);
 
@@ -436,7 +437,7 @@ impl QuicTimerScheduler {
             return Err(ConnectionRouterError::Cancelled);
         }
 
-        if let Some(mut sleep) = self.current_sleep.take() {
+        if let Some(sleep) = self.current_sleep.take() {
             let deadline = self.current_deadline.take();
 
             // Wait for the timer to fire

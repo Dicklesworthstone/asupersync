@@ -199,13 +199,8 @@ impl ManagedQuicEndpoint {
                 return Err(ManagedEndpointError::Cancelled);
             }
 
-            // Try to process both packets and timers concurrently
-            let packet_future = self.process_packet_batch(cx);
-            let timer_future = self.process_timer_events(cx);
-
-            // Use a simple select-like pattern
-            // In a complete implementation, this would use proper async concurrency
-            if let Err(e) = packet_future.await {
+            // Process packets first
+            if let Err(e) = self.process_packet_batch(cx).await {
                 match e {
                     ManagedEndpointError::Cancelled => return Err(e),
                     ManagedEndpointError::ShuttingDown => break,
@@ -216,7 +211,8 @@ impl ManagedQuicEndpoint {
                 }
             }
 
-            if let Err(e) = timer_future.await {
+            // Then process timer events
+            if let Err(e) = self.process_timer_events(cx).await {
                 match e {
                     ManagedEndpointError::Cancelled => return Err(e),
                     ManagedEndpointError::ShuttingDown => break,
@@ -228,8 +224,12 @@ impl ManagedQuicEndpoint {
             }
 
             // Brief yield to prevent busy loop
-            use crate::Time;
-            let now = Time::now();
+            let now = crate::Time::from_nanos(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::ZERO)
+                    .as_nanos() as u64
+            );
             sleep(now, Duration::from_millis(1)).await;
         }
 

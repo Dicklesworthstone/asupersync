@@ -5,6 +5,7 @@
 //! and graph commit semantics used by CLI, SDK, daemon, proofs, mailbox,
 //! swarm, and dogfood components.
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
@@ -22,7 +23,7 @@ fn domain_separated_sha256(domain: &[u8], payload: &[u8]) -> [u8; 32] {
 }
 
 /// Content-addressed object identifier using cryptographic hash.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ContentId {
     /// SHA-256 hash of the object's canonical content representation.
     hash: [u8; 32],
@@ -63,7 +64,7 @@ impl fmt::Display for ContentId {
 }
 
 /// Manifest-addressed object identifier using deterministic manifest hash.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ManifestId {
     /// SHA-256 hash of the object's canonical manifest representation.
     hash: [u8; 32],
@@ -112,7 +113,7 @@ impl From<ContentId> for ManifestId {
 }
 
 /// Object identifier that can be either content-addressed or manifest-addressed.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ObjectId {
     /// Content-addressed object (immutable content).
     Content(ContentId),

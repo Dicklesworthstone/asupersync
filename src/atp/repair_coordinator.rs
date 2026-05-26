@@ -11,7 +11,22 @@ use crate::types::{TraceId, Time};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime};
+#[cfg(feature = "tracing-integration")]
 use tracing::{debug, info, warn};
+
+// Provide no-op tracing macros when tracing is disabled
+#[cfg(not(feature = "tracing-integration"))]
+macro_rules! debug {
+    ($($arg:tt)*) => {};
+}
+#[cfg(not(feature = "tracing-integration"))]
+macro_rules! info {
+    ($($arg:tt)*) => {};
+}
+#[cfg(not(feature = "tracing-integration"))]
+macro_rules! warn {
+    ($($arg:tt)*) => {};
+}
 
 /// Configuration for the repair coordinator
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +72,7 @@ pub enum RepairLoggingLevel {
 }
 
 /// Repair modes available for different network scenarios
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RepairMode {
     /// No repair - rely on exact retransmission
     Off,
@@ -217,7 +232,7 @@ impl RepairRoi {
     /// Get human-readable ROI summary
     pub fn summary(&self) -> String {
         format!(
-            "ROI {:.2x} (benefit: {:.2}, cost: {:.2}, confidence: {:.1}%)",
+            "ROI {:.2} (benefit: {:.2}, cost: {:.2}, confidence: {:.1}%)",
             self.roi_ratio,
             self.benefit_score,
             self.cost_score,
@@ -355,7 +370,7 @@ impl RepairCoordinator {
     /// Make a repair decision based on current conditions
     pub fn decide_repair_mode(
         &mut self,
-        object_id: ObjectId,
+        _object_id: ObjectId,
         path: &PathCharacteristics,
         transfer: &TransferState,
         trace_id: TraceId,
@@ -583,7 +598,7 @@ impl RepairCoordinator {
         Duration::from_millis((base_time.as_millis() as f64 * loss_multiplier) as u64)
     }
 
-    fn estimate_repair_time(&self, mode: RepairMode, path: &PathCharacteristics, transfer: &TransferState) -> Duration {
+    fn estimate_repair_time(&self, mode: RepairMode, path: &PathCharacteristics, _transfer: &TransferState) -> Duration {
         // Estimate based on repair mode overhead and coordination
         let base_time = Duration::from_millis(path.rtt_ms as u64 / 2); // Half RTT for parallel repair
         let mode_multiplier = mode.typical_overhead_multiplier() + 1.0;
@@ -627,7 +642,7 @@ impl RepairCoordinator {
         }
     }
 
-    fn analyze_decision_factors(&self, mode: RepairMode, path: &PathCharacteristics, transfer: &TransferState) -> RepairDecisionFactors {
+    fn analyze_decision_factors(&self, _mode: RepairMode, path: &PathCharacteristics, transfer: &TransferState) -> RepairDecisionFactors {
         RepairDecisionFactors {
             path_quality: self.assess_path_quality(path),
             loss_impact: path.loss_rate,

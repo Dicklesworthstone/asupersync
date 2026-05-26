@@ -10,7 +10,22 @@ use crate::types::{Budget, TraceId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime};
+#[cfg(feature = "tracing-integration")]
 use tracing::{debug, info, warn};
+
+// Provide no-op tracing macros when tracing is disabled
+#[cfg(not(feature = "tracing-integration"))]
+macro_rules! debug {
+    ($($arg:tt)*) => {};
+}
+#[cfg(not(feature = "tracing-integration"))]
+macro_rules! info {
+    ($($arg:tt)*) => {};
+}
+#[cfg(not(feature = "tracing-integration"))]
+macro_rules! warn {
+    ($($arg:tt)*) => {};
+}
 
 /// Configuration for the transfer brain scheduler
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,25 +382,33 @@ impl TransferBrain {
             return Ok(None);
         }
 
-        // Find highest priority chunk that fits within budget
-        for (priority, chunks) in self.pending_chunks.iter_mut() {
+        // Find highest priority chunk that fits within budget - collect candidates first to avoid borrow conflicts
+        let mut candidates = Vec::new();
+
+        for (priority, chunks) in &self.pending_chunks {
             if chunks.is_empty() {
                 continue;
             }
 
-            // Sort chunks within priority by utility
-            chunks.sort_by(|a, b| {
-                let a_score = self.calculate_chunk_utility_score(a);
-                let b_score = self.calculate_chunk_utility_score(b);
-                b_score
-                    .partial_cmp(&a_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            // Collect utility scores and budget checks without borrowing conflicts
+            for (idx, chunk) in chunks.iter().enumerate() {
+                let score = self.calculate_chunk_utility_score(chunk);
+                let fits_budget = self.chunk_fits_budget(chunk, budget);
+                if fits_budget {
+                    candidates.push((*priority, idx, score, chunk.clone()));
+                }
+            }
+        }
 
-            // Try to find a chunk that fits within budget
-            for (index, chunk) in chunks.iter().enumerate() {
-                if self.chunk_fits_budget(chunk, budget) {
-                    let chosen_chunk = chunks.remove(index);
+        // Sort candidates by score (highest first)
+        candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Select the best candidate and remove it from pending chunks
+        if let Some((priority, chunk_index, _score, chosen_chunk)) = candidates.into_iter().next() {
+            // Remove the chosen chunk from pending_chunks
+            if let Some(chunks) = self.pending_chunks.get_mut(&priority) {
+                if chunk_index < chunks.len() {
+                    chunks.remove(chunk_index);
                     let decision = self.make_scheduling_decision(&chosen_chunk, trace_id);
 
                     info!(
@@ -418,7 +441,7 @@ impl TransferBrain {
         let chunk = self
             .in_flight_chunks
             .remove(chunk_id)
-            .ok_or_else(|| Error::new(ErrorKind::InternalError))?;
+            .ok_or_else(|| Error::new(ErrorKind::Internal))?;
 
         if success {
             self.completed_chunks.insert(chunk_id.clone());
@@ -428,9 +451,11 @@ impl TransferBrain {
             self.update_metrics_on_completion(&chunk, &actual_resources);
         } else {
             warn!("Chunk {} failed, rescheduling", chunk_id.as_string());
+            // Store size before moving chunk
+            let chunk_size = chunk.size_bytes;
             // Reschedule failed chunk (potentially with lower priority)
             self.schedule_chunk(chunk)?;
-            self.metrics.bytes_wasted += chunk.size_bytes as u64;
+            self.metrics.bytes_wasted += chunk_size as u64;
         }
 
         Ok(())
@@ -438,11 +463,11 @@ impl TransferBrain {
 
     /// Update system pressure feedback
     pub fn update_pressure(&mut self, pressure: SystemPressure) {
-        self.current_pressure = pressure;
-
-        // Update peak pressure metrics
+        // Update peak pressure metrics before moving pressure
         self.metrics.peak_disk_pressure =
             self.metrics.peak_disk_pressure.max(pressure.disk_pressure);
+
+        self.current_pressure = pressure;
 
         debug!(
             "Updated system pressure - CPU: {:.2}, Disk: {:.2}, Network: {:.2}",
@@ -523,7 +548,7 @@ impl TransferBrain {
 
     fn chunk_fits_budget(&self, chunk: &ScheduledChunk, budget: &Budget) -> bool {
         // Simple budget check - real implementation would be more sophisticated
-        budget.remaining_poll_operations() > 10 && chunk.size_bytes <= 10 * 1024 * 1024 // 10MB max chunk size
+        budget.remaining_polls() > 10 && chunk.size_bytes <= 10 * 1024 * 1024 // 10MB max chunk size
     }
 
     fn make_scheduling_decision(
