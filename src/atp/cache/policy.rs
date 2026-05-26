@@ -48,7 +48,7 @@ impl CachePolicyManager {
             }
             EvictionPolicy::ShortestTtl => {
                 candidates
-                    .sort_by_key(|(_, entry)| entry.created_at.elapsed().unwrap_or(Duration::ZERO));
+                    .sort_by_key(|(_, entry)| entry.created_at.elapsed().unwrap_or(Duration::MAX));
             }
             EvictionPolicy::LargestFirst => {
                 candidates.sort_by_key(|(_, entry)| std::cmp::Reverse(entry.size_bytes));
@@ -212,7 +212,7 @@ impl CacheMaintenanceScheduler {
     /// Check if maintenance is due.
     #[must_use]
     pub fn is_due(&self) -> bool {
-        self.last_run.elapsed().unwrap_or(Duration::ZERO) >= self.interval
+        self.last_run.elapsed().unwrap_or(Duration::MAX) >= self.interval
     }
 
     /// Run maintenance tasks and return metrics.
@@ -227,7 +227,7 @@ impl CacheMaintenanceScheduler {
         // Remove expired entries atomically to prevent TOCTOU races
         // Perform expiration check and removal in single pass
         entries.retain(|_key, entry| {
-            let elapsed = entry.created_at.elapsed().unwrap_or(Duration::ZERO);
+            let elapsed = entry.created_at.elapsed().unwrap_or(Duration::MAX);
             let is_expired = elapsed > entry.ttl;
 
             if is_expired {

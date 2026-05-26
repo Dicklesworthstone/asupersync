@@ -228,9 +228,10 @@ impl AtpCache {
             // Check TTL atomically with entry access
             let elapsed = entry.created_at.elapsed().unwrap_or(Duration::MAX);
             if elapsed > entry.ttl {
-                // Entry expired - remove it atomically
+                // Entry expired - extract data before removing
+                let storage_location = entry.storage_location.clone();
                 self.entries.remove(&index_key);
-                if let StorageLocation::File(path) = &entry.storage_location {
+                if let StorageLocation::File(path) = &storage_location {
                     let _ = std::fs::remove_file(path);
                 }
                 self.access_order.retain(|k| k != &index_key);

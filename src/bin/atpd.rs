@@ -637,10 +637,17 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
                     let _ = std::fs::remove_file(&cli.pid_file);
                 }
                 libc::EPERM => {
-                    return Err(anyhow::anyhow!("Permission denied: cannot send signal to process {}", pid));
+                    return Err(anyhow::anyhow!(
+                        "Permission denied: cannot send signal to process {}",
+                        pid
+                    ));
                 }
                 _ => {
-                    return Err(anyhow::anyhow!("Failed to send signal to process {}: errno {}", pid, errno));
+                    return Err(anyhow::anyhow!(
+                        "Failed to send signal to process {}: errno {}",
+                        pid,
+                        errno
+                    ));
                 }
             }
         }
@@ -692,8 +699,7 @@ fn show_status(cli: AtpdCli) -> Result<()> {
             println!("Config file: {}", cli.config.display());
         } else {
             println!("ATP daemon: STOPPED (stale PID file)");
-                warn!("PID file exists but process {} is not running", pid);
-            }
+            warn!("PID file exists but process {} is not running", pid);
         }
     }
 

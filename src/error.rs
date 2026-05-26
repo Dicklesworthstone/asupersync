@@ -198,7 +198,7 @@ impl ErrorKind {
             | Self::NodeUnavailable
             | Self::PartitionDetected => ErrorCategory::Distributed,
             Self::Internal | Self::InvalidStateTransition => ErrorCategory::Internal,
-            Self::ConfigError | Self::User | Self::InvalidInput => ErrorCategory::User,
+            Self::ConfigError | Self::User => ErrorCategory::User,
         }
     }
 
@@ -282,7 +282,8 @@ impl ErrorKind {
             Self::AdmissionDenied
             | Self::ThresholdTimeout
             | Self::QuorumNotReached
-            | Self::LeaseRenewalFailed => RecoveryAction::RetryWithBackoff(BackoffHint::DEFAULT),
+            | Self::LeaseRenewalFailed
+            | Self::RateLimited => RecoveryAction::RetryWithBackoff(BackoffHint::DEFAULT),
             Self::NodeUnavailable => RecoveryAction::RetryWithBackoff(BackoffHint::AGGRESSIVE),
 
             // Reconnect - connection is likely broken
@@ -303,7 +304,8 @@ impl ErrorKind {
             | Self::ProtocolError
             | Self::LeaseExpired
             | Self::PartitionDetected
-            | Self::ConfigError => RecoveryAction::Propagate,
+            | Self::ConfigError
+            | Self::InvalidInput => RecoveryAction::Propagate,
 
             // Escalate - serious problem, should cancel related work
             Self::ObligationLeak

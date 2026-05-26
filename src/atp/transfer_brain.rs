@@ -467,12 +467,13 @@ impl TransferBrain {
         self.metrics.peak_disk_pressure =
             self.metrics.peak_disk_pressure.max(pressure.disk_pressure);
 
-        self.current_pressure = pressure;
-
+        // Log before moving the value
         debug!(
             "Updated system pressure - CPU: {:.2}, Disk: {:.2}, Network: {:.2}",
             pressure.cpu_utilization, pressure.disk_pressure, pressure.network_pressure
         );
+
+        self.current_pressure = pressure;
     }
 
     /// Get current transfer metrics
