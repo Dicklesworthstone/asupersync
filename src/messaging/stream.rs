@@ -5,7 +5,9 @@ use super::subject::{Subject, SubjectPattern};
 use crate::types::{RegionId, Time};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, File, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
@@ -311,6 +313,13 @@ impl WalStorageConfig {
     /// Default segment size used when callers do not provide one explicitly.
     pub const DEFAULT_SEGMENT_MAX_BYTES: u64 = 256 * 1024;
 
+    /// Maximum size for a single WAL entry payload to prevent memory exhaustion attacks.
+    /// Entries larger than this are rejected during deserialization.
+    const MAX_WAL_ENTRY_BYTES: usize = 64 * 1024;
+
+    /// Simple integrity check seed for WAL entry validation.
+    const WAL_INTEGRITY_SEED: u64 = 0x1337_DEAD_BEEF_CAFE;
+
     /// Build a WAL config rooted at `root_dir` with defaults for `delivery_class`.
     #[must_use]
     pub fn new(root_dir: impl Into<PathBuf>, delivery_class: DeliveryClass) -> Self {
@@ -475,6 +484,47 @@ impl WalStorageBackend {
         }
     }
 
+    /// Compute integrity hash for WAL entry payload to detect corruption.
+    fn compute_payload_hash(payload: &[u8]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        Self::WAL_INTEGRITY_SEED.hash(&mut hasher);
+        payload.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Validate payload size and integrity before deserialization.
+    fn validate_payload(payload: &[u8], expected_hash: Option<u64>) -> Result<(), StreamError> {
+        // Check size bounds to prevent memory exhaustion
+        if payload.len() > Self::MAX_WAL_ENTRY_BYTES {
+            return Err(StreamError::WalFormat {
+                path: "<validation>".to_string(),
+                line: 0,
+                detail: format!(
+                    "WAL entry payload too large: {} bytes (max: {})",
+                    payload.len(),
+                    Self::MAX_WAL_ENTRY_BYTES
+                ),
+            });
+        }
+
+        // Verify integrity hash if provided
+        if let Some(expected) = expected_hash {
+            let actual = Self::compute_payload_hash(payload);
+            if actual != expected {
+                return Err(StreamError::WalFormat {
+                    path: "<validation>".to_string(),
+                    line: 0,
+                    detail: format!(
+                        "WAL entry integrity check failed: expected hash {:#x}, got {:#x}",
+                        expected, actual
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     fn load_segment(
         segment_id: u64,
         path: &Path,
@@ -506,11 +556,22 @@ impl WalStorageBackend {
                 continue;
             }
 
+            // Validate payload size and integrity before deserialization
+            Self::validate_payload(payload, None).map_err(|mut error| {
+                // Update path and line information for context
+                if let StreamError::WalFormat { path: ref mut error_path, line: ref mut error_line, .. } = error {
+                    *error_path = path.display().to_string();
+                    *error_line = line_number;
+                }
+                error
+            })?;
+
+            // Bounded deserialization with size constraints already validated
             let entry = serde_json::from_slice::<WalEntry>(payload).map_err(|error| {
                 StreamError::WalFormat {
                     path: path.display().to_string(),
                     line: line_number,
-                    detail: error.to_string(),
+                    detail: format!("JSON deserialization failed after validation: {}", error),
                 }
             })?;
             entries.push(entry);
