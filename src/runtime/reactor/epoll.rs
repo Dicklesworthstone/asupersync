@@ -80,6 +80,40 @@ use std::os::fd::BorrowedFd;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+/// File descriptor identity for TOCTOU race detection.
+///
+/// Used to detect if a file descriptor has been closed and reused
+/// during registration, which would create a race condition where
+/// epoll ends up watching a different resource than intended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FdIdentity {
+    /// Device ID of the file
+    dev: libc::dev_t,
+    /// Inode number of the file
+    ino: libc::ino_t,
+    /// File type and mode
+    mode: libc::mode_t,
+}
+
+impl FdIdentity {
+    /// Get the identity of a file descriptor.
+    ///
+    /// Returns None if the fd is invalid or if fstat fails.
+    fn from_fd(raw_fd: i32) -> Option<Self> {
+        let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+        let result = unsafe { libc::fstat(raw_fd, &mut stat_buf) };
+        if result == 0 {
+            Some(FdIdentity {
+                dev: stat_buf.st_dev,
+                ino: stat_buf.st_ino,
+                mode: stat_buf.st_mode,
+            })
+        } else {
+            None
+        }
+    }
+}
+
 /// Registration state for a source.
 #[derive(Debug)]
 struct RegistrationInfo {
@@ -87,6 +121,8 @@ struct RegistrationInfo {
     raw_fd: i32,
     /// The current interest flags.
     interest: Interest,
+    /// File descriptor identity to detect reuse/TOCTOU races.
+    fd_identity: FdIdentity,
 }
 
 #[derive(Debug)]
@@ -296,6 +332,11 @@ impl Reactor for EpollReactor {
             return Err(io::Error::from_raw_os_error(libc::EBADF));
         }
 
+        // Capture fd identity before any operations for TOCTOU detection
+        let pre_identity = FdIdentity::from_fd(raw_fd).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid file descriptor")
+        })?;
+
         // Check for duplicate registration first
         let mut state = self.state.lock();
         if state.tokens.contains_key(&token) {
@@ -324,18 +365,44 @@ impl Reactor for EpollReactor {
         // SAFETY: `borrowed_fd` remains valid for the duration of registration and
         // is explicitly removed in `deregister`.
         //
-        // Do not preflight the fd with `fcntl(F_GETFD)` here. A separate validity
-        // probe widens the close/reuse race window without making registration
-        // safer: the only authoritative answer is whether `epoll_ctl(ADD)` accepts
-        // the descriptor at the moment we install the kernel watch.
+        // We perform epoll_ctl first, then immediately validate that the fd
+        // identity hasn't changed to detect TOCTOU races. This minimizes the
+        // window where the fd could be closed and reused.
         unsafe {
             self.poller.add_with_mode(&borrowed_fd, event, mode)?;
         }
 
+        // Immediately after epoll_ctl succeeds, validate fd identity hasn't changed
+        let post_identity = FdIdentity::from_fd(raw_fd).ok_or_else(|| {
+            // If we can't get identity after successful epoll_ctl, the fd was closed
+            // Try to clean up the epoll registration
+            let _ = unsafe { self.poller.delete(&borrowed_fd) };
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fd became invalid during registration (possible TOCTOU race)",
+            )
+        })?;
+
+        if pre_identity != post_identity {
+            // FD was reused during registration - this is a TOCTOU race
+            // Try to clean up the epoll registration for the new fd
+            let _ = unsafe { self.poller.delete(&borrowed_fd) };
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fd identity changed during registration (TOCTOU race detected)",
+            ));
+        }
+
+        // Now we're confident the fd is the same one we intended to register
         // Track the registration for modify/deregister
-        state
-            .tokens
-            .insert(token, RegistrationInfo { raw_fd, interest });
+        state.tokens.insert(
+            token,
+            RegistrationInfo {
+                raw_fd,
+                interest,
+                fd_identity: post_identity,
+            },
+        );
         state.fds.insert(raw_fd, token);
         // A successful (re-)registration supersedes any orphan record for
         // this token so the next `deregister` reflects the real kernel
@@ -1822,6 +1889,11 @@ mod tests {
             RegistrationInfo {
                 raw_fd: -1,
                 interest: Interest::PRIORITY,
+                fd_identity: FdIdentity {
+                    dev: 0,
+                    ino: 0,
+                    mode: 0,
+                }, // Test dummy identity
             },
         );
 
