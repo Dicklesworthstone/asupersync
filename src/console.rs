@@ -536,6 +536,50 @@ impl Text {
 }
 
 /// Renderable console content.
+/// Sanitize ANSI escape sequences from user-provided content.
+///
+/// **Security**: This function prevents ANSI injection attacks by filtering out
+/// escape sequences that could manipulate the terminal. Only printable characters
+/// and safe whitespace are preserved.
+#[must_use]
+fn sanitize_ansi_escape_sequences(input: &str) -> String {
+    let mut sanitized = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            // ANSI escape sequence starts
+            '\x1b' => {
+                // Skip the entire ANSI sequence
+                // Common patterns: \x1b[...m, \x1b[...H, \x1b[...J, etc.
+                if chars.peek() == Some(&'[') {
+                    chars.next(); // consume '['
+                    // Skip until we find the terminating character (typically a letter)
+                    while let Some(next_ch) = chars.next() {
+                        if next_ch.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                } else {
+                    // Other ANSI sequences (e.g., \x1b7, \x1b8)
+                    chars.next(); // consume one more character
+                }
+                // ANSI sequence filtered out - don't add to output
+            }
+            // Control characters (except safe whitespace)
+            '\x00'..='\x08' | '\x0E'..='\x1F' | '\x7F' => {
+                // Filter out control characters that could be dangerous
+            }
+            // Safe characters: printable + safe whitespace (\t, \n, \r, space)
+            '\t' | '\n' | '\r' | ' '..='\x7E' | '\u{A0}'..=char::MAX => {
+                sanitized.push(ch);
+            }
+        }
+    }
+
+    sanitized
+}
+
 pub trait Render {
     /// Render content into the output buffer.
     fn render(&self, out: &mut String, caps: &Capabilities, mode: ColorMode);
@@ -565,7 +609,7 @@ impl Render for Text {
 
 impl Render for str {
     fn render(&self, out: &mut String, _caps: &Capabilities, _mode: ColorMode) {
-        out.push_str(self);
+        out.push_str(&sanitize_ansi_escape_sequences(self));
     }
 }
 
@@ -1488,5 +1532,76 @@ mod tests {
         let console = Console::with_caps(SharedWriter::new(), caps, ColorMode::Never);
         let dbg = format!("{console:?}");
         assert!(dbg.contains("Console"));
+    }
+
+    /// Test ANSI injection attack prevention.
+    ///
+    /// **Security Test**: Verifies that malicious ANSI escape sequences in user-provided
+    /// content are properly sanitized and cannot manipulate the terminal.
+    #[test]
+    fn ansi_injection_prevention() {
+        // Test various ANSI injection attacks
+        let malicious_inputs = vec![
+            "\x1b[2J\x1b[H",                    // Clear screen and home cursor
+            "\x1b[31mRED TEXT\x1b[0m",          // Color injection
+            "Hello\x1b[1000D\x1b[KEvil",       // Cursor movement + line clear
+            "\x1b]0;Fake Title\x07",           // Terminal title manipulation
+            "\x1b[?25l\x1b[?25h",             // Hide/show cursor
+            "\x1b[s\x1b[u",                    // Save/restore cursor
+            "Normal\x1b[3J\x1b[1;1HEvil",      // Clear all + position
+            "\x1b[2K\rOverwrite previous line", // Clear line + carriage return
+        ];
+
+        for (i, malicious_input) in malicious_inputs.iter().enumerate() {
+            let sanitized = sanitize_ansi_escape_sequences(malicious_input);
+
+            // Verify no ANSI escape sequences made it through
+            assert!(
+                !sanitized.contains('\x1b'),
+                "Test case {}: ANSI escape sequences not filtered from: {:?}",
+                i,
+                malicious_input
+            );
+
+            // Verify legitimate content is preserved
+            let expected_legitimate = malicious_input.chars()
+                .filter(|&c| matches!(c, '\t' | '\n' | '\r' | ' '..='\x7E' | '\u{A0}'..=char::MAX))
+                .filter(|&c| !matches!(c, '\x00'..='\x08' | '\x0E'..='\x1F' | '\x7F'))
+                .collect::<String>();
+
+            if !expected_legitimate.is_empty() {
+                assert!(
+                    sanitized.contains(&expected_legitimate) || sanitized == expected_legitimate,
+                    "Test case {}: Legitimate content missing: expected to contain {:?}, got {:?}",
+                    i,
+                    expected_legitimate,
+                    sanitized
+                );
+            }
+        }
+
+        // Test that legitimate content is preserved
+        let legitimate_inputs = vec![
+            "Hello, World!",
+            "Multi\nLine\nText",
+            "Tabs\tand\tspaces work fine",
+            "Symbols: !@#$%^&*()_+-=[]{}|;':\",./<>?",
+        ];
+
+        for legitimate_input in &legitimate_inputs {
+            let sanitized = sanitize_ansi_escape_sequences(legitimate_input);
+
+            // Legitimate content should be preserved exactly
+            assert_eq!(
+                sanitized, *legitimate_input,
+                "Legitimate content was incorrectly filtered: {:?}",
+                legitimate_input
+            );
+        }
+
+        println!("✓ ANSI injection prevention test passed");
+        println!("  - Malicious ANSI sequences filtered: ✓");
+        println!("  - Legitimate content preserved: ✓");
+        println!("  - Terminal manipulation attacks blocked: ✓");
     }
 }
