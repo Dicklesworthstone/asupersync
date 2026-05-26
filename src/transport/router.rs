@@ -164,19 +164,26 @@ impl Endpoint {
     /// Sets the endpoint state.
     #[must_use]
     pub fn with_state(self, state: EndpointState) -> Self {
-        self.state.store(state.as_u8(), Ordering::Relaxed);
+        // br-asupersync-4p3xds: Use Release ordering to prevent race conditions
+        self.state.store(state.as_u8(), Ordering::Release);
         self
     }
 
     /// Returns the current endpoint state.
     #[must_use]
     pub fn state(&self) -> EndpointState {
-        EndpointState::from_u8(self.state.load(Ordering::Relaxed))
+        // br-asupersync-4p3xds: Use Acquire ordering to synchronize with Release stores
+        EndpointState::from_u8(self.state.load(Ordering::Acquire))
     }
 
     /// Updates the endpoint state.
+    ///
+    /// **Security**: This method should only be called by authorized components
+    /// to prevent endpoint state manipulation attacks (br-asupersync-4p3xds).
     pub fn set_state(&self, state: EndpointState) {
-        self.state.store(state.as_u8(), Ordering::Relaxed);
+        // br-asupersync-4p3xds: Use Release ordering to prevent race conditions
+        // during routing decisions. Ensures visibility of state changes.
+        self.state.store(state.as_u8(), Ordering::Release);
     }
 
     /// Records a successful operation.
@@ -1672,11 +1679,18 @@ impl RoutingTable {
     }
 
     /// Updates endpoint state.
-    pub fn update_endpoint_state(&self, id: EndpointId, state: EndpointState) -> bool {
-        self.endpoints.read().get(&id).is_some_and(|endpoint| {
+    ///
+    /// **Security**: Requires admin-level capabilities to prevent endpoint state
+    /// manipulation attacks (br-asupersync-4p3xds).
+    pub fn update_endpoint_state(&self, cx: &Cx, id: EndpointId, state: EndpointState) -> Result<bool, Error> {
+        // br-asupersync-4p3xds: Add admin capability check to prevent state manipulation DoS
+        self.require_admin_capability(cx)?;
+
+        let updated = self.endpoints.read().get(&id).is_some_and(|endpoint| {
             endpoint.set_state(state);
             true
-        })
+        });
+        Ok(updated)
     }
 
     /// Adds a route.
@@ -4442,10 +4456,14 @@ mod tests {
     fn test_routing_table_updates_endpoint_state() {
         let table = RoutingTable::new();
         let endpoint = table.register_endpoint(test_endpoint(9));
+        let test_cx = Cx::for_testing();
+
         assert_eq!(endpoint.state(), EndpointState::Healthy);
-        assert!(table.update_endpoint_state(EndpointId(9), EndpointState::Draining));
+        assert!(table.update_endpoint_state(&test_cx, EndpointId(9), EndpointState::Draining)
+            .expect("update_endpoint_state should succeed"));
         assert_eq!(endpoint.state(), EndpointState::Draining);
-        assert!(!table.update_endpoint_state(EndpointId(999), EndpointState::Healthy));
+        assert!(!table.update_endpoint_state(&test_cx, EndpointId(999), EndpointState::Healthy)
+            .expect("update_endpoint_state should succeed"));
     }
 
     #[test]
