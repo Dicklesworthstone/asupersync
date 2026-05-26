@@ -260,8 +260,8 @@ impl RepairRoiE2eHarness {
         // Create simulator for this scenario with specific policy
         let mut simulator = RepairRoiSimulator::new();
         simulator.add_regime(scenario.regime.clone());
-        // TODO: Configure simulator with policy when the API supports it
-        // simulator.configure_policy(policy.clone());
+        // Configure simulator to use the specific policy for this scenario
+        simulator.configure_policy(policy.clone());
 
         for (config_index, config) in scenario.transfer_configs.iter().enumerate() {
             match self.execute_transfer_config(scenario, config, &mut simulator) {

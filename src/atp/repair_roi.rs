@@ -347,6 +347,14 @@ impl RepairRoiSimulator {
         self.policies.push(policy);
     }
 
+    /// Configure the simulator to use a specific policy, replacing any existing policies.
+    /// This differs from add_policy which appends to the list - configure_policy
+    /// sets a single policy as the only policy to test.
+    pub fn configure_policy(&mut self, policy: AtpRepairCoordinatorPolicy) {
+        self.policies.clear();
+        self.policies.push(policy);
+    }
+
     /// Run simulation across all regimes and transfer sizes.
     pub fn run_comprehensive_simulation(&self) -> HashMap<String, Vec<RepairRoiSimulationResult>> {
         let mut results = HashMap::new();
