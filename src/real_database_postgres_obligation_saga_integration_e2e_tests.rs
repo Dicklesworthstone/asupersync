@@ -437,7 +437,9 @@ mod tests {
                         if let Ok(()) = self.retry_failed_steps(cx, saga, obligation_lease).await {
                             return Ok(());
                         }
-                        cx.sleep(Duration::from_millis(100 * (1 << attempt))).await;
+                        // Cap exponential backoff to prevent overflow and excessive delays
+                        let delay_ms = 100 * (1u64 << attempt.min(10)); // Cap at ~100 seconds
+                        cx.sleep(Duration::from_millis(delay_ms)).await;
                     }
                     self.execute_immediate_rollback(cx, saga, obligation_lease)
                         .await
