@@ -1103,6 +1103,16 @@ test = false
 doc = false
 bench = false
 
+# Stateful IntrusivePriorityHeap fuzzer with shadow model verification
+# Tests complete heap operation sequences: push/pop/remove/clear/peek/contains
+# with priority ordering and generation-based tie-breaking verification
+[[bin]]
+name = "intrusive_priority_heap_stateful"
+path = "fuzz_targets/intrusive_priority_heap_stateful.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "fuzz_bytes_chain"
 path = "fuzz_targets/bytes_chain.rs"
@@ -1339,6 +1349,16 @@ bench = false
 [[bin]]
 name = "stealing_fuzz"
 path = "fuzz_targets/stealing_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# Stateful work stealing fuzzer with shadow model verification
+# Tests multi-queue stealing with Power of Two Choices algorithm,
+# owner LIFO vs stealer FIFO semantics, and task conservation invariants
+[[bin]]
+name = "work_stealing_stateful"
+path = "fuzz_targets/work_stealing_stateful.rs"
 test = false
 doc = false
 bench = false
@@ -3956,6 +3976,16 @@ bench = false
 [[bin]]
 name = "three_lane_decision_arbiter"
 path = "fuzz_targets/three_lane_decision_arbiter.rs"
+test = false
+doc = false
+bench = false
+
+# Stateful Lyapunov governor fuzzer with shadow model verification
+# Tests potential function computation, scheduling suggestions, convergence analysis,
+# weight configurations, state transitions, and Lyapunov stability properties
+[[bin]]
+name = "lyapunov_governor_stateful"
+path = "fuzz_targets/lyapunov_governor_stateful.rs"
 test = false
 doc = false
 bench = false
