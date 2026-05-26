@@ -8,7 +8,7 @@ use crate::types::{Symbol, SymbolKind};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::fmt;
-use subtle::ConstantTimeEq;
+use subtle::{Choice, ConstantTimeEq};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -63,20 +63,30 @@ impl AuthenticationTag {
     /// yet been wired through to a real key (see types/typed_symbol.rs
     /// callsites at lines 630 / 925). The sentinel is documented as
     /// "never produced by [`Self::compute`]" — accepting it here
-    /// would defeat the authentication contract entirely. The verify
-    /// path now returns `false` BEFORE running the constant-time HMAC
-    /// comparison, so any consumer that calls `verify()` against a
-    /// zero-tagged AuthenticatedSymbol gets a fail-closed result
-    /// regardless of the key.
+    /// would defeat the authentication contract entirely.
+    ///
+    /// br-asupersync-ju2k01: Fixed timing side-channel vulnerability.
+    /// Now uses constant-time verification to prevent timing attacks
+    /// that could distinguish between zero vs non-zero authentication tags.
+    /// All verification paths take the same time regardless of tag content.
     #[must_use]
     pub fn verify(&self, key: &AuthKey, symbol: &Symbol) -> bool {
-        if self.is_zero() {
-            return false;
-        }
+        // Always compute the expected HMAC (constant time)
         let mut mac =
             HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
         Self::update_mac(&mut mac, symbol);
-        mac.verify_slice(&self.bytes).is_ok()
+        let expected_bytes = mac.finalize().into_bytes();
+
+        // Constant-time HMAC verification
+        let hmac_valid = self.bytes.ct_eq(expected_bytes.as_slice());
+
+        // Constant-time zero check - convert bool to Choice
+        // is_zero() is already constant-time internally
+        let is_not_zero = Choice::from((!self.is_zero()) as u8);
+
+        // Both conditions must be true: valid HMAC AND not zero
+        // Use constant-time AND operation
+        (hmac_valid & is_not_zero).into()
     }
 
     /// br-asupersync-usr4ax: returns `true` when the tag is the

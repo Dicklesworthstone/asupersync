@@ -21,9 +21,10 @@ use crate::raptorq::systematic::{ConstraintMatrix, SystematicError, SystematicPa
 use crate::raptorq::{decision_contract, decision_contract::GovernanceSnapshot};
 use crate::types::ObjectId;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // ============================================================================
 // Column state tracking
@@ -40,6 +41,75 @@ enum ColumnState {
     Solved,
     /// Column has been inactivated (deferred to Gaussian elimination).
     Inactive,
+}
+
+// ============================================================================
+// Rate limiting and budget tracking
+// ============================================================================
+
+/// Maximum ESI value allowed to prevent amplification attacks.
+/// ESI values near u32::MAX can cause expensive operations.
+const MAX_ALLOWED_ESI: u32 = 1_000_000;
+
+/// Maximum columns generated per ESI to prevent matrix blow-up.
+const MAX_COLUMNS_PER_ESI: usize = 1000;
+
+/// Maximum compute budget (in arbitrary units) for dense matrix operations.
+const MAX_DENSE_COMPUTE_BUDGET: u64 = 1_000_000;
+
+/// Rate limiting entry for ESI/ObjectId combinations.
+#[derive(Debug, Clone)]
+struct EsiRateLimit {
+    /// Last access time for this ESI/ObjectId.
+    last_access: Instant,
+    /// Number of accesses in current time window.
+    access_count: u32,
+    /// Compute budget consumed by this ESI.
+    compute_budget_used: u64,
+}
+
+impl Default for EsiRateLimit {
+    fn default() -> Self {
+        Self {
+            last_access: Instant::now(),
+            access_count: 0,
+            compute_budget_used: 0,
+        }
+    }
+}
+
+/// Compute budget tracker for expensive matrix operations.
+#[derive(Debug, Default)]
+struct ComputeBudget {
+    /// Current budget consumed.
+    used: u64,
+    /// Maximum budget allowed.
+    max: u64,
+}
+
+impl ComputeBudget {
+    /// Create new budget with maximum limit.
+    fn new(max: u64) -> Self {
+        Self { used: 0, max }
+    }
+
+    /// Check if operation would exceed budget.
+    fn would_exceed(&self, cost: u64) -> bool {
+        self.used.saturating_add(cost) > self.max
+    }
+
+    /// Consume budget for operation, returning error if exceeded.
+    fn consume(&mut self, cost: u64) -> Result<(), DecodeError> {
+        if self.would_exceed(cost) {
+            return Err(DecodeError::ComputeBudgetExhausted {
+                used: self.used,
+                requested: cost,
+                max: self.max,
+            });
+        }
+        self.used = self.used.saturating_add(cost);
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -134,6 +204,30 @@ pub enum DecodeError {
         /// Received RHS byte from the input symbol.
         actual: u8,
     },
+    /// Compute budget exhausted during dense matrix operations.
+    ///
+    /// br-asupersync-ju2k01: Prevents RaptorQ decoder amplification DoS
+    /// attacks via malicious ESI values that force expensive O(L³) operations.
+    ComputeBudgetExhausted {
+        /// Budget already consumed.
+        used: u64,
+        /// Additional budget requested by operation.
+        requested: u64,
+        /// Maximum budget allowed.
+        max: u64,
+    },
+    /// ESI rate limit exceeded for this ObjectId.
+    ///
+    /// br-asupersync-ju2k01: Prevents amplification attacks where malicious
+    /// ESI values near u32::MAX cause excessive column generation.
+    EsiRateLimitExceeded {
+        /// The ESI that exceeded limits.
+        esi: u32,
+        /// Number of columns that would be generated.
+        column_count: usize,
+        /// Maximum allowed columns per ESI.
+        max_columns: usize,
+    },
 }
 
 /// Decode failure classification used to separate retryable failures from
@@ -160,7 +254,9 @@ impl DecodeError {
             | Self::ColumnIndexOutOfRange { .. }
             | Self::SourceEsiOutOfRange { .. }
             | Self::InvalidSourceSymbolEquation { .. }
-            | Self::CorruptDecodedOutput { .. } => DecodeFailureClass::Unrecoverable,
+            | Self::CorruptDecodedOutput { .. }
+            | Self::ComputeBudgetExhausted { .. }
+            | Self::EsiRateLimitExceeded { .. } => DecodeFailureClass::Unrecoverable,
         }
     }
 
@@ -1287,6 +1383,12 @@ pub struct InactivationDecoder {
     params: SystematicParams,
     seed: u64,
     dense_factor_cache: parking_lot::Mutex<DenseFactorCache>,
+    /// Rate limiting for ESI/ObjectId combinations to prevent amplification attacks.
+    ///
+    /// br-asupersync-ju2k01: Tracks ESI access patterns and compute budget
+    /// consumption to detect and block malicious ESI values near u32::MAX
+    /// that can cause expensive O(L³) Gaussian elimination operations.
+    esi_rate_limits: parking_lot::Mutex<HashMap<(u32, ObjectId), EsiRateLimit>>,
 }
 
 impl InactivationDecoder {
@@ -1304,6 +1406,7 @@ impl InactivationDecoder {
             params,
             seed,
             dense_factor_cache: parking_lot::Mutex::new(DenseFactorCache::default()),
+            esi_rate_limits: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -1323,6 +1426,7 @@ impl InactivationDecoder {
             params,
             seed,
             dense_factor_cache: parking_lot::Mutex::new(DenseFactorCache::default()),
+            esi_rate_limits: parking_lot::Mutex::new(HashMap::new()),
         })
     }
 
@@ -1343,11 +1447,97 @@ impl InactivationDecoder {
         self.params.l.saturating_sub(self.implicit_padding_rows())
     }
 
-    fn validate_input(&self, symbols: &[ReceivedSymbol]) -> Result<(), DecodeError> {
+    /// Validate ESI value against rate limits and amplification attack patterns.
+    ///
+    /// br-asupersync-ju2k01: Prevents RaptorQ decoder amplification DoS attacks
+    /// by checking for malicious ESI values near u32::MAX that can cause
+    /// expensive O(L³) Gaussian elimination operations.
+    fn validate_esi_rate_limits(
+        &self,
+        esi: u32,
+        object_id: &ObjectId,
+        compute_budget: &mut ComputeBudget,
+    ) -> Result<(), DecodeError> {
+        // Check for ESI values that are suspiciously large
+        if esi > MAX_ALLOWED_ESI {
+            return Err(DecodeError::EsiRateLimitExceeded {
+                esi,
+                column_count: 0,
+                max_columns: MAX_COLUMNS_PER_ESI,
+            });
+        }
+
+        // Estimate compute cost for this ESI based on column generation
+        let columns = repair_indices_for_esi(
+            self.params.j,
+            self.params.w,
+            self.params.p,
+            esi,
+        );
+
+        // Check if this ESI would generate too many columns (matrix blow-up)
+        if columns.len() > MAX_COLUMNS_PER_ESI {
+            return Err(DecodeError::EsiRateLimitExceeded {
+                esi,
+                column_count: columns.len(),
+                max_columns: MAX_COLUMNS_PER_ESI,
+            });
+        }
+
+        // Estimate compute budget needed: O(columns²) for dense operations
+        let estimated_cost = (columns.len() as u64).saturating_pow(2);
+        compute_budget.consume(estimated_cost)?;
+
+        // Update rate limiting state
+        let key = (esi, *object_id);
+        let mut rate_limits = self.esi_rate_limits.lock();
+        let now = Instant::now();
+
+        let entry = rate_limits.entry(key).or_default();
+
+        // Reset access count if enough time has passed (simple time window)
+        if now.duration_since(entry.last_access) > Duration::from_secs(60) {
+            entry.access_count = 0;
+            entry.compute_budget_used = 0;
+        }
+
+        entry.last_access = now;
+        entry.access_count = entry.access_count.saturating_add(1);
+        entry.compute_budget_used = entry.compute_budget_used.saturating_add(estimated_cost);
+
+        // Check rate limits: max 100 accesses per ESI/ObjectId per minute
+        if entry.access_count > 100 {
+            return Err(DecodeError::EsiRateLimitExceeded {
+                esi,
+                column_count: columns.len(),
+                max_columns: MAX_COLUMNS_PER_ESI,
+            });
+        }
+
+        // Check compute budget per ESI
+        if entry.compute_budget_used > MAX_DENSE_COMPUTE_BUDGET / 10 {
+            return Err(DecodeError::ComputeBudgetExhausted {
+                used: entry.compute_budget_used,
+                requested: estimated_cost,
+                max: MAX_DENSE_COMPUTE_BUDGET / 10,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn validate_input(
+        &self,
+        symbols: &[ReceivedSymbol],
+        object_id: Option<&ObjectId>,
+    ) -> Result<(), DecodeError> {
         let k = self.params.k;
         let l = self.params.l;
         let symbol_size = self.params.symbol_size;
         let required = self.minimum_received_symbols();
+
+        // br-asupersync-ju2k01: Create compute budget for dense operations
+        let mut compute_budget = ComputeBudget::new(MAX_DENSE_COMPUTE_BUDGET);
 
         if symbols.len() < required {
             return Err(DecodeError::InsufficientSymbols {
@@ -1370,6 +1560,11 @@ impl InactivationDecoder {
                     columns: sym.columns.len(),
                     coefficients: sym.coefficients.len(),
                 });
+            }
+
+            // br-asupersync-ju2k01: Validate ESI against amplification attacks
+            if let Some(object_id) = object_id {
+                self.validate_esi_rate_limits(sym.esi, object_id, &mut compute_budget)?;
             }
 
             if sym.is_source {
@@ -1455,9 +1650,22 @@ impl InactivationDecoder {
     /// to supply them explicitly.
     /// Returns the decoded source symbols on success.
     pub fn decode(&self, symbols: &[ReceivedSymbol]) -> Result<DecodeResult, DecodeError> {
+        self.decode_with_object_id(symbols, None)
+    }
+
+    /// Decode with ObjectId for rate limiting against amplification attacks.
+    ///
+    /// br-asupersync-ju2k01: Extended decode method that includes ObjectId
+    /// for rate limiting ESI/ObjectId combinations to prevent RaptorQ
+    /// decoder amplification DoS attacks via malicious ESI values.
+    pub fn decode_with_object_id(
+        &self,
+        symbols: &[ReceivedSymbol],
+        object_id: Option<&ObjectId>,
+    ) -> Result<DecodeResult, DecodeError> {
         let symbol_size = self.params.symbol_size;
 
-        self.validate_input(symbols)?;
+        self.validate_input(symbols, object_id)?;
 
         // Build decoder state
         let mut state = self.build_state(symbols);
@@ -1511,7 +1719,7 @@ impl InactivationDecoder {
     ) -> Result<DecodeResult, DecodeError> {
         let symbol_size = self.params.symbol_size;
 
-        self.validate_input(symbols)?;
+        self.validate_input(symbols, None)?;
 
         // A batch_size of 0 falls back to sequential (single batch = all symbols).
         let effective_batch = if batch_size == 0 {
@@ -1714,7 +1922,7 @@ impl InactivationDecoder {
         proof_builder.set_received(received);
 
         // Validate input
-        if let Err(err) = self.validate_input(symbols) {
+        if let Err(err) = self.validate_input(symbols, Some(&object_id)) {
             proof_builder.set_failure(FailureReason::from(&err));
             return Err((err, proof_builder.build()));
         }
