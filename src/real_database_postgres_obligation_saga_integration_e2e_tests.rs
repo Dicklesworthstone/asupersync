@@ -7,23 +7,23 @@
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod tests {
     use crate::{
+        channel::{broadcast, mpsc, oneshot},
         cx::{Cx, Scope},
         database::postgres::{PostgresConnection, PostgresPool, PostgresTransaction},
-        obligation::{
-            saga::{SagaCoordinator, SagaStep, CompensationAction, RollbackStrategy},
-            Obligation, ObligationTracker, ObligationLease
-        },
-        runtime::{RuntimeBuilder, LabRuntime},
-        sync::{Mutex, Arc},
-        types::{Outcome, Budget, TaskId, RegionId},
-        channel::{mpsc, oneshot, broadcast},
-        time::{Sleep, Duration, Instant},
         error::{AsupersyncError, ResultExt},
+        obligation::{
+            Obligation, ObligationLease, ObligationTracker,
+            saga::{CompensationAction, RollbackStrategy, SagaCoordinator, SagaStep},
+        },
+        runtime::{LabRuntime, RuntimeBuilder},
+        sync::{Arc, Mutex},
+        time::{Duration, Instant, Sleep},
+        types::{Budget, Outcome, RegionId, TaskId},
         util::{correlation::CorrelationId, entropy::SecureRng},
     };
-    use std::collections::{HashMap, BTreeMap, VecDeque};
+    use serde::{Deserialize, Serialize};
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-    use serde::{Serialize, Deserialize};
     use thiserror::Error;
 
     #[derive(Debug, Clone)]
@@ -185,7 +185,10 @@ mod tests {
         #[error("Obligation lease expired: {lease_id}")]
         ObligationExpired { lease_id: String },
         #[error("Rollback strategy failed: {strategy:?}, reason: {reason}")]
-        RollbackFailed { strategy: RollbackStrategy, reason: String },
+        RollbackFailed {
+            strategy: RollbackStrategy,
+            reason: String,
+        },
         #[error("Saga timeout: {correlation_id:?}")]
         SagaTimeout { correlation_id: CorrelationId },
         #[error("Concurrent modification conflict")]
@@ -218,14 +221,25 @@ mod tests {
             self.stats.sagas_started.fetch_add(1, Ordering::Relaxed);
 
             // Acquire obligation lease for saga duration
-            let obligation_lease = self.obligation_tracker
-                .acquire_lease(cx, format!("saga-{}", correlation_id), self.config.transaction_timeout)
+            let obligation_lease = self
+                .obligation_tracker
+                .acquire_lease(
+                    cx,
+                    format!("saga-{}", correlation_id),
+                    self.config.transaction_timeout,
+                )
                 .await
-                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Lease acquisition failed: {}", e)))?;
+                .map_err(|e| {
+                    PostgresSagaError::TransactionFailed(format!("Lease acquisition failed: {}", e))
+                })?;
 
             let mut saga = SagaTransaction {
                 correlation_id,
-                transaction_id: format!("txn-{}-{}", correlation_id, start_time.elapsed().as_nanos()),
+                transaction_id: format!(
+                    "txn-{}-{}",
+                    correlation_id,
+                    start_time.elapsed().as_nanos()
+                ),
                 steps: Vec::new(),
                 compensation_actions: Vec::new(),
                 status: SagaStatus::InProgress,
@@ -235,7 +249,10 @@ mod tests {
             };
 
             // Execute saga steps within transaction scope
-            match self.execute_saga_steps(cx, &mut saga, steps, &obligation_lease).await {
+            match self
+                .execute_saga_steps(cx, &mut saga, steps, &obligation_lease)
+                .await
+            {
                 Ok(()) => {
                     saga.status = SagaStatus::Committed;
                     saga.completed_at = Some(Instant::now());
@@ -247,26 +264,40 @@ mod tests {
                         *counts.entry(self.config.rollback_strategy).or_insert(0) += 1;
                     }
 
-                    let duration_ms = saga.completed_at.unwrap().duration_since(saga.created_at).as_millis() as u64;
-                    self.stats.avg_saga_duration_ms.store(duration_ms, Ordering::Relaxed);
+                    let duration_ms = saga
+                        .completed_at
+                        .unwrap()
+                        .duration_since(saga.created_at)
+                        .as_millis() as u64;
+                    self.stats
+                        .avg_saga_duration_ms
+                        .store(duration_ms, Ordering::Relaxed);
 
                     // Release obligation lease
-                    obligation_lease.commit(cx).await
-                        .map_err(|e| PostgresSagaError::TransactionFailed(format!("Lease commit failed: {}", e)))?;
+                    obligation_lease.commit(cx).await.map_err(|e| {
+                        PostgresSagaError::TransactionFailed(format!("Lease commit failed: {}", e))
+                    })?;
 
                     Ok(saga)
                 }
                 Err(error) => {
                     // Execute rollback based on configured strategy
-                    match self.execute_rollback(cx, &mut saga, &obligation_lease, error.clone()).await {
+                    match self
+                        .execute_rollback(cx, &mut saga, &obligation_lease, error.clone())
+                        .await
+                    {
                         Ok(()) => {
                             saga.status = SagaStatus::RolledBack;
                             saga.completed_at = Some(Instant::now());
                             self.stats.sagas_rolled_back.fetch_add(1, Ordering::Relaxed);
 
                             // Abort obligation lease
-                            obligation_lease.abort(cx).await
-                                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Lease abort failed: {}", e)))?;
+                            obligation_lease.abort(cx).await.map_err(|e| {
+                                PostgresSagaError::TransactionFailed(format!(
+                                    "Lease abort failed: {}",
+                                    e
+                                ))
+                            })?;
 
                             Err(error)
                         }
@@ -280,7 +311,10 @@ mod tests {
 
                             Err(PostgresSagaError::RollbackFailed {
                                 strategy: self.config.rollback_strategy,
-                                reason: format!("Original: {}, Rollback: {}", error, rollback_error),
+                                reason: format!(
+                                    "Original: {}, Rollback: {}",
+                                    error, rollback_error
+                                ),
                             })
                         }
                     }
@@ -295,17 +329,19 @@ mod tests {
             steps: Vec<SagaStepDefinition>,
             obligation_lease: &ObligationLease,
         ) -> Result<(), PostgresSagaError> {
-            let mut connection = self.pool.acquire(cx).await
-                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Pool acquisition failed: {}", e)))?;
+            let mut connection = self.pool.acquire(cx).await.map_err(|e| {
+                PostgresSagaError::TransactionFailed(format!("Pool acquisition failed: {}", e))
+            })?;
 
-            let mut transaction = connection.begin(cx).await
-                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Transaction begin failed: {}", e)))?;
+            let mut transaction = connection.begin(cx).await.map_err(|e| {
+                PostgresSagaError::TransactionFailed(format!("Transaction begin failed: {}", e))
+            })?;
 
             for (index, step_def) in steps.iter().enumerate() {
                 // Check obligation lease validity
                 if !obligation_lease.is_valid() {
                     return Err(PostgresSagaError::ObligationExpired {
-                        lease_id: obligation_lease.id().to_string()
+                        lease_id: obligation_lease.id().to_string(),
                     });
                 }
 
@@ -322,9 +358,13 @@ mod tests {
 
                 // Execute step with timeout
                 let step_start = Instant::now();
-                let step_result = cx.timeout(self.config.transaction_timeout, async {
-                    transaction.execute(&step_def.query, &step_def.parameters).await
-                }).await;
+                let step_result = cx
+                    .timeout(self.config.transaction_timeout, async {
+                        transaction
+                            .execute(&step_def.query, &step_def.parameters)
+                            .await
+                    })
+                    .await;
 
                 match step_result {
                     Ok(Ok(_)) => {
@@ -366,8 +406,9 @@ mod tests {
             }
 
             // Commit transaction
-            transaction.commit(cx).await
-                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Transaction commit failed: {}", e)))?;
+            transaction.commit(cx).await.map_err(|e| {
+                PostgresSagaError::TransactionFailed(format!("Transaction commit failed: {}", e))
+            })?;
 
             Ok(())
         }
@@ -383,10 +424,12 @@ mod tests {
 
             match self.config.rollback_strategy {
                 RollbackStrategy::Immediate => {
-                    self.execute_immediate_rollback(cx, saga, obligation_lease).await
+                    self.execute_immediate_rollback(cx, saga, obligation_lease)
+                        .await
                 }
                 RollbackStrategy::Batched => {
-                    self.execute_batched_rollback(cx, saga, obligation_lease).await
+                    self.execute_batched_rollback(cx, saga, obligation_lease)
+                        .await
                 }
                 RollbackStrategy::RetryThenRollback => {
                     // First attempt retry, then fallback to rollback
@@ -396,13 +439,17 @@ mod tests {
                         }
                         cx.sleep(Duration::from_millis(100 * (1 << attempt))).await;
                     }
-                    self.execute_immediate_rollback(cx, saga, obligation_lease).await
+                    self.execute_immediate_rollback(cx, saga, obligation_lease)
+                        .await
                 }
                 RollbackStrategy::Partial => {
-                    self.execute_partial_rollback(cx, saga, obligation_lease).await
+                    self.execute_partial_rollback(cx, saga, obligation_lease)
+                        .await
                 }
                 RollbackStrategy::BestEffort => {
-                    let _ = self.execute_best_effort_rollback(cx, saga, obligation_lease).await;
+                    let _ = self
+                        .execute_best_effort_rollback(cx, saga, obligation_lease)
+                        .await;
                     Ok(())
                 }
             }
@@ -414,21 +461,29 @@ mod tests {
             saga: &mut SagaTransaction,
             obligation_lease: &ObligationLease,
         ) -> Result<(), PostgresSagaError> {
-            let mut connection = self.pool.acquire(cx).await
-                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Rollback pool acquisition failed: {}", e)))?;
+            let mut connection = self.pool.acquire(cx).await.map_err(|e| {
+                PostgresSagaError::TransactionFailed(format!(
+                    "Rollback pool acquisition failed: {}",
+                    e
+                ))
+            })?;
 
             // Execute compensation actions in reverse order
             for compensation in saga.compensation_actions.iter_mut().rev() {
                 if !obligation_lease.is_valid() {
                     return Err(PostgresSagaError::ObligationExpired {
-                        lease_id: obligation_lease.id().to_string()
+                        lease_id: obligation_lease.id().to_string(),
                     });
                 }
 
                 let comp_start = Instant::now();
-                let comp_result = cx.timeout(self.config.compensation_timeout, async {
-                    connection.execute(&compensation.sql_query, &compensation.parameters).await
-                }).await;
+                let comp_result = cx
+                    .timeout(self.config.compensation_timeout, async {
+                        connection
+                            .execute(&compensation.sql_query, &compensation.parameters)
+                            .await
+                    })
+                    .await;
 
                 compensation.executed_at = Some(Instant::now());
 
@@ -463,21 +518,31 @@ mod tests {
             saga: &mut SagaTransaction,
             obligation_lease: &ObligationLease,
         ) -> Result<(), PostgresSagaError> {
-            let mut connection = self.pool.acquire(cx).await
-                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Batched rollback pool acquisition failed: {}", e)))?;
+            let mut connection = self.pool.acquire(cx).await.map_err(|e| {
+                PostgresSagaError::TransactionFailed(format!(
+                    "Batched rollback pool acquisition failed: {}",
+                    e
+                ))
+            })?;
 
-            let mut transaction = connection.begin(cx).await
-                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Batched rollback transaction begin failed: {}", e)))?;
+            let mut transaction = connection.begin(cx).await.map_err(|e| {
+                PostgresSagaError::TransactionFailed(format!(
+                    "Batched rollback transaction begin failed: {}",
+                    e
+                ))
+            })?;
 
             // Execute all compensation actions in a single transaction
             for compensation in saga.compensation_actions.iter_mut().rev() {
                 if !obligation_lease.is_valid() {
                     return Err(PostgresSagaError::ObligationExpired {
-                        lease_id: obligation_lease.id().to_string()
+                        lease_id: obligation_lease.id().to_string(),
                     });
                 }
 
-                let comp_result = transaction.execute(&compensation.sql_query, &compensation.parameters).await;
+                let comp_result = transaction
+                    .execute(&compensation.sql_query, &compensation.parameters)
+                    .await;
                 compensation.executed_at = Some(Instant::now());
 
                 match comp_result {
@@ -498,7 +563,9 @@ mod tests {
             }
 
             // Commit all compensation actions
-            transaction.commit(cx).await
+            transaction
+                .commit(cx)
+                .await
                 .map_err(|e| PostgresSagaError::CompensationFailed {
                     step_id: "batch".to_string(),
                     reason: format!("Batched compensation commit failed: {}", e),
@@ -514,8 +581,12 @@ mod tests {
             obligation_lease: &ObligationLease,
         ) -> Result<(), PostgresSagaError> {
             let mut partial_success = true;
-            let mut connection = self.pool.acquire(cx).await
-                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Partial rollback pool acquisition failed: {}", e)))?;
+            let mut connection = self.pool.acquire(cx).await.map_err(|e| {
+                PostgresSagaError::TransactionFailed(format!(
+                    "Partial rollback pool acquisition failed: {}",
+                    e
+                ))
+            })?;
 
             // Attempt to rollback each step independently
             for compensation in saga.compensation_actions.iter_mut().rev() {
@@ -524,7 +595,9 @@ mod tests {
                     continue;
                 }
 
-                let comp_result = connection.execute(&compensation.sql_query, &compensation.parameters).await;
+                let comp_result = connection
+                    .execute(&compensation.sql_query, &compensation.parameters)
+                    .await;
                 compensation.executed_at = Some(Instant::now());
 
                 match comp_result {
@@ -556,8 +629,12 @@ mod tests {
             saga: &mut SagaTransaction,
             obligation_lease: &ObligationLease,
         ) -> Result<(), PostgresSagaError> {
-            let mut connection = self.pool.acquire(cx).await
-                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Best effort rollback pool acquisition failed: {}", e)))?;
+            let mut connection = self.pool.acquire(cx).await.map_err(|e| {
+                PostgresSagaError::TransactionFailed(format!(
+                    "Best effort rollback pool acquisition failed: {}",
+                    e
+                ))
+            })?;
 
             // Execute all compensation actions, ignoring failures
             for compensation in saga.compensation_actions.iter_mut().rev() {
@@ -566,7 +643,9 @@ mod tests {
                     continue;
                 }
 
-                let comp_result = connection.execute(&compensation.sql_query, &compensation.parameters).await;
+                let comp_result = connection
+                    .execute(&compensation.sql_query, &compensation.parameters)
+                    .await;
                 compensation.executed_at = Some(Instant::now());
 
                 match comp_result {
@@ -591,7 +670,9 @@ mod tests {
             obligation_lease: &ObligationLease,
         ) -> Result<(), PostgresSagaError> {
             // Find failed steps and retry them
-            let failed_steps: Vec<_> = saga.steps.iter()
+            let failed_steps: Vec<_> = saga
+                .steps
+                .iter()
                 .filter(|step| step.status == StepStatus::Failed)
                 .collect();
 
@@ -599,17 +680,25 @@ mod tests {
                 return Ok(());
             }
 
-            let mut connection = self.pool.acquire(cx).await
-                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Retry pool acquisition failed: {}", e)))?;
+            let mut connection = self.pool.acquire(cx).await.map_err(|e| {
+                PostgresSagaError::TransactionFailed(format!(
+                    "Retry pool acquisition failed: {}",
+                    e
+                ))
+            })?;
 
-            let mut transaction = connection.begin(cx).await
-                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Retry transaction begin failed: {}", e)))?;
+            let mut transaction = connection.begin(cx).await.map_err(|e| {
+                PostgresSagaError::TransactionFailed(format!(
+                    "Retry transaction begin failed: {}",
+                    e
+                ))
+            })?;
 
             // Retry failed steps
             for step in &failed_steps {
                 if !obligation_lease.is_valid() {
                     return Err(PostgresSagaError::ObligationExpired {
-                        lease_id: obligation_lease.id().to_string()
+                        lease_id: obligation_lease.id().to_string(),
                     });
                 }
 
@@ -617,7 +706,9 @@ mod tests {
                 match retry_result {
                     Ok(_) => {
                         // Update step status in saga
-                        if let Some(saga_step) = saga.steps.iter_mut().find(|s| s.step_id == step.step_id) {
+                        if let Some(saga_step) =
+                            saga.steps.iter_mut().find(|s| s.step_id == step.step_id)
+                        {
                             saga_step.status = StepStatus::Completed;
                             saga_step.executed_at = Some(Instant::now());
                         }
@@ -635,8 +726,12 @@ mod tests {
             }
 
             // Commit retry transaction
-            transaction.commit(cx).await
-                .map_err(|e| PostgresSagaError::TransactionFailed(format!("Retry transaction commit failed: {}", e)))?;
+            transaction.commit(cx).await.map_err(|e| {
+                PostgresSagaError::TransactionFailed(format!(
+                    "Retry transaction commit failed: {}",
+                    e
+                ))
+            })?;
 
             Ok(())
         }
@@ -650,7 +745,10 @@ mod tests {
                 steps_executed: self.stats.steps_executed.load(Ordering::Relaxed),
                 steps_compensated: self.stats.steps_compensated.load(Ordering::Relaxed),
                 avg_saga_duration_ms: self.stats.avg_saga_duration_ms.load(Ordering::Relaxed),
-                avg_compensation_duration_ms: self.stats.avg_compensation_duration_ms.load(Ordering::Relaxed),
+                avg_compensation_duration_ms: self
+                    .stats
+                    .avg_compensation_duration_ms
+                    .load(Ordering::Relaxed),
                 transaction_conflicts: self.stats.transaction_conflicts.load(Ordering::Relaxed),
                 obligation_violations: self.stats.obligation_violations.load(Ordering::Relaxed),
             }
@@ -700,7 +798,8 @@ mod tests {
                 compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
             },
             SagaStepDefinition {
-                query: "INSERT INTO transactions (id, from_account, amount) VALUES ($1, $2, $3)".to_string(),
+                query: "INSERT INTO transactions (id, from_account, amount) VALUES ($1, $2, $3)"
+                    .to_string(),
                 parameters: vec!["txn1".to_string(), "acc1".to_string(), "100".to_string()],
                 compensation_query: Some("DELETE FROM transactions WHERE id = $1".to_string()),
             },
@@ -786,7 +885,8 @@ mod tests {
                 compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
             },
             SagaStepDefinition {
-                query: "INSERT INTO transactions (id, from_account, amount) VALUES ($1, $2, $3)".to_string(),
+                query: "INSERT INTO transactions (id, from_account, amount) VALUES ($1, $2, $3)"
+                    .to_string(),
                 parameters: vec!["txn3".to_string(), "acc3".to_string(), "100".to_string()],
                 compensation_query: Some("DELETE FROM transactions WHERE id = $1".to_string()),
             },
@@ -863,7 +963,8 @@ mod tests {
                 compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
             },
             SagaStepDefinition {
-                query: "INSERT INTO transactions (id, from_account, amount) VALUES ($1, $2, $3)".to_string(),
+                query: "INSERT INTO transactions (id, from_account, amount) VALUES ($1, $2, $3)"
+                    .to_string(),
                 parameters: vec!["txn5".to_string(), "acc5".to_string(), "100".to_string()],
                 compensation_query: Some("DELETE FROM invalid_table WHERE id = $1".to_string()), // Compensation will fail
             },
@@ -933,13 +1034,11 @@ mod tests {
         let system = PostgresSagaSystem::new(&cx, config).await.unwrap();
         let correlation_id = CorrelationId::new();
 
-        let steps = vec![
-            SagaStepDefinition {
-                query: "SELECT pg_sleep(1)".to_string(), // Sleep longer than timeout
-                parameters: vec![],
-                compensation_query: None,
-            },
-        ];
+        let steps = vec![SagaStepDefinition {
+            query: "SELECT pg_sleep(1)".to_string(), // Sleep longer than timeout
+            parameters: vec![],
+            compensation_query: None,
+        }];
 
         let result = system.execute_saga(&cx, correlation_id, steps).await;
         assert!(result.is_err());
@@ -977,15 +1076,15 @@ mod tests {
             let cx_clone = cx.clone();
             let handle = cx.spawn(async move {
                 let correlation_id = CorrelationId::new();
-                let steps = vec![
-                    SagaStepDefinition {
-                        query: format!("INSERT INTO accounts (id, balance) VALUES ($1, $2)"),
-                        parameters: vec![format!("acc{}", i), "1000".to_string()],
-                        compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
-                    },
-                ];
+                let steps = vec![SagaStepDefinition {
+                    query: format!("INSERT INTO accounts (id, balance) VALUES ($1, $2)"),
+                    parameters: vec![format!("acc{}", i), "1000".to_string()],
+                    compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
+                }];
 
-                system_clone.execute_saga(&cx_clone, correlation_id, steps).await
+                system_clone
+                    .execute_saga(&cx_clone, correlation_id, steps)
+                    .await
             });
             handles.push(handle);
         }
@@ -1022,27 +1121,27 @@ mod tests {
         let child_correlation_id = CorrelationId::new();
 
         // Execute parent saga
-        let parent_steps = vec![
-            SagaStepDefinition {
-                query: "INSERT INTO accounts (id, balance) VALUES ($1, $2)".to_string(),
-                parameters: vec!["parent_acc".to_string(), "5000".to_string()],
-                compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
-            },
-        ];
+        let parent_steps = vec![SagaStepDefinition {
+            query: "INSERT INTO accounts (id, balance) VALUES ($1, $2)".to_string(),
+            parameters: vec!["parent_acc".to_string(), "5000".to_string()],
+            compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
+        }];
 
-        let parent_result = system.execute_saga(&cx, parent_correlation_id, parent_steps).await;
+        let parent_result = system
+            .execute_saga(&cx, parent_correlation_id, parent_steps)
+            .await;
         assert!(result.is_ok());
 
         // Execute child saga as part of parent transaction scope
-        let child_steps = vec![
-            SagaStepDefinition {
-                query: "INSERT INTO accounts (id, balance) VALUES ($1, $2)".to_string(),
-                parameters: vec!["child_acc".to_string(), "1000".to_string()],
-                compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
-            },
-        ];
+        let child_steps = vec![SagaStepDefinition {
+            query: "INSERT INTO accounts (id, balance) VALUES ($1, $2)".to_string(),
+            parameters: vec!["child_acc".to_string(), "1000".to_string()],
+            compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
+        }];
 
-        let child_result = system.execute_saga(&cx, child_correlation_id, child_steps).await;
+        let child_result = system
+            .execute_saga(&cx, child_correlation_id, child_steps)
+            .await;
         assert!(child_result.is_ok());
 
         let stats = system.get_stats();
@@ -1062,28 +1161,26 @@ mod tests {
         // Execute multiple sagas with different outcomes
         for i in 0..3 {
             let correlation_id = CorrelationId::new();
-            let steps = vec![
-                SagaStepDefinition {
-                    query: format!("INSERT INTO accounts (id, balance) VALUES ($1, $2)"),
-                    parameters: vec![format!("stats_acc{}", i), "1000".to_string()],
-                    compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
-                },
-            ];
+            let steps = vec![SagaStepDefinition {
+                query: format!("INSERT INTO accounts (id, balance) VALUES ($1, $2)"),
+                parameters: vec![format!("stats_acc{}", i), "1000".to_string()],
+                compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
+            }];
 
             let _ = system.execute_saga(&cx, correlation_id, steps).await;
         }
 
         // Execute one failing saga
         let correlation_id = CorrelationId::new();
-        let failing_steps = vec![
-            SagaStepDefinition {
-                query: "INSERT INTO invalid_table (id) VALUES ($1)".to_string(),
-                parameters: vec!["invalid".to_string()],
-                compensation_query: None,
-            },
-        ];
+        let failing_steps = vec![SagaStepDefinition {
+            query: "INSERT INTO invalid_table (id) VALUES ($1)".to_string(),
+            parameters: vec!["invalid".to_string()],
+            compensation_query: None,
+        }];
 
-        let _ = system.execute_saga(&cx, correlation_id, failing_steps).await;
+        let _ = system
+            .execute_saga(&cx, correlation_id, failing_steps)
+            .await;
 
         let stats = system.get_stats();
         assert_eq!(stats.sagas_started, 4);
@@ -1101,13 +1198,11 @@ mod tests {
         let system = PostgresSagaSystem::new(&cx, config).await.unwrap();
 
         let correlation_id = CorrelationId::new();
-        let steps = vec![
-            SagaStepDefinition {
-                query: "INSERT INTO accounts (id, balance) VALUES ($1, $2)".to_string(),
-                parameters: vec!["correlation_acc".to_string(), "1000".to_string()],
-                compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
-            },
-        ];
+        let steps = vec![SagaStepDefinition {
+            query: "INSERT INTO accounts (id, balance) VALUES ($1, $2)".to_string(),
+            parameters: vec!["correlation_acc".to_string(), "1000".to_string()],
+            compensation_query: Some("DELETE FROM accounts WHERE id = $1".to_string()),
+        }];
 
         let result = system.execute_saga(&cx, correlation_id, steps).await;
         assert!(result.is_ok());

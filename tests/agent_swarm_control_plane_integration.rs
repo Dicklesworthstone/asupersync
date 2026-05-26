@@ -3,250 +3,266 @@
 //! Tests the core agent admission, resource allocation, validation coordination,
 //! and proof aggregation workflows under realistic multi-agent scenarios.
 
-use asupersync::agent_swarm::{
-    AgentAdmissionRequest, AgentAdmissionResult, AgentSwarmControlPlane, ControlPlaneConfig,
-    ResourceRequirements, AdmissionPriority, AdmissionController, ValidationCoordinator,
-    PressureMonitor, SystemPressure,
-};
-use asupersync::types::{Budget, Outcome};
-use asupersync::cx::Cx;
-use std::time::{Duration, SystemTime};
 use anyhow::Result;
+use asupersync::agent_swarm::{
+    AdmissionController, AdmissionPriority, AgentAdmissionRequest, AgentAdmissionResult,
+    AgentSwarmControlPlane, ControlPlaneConfig, PressureMonitor, ResourceRequirements,
+    SystemPressure, ValidationCoordinator,
+};
+use asupersync::cx::Cx;
+use asupersync::types::{Budget, Outcome};
+use std::time::{Duration, SystemTime};
 
 /// Test basic agent admission and resource allocation.
 #[tokio::test]
 async fn test_agent_admission_basic() -> Result<()> {
     // Create a test context with structured concurrency
-    let runtime = asupersync::runtime::RuntimeBuilder::new()
-        .build()
-        .await?;
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().await?;
 
-    runtime.scope(|cx| async {
-        // Create control plane configuration
-        let config = create_test_config();
-        let control_plane = AgentSwarmControlPlane::new(config)?;
+    runtime
+        .scope(|cx| async {
+            // Create control plane configuration
+            let config = create_test_config();
+            let control_plane = AgentSwarmControlPlane::new(config)?;
 
-        // Create an agent admission request
-        let admission_request = AgentAdmissionRequest {
-            agent_id: "test-agent-1".to_string(),
-            resource_requirements: ResourceRequirements {
-                cpu_cores: 2.0,
-                memory_bytes: 1 * 1024 * 1024 * 1024, // 1GB
-                disk_bytes: 5 * 1024 * 1024 * 1024, // 5GB
-                network_bandwidth: 100_000, // 100KB/s
-                estimated_duration: Some(Duration::from_secs(3600)),
-            },
-            required_capabilities: vec![],
-            priority: AdmissionPriority::Normal,
-            requested_at: SystemTime::now(),
-            admission_timeout: Some(Duration::from_secs(300)),
-        };
+            // Create an agent admission request
+            let admission_request = AgentAdmissionRequest {
+                agent_id: "test-agent-1".to_string(),
+                resource_requirements: ResourceRequirements {
+                    cpu_cores: 2.0,
+                    memory_bytes: 1 * 1024 * 1024 * 1024, // 1GB
+                    disk_bytes: 5 * 1024 * 1024 * 1024,   // 5GB
+                    network_bandwidth: 100_000,           // 100KB/s
+                    estimated_duration: Some(Duration::from_secs(3600)),
+                },
+                required_capabilities: vec![],
+                priority: AdmissionPriority::Normal,
+                requested_at: SystemTime::now(),
+                admission_timeout: Some(Duration::from_secs(300)),
+            };
 
-        // Admit the agent
-        let result = control_plane.admit_agent(cx, admission_request).await?;
+            // Admit the agent
+            let result = control_plane.admit_agent(cx, admission_request).await?;
 
-        // Verify admission was successful
-        match result {
-            AgentAdmissionResult::Admitted { session_id, allocated_resources, agent_region } => {
-                assert!(session_id.starts_with("session-test-agent-1"));
-                assert_eq!(allocated_resources.cpu_cores, 2.0);
-                assert_eq!(allocated_resources.memory_bytes, 1 * 1024 * 1024 * 1024);
-            },
-            AgentAdmissionResult::Rejected { reason, .. } => {
-                panic!("Agent admission unexpectedly rejected: {:?}", reason);
+            // Verify admission was successful
+            match result {
+                AgentAdmissionResult::Admitted {
+                    session_id,
+                    allocated_resources,
+                    agent_region,
+                } => {
+                    assert!(session_id.starts_with("session-test-agent-1"));
+                    assert_eq!(allocated_resources.cpu_cores, 2.0);
+                    assert_eq!(allocated_resources.memory_bytes, 1 * 1024 * 1024 * 1024);
+                }
+                AgentAdmissionResult::Rejected { reason, .. } => {
+                    panic!("Agent admission unexpectedly rejected: {:?}", reason);
+                }
             }
-        }
 
-        // Check control plane metrics
-        let metrics = control_plane.metrics().await;
-        assert_eq!(metrics.total_agents_admitted, 1);
-        assert_eq!(metrics.active_agent_count, 1);
-        assert_eq!(metrics.total_agents_rejected, 0);
+            // Check control plane metrics
+            let metrics = control_plane.metrics().await;
+            assert_eq!(metrics.total_agents_admitted, 1);
+            assert_eq!(metrics.active_agent_count, 1);
+            assert_eq!(metrics.total_agents_rejected, 0);
 
-        Ok(())
-    }).await
+            Ok(())
+        })
+        .await
 }
 
 /// Test agent admission under system pressure.
 #[tokio::test]
 async fn test_agent_admission_under_pressure() -> Result<()> {
-    let runtime = asupersync::runtime::RuntimeBuilder::new()
-        .build()
-        .await?;
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().await?;
 
-    runtime.scope(|cx| async {
-        let config = create_test_config();
-        let control_plane = AgentSwarmControlPlane::new(config)?;
+    runtime
+        .scope(|cx| async {
+            let config = create_test_config();
+            let control_plane = AgentSwarmControlPlane::new(config)?;
 
-        // Simulate high system pressure
-        let high_pressure = SystemPressure {
-            cpu_pressure: 0.9,
-            memory_pressure: 0.85,
-            disk_pressure: 0.8,
-            network_pressure: 0.75,
-            validation_pressure: 0.7,
-            overall_pressure: 0.85,
-            measured_at: SystemTime::now(),
-        };
+            // Simulate high system pressure
+            let high_pressure = SystemPressure {
+                cpu_pressure: 0.9,
+                memory_pressure: 0.85,
+                disk_pressure: 0.8,
+                network_pressure: 0.75,
+                validation_pressure: 0.7,
+                overall_pressure: 0.85,
+                measured_at: SystemTime::now(),
+            };
 
-        control_plane.update_pressure(high_pressure).await?;
+            control_plane.update_pressure(high_pressure).await?;
 
-        // Create an agent admission request
-        let admission_request = AgentAdmissionRequest {
-            agent_id: "test-agent-pressure".to_string(),
-            resource_requirements: ResourceRequirements {
-                cpu_cores: 4.0,
-                memory_bytes: 2 * 1024 * 1024 * 1024, // 2GB
-                disk_bytes: 10 * 1024 * 1024 * 1024, // 10GB
-                network_bandwidth: 1_000_000, // 1MB/s
-                estimated_duration: Some(Duration::from_secs(7200)),
-            },
-            required_capabilities: vec![],
-            priority: AdmissionPriority::Low,
-            requested_at: SystemTime::now(),
-            admission_timeout: Some(Duration::from_secs(300)),
-        };
+            // Create an agent admission request
+            let admission_request = AgentAdmissionRequest {
+                agent_id: "test-agent-pressure".to_string(),
+                resource_requirements: ResourceRequirements {
+                    cpu_cores: 4.0,
+                    memory_bytes: 2 * 1024 * 1024 * 1024, // 2GB
+                    disk_bytes: 10 * 1024 * 1024 * 1024,  // 10GB
+                    network_bandwidth: 1_000_000,         // 1MB/s
+                    estimated_duration: Some(Duration::from_secs(7200)),
+                },
+                required_capabilities: vec![],
+                priority: AdmissionPriority::Low,
+                requested_at: SystemTime::now(),
+                admission_timeout: Some(Duration::from_secs(300)),
+            };
 
-        // Attempt to admit the agent
-        let result = control_plane.admit_agent(cx, admission_request).await?;
+            // Attempt to admit the agent
+            let result = control_plane.admit_agent(cx, admission_request).await?;
 
-        // Verify admission was rejected due to system pressure
-        match result {
-            AgentAdmissionResult::Rejected { reason, retry_after } => {
-                assert_eq!(reason, asupersync::agent_swarm::AdmissionRejectionReason::SystemPressure);
-                assert!(retry_after.is_some());
-            },
-            AgentAdmissionResult::Admitted { .. } => {
-                panic!("Agent admission should have been rejected under high pressure");
+            // Verify admission was rejected due to system pressure
+            match result {
+                AgentAdmissionResult::Rejected {
+                    reason,
+                    retry_after,
+                } => {
+                    assert_eq!(
+                        reason,
+                        asupersync::agent_swarm::AdmissionRejectionReason::SystemPressure
+                    );
+                    assert!(retry_after.is_some());
+                }
+                AgentAdmissionResult::Admitted { .. } => {
+                    panic!("Agent admission should have been rejected under high pressure");
+                }
             }
-        }
 
-        // Check metrics show rejection
-        let metrics = control_plane.metrics().await;
-        assert_eq!(metrics.total_agents_rejected, 1);
+            // Check metrics show rejection
+            let metrics = control_plane.metrics().await;
+            assert_eq!(metrics.total_agents_rejected, 1);
 
-        Ok(())
-    }).await
+            Ok(())
+        })
+        .await
 }
 
 /// Test multiple concurrent agent admissions.
 #[tokio::test]
 async fn test_concurrent_agent_admissions() -> Result<()> {
-    let runtime = asupersync::runtime::RuntimeBuilder::new()
-        .build()
-        .await?;
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().await?;
 
-    runtime.scope(|cx| async {
-        let config = create_test_config();
-        let control_plane = AgentSwarmControlPlane::new(config)?;
+    runtime
+        .scope(|cx| async {
+            let config = create_test_config();
+            let control_plane = AgentSwarmControlPlane::new(config)?;
 
-        // Create multiple admission requests
-        let mut admission_futures = vec![];
+            // Create multiple admission requests
+            let mut admission_futures = vec![];
 
-        for i in 0..5 {
-            let agent_id = format!("concurrent-agent-{}", i);
-            let admission_request = AgentAdmissionRequest {
-                agent_id: agent_id.clone(),
-                resource_requirements: ResourceRequirements {
-                    cpu_cores: 1.0,
-                    memory_bytes: 512 * 1024 * 1024, // 512MB
-                    disk_bytes: 2 * 1024 * 1024 * 1024, // 2GB
-                    network_bandwidth: 50_000, // 50KB/s
-                    estimated_duration: Some(Duration::from_secs(1800)),
-                },
-                required_capabilities: vec![],
-                priority: AdmissionPriority::Normal,
-                requested_at: SystemTime::now(),
-                admission_timeout: Some(Duration::from_secs(300)),
-            };
+            for i in 0..5 {
+                let agent_id = format!("concurrent-agent-{}", i);
+                let admission_request = AgentAdmissionRequest {
+                    agent_id: agent_id.clone(),
+                    resource_requirements: ResourceRequirements {
+                        cpu_cores: 1.0,
+                        memory_bytes: 512 * 1024 * 1024,    // 512MB
+                        disk_bytes: 2 * 1024 * 1024 * 1024, // 2GB
+                        network_bandwidth: 50_000,          // 50KB/s
+                        estimated_duration: Some(Duration::from_secs(1800)),
+                    },
+                    required_capabilities: vec![],
+                    priority: AdmissionPriority::Normal,
+                    requested_at: SystemTime::now(),
+                    admission_timeout: Some(Duration::from_secs(300)),
+                };
 
-            let control_plane_ref = &control_plane;
-            admission_futures.push(async move {
-                control_plane_ref.admit_agent(cx, admission_request).await
-            });
-        }
-
-        // Wait for all admissions to complete
-        let results = futures::future::join_all(admission_futures).await;
-
-        // Count successful and failed admissions
-        let mut admitted_count = 0;
-        let mut rejected_count = 0;
-
-        for result in results {
-            match result? {
-                AgentAdmissionResult::Admitted { .. } => admitted_count += 1,
-                AgentAdmissionResult::Rejected { .. } => rejected_count += 1,
+                let control_plane_ref = &control_plane;
+                admission_futures.push(async move {
+                    control_plane_ref.admit_agent(cx, admission_request).await
+                });
             }
-        }
 
-        // Verify some agents were admitted (exact number depends on resource policies)
-        assert!(admitted_count > 0, "At least some agents should be admitted");
-        assert_eq!(admitted_count + rejected_count, 5, "All requests should be processed");
+            // Wait for all admissions to complete
+            let results = futures::future::join_all(admission_futures).await;
 
-        // Check final metrics
-        let metrics = control_plane.metrics().await;
-        assert_eq!(metrics.total_agents_admitted as usize, admitted_count);
-        assert_eq!(metrics.total_agents_rejected as usize, rejected_count);
+            // Count successful and failed admissions
+            let mut admitted_count = 0;
+            let mut rejected_count = 0;
 
-        Ok(())
-    }).await
+            for result in results {
+                match result? {
+                    AgentAdmissionResult::Admitted { .. } => admitted_count += 1,
+                    AgentAdmissionResult::Rejected { .. } => rejected_count += 1,
+                }
+            }
+
+            // Verify some agents were admitted (exact number depends on resource policies)
+            assert!(
+                admitted_count > 0,
+                "At least some agents should be admitted"
+            );
+            assert_eq!(
+                admitted_count + rejected_count,
+                5,
+                "All requests should be processed"
+            );
+
+            // Check final metrics
+            let metrics = control_plane.metrics().await;
+            assert_eq!(metrics.total_agents_admitted as usize, admitted_count);
+            assert_eq!(metrics.total_agents_rejected as usize, rejected_count);
+
+            Ok(())
+        })
+        .await
 }
 
 /// Test control plane graceful shutdown.
 #[tokio::test]
 async fn test_control_plane_shutdown() -> Result<()> {
-    let runtime = asupersync::runtime::RuntimeBuilder::new()
-        .build()
-        .await?;
+    let runtime = asupersync::runtime::RuntimeBuilder::new().build().await?;
 
-    runtime.scope(|cx| async {
-        let config = create_test_config();
-        let control_plane = AgentSwarmControlPlane::new(config)?;
+    runtime
+        .scope(|cx| async {
+            let config = create_test_config();
+            let control_plane = AgentSwarmControlPlane::new(config)?;
 
-        // Admit a few agents first
-        for i in 0..3 {
-            let admission_request = AgentAdmissionRequest {
-                agent_id: format!("shutdown-test-agent-{}", i),
-                resource_requirements: ResourceRequirements {
-                    cpu_cores: 0.5,
-                    memory_bytes: 256 * 1024 * 1024, // 256MB
-                    disk_bytes: 1024 * 1024 * 1024, // 1GB
-                    network_bandwidth: 25_000, // 25KB/s
-                    estimated_duration: Some(Duration::from_secs(600)),
-                },
-                required_capabilities: vec![],
-                priority: AdmissionPriority::Normal,
-                requested_at: SystemTime::now(),
-                admission_timeout: Some(Duration::from_secs(300)),
-            };
+            // Admit a few agents first
+            for i in 0..3 {
+                let admission_request = AgentAdmissionRequest {
+                    agent_id: format!("shutdown-test-agent-{}", i),
+                    resource_requirements: ResourceRequirements {
+                        cpu_cores: 0.5,
+                        memory_bytes: 256 * 1024 * 1024, // 256MB
+                        disk_bytes: 1024 * 1024 * 1024,  // 1GB
+                        network_bandwidth: 25_000,       // 25KB/s
+                        estimated_duration: Some(Duration::from_secs(600)),
+                    },
+                    required_capabilities: vec![],
+                    priority: AdmissionPriority::Normal,
+                    requested_at: SystemTime::now(),
+                    admission_timeout: Some(Duration::from_secs(300)),
+                };
 
-            control_plane.admit_agent(cx, admission_request).await?;
-        }
+                control_plane.admit_agent(cx, admission_request).await?;
+            }
 
-        // Verify agents were admitted
-        let metrics_before = control_plane.metrics().await;
-        assert_eq!(metrics_before.active_agent_count, 3);
+            // Verify agents were admitted
+            let metrics_before = control_plane.metrics().await;
+            assert_eq!(metrics_before.active_agent_count, 3);
 
-        // Graceful shutdown
-        control_plane.shutdown(cx).await?;
+            // Graceful shutdown
+            control_plane.shutdown(cx).await?;
 
-        // After shutdown, the control plane should still be queryable
-        let metrics_after = control_plane.metrics().await;
-        // Implementation would update metrics during shutdown
-        // but for this test we just verify the call succeeds
+            // After shutdown, the control plane should still be queryable
+            let metrics_after = control_plane.metrics().await;
+            // Implementation would update metrics during shutdown
+            // but for this test we just verify the call succeeds
 
-        Ok(())
-    }).await
+            Ok(())
+        })
+        .await
 }
 
 /// Create a test configuration for the control plane.
 fn create_test_config() -> ControlPlaneConfig {
     use asupersync::agent_swarm::{
-        AdmissionConfig, ValidationCoordinatorConfig, HandoffVerifierConfig,
-        PressureMonitorConfig, ResourcePolicies, CpuAllocationPolicy, MemoryAllocationPolicy,
-        DiskAllocationPolicy, NetworkAllocationPolicy, LanePolicies, ProofRoutingConfig,
-        PressureThresholds,
+        AdmissionConfig, CpuAllocationPolicy, DiskAllocationPolicy, HandoffVerifierConfig,
+        LanePolicies, MemoryAllocationPolicy, NetworkAllocationPolicy, PressureMonitorConfig,
+        PressureThresholds, ProofRoutingConfig, ResourcePolicies, ValidationCoordinatorConfig,
     };
     use std::collections::HashMap;
 
@@ -296,16 +312,22 @@ fn create_test_config() -> ControlPlaneConfig {
             monitoring_interval: Duration::from_secs(30),
             pressure_thresholds: {
                 let mut thresholds = HashMap::new();
-                thresholds.insert("cpu".to_string(), PressureThresholds {
-                    warning_threshold: 0.7,
-                    critical_threshold: 0.85,
-                    emergency_threshold: 0.95,
-                });
-                thresholds.insert("memory".to_string(), PressureThresholds {
-                    warning_threshold: 0.75,
-                    critical_threshold: 0.90,
-                    emergency_threshold: 0.98,
-                });
+                thresholds.insert(
+                    "cpu".to_string(),
+                    PressureThresholds {
+                        warning_threshold: 0.7,
+                        critical_threshold: 0.85,
+                        emergency_threshold: 0.95,
+                    },
+                );
+                thresholds.insert(
+                    "memory".to_string(),
+                    PressureThresholds {
+                        warning_threshold: 0.75,
+                        critical_threshold: 0.90,
+                        emergency_threshold: 0.98,
+                    },
+                );
                 thresholds
             },
         },
@@ -319,94 +341,100 @@ mod agent_swarm_e2e_tests {
     /// End-to-end test simulating a realistic agent swarm workflow.
     #[tokio::test]
     async fn test_e2e_agent_swarm_workflow() -> Result<()> {
-        let runtime = asupersync::runtime::RuntimeBuilder::new()
-            .build()
-            .await?;
+        let runtime = asupersync::runtime::RuntimeBuilder::new().build().await?;
 
-        runtime.scope(|cx| async {
-            let config = create_test_config();
-            let control_plane = AgentSwarmControlPlane::new(config)?;
+        runtime
+            .scope(|cx| async {
+                let config = create_test_config();
+                let control_plane = AgentSwarmControlPlane::new(config)?;
 
-            // Phase 1: Normal operations - admit several agents
-            let mut admitted_agents = vec![];
+                // Phase 1: Normal operations - admit several agents
+                let mut admitted_agents = vec![];
 
-            for i in 0..4 {
-                let admission_request = AgentAdmissionRequest {
-                    agent_id: format!("e2e-agent-{}", i),
+                for i in 0..4 {
+                    let admission_request = AgentAdmissionRequest {
+                        agent_id: format!("e2e-agent-{}", i),
+                        resource_requirements: ResourceRequirements {
+                            cpu_cores: 1.5,
+                            memory_bytes: 1024 * 1024 * 1024, // 1GB
+                            disk_bytes: 3 * 1024 * 1024 * 1024, // 3GB
+                            network_bandwidth: 100_000,       // 100KB/s
+                            estimated_duration: Some(Duration::from_secs(2400)),
+                        },
+                        required_capabilities: vec![],
+                        priority: AdmissionPriority::Normal,
+                        requested_at: SystemTime::now(),
+                        admission_timeout: Some(Duration::from_secs(300)),
+                    };
+
+                    match control_plane.admit_agent(cx, admission_request).await? {
+                        AgentAdmissionResult::Admitted { session_id, .. } => {
+                            admitted_agents.push(session_id);
+                        }
+                        AgentAdmissionResult::Rejected { .. } => {
+                            // Expected for some agents due to resource limits
+                        }
+                    }
+                }
+
+                // Phase 2: Pressure increase - simulate system load
+                let medium_pressure = SystemPressure {
+                    cpu_pressure: 0.6,
+                    memory_pressure: 0.7,
+                    disk_pressure: 0.5,
+                    network_pressure: 0.4,
+                    validation_pressure: 0.3,
+                    overall_pressure: 0.58,
+                    measured_at: SystemTime::now(),
+                };
+
+                control_plane.update_pressure(medium_pressure).await?;
+
+                // Phase 3: High priority agent admission during pressure
+                let high_priority_request = AgentAdmissionRequest {
+                    agent_id: "e2e-critical-agent".to_string(),
                     resource_requirements: ResourceRequirements {
-                        cpu_cores: 1.5,
-                        memory_bytes: 1024 * 1024 * 1024, // 1GB
-                        disk_bytes: 3 * 1024 * 1024 * 1024, // 3GB
-                        network_bandwidth: 100_000, // 100KB/s
-                        estimated_duration: Some(Duration::from_secs(2400)),
+                        cpu_cores: 0.5,
+                        memory_bytes: 256 * 1024 * 1024, // 256MB
+                        disk_bytes: 1024 * 1024 * 1024,  // 1GB
+                        network_bandwidth: 50_000,       // 50KB/s
+                        estimated_duration: Some(Duration::from_secs(600)),
                     },
                     required_capabilities: vec![],
-                    priority: AdmissionPriority::Normal,
+                    priority: AdmissionPriority::Critical,
                     requested_at: SystemTime::now(),
                     admission_timeout: Some(Duration::from_secs(300)),
                 };
 
-                match control_plane.admit_agent(cx, admission_request).await? {
+                let critical_result = control_plane.admit_agent(cx, high_priority_request).await?;
+
+                // Critical priority should often succeed even under pressure
+                match critical_result {
                     AgentAdmissionResult::Admitted { session_id, .. } => {
                         admitted_agents.push(session_id);
-                    },
-                    AgentAdmissionResult::Rejected { .. } => {
-                        // Expected for some agents due to resource limits
+                    }
+                    AgentAdmissionResult::Rejected { reason, .. } => {
+                        // Acceptable if system is truly overloaded
+                        println!("Critical agent rejected: {:?}", reason);
                     }
                 }
-            }
 
-            // Phase 2: Pressure increase - simulate system load
-            let medium_pressure = SystemPressure {
-                cpu_pressure: 0.6,
-                memory_pressure: 0.7,
-                disk_pressure: 0.5,
-                network_pressure: 0.4,
-                validation_pressure: 0.3,
-                overall_pressure: 0.58,
-                measured_at: SystemTime::now(),
-            };
+                // Phase 4: Verify final state
+                let final_metrics = control_plane.metrics().await;
+                assert!(
+                    final_metrics.total_agents_admitted > 0,
+                    "Some agents should have been admitted"
+                );
+                assert!(
+                    admitted_agents.len() > 0,
+                    "Should have at least one successful admission"
+                );
 
-            control_plane.update_pressure(medium_pressure).await?;
+                // Phase 5: Graceful shutdown
+                control_plane.shutdown(cx).await?;
 
-            // Phase 3: High priority agent admission during pressure
-            let high_priority_request = AgentAdmissionRequest {
-                agent_id: "e2e-critical-agent".to_string(),
-                resource_requirements: ResourceRequirements {
-                    cpu_cores: 0.5,
-                    memory_bytes: 256 * 1024 * 1024, // 256MB
-                    disk_bytes: 1024 * 1024 * 1024, // 1GB
-                    network_bandwidth: 50_000, // 50KB/s
-                    estimated_duration: Some(Duration::from_secs(600)),
-                },
-                required_capabilities: vec![],
-                priority: AdmissionPriority::Critical,
-                requested_at: SystemTime::now(),
-                admission_timeout: Some(Duration::from_secs(300)),
-            };
-
-            let critical_result = control_plane.admit_agent(cx, high_priority_request).await?;
-
-            // Critical priority should often succeed even under pressure
-            match critical_result {
-                AgentAdmissionResult::Admitted { session_id, .. } => {
-                    admitted_agents.push(session_id);
-                },
-                AgentAdmissionResult::Rejected { reason, .. } => {
-                    // Acceptable if system is truly overloaded
-                    println!("Critical agent rejected: {:?}", reason);
-                }
-            }
-
-            // Phase 4: Verify final state
-            let final_metrics = control_plane.metrics().await;
-            assert!(final_metrics.total_agents_admitted > 0, "Some agents should have been admitted");
-            assert!(admitted_agents.len() > 0, "Should have at least one successful admission");
-
-            // Phase 5: Graceful shutdown
-            control_plane.shutdown(cx).await?;
-
-            Ok(())
-        }).await
+                Ok(())
+            })
+            .await
     }
 }

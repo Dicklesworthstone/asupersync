@@ -113,7 +113,9 @@ impl From<ContentId> for ManifestId {
 }
 
 /// Object identifier that can be either content-addressed or manifest-addressed.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum ObjectId {
     /// Content-addressed object (immutable content).
     Content(ContentId),

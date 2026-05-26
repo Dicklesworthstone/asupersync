@@ -28,9 +28,10 @@ mod tests {
                 ..ManagedEndpointConfig::default()
             };
 
-            let mut server = ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), server_config)
-                .await
-                .expect("server bind should succeed");
+            let mut server =
+                ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), server_config)
+                    .await
+                    .expect("server bind should succeed");
 
             let server_addr = server.local_addr();
 
@@ -41,9 +42,10 @@ mod tests {
                 ..ManagedEndpointConfig::default()
             };
 
-            let mut client = ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), client_config)
-                .await
-                .expect("client bind should succeed");
+            let mut client =
+                ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), client_config)
+                    .await
+                    .expect("client bind should succeed");
 
             // Verify initial state
             let server_stats = server.connection_stats();
@@ -54,8 +56,14 @@ mod tests {
             assert_eq!(client_stats.active_connections, 0);
 
             // Test graceful shutdown
-            server.shutdown(&cx).await.expect("server shutdown should succeed");
-            client.shutdown(&cx).await.expect("client shutdown should succeed");
+            server
+                .shutdown(&cx)
+                .await
+                .expect("server shutdown should succeed");
+            client
+                .shutdown(&cx)
+                .await
+                .expect("client shutdown should succeed");
         });
     }
 
@@ -159,18 +167,17 @@ mod tests {
             ];
 
             for config in test_cases {
-                let result = ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config).await;
-                assert!(
-                    result.is_err(),
-                    "Expected configuration validation to fail"
-                );
+                let result =
+                    ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config).await;
+                assert!(result.is_err(), "Expected configuration validation to fail");
             }
 
             // Valid configuration should succeed
             let valid_config = ManagedEndpointConfig::default();
-            let endpoint = ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), valid_config)
-                .await
-                .expect("valid configuration should succeed");
+            let endpoint =
+                ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), valid_config)
+                    .await
+                    .expect("valid configuration should succeed");
 
             assert_ne!(endpoint.local_addr().port(), 0);
         });
@@ -214,10 +221,7 @@ mod tests {
             let mut allocated_ids = std::collections::HashSet::new();
             for _ in 0..10 {
                 let id = router.allocate_connection_id();
-                assert!(
-                    allocated_ids.insert(id),
-                    "Connection IDs should be unique"
-                );
+                assert!(allocated_ids.insert(id), "Connection IDs should be unique");
             }
 
             // Test connection creation with specific IDs
@@ -249,15 +253,18 @@ mod tests {
         run_test_with_cx(|cx| async move {
             // Test with IPv4
             let ipv4_config = ManagedEndpointConfig::default();
-            let ipv4_endpoint = ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), ipv4_config)
-                .await
-                .expect("IPv4 endpoint should bind successfully");
+            let ipv4_endpoint =
+                ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), ipv4_config)
+                    .await
+                    .expect("IPv4 endpoint should bind successfully");
 
             assert!(ipv4_endpoint.local_addr().is_ipv4());
 
             // Test with IPv6 (if available)
             let ipv6_config = ManagedEndpointConfig::default();
-            if let Ok(ipv6_endpoint) = ManagedQuicEndpoint::bind(&cx, "[::1]:0".parse().unwrap(), ipv6_config).await {
+            if let Ok(ipv6_endpoint) =
+                ManagedQuicEndpoint::bind(&cx, "[::1]:0".parse().unwrap(), ipv6_config).await
+            {
                 assert!(ipv6_endpoint.local_addr().is_ipv6());
             }
             // If IPv6 fails, that's acceptable on some systems
@@ -270,8 +277,10 @@ mod tests {
             if let Ok(port_endpoint) = ManagedQuicEndpoint::bind(
                 &cx,
                 format!("127.0.0.1:{specific_port}").parse().unwrap(),
-                port_config
-            ).await {
+                port_config,
+            )
+            .await
+            {
                 assert_eq!(port_endpoint.local_addr().port(), specific_port);
             }
         });

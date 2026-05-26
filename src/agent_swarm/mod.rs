@@ -24,9 +24,9 @@ pub use release_proof_aggregator::{
 };
 
 pub use control_plane::{
-    AgentAdmissionRequest, AgentAdmissionResult, AdmissionRejectionReason, AgentId,
-    AgentSession, AgentStatus, AgentSwarmControlPlane, ControlPlaneConfig, ControlPlaneMetrics,
-    ResourceRequirements, ResourceUsage, SessionId, SystemPressure, ValidationLane,
-    ValidationType, AdmissionController, ValidationCoordinator, PressureMonitor,
-    AdmissionPriority, LaneId, LaneStatus,
+    AdmissionController, AdmissionPriority, AdmissionRejectionReason, AgentAdmissionRequest,
+    AgentAdmissionResult, AgentId, AgentSession, AgentStatus, AgentSwarmControlPlane,
+    ControlPlaneConfig, ControlPlaneMetrics, LaneId, LaneStatus, PressureMonitor,
+    ResourceRequirements, ResourceUsage, SessionId, SystemPressure, ValidationCoordinator,
+    ValidationLane, ValidationType,
 };

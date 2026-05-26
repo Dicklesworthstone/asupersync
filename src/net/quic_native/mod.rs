@@ -32,9 +32,7 @@ pub use endpoint::{
     BatchResult, EndpointMetrics, OutgoingPacket, QuicUdpEndpoint, QuicUdpEndpointConfig,
     QuicUdpEndpointError, ReceivedPacket,
 };
-pub use managed_endpoint::{
-    ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint,
-};
+pub use managed_endpoint::{ManagedEndpointConfig, ManagedEndpointError, ManagedQuicEndpoint};
 pub use streams::{
     FlowControlError, FlowCredit, QuicStream, QuicStreamError, StreamDirection, StreamId,
     StreamRole, StreamTable, StreamTableError,

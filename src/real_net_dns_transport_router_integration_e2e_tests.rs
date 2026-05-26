@@ -17,11 +17,11 @@ mod tests {
         },
         time::{Duration, Instant},
         transport::{
+            Endpoint, EndpointConfig, TransportConfig,
             router::{
                 EndpointId, LoadBalancer, LoadBalancerStrategy, RouteDecision, RouteMetrics,
                 Router, RouterConfig, RouterError, RoutingTable, TargetEndpoint,
             },
-            Endpoint, EndpointConfig, TransportConfig,
         },
         types::{Budget, Outcome, TaskId, Time},
     };
@@ -29,8 +29,8 @@ mod tests {
         collections::{HashMap, HashSet, VecDeque},
         net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::{
-            atomic::{AtomicU64, AtomicUsize, Ordering},
             Arc, Mutex,
+            atomic::{AtomicU64, AtomicUsize, Ordering},
         },
     };
 
@@ -212,7 +212,9 @@ mod tests {
             self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
 
             // Perform DNS resolution with retries
-            let resolved_ips = self.resolve_with_retries(cx, hostname, correlation_id).await?;
+            let resolved_ips = self
+                .resolve_with_retries(cx, hostname, correlation_id)
+                .await?;
 
             // Make routing decision based on resolved IPs
             let (endpoint_id, socket_addr) = self
@@ -432,7 +434,12 @@ mod tests {
                 };
 
                 if avg_atomic
-                    .compare_exchange_weak(current_avg, new_avg, Ordering::Relaxed, Ordering::Relaxed)
+                    .compare_exchange_weak(
+                        current_avg,
+                        new_avg,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
                     .is_ok()
                 {
                     break;
@@ -444,10 +451,7 @@ mod tests {
         fn get_stats(&self) -> DnsRouterStatsSnapshot {
             DnsRouterStatsSnapshot {
                 total_requests: self.stats.total_requests.load(Ordering::Relaxed),
-                successful_integrations: self
-                    .stats
-                    .successful_integrations
-                    .load(Ordering::Relaxed),
+                successful_integrations: self.stats.successful_integrations.load(Ordering::Relaxed),
                 dns_failures: self.stats.dns_failures.load(Ordering::Relaxed),
                 routing_failures: self.stats.routing_failures.load(Ordering::Relaxed),
                 total_retries: self.stats.total_retries.load(Ordering::Relaxed),
@@ -534,14 +538,15 @@ mod tests {
                 let system = DnsRouterSystem::new(config);
 
                 // Test basic DNS resolution and routing
-                let result = system
-                    .resolve_and_route(cx, "example.com", 80)
-                    .await;
+                let result = system.resolve_and_route(cx, "example.com", 80).await;
 
                 match result {
                     Ok((endpoint_id, socket_addr)) => {
                         assert!(socket_addr.port() == 80);
-                        println!("Successfully routed to endpoint: {:?} at {}", endpoint_id, socket_addr);
+                        println!(
+                            "Successfully routed to endpoint: {:?} at {}",
+                            endpoint_id, socket_addr
+                        );
                     }
                     Err(e) => {
                         // Expected in test environment without real DNS
@@ -588,16 +593,16 @@ mod tests {
                     // Test multiple requests to observe load balancing behavior
                     for i in 0..5 {
                         let hostname = format!("test{}.example.com", i);
-                        let _result = system
-                            .resolve_and_route(cx, &hostname, 443)
-                            .await;
+                        let _result = system.resolve_and_route(cx, &hostname, 443).await;
 
                         // Expected to fail in test environment, but exercises the integration path
                     }
 
                     let stats = system.get_stats();
-                    println!("Strategy {:?} stats: total_requests={}, lb_hits={}",
-                        strategy, stats.total_requests, stats.lb_strategy_hits);
+                    println!(
+                        "Strategy {:?} stats: total_requests={}, lb_hits={}",
+                        strategy, stats.total_requests, stats.lb_strategy_hits
+                    );
 
                     // Verify load balancing strategy was applied
                     assert!(stats.total_requests >= 5);
@@ -635,30 +640,34 @@ mod tests {
 
                 for hostname in test_cases {
                     let start_time = Instant::now();
-                    let result = system
-                        .resolve_and_route(cx, hostname, 8080)
-                        .await;
+                    let result = system.resolve_and_route(cx, hostname, 8080).await;
 
                     match result {
                         Ok((endpoint_id, addr)) => {
-                            println!("Unexpected success for {}: {:?} -> {}", hostname, endpoint_id, addr);
+                            println!(
+                                "Unexpected success for {}: {:?} -> {}",
+                                hostname, endpoint_id, addr
+                            );
                         }
                         Err(e) => {
                             let elapsed = start_time.elapsed();
-                            println!("Expected failure for {} after {:?}: {}", hostname, elapsed, e);
+                            println!(
+                                "Expected failure for {} after {:?}: {}",
+                                hostname, elapsed, e
+                            );
                         }
                     }
 
                     // Verify retry mechanism was exercised
                     let correlations = system.get_active_correlations();
-                    let matching_correlation = correlations
-                        .iter()
-                        .find(|c| c.hostname == hostname);
+                    let matching_correlation = correlations.iter().find(|c| c.hostname == hostname);
 
                     if let Some(correlation) = matching_correlation {
                         assert!(correlation.retry_count <= 5);
-                        println!("Correlation for {}: retries={}, outcome={:?}",
-                            hostname, correlation.retry_count, correlation.final_outcome);
+                        println!(
+                            "Correlation for {}: retries={}, outcome={:?}",
+                            hostname, correlation.retry_count, correlation.final_outcome
+                        );
                     }
                 }
 
@@ -697,9 +706,7 @@ mod tests {
 
                     // Attempt routing after health check
                     let hostname = format!("service{}.example.org", i);
-                    let _result = system
-                        .resolve_and_route(cx, &hostname, 9000)
-                        .await;
+                    let _result = system.resolve_and_route(cx, &hostname, 9000).await;
                 }
 
                 let stats = system.get_stats();
@@ -712,7 +719,8 @@ mod tests {
                 println!("Active correlations: {}", correlations.len());
 
                 for correlation in correlations.iter().take(3) {
-                    println!("Correlation {}: hostname={}, retries={}, outcome={:?}",
+                    println!(
+                        "Correlation {}: hostname={}, retries={}, outcome={:?}",
                         correlation.correlation_id.0,
                         correlation.hostname,
                         correlation.retry_count,

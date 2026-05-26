@@ -117,7 +117,9 @@ mod tests {
         assert!(service.is_authorized(manifest_hash));
 
         // Remove the manifest and add an expired one through the public API
-        service.revoke_manifest(manifest_hash).expect("Failed to revoke");
+        service
+            .revoke_manifest(manifest_hash)
+            .expect("Failed to revoke");
 
         // Now it should not be authorized
         assert!(!service.is_authorized(manifest_hash));
@@ -163,11 +165,7 @@ mod tests {
         assert_eq!(key3.as_index_key(), "manifest2:content1:grant2");
 
         // Keys with same manifest but different grants should be distinct
-        let key_no_grant = CacheKey::new(
-            "manifest1".to_string(),
-            "content1".to_string(),
-            None,
-        );
+        let key_no_grant = CacheKey::new("manifest1".to_string(), "content1".to_string(), None);
         assert_eq!(key_no_grant.as_index_key(), "manifest1:content1");
         assert_ne!(key1.as_index_key(), key_no_grant.as_index_key());
     }
@@ -176,7 +174,7 @@ mod tests {
     #[test]
     fn test_eviction_preserves_proof_invariants() {
         use asupersync::atp::cache::policy::{CachePolicyManager, ProofConstraints};
-        use asupersync::atp::cache::{CacheEntry, VerificationMetadata, StorageLocation};
+        use asupersync::atp::cache::{CacheEntry, StorageLocation, VerificationMetadata};
         use std::collections::BTreeMap;
 
         let mut policy = CachePolicyManager::new(EvictionPolicy::LeastRecentlyUsed);
@@ -284,8 +282,10 @@ mod tests {
         assert!(result.is_err());
 
         if let Err(e) = result {
-            assert!(e.to_string().contains("Content hash mismatch") ||
-                   e.to_string().contains("verification"));
+            assert!(
+                e.to_string().contains("Content hash mismatch")
+                    || e.to_string().contains("verification")
+            );
         }
     }
 
@@ -331,7 +331,9 @@ mod tests {
         assert_eq!(metrics_after_start.sessions_completed, 0);
 
         // End the session
-        service.end_session(&session_id).expect("Failed to end session");
+        service
+            .end_session(&session_id)
+            .expect("Failed to end session");
 
         // Metrics should show session completed
         let final_metrics = service.metrics();
