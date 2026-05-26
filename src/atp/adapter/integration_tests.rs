@@ -232,7 +232,7 @@ mod tests {
                 .replay_pointer
                 .as_ref()
                 .unwrap(),
-            &format!("trace-{}", trace_id.as_u64())
+            &format!("trace-{}", trace_id.as_u128())
         );
     }
 
