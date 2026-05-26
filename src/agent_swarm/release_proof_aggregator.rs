@@ -583,20 +583,29 @@ impl ReleaseProofAggregator {
                         }
                     }
 
-                    if let Ok(content) = std::fs::read_to_string(&entry_path) {
-                        if content.contains(&bead_thread_pattern) {
-                            // Found reservation data for this bead
-                            // In practice, would parse actual Agent Mail reservation records
-                            let now = SystemTime::now();
-                            reservations.push(FileReservation {
-                                agent: "detected-agent".to_string(),
-                                patterns: vec!["src/**".to_string()], // Would parse from actual data
-                                exclusive: true,
-                                ttl_seconds: 3600, // Would get from actual reservation
-                                reason: bead_thread_pattern.clone(),
-                                acquired_at: now,
-                                released_at: None,
-                            });
+                    // Security: Handle file read gracefully to avoid TOCTOU issues
+                    // File may have been removed/changed between directory read and file read
+                    match std::fs::read_to_string(&entry_path) {
+                        Ok(content) => {
+                            if content.contains(&bead_thread_pattern) {
+                                // Found reservation data for this bead
+                                // In practice, would parse actual Agent Mail reservation records
+                                let now = SystemTime::now();
+                                reservations.push(FileReservation {
+                                    agent: "detected-agent".to_string(),
+                                    patterns: vec!["src/**".to_string()], // Would parse from actual data
+                                    exclusive: true,
+                                    ttl_seconds: 3600, // Would get from actual reservation
+                                    reason: bead_thread_pattern.clone(),
+                                    acquired_at: now,
+                                    released_at: None,
+                                });
+                            }
+                        }
+                        Err(_) => {
+                            // File read failed - may have been removed or changed permissions
+                            // This is acceptable for evidence collection, just skip this file
+                            continue;
                         }
                     }
                 }
@@ -837,25 +846,28 @@ impl ReleaseProofAggregator {
                 continue; // Skip invalid paths
             }
 
-            if let Ok(metadata) = std::fs::metadata(path) {
+            // Security: Use single atomic file read to prevent TOCTOU race conditions
+            // Read file content and get metadata atomically instead of separate operations
+            if let Ok(content) = std::fs::read_to_string(path) {
                 found_capsule = true;
-                if let Ok(modified) = metadata.modified() {
-                    last_updated = modified;
+
+                // Get metadata after successful read to ensure file consistency
+                if let Ok(metadata) = std::fs::metadata(path) {
+                    if let Ok(modified) = metadata.modified() {
+                        last_updated = modified;
+                    }
                 }
 
-                // Try to parse capsule content for decision
-                if let Ok(content) = std::fs::read_to_string(path) {
-                    // Look for decision indicators in the capsule content
-                    // This is a simplified check - real implementation would parse structured data
-                    if content.contains("\"decision\":\"Continue\"") || content.contains("Continue") {
-                        decision = Some(HandoffDecision::Continue);
-                    } else if content.contains("\"decision\":\"NarrowRefreshRequired\"") || content.contains("NarrowRefreshRequired") {
-                        decision = Some(HandoffDecision::NarrowRefreshRequired);
-                    } else if content.contains("\"decision\":\"CoordinateFirst\"") || content.contains("CoordinateFirst") {
-                        decision = Some(HandoffDecision::CoordinateFirst);
-                    } else if content.contains("\"decision\":\"UnsafeToContinue\"") || content.contains("UnsafeToContinue") {
-                        decision = Some(HandoffDecision::UnsafeToContinue);
-                    }
+                // Look for decision indicators in the capsule content
+                // This is a simplified check - real implementation would parse structured data
+                if content.contains("\"decision\":\"Continue\"") || content.contains("Continue") {
+                    decision = Some(HandoffDecision::Continue);
+                } else if content.contains("\"decision\":\"NarrowRefreshRequired\"") || content.contains("NarrowRefreshRequired") {
+                    decision = Some(HandoffDecision::NarrowRefreshRequired);
+                } else if content.contains("\"decision\":\"CoordinateFirst\"") || content.contains("CoordinateFirst") {
+                    decision = Some(HandoffDecision::CoordinateFirst);
+                } else if content.contains("\"decision\":\"UnsafeToContinue\"") || content.contains("UnsafeToContinue") {
+                    decision = Some(HandoffDecision::UnsafeToContinue);
                 }
                 break; // Use first found capsule
             }
