@@ -816,4 +816,72 @@ mod tests {
         assert!(analysis.regression_detected);
         assert_eq!(analysis.severity, RegressionSeverity::Moderate);
     }
+
+    #[test]
+    fn test_baseline_compatibility_validation() {
+        let create_baseline = |commit_hash: &str| BenchmarkResult {
+            name: "test".to_string(),
+            measurements: StatisticalMeasurements {
+                mean_ns: 1_000_000.0,
+                std_dev_ns: 100_000.0,
+                cv: 0.1,
+                median_ns: 1_000_000.0,
+                p95_ns: 1_200_000.0,
+                p99_ns: 1_500_000.0,
+                min_ns: 800_000.0,
+                max_ns: 1_800_000.0,
+                sample_count: 100,
+            },
+            metadata: BenchmarkMetadata {
+                start_time: Time::now(),
+                total_duration_ms: 1000,
+                target_iterations: 100,
+                completed_iterations: 100,
+                environment: EnvironmentInfo {
+                    platform: "test".to_string(),
+                    cpu_info: "mock-cpu".to_string(),
+                    memory_mb: 1024,
+                    rust_version: "1.70.0".to_string(),
+                    build_profile: "release".to_string(),
+                    commit_hash: commit_hash.to_string(),
+                },
+                config: CartelConfig::default(),
+            },
+            characteristics: PerformanceCharacteristics {
+                throughput_ops_per_sec: 1000.0,
+                allocation_rate_mb_per_sec: 10.0,
+                cpu_utilization_percent: 50.0,
+                cache_miss_ratio: 0.05,
+                context_switches_per_sec: 100.0,
+                gc_pressure_score: 0.1,
+            },
+            trace_id: None,
+        };
+
+        let current_commit = "abc123def456";
+
+        // Test exact commit match - should be compatible
+        let same_commit_baseline = create_baseline(current_commit);
+        let (compatible, reason) = BenchmarkCartel::is_baseline_compatible(&same_commit_baseline, current_commit);
+        assert!(compatible);
+        assert_eq!(reason, "Exact commit match");
+
+        // Test different commit - should be incompatible
+        let different_commit_baseline = create_baseline("xyz789uvw012");
+        let (compatible, reason) = BenchmarkCartel::is_baseline_compatible(&different_commit_baseline, current_commit);
+        assert!(!compatible);
+        assert!(reason.contains("Commit mismatch"));
+
+        // Test empty commit hash - should be incompatible
+        let empty_commit_baseline = create_baseline("");
+        let (compatible, reason) = BenchmarkCartel::is_baseline_compatible(&empty_commit_baseline, current_commit);
+        assert!(!compatible);
+        assert!(reason.contains("no commit hash"));
+
+        // Test "unknown" commit hash - should be incompatible
+        let unknown_commit_baseline = create_baseline("unknown");
+        let (compatible, reason) = BenchmarkCartel::is_baseline_compatible(&unknown_commit_baseline, current_commit);
+        assert!(!compatible);
+        assert!(reason.contains("no commit hash"));
+    }
 }
