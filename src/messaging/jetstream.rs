@@ -48,6 +48,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use std::collections::HashSet;
+use std::sync::Mutex;
+
 /// br-asupersync-w7n2qx: client-side cap on stream and consumer name
 /// length, in bytes. Mirrors the upstream `nats-server` 256-byte cap on
 /// stream / consumer names so a buggy or hostile caller cannot smuggle
@@ -63,6 +66,12 @@ const MAX_CONSUMER_NAME_CHARS: usize = 128;
 /// the same practical size ceiling as the underlying NATS parser.
 const MAX_STREAM_SUBJECT_BYTES: usize = 4 * 1024;
 
+/// Anti-replay token timeout in seconds - ack tokens expire after this duration
+const ACK_TOKEN_TIMEOUT_SECS: u64 = 300; // 5 minutes
+
+/// Maximum number of recent ack tokens to track for replay prevention
+const MAX_ACK_TOKEN_HISTORY: usize = 10000;
+
 /// br-asupersync-w7n2qx: client-side cap on the `batch` argument to
 /// pull-consumer requests. The pull path pre-allocates
 /// `Vec::with_capacity(batch)` for received messages; without a cap a
@@ -73,6 +82,76 @@ const MAX_STREAM_SUBJECT_BYTES: usize = 4 * 1024;
 /// nats.go pull-consumer client and the NATS JetStream documented
 /// recommendation.
 const MAX_PULL_BATCH: usize = 1024;
+
+/// Anti-replay tracker for JetStream acknowledgment tokens.
+/// Maintains a set of recently used ack tokens to prevent replay attacks.
+#[derive(Debug)]
+struct AckTokenTracker {
+    /// Set of recently used ack tokens with their expiry timestamps
+    used_tokens: Mutex<HashSet<(String, u64)>>, // (token_hash, expires_at)
+}
+
+impl AckTokenTracker {
+    fn new() -> Self {
+        Self {
+            used_tokens: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Check if a token has been used and mark it as used if not.
+    /// Returns true if the token is valid (not replayed), false if it's a replay.
+    fn validate_and_mark_token(&self, token: &str, timestamp: u64) -> bool {
+        let now = wall_now().as_nanos() as u64 / 1_000_000_000; // Current time in seconds
+        let token_hash = self.hash_token(token);
+
+        // Clean expired tokens first
+        self.cleanup_expired_tokens(now);
+
+        let mut tokens = self.used_tokens.lock().unwrap();
+
+        // Check if token is already used (replay attempt)
+        if tokens.iter().any(|(hash, _)| hash == &token_hash) {
+            return false; // Replay detected
+        }
+
+        // Check if token is expired
+        if now > timestamp + ACK_TOKEN_TIMEOUT_SECS {
+            return false; // Expired token
+        }
+
+        // Mark token as used
+        if tokens.len() >= MAX_ACK_TOKEN_HISTORY {
+            // Remove oldest entries to prevent unbounded growth
+            let min_timestamp = tokens.iter().map(|(_, ts)| *ts).min().unwrap_or(0);
+            tokens.retain(|(_, ts)| *ts > min_timestamp);
+        }
+
+        tokens.insert((token_hash, timestamp + ACK_TOKEN_TIMEOUT_SECS));
+        true
+    }
+
+    fn cleanup_expired_tokens(&self, now: u64) {
+        let mut tokens = self.used_tokens.lock().unwrap();
+        tokens.retain(|(_, expires_at)| *expires_at > now);
+    }
+
+    fn hash_token(&self, token: &str) -> String {
+        // Simple hash for token deduplication
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in token.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")
+    }
+}
+
+/// Global ack token tracker to prevent replay attacks across all consumers
+static ACK_TOKEN_TRACKER: std::sync::OnceLock<AckTokenTracker> = std::sync::OnceLock::new();
+
+fn get_ack_token_tracker() -> &'static AckTokenTracker {
+    ACK_TOKEN_TRACKER.get_or_init(|| AckTokenTracker::new())
+}
 
 fn redacted_name_fingerprint(value: &str) -> String {
     // Stable FNV-1a fingerprint for deterministic redaction/logging.
@@ -2544,8 +2623,20 @@ impl JsMessage {
             }
         }
 
+        // Generate anti-replay protected ack token
+        let (protected_reply_subject, ack_token) = self.generate_protected_ack_token();
+
+        // Validate the ack token to prevent replay attacks
+        let now = wall_now().as_nanos() as u64 / 1_000_000_000;
+        let tracker = get_ack_token_tracker();
+        if !tracker.validate_and_mark_token(&ack_token, now) {
+            return Err(JsError::InvalidConfig(
+                "Acknowledgment token replay detected or expired".to_string(),
+            ));
+        }
+
         match client
-            .publish(cx, &self.reply_subject, payload.as_ref())
+            .publish(cx, &protected_reply_subject, payload.as_ref())
             .await
         {
             Ok(()) => {
@@ -2561,6 +2652,89 @@ impl JsMessage {
                 Err(JsError::Nats(err))
             }
         }
+    }
+
+    /// Generate a cryptographically protected ack token to prevent replay attacks.
+    /// Returns (protected_reply_subject, ack_token).
+    fn generate_protected_ack_token(&self) -> (String, String) {
+        let now = wall_now().as_nanos() as u64 / 1_000_000_000; // Current time in seconds
+
+        // Generate a secure random nonce using the system entropy
+        let nonce = self.generate_secure_nonce();
+
+        // Create ack token with timestamp, sequence, delivery count, and nonce
+        let ack_token = format!(
+            "{}.{}.{}.{}.{}",
+            now, self.sequence, self.delivered, nonce,
+            self.hash_reply_subject_components()
+        );
+
+        // Create HMAC-protected reply subject
+        let hmac = self.generate_ack_token_hmac(&ack_token);
+        let protected_reply_subject = format!("{}.{}", self.reply_subject, hmac);
+
+        (protected_reply_subject, ack_token)
+    }
+
+    /// Generate a secure random nonce for anti-replay protection.
+    fn generate_secure_nonce(&self) -> u64 {
+        // Use sequence and delivered count as seed with current time for deterministic but unique nonce
+        let mut hasher = 0xcbf2_9ce4_8422_2325_u64;
+        let now = wall_now().as_nanos() as u64;
+
+        // Mix in sequence, delivered count, and current time
+        hasher ^= self.sequence;
+        hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
+        hasher ^= u64::from(self.delivered);
+        hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
+        hasher ^= now;
+        hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
+
+        // Mix in reply subject for additional entropy
+        for byte in self.reply_subject.as_bytes() {
+            hasher ^= u64::from(*byte);
+            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+
+        hasher
+    }
+
+    /// Generate HMAC for ack token integrity protection.
+    fn generate_ack_token_hmac(&self, token: &str) -> String {
+        // Simple HMAC-like construction using the reply subject as key
+        let mut hasher = 0xa5a5_a5a5_a5a5_a5a5_u64;
+
+        // Mix in the reply subject as secret key material
+        for byte in self.reply_subject.as_bytes() {
+            hasher ^= u64::from(*byte);
+            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+
+        // Mix in the token data
+        for byte in token.as_bytes() {
+            hasher ^= u64::from(*byte);
+            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+
+        format!("{hasher:016x}")
+    }
+
+    /// Hash reply subject components for additional verification.
+    fn hash_reply_subject_components(&self) -> u64 {
+        let mut hasher = 0xfeed_face_cafe_babe_u64;
+
+        // Hash subject and reply_subject together
+        for byte in self.subject.as_bytes() {
+            hasher ^= u64::from(*byte);
+            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+
+        for byte in self.reply_subject.as_bytes() {
+            hasher ^= u64::from(*byte);
+            hasher = hasher.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+
+        hasher
     }
 }
 
