@@ -9,6 +9,7 @@
 #![allow(unsafe_code)]
 
 use crate::util::DetRng;
+use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -21,23 +22,28 @@ pub const AUTH_KEY_SIZE: usize = 32;
 /// br-asupersync-q3terg: minimum number of distinct byte values
 /// required across the 32-byte key.
 ///
-/// A real CSPRNG/HKDF output has ~30 distinct values almost surely; 8
-/// is a generous lower bound that still rejects all-zero / all-0xFF /
-/// 2-pattern-alternating / [N; 32] inputs.
-pub const MIN_DISTINCT_BYTES: usize = 8;
+/// A real CSPRNG/HKDF output has ~30 distinct values almost surely; 16
+/// provides strong diversity while still allowing legitimate keys.
+/// Rejects patterns with insufficient byte diversity.
+pub const MIN_DISTINCT_BYTES: usize = 16;
 
 /// br-asupersync-q3terg: minimum total Hamming weight (count of
 /// 1-bits across all 256 bits).
 ///
-/// A uniformly-random key has weight near 128; weight < 8 is
-/// essentially impossible for a strong key and indicates a
-/// near-all-zeros pathology.
-pub const MIN_HAMMING_WEIGHT: u32 = 8;
+/// A uniformly-random key has weight near 128; 64 (25%) provides
+/// strong lower bound against entropy-starved keys while allowing
+/// legitimate variation. Previous value of 8 was dangerously weak.
+pub const MIN_HAMMING_WEIGHT: u32 = 64;
 
-/// br-asupersync-q3terg: maximum total Hamming weight. Symmetric
-/// to [`MIN_HAMMING_WEIGHT`] — weight > 248 indicates a near-all-
-/// 0xFF pathology.
-pub const MAX_HAMMING_WEIGHT: u32 = 248;
+/// br-asupersync-q3terg: maximum total Hamming weight.
+/// 192 (75%) provides strong upper bound against entropy-concentrated
+/// keys. Previous value of 248 was dangerously permissive.
+pub const MAX_HAMMING_WEIGHT: u32 = 192;
+
+/// Maximum frequency any single byte value can appear in a valid key.
+/// No byte value should appear more than 4 times in 32 bytes (12.5%).
+/// This prevents concentration attacks where keys have predictable patterns.
+pub const MAX_BYTE_FREQUENCY: usize = 4;
 
 /// br-asupersync-q3terg: error returned when [`AuthKey::from_bytes`]
 /// receives a low-entropy input that fails the strength validators.
@@ -80,6 +86,18 @@ pub enum WeakKeyReason {
         minimum: u32,
         /// Maximum acceptable.
         maximum: u32,
+    },
+    /// Byte frequency concentration too high - indicates predictable patterns.
+    #[error(
+        "excessive byte concentration: byte value {byte_value} appears {frequency} times (maximum {maximum})"
+    )]
+    ExcessiveByteConcentration {
+        /// The byte value that appears too frequently.
+        byte_value: u8,
+        /// How many times it appears.
+        frequency: usize,
+        /// Maximum allowed frequency.
+        maximum: usize,
     },
 }
 
@@ -153,16 +171,17 @@ impl AuthKey {
     /// buffer) can forge authentication tags for any symbol.
     ///
     /// Validation rules (any failure rejects with `AuthKeyError`):
-    ///   * `bytes` must contain at least `MIN_DISTINCT_BYTES` (8)
-    ///     distinct byte values out of 32. A real CSPRNG/HKDF output
-    ///     has ~30 distinct values almost surely; 8 is a generous
-    ///     lower bound that still catches all-zero / all-0xFF /
-    ///     2-pattern-alternating / [42; 32] inputs.
+    ///   * `bytes` must contain at least `MIN_DISTINCT_BYTES` (16)
+    ///     distinct byte values out of 32. Strengthened from previous
+    ///     dangerously-low threshold of 8.
     ///   * The Hamming weight (count of 1-bits across all 256 bits)
     ///     must lie in `[MIN_HAMMING_WEIGHT, MAX_HAMMING_WEIGHT]`
-    ///     (8, 248). A uniformly-random key has weight ≈ 128;
-    ///     the probability of weight < 8 or > 248 is essentially
-    ///     zero. Catches all-bits-low and all-bits-high pathologies.
+    ///     (64, 192). Represents 25%-75% bit density, preventing
+    ///     entropy-starved keys. Previous thresholds (8, 248) were
+    ///     cryptographically dangerous.
+    ///   * No byte value may appear more than `MAX_BYTE_FREQUENCY`
+    ///     (4) times. Prevents concentration attacks and predictable
+    ///     patterns like repeating sequences.
     ///
     /// For known-strong byte sources (e.g. HMAC outputs in the
     /// macaroon caveat chain — by construction uniformly random),
@@ -171,18 +190,30 @@ impl AuthKey {
     /// accidentally importing the bypass path.
     #[inline]
     pub fn from_bytes(bytes: [u8; AUTH_KEY_SIZE]) -> Result<Self, AuthKeyError> {
-        let distinct = {
-            let mut seen = [false; 256];
-            let mut count = 0usize;
-            for &b in bytes.iter() {
-                let idx = b as usize;
-                if !seen[idx] {
-                    seen[idx] = true;
-                    count += 1;
-                }
+        // Count distinct byte values and track frequency
+        let mut byte_counts = [0u8; 256];
+        let mut distinct = 0usize;
+
+        for &b in bytes.iter() {
+            let idx = b as usize;
+            if byte_counts[idx] == 0 {
+                distinct += 1;
             }
-            count
-        };
+            byte_counts[idx] = byte_counts[idx].saturating_add(1);
+
+            // Check concentration during counting for early exit
+            if byte_counts[idx] > MAX_BYTE_FREQUENCY as u8 {
+                return Err(AuthKeyError::WeakKey {
+                    reason: WeakKeyReason::ExcessiveByteConcentration {
+                        byte_value: b,
+                        frequency: byte_counts[idx] as usize,
+                        maximum: MAX_BYTE_FREQUENCY,
+                    },
+                });
+            }
+        }
+
+        // Validate byte diversity
         if distinct < MIN_DISTINCT_BYTES {
             return Err(AuthKeyError::WeakKey {
                 reason: WeakKeyReason::InsufficientByteDiversity {
@@ -191,6 +222,8 @@ impl AuthKey {
                 },
             });
         }
+
+        // Validate Hamming weight (bit entropy)
         let hamming: u32 = bytes.iter().map(|b| b.count_ones()).sum();
         if !(MIN_HAMMING_WEIGHT..=MAX_HAMMING_WEIGHT).contains(&hamming) {
             return Err(AuthKeyError::WeakKey {
@@ -201,6 +234,7 @@ impl AuthKey {
                 },
             });
         }
+
         Ok(Self { bytes })
     }
 
@@ -222,6 +256,40 @@ impl AuthKey {
         Self {
             bytes: result.into(),
         }
+    }
+
+    /// Derives a key using HKDF-SHA256 with optional salt and info parameters.
+    ///
+    /// This provides RFC 5869 compliant key derivation, which is cryptographically
+    /// stronger than simple HMAC-based derivation. HKDF performs extract-then-expand:
+    /// 1. Extract: PRK = HMAC-SHA256(salt, input_key_material)
+    /// 2. Expand: OKM = HKDF-Expand(PRK, info, key_length)
+    ///
+    /// Use this for production key derivation where standards compliance matters.
+    #[must_use]
+    pub fn derive_hkdf(&self, salt: Option<&[u8]>, info: &[u8]) -> Self {
+        let hk = Hkdf::<Sha256>::new(salt, &self.bytes);
+        let mut okm = [0u8; AUTH_KEY_SIZE];
+        hk.expand(info, &mut okm).expect("AUTH_KEY_SIZE is valid for HKDF-SHA256 expansion");
+        Self { bytes: okm }
+    }
+
+    /// Creates a key using HKDF-SHA256 directly from input key material.
+    ///
+    /// This bypasses the entropy validation since HKDF output is cryptographically
+    /// strong by construction. Use for deriving keys from high-entropy sources
+    /// like master keys or shared secrets.
+    ///
+    /// Arguments:
+    /// - `ikm`: Input key material (e.g., master key, shared secret)
+    /// - `salt`: Optional salt value (improves security if randomized)
+    /// - `info`: Context/purpose information for domain separation
+    #[must_use]
+    pub fn from_hkdf(ikm: &[u8], salt: Option<&[u8]>, info: &[u8]) -> Self {
+        let hk = Hkdf::<Sha256>::new(salt, ikm);
+        let mut okm = [0u8; AUTH_KEY_SIZE];
+        hk.expand(info, &mut okm).expect("AUTH_KEY_SIZE is valid for HKDF-SHA256 expansion");
+        Self { bytes: okm }
     }
 
     /// Creates a key from HMAC-derived bytes with validation.
@@ -704,5 +772,113 @@ mod tests {
         assert!(ring.verify(b"recently_retired", &k2_sig));
         let k3_sig = hmac_sign(&k3, b"current");
         assert!(ring.verify(b"current", &k3_sig));
+    }
+
+    // Tests for strengthened validation (asupersync-uw3asa fix)
+    #[test]
+    fn test_strengthened_validation_rejects_weak_keys() {
+        // Test 1: Insufficient byte diversity (old threshold was 8, new is 16)
+        let low_diversity = [0u8; 32]; // Only 1 distinct byte
+        match AuthKey::from_bytes(low_diversity) {
+            Err(AuthKeyError::WeakKey {
+                reason: WeakKeyReason::InsufficientByteDiversity { distinct, minimum },
+            }) => {
+                assert_eq!(distinct, 1);
+                assert_eq!(minimum, MIN_DISTINCT_BYTES);
+            }
+            _ => panic!("Expected InsufficientByteDiversity error"),
+        }
+
+        // Test 2: Extreme Hamming weight - too low (old min was 8, new is 64)
+        let low_hamming = [1u8; 32]; // Only 32 bits set, well below new minimum
+        match AuthKey::from_bytes(low_hamming) {
+            Err(AuthKeyError::WeakKey {
+                reason: WeakKeyReason::ExtremeHammingWeight { weight, .. },
+            }) => {
+                assert_eq!(weight, 32);
+                assert!(weight < MIN_HAMMING_WEIGHT);
+            }
+            _ => panic!("Expected ExtremeHammingWeight error for low weight"),
+        }
+
+        // Test 3: Extreme Hamming weight - too high (old max was 248, new is 192)
+        let high_hamming = [0xFFu8; 32]; // All bits set = 256 bits, above new maximum
+        match AuthKey::from_bytes(high_hamming) {
+            Err(AuthKeyError::WeakKey {
+                reason: WeakKeyReason::ExtremeHammingWeight { weight, .. },
+            }) => {
+                assert_eq!(weight, 256);
+                assert!(weight > MAX_HAMMING_WEIGHT);
+            }
+            _ => panic!("Expected ExtremeHammingWeight error for high weight"),
+        }
+
+        // Test 4: Byte concentration attack (new validation)
+        let mut concentrated = [0u8; 32];
+        concentrated[0..5].fill(42); // Byte 42 appears 5 times, exceeds MAX_BYTE_FREQUENCY=4
+        concentrated[5..].fill(1); // Fill rest to ensure diversity
+        match AuthKey::from_bytes(concentrated) {
+            Err(AuthKeyError::WeakKey {
+                reason: WeakKeyReason::ExcessiveByteConcentration { byte_value, frequency, .. },
+            }) => {
+                assert_eq!(byte_value, 42);
+                assert_eq!(frequency, 5);
+            }
+            _ => panic!("Expected ExcessiveByteConcentration error"),
+        }
+    }
+
+    #[test]
+    fn test_hkdf_key_derivation() {
+        let master_key = AuthKey::from_seed(42);
+
+        // Test HKDF instance method
+        let derived1 = master_key.derive_hkdf(None, b"test-purpose");
+        let derived2 = master_key.derive_hkdf(None, b"test-purpose");
+        let derived3 = master_key.derive_hkdf(None, b"different-purpose");
+
+        assert_eq!(derived1, derived2, "HKDF should be deterministic");
+        assert_ne!(derived1, derived3, "Different purposes should yield different keys");
+
+        // Test HKDF with salt
+        let with_salt = master_key.derive_hkdf(Some(b"test-salt"), b"test-purpose");
+        let without_salt = master_key.derive_hkdf(None, b"test-purpose");
+        assert_ne!(with_salt, without_salt, "Salt should affect derivation");
+
+        // Test static HKDF method
+        let static_derived = AuthKey::from_hkdf(master_key.as_bytes(), None, b"test-purpose");
+        assert_eq!(derived1, static_derived, "Instance and static HKDF should match");
+    }
+
+    #[test]
+    fn test_legacy_keys_now_rejected() {
+        // Keys that would have passed the old weak validation should now be rejected
+
+        // Old validation: MIN_HAMMING_WEIGHT=8, now requires 64
+        let mut weak_key = [0u8; 32];
+        weak_key[0] = 0xFF; // 8 bits set, would pass old validation
+        assert!(AuthKey::from_bytes(weak_key).is_err(), "Weak key should be rejected");
+
+        // Old validation: MIN_DISTINCT_BYTES=8, now requires 16
+        let mut pattern_key = [0u8; 32];
+        for i in 0..8 {
+            pattern_key[i * 4] = i as u8; // Only 8 distinct bytes
+        }
+        assert!(AuthKey::from_bytes(pattern_key).is_err(), "Pattern key should be rejected");
+    }
+
+    #[test]
+    fn test_legitimate_strong_keys_accepted() {
+        // Verify that legitimately strong keys still pass validation
+        let strong_key = AuthKey::from_seed(12345);
+
+        // Should pass all new validation checks
+        let validation_result = AuthKey::from_bytes(*strong_key.as_bytes());
+        assert!(validation_result.is_ok(), "Strong key should pass validation");
+
+        // Verify HKDF outputs also pass (they should by construction)
+        let hkdf_key = AuthKey::from_hkdf(b"input-key-material", Some(b"salt"), b"context");
+        let hkdf_revalidation = AuthKey::from_bytes(*hkdf_key.as_bytes());
+        assert!(hkdf_revalidation.is_ok(), "HKDF key should pass validation");
     }
 }
