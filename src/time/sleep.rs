@@ -80,10 +80,28 @@ fn duration_to_nanos(duration: Duration) -> u64 {
 /// time-related function in this module. It is suitable for production
 /// use where real wall clock time is needed.
 ///
+/// **Capability-aware**: First attempts to route through the current `Cx` context
+/// and timer driver when available, only falling back to direct `Instant::now()`
+/// when no capability context is present. This preserves the "no ambient authority"
+/// invariant while still providing a fallback for contexts without capabilities.
+///
 /// For virtual time in tests/lab runtime, use a timer driver's `now()` method.
 #[must_use]
 #[inline]
 pub fn wall_now() -> Time {
+    // First try to route through current Cx capabilities if available
+    if let Some(current_cx) = crate::cx::Cx::current() {
+        if let Some(timer_driver) = current_cx.timer_driver() {
+            return timer_driver.now();
+        }
+        // Cx exists but no timer driver - check if it has time capability
+        if current_cx.runtime_mask.has(crate::cx::cap::CapMask::TIME) {
+            return current_cx.now();
+        }
+    }
+
+    // Absolute fallback: no Cx context or capabilities available
+    // This preserves compatibility for truly capability-free contexts
     let start = START_TIME.get_or_init(Instant::now);
     let now = Instant::now();
     if now < *start {
