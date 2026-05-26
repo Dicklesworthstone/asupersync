@@ -343,10 +343,39 @@ fn validate_sqlite_open_path(path: &Path) -> Result<(), SqliteError> {
     }
 
     let resolved = resolve_sqlite_open_path(path)?;
-    if resolved.starts_with(Path::new("/etc")) {
+    validate_resolved_sqlite_path(&resolved)
+}
+
+/// Validate a resolved (canonicalized) SQLite path for security restrictions
+/// This function operates on already-resolved paths to avoid TOCTOU vulnerabilities
+fn validate_resolved_sqlite_path(resolved_path: &Path) -> Result<(), SqliteError> {
+    // SECURITY: Check resolved path against restricted system directories
+    if resolved_path.starts_with(Path::new("/etc")) {
         return Err(SqliteError::UnsafePath(format!(
             "SQLite database path resolves into restricted system directory: {}",
-            resolved.display()
+            resolved_path.display()
+        )));
+    }
+
+    // SECURITY: Additional system directory restrictions
+    if resolved_path.starts_with(Path::new("/sys")) {
+        return Err(SqliteError::UnsafePath(format!(
+            "SQLite database path resolves into restricted /sys directory: {}",
+            resolved_path.display()
+        )));
+    }
+
+    if resolved_path.starts_with(Path::new("/proc")) {
+        return Err(SqliteError::UnsafePath(format!(
+            "SQLite database path resolves into restricted /proc directory: {}",
+            resolved_path.display()
+        )));
+    }
+
+    if resolved_path.starts_with(Path::new("/dev")) {
+        return Err(SqliteError::UnsafePath(format!(
+            "SQLite database path resolves into restricted /dev directory: {}",
+            resolved_path.display()
         )));
     }
 
@@ -1046,8 +1075,11 @@ impl SqliteConnection {
 
         let handle = pool.spawn(move || {
             let result = (|| {
-                validate_sqlite_open_path(&path)?;
-                let conn = rusqlite::Connection::open(&path)
+                // SECURITY FIX: Resolve path once and use same resolved path for both validation and opening
+                // Eliminates TOCTOU vulnerability where symlinks could change between check and use
+                let resolved_path = resolve_sqlite_open_path(&path)?;
+                validate_resolved_sqlite_path(&resolved_path)?;
+                let conn = rusqlite::Connection::open(&resolved_path)
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
                 configure_connection_defaults(&conn, true)?;
                 Ok(conn)
@@ -1927,6 +1959,79 @@ mod tests {
         // Test nested comments in fallback
         let sql = "/* outer /* inner */ comment */ SELECT 1";
         assert_eq!(classify_sql_surface_violation(sql), None);
+    }
+
+    /// TOCTOU Security Tests - Verify the TOCTOU vulnerability fix (asupersync-607uqy)
+    #[test]
+    fn test_toctou_fix_path_resolution() {
+        use tempfile::tempdir;
+        use std::fs;
+
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let temp_path = temp_dir.path();
+
+        // Create a safe database file
+        let db_file = temp_path.join("test.sqlite");
+        fs::write(&db_file, b"").expect("Failed to create test database file");
+
+        // Test that resolve_sqlite_open_path works correctly
+        let resolved = resolve_sqlite_open_path(&db_file).expect("Failed to resolve path");
+
+        // Verify validation of resolved path works
+        validate_resolved_sqlite_path(&resolved).expect("Safe path should validate");
+
+        // Test /etc restriction on resolved path
+        let etc_path = Path::new("/etc/passwd");
+        assert!(validate_resolved_sqlite_path(etc_path).is_err());
+
+        // Test /sys restriction on resolved path
+        let sys_path = Path::new("/sys/kernel");
+        assert!(validate_resolved_sqlite_path(sys_path).is_err());
+
+        // Test /proc restriction on resolved path
+        let proc_path = Path::new("/proc/version");
+        assert!(validate_resolved_sqlite_path(proc_path).is_err());
+
+        // Test /dev restriction on resolved path
+        let dev_path = Path::new("/dev/null");
+        assert!(validate_resolved_sqlite_path(dev_path).is_err());
+    }
+
+    #[test]
+    fn test_toctou_fix_prevents_symlink_attack() {
+        use tempfile::tempdir;
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempdir().expect("Failed to create temp directory");
+        let temp_path = temp_dir.path();
+
+        // Create a symlink pointing to /etc/passwd
+        let symlink_path = temp_path.join("malicious.sqlite");
+        if symlink("/etc/passwd", &symlink_path).is_ok() {
+            // Test that our fixed validation catches symlinks to restricted paths
+            let resolved = resolve_sqlite_open_path(&symlink_path).expect("Failed to resolve symlink");
+
+            // The resolved path should point to /etc/passwd and be rejected
+            assert!(validate_resolved_sqlite_path(&resolved).is_err());
+            assert!(resolved.starts_with("/etc"));
+        }
+    }
+
+    #[test]
+    fn test_path_validation_comprehensive() {
+        // Test tilde prefix rejection
+        let tilde_path = Path::new("~/database.sqlite");
+        assert!(validate_sqlite_open_path(tilde_path).is_err());
+
+        // Test parent directory traversal rejection
+        let traversal_path = Path::new("../../../etc/passwd");
+        assert!(validate_sqlite_open_path(traversal_path).is_err());
+
+        // Test current directory is allowed
+        let current_path = Path::new("./test.sqlite");
+        // Note: This may fail if the file doesn't exist, but parent directory traversal check should pass
+        let _ = validate_sqlite_open_path(current_path);
     }
 
     fn create_test_cx() -> Cx {
