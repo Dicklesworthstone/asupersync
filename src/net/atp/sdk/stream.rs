@@ -169,8 +169,8 @@ impl AtpWriter {
     }
 
     /// Get the next progress update.
-    pub async fn next_progress(&mut self) -> Option<TransferProgress> {
-        self.progress_rx.recv().await
+    pub async fn next_progress(&mut self, cx: &Cx) -> Option<TransferProgress> {
+        self.progress_rx.recv(cx).await.ok()
     }
 
     /// Close the writer and flush any remaining data.

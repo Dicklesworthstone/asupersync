@@ -16,11 +16,10 @@
 //! - Cx-first APIs with explicit capability boundaries
 
 pub mod chunk;
-pub mod handshake;
-// TODO: Fix compilation issues in ATP loss module
-// pub mod loss;
 pub mod datagram;
 pub mod discovery;
+pub mod handshake;
+pub mod loss;
 pub mod object;
 pub mod ops;
 pub mod path;
@@ -29,8 +28,7 @@ pub mod protocol;
 pub mod quic;
 pub mod relay;
 pub mod rendezvous;
-// TODO: Fix compilation issues in ATP SDK
-// pub mod sdk;
+pub mod sdk;
 pub mod streams;
 pub mod stun;
 

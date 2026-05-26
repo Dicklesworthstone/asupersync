@@ -731,8 +731,3 @@ mod tests {
         crate::test_complete!("filesystem_object_store");
     }
 }
-    result.join().unwrap();
-
-        crate::test_complete!("filesystem_object_store");
-    }
-}

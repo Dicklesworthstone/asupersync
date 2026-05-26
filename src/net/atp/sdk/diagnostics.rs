@@ -1,12 +1,14 @@
 //! ATP diagnostics and path troubleshooting.
 
-use crate::cx::Cx;
-use crate::net::atp::protocol::{AtpOutcome, AtpError, PathError, PeerId, SessionId, TransferNonce};
+use super::{AtpSdk, AtpSession, TransferId};
 use crate::atp::path::PathCandidateId;
-use super::{AtpSession, TransferId, AtpSdk};
-use std::net::{IpAddr, SocketAddr};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use crate::cx::Cx;
+use crate::net::atp::protocol::{
+    AtpError, AtpOutcome, PathError, PeerId, SessionId, TransferNonce,
+};
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, SocketAddr};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Comprehensive path diagnosis result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -311,11 +313,7 @@ pub enum WarningCategory {
 
 impl AtpSdk {
     /// Perform comprehensive path diagnosis for a target peer.
-    pub async fn path_diagnose(
-        &self,
-        cx: &Cx,
-        target_peer: PeerId,
-    ) -> AtpOutcome<PathDiagnosis> {
+    pub async fn path_diagnose(&self, cx: &Cx, target_peer: PeerId) -> AtpOutcome<PathDiagnosis> {
         let timestamp_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -504,11 +502,7 @@ pub struct PathMonitor {
 }
 
 impl PathMonitor {
-    async fn start(
-        session: AtpSession,
-        cx: Cx,
-        interval_ms: u64,
-    ) -> AtpOutcome<Self> {
+    async fn start(session: AtpSession, cx: Cx, interval_ms: u64) -> AtpOutcome<Self> {
         let monitor = Self {
             session: session.clone(),
             monitoring: true,
@@ -526,7 +520,7 @@ impl PathMonitor {
     async fn monitoring_loop(&mut self, _cx: Cx) {
         while self.monitoring {
             // Simulate path monitoring
-            crate::time::sleep(Duration::from_millis(self.interval_ms)).await;
+            crate::time::sleep(crate::time::wall_now(), Duration::from_millis(self.interval_ms)).await;
 
             // In a real implementation, this would:
             // 1. Check path quality metrics
@@ -605,21 +599,28 @@ mod tests {
         crate::test_utils::init_test("path_diagnosis_basic");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime.state.create_root_region(crate::types::Budget::INFINITE);
+        let region = runtime
+            .state
+            .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(region, crate::types::Budget::INFINITE);
+        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+            region,
+            crate::types::Budget::INFINITE,
+        );
 
-        let (_, result) = scope.spawn(&mut runtime.state, &cx, async move {
-            let config = SessionConfig::default();
-            let sdk = AtpSdk::new_in_process(config);
+        let (_, result) = scope
+            .spawn(&mut runtime.state, &cx, async move {
+                let config = SessionConfig::default();
+                let sdk = AtpSdk::new_in_process(config);
 
-            let target_peer = PeerId::from_label("target_peer");
-            let diagnosis = sdk.path_diagnose(&cx, target_peer).await.unwrap();
+                let target_peer = PeerId::from_label("target_peer");
+                let diagnosis = sdk.path_diagnose(&cx, target_peer).await.unwrap();
 
-            assert_eq!(diagnosis.peer_id, target_peer);
-            assert!(!diagnosis.path_candidates.is_empty());
-            assert!(diagnosis.timestamp_nanos > 0);
-        }).unwrap();
+                assert_eq!(diagnosis.peer_id, target_peer);
+                assert!(!diagnosis.path_candidates.is_empty());
+                assert!(diagnosis.timestamp_nanos > 0);
+            })
+            .unwrap();
 
         runtime.run_until_idle();
         result.join().unwrap();
@@ -699,24 +700,31 @@ mod tests {
         crate::test_utils::init_test("path_monitoring");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime.state.create_root_region(crate::types::Budget::INFINITE);
+        let region = runtime
+            .state
+            .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(region, crate::types::Budget::INFINITE);
+        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+            region,
+            crate::types::Budget::INFINITE,
+        );
 
-        let (_, result) = scope.spawn(&mut runtime.state, &cx, async move {
-            let config = SessionConfig::default();
-            let sdk = AtpSdk::new_in_process(config);
+        let (_, result) = scope
+            .spawn(&mut runtime.state, &cx, async move {
+                let config = SessionConfig::default();
+                let sdk = AtpSdk::new_in_process(config);
 
-            let peer = PeerId::from_label("test_peer");
-            let session_options = crate::net::atp::sdk::SessionOptions::direct(peer);
-            let session = sdk.open_session(&cx, session_options).await.unwrap();
+                let peer = PeerId::from_label("test_peer");
+                let session_options = crate::net::atp::sdk::SessionOptions::direct(peer);
+                let session = sdk.open_session(&cx, session_options).await.unwrap();
 
-            let monitor = session.start_path_monitoring(&cx, 100).await.unwrap();
-            assert!(monitor.last_diagnosis().is_none());
+                let monitor = session.start_path_monitoring(&cx, 100).await.unwrap();
+                assert!(monitor.last_diagnosis().is_none());
 
-            // In a real test, we would wait for monitoring to produce results
-            crate::time::sleep(Duration::from_millis(50)).await;
-        }).unwrap();
+                // In a real test, we would wait for monitoring to produce results
+                crate::time::sleep(Duration::from_millis(50)).await;
+            })
+            .unwrap();
 
         runtime.run_until_idle();
         result.join().unwrap();
