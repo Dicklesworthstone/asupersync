@@ -556,4 +556,83 @@ mod tests {
         assert_eq!(cache.metrics().total_bytes, 0);
         assert_eq!(cache.metrics().entry_count, 0);
     }
+
+    // Golden Artifact Tests for ATP Cache Serialization Stability
+
+    #[test]
+    fn golden_cache_config_default_serialization() {
+        use insta::assert_json_snapshot;
+
+        let config = CacheConfig::default();
+        assert_json_snapshot!("cache_config_default", config);
+    }
+
+    #[test]
+    fn golden_cache_config_custom_serialization() {
+        use insta::assert_json_snapshot;
+        use std::path::PathBuf;
+
+        let config = CacheConfig {
+            max_size_bytes: 512 * 1024 * 1024, // 512 MiB
+            max_entries: 5_000,
+            default_ttl: Duration::from_secs(12 * 60 * 60), // 12 hours
+            eviction_policy: EvictionPolicy::Hybrid,
+            allow_plaintext_shared: true,
+            storage_root: PathBuf::from("/var/cache/atp"),
+            compression_enabled: false,
+        };
+        assert_json_snapshot!("cache_config_custom", config);
+    }
+
+    #[test]
+    fn golden_cache_key_serialization() {
+        use insta::assert_json_snapshot;
+
+        // Test cache key with scope
+        let key_with_scope = CacheKey::new(
+            "sha256:a1b2c3d4e5f6g7h8".to_string(),
+            "sha256:1234567890abcdef".to_string(),
+            Some("team:engineering".to_string()),
+        );
+        assert_json_snapshot!("cache_key_with_scope", key_with_scope);
+
+        // Test cache key without scope
+        let key_no_scope = CacheKey::new(
+            "sha256:fedcba0987654321".to_string(),
+            "sha256:abcdef1234567890".to_string(),
+            None,
+        );
+        assert_json_snapshot!("cache_key_no_scope", key_no_scope);
+    }
+
+    #[test]
+    fn golden_eviction_policy_serialization() {
+        use insta::assert_json_snapshot;
+
+        let policies = vec![
+            EvictionPolicy::LeastRecentlyUsed,
+            EvictionPolicy::LeastFrequentlyUsed,
+            EvictionPolicy::ShortestTtl,
+            EvictionPolicy::LargestFirst,
+            EvictionPolicy::Hybrid,
+        ];
+
+        assert_json_snapshot!("eviction_policies", policies);
+    }
+
+    #[test]
+    fn golden_cache_metrics_serialization() {
+        use insta::assert_json_snapshot;
+
+        let mut metrics = CacheMetrics::default();
+        metrics.hits = 1500;
+        metrics.misses = 300;
+        metrics.evictions = 25;
+        metrics.verification_failures = 2;
+        metrics.total_bytes = 1024 * 1024; // 1 MiB
+        metrics.entry_count = 150;
+        metrics.update_hit_ratio();
+
+        assert_json_snapshot!("cache_metrics_sample", metrics);
+    }
 }
