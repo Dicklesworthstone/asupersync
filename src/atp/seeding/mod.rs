@@ -236,9 +236,13 @@ impl AtpSeedingService {
             ));
         }
 
-        // Check if requester has appropriate grants
-        if self.config.require_explicit_grants && !requester_grants.contains(&auth.grant_scope) {
-            return Err(SeedingError::InsufficientGrants(auth.grant_scope.clone()));
+        // Always check if requester has appropriate grants
+        // Security: Grant verification cannot be bypassed, even when explicit grants are disabled
+        if !requester_grants.contains(&auth.grant_scope) {
+            // For explicitly public content, allow access without specific grants
+            if auth.grant_scope != "public" && auth.grant_scope != "public-read" {
+                return Err(SeedingError::InsufficientGrants(auth.grant_scope.clone()));
+            }
         }
 
         // Try to get content from cache
@@ -327,9 +331,12 @@ impl AtpSeedingService {
             return Err(SeedingError::ExpiredAuthorization(manifest_hash));
         }
 
-        // Check grants
-        if self.config.require_explicit_grants && !requester_grants.contains(&auth.grant_scope) {
-            return Err(SeedingError::InsufficientGrants(auth.grant_scope.clone()));
+        // Always check grants - security cannot be bypassed via configuration
+        if !requester_grants.contains(&auth.grant_scope) {
+            // For explicitly public content, allow access without specific grants
+            if auth.grant_scope != "public" && auth.grant_scope != "public-read" {
+                return Err(SeedingError::InsufficientGrants(auth.grant_scope.clone()));
+            }
         }
 
         // Create session
@@ -574,5 +581,58 @@ mod tests {
         service.end_session(&session_id).unwrap();
         assert!(!service.active_sessions.contains_key(&session_id));
         assert_eq!(service.metrics().sessions_completed, 1);
+    }
+
+    #[test]
+    fn grant_verification_cannot_be_bypassed() {
+        let config = SeedingConfig {
+            enabled: true,
+            require_explicit_grants: false, // Even when disabled, security should still work
+            ..SeedingConfig::default()
+        };
+        let cache = AtpCache::new(CacheConfig::default());
+        let mut service = AtpSeedingService::new(config, cache);
+
+        // Authorize a manifest with private scope
+        service
+            .authorize_manifest(
+                "manifest123".to_string(),
+                "private-scope".to_string(),
+                "high".to_string(),
+            )
+            .unwrap();
+
+        // Try to access without proper grants - should be denied
+        let result = service.get_seeded_content(
+            "manifest123",
+            "content456",
+            &["wrong-scope".to_string()],
+        );
+        assert!(matches!(result, Err(SeedingError::InsufficientGrants(_))));
+
+        // Try to start session without proper grants - should be denied
+        let result = service.start_session(
+            "peer1".to_string(),
+            "manifest123".to_string(),
+            vec!["wrong-scope".to_string()],
+        );
+        assert!(matches!(result, Err(SeedingError::InsufficientGrants(_))));
+
+        // Public content should still be accessible
+        service
+            .authorize_manifest(
+                "public-manifest".to_string(),
+                "public".to_string(),
+                "high".to_string(),
+            )
+            .unwrap();
+
+        let result = service.get_seeded_content(
+            "public-manifest",
+            "content789",
+            &["any-scope".to_string()],
+        );
+        // Should not fail due to grants (will fail due to missing cache content)
+        assert!(matches!(result, Ok(None) | Err(SeedingError::CacheError(_))));
     }
 }
