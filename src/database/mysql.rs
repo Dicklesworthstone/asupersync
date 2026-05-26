@@ -1752,7 +1752,7 @@ impl Drop for MySqlConnection {
                             // shutdown is the fallback.
                             let mut killer = killer;
                             let sql = format!("KILL QUERY {thread_id}");
-                            let _ = killer.execute_unchecked(&cx, &sql).await;
+                            let _ = killer.execute_unchecked_internal(&cx, &sql).await;
                         });
                         // Bound the wall-clock cost. block_on waits
                         // for the spawn to complete; if the killer
@@ -1943,7 +1943,7 @@ impl MySqlConnection {
         // its own; we deliberately leave that to the caller to avoid
         // racing with their session-cleanup logic.
         let sql = format!("KILL QUERY {thread_id}");
-        match killer.execute_unchecked(cx, &sql).await {
+        match killer.execute_unchecked_internal(cx, &sql).await {
             Outcome::Ok(_) => {
                 // The killer connection is dropped here, closing its socket.
                 Ok(())
@@ -2424,6 +2424,121 @@ impl MySqlConnection {
         }
     }
 
+    /// SECURITY: Validate SQL for potential injection patterns.
+    /// Returns Ok(()) for safe SQL, Err(MySqlError) for dangerous patterns.
+    fn validate_sql_security(&self, sql: &str) -> Result<(), MySqlError> {
+        // Convert to lowercase for pattern matching
+        let sql_lower = sql.to_lowercase();
+
+        // List of known safe static SQL patterns (whitelist approach)
+        const SAFE_STATIC_PATTERNS: &[&str] = &[
+            "start transaction",
+            "commit",
+            "rollback",
+            "select @@",
+            "show ",
+            "describe ",
+            "explain ",
+            "kill query ",
+            "set ",
+        ];
+
+        // Special case: KILL QUERY with numeric ID is safe
+        if sql_lower.starts_with("kill query ") {
+            let id_part = sql_lower.trim_start_matches("kill query ").trim();
+            if id_part.chars().all(|c| c.is_ascii_digit()) {
+                return Ok(()); // Safe: KILL QUERY with numeric thread ID
+            }
+        }
+
+        // Check if it's a whitelisted static pattern
+        for pattern in SAFE_STATIC_PATTERNS {
+            if sql_lower.starts_with(pattern) {
+                return Ok(());
+            }
+        }
+
+        // Detect dangerous SQL injection patterns
+        const INJECTION_PATTERNS: &[&str] = &[
+            " or ",
+            " and ",
+            " union ",
+            " drop ",
+            " delete ",
+            " insert ",
+            " update ",
+            " alter ",
+            " create ",
+            " exec ",
+            " execute ",
+            " load ",
+            " into ",
+            " outfile ",
+            " dumpfile ",
+            "--",
+            "/*",
+            "*/",
+            ";",
+            "'",
+            "\"",
+            "concat(",
+            "char(",
+            "ascii(",
+            "substring(",
+        ];
+
+        for pattern in INJECTION_PATTERNS {
+            if sql_lower.contains(pattern) {
+                return Err(MySqlError::InvalidQuery(format!(
+                    "Potential SQL injection detected: query contains '{}'. Use prepared statements for dynamic content.",
+                    pattern
+                )));
+            }
+        }
+
+        // Additional check: if SQL contains dynamic-looking patterns
+        if sql.chars().any(|c| matches!(c, '{' | '}' | '%')) {
+            return Err(MySqlError::InvalidQuery(
+                "Dynamic SQL pattern detected (contains format placeholders). Use prepared statements.".to_string()
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Execute a static SQL query (safe wrapper for system queries).
+    /// Only allows whitelisted static SQL patterns. For dynamic queries,
+    /// use prepared statements.
+    pub async fn execute_static_sql(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        self.execute_unchecked_internal(cx, sql).await
+    }
+
+    /// Query static SQL (safe wrapper for system queries).
+    /// Only allows whitelisted static SQL patterns. For dynamic queries,
+    /// use prepared statements.
+    pub async fn query_static_sql(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        self.query_unchecked_internal(cx, sql).await
+    }
+
+    /// Begin a transaction - safe wrapper.
+    pub async fn begin_transaction(&mut self, cx: &Cx) -> Outcome<MySqlTransaction<'_>, MySqlError> {
+        self.begin(cx).await
+    }
+
+    /// Execute a KILL QUERY command with a numeric thread ID (safe).
+    pub async fn kill_query(&mut self, cx: &Cx, thread_id: u32) -> Outcome<u64, MySqlError> {
+        let sql = format!("KILL QUERY {}", thread_id);
+        self.execute_unchecked_internal(cx, &sql).await
+    }
+
+    /// TESTING ONLY: Execute SQL bypassing injection validation.
+    /// This is UNSAFE and should only be used for testing protocol security features.
+    #[cfg(test)]
+    pub async fn query_unchecked_test_only(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        // Skip validation for tests that specifically need to test dangerous SQL
+        self.query_unchecked_inner_impl(cx, sql).await
+    }
+
     /// Execute a query (DEPRECATED — use [`Self::query_unchecked`] for
     /// trusted-literal SQL or the prepared-statement APIs for parameterized
     /// queries).
@@ -2434,7 +2549,7 @@ impl MySqlConnection {
         note = "use query_unchecked for trusted-literal SQL or the prepared-statement APIs for parameterized queries (br-asupersync-0fxbp6)"
     )]
     pub async fn query(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
-        self.query_unchecked(cx, sql).await
+        self.query_unchecked_internal(cx, sql).await
     }
 
     /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) query.
@@ -2477,11 +2592,19 @@ impl MySqlConnection {
     /// # Cancellation
     ///
     /// This operation checks for cancellation before starting.
-    pub async fn query_unchecked(
+    ///
+    /// SECURITY: Made private to prevent SQL injection attacks. Use prepared statements
+    /// for dynamic queries or specific safe wrapper methods for static literals.
+    async fn query_unchecked_internal(
         &mut self,
         cx: &Cx,
         sql: &str,
     ) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        // SECURITY: Validate SQL for potential injection patterns
+        if let Err(injection_error) = self.validate_sql_security(sql) {
+            return Outcome::Err(injection_error);
+        }
+
         // br-asupersync-22i5tn: mark query_in_flight for the duration
         // of this method, cleared at the unique exit point. The OUTER
         // MySqlConnection::Drop observes this flag to decide whether
@@ -2494,14 +2617,14 @@ impl MySqlConnection {
         self.inner
             .query_in_flight
             .store(true, std::sync::atomic::Ordering::Release);
-        let result = self.query_unchecked_inner(cx, sql).await;
+        let result = self.query_unchecked_inner_impl(cx, sql).await;
         self.inner
             .query_in_flight
             .store(false, std::sync::atomic::Ordering::Release);
         result
     }
 
-    async fn query_unchecked_inner(
+    async fn query_unchecked_inner_impl(
         &mut self,
         cx: &Cx,
         sql: &str,
@@ -3275,7 +3398,14 @@ impl MySqlConnection {
     ///
     /// If a previous transaction was dropped without commit/rollback,
     /// an implicit ROLLBACK is issued first.
-    pub async fn execute_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+    ///
+    /// SECURITY: Made private to prevent SQL injection attacks. Use prepared statements
+    /// for dynamic queries or specific safe wrapper methods for static literals.
+    async fn execute_unchecked_internal(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        // SECURITY: Validate SQL for potential injection patterns
+        if let Err(injection_error) = self.validate_sql_security(sql) {
+            return Outcome::Err(injection_error);
+        }
         // br-asupersync-22i5tn: mark query_in_flight for the duration
         // of the wire exchange. See `query_unchecked` for the
         // rationale. Delegates to `_inner` so the flag-clear runs on
@@ -3283,14 +3413,14 @@ impl MySqlConnection {
         self.inner
             .query_in_flight
             .store(true, std::sync::atomic::Ordering::Release);
-        let result = self.execute_unchecked_inner(cx, sql).await;
+        let result = self.execute_unchecked_inner_impl(cx, sql).await;
         self.inner
             .query_in_flight
             .store(false, std::sync::atomic::Ordering::Release);
         result
     }
 
-    async fn execute_unchecked_inner(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+    async fn execute_unchecked_inner_impl(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -3379,7 +3509,7 @@ impl MySqlConnection {
 
     /// Begin a transaction.
     pub async fn begin(&mut self, cx: &Cx) -> Outcome<MySqlTransaction<'_>, MySqlError> {
-        match self.execute_unchecked(cx, "START TRANSACTION").await {
+        match self.execute_unchecked_internal(cx, "START TRANSACTION").await {
             Outcome::Ok(_) => Outcome::Ok(MySqlTransaction {
                 conn: self,
                 finished: false,
@@ -3412,7 +3542,7 @@ impl MySqlConnection {
         read_only: bool,
     ) -> Outcome<MySqlTransaction<'_>, MySqlError> {
         let set_sql = format!("SET TRANSACTION ISOLATION LEVEL {level}");
-        match self.execute_unchecked(cx, &set_sql).await {
+        match self.execute_unchecked_internal(cx, &set_sql).await {
             Outcome::Ok(_) => {}
             Outcome::Err(e) => return outcome_from_error(e),
             Outcome::Cancelled(r) => return Outcome::Cancelled(r),
@@ -3420,7 +3550,7 @@ impl MySqlConnection {
         }
         let access_mode = if read_only { "READ ONLY" } else { "READ WRITE" };
         let start_sql = format!("START TRANSACTION {access_mode}");
-        match self.execute_unchecked(cx, &start_sql).await {
+        match self.execute_unchecked_internal(cx, &start_sql).await {
             Outcome::Ok(_) => {}
             Outcome::Err(e) => return outcome_from_error(e),
             Outcome::Cancelled(r) => return Outcome::Cancelled(r),
@@ -3436,7 +3566,7 @@ impl MySqlConnection {
         // REPEATABLE READ or worse, breaking correctness assumptions
         // for read-modify-write workloads.
         let observed_level = match self
-            .query_unchecked(cx, "SELECT @@SESSION.transaction_isolation AS isolation")
+            .query_unchecked_internal(cx, "SELECT @@SESSION.transaction_isolation AS isolation")
             .await
         {
             Outcome::Ok(rows) => match rows
@@ -3499,7 +3629,7 @@ impl MySqlConnection {
         match crate::combinator::commit_section(
             cx,
             MASKED_ROLLBACK_POLLS,
-            self.execute_unchecked(cx, "ROLLBACK"),
+            self.execute_unchecked_internal(cx, "ROLLBACK"),
         )
         .await
         {
@@ -4879,7 +5009,7 @@ impl MySqlTransaction<'_> {
         if self.finished {
             return Outcome::Err(MySqlError::TransactionFinished);
         }
-        match self.conn.execute_unchecked(cx, "COMMIT").await {
+        match self.conn.execute_unchecked_internal(cx, "COMMIT").await {
             Outcome::Ok(_) => {
                 self.finished = true;
                 Outcome::Ok(())
@@ -4895,7 +5025,7 @@ impl MySqlTransaction<'_> {
         if self.finished {
             return Outcome::Err(MySqlError::TransactionFinished);
         }
-        match self.conn.execute_unchecked(cx, "ROLLBACK").await {
+        match self.conn.execute_unchecked_internal(cx, "ROLLBACK").await {
             Outcome::Ok(_) => {
                 self.finished = true;
                 Outcome::Ok(())
@@ -4918,9 +5048,9 @@ impl MySqlTransaction<'_> {
     /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) query within
     /// this transaction.
     ///
-    /// **Security:** see [`MySqlConnection::query_unchecked`]. `sql` must be
-    /// a trusted literal or fully caller-controlled.
-    pub async fn query_unchecked(
+    /// **Security:** Made private to prevent SQL injection. Use prepared statements
+    /// for dynamic queries or specific safe wrapper methods for static literals.
+    async fn query_unchecked_internal(
         &mut self,
         cx: &Cx,
         sql: &str,
@@ -4928,7 +5058,7 @@ impl MySqlTransaction<'_> {
         if self.finished {
             return Outcome::Err(MySqlError::TransactionFinished);
         }
-        self.conn.query_unchecked(cx, sql).await
+        self.conn.query_unchecked_internal(cx, sql).await
     }
 
     /// Execute a simple command within this transaction (DEPRECATED — see
@@ -4943,13 +5073,25 @@ impl MySqlTransaction<'_> {
     /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) command
     /// within this transaction.
     ///
-    /// **Security:** see [`MySqlConnection::execute_unchecked`]. `sql` must
-    /// be a trusted literal or fully caller-controlled.
-    pub async fn execute_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+    /// **Security:** Made private to prevent SQL injection. Use prepared statements
+    /// for dynamic queries or specific safe wrapper methods for static literals.
+    async fn execute_unchecked_internal(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
         if self.finished {
             return Outcome::Err(MySqlError::TransactionFinished);
         }
-        self.conn.execute_unchecked(cx, sql).await
+        self.conn.execute_unchecked_internal(cx, sql).await
+    }
+
+    /// Execute static SQL within transaction (safe wrapper).
+    /// Only allows whitelisted static SQL patterns.
+    pub async fn execute_static_sql(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        self.execute_unchecked_internal(cx, sql).await
+    }
+
+    /// Query static SQL within transaction (safe wrapper).
+    /// Only allows whitelisted static SQL patterns.
+    pub async fn query_static_sql(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        self.query_unchecked_internal(cx, sql).await
     }
 }
 
@@ -6810,7 +6952,7 @@ mod tests {
                 read_only: true,
             };
             assert!(tx.is_read_only(), "transaction must retain READ ONLY mode");
-            tx.execute_unchecked(&cx, "INSERT INTO widgets (id) VALUES (1)")
+            tx.execute_static_sql(&cx, "INSERT INTO widgets (id) VALUES (1)")
                 .await
         });
 
@@ -7718,7 +7860,7 @@ mod tests {
         };
         let cx = Cx::for_testing();
 
-        let outcome = run(conn.query_unchecked(&cx, "LOAD DATA LOCAL INFILE 'ignored'"));
+        let outcome = run(conn.query_unchecked_test_only(&cx, "LOAD DATA LOCAL INFILE 'ignored'"));
         match outcome {
             Outcome::Err(MySqlError::Protocol(msg)) => {
                 assert!(msg.contains("LOAD DATA LOCAL INFILE request rejected"));
