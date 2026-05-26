@@ -124,6 +124,64 @@
 - **Tests affected:** ATP-CAP-013
 - **Review date:** 2026-05-26
 
+## ATP Object Graph Transfer Conformance Divergences
+
+### DISC-OBJ-001: Transfer atomicity not implemented
+- **Reference:** ATP Object Graph Transfer Section 4.1 - Atomic transfer operations
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Object graph transfers may leave system in inconsistent state on failure
+- **Resolution:** WILL-FIX — implement atomic transfer operation mechanism
+- **Tests affected:** OBJ-ATOMIC-001
+- **Review date:** 2026-05-26
+
+### DISC-OBJ-002: Partial transfer rollback missing
+- **Reference:** ATP Object Graph Transfer Section 4.2 - Rollback safety for partial transfers
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Partial transfers cannot be safely rolled back on errors
+- **Resolution:** WILL-FIX — implement partial transfer rollback mechanism
+- **Tests affected:** OBJ-ATOMIC-002
+- **Review date:** 2026-05-26
+
+### DISC-OBJ-003: Incremental transfer progress missing
+- **Reference:** ATP Object Graph Transfer Section 4.3 - Incremental progress support
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Large transfers have no progress tracking or resumption capability
+- **Resolution:** WILL-FIX — implement incremental transfer progress tracking
+- **Tests affected:** OBJ-ATOMIC-003
+- **Review date:** 2026-05-26
+
+### DISC-OBJ-004: Transfer-time corruption detection missing
+- **Reference:** ATP Object Graph Transfer Section 5.1 - Runtime corruption detection
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Corrupted objects not detected during transfer - security risk
+- **Resolution:** WILL-FIX — implement runtime content verification during transfers
+- **Tests affected:** OBJ-CORRUPT-001
+- **Review date:** 2026-05-26
+
+### DISC-OBJ-005: Manifest corruption detection missing
+- **Reference:** ATP Object Graph Transfer Section 5.2 - Manifest verification
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Manifest tampering may go undetected - integrity risk
+- **Resolution:** WILL-FIX — implement manifest corruption detection
+- **Tests affected:** OBJ-CORRUPT-002
+- **Review date:** 2026-05-26
+
+### DISC-OBJ-006: Detailed corruption error reporting missing
+- **Reference:** ATP Object Graph Transfer Section 5.3 - Corruption error details
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Poor debugging experience for corruption issues
+- **Resolution:** WILL-FIX — implement detailed corruption error reporting
+- **Tests affected:** OBJ-CORRUPT-003
+- **Review date:** 2026-05-26
+
+### DISC-OBJ-007: Duplicate child name validation missing
+- **Reference:** ATP Object Graph Transfer Section 7.2 - Graph structure validation
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Invalid object graphs with duplicate child names may be accepted
+- **Resolution:** WILL-FIX — implement duplicate child name validation
+- **Tests affected:** OBJ-VALID-002
+- **Review date:** 2026-05-26
+
 ## RaptorQ RFC 6330 Conformance Divergences
 
 ### DISC-001: GF(256) inverse operation for zero element
