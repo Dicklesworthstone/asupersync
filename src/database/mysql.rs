@@ -2455,6 +2455,28 @@ impl MySqlConnection {
     /// This operation checks for cancellation before starting.
     /// If a previous transaction was dropped without commit/rollback,
     /// an implicit ROLLBACK is issued first.
+    /// br-asupersync-6lfi5s — Execute a simple (unparameterized) query.
+    ///
+    /// # Security
+    ///
+    /// **This function performs NO parameterization.** The `sql` string is
+    /// sent directly to the server as a MySQL protocol Query message. If
+    /// any portion of `sql` is built from untrusted input
+    /// (`format!`, `String::push_str`, concatenation, etc.) the connection
+    /// is wide open to SQL injection.
+    ///
+    /// Use this only when:
+    /// - `sql` is a static literal (e.g. `"BEGIN"`, `"COMMIT"`,
+    ///   `"SHOW TABLES"`), or
+    /// - `sql` was built entirely from values you control end-to-end.
+    ///
+    /// For any value derived from a user, request body, URL parameter,
+    /// header, file content, environment variable, or other external source,
+    /// use [`Self::query_prepared`] with proper parameterization instead.
+    ///
+    /// # Cancellation
+    ///
+    /// This operation checks for cancellation before starting.
     pub async fn query_unchecked(
         &mut self,
         cx: &Cx,
