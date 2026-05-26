@@ -291,7 +291,7 @@ mod tests {
             access_count: 1,
             ttl: Duration::from_secs(86400),
             encrypted: true,
-            storage_location: crate::atp::cache::StorageLocation::Memory,
+            storage_location: crate::atp::cache::StorageLocation::Memory("test:key".to_string()),
             verification: crate::atp::cache::VerificationMetadata {
                 content_verified: true,
                 manifest_verified: true,
@@ -308,7 +308,7 @@ mod tests {
             access_count: 5,
             ttl: Duration::from_secs(86400),
             encrypted: true,
-            storage_location: crate::atp::cache::StorageLocation::Memory,
+            storage_location: crate::atp::cache::StorageLocation::Memory("test:key".to_string()),
             verification: crate::atp::cache::VerificationMetadata {
                 content_verified: true,
                 manifest_verified: true,
@@ -347,7 +347,7 @@ mod tests {
             access_count: 1,
             ttl: Duration::from_secs(86400),
             encrypted: true,
-            storage_location: crate::atp::cache::StorageLocation::Memory,
+            storage_location: crate::atp::cache::StorageLocation::Memory("test:key".to_string()),
             verification: crate::atp::cache::VerificationMetadata {
                 content_verified: true,
                 manifest_verified: true,

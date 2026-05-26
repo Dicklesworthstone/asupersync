@@ -125,7 +125,7 @@ impl CacheStorage for FileStorage {
 
                 Ok(decompressed)
             }
-            StorageLocation::Memory => Err(CacheError::Storage(
+            StorageLocation::Memory(_) => Err(CacheError::Storage(
                 "Memory storage not supported by FileStorage".to_string(),
             )),
             StorageLocation::External(url) => Err(CacheError::Storage(format!(
@@ -147,7 +147,7 @@ impl CacheStorage for FileStorage {
                 }
                 Ok(())
             }
-            StorageLocation::Memory => Err(CacheError::Storage(
+            StorageLocation::Memory(_) => Err(CacheError::Storage(
                 "Memory storage not supported by FileStorage".to_string(),
             )),
             StorageLocation::External(url) => Err(CacheError::Storage(format!(
@@ -164,7 +164,7 @@ impl CacheStorage for FileStorage {
     fn exists(&self, location: &StorageLocation) -> bool {
         match location {
             StorageLocation::File(path) => path.exists(),
-            StorageLocation::Memory => false, // FileStorage doesn't handle memory
+            StorageLocation::Memory(_) => false, // FileStorage doesn't handle memory
             StorageLocation::External(_) => false, // Can't check external existence
         }
     }
@@ -212,7 +212,7 @@ impl CacheStorage for MemoryStorage {
 
         {
             let mut store = self.content_store.write().unwrap();
-            store.insert(memory_key, content.to_vec());
+            store.insert(memory_key.clone(), content.to_vec());
         }
 
         // Update metrics
@@ -220,17 +220,17 @@ impl CacheStorage for MemoryStorage {
         self.metrics.bytes_stored += content.len() as u64;
         self.current_memory_bytes += content.len() as u64;
 
-        Ok(StorageLocation::Memory)
+        Ok(StorageLocation::Memory(memory_key))
     }
 
     fn retrieve(&self, location: &StorageLocation) -> Result<Vec<u8>, CacheError> {
         match location {
-            StorageLocation::Memory => {
-                // For memory storage, we'd need the key to retrieve
-                // This is a limitation of the current design - would need to pass key
-                Err(CacheError::Storage(
-                    "Memory retrieval requires key context".to_string(),
-                ))
+            StorageLocation::Memory(key) => {
+                let store = self.content_store.read().unwrap();
+                store
+                    .get(key)
+                    .cloned()
+                    .ok_or_else(|| CacheError::Storage("Content not found in memory".to_string()))
             }
             StorageLocation::File(path) => Err(CacheError::Storage(format!(
                 "File storage not supported: {:?}",
@@ -245,11 +245,14 @@ impl CacheStorage for MemoryStorage {
 
     fn remove(&mut self, location: &StorageLocation) -> Result<(), CacheError> {
         match location {
-            StorageLocation::Memory => {
-                // Would need key to identify what to remove
-                Err(CacheError::Storage(
-                    "Memory removal requires key context".to_string(),
-                ))
+            StorageLocation::Memory(key) => {
+                let mut store = self.content_store.write().unwrap();
+                if let Some(content) = store.remove(key) {
+                    // Update metrics and memory tracking
+                    self.metrics.files_removed += 1;
+                    self.current_memory_bytes -= content.len() as u64;
+                }
+                Ok(())
             }
             StorageLocation::File(path) => Err(CacheError::Storage(format!(
                 "File storage not supported: {:?}",
@@ -268,9 +271,9 @@ impl CacheStorage for MemoryStorage {
 
     fn exists(&self, location: &StorageLocation) -> bool {
         match location {
-            StorageLocation::Memory => {
-                // Would need key to check existence
-                false
+            StorageLocation::Memory(key) => {
+                let store = self.content_store.read().unwrap();
+                store.contains_key(key)
             }
             StorageLocation::File(_) => false,
             StorageLocation::External(_) => false,
@@ -357,7 +360,7 @@ impl CacheStorage for HybridStorage {
 
     fn retrieve(&self, location: &StorageLocation) -> Result<Vec<u8>, CacheError> {
         let result = match location {
-            StorageLocation::Memory => self.memory_storage.retrieve(location),
+            StorageLocation::Memory(_) => self.memory_storage.retrieve(location),
             StorageLocation::File(_) => self.file_storage.retrieve(location),
             StorageLocation::External(_) => Err(CacheError::Storage(
                 "External storage not supported".to_string(),
@@ -370,7 +373,7 @@ impl CacheStorage for HybridStorage {
 
     fn remove(&mut self, location: &StorageLocation) -> Result<(), CacheError> {
         let result = match location {
-            StorageLocation::Memory => self.memory_storage.remove(location),
+            StorageLocation::Memory(_) => self.memory_storage.remove(location),
             StorageLocation::File(_) => self.file_storage.remove(location),
             StorageLocation::External(_) => Err(CacheError::Storage(
                 "External storage not supported".to_string(),
@@ -404,7 +407,7 @@ impl CacheStorage for HybridStorage {
 
     fn exists(&self, location: &StorageLocation) -> bool {
         match location {
-            StorageLocation::Memory => self.memory_storage.exists(location),
+            StorageLocation::Memory(_) => self.memory_storage.exists(location),
             StorageLocation::File(_) => self.file_storage.exists(location),
             StorageLocation::External(_) => false,
         }

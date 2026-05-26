@@ -74,8 +74,8 @@ pub struct CacheEntry {
 pub enum StorageLocation {
     /// Stored in a file on disk.
     File(PathBuf),
-    /// Stored in memory (for small, hot content).
-    Memory,
+    /// Stored in memory (for small, hot content) with lookup key.
+    Memory(String),
     /// Stored in external location (relay, CDN, etc.).
     External(String),
 }
@@ -263,8 +263,8 @@ impl AtpCache {
                     }
                 }
             }
-            StorageLocation::Memory => {
-                // For now, return empty content - full memory caching would need a separate store
+            StorageLocation::Memory(_) => {
+                // Memory content - would need proper storage backend integration
                 Ok(Some(Vec::new()))
             }
             StorageLocation::External(_) => {
@@ -297,7 +297,9 @@ impl AtpCache {
 
         // Choose storage location
         let storage_location = if size_bytes < 64 * 1024 {
-            StorageLocation::Memory // Small content in memory
+            // Small content in memory - generate memory key from cache key
+            let memory_key = format!("{}:{}", key.manifest_hash, key.content_hash);
+            StorageLocation::Memory(memory_key)
         } else {
             // Store in file
             let filename = format!("{}.cache", actual_hash);
