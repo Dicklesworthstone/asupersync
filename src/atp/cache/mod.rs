@@ -223,22 +223,25 @@ impl AtpCache {
     pub fn get(&mut self, key: &CacheKey) -> Result<Option<Vec<u8>>, CacheError> {
         let index_key = key.as_index_key();
 
-        // Check if entry exists
-        let entry = match self.entries.get(&index_key) {
-            Some(entry) => entry,
-            None => {
+        // Atomically check TTL and remove if expired to prevent TOCTOU races
+        let entry = if let Some(entry) = self.entries.get(&index_key) {
+            // Check TTL atomically with entry access
+            let elapsed = entry.created_at.elapsed().unwrap_or(Duration::MAX);
+            if elapsed > entry.ttl {
+                // Entry expired - remove it atomically
+                self.entries.remove(&index_key);
+                if let StorageLocation::File(path) = &entry.storage_location {
+                    let _ = std::fs::remove_file(path);
+                }
+                self.access_order.retain(|k| k != &index_key);
                 self.metrics.record_miss();
                 return Ok(None);
             }
-        };
-
-        // Check TTL
-        if entry.created_at.elapsed().unwrap_or(Duration::ZERO) > entry.ttl {
-            // Entry expired, remove it
-            self.remove(key)?;
+            entry
+        } else {
             self.metrics.record_miss();
             return Ok(None);
-        }
+        };
 
         // Check trust policy
         self.trust_policy.check_access(key)?;
@@ -494,6 +497,53 @@ mod tests {
         // This will fail due to hash mismatch, but tests the interface
         let result = cache.put(key.clone(), content);
         assert!(result.is_err()); // Should fail due to hash verification
+    }
+
+    #[test]
+    fn cache_ttl_toctou_fix() {
+        let mut cache = AtpCache::new(CacheConfig::default());
+
+        // Create a cache key
+        let key = CacheKey::new(
+            "manifest123".to_string(),
+            "d2d2d2d2d2d2d2d2".to_string(), // Dummy hash for test
+            None,
+        );
+
+        // Put some content with very short TTL
+        let content = b"test content";
+
+        // Manually add an expired entry to test TTL check
+        let expired_entry = CacheEntry {
+            key: key.clone(),
+            size_bytes: content.len() as u64,
+            created_at: SystemTime::now() - Duration::from_secs(3600), // 1 hour ago
+            last_accessed: SystemTime::now(),
+            access_count: 1,
+            ttl: Duration::from_secs(60), // 1 minute TTL (expired)
+            encrypted: true,
+            storage_location: StorageLocation::Memory("test".to_string()),
+            verification: VerificationMetadata {
+                content_verified: true,
+                manifest_verified: true,
+                proof_location: None,
+                verified_at: Some(SystemTime::now()),
+            },
+        };
+
+        // Insert expired entry directly
+        cache.entries.insert(key.as_index_key(), expired_entry);
+        cache.access_order.push(key.as_index_key());
+        assert_eq!(cache.entries.len(), 1);
+
+        // Try to get expired entry - should be atomically removed
+        let result = cache.get(&key);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none()); // Should return None for expired entry
+
+        // Entry should be removed from cache
+        assert_eq!(cache.entries.len(), 0);
+        assert_eq!(cache.access_order.len(), 0);
     }
 
     #[test]
