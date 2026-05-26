@@ -727,6 +727,31 @@ fn parse_nats_jwt_claims(jwt: &str) -> Result<JwtClaimsSummary, NatsError> {
         ));
     }
 
+    // br-asupersync-w6pmc1: P1 HIGH security fix - validate JWT expiration
+    // Prevent authentication with expired JWTs by checking exp claim against current time.
+    // Include clock skew tolerance to handle network delays and minor time differences.
+    if let Some(exp_timestamp) = expires_at {
+        // Get current time as Unix timestamp (seconds since epoch)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| {
+                NatsError::InvalidAuth("system clock error: cannot determine current time".to_string())
+            })?
+            .as_secs() as i64;
+
+        // Clock skew tolerance: allow 60 seconds of leeway for network delays
+        // and minor time synchronization differences between client and server
+        const CLOCK_SKEW_TOLERANCE_SECS: i64 = 60;
+        let effective_now = now - CLOCK_SKEW_TOLERANCE_SECS;
+
+        if exp_timestamp < effective_now {
+            return Err(NatsError::InvalidAuth(format!(
+                "JWT has expired: exp={} < current_time={} (with {}s tolerance)",
+                exp_timestamp, now, CLOCK_SKEW_TOLERANCE_SECS
+            )));
+        }
+    }
+
     Ok(JwtClaimsSummary {
         subject: subject.to_string(),
         issuer,
