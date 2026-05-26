@@ -60,6 +60,61 @@ use crate::record::{ObligationKind, ObligationState};
 use crate::types::RegionId;
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
+
+// ============================================================================
+// Panic-Safe Leak Tracker
+// ============================================================================
+
+/// Tracks obligation leaks that occur during panic unwinding.
+///
+/// This preserves the "no obligation leaks" invariant even when obligations
+/// are dropped during panic unwinding, where we cannot panic again.
+struct PanicLeakTracker {
+    /// Total number of obligations leaked during panic unwinding.
+    leak_count: AtomicU64,
+}
+
+impl PanicLeakTracker {
+    const fn new() -> Self {
+        Self {
+            leak_count: AtomicU64::new(0),
+        }
+    }
+
+    /// Record an obligation leak during panic unwinding.
+    ///
+    /// This is panic-safe and will not panic even if called during unwinding.
+    fn record_panic_leak(&self, kind: ObligationKind, description: &str) {
+        let count = self.leak_count.fetch_add(1, Ordering::Relaxed);
+
+        // Best-effort logging that won't panic during unwinding.
+        // In production, this could send to a metrics system.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            eprintln!(
+                "PANIC LEAK #{}: {} obligation '{}' dropped during panic unwinding",
+                count + 1, kind, description
+            );
+        }));
+    }
+
+    /// Get the total number of panic leaks recorded.
+    pub fn leak_count(&self) -> u64 {
+        self.leak_count.load(Ordering::Relaxed)
+    }
+}
+
+/// Global panic leak tracker instance.
+static PANIC_LEAK_TRACKER: LazyLock<PanicLeakTracker> = LazyLock::new(PanicLeakTracker::new);
+
+/// Returns the number of obligations that have leaked during panic unwinding.
+///
+/// This is useful for tests and monitoring to ensure that the "no obligation leaks"
+/// invariant is maintained even during exceptional circumstances.
+pub fn panic_leak_count() -> u64 {
+    PANIC_LEAK_TRACKER.leak_count()
+}
 
 // ============================================================================
 // Resolution
@@ -199,6 +254,10 @@ impl Drop for GradedObligation {
     fn drop(&mut self) {
         if !self.resolved {
             if std::thread::panicking() {
+                // During panic unwinding, we cannot panic again, but we must still
+                // track the obligation leak to maintain the "no obligation leaks" invariant.
+                // This preserves leak detection even during panic unwinding.
+                PANIC_LEAK_TRACKER.record_panic_leak(self.kind, &self.description);
                 return;
             }
             // In lab/debug mode: panic to surface the bug immediately.
