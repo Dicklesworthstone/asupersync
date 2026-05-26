@@ -49,6 +49,8 @@
 
 // Default to deny for unsafe code - specific modules (like epoll reactor) can use #[allow(unsafe_code)]
 // when they need to interface with FFI or low-level system APIs
+#![feature(try_trait_v2)]
+#![feature(try_trait_v2_residual)]
 #![deny(unsafe_code)]
 // missing_docs, clippy::pedantic, clippy::nursery, and the large set of
 // targeted `allow` overrides live in `[lints.rust]` / `[lints.clippy]` in

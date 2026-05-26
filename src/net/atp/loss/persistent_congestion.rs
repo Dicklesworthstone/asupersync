@@ -50,6 +50,7 @@ impl Default for PersistentCongestionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CongestionEvent {
     /// Event timestamp.
+    #[serde(skip, default = "Instant::now")]
     timestamp: Instant,
     /// Event type.
     event_type: CongestionEventType,
@@ -88,9 +89,10 @@ struct NetworkConditions {
 }
 
 /// A congestion epoch (period of sustained congestion).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct CongestionEpoch {
     /// Epoch start time.
+    #[serde(skip, default = "Instant::now")]
     start_time: Instant,
     /// Associated events.
     events: Vec<CongestionEvent>,

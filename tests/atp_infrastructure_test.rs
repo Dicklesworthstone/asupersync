@@ -4,8 +4,8 @@
 //! infrastructure works as expected. Serves as a foundational test for
 //! ATP development.
 
-use asupersync::net::atp;
 use asupersync::cx::Cx;
+use asupersync::net::atp;
 use asupersync::types::{Budget, Outcome};
 
 #[tokio::test]
@@ -43,7 +43,7 @@ mod atp_test_utils_tests {
         #[cfg(test)]
         {
             use asupersync::net::atp::test_utils::{
-                test_cx, test_data, assertions, mocks, TEST_BUDGET
+                TEST_BUDGET, assertions, mocks, test_cx, test_data,
             };
 
             // Test context creation
@@ -79,7 +79,10 @@ mod atp_test_utils_tests {
 
             let session1 = mocks::test_session_id(500);
             let session2 = mocks::test_session_id(500);
-            assert_eq!(session1, session2, "Mock session IDs should be deterministic");
+            assert_eq!(
+                session1, session2,
+                "Mock session IDs should be deterministic"
+            );
         }
     }
 }

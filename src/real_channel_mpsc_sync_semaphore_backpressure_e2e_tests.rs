@@ -52,7 +52,7 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::pin::Pin;
     use std::sync::{
-        Arc, Mutex, RwLock, PoisonError,
+        Arc, Mutex, PoisonError, RwLock,
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     };
     use std::task::{Context, Poll};
@@ -277,7 +277,8 @@ mod tests {
 
             // Update producer tracker
             if let Some(tracker) = safe_mutex_lock(&self.producer_trackers)
-                .get_mut(&producer_id) {
+                .get_mut(&producer_id)
+            {
                 tracker.messages_attempted += 1;
                 tracker.blocked_on_permits = true;
                 tracker.last_operation_time = Instant::now();
@@ -303,7 +304,8 @@ mod tests {
 
             // Update tracker for permit acquisition
             if let Some(tracker) = safe_mutex_lock(&self.producer_trackers)
-                .get_mut(&producer_id) {
+                .get_mut(&producer_id)
+            {
                 tracker.permits_acquired += 1;
                 tracker.blocked_on_permits = false;
                 tracker.blocked_on_mpsc_capacity = true;
@@ -361,8 +363,7 @@ mod tests {
 
                     // Update tracker
                     if let Some(tracker) =
-                        safe_mutex_lock(&self.producer_trackers)
-                            .get_mut(&producer_id)
+                        safe_mutex_lock(&self.producer_trackers).get_mut(&producer_id)
                     {
                         tracker.messages_sent += 1;
                         tracker.blocked_on_mpsc_capacity = false;

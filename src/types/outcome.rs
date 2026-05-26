@@ -98,7 +98,9 @@
 //! ```
 
 use super::cancel::CancelReason;
+use core::convert::Infallible;
 use core::fmt;
+use core::ops::{ControlFlow, FromResidual, Residual, Try};
 use serde::{Deserialize, Serialize};
 
 /// Payload from a caught panic.
@@ -685,6 +687,52 @@ impl<T, E> From<Result<T, E>> for Outcome<T, E> {
         match result {
             Ok(v) => Self::Ok(v),
             Err(e) => Self::Err(e),
+        }
+    }
+}
+
+impl<T, E> Try for Outcome<T, E> {
+    type Output = T;
+    type Residual = Outcome<Infallible, E>;
+
+    #[inline]
+    fn from_output(output: Self::Output) -> Self {
+        Self::Ok(output)
+    }
+
+    #[inline]
+    fn branch(self) -> ControlFlow<Self::Residual, Self::Output> {
+        match self {
+            Self::Ok(value) => ControlFlow::Continue(value),
+            Self::Err(error) => ControlFlow::Break(Outcome::Err(error)),
+            Self::Cancelled(reason) => ControlFlow::Break(Outcome::Cancelled(reason)),
+            Self::Panicked(payload) => ControlFlow::Break(Outcome::Panicked(payload)),
+        }
+    }
+}
+
+impl<T, E> Residual<T> for Outcome<Infallible, E> {
+    type TryType = Outcome<T, E>;
+}
+
+impl<T, E> FromResidual<Outcome<Infallible, E>> for Outcome<T, E> {
+    #[inline]
+    fn from_residual(residual: Outcome<Infallible, E>) -> Self {
+        match residual {
+            Outcome::Ok(value) => match value {},
+            Outcome::Err(error) => Self::Err(error),
+            Outcome::Cancelled(reason) => Self::Cancelled(reason),
+            Outcome::Panicked(payload) => Self::Panicked(payload),
+        }
+    }
+}
+
+impl<T, E> FromResidual<Result<Infallible, E>> for Outcome<T, E> {
+    #[inline]
+    fn from_residual(residual: Result<Infallible, E>) -> Self {
+        match residual {
+            Ok(value) => match value {},
+            Err(error) => Self::Err(error),
         }
     }
 }

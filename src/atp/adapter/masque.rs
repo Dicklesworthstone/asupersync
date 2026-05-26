@@ -4,6 +4,8 @@
 //! tunneling through HTTP/3 CONNECT-UDP proxies for enterprise egress and NAT
 //! traversal scenarios where direct QUIC is blocked.
 
+#![allow(dead_code)]
+
 use crate::{
     Cx,
     time::{Sleep, wall_now},

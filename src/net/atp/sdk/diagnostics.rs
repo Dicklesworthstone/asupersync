@@ -1,5 +1,7 @@
 //! ATP diagnostics and path troubleshooting.
 
+#![allow(dead_code)]
+
 use super::{AtpSdk, AtpSession};
 use crate::atp::path::PathCandidateId;
 use crate::cx::Cx;
@@ -331,7 +333,7 @@ impl AtpSdk {
             warnings: Vec::new(),
         };
 
-        Ok(diagnosis)
+        AtpOutcome::ok(diagnosis)
     }
 
     async fn assess_connectivity(
@@ -340,7 +342,7 @@ impl AtpSdk {
         _target_peer: PeerId,
     ) -> AtpOutcome<ConnectivityResult> {
         // Simulate connectivity assessment
-        Ok(ConnectivityResult::DirectConnectable)
+        AtpOutcome::ok(ConnectivityResult::DirectConnectable)
     }
 
     async fn discover_path_candidates(
@@ -382,7 +384,7 @@ impl AtpSdk {
             },
         ];
 
-        Ok(candidates)
+        AtpOutcome::ok(candidates)
     }
 
     async fn assess_nat_traversal(
@@ -391,7 +393,7 @@ impl AtpSdk {
         _target_peer: PeerId,
     ) -> AtpOutcome<NatTraversalResult> {
         // Simulate NAT assessment
-        Ok(NatTraversalResult {
+        AtpOutcome::ok(NatTraversalResult {
             local_nat_type: NatType::FullCone,
             remote_nat_type: Some(NatType::RestrictedCone),
             hole_punching_feasible: true,
@@ -434,7 +436,7 @@ impl AtpSdk {
             },
         ];
 
-        Ok(RelayInfo {
+        AtpOutcome::ok(RelayInfo {
             recommended_relay: relays.first().cloned(),
             availability_score: 0.98,
             available_relays: relays,
@@ -460,12 +462,12 @@ impl AtpSdk {
             },
         ];
 
-        Ok(results)
+        AtpOutcome::ok(results)
     }
 
     async fn assess_network_quality(&self, _cx: &Cx) -> AtpOutcome<NetworkQuality> {
         // Simulate network quality assessment
-        Ok(NetworkQuality {
+        AtpOutcome::ok(NetworkQuality {
             overall_score: 0.88,
             stability_score: 0.92,
             throughput_score: 0.85,
@@ -512,7 +514,7 @@ impl PathMonitor {
         // TODO: Replace with proper Cx::spawn background task
         // For now, just create the monitor without background processing
 
-        Ok(monitor)
+        AtpOutcome::ok(monitor)
     }
 
     async fn monitoring_loop(&mut self, _cx: Cx) {

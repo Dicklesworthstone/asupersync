@@ -52,7 +52,7 @@ pub mod assertions {
     /// Assert that an ATP outcome is successful and extract the value.
     pub fn assert_atp_ok<T, E>(outcome: Outcome<T, E>) -> T
     where
-        E: std::fmt::Debug
+        E: std::fmt::Debug,
     {
         match outcome {
             Outcome::Ok(value) => value,
@@ -66,10 +66,10 @@ pub mod assertions {
     pub fn assert_atp_cancelled<T, E>(outcome: Outcome<T, E>)
     where
         T: std::fmt::Debug,
-        E: std::fmt::Debug
+        E: std::fmt::Debug,
     {
         match outcome {
-            Outcome::Cancelled => {},
+            Outcome::Cancelled => {}
             other => panic!("Expected Cancelled, got: {:?}", other),
         }
     }
@@ -77,7 +77,7 @@ pub mod assertions {
     /// Assert that an ATP outcome is an error of expected type.
     pub fn assert_atp_err<T, E>(outcome: Outcome<T, E>) -> E
     where
-        T: std::fmt::Debug
+        T: std::fmt::Debug,
     {
         match outcome {
             Outcome::Err(err) => err,
@@ -105,9 +105,9 @@ pub mod mocks {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::test_data::*;
     use super::assertions::*;
+    use super::test_data::*;
+    use super::*;
     use crate::types::Outcome;
 
     #[test]
@@ -169,8 +169,14 @@ mod tests {
         let peer2 = mocks::test_peer_id(2);
         let peer1_again = mocks::test_peer_id(1);
 
-        assert_eq!(peer1, peer1_again, "Same suffix should produce same peer ID");
-        assert_ne!(peer1, peer2, "Different suffix should produce different peer ID");
+        assert_eq!(
+            peer1, peer1_again,
+            "Same suffix should produce same peer ID"
+        );
+        assert_ne!(
+            peer1, peer2,
+            "Different suffix should produce different peer ID"
+        );
     }
 
     #[test]
@@ -179,7 +185,13 @@ mod tests {
         let session2 = mocks::test_session_id(200);
         let session1_again = mocks::test_session_id(100);
 
-        assert_eq!(session1, session1_again, "Same suffix should produce same session ID");
-        assert_ne!(session1, session2, "Different suffix should produce different session ID");
+        assert_eq!(
+            session1, session1_again,
+            "Same suffix should produce same session ID"
+        );
+        assert_ne!(
+            session1, session2,
+            "Different suffix should produce different session ID"
+        );
     }
 }

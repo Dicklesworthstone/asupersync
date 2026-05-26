@@ -1,5 +1,7 @@
 //! ATP streaming interfaces for large buffer movement with backpressure.
 
+#![allow(dead_code)]
+
 use super::{AtpSession, TransferId, TransferProgress};
 use crate::channel::mpsc;
 use crate::cx::Cx;
@@ -175,7 +177,7 @@ impl AtpWriter {
     /// Close the writer and flush any remaining data.
     pub async fn close(&mut self) -> AtpOutcome<()> {
         if matches!(self.state, WriterState::Closed) {
-            return Ok(());
+            return AtpOutcome::ok(());
         }
 
         self.state = WriterState::Flushing;
@@ -183,8 +185,7 @@ impl AtpWriter {
         // Send final empty chunk to signal completion
         let final_chunk = StreamChunk::new(Vec::new(), 0, true);
         self.data_tx
-            .send(final_chunk)
-            .await
+            .try_send(final_chunk)
             .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
 
         // Cancel the background task
@@ -198,25 +199,24 @@ impl AtpWriter {
         }
 
         self.state = WriterState::Closed;
-        Ok(())
+        AtpOutcome::ok(())
     }
 
     /// Write data chunk directly.
     pub async fn write_chunk(&mut self, data: Vec<u8>) -> AtpOutcome<()> {
         if !matches!(self.state, WriterState::Ready | WriterState::Writing) {
-            return Err(AtpError::Platform(PlatformError::OperatingSystemError));
+            return AtpOutcome::Err(AtpError::Platform(PlatformError::OperatingSystemError));
         }
 
         self.state = WriterState::Writing;
 
         let chunk = StreamChunk::new(data, 0, false); // Sequence managed internally
         self.data_tx
-            .send(chunk)
-            .await
+            .try_send(chunk)
             .map_err(|_| AtpError::Platform(PlatformError::OperatingSystemError))?;
 
         self.state = WriterState::Ready;
-        Ok(())
+        AtpOutcome::ok(())
     }
 }
 
@@ -235,29 +235,33 @@ impl AtpReader {
 
     /// Get the next progress update.
     pub async fn next_progress(&mut self) -> Option<TransferProgress> {
-        self.progress_rx.recv().await
+        self.progress_rx.try_recv().ok()
     }
 
     /// Read the next chunk of data.
     pub async fn read_chunk(&mut self) -> AtpOutcome<Option<StreamChunk>> {
         if matches!(self.state, ReaderState::Closed | ReaderState::Error(_)) {
-            return Ok(None);
+            return AtpOutcome::ok(None);
         }
 
         self.state = ReaderState::Reading;
 
-        match self.data_rx.recv().await {
-            Some(chunk) => {
+        match self.data_rx.try_recv() {
+            Ok(chunk) => {
                 if chunk.is_final {
                     self.state = ReaderState::Closed;
                 } else {
                     self.state = ReaderState::Ready;
                 }
-                Ok(Some(chunk))
+                AtpOutcome::ok(Some(chunk))
             }
-            None => {
+            Err(mpsc::RecvError::Empty) => {
+                self.state = ReaderState::Ready;
+                AtpOutcome::ok(None)
+            }
+            Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Cancelled) => {
                 self.state = ReaderState::Closed;
-                Ok(None)
+                AtpOutcome::ok(None)
             }
         }
     }
@@ -299,13 +303,13 @@ impl AtpReader {
             }
         }
 
-        Ok(bytes_read)
+        AtpOutcome::ok(bytes_read)
     }
 
     /// Close the reader and cancel the background task.
     pub async fn close(&mut self) -> AtpOutcome<()> {
         if matches!(self.state, ReaderState::Closed) {
-            return Ok(());
+            return AtpOutcome::ok(());
         }
 
         // Cancel the background task
@@ -319,7 +323,7 @@ impl AtpReader {
         }
 
         self.state = ReaderState::Closed;
-        Ok(())
+        AtpOutcome::ok(())
     }
 }
 

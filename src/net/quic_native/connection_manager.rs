@@ -5,6 +5,8 @@
 //! It bridges the gap between the UDP endpoint packet I/O and individual
 //! QUIC connection state machines.
 
+#![allow(dead_code)]
+
 use crate::cx::Cx;
 use crate::net::quic_core::ConnectionId;
 use crate::net::quic_native::{

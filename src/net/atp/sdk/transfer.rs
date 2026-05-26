@@ -1,5 +1,7 @@
 //! ATP transfer operations and management.
 
+#![allow(dead_code)]
+
 use super::{AtpSession, SdkMode, TransferId, TransferPhase, TransferProgress};
 use crate::channel::mpsc;
 use crate::cx::Cx;
@@ -649,7 +651,7 @@ impl ActiveTransfer {
 
     /// Get the next progress update.
     pub async fn next_progress(&mut self) -> Option<TransferProgress> {
-        self.progress_rx.recv().await
+        self.progress_rx.try_recv().ok()
     }
 
     /// Cancel this transfer.

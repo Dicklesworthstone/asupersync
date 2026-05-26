@@ -3,6 +3,8 @@
 //! Advanced loss detection for ATP with improved accuracy and
 //! integration with transfer decision-making.
 
+#![allow(dead_code)]
+
 use crate::net::atp::protocol::outcome::AtpOutcome;
 use crate::net::quic_native::{
     AckRange, PacketNumberSpace, QuicTransportMachine, RttEstimator, SentPacketMeta,
@@ -375,7 +377,7 @@ impl AtpLossDetector {
         // Update reordering tracking
         self.update_reordering_tracking(&newly_acked, &loss_result);
 
-        Ok(loss_result)
+        AtpOutcome::ok(loss_result)
     }
 
     /// Detect losses in a packet number space.
@@ -387,7 +389,7 @@ impl AtpLossDetector {
     ) -> AtpOutcome<LossDetectionResult> {
         let space_idx = space as usize;
         let Some(largest_acked) = self.spaces[space_idx].largest_acked else {
-            return Ok(LossDetectionResult::empty());
+            return AtpOutcome::ok(LossDetectionResult::empty());
         };
 
         let mut lost_packets = Vec::new();
@@ -405,6 +407,8 @@ impl AtpLossDetector {
         let time_threshold_boundary = now_micros.saturating_sub(time_threshold);
 
         let mut remaining_packets = VecDeque::new();
+        let enable_early_retransmit = self.config.enable_early_retransmit;
+        let early_retransmit_threshold = self.config.early_retransmit_threshold;
         let state = &mut self.spaces[space_idx];
         while let Some(packet) = state.sent_packets.pop_front() {
             let mut is_lost = false;
@@ -443,8 +447,8 @@ impl AtpLossDetector {
             }
 
             // Early retransmit
-            if !is_lost && self.config.enable_early_retransmit {
-                if self.should_early_retransmit(&packet, largest_acked) {
+            if !is_lost && enable_early_retransmit {
+                if packet.packet_number + u64::from(early_retransmit_threshold) == largest_acked {
                     is_lost = true;
                     loss_reason = Some(LossReason::EarlyRetransmit);
                     detection_methods.push(LossDetectionMethod::EarlyRetransmit);
@@ -501,7 +505,7 @@ impl AtpLossDetector {
         // Generate recommendations
         let recommendations = self.generate_recommendations(&lost_packets, detection_method);
 
-        Ok(LossDetectionResult {
+        AtpOutcome::ok(LossDetectionResult {
             lost_packets,
             lost_bytes,
             detection_method,
@@ -559,10 +563,10 @@ impl AtpLossDetector {
                     .get(pattern)
                     .unwrap_or(&0.0)
             })
-            .fold(0.0, |acc, &conf| acc.max(conf))
+            .fold(0.0_f64, |acc, &conf| acc.max(conf))
             * 0.1;
 
-        (base_confidence + pattern_bonus).min(1.0)
+        (base_confidence + pattern_bonus).min(1.0_f64)
     }
 
     fn generate_recommendations(

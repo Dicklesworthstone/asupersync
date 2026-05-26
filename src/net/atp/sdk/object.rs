@@ -231,7 +231,6 @@ impl MemoryObjectStore {
             Ok(objects) => AtpOutcome::ok(objects),
             Err(LockError::Cancelled) => AtpOutcome::cancelled(
                 cx.cancel_reason()
-                    .cloned()
                     .unwrap_or_else(CancelReason::parent_cancelled),
             ),
             Err(LockError::TimedOut(_)) => AtpOutcome::cancelled(CancelReason::timeout()),
@@ -279,7 +278,7 @@ impl ObjectStore for MemoryObjectStore {
             AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
             AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
         };
-        Ok(objects.get(hash).map(|(data, _)| data.clone()))
+        AtpOutcome::ok(objects.get(hash).map(|(data, _)| data.clone()))
     }
 
     async fn get_object_info(&self, cx: &Cx, hash: &ObjectHash) -> AtpOutcome<Option<AtpObject>> {
@@ -289,7 +288,7 @@ impl ObjectStore for MemoryObjectStore {
             AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
             AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
         };
-        Ok(objects.get(hash).map(|(_, object)| object.clone()))
+        AtpOutcome::ok(objects.get(hash).map(|(_, object)| object.clone()))
     }
 
     async fn has_object(&self, cx: &Cx, hash: &ObjectHash) -> AtpOutcome<bool> {
@@ -299,7 +298,7 @@ impl ObjectStore for MemoryObjectStore {
             AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
             AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
         };
-        Ok(objects.contains_key(hash))
+        AtpOutcome::ok(objects.contains_key(hash))
     }
 
     async fn delete_object(&self, cx: &Cx, hash: &ObjectHash) -> AtpOutcome<bool> {
@@ -309,7 +308,7 @@ impl ObjectStore for MemoryObjectStore {
             AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
             AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
         };
-        Ok(objects.remove(hash).is_some())
+        AtpOutcome::ok(objects.remove(hash).is_some())
     }
 
     async fn list_objects(&self, cx: &Cx) -> AtpOutcome<Vec<ObjectHash>> {
@@ -319,7 +318,7 @@ impl ObjectStore for MemoryObjectStore {
             AtpOutcome::Cancelled(reason) => return AtpOutcome::Cancelled(reason),
             AtpOutcome::Panicked(payload) => return AtpOutcome::Panicked(payload),
         };
-        Ok(objects.keys().cloned().collect())
+        AtpOutcome::ok(objects.keys().cloned().collect())
     }
 }
 
@@ -404,14 +403,14 @@ impl ObjectStore for FileSystemObjectStore {
             .await
             .map_err(|_| AtpError::Disk(DiskError::IoError))?;
 
-        Ok(object)
+        AtpOutcome::ok(object)
     }
 
     async fn get_object(&self, _cx: &Cx, hash: &ObjectHash) -> AtpOutcome<Option<Vec<u8>>> {
         let object_path = self.object_path(hash);
 
         if !object_path.exists() {
-            return Ok(None);
+            return AtpOutcome::ok(None);
         }
 
         let data = crate::fs::read(&object_path)
@@ -421,17 +420,17 @@ impl ObjectStore for FileSystemObjectStore {
         // Verify hash matches
         let computed_hash = ObjectHash::from_data(&data);
         if computed_hash != *hash {
-            return Err(AtpError::Manifest(ManifestError::HashMismatch));
+            return AtpOutcome::Err(AtpError::Manifest(ManifestError::HashMismatch));
         }
 
-        Ok(Some(data))
+        AtpOutcome::ok(Some(data))
     }
 
     async fn get_object_info(&self, _cx: &Cx, hash: &ObjectHash) -> AtpOutcome<Option<AtpObject>> {
         let metadata_path = self.metadata_path(hash);
 
         if !metadata_path.exists() {
-            return Ok(None);
+            return AtpOutcome::ok(None);
         }
 
         let metadata_json = crate::fs::read(&metadata_path)
@@ -441,12 +440,12 @@ impl ObjectStore for FileSystemObjectStore {
         let object: AtpObject = serde_json::from_slice(&metadata_json)
             .map_err(|_| AtpError::Manifest(ManifestError::InvalidFormat))?;
 
-        Ok(Some(object))
+        AtpOutcome::ok(Some(object))
     }
 
     async fn has_object(&self, _cx: &Cx, hash: &ObjectHash) -> AtpOutcome<bool> {
         let object_path = self.object_path(hash);
-        Ok(object_path.exists())
+        AtpOutcome::ok(object_path.exists())
     }
 
     async fn delete_object(&self, _cx: &Cx, hash: &ObjectHash) -> AtpOutcome<bool> {
@@ -454,14 +453,14 @@ impl ObjectStore for FileSystemObjectStore {
         let metadata_path = self.metadata_path(hash);
 
         if !object_path.exists() {
-            return Ok(false);
+            return AtpOutcome::ok(false);
         }
 
         // Remove both object data and metadata
         let _ = crate::fs::remove_file(&object_path).await;
         let _ = crate::fs::remove_file(&metadata_path).await;
 
-        Ok(true)
+        AtpOutcome::ok(true)
     }
 
     async fn list_objects(&self, _cx: &Cx) -> AtpOutcome<Vec<ObjectHash>> {
@@ -483,7 +482,7 @@ impl ObjectStore for FileSystemObjectStore {
             }
         }
 
-        Ok(hashes)
+        AtpOutcome::ok(hashes)
     }
 }
 

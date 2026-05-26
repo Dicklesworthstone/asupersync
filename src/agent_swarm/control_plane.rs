@@ -4,6 +4,8 @@
 //! managing resource admission, validation lanes, crash recovery, and operator
 //! visibility across concurrent AI agent operations on high-core machines.
 
+#![allow(dead_code)]
+
 use crate::cx::Cx;
 use crate::error::Result;
 use crate::sync::Mutex;
