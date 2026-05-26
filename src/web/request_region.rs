@@ -36,10 +36,10 @@
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
-use std::pin::Pin;
 use std::rc::Rc;
 
 use crate::cx::{Cx, cap};
+use crate::cx::scope::CatchUnwind;
 use crate::error::Error;
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
