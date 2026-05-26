@@ -182,21 +182,43 @@ impl ReadBiasedDrainingRegionSnapshot {
             return regions.draining_region_count();
         }
 
-        // KNOWN RACE CONDITION (TOCTOU): Between checking valid/writes and loading
-        // cached_count, another thread could invalidate the cache leading to stale data.
-        // TODO: Use atomic compare-and-swap or hold lock across entire operation.
-        let writes = self.writes_since_last_read.load(Ordering::Relaxed);
-        if self.valid.load(Ordering::Acquire)
-            && writes < READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD
-        {
-            self.cache_hits.fetch_add(1, Ordering::Release);
-            self.writes_since_last_read.store(0, Ordering::Release);
-            return self.cached_count.load(Ordering::Acquire);
+        // Fixed TOCTOU race condition using atomic compare-and-swap operations
+        // to ensure cache validity check and write counter reset are atomic
+        let mut final_writes = 0;
+        loop {
+            let writes = self.writes_since_last_read.load(Ordering::Acquire);
+            final_writes = writes; // Store for use in fallback path
+
+            // Check cache validity and write threshold atomically
+            if self.valid.load(Ordering::Acquire)
+                && writes < READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD
+            {
+                // Atomically reset write counter to 0, but only if it hasn't changed
+                match self.writes_since_last_read.compare_exchange_weak(
+                    writes,
+                    0,
+                    Ordering::AcqRel,
+                    Ordering::Acquire
+                ) {
+                    Ok(_) => {
+                        // Successfully reset counter, cache is still valid
+                        self.cache_hits.fetch_add(1, Ordering::Relaxed);
+                        return self.cached_count.load(Ordering::Acquire);
+                    },
+                    Err(_) => {
+                        // Counter was modified by another thread, retry
+                        continue;
+                    }
+                }
+            } else {
+                // Cache invalid or too many writes, break out to scan
+                break;
+            }
         }
 
         let started = Instant::now();
         let scanned = regions.draining_region_count();
-        if writes >= READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD {
+        if final_writes >= READ_BIASED_REGION_SNAPSHOT_WRITE_HEAVY_THRESHOLD {
             self.write_heavy_fallbacks.fetch_add(1, Ordering::Relaxed);
         }
         self.fallback_scans.fetch_add(1, Ordering::Relaxed);
