@@ -1040,6 +1040,7 @@ mod tests {
             cancel_reason: None,
             parent: None,
             metadata: vec![],
+            auth_tag: AuthenticationTag::zero(),
         }
     }
 

@@ -871,6 +871,7 @@ impl RegionBridge {
                 .map(|r| r.kind.as_str().to_owned()),
             parent: self.local.parent,
             metadata: vec![],
+            auth_tag: crate::security::AuthenticationTag::zero(), // Requires signing with key
         }
     }
 
