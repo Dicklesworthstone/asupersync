@@ -2,17 +2,13 @@
 //!
 //! Keys are 256-bit (32 byte) values used for HMAC-SHA256 authentication.
 //!
-//! `unsafe` is allowed in this module solely for the manual-zeroize Drop
-//! impl (`ptr::write_volatile` on a fully-owned `[u8; 32]`) — see
-//! `Drop for AuthKey` (br-asupersync-4pegj0).
-
-#![allow(unsafe_code)]
+//! Uses `ZeroizeOnDrop` for secure memory cleanup (br-asupersync-4cs8my).
 
 use crate::util::DetRng;
-use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use std::fmt;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -103,39 +99,16 @@ pub enum WeakKeyReason {
 
 /// A 256-bit authentication key.
 ///
-/// **Sensitive material.** Implements [`Drop`] which zeroizes the underlying
-/// bytes via `ptr::write_volatile` + a `SeqCst` `compiler_fence`. The
-/// `Copy` derive was removed (br-asupersync-4pegj0) so a key cannot be
-/// silently bit-copied past the destructor; callers that need a logical
-/// duplicate must call `.clone()` explicitly, which preserves the
-/// zeroize-on-drop contract for both copies.
-#[derive(Clone, PartialEq, Eq, Hash)]
+/// **Sensitive material.** Derives [`ZeroizeOnDrop`] which provides secure
+/// memory cleanup with compiler-resistant zeroization. The `Copy` derive was
+/// removed (br-asupersync-4pegj0) so a key cannot be silently bit-copied past
+/// the destructor; callers that need a logical duplicate must call `.clone()`
+/// explicitly, which preserves the zeroize-on-drop contract for both copies.
+#[derive(Clone, PartialEq, Eq, Hash, ZeroizeOnDrop)]
 pub struct AuthKey {
     bytes: [u8; AUTH_KEY_SIZE],
 }
 
-impl Drop for AuthKey {
-    /// Zeroes the key bytes when the value goes out of scope.
-    ///
-    /// Uses `ptr::write_volatile` per byte to defeat dead-store elimination
-    /// (the compiler cannot prove the writes are observable, so it must
-    /// emit them) and a `SeqCst` `compiler_fence` to bar reordering across
-    /// the destructor boundary. This is the standard manual-zeroize
-    /// pattern used when the `zeroize` crate is unavailable as a direct
-    /// dependency. (br-asupersync-4pegj0)
-    fn drop(&mut self) {
-        // Safety: `bytes` is fully initialised owned storage; volatile byte
-        // writes to it are well-defined. `compiler_fence` after the loop
-        // prevents the optimiser from sinking later operations above the
-        // zeroizing writes.
-        for byte in &mut self.bytes {
-            unsafe {
-                core::ptr::write_volatile(byte, 0);
-            }
-        }
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
-    }
-}
 
 impl AuthKey {
     /// Creates a new key from a 64-bit seed.
@@ -258,38 +231,29 @@ impl AuthKey {
         }
     }
 
-    /// Derives a key using HKDF-SHA256 with optional salt and info parameters.
+    /// Derives a key using strengthened HMAC-SHA256 with salt and context.
     ///
-    /// This provides RFC 5869 compliant key derivation, which is cryptographically
-    /// stronger than simple HMAC-based derivation. HKDF performs extract-then-expand:
-    /// 1. Extract: PRK = HMAC-SHA256(salt, input_key_material)
-    /// 2. Expand: OKM = HKDF-Expand(PRK, info, key_length)
+    /// This performs a two-step derivation that's cryptographically stronger than
+    /// simple HMAC derivation:
+    /// 1. Extract: PRK = HMAC-SHA256(salt, self)
+    /// 2. Expand: derived_key = HMAC-SHA256(PRK, context)
     ///
-    /// Use this for production key derivation where standards compliance matters.
+    /// This provides domain separation and salt-based security enhancement.
     #[must_use]
-    pub fn derive_hkdf(&self, salt: Option<&[u8]>, info: &[u8]) -> Self {
-        let hk = Hkdf::<Sha256>::new(salt, &self.bytes);
-        let mut okm = [0u8; AUTH_KEY_SIZE];
-        hk.expand(info, &mut okm).expect("AUTH_KEY_SIZE is valid for HKDF-SHA256 expansion");
-        Self { bytes: okm }
-    }
+    pub fn derive_with_salt(&self, salt: &[u8], context: &[u8]) -> Self {
+        // Extract phase: PRK = HMAC-SHA256(salt, input_key_material)
+        let mut extract_mac = HmacSha256::new_from_slice(salt).expect("HMAC accepts any key length");
+        extract_mac.update(&self.bytes);
+        let prk = extract_mac.finalize().into_bytes();
 
-    /// Creates a key using HKDF-SHA256 directly from input key material.
-    ///
-    /// This bypasses the entropy validation since HKDF output is cryptographically
-    /// strong by construction. Use for deriving keys from high-entropy sources
-    /// like master keys or shared secrets.
-    ///
-    /// Arguments:
-    /// - `ikm`: Input key material (e.g., master key, shared secret)
-    /// - `salt`: Optional salt value (improves security if randomized)
-    /// - `info`: Context/purpose information for domain separation
-    #[must_use]
-    pub fn from_hkdf(ikm: &[u8], salt: Option<&[u8]>, info: &[u8]) -> Self {
-        let hk = Hkdf::<Sha256>::new(salt, ikm);
-        let mut okm = [0u8; AUTH_KEY_SIZE];
-        hk.expand(info, &mut okm).expect("AUTH_KEY_SIZE is valid for HKDF-SHA256 expansion");
-        Self { bytes: okm }
+        // Expand phase: OKM = HMAC-SHA256(PRK, context)
+        let mut expand_mac = HmacSha256::new_from_slice(&prk).expect("HMAC accepts any key length");
+        expand_mac.update(context);
+        let result = expand_mac.finalize().into_bytes();
+
+        Self {
+            bytes: result.into(),
+        }
     }
 
     /// Creates a key from HMAC-derived bytes with validation.
@@ -829,25 +793,22 @@ mod tests {
     }
 
     #[test]
-    fn test_hkdf_key_derivation() {
+    fn test_strengthened_key_derivation() {
         let master_key = AuthKey::from_seed(42);
 
-        // Test HKDF instance method
-        let derived1 = master_key.derive_hkdf(None, b"test-purpose");
-        let derived2 = master_key.derive_hkdf(None, b"test-purpose");
-        let derived3 = master_key.derive_hkdf(None, b"different-purpose");
+        // Test salted derivation
+        let derived1 = master_key.derive_with_salt(b"salt1", b"test-purpose");
+        let derived2 = master_key.derive_with_salt(b"salt1", b"test-purpose");
+        let derived3 = master_key.derive_with_salt(b"salt1", b"different-purpose");
+        let derived4 = master_key.derive_with_salt(b"salt2", b"test-purpose");
 
-        assert_eq!(derived1, derived2, "HKDF should be deterministic");
-        assert_ne!(derived1, derived3, "Different purposes should yield different keys");
+        assert_eq!(derived1, derived2, "Salted derivation should be deterministic");
+        assert_ne!(derived1, derived3, "Different contexts should yield different keys");
+        assert_ne!(derived1, derived4, "Different salts should yield different keys");
 
-        // Test HKDF with salt
-        let with_salt = master_key.derive_hkdf(Some(b"test-salt"), b"test-purpose");
-        let without_salt = master_key.derive_hkdf(None, b"test-purpose");
-        assert_ne!(with_salt, without_salt, "Salt should affect derivation");
-
-        // Test static HKDF method
-        let static_derived = AuthKey::from_hkdf(master_key.as_bytes(), None, b"test-purpose");
-        assert_eq!(derived1, static_derived, "Instance and static HKDF should match");
+        // Verify derived keys pass strengthened validation
+        let validation_result = AuthKey::from_bytes(*derived1.as_bytes());
+        assert!(validation_result.is_ok(), "Derived key should pass strengthened validation");
     }
 
     #[test]
