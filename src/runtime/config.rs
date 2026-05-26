@@ -42,6 +42,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use nkeys::KeyPair;
 use sha2::{Digest, Sha256};
 use std::fmt;
+
+// Security imports for spawn authorization
+use crate::security::key::AuthKey;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -1851,6 +1854,22 @@ pub enum RuntimeStateShape {
     Sharded,
 }
 
+/// Security configuration for runtime authorization.
+#[derive(Debug, Clone)]
+pub struct SecurityConfig {
+    /// Root authorization key for spawn capabilities.
+    /// When None, authorization is disabled (fail-open for testing).
+    pub spawn_authorization_key: Option<AuthKey>,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            spawn_authorization_key: None,
+        }
+    }
+}
+
 /// Concrete scheduler, blocking-pool, tracing, and policy settings for a runtime.
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -1961,6 +1980,8 @@ pub struct RuntimeConfig {
     /// pending the scheduler-side integration (also tracked under
     /// br-asupersync-8fuxnt).
     pub runtime_state_shape: RuntimeStateShape,
+    /// Security configuration for authorization.
+    pub security: SecurityConfig,
 }
 
 impl RuntimeConfig {
@@ -2169,6 +2190,7 @@ impl Default for RuntimeConfig {
             // backing store to preserve all pre-bead behavior. Opt in to
             // Sharded once the scheduler-side wire-up lands.
             runtime_state_shape: RuntimeStateShape::Unified,
+            security: SecurityConfig::default(),
         }
     }
 }

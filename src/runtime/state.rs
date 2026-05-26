@@ -1810,13 +1810,7 @@ impl RuntimeState {
     /// spawn capability macaroons. Returns None if authorization is disabled
     /// or not configured for this runtime.
     fn get_spawn_authorization_key(&self) -> Option<crate::security::key::AuthKey> {
-        // TODO: Integration with runtime security configuration
-        // For now, return None to maintain backward compatibility.
-        // In a full implementation, this would:
-        // 1. Check if authorization is enabled in runtime config
-        // 2. Return the appropriate root key from the security subsystem
-        // 3. Handle key rotation and validation
-        None
+        self.config.security.spawn_authorization_key.clone()
     }
 
     /// Creates a system-level Cx for internal runtime operations.
@@ -1855,9 +1849,6 @@ impl RuntimeState {
         // Authorization check: verify caller has permission to spawn tasks in the target region
         use crate::cx::macaroon::VerificationContext;
 
-        // TODO: Get the appropriate root key from the runtime's security context
-        // For now, we'll need to determine how to obtain the root key for verification
-        // This will need to be integrated with the runtime's security infrastructure
         let spawn_capability = format!("spawn:region_{:?}", region.0);
         let verification_context = VerificationContext::new();
 

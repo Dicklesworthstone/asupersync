@@ -2464,6 +2464,25 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Set the spawn authorization key.
+    ///
+    /// When set, the runtime will require valid capability macaroons for spawn operations.
+    /// When not set, spawn authorization is disabled (fail-open for testing).
+    #[must_use]
+    pub fn with_spawn_authorization_key(mut self, key: crate::security::key::AuthKey) -> Self {
+        self.config.security.spawn_authorization_key = Some(key);
+        self
+    }
+
+    /// Disable spawn authorization (fail-open for testing).
+    ///
+    /// This explicitly disables spawn authorization even if it was previously enabled.
+    #[must_use]
+    pub fn disable_spawn_authorization(mut self) -> Self {
+        self.config.security.spawn_authorization_key = None;
+        self
+    }
+
     /// Enable the Lyapunov governor for scheduling suggestions.
     ///
     /// When enabled, the scheduler periodically snapshots runtime state and
