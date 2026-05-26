@@ -675,7 +675,7 @@ struct ThirdPartyVerification<'a> {
     /// bind-to-parent semantics that contradicted the spec and the
     /// `bind_for_request` docstring).
     auth_unbound_signature: &'a MacaroonSignature,
-    active_discharges: &'a mut Vec<usize>,
+    active_discharges: &'a mut Vec<u64>,
 }
 
 impl MacaroonToken {
@@ -954,7 +954,7 @@ impl MacaroonToken {
         discharges: &[Self],
         binding_signature: Option<&MacaroonSignature>,
         auth_unbound_signature: Option<&MacaroonSignature>,
-        active_discharges: &mut Vec<usize>,
+        active_discharges: &mut Vec<u64>,
     ) -> Result<MacaroonSignature, VerificationError> {
         // Enhanced depth checking to prevent stack overflow (br-asupersync-kya99g)
         if active_discharges.len() >= Self::MAX_DISCHARGE_DEPTH {
@@ -1031,7 +1031,7 @@ impl MacaroonToken {
         context: &VerificationContext,
         discharges: &[Self],
         auth_unbound_signature: &MacaroonSignature,
-        active_discharges: &mut Vec<usize>,
+        active_discharges: &mut Vec<u64>,
     ) -> Result<(), VerificationError> {
         let mut sig = hmac_compute(root_key, self.identifier.as_bytes());
         let mut third_party = ThirdPartyVerification {
@@ -1144,8 +1144,17 @@ impl MacaroonToken {
             })
     }
 
-    fn discharge_stack_id(token: &Self) -> usize {
-        std::ptr::from_ref(token).cast::<()>() as usize
+    fn discharge_stack_id(token: &Self) -> u64 {
+        // P2 FIX (asupersync-uq5m3l): Use stable content-based hash instead of memory address
+        // to prevent TOCTOU attacks on discharge cycle detection. Memory addresses are unreliable
+        // due to ASLR and could be manipulated to bypass or falsely trigger cycle detection.
+        use sha2::Digest;
+        let mut hasher = Sha256::new();
+        hasher.update(token.identifier.as_bytes());
+        hasher.update(token.signature.as_bytes());
+        let result = hasher.finalize();
+        // Use first 8 bytes as deterministic, collision-resistant identifier
+        u64::from_be_bytes(result[..8].try_into().unwrap())
     }
 
     fn discharge_invalid(index: usize, identifier: &str) -> VerificationError {
