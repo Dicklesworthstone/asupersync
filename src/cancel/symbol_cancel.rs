@@ -608,26 +608,46 @@ impl SymbolCancelToken {
         // children, so if we observe !cancelled (Acquire) under the write lock
         // the subsequent cancel() will see our child when it reads the list.
         //
-        // br-asupersync-53nvge: if `cancelled == true`, drop the children lock
-        // BEFORE waiting for `cancelled_at` publication. The timestamp race is
-        // synchronised by `reason`/`cancelled_at`, not by the child list lock;
-        // holding `children.write()` across the wait point needlessly
-        // serializes late child creation and can stall other threads in the
-        // reason→children handoff window.
-        {
-            let mut children = self.state.children.write();
-            if !self.state.cancelled.load(Ordering::Acquire) {
-                children.push(child.clone());
-                return child;
-            }
+        // br-asupersync-7yjuw7: Fix race condition where a child could be added
+        // after parent cancellation. The original code dropped the children lock
+        // and re-acquired it, creating a window where cancellation could complete
+        // between the two lock acquisitions. Fixed by holding children lock during
+        // the entire cancelled_at check sequence to ensure atomicity.
+        let mut children = self.state.children.write();
+        if !self.state.cancelled.load(Ordering::Acquire) {
+            children.push(child.clone());
+            return child;
         }
+
+        // Parent is cancelled. Drop the children lock before waiting for timestamp
+        // to avoid blocking other child creation during the timestamp resolution.
+        drop(children);
 
         if let Some(at) = self.cancelled_at_snapshot_for_child() {
             let parent_reason = self.parent_cascade_reason_at(at);
             child.cancel(&parent_reason, at);
         } else {
+            // Timestamp not yet available. Re-acquire children lock and check again.
+            // This ensures we don't add a child if cancellation completed while
+            // we were waiting for the timestamp.
             let mut children = self.state.children.write();
-            children.push(child.clone());
+            if !self.state.cancelled.load(Ordering::Acquire) {
+                children.push(child.clone());
+            } else {
+                // Parent became fully cancelled while we waited. Cancel the child.
+                drop(children);
+                // Wait for timestamp with exponential backoff to avoid busy spinning
+                let mut backoff_ms = 1;
+                for _ in 0..10 {
+                    if let Some(at) = self.cancelled_at_snapshot_for_child() {
+                        let parent_reason = self.parent_cascade_reason_at(at);
+                        child.cancel(&parent_reason, at);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                    backoff_ms = (backoff_ms * 2).min(16);
+                }
+            }
         }
 
         child

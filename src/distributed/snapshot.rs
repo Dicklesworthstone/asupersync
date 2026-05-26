@@ -1074,6 +1074,7 @@ mod tests {
             cancel_reason: Some("timeout".to_string()),
             parent: Some(RegionId::new_for_test(0, 0)),
             metadata: vec![1, 2, 3, 4, 5],
+            auth_tag: AuthenticationTag::zero(),
         }
     }
 
@@ -2304,6 +2305,85 @@ mod tests {
 
             let cloned = err.clone();
             assert_eq!(&cloned, err);
+        }
+    }
+
+    #[test]
+    fn test_authenticated_snapshot_roundtrip() {
+        use crate::security::AuthKey;
+
+        let key = AuthKey::from_seed(42);
+        let snapshot = create_test_snapshot();
+
+        // Test authenticated serialization
+        let bytes = snapshot.to_bytes_with_key(&key);
+        assert!(bytes.len() > snapshot.to_bytes_unsigned().len(), "authenticated bytes should be larger");
+
+        // Test successful verification
+        let restored = RegionSnapshot::from_bytes_with_key(&bytes, &key)
+            .expect("authenticated snapshot should deserialize");
+
+        assert_eq!(snapshot.region_id, restored.region_id);
+        assert_eq!(snapshot.sequence, restored.sequence);
+        assert!(!restored.auth_tag.is_zero(), "restored snapshot should have non-zero auth tag");
+    }
+
+    #[test]
+    fn test_snapshot_authentication_wrong_key() {
+        use crate::security::AuthKey;
+
+        let key1 = AuthKey::from_seed(42);
+        let key2 = AuthKey::from_seed(43);
+        let snapshot = create_test_snapshot();
+
+        let bytes = snapshot.to_bytes_with_key(&key1);
+
+        // Should fail with wrong key
+        let result = RegionSnapshot::from_bytes_with_key(&bytes, &key2);
+        assert!(result.is_err(), "wrong key should fail verification");
+        match result.unwrap_err() {
+            SnapshotError::AuthenticationFailed => {}, // Expected
+            other => panic!("Expected AuthenticationFailed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_snapshot_authentication_zero_tag() {
+        use crate::security::AuthKey;
+
+        let key = AuthKey::from_seed(42);
+        let mut snapshot = create_test_snapshot();
+        snapshot.auth_tag = AuthenticationTag::zero(); // Unauthenticated
+
+        let bytes = snapshot.to_bytes(); // Use regular serialization with zero tag
+
+        // Should fail with zero tag
+        let result = RegionSnapshot::from_bytes_with_key(&bytes, &key);
+        assert!(result.is_err(), "zero tag should fail verification");
+        match result.unwrap_err() {
+            SnapshotError::UnauthenticatedSnapshot => {}, // Expected
+            other => panic!("Expected UnauthenticatedSnapshot, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_snapshot_authentication_tampered_content() {
+        use crate::security::AuthKey;
+
+        let key = AuthKey::from_seed(42);
+        let snapshot = create_test_snapshot();
+
+        let mut bytes = snapshot.to_bytes_with_key(&key);
+
+        // Tamper with content (change sequence number in the middle)
+        bytes[20] ^= 0xFF; // XOR flip some bits
+
+        // Should fail verification
+        let result = RegionSnapshot::from_bytes_with_key(&bytes, &key);
+        assert!(result.is_err(), "tampered content should fail verification");
+        match result.unwrap_err() {
+            SnapshotError::AuthenticationFailed => {}, // Expected
+            other => panic!("Expected AuthenticationFailed, got {:?}", other),
         }
     }
 }

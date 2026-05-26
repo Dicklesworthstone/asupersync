@@ -1674,6 +1674,7 @@ pub struct OtlpHttpExporter {
     initial_retry_delay: Duration,
     max_retry_delay: Duration,
     compression: bool,
+    auth_headers: Vec<(String, String)>,
 }
 
 impl OtlpHttpExporter {
@@ -1687,6 +1688,7 @@ impl OtlpHttpExporter {
             initial_retry_delay: Duration::from_millis(100),
             max_retry_delay: Duration::from_secs(30),
             compression: false, // Default to false for backward compatibility
+            auth_headers: Vec::new(),
         }
     }
 
@@ -1715,6 +1717,27 @@ impl OtlpHttpExporter {
     #[must_use]
     pub fn with_compression(mut self, compression: bool) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Add Authorization header with Bearer token.
+    #[must_use]
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.auth_headers.push(("Authorization".to_owned(), format!("Bearer {}", token.into())));
+        self
+    }
+
+    /// Add API key header.
+    #[must_use]
+    pub fn with_api_key(mut self, header_name: impl Into<String>, key: impl Into<String>) -> Self {
+        self.auth_headers.push((header_name.into(), key.into()));
+        self
+    }
+
+    /// Add custom authentication header.
+    #[must_use]
+    pub fn with_auth_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.auth_headers.push((name.into(), value.into()));
         self
     }
 
@@ -1852,6 +1875,9 @@ impl OtlpHttpExporter {
             if let Some(encoding) = content_encoding {
                 headers.push(("Content-Encoding".to_owned(), encoding));
             }
+
+            // Add authentication headers
+            headers.extend(self.auth_headers.clone());
 
             // Send request with timeout
             let response = crate::time::timeout(cx.now(), self.timeout, async {

@@ -75,6 +75,49 @@ pub enum LedgerError {
         /// The obligation ID that was not present in the ledger.
         obligation: ObligationId,
     },
+    /// The obligation is not in the expected pending state. Returned when
+    /// trying to resolve an obligation that has already been committed,
+    /// aborted, or leaked.
+    NotPending {
+        /// The obligation ID that was not in pending state.
+        obligation: ObligationId,
+        /// The actual state observed.
+        state: ObligationState,
+    },
+    /// Obligation token validation failed - the token's fields do not
+    /// match the ledger record. This indicates token corruption or
+    /// use-after-resolve.
+    TokenMismatch {
+        /// The obligation ID from the token.
+        obligation: ObligationId,
+        /// Description of which field mismatched.
+        field: &'static str,
+    },
+    /// Ledger stats underflow - attempting to decrement a counter below zero.
+    /// This indicates a double-resolution or other accounting error.
+    StatsUnderflow {
+        /// The counter that would underflow.
+        counter: &'static str,
+    },
+    /// Cannot acquire obligation against finalized region. The region was
+    /// closed before this obligation could be created.
+    AcquireAfterFinalize {
+        /// The region that was already finalized.
+        region: RegionId,
+        /// The obligation kind that was attempted.
+        kind: ObligationKind,
+        /// The holder that attempted the acquire.
+        holder: TaskId,
+    },
+    /// Obligation ledger index space exhausted within current generation.
+    /// This is a resource limit error - too many obligations created.
+    IndexOverflow {
+        /// The current generation that ran out of index space.
+        generation: u64,
+    },
+    /// Obligation ledger generation counter exhausted. This is extremely
+    /// unlikely in practice but must be handled for correctness.
+    GenerationOverflow,
 }
 
 impl std::fmt::Display for LedgerError {
@@ -92,6 +135,29 @@ impl std::fmt::Display for LedgerError {
             ),
             Self::NotFound { obligation } => {
                 write!(f, "obligation {obligation:?} not found in ledger")
+            }
+            Self::NotPending { obligation, state } => write!(
+                f,
+                "obligation {obligation:?} is not pending (state={state:?})"
+            ),
+            Self::TokenMismatch { obligation, field } => write!(
+                f,
+                "obligation token {obligation:?} {field} does not match ledger record"
+            ),
+            Self::StatsUnderflow { counter } => {
+                write!(f, "obligation ledger {counter} stats underflow")
+            }
+            Self::AcquireAfterFinalize { region, kind, holder } => write!(
+                f,
+                "cannot acquire obligation against finalized region {region:?} \
+                 (kind={kind:?}, holder={holder:?})"
+            ),
+            Self::IndexOverflow { generation } => write!(
+                f,
+                "obligation ledger index overflow within generation {generation}; reset required"
+            ),
+            Self::GenerationOverflow => {
+                write!(f, "obligation ledger generation overflow")
             }
         }
     }
@@ -258,45 +324,54 @@ impl ObligationLedger {
     fn pending_record_for_id_mut(
         &mut self,
         id: ObligationId,
-        operation: &'static str,
-    ) -> &mut ObligationRecord {
+        _operation: &'static str,
+    ) -> Result<&mut ObligationRecord, LedgerError> {
         let record = self
             .obligations
             .get_mut(&id)
-            .unwrap_or_else(|| panic!("{operation}: obligation {id:?} not found in ledger"));
-        assert!(
-            record.is_pending(),
-            "{operation}: obligation {id:?} is not pending (state={:?})",
-            record.state
-        );
-        record
-    }
-
-    fn resolve_one_pending(&mut self, operation: &'static str) {
-        self.stats.pending =
-            self.stats.pending.checked_sub(1).unwrap_or_else(|| {
-                panic!("{operation}: obligation ledger pending stats underflow")
+            .ok_or_else(|| LedgerError::NotFound { obligation: id })?;
+        if !record.is_pending() {
+            return Err(LedgerError::NotPending {
+                obligation: id,
+                state: record.state,
             });
+        }
+        Ok(record)
     }
 
-    fn record_for_token_mut(&mut self, token: &ObligationToken) -> &mut ObligationRecord {
-        let record = self.pending_record_for_id_mut(token.id, "token resolve");
-        assert_eq!(
-            record.kind, token.kind,
-            "obligation token kind does not match ledger record"
-        );
-        assert_eq!(
-            record.holder, token.holder,
-            "obligation token holder does not match ledger record"
-        );
-        assert_eq!(
-            record.region, token.region,
-            "obligation token region does not match ledger record"
-        );
-        record
+    fn resolve_one_pending(&mut self, _operation: &'static str) -> Result<(), LedgerError> {
+        self.stats.pending = self.stats.pending.checked_sub(1).ok_or_else(|| {
+            LedgerError::StatsUnderflow {
+                counter: "pending",
+            }
+        })?;
+        Ok(())
     }
 
-    fn finish_resolution(&mut self, operation: &'static str, resolution: ObligationResolution) {
+    fn record_for_token_mut(&mut self, token: &ObligationToken) -> Result<&mut ObligationRecord, LedgerError> {
+        let record = self.pending_record_for_id_mut(token.id, "token resolve")?;
+        if record.kind != token.kind {
+            return Err(LedgerError::TokenMismatch {
+                obligation: token.id,
+                field: "kind",
+            });
+        }
+        if record.holder != token.holder {
+            return Err(LedgerError::TokenMismatch {
+                obligation: token.id,
+                field: "holder",
+            });
+        }
+        if record.region != token.region {
+            return Err(LedgerError::TokenMismatch {
+                obligation: token.id,
+                field: "region",
+            });
+        }
+        Ok(record)
+    }
+
+    fn finish_resolution(&mut self, operation: &'static str, resolution: ObligationResolution) -> Result<(), LedgerError> {
         match resolution {
             ObligationResolution::Commit => {
                 self.stats.total_committed += 1;
@@ -308,7 +383,7 @@ impl ObligationLedger {
                 self.stats.total_leaked += 1;
             }
         }
-        self.resolve_one_pending(operation);
+        self.resolve_one_pending(operation)
     }
 
     fn resolve_token(
@@ -317,13 +392,13 @@ impl ObligationLedger {
         operation: &'static str,
         resolution: ObligationResolution,
         now: Time,
-    ) -> u64 {
+    ) -> Result<u64, LedgerError> {
         let duration = {
-            let record = self.record_for_token_mut(token);
+            let record = self.record_for_token_mut(token)?;
             record.resolve_with(now, resolution)
         };
-        self.finish_resolution(operation, resolution);
-        duration
+        self.finish_resolution(operation, resolution)?;
+        Ok(duration)
     }
 
     fn resolve_id(
@@ -332,13 +407,13 @@ impl ObligationLedger {
         operation: &'static str,
         resolution: ObligationResolution,
         now: Time,
-    ) -> u64 {
+    ) -> Result<u64, LedgerError> {
         let duration = {
-            let record = self.pending_record_for_id_mut(id, operation);
+            let record = self.pending_record_for_id_mut(id, operation)?;
             record.resolve_with(now, resolution)
         };
-        self.finish_resolution(operation, resolution);
-        duration
+        self.finish_resolution(operation, resolution)?;
+        Ok(duration)
     }
 
     /// Creates an empty ledger.
@@ -459,6 +534,58 @@ impl ObligationLedger {
         )
     }
 
+    /// Internal acquire implementation that returns Result for all error cases.
+    #[allow(clippy::too_many_arguments)]
+    fn acquire_internal(
+        &mut self,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+        location: SourceLocation,
+        backtrace: Option<Arc<std::backtrace::Backtrace>>,
+        description: Option<String>,
+    ) -> Result<ObligationToken, LedgerError> {
+        // Check if region is finalized
+        if self.finalized_regions.contains(&region) {
+            return Err(LedgerError::AcquireAfterFinalize {
+                region,
+                kind,
+                holder,
+            });
+        }
+
+        // Check for index overflow
+        let next_index = self.next_index.checked_add(1).ok_or_else(|| {
+            LedgerError::IndexOverflow {
+                generation: self.generation,
+            }
+        })?;
+
+        let idx = ArenaIndex::new(self.next_index, self.generation);
+        self.next_index = next_index;
+        let id = ObligationId::from_arena(idx);
+
+        let record = if let Some(desc) = description {
+            ObligationRecord::with_description_and_context(
+                id, kind, holder, region, now, desc, location, backtrace,
+            )
+        } else {
+            ObligationRecord::new_with_context(id, kind, holder, region, now, location, backtrace)
+        };
+
+        self.obligations.insert(id, record);
+        self.stats.total_acquired += 1;
+        self.stats.pending += 1;
+
+        Ok(ObligationToken {
+            id,
+            kind,
+            holder,
+            region,
+        })
+    }
+
     /// Acquires a new obligation with full context.
     ///
     /// br-asupersync-12cqs2: PANICS if the owning region was already
@@ -477,41 +604,21 @@ impl ObligationLedger {
         backtrace: Option<Arc<std::backtrace::Backtrace>>,
         description: Option<String>,
     ) -> ObligationToken {
-        // br-asupersync-12cqs2: fence check FIRST. Acquire-on-
-        // finalized-region is a programming error in the infallible
-        // path; surface it as a panic with a clear message rather
-        // than silently mutating the ledger.
-        assert!(
-            !self.finalized_regions.contains(&region),
-            "br-asupersync-12cqs2: cannot acquire obligation against finalized region {region:?} \
-             (kind={kind:?}, holder={holder:?}); use try_acquire_with_context for late-arrival paths"
-        );
-
-        let idx = ArenaIndex::new(self.next_index, self.generation);
-        self.next_index = self
-            .next_index
-            .checked_add(1)
-            .expect("obligation ledger index overflow within current generation; reset required");
-        let id = ObligationId::from_arena(idx);
-
-        let record = if let Some(desc) = description {
-            ObligationRecord::with_description_and_context(
-                id, kind, holder, region, now, desc, location, backtrace,
-            )
-        } else {
-            ObligationRecord::new_with_context(id, kind, holder, region, now, location, backtrace)
-        };
-
-        self.obligations.insert(id, record);
-        self.stats.total_acquired += 1;
-        self.stats.pending += 1;
-
-        ObligationToken {
-            id,
-            kind,
-            holder,
-            region,
-        }
+        self.acquire_internal(kind, holder, region, now, location, backtrace, description)
+            .unwrap_or_else(|err| match err {
+                LedgerError::AcquireAfterFinalize { region, kind, holder } => {
+                    panic!(
+                        "br-asupersync-12cqs2: cannot acquire obligation against finalized region {region:?} \
+                         (kind={kind:?}, holder={holder:?}); use try_acquire_with_context for late-arrival paths"
+                    )
+                }
+                LedgerError::IndexOverflow { generation } => {
+                    panic!(
+                        "obligation ledger index overflow within generation {generation}; reset required"
+                    )
+                }
+                _ => panic!("unexpected error in acquire_with_context: {err}"),
+            })
     }
 
     /// br-asupersync-12cqs2: fallible variant of [`Self::acquire`].
@@ -552,14 +659,18 @@ impl ObligationLedger {
         backtrace: Option<Arc<std::backtrace::Backtrace>>,
         description: Option<String>,
     ) -> Result<ObligationToken, LedgerError> {
-        if self.finalized_regions.contains(&region) {
-            return Err(LedgerError::RegionFinalized {
-                region,
-                // No token minted yet; sentinel ID for pattern-match.
-                obligation: ObligationId::from_arena(ArenaIndex::new(0, u32::MAX)),
-            });
-        }
-        Ok(self.acquire_with_context(kind, holder, region, now, location, backtrace, description))
+        self.acquire_internal(kind, holder, region, now, location, backtrace, description)
+            .map_err(|err| match err {
+                LedgerError::AcquireAfterFinalize { region, .. } => {
+                    // Convert to the existing RegionFinalized error variant for API consistency
+                    LedgerError::RegionFinalized {
+                        region,
+                        // No token minted yet; sentinel ID for pattern-match.
+                        obligation: ObligationId::from_arena(ArenaIndex::new(0, u32::MAX)),
+                    }
+                }
+                other => other,
+            })
     }
 
     /// Commits an obligation, consuming the token.
@@ -589,6 +700,9 @@ impl ObligationLedger {
             return 0;
         }
         self.resolve_token(&token, "commit", ObligationResolution::Commit, now)
+            .unwrap_or_else(|err| {
+                panic!("commit: {err}")
+            })
     }
 
     /// Aborts an obligation, consuming the token.
@@ -615,6 +729,9 @@ impl ObligationLedger {
             return 0;
         }
         self.resolve_token(&token, "abort", ObligationResolution::Abort(reason), now)
+            .unwrap_or_else(|err| {
+                panic!("abort: {err}")
+            })
     }
 
     /// Aborts an obligation by ID.
@@ -653,6 +770,9 @@ impl ObligationLedger {
             }
         }
         self.resolve_id(id, "abort_by_id", ObligationResolution::Abort(reason), now)
+            .unwrap_or_else(|err| {
+                panic!("abort_by_id: {err}")
+            })
     }
 
     /// Race-tolerant variant of [`Self::abort_by_id`] for drain loops
@@ -707,12 +827,12 @@ impl ObligationLedger {
                 state,
             });
         }
-        Ok(self.resolve_id(
+        self.resolve_id(
             id,
             "try_abort_by_id",
             ObligationResolution::Abort(reason),
             now,
-        ))
+        )
     }
 
     /// Marks an obligation as leaked (runtime detected the holder completed
@@ -723,6 +843,9 @@ impl ObligationLedger {
     /// Panics if the obligation was already resolved or does not exist.
     pub fn mark_leaked(&mut self, id: ObligationId, now: Time) -> u64 {
         self.resolve_id(id, "mark_leaked", ObligationResolution::Leak, now)
+            .unwrap_or_else(|err| {
+                panic!("mark_leaked: {err}")
+            })
     }
 
     /// Returns the current ledger statistics.
