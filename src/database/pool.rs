@@ -464,14 +464,16 @@ struct ValidationGuard<'a, M: ConnectionManager> {
 impl<M: ConnectionManager> Drop for ValidationGuard<'_, M> {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
-            let mut inner = self.pool.inner.lock();
-            inner.total = inner.total.saturating_sub(1);
-            drop(inner);
-            self.pool
-                .stats
-                .total_discards
-                .fetch_add(1, Ordering::Relaxed);
-            self.pool.manager.disconnect(conn);
+            // br-asupersync-sxhome: Use safe disconnect to prevent resource leaks
+            if self.pool.safe_disconnect(conn) {
+                // Only update counts if disconnect succeeded
+                let mut inner = self.pool.inner.lock();
+                inner.total = inner.total.saturating_sub(1);
+                drop(inner);
+                self.pool.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+            } else {
+                eprintln!("SECURITY: ValidationGuard disconnect failure - pool state preserved");
+            }
         }
     }
 }
@@ -605,7 +607,8 @@ impl<M: ConnectionManager> DbPool<M> {
 
             if let Some((conn, needs_validation, created_at, _authenticated_for)) = conn_to_validate {
                 if !needs_validation {
-                    self.manager.disconnect(conn);
+                    // br-asupersync-sxhome: Use safe disconnect for expired connections
+                    self.safe_disconnect(conn);
                     continue;
                 }
 
@@ -776,7 +779,8 @@ impl<M: ConnectionManager> DbPool<M> {
                         }
                     }
 
-                    self.manager.disconnect(conn);
+                    // br-asupersync-sxhome: Use safe disconnect for mismatched auth connections
+                    self.safe_disconnect(conn);
                     continue;
                 }
 
@@ -1183,8 +1187,20 @@ impl<M: ConnectionManager> DbPool<M> {
                 .fetch_add(drained as u64, Ordering::Relaxed);
         }
         drop(inner);
+        // br-asupersync-sxhome: Use safe disconnect to prevent resource leaks during close
+        let mut failed_disconnects = 0;
         for entry in idle {
-            self.manager.disconnect(entry.conn);
+            if !self.safe_disconnect(entry.conn) {
+                failed_disconnects += 1;
+            }
+        }
+
+        // If any disconnects failed during close, log the security event
+        if failed_disconnects > 0 {
+            eprintln!(
+                "SECURITY: {} disconnect failures during pool close - potential resource leaks",
+                failed_disconnects
+            );
         }
     }
 
@@ -1221,9 +1237,24 @@ impl<M: ConnectionManager> DbPool<M> {
         inner.total = inner.total.saturating_sub(evicted);
         drop(inner);
 
+        // br-asupersync-sxhome: Use safe disconnect to prevent resource leaks during eviction
+        let mut failed_disconnects = 0;
         for conn in to_disconnect {
-            self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-            self.manager.disconnect(conn);
+            if self.safe_disconnect(conn) {
+                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+            } else {
+                failed_disconnects += 1;
+            }
+        }
+
+        // If any disconnects failed, restore the pool total count to maintain consistency
+        if failed_disconnects > 0 {
+            let mut inner = self.inner.lock();
+            inner.total += failed_disconnects;
+            eprintln!(
+                "SECURITY: {} disconnect failures during eviction - pool count adjusted",
+                failed_disconnects
+            );
         }
         evicted
     }
@@ -1870,8 +1901,20 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 .fetch_add(drained as u64, Ordering::Relaxed);
         }
         drop(inner);
+        // br-asupersync-sxhome: Use safe disconnect to prevent resource leaks during close
+        let mut failed_disconnects = 0;
         for entry in idle {
-            self.manager.disconnect(entry.conn);
+            if !self.safe_disconnect(entry.conn) {
+                failed_disconnects += 1;
+            }
+        }
+
+        // If any disconnects failed during close, log the security event
+        if failed_disconnects > 0 {
+            eprintln!(
+                "SECURITY: {} disconnect failures during pool close - potential resource leaks",
+                failed_disconnects
+            );
         }
     }
 
