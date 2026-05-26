@@ -9,6 +9,8 @@
 //! - Service lifecycle management
 //! - Diagnostics and monitoring
 
+#![allow(unsafe_code)]
+
 use anyhow::Result;
 use asupersync::atp::identity::PeerId;
 use asupersync::cx::Cx;
@@ -20,9 +22,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use toml;
 use tracing::{error, info, warn};
+
+#[cfg(unix)]
+extern crate libc;
 
 /// ATP Daemon - Always-on ATP transfer service
 #[derive(Parser)]
