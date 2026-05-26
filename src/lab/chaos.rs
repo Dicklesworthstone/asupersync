@@ -352,9 +352,25 @@ impl ChaosConfig {
     }
 
     /// Sets the range of wakeup counts in a storm.
+    ///
+    /// # Security
+    ///
+    /// The range is validated to prevent DoS attacks via excessive wakeup storms.
+    /// The maximum end value is capped at 100,000 wakeups per storm.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range end exceeds the security limit.
     #[inline]
     #[must_use]
     pub fn with_wakeup_storm_count(mut self, range: Range<usize>) -> Self {
+        const MAX_WAKEUP_STORM_COUNT: usize = 10_000;
+        assert!(
+            range.end <= MAX_WAKEUP_STORM_COUNT,
+            "wakeup storm count end ({}) must be <= {} to prevent DoS attacks",
+            range.end,
+            MAX_WAKEUP_STORM_COUNT
+        );
         self.wakeup_storm_count = range;
         self
     }
@@ -872,6 +888,11 @@ fn delay_range_can_emit_nonzero(range: &Range<Duration>) -> bool {
 }
 
 fn wakeup_range_can_emit_positive(range: &Range<usize>) -> bool {
+    const MAX_WAKEUP_STORM_COUNT: usize = 10_000;
+    // Security: Reject ranges that could cause DoS attacks
+    if range.end > MAX_WAKEUP_STORM_COUNT {
+        return false;
+    }
     range.end > range.start && (range.start > 0 || range.end > 1)
 }
 
@@ -1383,5 +1404,42 @@ mod tests {
         assert!(dbg.contains("ChaosStats"), "{dbg}");
         let cloned = def;
         assert_eq!(cloned.cancellations, 0);
+    }
+
+    // Security regression test for DoS vulnerability br-asupersync-e51d48
+    #[test]
+    #[should_panic(expected = "wakeup storm count end (200000) must be <= 10000 to prevent DoS attacks")]
+    fn wakeup_storm_count_rejects_dos_attack() {
+        let _ = ChaosConfig::new(42).with_wakeup_storm_count(0..200_000);
+    }
+
+    #[test]
+    fn wakeup_storm_count_accepts_reasonable_values() {
+        let config = ChaosConfig::new(42).with_wakeup_storm_count(1..1000);
+        assert_eq!(config.wakeup_storm_count, 1..1000);
+    }
+
+    #[test]
+    fn wakeup_storm_count_accepts_max_limit() {
+        let config = ChaosConfig::new(42).with_wakeup_storm_count(1..10_000);
+        assert_eq!(config.wakeup_storm_count, 1..10_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "wakeup storm count end (10001) must be <= 10000 to prevent DoS attacks")]
+    fn wakeup_storm_count_rejects_above_limit() {
+        let _ = ChaosConfig::new(42).with_wakeup_storm_count(1..10_001);
+    }
+
+    #[test]
+    fn wakeup_range_can_emit_positive_rejects_excessive_values() {
+        // Should reject ranges that could cause DoS
+        assert!(!wakeup_range_can_emit_positive(&(0..200_000)));
+        assert!(!wakeup_range_can_emit_positive(&(1..100_001)));
+        assert!(!wakeup_range_can_emit_positive(&(1..10_001)));
+
+        // Should accept reasonable ranges
+        assert!(wakeup_range_can_emit_positive(&(1..1000)));
+        assert!(wakeup_range_can_emit_positive(&(0..10_000)));
     }
 }
