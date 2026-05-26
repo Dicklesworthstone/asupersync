@@ -1670,6 +1670,49 @@ impl RedisConfig {
         }
     }
 
+    /// URL-decode credential strings to handle percent-encoded characters.
+    ///
+    /// SECURITY: Prevents authentication bypass via URL-encoded credentials
+    /// like `%3A` (colon) or `%40` (at-sign) that could bypass credential
+    /// parsing (asupersync-ts45lv).
+    fn url_decode_credential(encoded: &str) -> Result<String, RedisError> {
+        let mut result = String::with_capacity(encoded.len());
+        let mut chars = encoded.chars();
+
+        while let Some(ch) = chars.next() {
+            if ch == '%' {
+                // Percent-encoded character: read next two hex digits
+                let hex1 = chars.next().ok_or_else(|| {
+                    RedisError::InvalidUrl("incomplete percent encoding in credential".to_string())
+                })?;
+                let hex2 = chars.next().ok_or_else(|| {
+                    RedisError::InvalidUrl("incomplete percent encoding in credential".to_string())
+                })?;
+
+                // Parse hex digits to byte value
+                let byte = u8::from_str_radix(&format!("{}{}", hex1, hex2), 16)
+                    .map_err(|_| {
+                        RedisError::InvalidUrl("invalid percent encoding in credential".to_string())
+                    })?;
+
+                // Convert byte to char (assuming UTF-8, which is standard for URLs)
+                if byte.is_ascii() {
+                    result.push(byte as char);
+                } else {
+                    // For non-ASCII bytes, we'd need proper UTF-8 decoding,
+                    // but Redis credentials should be ASCII-safe
+                    return Err(RedisError::InvalidUrl(
+                        "non-ASCII percent encoding in credential".to_string(),
+                    ));
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+
+        Ok(result)
+    }
+
     /// Create config from a Redis URL.
     pub fn from_url(url: &str) -> Result<Self, RedisError> {
         let (url, use_tls) = if let Some(url) = url.strip_prefix("rediss://") {
@@ -1687,14 +1730,16 @@ impl RedisConfig {
 
         let url = if let Some((userinfo, rest)) = url.rsplit_once('@') {
             // Split userinfo into username:password per Redis URL convention.
+            // SECURITY: Apply URL percent-decoding to credentials to prevent
+            // authentication bypass via encoded characters (asupersync-ts45lv).
             if let Some((username, password)) = userinfo.split_once(':') {
                 if !username.is_empty() {
-                    config.username = Some(username.to_string());
+                    config.username = Some(Self::url_decode_credential(username)?);
                 }
-                config.password = Some(password.to_string());
+                config.password = Some(Self::url_decode_credential(password)?);
             } else {
                 // No colon: treat the entire userinfo as the password.
-                config.password = Some(userinfo.to_string());
+                config.password = Some(Self::url_decode_credential(userinfo)?);
             }
             rest
         } else {
@@ -7696,6 +7741,56 @@ mod tests {
         let redacted = RedisConfig::redact_url_for_errors(complex_url);
         assert_eq!(redacted, "redis://***@localhost:6379");
         assert!(!redacted.contains("p@ss:w0rd!"));
+    }
+
+    #[test]
+    fn test_redis_url_credential_decoding() {
+        // SECURITY TEST: Verify URL-encoded credentials are properly decoded
+        // to prevent authentication bypass (asupersync-ts45lv)
+
+        // Test basic percent-encoding decoding
+        assert_eq!(
+            RedisConfig::url_decode_credential("user").unwrap(),
+            "user"
+        );
+        assert_eq!(
+            RedisConfig::url_decode_credential("user%3Aescaped").unwrap(),
+            "user:escaped"
+        );
+        assert_eq!(
+            RedisConfig::url_decode_credential("pass%40word").unwrap(),
+            "pass@word"
+        );
+
+        // Test URL with encoded colon in username (potential bypass vector)
+        let config = RedisConfig::from_url("redis://admin%3Auser:password@localhost:6379").unwrap();
+        assert_eq!(config.username, Some("admin:user".to_string()));
+        assert_eq!(config.password, Some("password".to_string()));
+
+        // Test URL with encoded characters in password
+        let config = RedisConfig::from_url("redis://user:p%40ss%3Aw0rd@localhost:6379").unwrap();
+        assert_eq!(config.username, Some("user".to_string()));
+        assert_eq!(config.password, Some("p@ss:w0rd".to_string()));
+
+        // Test password-only format with encoding
+        let config = RedisConfig::from_url("redis://my%40password@localhost:6379").unwrap();
+        assert_eq!(config.username, None);
+        assert_eq!(config.password, Some("my@password".to_string()));
+
+        // Test error cases
+        assert!(RedisConfig::url_decode_credential("invalid%").is_err());
+        assert!(RedisConfig::url_decode_credential("invalid%G").is_err());
+        assert!(RedisConfig::url_decode_credential("invalid%GZ").is_err());
+
+        // Test common percent-encoded characters
+        assert_eq!(
+            RedisConfig::url_decode_credential("test%20space").unwrap(),
+            "test space"
+        );
+        assert_eq!(
+            RedisConfig::url_decode_credential("test%21exclaim").unwrap(),
+            "test!exclaim"
+        );
     }
 
     // Pure data-type tests (wave 13 – CyanBarn)
