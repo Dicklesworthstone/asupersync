@@ -110,10 +110,10 @@ impl TrustPolicy {
                 // Security: Reject storage of potentially unencrypted content in shared cache
                 // Public content can be stored unencrypted, but private content must be encrypted
                 // This prevents sensitive data leaks in shared cache environments
-                return Err(CacheError::TrustViolation(
-                    format!("Private content requires encryption for shared cache. Grant scope: {:?}",
-                            key.grant_scope)
-                ));
+                return Err(CacheError::TrustViolation(format!(
+                    "Private content requires encryption for shared cache. Grant scope: {:?}",
+                    key.grant_scope
+                )));
             }
         }
 
@@ -199,15 +199,27 @@ pub struct TrustBoundaryChecker {
     policy: TrustPolicy,
     /// Access log for auditing.
     access_log: Vec<TrustAccessEvent>,
+    /// Maximum number of access log entries to retain.
+    max_log_entries: usize,
 }
 
 impl TrustBoundaryChecker {
-    /// Create a new trust boundary checker.
+    /// Default maximum number of access log entries.
+    const DEFAULT_MAX_LOG_ENTRIES: usize = 1000;
+
+    /// Create a new trust boundary checker with default log size limit.
     #[must_use]
     pub fn new(policy: TrustPolicy) -> Self {
+        Self::with_max_log_entries(policy, Self::DEFAULT_MAX_LOG_ENTRIES)
+    }
+
+    /// Create a new trust boundary checker with custom log size limit.
+    #[must_use]
+    pub fn with_max_log_entries(policy: TrustPolicy, max_log_entries: usize) -> Self {
         Self {
             policy,
             access_log: Vec::new(),
+            max_log_entries: max_log_entries.max(1), // Ensure at least 1 entry
         }
     }
 
@@ -215,13 +227,21 @@ impl TrustBoundaryChecker {
     pub fn check_access(&mut self, key: &CacheKey, operation: &str) -> Result<(), CacheError> {
         let result = self.policy.check_access(key);
 
-        // Log access attempt
-        self.access_log.push(TrustAccessEvent {
+        // Log access attempt with bounded memory growth
+        let event = TrustAccessEvent {
             key: key.clone(),
             operation: operation.to_string(),
             allowed: result.is_ok(),
             timestamp: std::time::SystemTime::now(),
-        });
+        };
+
+        // Ensure we don't exceed max_log_entries (FIFO eviction)
+        if self.access_log.len() >= self.max_log_entries {
+            // Remove oldest entry (front of Vec) to make room
+            self.access_log.remove(0);
+        }
+
+        self.access_log.push(event);
 
         result
     }
@@ -235,6 +255,12 @@ impl TrustBoundaryChecker {
     /// Clear access log.
     pub fn clear_log(&mut self) {
         self.access_log.clear();
+    }
+
+    /// Get the maximum number of log entries allowed.
+    #[must_use]
+    pub const fn max_log_entries(&self) -> usize {
+        self.max_log_entries
     }
 }
 
@@ -318,6 +344,77 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(checker.access_log().len(), 1);
         assert!(checker.access_log()[0].allowed);
+        assert_eq!(checker.max_log_entries(), TrustBoundaryChecker::DEFAULT_MAX_LOG_ENTRIES);
+    }
+
+    #[test]
+    fn trust_boundary_checker_bounded_logging() {
+        let policy = TrustPolicy::local();
+        let mut checker = TrustBoundaryChecker::with_max_log_entries(policy, 3);
+
+        let key1 = CacheKey::new("manifest1".to_string(), "content1".to_string(), None);
+        let key2 = CacheKey::new("manifest2".to_string(), "content2".to_string(), None);
+        let key3 = CacheKey::new("manifest3".to_string(), "content3".to_string(), None);
+        let key4 = CacheKey::new("manifest4".to_string(), "content4".to_string(), None);
+
+        // Add 3 entries (within limit)
+        checker.check_access(&key1, "get").unwrap();
+        checker.check_access(&key2, "put").unwrap();
+        checker.check_access(&key3, "delete").unwrap();
+        assert_eq!(checker.access_log().len(), 3);
+        assert_eq!(checker.max_log_entries(), 3);
+
+        // Verify the entries are in order
+        assert_eq!(checker.access_log()[0].key.content_id, "content1");
+        assert_eq!(checker.access_log()[1].key.content_id, "content2");
+        assert_eq!(checker.access_log()[2].key.content_id, "content3");
+
+        // Add 4th entry - should evict oldest (FIFO)
+        checker.check_access(&key4, "verify").unwrap();
+        assert_eq!(checker.access_log().len(), 3); // Still capped at 3
+
+        // First entry should be evicted, remaining entries shifted
+        assert_eq!(checker.access_log()[0].key.content_id, "content2");
+        assert_eq!(checker.access_log()[1].key.content_id, "content3");
+        assert_eq!(checker.access_log()[2].key.content_id, "content4");
+    }
+
+    #[test]
+    fn trust_boundary_checker_custom_max_entries() {
+        let policy = TrustPolicy::local();
+        let mut checker = TrustBoundaryChecker::with_max_log_entries(policy, 100);
+
+        assert_eq!(checker.max_log_entries(), 100);
+
+        // Test minimum constraint (at least 1 entry)
+        let policy2 = TrustPolicy::local();
+        let checker2 = TrustBoundaryChecker::with_max_log_entries(policy2, 0);
+        assert_eq!(checker2.max_log_entries(), 1);
+    }
+
+    #[test]
+    fn trust_boundary_checker_clear_log_preserves_limit() {
+        let policy = TrustPolicy::local();
+        let mut checker = TrustBoundaryChecker::with_max_log_entries(policy, 5);
+
+        let key = CacheKey::new("manifest".to_string(), "content".to_string(), None);
+
+        // Add some entries
+        for i in 0..3 {
+            checker.check_access(&key, &format!("operation{}", i)).unwrap();
+        }
+        assert_eq!(checker.access_log().len(), 3);
+
+        // Clear log
+        checker.clear_log();
+        assert_eq!(checker.access_log().len(), 0);
+        assert_eq!(checker.max_log_entries(), 5); // Limit preserved
+
+        // Add more entries - should respect original limit
+        for i in 0..7 {
+            checker.check_access(&key, &format!("operation{}", i)).unwrap();
+        }
+        assert_eq!(checker.access_log().len(), 5); // Capped at limit
     }
 
     #[test]
@@ -362,11 +459,7 @@ mod tests {
         assert!(matches!(result, Err(CacheError::TrustViolation(_))));
 
         // Content with no scope should be allowed (no scope check)
-        let no_scope_key = CacheKey::new(
-            "manifest123".to_string(),
-            "content456".to_string(),
-            None,
-        );
+        let no_scope_key = CacheKey::new("manifest123".to_string(), "content456".to_string(), None);
         assert!(policy.check_access(&no_scope_key).is_ok());
 
         // When scopes ARE configured, they should be enforced
@@ -419,11 +512,7 @@ mod tests {
         assert!(matches!(result, Err(CacheError::TrustViolation(_))));
 
         // Content with no scope should be rejected (requires encryption)
-        let no_scope_key = CacheKey::new(
-            "manifest123".to_string(),
-            "content456".to_string(),
-            None,
-        );
+        let no_scope_key = CacheKey::new("manifest123".to_string(), "content456".to_string(), None);
         let result = policy.check_storage(&no_scope_key);
         assert!(result.is_err());
         assert!(matches!(result, Err(CacheError::TrustViolation(_))));
@@ -464,11 +553,7 @@ mod tests {
         assert!(!policy.is_explicitly_public_content(&private_key));
 
         // Content with no scope should NOT be considered public
-        let no_scope_key = CacheKey::new(
-            "manifest123".to_string(),
-            "content456".to_string(),
-            None,
-        );
+        let no_scope_key = CacheKey::new("manifest123".to_string(), "content456".to_string(), None);
         assert!(!policy.is_explicitly_public_content(&no_scope_key));
 
         // When global policy disallows public content, nothing should be public
