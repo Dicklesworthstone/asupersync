@@ -103,6 +103,14 @@ pub enum SystematicParamError {
         /// Maximum value that fits in u32.
         max_u32: usize,
     },
+    /// RFC 6330 systematic index table contains invalid parameter relationships.
+    /// This indicates corrupted table data that violates mathematical invariants.
+    RfcTableInvariantViolation {
+        /// Description of the violated invariant.
+        invariant: &'static str,
+        /// The problematic values involved.
+        details: String,
+    },
 }
 
 impl SystematicParams {
@@ -173,10 +181,16 @@ impl SystematicParams {
         let l = k_prime + s + h;
         let b = w
             .checked_sub(s)
-            .expect("RFC table invariant violated: W < S");
+            .ok_or(SystematicParamError::RfcTableInvariantViolation {
+                invariant: "W >= S",
+                details: format!("W={w} < S={s} in RFC table entry for K={k}"),
+            })?;
         let p = l
             .checked_sub(w)
-            .expect("RFC table invariant violated: W > L");
+            .ok_or(SystematicParamError::RfcTableInvariantViolation {
+                invariant: "L >= W",
+                details: format!("L={l} < W={w} in RFC table entry for K={k}"),
+            })?;
 
         Ok(Self {
             k,
