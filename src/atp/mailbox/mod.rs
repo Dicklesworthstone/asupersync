@@ -360,4 +360,212 @@ mod tests {
         assert!(display.contains("1500"));
         assert!(display.contains("1000"));
     }
+
+    // Golden artifact tests for ATP mailbox protocol serialization stability
+    // These tests freeze the JSON serialization format to detect unintended changes
+    // Fixed timestamp: 1640995200000000 = 2022-01-01T00:00:00Z
+
+    #[test]
+    fn golden_mailbox_transfer_id_serialization() {
+        use uuid::Uuid;
+
+        let fixed_uuid = Uuid::from_bytes([
+            0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
+            0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+        ]);
+        let transfer_id = MailboxTransferId(fixed_uuid);
+
+        insta::assert_json_snapshot!(transfer_id, @r###"
+        "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+        "###);
+    }
+
+    #[test]
+    fn golden_peer_id_serialization() {
+        let peer_id = PeerId::new("peer-atp-node-f3c4d5e6");
+
+        insta::assert_json_snapshot!(peer_id, @r###"
+        "peer-atp-node-f3c4d5e6"
+        "###);
+    }
+
+    #[test]
+    fn golden_mailbox_transfer_metadata_serialization() {
+        use uuid::Uuid;
+
+        let fixed_uuid = Uuid::from_bytes([
+            0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
+            0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+        ]);
+
+        let metadata = MailboxTransferMetadata {
+            transfer_id: MailboxTransferId(fixed_uuid),
+            destination_peer: PeerId::new("peer-destination-node"),
+            created_at: Time::from_micros(1640995200000000), // 2022-01-01T00:00:00Z
+            expires_at: Time::from_micros(1640995200000000 + 604800000000), // +1 week
+            total_size: 2048576, // 2MB
+            chunk_count: 4,
+            encrypted_metadata: vec![0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe],
+        };
+
+        insta::assert_json_snapshot!(metadata, @r###"
+        {
+          "transfer_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+          "destination_peer": "peer-destination-node",
+          "created_at": 1640995200000000,
+          "expires_at": 1641600000000000,
+          "total_size": 2048576,
+          "chunk_count": 4,
+          "encrypted_metadata": [
+            222,
+            173,
+            190,
+            239,
+            202,
+            254,
+            186,
+            190
+          ]
+        }
+        "###);
+    }
+
+    #[test]
+    fn golden_mailbox_operation_result_serialization() {
+        use crate::atp::mailbox::quota::QuotaUsage;
+        use uuid::Uuid;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let fixed_uuid = Uuid::from_bytes([
+            0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
+            0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+        ]);
+
+        let result = MailboxOperationResult {
+            success: true,
+            transfer_id: Some(MailboxTransferId(fixed_uuid)),
+            quota_usage: QuotaUsage {
+                bytes_used: 1048576, // 1MB
+                active_transfers: 3,
+                total_transfers: 15,
+                last_updated: UNIX_EPOCH + std::time::Duration::from_secs(1640995200), // 2022-01-01T00:00:00Z
+            },
+            duration_ms: 1234,
+            messages: vec![
+                "Transfer initiated successfully".to_string(),
+                "Encryption completed".to_string(),
+            ],
+            relay_receipt: Some("receipt-abc123def456".to_string()),
+        };
+
+        insta::assert_json_snapshot!(result, @r###"
+        {
+          "success": true,
+          "transfer_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+          "quota_usage": {
+            "bytes_used": 1048576,
+            "active_transfers": 3,
+            "total_transfers": 15,
+            "last_updated": {
+              "secs_since_epoch": 1640995200,
+              "nanos_since_epoch": 0
+            }
+          },
+          "duration_ms": 1234,
+          "messages": [
+            "Transfer initiated successfully",
+            "Encryption completed"
+          ],
+          "relay_receipt": "receipt-abc123def456"
+        }
+        "###);
+    }
+
+    #[test]
+    fn golden_mailbox_event_transfer_upload_started_serialization() {
+        use uuid::Uuid;
+
+        let fixed_uuid = Uuid::from_bytes([
+            0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
+            0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+        ]);
+
+        let event = MailboxEvent::TransferUploadStarted {
+            transfer_id: MailboxTransferId(fixed_uuid),
+            destination: PeerId::new("peer-upload-target"),
+            total_size: 3145728, // 3MB
+        };
+
+        insta::assert_json_snapshot!(event, @r###"
+        {
+          "TransferUploadStarted": {
+            "transfer_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+            "destination": "peer-upload-target",
+            "total_size": 3145728
+          }
+        }
+        "###);
+    }
+
+    #[test]
+    fn golden_mailbox_event_quota_warning_serialization() {
+        let event = MailboxEvent::QuotaWarning {
+            current_usage: 85000000, // 85MB
+            quota_limit: 100000000, // 100MB
+            utilization_percent: 85.0,
+        };
+
+        insta::assert_json_snapshot!(event, @r###"
+        {
+          "QuotaWarning": {
+            "current_usage": 85000000,
+            "quota_limit": 100000000,
+            "utilization_percent": 85.0
+          }
+        }
+        "###);
+    }
+
+    #[test]
+    fn golden_mailbox_event_tamper_detected_serialization() {
+        use uuid::Uuid;
+
+        let fixed_uuid = Uuid::from_bytes([
+            0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
+            0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
+        ]);
+
+        let event = MailboxEvent::TamperDetected {
+            transfer_id: MailboxTransferId(fixed_uuid),
+            tamper_type: "checksum_mismatch".to_string(),
+            evidence: "expected_hash=abc123, actual_hash=def456".to_string(),
+        };
+
+        insta::assert_json_snapshot!(event, @r###"
+        {
+          "TamperDetected": {
+            "transfer_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+            "tamper_type": "checksum_mismatch",
+            "evidence": "expected_hash=abc123, actual_hash=def456"
+          }
+        }
+        "###);
+    }
+
+    #[test]
+    fn golden_mailbox_event_cleanup_performed_serialization() {
+        let event = MailboxEvent::CleanupPerformed {
+            expired_transfers: 7,
+            bytes_freed: 15728640, // 15MB
+        };
+
+        insta::assert_json_snapshot!(event, @r###"
+        {
+          "CleanupPerformed": {
+            "expired_transfers": 7,
+            "bytes_freed": 15728640
+          }
+        }
+        "###);
+    }
 }
