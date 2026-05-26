@@ -97,12 +97,15 @@ impl TrustPolicy {
 
         // For shared caches, enforce encryption requirements
         if self.is_shared_cache && self.require_encryption_for_shared {
-            // This is a placeholder - in a real implementation, we'd need to know
-            // if the content is encrypted. For now, we assume content without
-            // explicit public marking must be encrypted.
+            // Non-public content MUST be encrypted when stored in shared caches
             if !self.is_explicitly_public_content(key) {
-                // Content should be encrypted for shared cache
-                // This would be checked against actual content metadata
+                // Security: Reject storage of potentially unencrypted content in shared cache
+                // Public content can be stored unencrypted, but private content must be encrypted
+                // This prevents sensitive data leaks in shared cache environments
+                return Err(CacheError::TrustViolation(
+                    format!("Private content requires encryption for shared cache. Grant scope: {:?}",
+                            key.grant_scope)
+                ));
             }
         }
 
@@ -318,6 +321,50 @@ mod tests {
         assert!(summary.encryption_required);
         assert!(!summary.public_content_allowed);
         assert_eq!(summary.authorized_scope_count, 0);
+    }
+
+    #[test]
+    fn shared_cache_encryption_validation() {
+        // Test shared cache with encryption requirements
+        let policy = TrustPolicy {
+            is_shared_cache: true,
+            require_encryption_for_shared: true,
+            allow_public_content: true,
+            ..TrustPolicy::default()
+        };
+
+        // Public content should be allowed (can be unencrypted)
+        let public_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            Some("public".to_string()),
+        );
+        assert!(policy.check_storage(&public_key).is_ok());
+
+        // Private content should be rejected (requires encryption)
+        let private_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            Some("private".to_string()),
+        );
+        let result = policy.check_storage(&private_key);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(CacheError::TrustViolation(_))));
+
+        // Content with no scope should be rejected (requires encryption)
+        let no_scope_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            None,
+        );
+        let result = policy.check_storage(&no_scope_key);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(CacheError::TrustViolation(_))));
+
+        // Local cache should allow any content (no shared cache restrictions)
+        let local_policy = TrustPolicy::local();
+        assert!(local_policy.check_storage(&private_key).is_ok());
+        assert!(local_policy.check_storage(&no_scope_key).is_ok());
     }
 
     #[test]
