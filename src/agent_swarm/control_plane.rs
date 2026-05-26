@@ -138,6 +138,19 @@ pub struct ResourceUsage {
     pub active_regions: usize,
 }
 
+/// Authentication credentials for agent admission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentCredentials {
+    /// Certificate or signature proving agent identity
+    pub certificate: String,
+    /// Public key for verification
+    pub public_key: String,
+    /// Signature over agent_id + requested_at timestamp
+    pub signature: String,
+    /// Optional trust anchor or issuer information
+    pub issuer: Option<String>,
+}
+
 /// Agent admission request with resource requirements.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentAdmissionRequest {
@@ -153,6 +166,10 @@ pub struct AgentAdmissionRequest {
     pub requested_at: SystemTime,
     /// Optional timeout for admission
     pub admission_timeout: Option<Duration>,
+    /// Authentication token for agent authorization
+    pub auth_token: Option<String>,
+    /// Agent certificate or credential proof
+    pub agent_credentials: Option<AgentCredentials>,
 }
 
 /// Resource requirements for agent admission.
@@ -411,6 +428,14 @@ impl AgentSwarmControlPlane {
         cx: &Cx,
         request: AgentAdmissionRequest,
     ) -> Result<AgentAdmissionResult> {
+        // SECURITY: Validate agent authentication/authorization before admission
+        if !self.validate_agent_authorization(cx, &request).await? {
+            return Ok(AgentAdmissionResult::Rejected {
+                reason: AdmissionRejectionReason::Unauthorized,
+                retry_after: Some(Duration::from_secs(60)),
+            });
+        }
+
         // Check current system pressure
         let pressure = self.pressure_monitor.current_pressure(cx).await?;
         if pressure.overall_pressure > 0.8 {
@@ -472,6 +497,113 @@ impl AgentSwarmControlPlane {
             allocated_resources: session.allocated_resources,
             agent_region,
         })
+    }
+
+    /// Validate agent authorization and authentication.
+    async fn validate_agent_authorization(
+        &self,
+        cx: &Cx,
+        request: &AgentAdmissionRequest,
+    ) -> Result<bool> {
+        // If no authentication provided, reject
+        if request.auth_token.is_none() && request.agent_credentials.is_none() {
+            return Ok(false);
+        }
+
+        // Validate auth token if provided
+        if let Some(ref token) = request.auth_token {
+            if !self.validate_auth_token(token, &request.agent_id).await? {
+                return Ok(false);
+            }
+        }
+
+        // Validate agent credentials if provided
+        if let Some(ref credentials) = request.agent_credentials {
+            if !self
+                .validate_agent_credentials(credentials, &request.agent_id, request.requested_at)
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+
+        // Additional authorization checks (role-based access, resource limits, etc.)
+        self.check_agent_permissions(&request.agent_id, &request.priority)
+            .await
+    }
+
+    /// Validate authentication token.
+    async fn validate_auth_token(&self, token: &str, agent_id: &AgentId) -> Result<bool> {
+        // Implement token validation logic
+        // - Verify token signature
+        // - Check token expiration
+        // - Validate token was issued for this agent_id
+        // For now, basic validation that token is non-empty and matches expected format
+        if token.is_empty() || token.len() < 16 {
+            return Ok(false);
+        }
+
+        // TODO: Implement proper JWT validation, token signature verification, etc.
+        // This is a placeholder implementation
+        Ok(token.starts_with("agent_token_") && token.contains(agent_id))
+    }
+
+    /// Validate agent credentials and signature.
+    async fn validate_agent_credentials(
+        &self,
+        credentials: &AgentCredentials,
+        agent_id: &AgentId,
+        requested_at: SystemTime,
+    ) -> Result<bool> {
+        // Basic validation
+        if credentials.certificate.is_empty()
+            || credentials.public_key.is_empty()
+            || credentials.signature.is_empty()
+        {
+            return Ok(false);
+        }
+
+        // Verify the signature over agent_id + timestamp
+        let message = format!(
+            "{}:{}",
+            agent_id,
+            requested_at
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        );
+
+        // TODO: Implement proper cryptographic signature verification
+        // This is a placeholder implementation
+        let expected_signature = format!("sig_{}_for_{}", credentials.public_key, message);
+        Ok(credentials.signature == expected_signature)
+    }
+
+    /// Check agent permissions and authorization levels.
+    async fn check_agent_permissions(
+        &self,
+        agent_id: &AgentId,
+        priority: &AdmissionPriority,
+    ) -> Result<bool> {
+        // Check if agent is in allowed list
+        // Check role-based access for the requested priority level
+        // Verify agent has not been revoked or banned
+
+        // For critical/high priority, require additional authorization
+        match priority {
+            AdmissionPriority::Critical => {
+                // Only pre-approved critical agents allowed
+                Ok(agent_id.starts_with("critical_agent_"))
+            }
+            AdmissionPriority::High => {
+                // High priority agents need elevated permissions
+                Ok(agent_id.starts_with("high_agent_") || agent_id.starts_with("critical_agent_"))
+            }
+            AdmissionPriority::Normal | AdmissionPriority::Low => {
+                // Normal agents just need valid authentication
+                Ok(!agent_id.starts_with("banned_") && !agent_id.is_empty())
+            }
+        }
     }
 
     /// Get current control plane metrics.
@@ -572,6 +704,8 @@ pub enum AdmissionRejectionReason {
     AgentLimitReached,
     /// Configuration error
     ConfigurationError,
+    /// Agent lacks valid authentication or authorization
+    Unauthorized,
 }
 
 // Implementation stubs for associated types
