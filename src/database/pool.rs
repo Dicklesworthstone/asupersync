@@ -344,6 +344,7 @@ struct PoolStatCounters {
     total_timeouts: AtomicU64,
     total_validation_failures: AtomicU64,
     total_retry_limits_exceeded: AtomicU64,
+    total_disconnect_failures: AtomicU64,
 }
 
 impl fmt::Debug for PoolStatCounters {
@@ -369,6 +370,10 @@ impl fmt::Debug for PoolStatCounters {
             .field(
                 "total_retry_limits_exceeded",
                 &self.total_retry_limits_exceeded.load(Ordering::Relaxed),
+            )
+            .field(
+                "total_disconnect_failures",
+                &self.total_disconnect_failures.load(Ordering::Relaxed),
             )
             .finish()
     }
@@ -398,6 +403,9 @@ pub struct DbPoolStats {
     /// Total retry limits exceeded.
     /// br-asupersync-mlojr9: Tracks retry storm protection activations.
     pub total_retry_limits_exceeded: u64,
+    /// Total disconnect failures.
+    /// br-asupersync-sxhome: Tracks connection disconnect failure events.
+    pub total_disconnect_failures: u64,
 }
 
 /// Error returned by pool operations.
@@ -525,6 +533,7 @@ impl<M: ConnectionManager> DbPool<M> {
             total_timeouts: self.stats.total_timeouts.load(Ordering::Relaxed),
             total_validation_failures: self.stats.total_validation_failures.load(Ordering::Relaxed),
             total_retry_limits_exceeded: self.stats.total_retry_limits_exceeded.load(Ordering::Relaxed),
+            total_disconnect_failures: self.stats.total_disconnect_failures.load(Ordering::Relaxed),
         }
     }
 
@@ -1139,19 +1148,23 @@ impl<M: ConnectionManager> DbPool<M> {
         };
 
         if let Some(c) = conn_to_disconnect {
-            self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-            self.manager.disconnect(c);
+            // br-asupersync-sxhome: Use safe disconnect to prevent resource leaks
+            if !self.safe_disconnect(c) {
+                // If disconnect failed, we still decremented total count above,
+                // so we need to increment it back to maintain consistency
+                let mut inner = self.inner.lock();
+                inner.total += 1;
+                eprintln!("SECURITY: Disconnect failure in return_connection - pool count restored");
+            } else {
+                self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
     /// Discard a connection (don't return to pool).
     fn discard_connection(&self, conn: M::Connection) {
-        {
-            let mut inner = self.inner.lock();
-            inner.total = inner.total.saturating_sub(1);
-        }
-        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-        self.manager.disconnect(conn);
+        // br-asupersync-sxhome: Use safe disconnect to prevent resource leaks
+        self.safe_discard_connection(conn, None);
     }
 
     /// Close the pool, preventing new acquisitions.
@@ -1228,6 +1241,71 @@ impl<M: ConnectionManager> DbPool<M> {
             let age = Duration::from_nanos(now.duration_since(*last_retry));
             age < stale_threshold
         });
+    }
+
+    /// Safely disconnect a connection with proper error handling and resource cleanup.
+    ///
+    /// br-asupersync-sxhome: This method provides resource leak protection by ensuring
+    /// that connection disconnect failures don't leave the pool in an inconsistent state.
+    /// Returns true if disconnect succeeded, false if it failed.
+    fn safe_disconnect(&self, conn: M::Connection) -> bool {
+        // Use std::panic::catch_unwind to handle disconnect panics
+        let disconnect_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.manager.disconnect(conn);
+        }));
+
+        match disconnect_result {
+            Ok(()) => {
+                // Disconnect succeeded
+                true
+            }
+            Err(_panic_info) => {
+                // Disconnect panicked - this is a resource leak
+                self.stats.total_disconnect_failures.fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "SECURITY WARNING: Connection disconnect failed (panic) - potential resource leak detected"
+                );
+                false
+            }
+        }
+    }
+
+    /// Safely discard a connection with proper resource cleanup on disconnect failure.
+    ///
+    /// br-asupersync-sxhome: Enhanced version of discard_connection that handles
+    /// disconnect failures gracefully and ensures pool state consistency.
+    fn safe_discard_connection(&self, conn: M::Connection, client_id: Option<String>) -> bool {
+        let disconnect_succeeded = self.safe_disconnect(conn);
+
+        if disconnect_succeeded {
+            // Only update stats and counts if disconnect actually succeeded
+            {
+                let mut inner = self.inner.lock();
+                inner.total = inner.total.saturating_sub(1);
+
+                // br-asupersync-qydi3j: Update client connection count only on successful disconnect
+                if let Some(ref client) = client_id {
+                    if self.config.enforce_client_quotas {
+                        if let Some(count) = inner.client_connections.get_mut(client) {
+                            *count = count.saturating_sub(1);
+                            if *count == 0 {
+                                inner.client_connections.remove(client);
+                            }
+                        }
+                    }
+                }
+            }
+            self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+        } else {
+            // Disconnect failed - log security event but don't update pool counts
+            // to prevent resource count inconsistencies
+            eprintln!(
+                "SECURITY: Failed to disconnect connection for client {:?} - resource leak potential",
+                client_id.as_deref().unwrap_or("unknown")
+            );
+        }
+
+        disconnect_succeeded
     }
 
     /// Pre-warm the pool by creating connections up to min_idle.
@@ -1362,7 +1440,23 @@ impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
             if self.pool.manager.release_check(&mut conn) {
                 self.pool.return_connection(conn, self.created_at, self.client_id.clone());
             } else {
-                self.pool.discard_connection(conn);
+                // br-asupersync-sxhome: Use safe discard to handle disconnect failures
+                // If disconnect fails, client count was already decremented above,
+                // so we need to restore it
+                if !self.pool.safe_discard_connection(conn, self.client_id.clone()) {
+                    // Disconnect failed - restore client connection count that was decremented above
+                    if let Some(ref client_id) = self.client_id {
+                        if self.pool.config.enforce_client_quotas {
+                            let mut inner = self.pool.inner.lock();
+                            let count = inner.client_connections.entry(client_id.clone()).or_insert(0);
+                            *count += 1;
+                            eprintln!(
+                                "SECURITY: Disconnect failure in Drop - client count restored for '{}'",
+                                client_id
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -1512,6 +1606,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             total_timeouts: self.stats.total_timeouts.load(Ordering::Relaxed),
             total_validation_failures: self.stats.total_validation_failures.load(Ordering::Relaxed),
             total_retry_limits_exceeded: self.stats.total_retry_limits_exceeded.load(Ordering::Relaxed),
+            total_disconnect_failures: self.stats.total_disconnect_failures.load(Ordering::Relaxed),
         }
     }
 
