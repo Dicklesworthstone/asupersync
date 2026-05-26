@@ -38,7 +38,7 @@ pub struct HandoffCapsule {
 }
 
 /// Session metadata for the agent handoff.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct SessionMetadata {
     /// Agent identifier (may be redacted)
     pub agent_id: String,
@@ -53,7 +53,7 @@ pub struct SessionMetadata {
 }
 
 /// Type of agent session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub enum SessionType {
     /// Interactive session with human oversight
     Interactive,
@@ -66,7 +66,7 @@ pub enum SessionType {
 }
 
 /// Documentation read receipt.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct DocReceipt {
     /// Document path or identifier
     pub doc_path: String,
@@ -77,7 +77,7 @@ pub struct DocReceipt {
 }
 
 /// Git repository state at handoff time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct GitState {
     /// Current branch (should be main per RULE 2)
     pub current_branch: String,
@@ -94,7 +94,7 @@ pub struct GitState {
 }
 
 /// Agent inbox and acknowledgment state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct InboxState {
     /// Unread message count
     pub unread_count: u32,
@@ -107,7 +107,7 @@ pub struct InboxState {
 }
 
 /// Reference to a message requiring acknowledgment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct MessageRef {
     /// Message ID
     pub message_id: String,
@@ -120,7 +120,7 @@ pub struct MessageRef {
 }
 
 /// Message priority levels.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub enum MessagePriority {
     /// Low priority, non-urgent messages
     Low,
@@ -133,7 +133,7 @@ pub enum MessagePriority {
 }
 
 /// Active file reservation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct FileReservation {
     /// Reservation ID
     pub id: String,
@@ -163,7 +163,7 @@ pub struct BeadClaim {
 }
 
 /// Bead status.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub enum BeadStatus {
     /// Bead is available for work
     Open,
@@ -176,7 +176,7 @@ pub enum BeadStatus {
 }
 
 /// Summary of dirty path ownership.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct DirtyPathSummary {
     /// Files owned by this agent
     pub owned_files: BTreeSet<String>,
@@ -187,7 +187,7 @@ pub struct DirtyPathSummary {
 }
 
 /// Information about potential file conflicts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct ConflictInfo {
     /// Conflicting file path
     pub file_path: String,
@@ -198,7 +198,7 @@ pub struct ConflictInfo {
 }
 
 /// Conflict severity levels.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub enum ConflictSeverity {
     /// Minor conflict, can likely be resolved automatically
     Low,
@@ -211,7 +211,7 @@ pub enum ConflictSeverity {
 }
 
 /// Proof command in flight.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct ProofCommand {
     /// Command ID
     pub command_id: String,
@@ -226,7 +226,7 @@ pub struct ProofCommand {
 }
 
 /// Type of proof command.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub enum ProofCommandType {
     /// Compilation check (cargo check/build)
     Compile,
@@ -243,7 +243,7 @@ pub enum ProofCommandType {
 }
 
 /// Information about a blocking issue.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct BlockerInfo {
     /// Blocker type
     pub blocker_type: BlockerType,
@@ -256,7 +256,7 @@ pub struct BlockerInfo {
 }
 
 /// Types of blocking issues.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub enum BlockerType {
     /// Git merge conflict or repository state issue
     GitConflict,
@@ -275,7 +275,7 @@ pub enum BlockerType {
 }
 
 /// Information about a pushed commit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct CommitInfo {
     /// Commit hash
     pub commit_hash: String,
@@ -290,7 +290,7 @@ pub struct CommitInfo {
 }
 
 /// Risk assessment for continuation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub struct RiskAssessment {
     /// Risk category
     pub category: RiskCategory,
@@ -303,7 +303,7 @@ pub struct RiskAssessment {
 }
 
 /// Categories of continuation risks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub enum RiskCategory {
     /// Documentation may be outdated or stale
     StaleDocumentation,
@@ -322,7 +322,7 @@ pub enum RiskCategory {
 }
 
 /// Risk severity levels.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub enum RiskLevel {
     /// Low risk, can proceed with minor precautions
     Low,
@@ -557,15 +557,49 @@ impl HandoffVerifier {
     }
 
     fn check_integrity(&self, capsule: &HandoffCapsule) -> Option<SafetyViolation> {
-        // Simple integrity check - in practice would verify content hash
+        // Check if content hash is present
         if capsule.content_hash.is_empty() {
-            Some(SafetyViolation {
+            return Some(SafetyViolation {
                 category: ViolationCategory::IntegrityCheckFailure,
                 reason: "Missing content hash".to_string(),
                 evidence: "Capsule integrity cannot be verified".to_string(),
+            });
+        }
+
+        // Compute actual content hash and verify against stored hash
+        let computed_hash = self.compute_content_hash(capsule);
+        if computed_hash != capsule.content_hash {
+            Some(SafetyViolation {
+                category: ViolationCategory::IntegrityCheckFailure,
+                reason: "Content hash mismatch".to_string(),
+                evidence: format!(
+                    "Expected: {}, Computed: {}",
+                    capsule.content_hash,
+                    computed_hash
+                ),
             })
         } else {
             None
+        }
+    }
+
+    /// Computes SHA-256 hash of capsule content for integrity verification.
+    fn compute_content_hash(&self, capsule: &HandoffCapsule) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Create a capsule copy without the content_hash field for hashing
+        let mut capsule_for_hash = capsule.clone();
+        capsule_for_hash.content_hash = String::new(); // Exclude hash field itself
+
+        // Serialize to JSON for consistent hashing across SystemTime fields
+        if let Ok(json_bytes) = serde_json::to_vec(&capsule_for_hash) {
+            let mut hasher = DefaultHasher::new();
+            json_bytes.hash(&mut hasher);
+            format!("{:x}", hasher.finish())
+        } else {
+            // Fallback to empty string hash if serialization fails
+            "serialization-failed".to_string()
         }
     }
 
@@ -892,6 +926,45 @@ mod tests {
                 );
             }
             other => panic!("Expected UnsafeToContinue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_invalid_content_hash_unsafe() {
+        let verifier = HandoffVerifier::new();
+        let mut capsule = create_test_capsule();
+
+        // Set an incorrect hash that won't match the computed hash
+        capsule.content_hash = "invalid-hash-that-wont-match".to_string();
+
+        match verifier.verify_handoff(&capsule) {
+            HandoffDecision::UnsafeToContinue { reasons } => {
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|r| matches!(r.category, ViolationCategory::IntegrityCheckFailure))
+                );
+                // Check that the evidence includes the hash mismatch details
+                assert!(
+                    reasons.iter().any(|r| r.evidence.contains("Expected:") && r.evidence.contains("Computed:"))
+                );
+            }
+            other => panic!("Expected UnsafeToContinue, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_valid_content_hash_continues() {
+        let verifier = HandoffVerifier::new();
+        let mut capsule = create_test_capsule();
+
+        // Compute the correct hash for the capsule
+        let correct_hash = verifier.compute_content_hash(&capsule);
+        capsule.content_hash = correct_hash;
+
+        match verifier.verify_handoff(&capsule) {
+            HandoffDecision::Continue => {}
+            other => panic!("Expected Continue, got {:?}", other),
         }
     }
 
