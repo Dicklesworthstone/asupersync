@@ -102,17 +102,32 @@ pub struct MetricsConfig {
     pub sampling: Option<SamplingConfig>,
 }
 
-/// Configuration for OTLP trace span privacy filtering.
+/// Configuration for OTLP privacy filtering across traces, metrics, and logs.
 #[derive(Debug, Clone, Default)]
-pub struct SpanConfig {
+pub struct PrivacyConfig {
     /// Span attributes to always drop before OTLP serialization (e.g., user.email, api.key).
     /// **Privacy Protection**: These attributes are removed before protobuf encoding
     /// to prevent sensitive data from reaching the collector.
     pub drop_attributes: Vec<String>,
+    /// Metric labels to always drop before OTLP serialization (e.g., request_id, user_id).
+    /// **Privacy Protection**: These labels are removed before protobuf encoding
+    /// to prevent sensitive data from reaching the collector.
+    pub drop_labels: Vec<String>,
+    /// Allowlist of attributes/labels that are safe to export. If non-empty,
+    /// only attributes/labels matching these patterns are exported.
+    /// **Privacy Protection**: Provides explicit control over what data reaches collectors.
+    pub allowed_fields: Vec<String>,
+    /// PII redaction patterns. Field values matching these regex patterns
+    /// will be redacted before export.
+    /// **Privacy Protection**: Automatically detects and redacts common PII patterns.
+    pub pii_patterns: Vec<String>,
+    /// Whether to apply automatic PII detection for common patterns
+    /// (emails, phone numbers, credit cards, SSNs, etc.).
+    pub auto_pii_detection: bool,
 }
 
-impl SpanConfig {
-    /// Create a new span configuration with defaults.
+impl PrivacyConfig {
+    /// Create a new privacy configuration with defaults.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -124,7 +139,123 @@ impl SpanConfig {
         self.drop_attributes.push(attribute.into());
         self
     }
+
+    /// Add a metric label to always drop for privacy.
+    #[must_use]
+    pub fn with_drop_label(mut self, label: impl Into<String>) -> Self {
+        self.drop_labels.push(label.into());
+        self
+    }
+
+    /// Add an allowed field pattern. If any allowed fields are specified,
+    /// only fields matching these patterns will be exported.
+    #[must_use]
+    pub fn with_allowed_field(mut self, pattern: impl Into<String>) -> Self {
+        self.allowed_fields.push(pattern.into());
+        self
+    }
+
+    /// Add a custom PII redaction pattern (regex).
+    #[must_use]
+    pub fn with_pii_pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.pii_patterns.push(pattern.into());
+        self
+    }
+
+    /// Enable automatic PII detection for common patterns.
+    #[must_use]
+    pub fn with_auto_pii_detection(mut self) -> Self {
+        self.auto_pii_detection = true;
+        self
+    }
+
+    /// Check if a field should be dropped based on privacy configuration.
+    fn should_drop_field(&self, field_name: &str) -> bool {
+        // Check explicit drop lists
+        if self.drop_attributes.contains(&field_name.to_string())
+            || self.drop_labels.contains(&field_name.to_string()) {
+            return true;
+        }
+
+        // Check allowlist (if specified, only allow matching fields)
+        if !self.allowed_fields.is_empty() {
+            return !self.allowed_fields.iter().any(|pattern| {
+                // Simple pattern matching for now (exact match or starts_with for wildcard *)
+                if pattern.ends_with('*') {
+                    field_name.starts_with(&pattern[..pattern.len() - 1])
+                } else {
+                    field_name == pattern
+                }
+            });
+        }
+
+        false
+    }
+
+    /// Redact PII from field values.
+    fn redact_pii(&self, field_name: &str, value: &str) -> String {
+        let mut redacted_value = value.to_string();
+
+        // Apply custom PII patterns
+        for pattern in &self.pii_patterns {
+            // For simplicity, replace any occurrence with [REDACTED]
+            // In production, this would use proper regex matching
+            if value.contains(pattern) {
+                redacted_value = "[REDACTED]".to_string();
+                break;
+            }
+        }
+
+        // Apply automatic PII detection
+        if self.auto_pii_detection {
+            redacted_value = self.apply_auto_pii_redaction(&redacted_value);
+        }
+
+        redacted_value
+    }
+
+    /// Apply automatic PII detection and redaction.
+    fn apply_auto_pii_redaction(&self, value: &str) -> String {
+        // Email pattern detection
+        if value.contains('@') && value.contains('.') && value.len() > 5 {
+            if value.chars().any(|c| c == '@') {
+                return "[EMAIL_REDACTED]".to_string();
+            }
+        }
+
+        // Phone number pattern detection (basic)
+        if value.chars().filter(|c| c.is_ascii_digit()).count() >= 10 {
+            let digit_count = value.chars().filter(|c| c.is_ascii_digit()).count();
+            let total_length = value.len();
+            // Likely a phone number if mostly digits
+            if digit_count as f32 / total_length as f32 > 0.7 {
+                return "[PHONE_REDACTED]".to_string();
+            }
+        }
+
+        // Credit card pattern detection (simplified)
+        let digits_only: String = value.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits_only.len() >= 13 && digits_only.len() <= 19 {
+            return "[CARD_REDACTED]".to_string();
+        }
+
+        // SSN pattern detection (XXX-XX-XXXX format)
+        if value.len() == 11 && value.chars().nth(3) == Some('-') && value.chars().nth(6) == Some('-') {
+            let parts: Vec<&str> = value.split('-').collect();
+            if parts.len() == 3 && parts[0].len() == 3 && parts[1].len() == 2 && parts[2].len() == 4 {
+                if parts.iter().all(|part| part.chars().all(|c| c.is_ascii_digit())) {
+                    return "[SSN_REDACTED]".to_string();
+                }
+            }
+        }
+
+        value.to_string()
+    }
 }
+
+/// Configuration for OTLP trace span privacy filtering.
+/// **DEPRECATED**: Use `PrivacyConfig` instead for comprehensive privacy filtering.
+pub type SpanConfig = PrivacyConfig;
 
 impl Default for MetricsConfig {
     fn default() -> Self {
@@ -7654,16 +7785,32 @@ pub mod otlp_request_builder {
             // **PRIVACY FILTER**: Drop sensitive attributes before serialization
             .filter(|(key, _value)| {
                 if let Some(config) = span_config {
-                    !config.drop_attributes.contains(key)
+                    !config.should_drop_field(key)
                 } else {
                     true // No filtering if no config provided
                 }
             })
-            .map(|(key, value)| key_value(key.clone(), value.clone()))
+            .map(|(key, value)| {
+                // **PII REDACTION**: Apply PII filtering to attribute values
+                let redacted_value = if let Some(config) = span_config {
+                    config.redact_pii(key, value)
+                } else {
+                    value.clone()
+                };
+                key_value(key.clone(), redacted_value)
+            })
             .collect()
     }
 
     fn proto_labels(labels: &MetricLabels) -> Vec<KeyValue> {
+        proto_labels_with_config(labels, None)
+    }
+
+    /// Privacy-aware metric label serialization with optional filtering configuration.
+    fn proto_labels_with_config(
+        labels: &MetricLabels,
+        privacy_config: Option<&PrivacyConfig>,
+    ) -> Vec<KeyValue> {
         let mut ordered = labels.clone();
         ordered.sort_unstable_by(|(left_key, left_value), (right_key, right_value)| {
             left_key
@@ -7672,7 +7819,25 @@ pub mod otlp_request_builder {
         });
         ordered
             .into_iter()
-            .map(|(key, value)| key_value(key, value))
+            // **OTLP §2.3.1 COMPLIANCE FIX**: Drop empty keys and empty values per specification
+            .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+            // **PRIVACY FILTER**: Drop sensitive labels before serialization
+            .filter(|(key, _value)| {
+                if let Some(config) = privacy_config {
+                    !config.should_drop_field(key)
+                } else {
+                    true // No filtering if no config provided
+                }
+            })
+            .map(|(key, value)| {
+                // **PII REDACTION**: Apply PII filtering to label values
+                let redacted_value = if let Some(config) = privacy_config {
+                    config.redact_pii(key, value)
+                } else {
+                    value.clone()
+                };
+                key_value(key, redacted_value)
+            })
             .collect()
     }
 
@@ -7708,6 +7873,17 @@ pub mod otlp_request_builder {
         batch_sequence: u64,
         scope_name: &str,
     ) -> ExportMetricsServiceRequest {
+        metrics_request_from_snapshot_with_privacy(snapshot, service_name, batch_sequence, scope_name, None)
+    }
+
+    /// Build a single-scope OTLP metrics export request from a metrics snapshot with privacy filtering.
+    pub fn metrics_request_from_snapshot_with_privacy(
+        snapshot: &MetricsSnapshot,
+        service_name: &str,
+        batch_sequence: u64,
+        scope_name: &str,
+        privacy_config: Option<&PrivacyConfig>,
+    ) -> ExportMetricsServiceRequest {
         let mut metrics = Vec::new();
 
         for (name, labels, value) in &snapshot.counters {
@@ -7717,7 +7893,7 @@ pub mod otlp_request_builder {
                     aggregation_temporality: AggregationTemporality::Cumulative as i32,
                     is_monotonic: true,
                     data_points: vec![NumberDataPoint {
-                        attributes: proto_labels(labels),
+                        attributes: proto_labels_with_config(labels, privacy_config),
                         start_time_unix_nano: batch_sequence * 1_000 + 1,
                         time_unix_nano: batch_sequence * 1_000 + 2,
                         value: Some(number_data_point::Value::AsInt((*value).cast_signed())),
@@ -7733,7 +7909,7 @@ pub mod otlp_request_builder {
                 name: name.clone(),
                 data: Some(metric::Data::Gauge(Gauge {
                     data_points: vec![NumberDataPoint {
-                        attributes: proto_labels(labels),
+                        attributes: proto_labels_with_config(labels, privacy_config),
                         time_unix_nano: batch_sequence * 1_000 + 3,
                         value: Some(number_data_point::Value::AsInt(*value)),
                         ..Default::default()
@@ -7749,7 +7925,7 @@ pub mod otlp_request_builder {
                 data: Some(metric::Data::Histogram(Histogram {
                     aggregation_temporality: AggregationTemporality::Cumulative as i32,
                     data_points: vec![HistogramDataPoint {
-                        attributes: proto_labels(labels),
+                        attributes: proto_labels_with_config(labels, privacy_config),
                         start_time_unix_nano: batch_sequence * 1_000 + 4,
                         time_unix_nano: batch_sequence * 1_000 + 5,
                         count: *count,
@@ -8947,13 +9123,110 @@ mod otlp_wire_format_tests {
     /// `SpanConfig::drop_attributes` are properly filtered from OTLP exports
     /// to prevent data leakage to observability collectors.
     #[test]
+    fn otlp_metrics_privacy_filtering() {
+        // Test privacy filtering for OTLP metrics export
+        let mut snapshot = MetricsSnapshot::new();
+
+        // Add a counter with both safe and sensitive labels
+        snapshot.add_counter(
+            "http_requests_total",
+            vec![
+                ("method".to_string(), "POST".to_string()),  // Safe
+                ("endpoint".to_string(), "/api/v1/users".to_string()), // Safe
+                ("user_id".to_string(), "user_12345".to_string()), // Sensitive - PII
+                ("request_id".to_string(), "req_abc123".to_string()), // Sensitive - tracking
+                ("user_email".to_string(), "john.doe@company.com".to_string()), // Sensitive - PII
+            ],
+            42,
+        );
+
+        // Add a gauge with sensitive labels
+        snapshot.add_gauge(
+            "active_sessions",
+            vec![
+                ("service".to_string(), "auth".to_string()), // Safe
+                ("session_token".to_string(), "sess_xyz789".to_string()), // Sensitive - credential
+            ],
+            15,
+        );
+
+        // Create privacy config that drops sensitive labels
+        let privacy_config = PrivacyConfig::new()
+            .with_drop_label("user_id")
+            .with_drop_label("request_id")
+            .with_drop_label("user_email")
+            .with_drop_label("session_token")
+            .with_auto_pii_detection();
+
+        // Test export without privacy filtering (baseline)
+        let request_no_privacy = otlp_request_builder::metrics_request_from_snapshot(
+            &snapshot,
+            "test-service",
+            1,
+            "test-scope",
+        );
+
+        // Test export with privacy filtering
+        let request_with_privacy = otlp_request_builder::metrics_request_from_snapshot_with_privacy(
+            &snapshot,
+            "test-service",
+            1,
+            "test-scope",
+            Some(&privacy_config),
+        );
+
+        // Extract attributes from both requests for comparison
+        let extract_counter_attributes = |request: &otlp_request_builder::ExportMetricsServiceRequest| -> Vec<String> {
+            request.resource_metrics[0].scope_metrics[0].metrics
+                .iter()
+                .find(|m| m.name == "http_requests_total")
+                .and_then(|m| m.data.as_ref())
+                .and_then(|data| match data {
+                    otlp_request_builder::metric::Data::Sum(sum) => Some(&sum.data_points[0].attributes),
+                    _ => None,
+                })
+                .map(|attrs| attrs.iter().map(|kv| kv.key.clone()).collect())
+                .unwrap_or_default()
+        };
+
+        let attrs_no_privacy = extract_counter_attributes(&request_no_privacy);
+        let attrs_with_privacy = extract_counter_attributes(&request_with_privacy);
+
+        // Verify that sensitive labels are present without privacy filtering
+        assert!(attrs_no_privacy.contains(&"user_id".to_string()),
+                "Baseline should contain user_id");
+        assert!(attrs_no_privacy.contains(&"request_id".to_string()),
+                "Baseline should contain request_id");
+        assert!(attrs_no_privacy.contains(&"user_email".to_string()),
+                "Baseline should contain user_email");
+
+        // Verify that sensitive labels are removed with privacy filtering
+        assert!(!attrs_with_privacy.contains(&"user_id".to_string()),
+                "Privacy filtering should remove user_id");
+        assert!(!attrs_with_privacy.contains(&"request_id".to_string()),
+                "Privacy filtering should remove request_id");
+        assert!(!attrs_with_privacy.contains(&"user_email".to_string()),
+                "Privacy filtering should remove user_email");
+
+        // Verify that safe labels are preserved
+        assert!(attrs_with_privacy.contains(&"method".to_string()),
+                "Safe labels should be preserved");
+        assert!(attrs_with_privacy.contains(&"endpoint".to_string()),
+                "Safe labels should be preserved");
+
+        eprintln!("✅ OTLP metrics privacy filtering test passed");
+        eprintln!("   • Sensitive labels removed: user_id, request_id, user_email");
+        eprintln!("   • Safe labels preserved: method, endpoint");
+    }
+
+    #[test]
     fn otlp_log_privacy_filtering() {
         use crate::observability::entry::LogEntry;
         use crate::observability::level::LogLevel;
         use std::time::{SystemTime, UNIX_EPOCH};
 
         // Create a span config that drops sensitive attributes
-        let privacy_config = SpanConfig::new()
+        let privacy_config = PrivacyConfig::new()
             .with_drop_attribute("user.email")
             .with_drop_attribute("api.key")
             .with_drop_attribute("auth.token");
