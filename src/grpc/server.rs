@@ -409,8 +409,110 @@ fn grpc_te_header_is_allowed(value: &str) -> bool {
     value.trim().eq_ignore_ascii_case("trailers")
 }
 
+/// br-asupersync-60vn7x: RFC 7230 compliant header name validation.
+/// Header names must be tokens as defined in RFC 7230 section 3.2.6:
+/// token = 1*tchar
+/// tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*" / "+" / "-" / "." /
+///         "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+fn is_valid_header_name_rfc7230(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+
+    for byte in name.bytes() {
+        match byte {
+            // ALPHA (A-Z, a-z)
+            b'A'..=b'Z' | b'a'..=b'z' => continue,
+            // DIGIT (0-9)
+            b'0'..=b'9' => continue,
+            // tchar special characters
+            b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' |
+            b'^' | b'_' | b'`' | b'|' | b'~' => continue,
+            // Invalid character for header name
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// br-asupersync-60vn7x: RFC 7230 compliant header value validation.
+/// Header values must not contain CRLF sequences (prevents injection attacks)
+/// and should only contain visible characters, spaces, and horizontal tabs.
+/// RFC 7230 section 3.2: field-value = *( field-content / obs-fold )
+/// field-content = field-vchar [ 1*( SP / HTAB ) field-vchar ]
+/// field-vchar = VCHAR / obs-text
+fn is_valid_header_value_rfc7230(value: &str) -> bool {
+    let bytes = value.as_bytes();
+
+    // Check for CRLF injection attacks
+    if value.contains('\r') || value.contains('\n') {
+        return false;
+    }
+
+    for &byte in bytes {
+        match byte {
+            // VCHAR (visible characters)
+            0x21..=0x7E => continue,
+            // SP (space) and HTAB (horizontal tab) - allowed in field values
+            b' ' | b'\t' => continue,
+            // obs-text (0x80-0xFF) - technically allowed but we reject for safety
+            // Control characters (0x00-0x1F, 0x7F) - forbidden
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// br-asupersync-60vn7x: Maximum allowed length for individual header names and values
+/// to prevent memory exhaustion attacks via oversized headers.
+const MAX_HEADER_NAME_LEN: usize = 256;   // 256 bytes
+const MAX_HEADER_VALUE_LEN: usize = 8192; // 8 KB
+
 fn validate_inbound_metadata(metadata: &super::streaming::Metadata) -> Result<(), Status> {
     for (key, value) in metadata.iter() {
+        // br-asupersync-60vn7x: RFC 7230 header name validation
+        if !is_valid_header_name_rfc7230(key) {
+            return Err(Status::invalid_argument(format!(
+                "metadata key '{key}' contains invalid characters (RFC 7230 violation)"
+            )));
+        }
+
+        // br-asupersync-60vn7x: Header name length limit
+        if key.len() > MAX_HEADER_NAME_LEN {
+            return Err(Status::invalid_argument(format!(
+                "metadata key '{key}' exceeds maximum length ({} > {})",
+                key.len(),
+                MAX_HEADER_NAME_LEN
+            )));
+        }
+
+        // br-asupersync-60vn7x: RFC 7230 header value validation
+        match value {
+            super::streaming::MetadataValue::Ascii(text) => {
+                if !is_valid_header_value_rfc7230(text) {
+                    return Err(Status::invalid_argument(format!(
+                        "metadata value for '{key}' contains CRLF or invalid characters (RFC 7230 violation)"
+                    )));
+                }
+                if text.len() > MAX_HEADER_VALUE_LEN {
+                    return Err(Status::invalid_argument(format!(
+                        "metadata value for '{key}' exceeds maximum length ({} > {})",
+                        text.len(),
+                        MAX_HEADER_VALUE_LEN
+                    )));
+                }
+            }
+            super::streaming::MetadataValue::Binary(bytes) => {
+                if bytes.len() > MAX_HEADER_VALUE_LEN {
+                    return Err(Status::invalid_argument(format!(
+                        "binary metadata value for '{key}' exceeds maximum length ({} > {})",
+                        bytes.len(),
+                        MAX_HEADER_VALUE_LEN
+                    )));
+                }
+            }
+        }
+
         if metadata_key_uses_grpc_prefix(key) && !grpc_request_header_is_allowed(key) {
             return Err(Status::invalid_argument(format!(
                 "client metadata key uses reserved grpc-* prefix: {key}"
@@ -2600,6 +2702,219 @@ mod tests {
         let server = ServerBuilder::new().max_metadata_size(16 * 1024).build();
         assert_eq!(server.config().max_metadata_size, 16 * 1024);
         crate::test_complete!("server_builder_max_metadata_size_overrides_default");
+    }
+
+    // =========================================================================
+    // br-asupersync-60vn7x: RFC 7230 Header Injection Vulnerability Tests
+    // =========================================================================
+
+    #[test]
+    fn test_rfc7230_header_name_validation_rejects_invalid_characters() {
+        init_test("test_rfc7230_header_name_validation_rejects_invalid_characters");
+
+        // Test various invalid characters in header names
+        assert!(!is_valid_header_name_rfc7230(""));                    // Empty name
+        assert!(!is_valid_header_name_rfc7230("invalid space"));      // Space
+        assert!(!is_valid_header_name_rfc7230("invalid\r"));          // CR
+        assert!(!is_valid_header_name_rfc7230("invalid\n"));          // LF
+        assert!(!is_valid_header_name_rfc7230("invalid\t"));          // Tab
+        assert!(!is_valid_header_name_rfc7230("invalid:header"));     // Colon (separator)
+        assert!(!is_valid_header_name_rfc7230("invalid;header"));     // Semicolon
+        assert!(!is_valid_header_name_rfc7230("invalid(header"));     // Parenthesis
+        assert!(!is_valid_header_name_rfc7230("invalid)header"));     // Parenthesis
+        assert!(!is_valid_header_name_rfc7230("invalid<header"));     // Angle bracket
+        assert!(!is_valid_header_name_rfc7230("invalid>header"));     // Angle bracket
+        assert!(!is_valid_header_name_rfc7230("invalid@header"));     // At sign
+        assert!(!is_valid_header_name_rfc7230("invalid,header"));     // Comma
+        assert!(!is_valid_header_name_rfc7230("invalid\\header"));    // Backslash
+        assert!(!is_valid_header_name_rfc7230("invalid\"header"));    // Quote
+        assert!(!is_valid_header_name_rfc7230("invalid/header"));     // Slash
+        assert!(!is_valid_header_name_rfc7230("invalid[header"));     // Bracket
+        assert!(!is_valid_header_name_rfc7230("invalid]header"));     // Bracket
+        assert!(!is_valid_header_name_rfc7230("invalid?header"));     // Question
+        assert!(!is_valid_header_name_rfc7230("invalid=header"));     // Equals
+        assert!(!is_valid_header_name_rfc7230("invalid{header"));     // Brace
+        assert!(!is_valid_header_name_rfc7230("invalid}header"));     // Brace
+
+        // Test valid characters
+        assert!(is_valid_header_name_rfc7230("valid-header"));        // Hyphen (allowed)
+        assert!(is_valid_header_name_rfc7230("valid_header"));        // Underscore (allowed)
+        assert!(is_valid_header_name_rfc7230("validheader123"));      // Alphanumeric
+        assert!(is_valid_header_name_rfc7230("x-custom-header"));     // Common pattern
+        assert!(is_valid_header_name_rfc7230("content-type"));        // Standard header
+        assert!(is_valid_header_name_rfc7230("x-trace-id"));         // Trace header
+        assert!(is_valid_header_name_rfc7230("authorization"));       // Auth header
+
+        crate::test_complete!("test_rfc7230_header_name_validation_rejects_invalid_characters");
+    }
+
+    #[test]
+    fn test_rfc7230_header_value_validation_rejects_crlf_injection() {
+        init_test("test_rfc7230_header_value_validation_rejects_crlf_injection");
+
+        // Test CRLF injection attacks
+        assert!(!is_valid_header_value_rfc7230("value1\r\ninjected-header: evil"));
+        assert!(!is_valid_header_value_rfc7230("value1\ninjected-header: evil"));
+        assert!(!is_valid_header_value_rfc7230("value1\rinjected-header: evil"));
+        assert!(!is_valid_header_value_rfc7230("\r\nevil-header: value"));
+        assert!(!is_valid_header_value_rfc7230("normal\r\nContent-Length: 0"));
+        assert!(!is_valid_header_value_rfc7230("test\r\n\r\nHTTP/1.1 200 OK"));
+
+        // Test control characters
+        assert!(!is_valid_header_value_rfc7230("value\x00control"));   // NULL
+        assert!(!is_valid_header_value_rfc7230("value\x01control"));   // SOH
+        assert!(!is_valid_header_value_rfc7230("value\x02control"));   // STX
+        assert!(!is_valid_header_value_rfc7230("value\x7Fcontrol"));   // DEL
+
+        // Test valid values
+        assert!(is_valid_header_value_rfc7230("valid header value"));
+        assert!(is_valid_header_value_rfc7230("Bearer abc123"));
+        assert!(is_valid_header_value_rfc7230("application/grpc+proto"));
+        assert!(is_valid_header_value_rfc7230("trailers"));
+        assert!(is_valid_header_value_rfc7230("5S"));
+        assert!(is_valid_header_value_rfc7230("identity,gzip"));
+        assert!(is_valid_header_value_rfc7230(""));  // Empty is valid
+
+        crate::test_complete!("test_rfc7230_header_value_validation_rejects_crlf_injection");
+    }
+
+    #[test]
+    fn test_enforce_metadata_rejects_rfc7230_header_name_violations() {
+        init_test("test_enforce_metadata_rejects_rfc7230_header_name_violations");
+
+        // Header name with space
+        let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
+            "invalid header".to_string(),
+            super::super::streaming::MetadataValue::Ascii("value".to_string()),
+        )]);
+        let status = enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect_err("header name with space must be rejected");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        assert!(format!("{status}").contains("invalid characters"));
+
+        // Header name with CRLF
+        let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
+            "invalid\r\nheader".to_string(),
+            super::super::streaming::MetadataValue::Ascii("value".to_string()),
+        )]);
+        let status = enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect_err("header name with CRLF must be rejected");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        assert!(format!("{status}").contains("RFC 7230 violation"));
+
+        crate::test_complete!("test_enforce_metadata_rejects_rfc7230_header_name_violations");
+    }
+
+    #[test]
+    fn test_enforce_metadata_rejects_header_injection_attacks() {
+        init_test("test_enforce_metadata_rejects_header_injection_attacks");
+
+        // CRLF injection in header value
+        let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
+            "x-trace-id".to_string(),
+            super::super::streaming::MetadataValue::Ascii("normal\r\ninjected-header: evil".to_string()),
+        )]);
+        let status = enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect_err("CRLF injection attack must be rejected");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        assert!(format!("{status}").contains("CRLF"));
+
+        // Double CRLF response splitting
+        let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
+            "authorization".to_string(),
+            super::super::streaming::MetadataValue::Ascii("Bearer token\r\n\r\nHTTP/1.1 200 OK".to_string()),
+        )]);
+        let status = enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect_err("response splitting attack must be rejected");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+
+        crate::test_complete!("test_enforce_metadata_rejects_header_injection_attacks");
+    }
+
+    #[test]
+    fn test_enforce_metadata_rejects_oversized_headers() {
+        init_test("test_enforce_metadata_rejects_oversized_headers");
+
+        // Oversized header name
+        let long_name = "x-".to_owned() + &"a".repeat(MAX_HEADER_NAME_LEN);
+        let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
+            long_name,
+            super::super::streaming::MetadataValue::Ascii("value".to_string()),
+        )]);
+        let status = enforce_metadata_size_limit(&metadata, 64 * 1024)
+            .expect_err("oversized header name must be rejected");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        assert!(format!("{status}").contains("exceeds maximum length"));
+
+        // Oversized header value
+        let long_value = "a".repeat(MAX_HEADER_VALUE_LEN + 1);
+        let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
+            "x-large-value".to_string(),
+            super::super::streaming::MetadataValue::Ascii(long_value),
+        )]);
+        let status = enforce_metadata_size_limit(&metadata, 64 * 1024)
+            .expect_err("oversized header value must be rejected");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        assert!(format!("{status}").contains("exceeds maximum length"));
+
+        // Oversized binary value
+        let long_binary = vec![0u8; MAX_HEADER_VALUE_LEN + 1];
+        let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
+            "x-large-binary".to_string(),
+            super::super::streaming::MetadataValue::Binary(long_binary),
+        )]);
+        let status = enforce_metadata_size_limit(&metadata, 64 * 1024)
+            .expect_err("oversized binary value must be rejected");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+
+        crate::test_complete!("test_enforce_metadata_rejects_oversized_headers");
+    }
+
+    #[test]
+    fn test_enforce_metadata_allows_valid_rfc7230_headers() {
+        init_test("test_enforce_metadata_allows_valid_rfc7230_headers");
+
+        let mut metadata = super::super::streaming::Metadata::new();
+        metadata.insert("x-trace-id", "abc123def456");
+        metadata.insert("authorization", "Bearer valid-token");
+        metadata.insert("content-type", "application/grpc+proto");
+        metadata.insert("user-agent", "grpc-client/1.0");
+        metadata.insert("x-custom-header", "valid value with spaces");
+
+        enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect("valid RFC 7230 compliant headers must be accepted");
+
+        crate::test_complete!("test_enforce_metadata_allows_valid_rfc7230_headers");
+    }
+
+    #[test]
+    fn test_dispatch_unary_rejects_header_injection_before_handler() {
+        use futures_lite::future::block_on;
+        init_test("test_dispatch_unary_rejects_header_injection_before_handler");
+
+        let server = Server::builder().max_metadata_size(8 * 1024).build();
+
+        // CRLF injection attempt
+        let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
+            "x-trace-id".to_string(),
+            super::super::streaming::MetadataValue::Ascii("valid\r\ninjected-header: malicious".to_string()),
+        )]);
+        let request = Request::with_metadata(Bytes::new(), metadata);
+
+        let mut handler_invoked = false;
+        let result = block_on(server.dispatch_unary(request, |_req| async {
+            handler_invoked = true;
+            Ok(Response::new(Bytes::from_static(b"should-not-reach")))
+        }));
+
+        assert!(result.is_err(), "CRLF injection must be rejected");
+        assert!(!handler_invoked, "handler must NOT be invoked for header injection attempts");
+
+        let status = result.unwrap_err();
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        assert!(format!("{status}").contains("CRLF"));
+
+        crate::test_complete!("test_dispatch_unary_rejects_header_injection_before_handler");
     }
 
     // =========================================================================
