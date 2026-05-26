@@ -1,3 +1,15 @@
+//! Notify synchronization primitive bug regression tests.
+//!
+//! Test suite for verifying correct waker management in the Notify primitive.
+//! Tests critical edge cases around broadcast notifications, waiter drops,
+//! and spurious wakeups that have historically caused synchronization bugs.
+//!
+//! # Bug Classes Covered
+//! - Dropped waiters incorrectly notifying late arrivals
+//! - Broadcast notification state inconsistencies
+//! - Waker registration race conditions
+//! - Memory ordering violations in notification paths
+
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};

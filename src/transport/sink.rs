@@ -1,4 +1,22 @@
-//! Symbol sink traits and implementations.
+//! Symbol sink traits and implementations for transport layer.
+//!
+//! This module defines the sink side of symbol transmission, handling the
+//! outbound flow of [`AuthenticatedSymbol`]s to transport destinations.
+//! Sinks provide buffering, flow control, and reliable delivery semantics.
+//!
+//! # Core Abstractions
+//!
+//! - **Symbol sinks**: Async sinks for sending [`AuthenticatedSymbol`]s with flow control
+//! - **Channel coordination**: Integration with shared channels for distribution
+//! - **Waker management**: Efficient notification when sinks become ready
+//! - **Error handling**: Comprehensive error recovery for transmission failures
+//!
+//! # Design Properties
+//!
+//! - **Backpressure**: Sinks apply flow control to prevent memory exhaustion
+//! - **Reliability**: Transmission failures are detected and reported
+//! - **Efficiency**: Batch operations and waker deduplication minimize overhead
+//! - **Cancellation safety**: Partial sends are handled correctly on cancellation
 
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::transport::error::SinkError;

@@ -1,3 +1,15 @@
+//! RwLock lost wakeup regression tests.
+//!
+//! Test suite for verifying correct waker management in reader-writer locks.
+//! Lost wakeups in RwLocks can occur when lock state transitions don't
+//! properly notify waiting readers or writers, leading to permanent suspension.
+//!
+//! # Test Scenarios
+//! - Reader wakeup when writers release locks
+//! - Writer wakeup when all readers release locks
+//! - Multiple reader wakeup coordination
+//! - Lock preference policies and fairness guarantees
+
 use super::RwLock;
 use crate::cx::Cx;
 use crate::types::{Budget, RegionId, TaskId};

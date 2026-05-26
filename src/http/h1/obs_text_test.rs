@@ -1,3 +1,14 @@
+//! HTTP/1.1 obsolete text handling tests.
+//!
+//! Test suite for verifying correct handling of obs-text in HTTP/1.1 headers.
+//! Obsolete text allows characters outside the ASCII range (0x80-0xFF) in
+//! header values for backward compatibility with legacy systems.
+//!
+//! # Standards Compliance
+//! - RFC 7230 Section 3.2.6 (Field Value Components)
+//! - Latin-1 fallback encoding for non-ASCII bytes
+//! - Proper rejection of invalid character sequences
+
 use crate::bytes::BytesMut;
 use crate::codec::Decoder;
 use crate::http::h1::codec::Http1Codec;

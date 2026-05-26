@@ -1,4 +1,22 @@
-//! Symbol stream traits and implementations.
+//! Symbol stream traits and implementations for transport layer.
+//!
+//! This module defines the streaming abstractions used by the transport layer
+//! to send and receive authenticated symbols between peers. Symbol streams
+//! provide flow control, buffering, and cancellation-safe transmission.
+//!
+//! # Core Abstractions
+//!
+//! - **Symbol streams**: Async streams of [`AuthenticatedSymbol`] with flow control
+//! - **Shared channels**: Multi-producer, multi-consumer symbol distribution
+//! - **Channel waiters**: Efficient waiting for stream readiness without polling
+//! - **Stream lifecycle**: Proper setup, transmission, and teardown protocols
+//!
+//! # Design Properties
+//!
+//! - **Cancellation safety**: Streams handle cancellation without data loss
+//! - **Flow control**: Back-pressure prevents memory exhaustion
+//! - **Authentication**: All symbols are authenticated before transmission
+//! - **Efficiency**: Zero-copy transmission where possible, minimal allocations
 
 use crate::cx::Cx;
 use crate::security::authenticated::AuthenticatedSymbol;

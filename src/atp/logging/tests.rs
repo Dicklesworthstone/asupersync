@@ -1,3 +1,15 @@
+//! ATP logging system tests.
+//!
+//! Comprehensive test suite for the Asupersync Transfer Protocol logging
+//! infrastructure. Verifies structured event formatting, schema validation,
+//! and proper context propagation across transfer operations.
+//!
+//! # Test Coverage
+//! - Event serialization and deserialization
+//! - Schema compliance for all ATP subsystems
+//! - Context field validation and sanitization
+//! - Performance measurement event formatting
+
 use super::*;
 use serde_json::json;
 use std::time::{Duration, UNIX_EPOCH};

@@ -1,3 +1,15 @@
+//! Channel deadlock detection and prevention tests.
+//!
+//! Test suite for verifying that channel operations cannot create deadlocks
+//! under various usage patterns. Covers cyclic dependencies, resource
+//! contention, and improper lock ordering scenarios.
+//!
+//! # Critical Properties
+//! - No circular waiting on channel permits
+//! - Cancellation always breaks potential deadlocks
+//! - Lock ordering respects the global hierarchy
+//! - Timeout operations provide deadlock recovery
+
 use super::mpsc::{Sender, channel};
 use crate::cx::Cx;
 use std::future::Future;

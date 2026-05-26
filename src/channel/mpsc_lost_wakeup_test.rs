@@ -1,3 +1,15 @@
+//! MPSC channel lost wakeup regression tests.
+//!
+//! Critical test suite for verifying correct waker management in MPSC channels.
+//! Lost wakeups occur when a waker is registered but not properly notified when
+//! the channel becomes available, leading to permanent task suspension.
+//!
+//! # Test Scenarios
+//! - Receiver wakeup after sender permits become available
+//! - Sender wakeup after receiver drains buffered items
+//! - Concurrent waker registration and channel state changes
+//! - Waker deduplication to prevent spurious notifications
+
 #[cfg(test)]
 mod tests {
     #![allow(

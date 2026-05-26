@@ -1,4 +1,22 @@
-//! TLS error types.
+//! TLS error types with security-hardened display formatting.
+//!
+//! This module provides comprehensive error types for TLS operations in the
+//! asupersync runtime, with special attention to preventing log injection attacks
+//! and information disclosure through error messages.
+//!
+//! # Security Design
+//!
+//! - **Log injection prevention**: Peer-controlled strings are sanitized before logging
+//! - **Amplification protection**: Error messages are length-limited to prevent DoS
+//! - **Information hiding**: Internal details are not exposed in error displays
+//! - **Structured errors**: Errors are properly typed for programmatic handling
+//!
+//! # Error Categories
+//!
+//! - **Connection errors**: Handshake failures, protocol violations
+//! - **Certificate errors**: Validation, parsing, and chain building failures
+//! - **Configuration errors**: Invalid TLS settings or feature mismatches
+//! - **I/O errors**: Network layer failures with TLS context
 
 use std::fmt;
 use std::io;

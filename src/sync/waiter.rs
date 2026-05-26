@@ -1,3 +1,24 @@
+//! Waiter queue management for synchronization primitives.
+//!
+//! This module provides [`WaiterChain`], a slab-backed doubly-linked FIFO queue
+//! used by mutexes, semaphores, and other sync primitives to manage waiting tasks.
+//! Each waiter has a stable identity to prevent races when futures are cancelled
+//! or wake up out of order.
+//!
+//! # Design
+//!
+//! - **Stable IDs**: [`WaiterId`] provides identity that survives slab reuse
+//! - **O(1) operations**: Insert, remove, and wake operations are constant time
+//! - **FIFO ordering**: Waiters are woken in the order they arrive (fairness)
+//! - **Intrusive linking**: Uses slab indices for prev/next pointers
+//!
+//! # Usage
+//!
+//! Synchronization primitives use this to queue waiting tasks:
+//! 1. `enqueue_waiter()` when a task must wait
+//! 2. `remove_waiter()` if the task is cancelled
+//! 3. `wake_next()` when resources become available
+
 use slab::Slab;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;

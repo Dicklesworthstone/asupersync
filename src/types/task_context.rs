@@ -1,4 +1,22 @@
-//! Internal state shared between TaskRecord and Cx.
+//! Internal task context state shared between TaskRecord and Cx.
+//!
+//! This module provides core types for managing task execution context,
+//! including cancellation masking, progress tracking, and capability budgets.
+//! The types here bridge the runtime's internal [`TaskRecord`] bookkeeping
+//! with the user-facing [`Cx`] API.
+//!
+//! # Key Components
+//!
+//! - **Mask tracking**: [`MAX_MASK_DEPTH`] and mask state for cancellation masking
+//! - **Progress reporting**: Checkpoint tracking for detecting stuck tasks
+//! - **Capability budgets**: Resource limits that flow with task context
+//! - **Runtime coordination**: State that coordinates between Cx and TaskRecord
+//!
+//! # Design Principles
+//!
+//! - **Finite masking**: Mask depth is bounded to prevent indefinite cancellation deferral
+//! - **Progress observability**: Tasks must demonstrate forward progress through checkpoints
+//! - **Resource accounting**: Budgets are tracked and enforced at the task level
 
 use crate::types::{Budget, CancelReason, CapabilityBudget, RegionId, TaskId, Time};
 use std::task::Waker;

@@ -1,3 +1,13 @@
+//! Transport layer unit tests.
+//!
+//! Comprehensive test suite for symbol streams and sinks, covering:
+//! - Channel-based symbol transport with backpressure
+//! - Stream merging and buffering operations
+//! - Error propagation and recovery patterns
+//! - Authentication tag integration with transport primitives
+//!
+//! Tests use deterministic symbols with controlled IDs for reproducible behavior.
+
 #![allow(clippy::all)]
 #[cfg(test)]
 mod tests {
