@@ -113,7 +113,7 @@ pub enum LedgerError {
     /// This is a resource limit error - too many obligations created.
     IndexOverflow {
         /// The current generation that ran out of index space.
-        generation: u64,
+        generation: u32,
     },
     /// Obligation ledger generation counter exhausted. This is extremely
     /// unlikely in practice but must be handled for correctness.
