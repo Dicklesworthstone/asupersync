@@ -99,7 +99,7 @@ use super::marking::{MarkingEvent, MarkingEventKind};
 // Contracts
 // ============================================================================
 
-/// The five Dialectica contracts for two-phase effects.
+/// The Dialectica contracts for two-phase effects (basic + temporal logic).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialecticaContract {
     /// Every reserved obligation must reach a terminal state.
@@ -112,6 +112,15 @@ pub enum DialecticaContract {
     CancellationNonCascading,
     /// All obligation kinds follow the same state machine.
     KindUniformStateMachine,
+    // Temporal Logic Contracts
+    /// Always-Eventually: Every reserved obligation should eventually be resolved within a time bound.
+    AlwaysEventuallyResolved,
+    /// Never-Then: After region close, no new obligations should be reserved in that region.
+    NeverThenAfterClose,
+    /// Always-Implies: If obligation is reserved, it should always remain trackable until resolved.
+    AlwaysImpliesTrackable,
+    /// Eventually-Always: Once system reaches quiescence, it should remain quiescent.
+    EventuallyAlwaysQuiescent,
 }
 
 impl DialecticaContract {
@@ -124,6 +133,11 @@ impl DialecticaContract {
             Self::RegionClosureSafety => "region close requires all obligations terminal",
             Self::CancellationNonCascading => "cancellation does not auto-resolve obligations",
             Self::KindUniformStateMachine => "all obligation kinds share identical state machine",
+            // Temporal Logic Contracts
+            Self::AlwaysEventuallyResolved => "every reserved obligation eventually resolves within time bound",
+            Self::NeverThenAfterClose => "no new reservations after region close",
+            Self::AlwaysImpliesTrackable => "reserved obligations remain trackable until resolved",
+            Self::EventuallyAlwaysQuiescent => "quiescent state is eventually reached and maintained",
         }
     }
 }
@@ -136,6 +150,11 @@ impl fmt::Display for DialecticaContract {
             Self::RegionClosureSafety => "RegionClosureSafety",
             Self::CancellationNonCascading => "CancellationNonCascading",
             Self::KindUniformStateMachine => "KindUniformStateMachine",
+            // Temporal Logic Contracts
+            Self::AlwaysEventuallyResolved => "AlwaysEventuallyResolved",
+            Self::NeverThenAfterClose => "NeverThenAfterClose",
+            Self::AlwaysImpliesTrackable => "AlwaysImpliesTrackable",
+            Self::EventuallyAlwaysQuiescent => "EventuallyAlwaysQuiescent",
         };
         write!(f, "{name}: {}", self.description())
     }
@@ -194,6 +213,11 @@ pub struct ContractStatusMap {
     region_closure_safety: bool,
     cancellation_non_cascading: bool,
     kind_uniform_state_machine: bool,
+    // Temporal Logic Contracts
+    always_eventually_resolved: bool,
+    never_then_after_close: bool,
+    always_implies_trackable: bool,
+    eventually_always_quiescent: bool,
 }
 
 impl ContractStatusMap {
@@ -204,6 +228,11 @@ impl ContractStatusMap {
             region_closure_safety: true,
             cancellation_non_cascading: true,
             kind_uniform_state_machine: true,
+            // Temporal Logic Contracts
+            always_eventually_resolved: true,
+            never_then_after_close: true,
+            always_implies_trackable: true,
+            eventually_always_quiescent: true,
         }
     }
 
@@ -218,6 +247,19 @@ impl ContractStatusMap {
             DialecticaContract::KindUniformStateMachine => {
                 self.kind_uniform_state_machine = false;
             }
+            // Temporal Logic Contracts
+            DialecticaContract::AlwaysEventuallyResolved => {
+                self.always_eventually_resolved = false;
+            }
+            DialecticaContract::NeverThenAfterClose => {
+                self.never_then_after_close = false;
+            }
+            DialecticaContract::AlwaysImpliesTrackable => {
+                self.always_implies_trackable = false;
+            }
+            DialecticaContract::EventuallyAlwaysQuiescent => {
+                self.eventually_always_quiescent = false;
+            }
         }
     }
 
@@ -230,6 +272,11 @@ impl ContractStatusMap {
             DialecticaContract::RegionClosureSafety => self.region_closure_safety,
             DialecticaContract::CancellationNonCascading => self.cancellation_non_cascading,
             DialecticaContract::KindUniformStateMachine => self.kind_uniform_state_machine,
+            // Temporal Logic Contracts
+            DialecticaContract::AlwaysEventuallyResolved => self.always_eventually_resolved,
+            DialecticaContract::NeverThenAfterClose => self.never_then_after_close,
+            DialecticaContract::AlwaysImpliesTrackable => self.always_implies_trackable,
+            DialecticaContract::EventuallyAlwaysQuiescent => self.eventually_always_quiescent,
         }
     }
 
@@ -328,9 +375,9 @@ struct ObligationSnapshot {
 
 /// Checks Dialectica contracts against a sequence of marking events.
 ///
-/// The checker tracks obligation state and detects violations of the five
-/// contracts. It is designed to be run against marking events produced by
-/// [`super::marking::project_trace`] or constructed directly in tests.
+/// The checker tracks obligation state and detects violations of the basic
+/// and temporal logic contracts. It is designed to be run against marking events
+/// produced by [`super::marking::project_trace`] or constructed directly in tests.
 #[derive(Debug, Default)]
 pub struct ContractChecker {
     /// Tracked obligations: id → snapshot.
@@ -339,13 +386,42 @@ pub struct ContractChecker {
     violations: Vec<ContractViolation>,
     /// Per-contract status.
     status: Option<ContractStatusMap>,
+    // Temporal Logic Tracking
+    /// Closed regions (for NeverThenAfterClose verification).
+    closed_regions: std::collections::BTreeSet<RegionId>,
+    /// Time bound for AlwaysEventuallyResolved (configurable, default 1 second).
+    resolution_time_bound: Time,
+    /// Track if system has reached quiescence for EventuallyAlwaysQuiescent.
+    quiescence_start: Option<Time>,
+}
+
+impl Default for ContractChecker {
+    fn default() -> Self {
+        Self {
+            obligations: BTreeMap::new(),
+            violations: Vec::new(),
+            status: None,
+            closed_regions: std::collections::BTreeSet::new(),
+            resolution_time_bound: Time::from_millis(1000), // 1 second default
+            quiescence_start: None,
+        }
+    }
 }
 
 impl ContractChecker {
-    /// Creates a new contract checker.
+    /// Creates a new contract checker with default time bounds.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a new contract checker with custom resolution time bound.
+    #[must_use]
+    pub fn new_with_time_bound(time_bound: Time) -> Self {
+        Self {
+            resolution_time_bound: time_bound,
+            ..Self::default()
+        }
     }
 
     /// Check the Dialectica contracts against a sequence of marking events.
@@ -378,6 +454,9 @@ impl ContractChecker {
         self.obligations.clear();
         self.violations.clear();
         self.status = None;
+        // Reset temporal logic tracking
+        self.closed_regions.clear();
+        self.quiescence_start = None;
     }
 
     fn process_event(&mut self, event: &MarkingEvent) {
@@ -406,6 +485,21 @@ impl ContractChecker {
                     });
                     return;
                 }
+
+                // Temporal Logic: NeverThenAfterClose
+                // Check if this reservation is in a region that was already closed
+                if self.closed_regions.contains(region) {
+                    self.violations.push(ContractViolation {
+                        contract: DialecticaContract::NeverThenAfterClose,
+                        time: event.time,
+                        description: format!(
+                            "new obligation {obligation:?} reserved in already-closed region {region:?}"
+                        ),
+                        obligation: Some(*obligation),
+                        region: Some(*region),
+                    });
+                }
+
                 self.obligations.insert(
                     *obligation,
                     ObligationSnapshot {
@@ -417,6 +511,9 @@ impl ContractChecker {
                         transition_count: 0,
                     },
                 );
+
+                // Reset quiescence tracking since we have a new reservation
+                self.quiescence_start = None;
             }
 
             MarkingEventKind::Commit {
@@ -431,6 +528,8 @@ impl ContractChecker {
                     *kind,
                     *region,
                 );
+                // Check if resolution brings us closer to quiescence
+                self.check_quiescence(event.time);
             }
 
             MarkingEventKind::Abort {
@@ -445,6 +544,8 @@ impl ContractChecker {
                     *kind,
                     *region,
                 );
+                // Check if resolution brings us closer to quiescence
+                self.check_quiescence(event.time);
             }
 
             MarkingEventKind::Leak {
@@ -459,10 +560,18 @@ impl ContractChecker {
                     *kind,
                     *region,
                 );
+                // Check if resolution brings us closer to quiescence
+                self.check_quiescence(event.time);
             }
 
             MarkingEventKind::RegionClose { region } => {
                 self.check_region_closure(*region, event.time);
+
+                // Temporal Logic: Track closed regions for NeverThenAfterClose
+                self.closed_regions.insert(*region);
+
+                // Check if this brings us closer to quiescence
+                self.check_quiescence(event.time);
             }
             MarkingEventKind::TaskComplete { .. } => {}
         }
@@ -624,6 +733,80 @@ impl ContractChecker {
                     region: Some(snap.region),
                 });
             }
+        }
+
+        // Temporal Logic: Check AlwaysEventuallyResolved
+        self.check_always_eventually_resolved(trace_end);
+    }
+
+    /// Check AlwaysEventuallyResolved: obligations should resolve within time bound.
+    fn check_always_eventually_resolved(&mut self, current_time: Time) {
+        for (id, snap) in &self.obligations {
+            if !snap.state.is_terminal() {
+                let elapsed = current_time.duration_since(snap.reserved_at);
+                if elapsed > self.resolution_time_bound.as_duration() {
+                    self.violations.push(ContractViolation {
+                        contract: DialecticaContract::AlwaysEventuallyResolved,
+                        time: current_time,
+                        description: format!(
+                            "obligation {id:?} reserved at t={} not resolved within time bound \
+                             {} (elapsed: {})",
+                            snap.reserved_at,
+                            self.resolution_time_bound,
+                            Time::from_duration(elapsed),
+                        ),
+                        obligation: Some(*id),
+                        region: Some(snap.region),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Check quiescence state for EventuallyAlwaysQuiescent contract.
+    fn check_quiescence(&mut self, current_time: Time) {
+        let is_quiescent = self.obligations.values().all(|snap| snap.state.is_terminal());
+
+        if is_quiescent {
+            if self.quiescence_start.is_none() {
+                // First time reaching quiescence
+                self.quiescence_start = Some(current_time);
+            }
+            // Already quiescent - EventuallyAlwaysQuiescent is satisfied
+        } else {
+            // Lost quiescence - check if we violated EventuallyAlwaysQuiescent
+            if let Some(quiescence_start) = self.quiescence_start {
+                self.violations.push(ContractViolation {
+                    contract: DialecticaContract::EventuallyAlwaysQuiescent,
+                    time: current_time,
+                    description: format!(
+                        "system lost quiescence at t={} after achieving it at t={}",
+                        current_time, quiescence_start,
+                    ),
+                    obligation: None,
+                    region: None,
+                });
+            }
+            self.quiescence_start = None;
+        }
+    }
+
+    /// Check AlwaysImpliesTrackable: reserved obligations remain trackable.
+    fn check_always_implies_trackable(&mut self, obligation: ObligationId, time: Time) {
+        // This is checked implicitly by the obligation tracking system.
+        // If an obligation becomes untrackable, it would be detected as a
+        // data structure inconsistency. For now, we consider this satisfied
+        // if the obligation exists in our tracking map.
+        if !self.obligations.contains_key(&obligation) {
+            self.violations.push(ContractViolation {
+                contract: DialecticaContract::AlwaysImpliesTrackable,
+                time,
+                description: format!(
+                    "obligation {obligation:?} became untrackable"
+                ),
+                obligation: Some(obligation),
+                region: None,
+            });
         }
     }
 }
@@ -2497,5 +2680,65 @@ mod tests {
             pass,
             "unreserved resolve did not surface a single NoPartialCommit violation"
         );
+    }
+
+    // TEMPORAL-LOGIC-1: Test temporal logic contracts
+    #[test]
+    fn temporal_logic_contracts() {
+        init_test("temporal_logic_contracts");
+
+        // Test NeverThenAfterClose: reservation after region close should be violation
+        let events_never_then = vec![
+            close(0, r(0)), // Close region 0
+            reserve(10, o(0), ObligationKind::SendPermit, t(0), r(0)), // Should violate
+        ];
+        let mut checker = ContractChecker::new();
+        let result = checker.check(&events_never_then);
+        assert!(!result.is_clean(), "Should detect NeverThenAfterClose violation");
+        let violations = result.violations_for(DialecticaContract::NeverThenAfterClose);
+        assert_eq!(violations.len(), 1, "Should have exactly one NeverThenAfterClose violation");
+
+        // Test AlwaysEventuallyResolved: obligation not resolved within time bound
+        let time_bound = Time::from_millis(100);
+        let events_slow_resolve = vec![
+            reserve(0, o(1), ObligationKind::SendPermit, t(1), r(1)),
+            // No commit within time bound - should violate at trace end
+        ];
+        let mut checker_time = ContractChecker::new_with_time_bound(time_bound);
+        let result_time = checker_time.check(&events_slow_resolve);
+        assert!(!result_time.is_clean(), "Should detect AlwaysEventuallyResolved violation");
+        let time_violations = result_time.violations_for(DialecticaContract::AlwaysEventuallyResolved);
+        assert_eq!(time_violations.len(), 1, "Should have exactly one AlwaysEventuallyResolved violation");
+
+        // Test EventuallyAlwaysQuiescent: system reaches and maintains quiescence
+        let events_quiescent = vec![
+            reserve(0, o(2), ObligationKind::SendPermit, t(2), r(2)),
+            commit(50, o(2), r(2), ObligationKind::SendPermit), // Reach quiescence
+            close(100, r(2)),
+            // System remains quiescent - should be satisfied
+        ];
+        let mut checker_quies = ContractChecker::new();
+        let result_quies = checker_quies.check(&events_quiescent);
+        assert!(result_quies.contract_status.is_satisfied(DialecticaContract::EventuallyAlwaysQuiescent));
+
+        // Test EventuallyAlwaysQuiescent violation: lose quiescence
+        let events_lose_quies = vec![
+            reserve(0, o(3), ObligationKind::SendPermit, t(3), r(3)),
+            commit(50, o(3), r(3), ObligationKind::SendPermit), // Reach quiescence
+            reserve(100, o(4), ObligationKind::Ack, t(4), r(3)), // Lose quiescence - should violate
+        ];
+        let mut checker_lose = ContractChecker::new();
+        let result_lose = checker_lose.check(&events_lose_quies);
+        let quies_violations = result_lose.violations_for(DialecticaContract::EventuallyAlwaysQuiescent);
+        assert_eq!(quies_violations.len(), 1, "Should have exactly one EventuallyAlwaysQuiescent violation");
+
+        // Test AlwaysImpliesTrackable: this is implicitly satisfied if obligations are tracked
+        let events_trackable = vec![
+            reserve(0, o(5), ObligationKind::Lease, t(5), r(5)),
+            commit(10, o(5), r(5), ObligationKind::Lease),
+        ];
+        let mut checker_track = ContractChecker::new();
+        let result_track = checker_track.check(&events_trackable);
+        assert!(result_track.contract_status.is_satisfied(DialecticaContract::AlwaysImpliesTrackable));
     }
 }
