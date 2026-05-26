@@ -376,6 +376,18 @@ pub enum SwarmError {
     /// Swarm configuration error
     #[error("Invalid swarm configuration: {details}")]
     ConfigurationError { details: String },
+
+    /// Transfer not found
+    #[error("Transfer not found: {transfer_id}")]
+    TransferNotFound { transfer_id: MailboxTransferId },
+
+    /// Piece not found
+    #[error("Piece not found: {piece_id}")]
+    PieceNotFound { piece_id: PieceId },
+
+    /// Invalid piece state
+    #[error("Invalid piece state for {piece_id}: {current_state}")]
+    InvalidPieceState { piece_id: PieceId, current_state: String },
 }
 
 /// Type alias for swarm operation results.
