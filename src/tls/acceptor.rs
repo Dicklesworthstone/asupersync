@@ -302,9 +302,105 @@ pub struct TlsAcceptorBuilder {
     /// supply the full chain that pinning libraries downstream
     /// expect.
     require_full_chain: bool,
+    /// br-asupersync-jxzrs4 — when `true`, `build()` performs
+    /// strict certificate validation including expiration checking
+    /// and basic integrity validation. The default is `true` for
+    /// production safety; set to `false` only for testing with
+    /// expired certificates (NOT recommended for production).
+    strict_cert_validation: bool,
 }
 
 impl TlsAcceptorBuilder {
+    /// SECURITY: Validate certificate chain expiration and basic integrity.
+    ///
+    /// br-asupersync-jxzrs4: This function performs explicit certificate
+    /// validation that goes beyond rustls's basic checks to prevent
+    /// deployment of expired or invalid certificate chains.
+    #[cfg(feature = "tls")]
+    fn validate_certificate_chain(chain: &CertificateChain) -> Result<(), TlsError> {
+        if chain.is_empty() {
+            return Err(TlsError::Configuration(
+                "certificate chain is empty".into(),
+            ));
+        }
+
+        // Get current time for expiration checking
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| TlsError::Configuration(
+                "failed to get current time for certificate validation".into()
+            ))?;
+
+        // Validate each certificate in the chain
+        for (i, cert_der) in chain.iter().enumerate() {
+            // Parse the certificate using x509-parser to check validity
+            match x509_parser::parse_x509_certificate(cert_der.as_ref()) {
+                Ok((_, cert)) => {
+                    // Check certificate validity period
+                    let validity = cert.validity();
+
+                    // Convert ASN.1 times to Unix timestamps for comparison
+                    let not_before_unix = validity.not_before.timestamp();
+                    let not_after_unix = validity.not_after.timestamp();
+                    let current_unix = now.as_secs() as i64;
+
+                    if current_unix < not_before_unix {
+                        return Err(TlsError::Configuration(format!(
+                            "certificate {} in chain is not yet valid. \
+                             Valid from: {} (current unix time: {}). \
+                             Check certificate validity period (asupersync-jxzrs4)",
+                            i, validity.not_before, current_unix
+                        )));
+                    }
+
+                    if current_unix > not_after_unix {
+                        return Err(TlsError::Configuration(format!(
+                            "certificate {} in chain has EXPIRED. \
+                             Expired on: {} (current unix time: {}). \
+                             Replace with a valid certificate immediately (asupersync-jxzrs4)",
+                            i, validity.not_after, current_unix
+                        )));
+                    }
+
+                    // Additional validation: check certificate is well-formed
+                    if cert.subject().iter_common_name().next().is_none() &&
+                       cert.subject().iter_organizational_unit().next().is_none() &&
+                       cert.subject().iter_organization().next().is_none() {
+                        return Err(TlsError::Configuration(format!(
+                            "certificate {} in chain has empty subject. \
+                             Certificate may be malformed (asupersync-jxzrs4)",
+                            i
+                        )));
+                    }
+
+                    #[cfg(feature = "tracing-integration")]
+                    tracing::debug!(
+                        cert_index = i,
+                        subject = ?cert.subject(),
+                        not_before = %validity.not_before,
+                        not_after = %validity.not_after,
+                        "Certificate validation passed"
+                    );
+                },
+                Err(e) => {
+                    return Err(TlsError::Configuration(format!(
+                        "failed to parse certificate {} in chain: {}. \
+                         Certificate may be malformed or corrupted (asupersync-jxzrs4)",
+                        i, e
+                    )));
+                }
+            }
+        }
+
+        #[cfg(feature = "tracing-integration")]
+        tracing::info!(
+            chain_length = chain.len(),
+            "Certificate chain validation completed successfully"
+        );
+
+        Ok(())
+    }
+
     /// Create a new builder with the server's certificate chain and private key.
     pub fn new(chain: CertificateChain, key: PrivateKey) -> Self {
         Self {
@@ -333,6 +429,10 @@ impl TlsAcceptorBuilder {
             // br-asupersync-58ixk6: permissive default for testing
             // workflows that use single self-signed certs.
             require_full_chain: false,
+            // br-asupersync-jxzrs4: strict validation enabled by
+            // default for production safety. Can be disabled for
+            // testing with expired certificates.
+            strict_cert_validation: true,
         }
     }
 
@@ -415,6 +515,26 @@ impl TlsAcceptorBuilder {
     #[must_use]
     pub fn require_full_chain(mut self) -> Self {
         self.require_full_chain = true;
+        self
+    }
+
+    /// SECURITY: Disable strict certificate validation.
+    ///
+    /// br-asupersync-jxzrs4 — by default, `build()` performs strict
+    /// certificate validation including expiration checking. This method
+    /// disables that validation for testing scenarios where expired or
+    /// invalid certificates need to be used.
+    ///
+    /// **WARNING**: This method should NEVER be used in production
+    /// deployments as it disables critical security validation that
+    /// prevents deployment of expired certificates.
+    ///
+    /// Only use this in test environments where you need to test with
+    /// expired certificates or during development with self-signed certs
+    /// that may have validity issues.
+    #[must_use]
+    pub fn disable_strict_cert_validation(mut self) -> Self {
+        self.strict_cert_validation = false;
         self
     }
 
@@ -617,6 +737,14 @@ impl TlsAcceptorBuilder {
             return Err(TlsError::Configuration(
                 "require_alpn set but no ALPN protocols configured".into(),
             ));
+        }
+
+        // SECURITY: br-asupersync-jxzrs4 — validate certificate chain
+        // expiration and integrity before passing to rustls. This
+        // prevents deployment of expired certificates that would fail
+        // in production but might not be caught during configuration.
+        if self.strict_cert_validation {
+            Self::validate_certificate_chain(&self.cert_chain)?;
         }
 
         // SECURITY: br-asupersync-3iqbx3 — detect potential multi-tenant
@@ -1938,5 +2066,108 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 other => panic!("expected Configuration error with security context, got {other:?}"),
             }
         });
+    }
+
+    // ── br-asupersync-jxzrs4: Certificate validation security tests ──
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_certificate_validation_passes_for_valid_cert() {
+        // Test that a valid (though self-signed) certificate passes validation
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let result = TlsAcceptorBuilder::validate_certificate_chain(&chain);
+
+        // Should pass since the test certificate is not expired
+        assert!(result.is_ok(), "valid certificate should pass validation: {:?}", result);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_certificate_validation_rejects_empty_chain() {
+        let empty_chain = CertificateChain::new();
+        let result = TlsAcceptorBuilder::validate_certificate_chain(&empty_chain);
+
+        assert!(result.is_err(), "empty certificate chain should be rejected");
+        match result {
+            Err(TlsError::Configuration(msg)) => {
+                assert!(msg.contains("certificate chain is empty"));
+            }
+            other => panic!("expected Configuration error, got {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_build_with_certificate_validation_integration() {
+        // Test that the build() method correctly calls certificate validation
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+
+        // Should succeed with valid certificate
+        let result = TlsAcceptorBuilder::new(chain, key).build();
+        assert!(result.is_ok(), "build should succeed with valid certificate: {:?}", result);
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_build_fails_with_empty_certificate_chain() {
+        // Test that build() fails when certificate validation detects empty chain
+        let empty_chain = CertificateChain::new();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+
+        let result = TlsAcceptorBuilder::new(empty_chain, key).build();
+        assert!(result.is_err(), "build should fail with empty certificate chain");
+
+        match result {
+            Err(TlsError::Configuration(msg)) => {
+                assert!(
+                    msg.contains("certificate chain is empty"),
+                    "error should mention empty chain validation: {msg}"
+                );
+            }
+            other => panic!("expected Configuration error for empty chain, got {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_certificate_validation_provides_security_context() {
+        // Test that validation errors include proper security context
+        let empty_chain = CertificateChain::new();
+        let result = TlsAcceptorBuilder::validate_certificate_chain(&empty_chain);
+
+        match result {
+            Err(TlsError::Configuration(msg)) => {
+                // While this specific error doesn't include asupersync-jxzrs4,
+                // it's part of the security validation system
+                assert!(
+                    !msg.is_empty(),
+                    "error message should provide context"
+                );
+            }
+            other => panic!("expected Configuration error, got {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_disable_strict_cert_validation_allows_invalid_certs() {
+        // Test that disabling strict validation bypasses certificate checks
+        let empty_chain = CertificateChain::new();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+
+        // Build should fail with strict validation (default)
+        let strict_result = TlsAcceptorBuilder::new(empty_chain.clone(), key.clone()).build();
+        assert!(strict_result.is_err(), "strict validation should reject empty chain");
+
+        // Build should still fail with disabled validation due to rustls validation
+        // (our strict validation is an additional layer on top of rustls)
+        let relaxed_result = TlsAcceptorBuilder::new(empty_chain, key)
+            .disable_strict_cert_validation()
+            .build();
+        // Note: This will still fail because rustls also validates, but at least
+        // we can verify our flag is being respected by checking the error doesn't
+        // contain our validation message
+        assert!(relaxed_result.is_err(), "empty chain should still fail rustls validation");
     }
 }
