@@ -633,25 +633,37 @@ fn jwt_numeric_claim_to_i64(value: &serde_json::Value) -> Option<i64> {
 
 fn parse_nats_jwt_claims(jwt: &str) -> Result<JwtClaimsSummary, NatsError> {
     let mut parts = jwt.split('.');
-    let header = parts.next().unwrap_or_default();
-    let payload = parts.next().unwrap_or_default();
-    let signature = parts.next().unwrap_or_default();
-    if header.is_empty() || payload.is_empty() || signature.is_empty() || parts.next().is_some() {
+    let header_b64 = parts.next().unwrap_or_default();
+    let payload_b64 = parts.next().unwrap_or_default();
+    let signature_b64 = parts.next().unwrap_or_default();
+    if header_b64.is_empty() || payload_b64.is_empty() || signature_b64.is_empty() || parts.next().is_some() {
         return Err(NatsError::InvalidAuth(
             "JWT auth expects a compact JWT with exactly 3 non-empty segments".to_string(),
         ));
     }
 
-    let header = decode_base64_url(header, "JWT header")?;
+    let header = decode_base64_url(header_b64, "JWT header")?;
     let header: serde_json::Value = serde_json::from_slice(&header)
         .map_err(|err| NatsError::InvalidAuth(format!("JWT header is not valid JSON: {err}")))?;
-    if !header.is_object() {
-        return Err(NatsError::InvalidAuth(
-            "JWT header must decode to a JSON object".to_string(),
-        ));
+    let header_obj = header.as_object().ok_or_else(|| {
+        NatsError::InvalidAuth("JWT header must decode to a JSON object".to_string())
+    })?;
+
+    // Verify the algorithm is ed25519-nkey (required for NATS JWTs)
+    let algorithm = header_obj
+        .get("alg")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            NatsError::InvalidAuth("JWT header must contain an 'alg' field".to_string())
+        })?;
+    if algorithm != "ed25519-nkey" {
+        return Err(NatsError::InvalidAuth(format!(
+            "unsupported JWT algorithm '{}', expected 'ed25519-nkey'",
+            algorithm
+        )));
     }
 
-    let payload = decode_base64_url(payload, "JWT payload")?;
+    let payload = decode_base64_url(payload_b64, "JWT payload")?;
     let payload: serde_json::Value = serde_json::from_slice(&payload)
         .map_err(|err| NatsError::InvalidAuth(format!("JWT payload is not valid JSON: {err}")))?;
     let payload_obj = payload.as_object().ok_or_else(|| {
@@ -675,6 +687,45 @@ fn parse_nats_jwt_claims(jwt: &str) -> Result<JwtClaimsSummary, NatsError> {
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
     let expires_at = payload_obj.get("exp").and_then(jwt_numeric_claim_to_i64);
+
+    // br-asupersync-4h6ck7: CRITICAL security fix - verify JWT signature
+    // For NATS JWTs, we need the issuer's public key to verify the signature.
+    // In a production deployment, issuer keys should be pre-configured or
+    // fetched from a trusted source. For now, we verify the signature if
+    // the issuer claim is present and non-empty - the caller must ensure
+    // proper issuer key validation.
+    if let Some(issuer_str) = issuer.as_deref() {
+        if !issuer_str.is_empty() {
+            let signature = decode_base64_url(signature_b64, "JWT signature")?;
+            let signed_data = format!("{}.{}", header_b64, payload_b64);
+
+            // For NATS, the issuer field typically contains the issuer's public key
+            // Attempt to verify signature using issuer as the public key
+            match KeyPair::from_public_key(issuer_str) {
+                Ok(issuer_keypair) => {
+                    issuer_keypair.verify(signed_data.as_bytes(), &signature).map_err(|err| {
+                        NatsError::InvalidAuth(format!(
+                            "JWT signature verification failed: {}",
+                            err
+                        ))
+                    })?;
+                }
+                Err(_) => {
+                    // If issuer is not a valid public key, we cannot verify the signature.
+                    // In a production system, this should be a hard error or the issuer
+                    // keys should be resolved from a different source.
+                    return Err(NatsError::InvalidAuth(
+                        "JWT issuer claim is not a valid NATS public key for signature verification".to_string(),
+                    ));
+                }
+            }
+        }
+    } else {
+        // No issuer claim means we cannot verify the JWT signature
+        return Err(NatsError::InvalidAuth(
+            "JWT missing issuer claim required for signature verification".to_string(),
+        ));
+    }
 
     Ok(JwtClaimsSummary {
         subject: subject.to_string(),
