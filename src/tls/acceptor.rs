@@ -243,10 +243,12 @@ impl TlsAcceptor {
                 .as_deref()
                 .is_some_and(|p| expected.iter().any(|e| e.as_slice() == p));
             if !ok {
-                return Err(TlsError::AlpnNegotiationFailed {
-                    expected,
-                    negotiated,
-                });
+                // SECURITY: br-asupersync-iz6751 — sanitize error message to prevent
+                // ALPN protocol reconnaissance. Don't expose expected/negotiated protocol
+                // lists which could help attackers understand server capabilities.
+                return Err(TlsError::Configuration(
+                    "ALPN protocol negotiation failed - client protocol not supported".into(),
+                ));
             }
         }
 
@@ -283,19 +285,23 @@ impl TlsAcceptor {
             };
             match allow_list.get(&sni) {
                 None => {
-                    return Err(TlsError::Configuration(format!(
-                        "SNI hostname {sni:?} is not in the configured \
-                         sni_alpn_allow_list"
-                    )));
+                    // SECURITY: br-asupersync-iz6751 — sanitize error message to prevent
+                    // SNI hostname reconnaissance. Don't expose which hostnames are
+                    // configured which could help attackers enumerate tenants.
+                    return Err(TlsError::Configuration(
+                        "SNI hostname not permitted by server configuration".into(),
+                    ));
                 }
                 Some(allowed) => {
                     let alpn_ref = alpn.as_deref();
                     let ok = alpn_ref.is_some_and(|p| allowed.iter().any(|a| a.as_slice() == p));
                     if !ok {
-                        return Err(TlsError::AlpnNegotiationFailed {
-                            expected: allowed.clone(),
-                            negotiated: alpn,
-                        });
+                        // SECURITY: br-asupersync-iz6751 — sanitize error message to prevent
+                        // ALPN protocol reconnaissance. Don't expose allowed/negotiated protocol
+                        // lists which could help attackers understand tenant-specific routing.
+                        return Err(TlsError::Configuration(
+                            "ALPN protocol not permitted for this SNI hostname".into(),
+                        ));
                     }
                 }
             }
@@ -485,7 +491,8 @@ impl TlsAcceptorBuilder {
             ))?;
 
         // Validate each certificate in the chain
-        for (i, cert_der) in chain.iter().enumerate() {
+        for (i, cert) in chain.iter().enumerate() {
+            let cert_der = cert.as_der();
             // Parse the certificate using x509-parser to check validity
             match x509_parser::parse_x509_certificate(cert_der.as_ref()) {
                 Ok((_, cert)) => {
@@ -1055,10 +1062,13 @@ impl TlsAcceptorBuilder {
             for (sni, allowed) in allow_list {
                 for protocol in allowed {
                     if !self.alpn_protocols.iter().any(|p| p == protocol) {
-                        return Err(TlsError::Configuration(format!(
-                            "sni_alpn_allow_list entry {sni:?} permits ALPN \
-                             protocol {protocol:?} that is not in alpn_protocols"
-                        )));
+                        // SECURITY: br-asupersync-iz6751 — sanitize error message to prevent
+                        // SNI hostname and ALPN protocol reconnaissance during config validation.
+                        // Don't expose which hostnames or protocols are configured.
+                        return Err(TlsError::Configuration(
+                            "sni_alpn_allow_list contains protocol not advertised in alpn_protocols \
+                             - check configuration consistency".into(),
+                        ));
                     }
                 }
             }
