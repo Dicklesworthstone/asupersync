@@ -539,6 +539,8 @@ pub mod real_net_dns_resolver_cache_happy_eyeballs_timing_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_dns_resolver_happy_eyeballs_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
+pub mod real_net_dns_transport_router_integration_e2e_tests;
+#[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_quic_core_session_integration_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_net_quic_native_connection_raptorq_proof_integration_e2e_tests;
