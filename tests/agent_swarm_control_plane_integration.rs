@@ -10,17 +10,20 @@ use asupersync::agent_swarm::{
     SystemPressure, ValidationCoordinator,
 };
 use asupersync::cx::Cx;
+use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::{Budget, Outcome};
 use std::time::{Duration, SystemTime};
 
 /// Test basic agent admission and resource allocation.
-#[tokio::test]
-async fn test_agent_admission_basic() -> Result<()> {
-    // Create a test context with structured concurrency
-    let runtime = asupersync::runtime::RuntimeBuilder::new().build().await?;
+#[test]
+fn test_agent_admission_basic() -> Result<()> {
+    asupersync::test_utils::init_test_logging();
 
-    runtime
-        .scope(|cx| async {
+    // Create deterministic lab runtime for consistent E2E testing
+    let mut runtime = LabRuntime::new(LabConfig::new(0x5157_9001).max_steps(50_000));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    runtime.run(&root, |cx| async {
             // Create control plane configuration
             let config = create_test_config();
             let control_plane = AgentSwarmControlPlane::new(config)?;
@@ -67,17 +70,21 @@ async fn test_agent_admission_basic() -> Result<()> {
             assert_eq!(metrics.total_agents_rejected, 0);
 
             Ok(())
-        })
-        .await
+        });
+
+    Ok(())
 }
 
 /// Test agent admission under system pressure.
-#[tokio::test]
-async fn test_agent_admission_under_pressure() -> Result<()> {
-    let runtime = asupersync::runtime::RuntimeBuilder::new().build().await?;
+#[test]
+fn test_agent_admission_under_pressure() -> Result<()> {
+    asupersync::test_utils::init_test_logging();
 
-    runtime
-        .scope(|cx| async {
+    // Create deterministic lab runtime for consistent E2E testing
+    let mut runtime = LabRuntime::new(LabConfig::new(0x5157_9002).max_steps(50_000));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    runtime.run(&root, |cx| async {
             let config = create_test_config();
             let control_plane = AgentSwarmControlPlane::new(config)?;
 
@@ -135,17 +142,21 @@ async fn test_agent_admission_under_pressure() -> Result<()> {
             assert_eq!(metrics.total_agents_rejected, 1);
 
             Ok(())
-        })
-        .await
+        });
+
+    Ok(())
 }
 
 /// Test multiple concurrent agent admissions.
-#[tokio::test]
-async fn test_concurrent_agent_admissions() -> Result<()> {
-    let runtime = asupersync::runtime::RuntimeBuilder::new().build().await?;
+#[test]
+fn test_concurrent_agent_admissions() -> Result<()> {
+    asupersync::test_utils::init_test_logging();
 
-    runtime
-        .scope(|cx| async {
+    // Create deterministic lab runtime for consistent E2E testing
+    let mut runtime = LabRuntime::new(LabConfig::new(0x5157_9003).max_steps(50_000));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    runtime.run(&root, |cx| async {
             let config = create_test_config();
             let control_plane = AgentSwarmControlPlane::new(config)?;
 
@@ -206,17 +217,21 @@ async fn test_concurrent_agent_admissions() -> Result<()> {
             assert_eq!(metrics.total_agents_rejected as usize, rejected_count);
 
             Ok(())
-        })
-        .await
+        });
+
+    Ok(())
 }
 
 /// Test control plane graceful shutdown.
-#[tokio::test]
-async fn test_control_plane_shutdown() -> Result<()> {
-    let runtime = asupersync::runtime::RuntimeBuilder::new().build().await?;
+#[test]
+fn test_control_plane_shutdown() -> Result<()> {
+    asupersync::test_utils::init_test_logging();
 
-    runtime
-        .scope(|cx| async {
+    // Create deterministic lab runtime for consistent E2E testing
+    let mut runtime = LabRuntime::new(LabConfig::new(0x5157_9004).max_steps(50_000));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+
+    runtime.run(&root, |cx| async {
             let config = create_test_config();
             let control_plane = AgentSwarmControlPlane::new(config)?;
 
@@ -253,8 +268,9 @@ async fn test_control_plane_shutdown() -> Result<()> {
             // but for this test we just verify the call succeeds
 
             Ok(())
-        })
-        .await
+        });
+
+    Ok(())
 }
 
 /// Create a test configuration for the control plane.
@@ -339,12 +355,15 @@ mod agent_swarm_e2e_tests {
     use super::*;
 
     /// End-to-end test simulating a realistic agent swarm workflow.
-    #[tokio::test]
-    async fn test_e2e_agent_swarm_workflow() -> Result<()> {
-        let runtime = asupersync::runtime::RuntimeBuilder::new().build().await?;
+    #[test]
+    fn test_e2e_agent_swarm_workflow() -> Result<()> {
+        asupersync::test_utils::init_test_logging();
 
-        runtime
-            .scope(|cx| async {
+        // Create deterministic lab runtime for consistent E2E testing
+        let mut runtime = LabRuntime::new(LabConfig::new(0x5157_9005).max_steps(100_000));
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+
+        runtime.run(&root, |cx| async {
                 let config = create_test_config();
                 let control_plane = AgentSwarmControlPlane::new(config)?;
 
@@ -434,7 +453,8 @@ mod agent_swarm_e2e_tests {
                 control_plane.shutdown(cx).await?;
 
                 Ok(())
-            })
-            .await
+            });
+
+        Ok(())
     }
 }
