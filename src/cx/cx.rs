@@ -2215,13 +2215,16 @@ impl<Caps> Cx<Caps> {
     {
         {
             let mut inner = self.inner.write();
-            assert!(
-                inner.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
-                "mask depth exceeded MAX_MASK_DEPTH ({}): this violates INV-MASK-BOUNDED \
-                 and prevents cancellation from ever being observed. \
-                 Reduce nesting of Cx::masked() sections.",
-                crate::types::task_context::MAX_MASK_DEPTH,
-            );
+            // Enforce mask depth cap to prevent overflow and infinite recursion
+            // This maintains INV-MASK-BOUNDED invariant in both debug and release builds
+            if inner.mask_depth >= crate::types::task_context::MAX_MASK_DEPTH {
+                panic!(
+                    "mask depth exceeded MAX_MASK_DEPTH ({}): this violates INV-MASK-BOUNDED \
+                     and prevents cancellation from ever being observed. \
+                     Reduce nesting of Cx::masked() sections.",
+                    crate::types::task_context::MAX_MASK_DEPTH,
+                );
+            }
             inner.mask_depth += 1;
         }
 
