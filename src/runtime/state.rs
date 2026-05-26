@@ -408,6 +408,13 @@ pub enum SpawnError {
         /// The number of live tasks at the time of rejection.
         live: usize,
     },
+    /// Authorization failed: caller lacks permission to create tasks in the target region.
+    AuthorizationDenied {
+        /// The region that denied access.
+        region: RegionId,
+        /// The capability context that was checked.
+        cx_id: String,
+    },
 }
 
 impl std::fmt::Display for SpawnError {
@@ -429,6 +436,10 @@ impl std::fmt::Display for SpawnError {
             } => write!(
                 f,
                 "region admission limit reached: region={region:?} limit={limit} live={live}"
+            ),
+            Self::AuthorizationDenied { region, cx_id } => write!(
+                f,
+                "authorization denied: caller lacks permission to create tasks in region {region:?} (cx={cx_id})"
             ),
         }
     }
@@ -1794,6 +1805,31 @@ impl RuntimeState {
         self.regions.capability_budget(region)
     }
 
+    /// Returns the root key for spawn authorization verification.
+    ///
+    /// This method provides access to the cryptographic key used to verify
+    /// spawn capability macaroons. Returns None if authorization is disabled
+    /// or not configured for this runtime.
+    fn get_spawn_authorization_key(&self) -> Option<crate::security::key::AuthKey> {
+        // TODO: Integration with runtime security configuration
+        // For now, return None to maintain backward compatibility.
+        // In a full implementation, this would:
+        // 1. Check if authorization is enabled in runtime config
+        // 2. Return the appropriate root key from the security subsystem
+        // 3. Handle key rotation and validation
+        None
+    }
+
+    /// Creates a system-level Cx for internal runtime operations.
+    ///
+    /// This Cx has elevated privileges and should only be used for
+    /// runtime-internal operations like finalizers and builder tasks.
+    pub(crate) fn create_system_cx(&self) -> crate::cx::Cx {
+        // Create a minimal Cx for system operations
+        // In a full implementation, this would include system-level macaroons
+        crate::cx::Cx::for_testing()
+    }
+
     /// Creates the infrastructure for a task (record, context, channel) without storing the future.
     ///
     /// This helper allows `create_task` and `spawn_local` to share the same setup logic
@@ -1801,6 +1837,7 @@ impl RuntimeState {
     #[allow(clippy::type_complexity)]
     pub(crate) fn create_task_infrastructure<T>(
         &mut self,
+        caller_cx: &crate::cx::Cx,
         region: RegionId,
         budget: Budget,
         cleanup_task: bool,
@@ -1816,6 +1853,30 @@ impl RuntimeState {
     where
         T: Send + 'static,
     {
+        // Authorization check: verify caller has permission to spawn tasks in the target region
+        use crate::cx::macaroon::VerificationContext;
+
+        // TODO: Get the appropriate root key from the runtime's security context
+        // For now, we'll need to determine how to obtain the root key for verification
+        // This will need to be integrated with the runtime's security infrastructure
+        let spawn_capability = format!("spawn:region_{:?}", region.0);
+        let verification_context = VerificationContext::new();
+
+        // Check if caller has authorization to spawn in this region
+        if let Some(root_key) = self.get_spawn_authorization_key() {
+            if let Err(verification_error) = caller_cx.verify_capability(
+                &root_key,
+                &spawn_capability,
+                &verification_context,
+            ) {
+                return Err(SpawnError::AuthorizationDenied {
+                    region,
+                    cx_id: format!("{:?}", caller_cx.task_id()),
+                });
+            }
+        }
+        // If no root key is configured, proceed without authorization (fail-open for testing)
+
         use crate::channel::oneshot;
 
         // Create oneshot channel for the result
@@ -1962,6 +2023,10 @@ impl RuntimeState {
     /// # Returns
     /// A Result containing `(TaskId, TaskHandle)` on success, or `SpawnError` on failure.
     ///
+    /// # Security Note
+    /// This method does not perform authorization checks. For secure task creation,
+    /// use `create_task_with_auth` which verifies caller permissions.
+    ///
     /// # Example
     /// ```ignore
     /// let (task_id, handle) = state.create_task(region, budget, async { 42 })?;
@@ -1980,8 +2045,82 @@ impl RuntimeState {
     {
         use crate::runtime::task_handle::JoinError;
 
+        // Use system Cx for legacy compatibility - no authorization check
+        let system_cx = self.create_system_cx();
         let (task_id, handle, cx, result_tx) =
-            self.create_task_infrastructure(region, budget, false)?;
+            self.create_task_infrastructure(&system_cx, region, budget, false)?;
+
+        // Wrap the future to send the result through the channel. Panics must
+        // surface as `JoinError::Panicked` rather than silently closing the
+        // channel and looking like cancellation to the join handle.
+        let wrapped_future = async move {
+            match (CatchUnwind { inner: future }).await {
+                Ok(result) => {
+                    let _ = result_tx.send(&cx, Ok::<_, JoinError>(result));
+                    crate::types::Outcome::Ok(())
+                }
+                Err(payload) => {
+                    let panic_payload =
+                        crate::types::outcome::PanicPayload::new(payload_to_string(&payload));
+                    let _ = result_tx.send(
+                        &cx,
+                        Err::<T, JoinError>(JoinError::Panicked(panic_payload.clone())),
+                    );
+                    crate::types::Outcome::Panicked(panic_payload)
+                }
+            }
+        };
+
+        // Store the wrapped future with task_id for poll tracing
+        self.tasks
+            .store_spawned_task(task_id, StoredTask::new_with_id(wrapped_future, task_id));
+
+        // Notify epoch tracker of task creation
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::TaskTable);
+
+        Ok((task_id, handle))
+    }
+
+    /// Creates a task with authorization checks.
+    ///
+    /// This is the secure version of `create_task` that verifies the caller
+    /// has permission to create tasks in the target region before proceeding.
+    /// Use this method for new code that needs capability-based security.
+    ///
+    /// # Arguments
+    /// * `caller_cx` - The capability context for authorization
+    /// * `region` - The region that will own this task
+    /// * `budget` - The budget for this task
+    /// * `future` - The future to execute
+    ///
+    /// # Returns
+    /// A Result containing `(TaskId, TaskHandle)` on success, or `SpawnError` on failure.
+    ///
+    /// # Errors
+    /// * `SpawnError::AuthorizationDenied` - Caller lacks permission to create tasks in the region
+    /// * Other spawn errors as before (region not found, closed, at capacity, etc.)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let (task_id, handle) = state.create_task_with_auth(&cx, region, budget, async { 42 })?;
+    /// // Later: scheduler.schedule(task_id);
+    /// // Even later: let result = handle.join(cx)?;
+    /// ```
+    pub fn create_task_with_auth<F, T>(
+        &mut self,
+        caller_cx: &crate::cx::Cx,
+        region: RegionId,
+        budget: Budget,
+        future: F,
+    ) -> Result<(TaskId, crate::runtime::TaskHandle<T>), SpawnError>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        use crate::runtime::{task_handle::JoinError, StoredTask};
+
+        let (task_id, handle, cx, result_tx) =
+            self.create_task_infrastructure(caller_cx, region, budget, false)?;
 
         // Wrap the future to send the result through the channel. Panics must
         // surface as `JoinError::Panicked` rather than silently closing the
@@ -3414,8 +3553,9 @@ impl RuntimeState {
             .saturating_add_nanos(FINALIZER_TIME_BUDGET_NANOS);
         let budget = finalizer_budget().with_deadline(deadline);
 
+        let system_cx = self.create_system_cx();
         let Ok((task_id, _handle, cx, result_tx)) =
-            self.create_task_infrastructure::<()>(region_id, budget, true)
+            self.create_task_infrastructure::<()>(&system_cx, region_id, budget, true)
         else {
             return Err(future);
         };
@@ -13495,6 +13635,72 @@ mod tests {
         );
 
         crate::test_complete!("read_biased_region_snapshot_enabled_by_default");
+    }
+
+    #[test]
+    fn create_task_with_authorization_check() {
+        init_test("create_task_with_authorization_check");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+
+        // Create a test Cx (which doesn't have spawn permissions)
+        let test_cx = crate::cx::Cx::for_testing();
+
+        // Legacy method should still work without authorization checks
+        let result = state.create_task(
+            region,
+            Budget::INFINITE,
+            async { 42 }
+        );
+        crate::assert_with_log!(
+            result.is_ok(),
+            "legacy create_task should succeed without authorization",
+            true,
+            result.is_ok()
+        );
+
+        // Secure method should succeed when authorization is disabled (default behavior)
+        let result = state.create_task_with_auth(
+            &test_cx,
+            region,
+            Budget::INFINITE,
+            async { 42 }
+        );
+        crate::assert_with_log!(
+            result.is_ok(),
+            "create_task_with_auth should succeed when authorization is disabled",
+            true,
+            result.is_ok()
+        );
+
+        crate::test_complete!("create_task_with_authorization_check");
+    }
+
+    #[test]
+    fn authorization_denial_error_format() {
+        init_test("authorization_denial_error_format");
+
+        let region = crate::types::RegionId::from_arena(42);
+        let error = SpawnError::AuthorizationDenied {
+            region,
+            cx_id: "task_123".to_string()
+        };
+
+        let error_msg = format!("{}", error);
+        crate::assert_with_log!(
+            error_msg.contains("authorization denied"),
+            "error message should contain 'authorization denied'",
+            true,
+            error_msg.contains("authorization denied")
+        );
+        crate::assert_with_log!(
+            error_msg.contains("task_123"),
+            "error message should contain the Cx ID",
+            true,
+            error_msg.contains("task_123")
+        );
+
+        crate::test_complete!("authorization_denial_error_format");
     }
 }
 

@@ -3989,8 +3989,9 @@ impl RuntimeInner {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
 
+            let system_cx = guard.create_system_cx();
             let (task_id, _handle, cx, _result_tx) =
-                guard.create_task_infrastructure::<()>(self.root_region, Budget::new(), false)?;
+                guard.create_task_infrastructure::<()>(&system_cx, self.root_region, Budget::new(), false)?;
 
             let future = f(cx);
 
