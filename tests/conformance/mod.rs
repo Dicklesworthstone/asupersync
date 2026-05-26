@@ -151,6 +151,14 @@ pub mod web_session_cookies; // repaired by br-asupersync-nax796 web session-coo
 // individually commented out earlier in this file with bit-rot rationale;
 // deliberately not re-declared here.
 
+// ─── ATP Conformance Modules (br-asupersync-j1ulfv) ────────────────────────
+// ATP (Asupersync Transfer Protocol) conformance test suites using Pattern 4
+// (Spec-Derived Test Matrix) from testing-conformance-harnesses skill.
+// Systematic MUST/SHOULD/MAY requirement testing with structured JSON output.
+pub mod atp_protocol_conformance;
+pub mod atp_capability_security_conformance;
+pub mod atp_proof_artifacts_conformance;
+
 // Re-export main conformance test functionality
 pub use aggregator_flush::AggregatorFlushConformanceHarness;
 #[cfg(feature = "deterministic-mode")]
