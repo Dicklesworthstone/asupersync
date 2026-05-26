@@ -417,7 +417,7 @@ impl CacheStorage for HybridStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::cache::trust::{TrustPolicy, TrustBoundaryChecker};
+    use crate::atp::cache::trust::{TrustBoundaryChecker, TrustPolicy};
     use crate::cx::Cx;
     use crate::lab::{LabConfig, LabRuntime};
     use crate::types::Budget;
@@ -496,7 +496,11 @@ mod tests {
             S: std::fmt::Debug,
         {
             let snapshot = StorageSnapshot {
-                backend_type: std::any::type_name::<S>().split("::").last().unwrap_or("unknown").to_string(),
+                backend_type: std::any::type_name::<S>()
+                    .split("::")
+                    .last()
+                    .unwrap_or("unknown")
+                    .to_string(),
                 files_stored: metrics.files_stored,
                 bytes_stored: metrics.bytes_stored,
                 errors: metrics.errors,
@@ -533,8 +537,12 @@ mod tests {
             let matches = expected == actual;
 
             if let Some(ref cx) = self.cx {
-                cx.trace(|| format!("CacheStorage assertion {}: expected={:?}, actual={:?}, match={}",
-                    field, expected, actual, matches));
+                cx.trace(|| {
+                    format!(
+                        "CacheStorage assertion {}: expected={:?}, actual={:?}, match={}",
+                        field, expected, actual, matches
+                    )
+                });
             }
 
             eprintln!(
@@ -556,11 +564,19 @@ mod tests {
         }
 
         fn test_end(&self, result: &str) {
-            let duration_ms = self.start_time.elapsed().unwrap_or(Duration::ZERO).as_millis() as u64;
+            let duration_ms = self
+                .start_time
+                .elapsed()
+                .unwrap_or(Duration::ZERO)
+                .as_millis() as u64;
 
             if let Some(ref cx) = self.cx {
-                cx.trace(|| format!("CacheStorageTest {} completed: {} in {}ms",
-                    self.test_name, result, duration_ms));
+                cx.trace(|| {
+                    format!(
+                        "CacheStorageTest {} completed: {} in {}ms",
+                        self.test_name, result, duration_ms
+                    )
+                });
             }
 
             eprintln!(
@@ -606,7 +622,11 @@ mod tests {
         fn encrypted_content(plaintext: &[u8], key_hint: &str) -> Vec<u8> {
             // Simple XOR "encryption" for testing (NOT for production)
             let key: Vec<u8> = key_hint.bytes().cycle().take(plaintext.len()).collect();
-            plaintext.iter().zip(key.iter()).map(|(p, k)| p ^ k).collect()
+            plaintext
+                .iter()
+                .zip(key.iter())
+                .map(|(p, k)| p ^ k)
+                .collect()
         }
 
         fn test_cache_key(manifest: &str, content: &str, scope: Option<&str>) -> CacheKey {
@@ -663,7 +683,11 @@ mod tests {
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
         runtime.run(&root, |cx| async {
-            let mut log = CacheStorageTestLogger::new("cache_storage_integration", "workflow_with_trust", Some(cx.clone()));
+            let mut log = CacheStorageTestLogger::new(
+                "cache_storage_integration",
+                "workflow_with_trust",
+                Some(cx.clone()),
+            );
 
             log.phase("setup");
 
@@ -677,8 +701,16 @@ mod tests {
             trust_policy.add_authorized_scope("test-workflow".to_string());
             let mut trust_checker = TrustBoundaryChecker::new(trust_policy);
 
-            log.storage_snapshot("initial_file_storage", &file_storage, &file_storage.metrics());
-            log.storage_snapshot("initial_memory_storage", &memory_storage, &memory_storage.metrics());
+            log.storage_snapshot(
+                "initial_file_storage",
+                &file_storage,
+                &file_storage.metrics(),
+            );
+            log.storage_snapshot(
+                "initial_memory_storage",
+                &memory_storage,
+                &memory_storage.metrics(),
+            );
 
             log.phase("content_creation");
 
@@ -687,9 +719,18 @@ mod tests {
             let blob_data = CacheContentFactory::binary_blob_content(4096, 0xAB);
             let encrypted_data = CacheContentFactory::encrypted_content(&blob_data, "test_key_123");
 
-            let manifest_key = CacheContentFactory::test_cache_key("workflow_test", "manifest", Some("test-workflow"));
-            let blob_key = CacheContentFactory::test_cache_key("workflow_test", "blob", Some("test-workflow"));
-            let encrypted_key = CacheContentFactory::test_cache_key("workflow_test", "encrypted", Some("test-workflow"));
+            let manifest_key = CacheContentFactory::test_cache_key(
+                "workflow_test",
+                "manifest",
+                Some("test-workflow"),
+            );
+            let blob_key =
+                CacheContentFactory::test_cache_key("workflow_test", "blob", Some("test-workflow"));
+            let encrypted_key = CacheContentFactory::test_cache_key(
+                "workflow_test",
+                "encrypted",
+                Some("test-workflow"),
+            );
 
             log.phase("trust_validation");
 
@@ -698,42 +739,90 @@ mod tests {
             let blob_trust_result = trust_checker.check_access(&blob_key, "store");
             let encrypted_trust_result = trust_checker.check_access(&encrypted_key, "store");
 
-            assert!(log.assert_storage_outcome("manifest_trust_check", &true, &manifest_trust_result.is_ok()));
-            assert!(log.assert_storage_outcome("blob_trust_check", &true, &blob_trust_result.is_ok()));
-            assert!(log.assert_storage_outcome("encrypted_trust_check", &true, &encrypted_trust_result.is_ok()));
+            assert!(log.assert_storage_outcome(
+                "manifest_trust_check",
+                &true,
+                &manifest_trust_result.is_ok()
+            ));
+            assert!(log.assert_storage_outcome(
+                "blob_trust_check",
+                &true,
+                &blob_trust_result.is_ok()
+            ));
+            assert!(log.assert_storage_outcome(
+                "encrypted_trust_check",
+                &true,
+                &encrypted_trust_result.is_ok()
+            ));
 
             log.phase("storage_operations");
 
             // Store content in different backends (real cache workflow)
-            let manifest_location = file_storage.store(&manifest_key, &manifest_data).expect("store manifest");
-            let blob_location = memory_storage.store(&blob_key, &blob_data).expect("store blob");
-            let encrypted_location = file_storage.store(&encrypted_key, &encrypted_data).expect("store encrypted");
+            let manifest_location = file_storage
+                .store(&manifest_key, &manifest_data)
+                .expect("store manifest");
+            let blob_location = memory_storage
+                .store(&blob_key, &blob_data)
+                .expect("store blob");
+            let encrypted_location = file_storage
+                .store(&encrypted_key, &encrypted_data)
+                .expect("store encrypted");
 
             isolation.track_location(manifest_location.clone());
             isolation.track_location(blob_location.clone());
             isolation.track_location(encrypted_location.clone());
 
             log.storage_snapshot("post_storage_file", &file_storage, &file_storage.metrics());
-            log.storage_snapshot("post_storage_memory", &memory_storage, &memory_storage.metrics());
+            log.storage_snapshot(
+                "post_storage_memory",
+                &memory_storage,
+                &memory_storage.metrics(),
+            );
 
             log.phase("retrieval_and_verification");
 
             // Retrieve and verify content (end-to-end cache workflow)
-            let retrieved_manifest = file_storage.retrieve(&manifest_location).expect("retrieve manifest");
-            let retrieved_blob = memory_storage.retrieve(&blob_location).expect("retrieve blob");
-            let retrieved_encrypted = file_storage.retrieve(&encrypted_location).expect("retrieve encrypted");
+            let retrieved_manifest = file_storage
+                .retrieve(&manifest_location)
+                .expect("retrieve manifest");
+            let retrieved_blob = memory_storage
+                .retrieve(&blob_location)
+                .expect("retrieve blob");
+            let retrieved_encrypted = file_storage
+                .retrieve(&encrypted_location)
+                .expect("retrieve encrypted");
 
             // Verify content integrity
-            assert!(log.assert_storage_outcome("manifest_integrity", &manifest_data, &retrieved_manifest));
+            assert!(log.assert_storage_outcome(
+                "manifest_integrity",
+                &manifest_data,
+                &retrieved_manifest
+            ));
             assert!(log.assert_storage_outcome("blob_integrity", &blob_data, &retrieved_blob));
-            assert!(log.assert_storage_outcome("encrypted_integrity", &encrypted_data, &retrieved_encrypted));
+            assert!(log.assert_storage_outcome(
+                "encrypted_integrity",
+                &encrypted_data,
+                &retrieved_encrypted
+            ));
 
             // Verify storage metrics
-            assert!(log.assert_storage_outcome("file_storage_files", &2u64, &file_storage.metrics().files_stored));
-            assert!(log.assert_storage_outcome("memory_storage_files", &1u64, &memory_storage.metrics().files_stored));
+            assert!(log.assert_storage_outcome(
+                "file_storage_files",
+                &2u64,
+                &file_storage.metrics().files_stored
+            ));
+            assert!(log.assert_storage_outcome(
+                "memory_storage_files",
+                &1u64,
+                &memory_storage.metrics().files_stored
+            ));
 
             let total_file_bytes = manifest_data.len() + encrypted_data.len();
-            assert!(log.assert_storage_outcome("file_storage_bytes", &(total_file_bytes as u64), &file_storage.metrics().bytes_stored));
+            assert!(log.assert_storage_outcome(
+                "file_storage_bytes",
+                &(total_file_bytes as u64),
+                &file_storage.metrics().bytes_stored
+            ));
 
             log.phase("cross_backend_verification");
 
@@ -741,8 +830,14 @@ mod tests {
             let cross_store_result = memory_storage.store(&manifest_key, &manifest_data);
             if let Ok(cross_location) = cross_store_result {
                 isolation.track_location(cross_location.clone());
-                let cross_retrieved = memory_storage.retrieve(&cross_location).expect("cross retrieve");
-                assert!(log.assert_storage_outcome("cross_backend_integrity", &manifest_data, &cross_retrieved));
+                let cross_retrieved = memory_storage
+                    .retrieve(&cross_location)
+                    .expect("cross retrieve");
+                assert!(log.assert_storage_outcome(
+                    "cross_backend_integrity",
+                    &manifest_data,
+                    &cross_retrieved
+                ));
             }
 
             log.phase("error_simulation");
@@ -753,10 +848,14 @@ mod tests {
             assert!(log.assert_storage_outcome("error_handling", &true, &error_result.is_err()));
 
             log.storage_snapshot("final_file_storage", &file_storage, &file_storage.metrics());
-            log.storage_snapshot("final_memory_storage", &memory_storage, &memory_storage.metrics());
+            log.storage_snapshot(
+                "final_memory_storage",
+                &memory_storage,
+                &memory_storage.metrics(),
+            );
 
             log.test_end("pass");
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), Box<dyn std::error::Error>>(())
         });
     }
 
@@ -768,26 +867,34 @@ mod tests {
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
         runtime.run(&root, |cx| async {
-            let mut log = CacheStorageTestLogger::new("cache_storage_integration", "hybrid_backend_workflow", Some(cx.clone()));
+            let mut log = CacheStorageTestLogger::new(
+                "cache_storage_integration",
+                "hybrid_backend_workflow",
+                Some(cx.clone()),
+            );
 
             log.phase("setup");
 
             let temp_path = isolation.create_temp_dir();
             let mut hybrid_storage = HybridStorage::new(
-                2048,     // Memory threshold: 2KB
-                1024,     // File threshold: 1KB
-                temp_path,
-                false,    // Not encrypted by default
-            ).expect("create hybrid storage");
+                2048, // Memory threshold: 2KB
+                1024, // File threshold: 1KB
+                temp_path, false, // Not encrypted by default
+            )
+            .expect("create hybrid storage");
 
-            log.storage_snapshot("initial_hybrid_storage", &hybrid_storage, &hybrid_storage.metrics());
+            log.storage_snapshot(
+                "initial_hybrid_storage",
+                &hybrid_storage,
+                &hybrid_storage.metrics(),
+            );
 
             log.phase("backend_selection_testing");
 
             // Test backend selection logic (realistic size-based routing)
-            let small_content = CacheContentFactory::binary_blob_content(512, 0x11);   // < 1KB -> memory
+            let small_content = CacheContentFactory::binary_blob_content(512, 0x11); // < 1KB -> memory
             let medium_content = CacheContentFactory::binary_blob_content(1536, 0x22); // 1.5KB -> file
-            let large_content = CacheContentFactory::binary_blob_content(3072, 0x33);  // 3KB -> file
+            let large_content = CacheContentFactory::binary_blob_content(3072, 0x33); // 3KB -> file
 
             let small_key = CacheContentFactory::test_cache_key("hybrid", "small", None);
             let medium_key = CacheContentFactory::test_cache_key("hybrid", "medium", None);
@@ -796,9 +903,15 @@ mod tests {
             log.phase("size_based_routing");
 
             // Store content and verify backend selection
-            let small_location = hybrid_storage.store(&small_key, &small_content).expect("store small");
-            let medium_location = hybrid_storage.store(&medium_key, &medium_content).expect("store medium");
-            let large_location = hybrid_storage.store(&large_key, &large_content).expect("store large");
+            let small_location = hybrid_storage
+                .store(&small_key, &small_content)
+                .expect("store small");
+            let medium_location = hybrid_storage
+                .store(&medium_key, &medium_content)
+                .expect("store medium");
+            let large_location = hybrid_storage
+                .store(&large_key, &large_content)
+                .expect("store large");
 
             isolation.track_location(small_location.clone());
             isolation.track_location(medium_location.clone());
@@ -806,32 +919,64 @@ mod tests {
 
             // Verify backend selection based on size
             match (&small_location, &medium_location, &large_location) {
-                (StorageLocation::Memory(_), StorageLocation::File(_), StorageLocation::File(_)) => {
+                (
+                    StorageLocation::Memory(_),
+                    StorageLocation::File(_),
+                    StorageLocation::File(_),
+                ) => {
                     assert!(log.assert_storage_outcome("backend_selection_correct", &true, &true));
                 }
                 _ => {
-                    eprintln!("Backend selection: small={:?}, medium={:?}, large={:?}",
-                        small_location, medium_location, large_location);
+                    eprintln!(
+                        "Backend selection: small={:?}, medium={:?}, large={:?}",
+                        small_location, medium_location, large_location
+                    );
                     assert!(log.assert_storage_outcome("backend_selection_correct", &true, &false));
                 }
             }
 
-            log.storage_snapshot("post_routing_hybrid_storage", &hybrid_storage, &hybrid_storage.metrics());
+            log.storage_snapshot(
+                "post_routing_hybrid_storage",
+                &hybrid_storage,
+                &hybrid_storage.metrics(),
+            );
 
             log.phase("retrieval_verification");
 
             // Retrieve from different backends and verify integrity
-            let retrieved_small = hybrid_storage.retrieve(&small_location).expect("retrieve small");
-            let retrieved_medium = hybrid_storage.retrieve(&medium_location).expect("retrieve medium");
-            let retrieved_large = hybrid_storage.retrieve(&large_location).expect("retrieve large");
+            let retrieved_small = hybrid_storage
+                .retrieve(&small_location)
+                .expect("retrieve small");
+            let retrieved_medium = hybrid_storage
+                .retrieve(&medium_location)
+                .expect("retrieve medium");
+            let retrieved_large = hybrid_storage
+                .retrieve(&large_location)
+                .expect("retrieve large");
 
-            assert!(log.assert_storage_outcome("small_content_integrity", &small_content, &retrieved_small));
-            assert!(log.assert_storage_outcome("medium_content_integrity", &medium_content, &retrieved_medium));
-            assert!(log.assert_storage_outcome("large_content_integrity", &large_content, &retrieved_large));
+            assert!(log.assert_storage_outcome(
+                "small_content_integrity",
+                &small_content,
+                &retrieved_small
+            ));
+            assert!(log.assert_storage_outcome(
+                "medium_content_integrity",
+                &medium_content,
+                &retrieved_medium
+            ));
+            assert!(log.assert_storage_outcome(
+                "large_content_integrity",
+                &large_content,
+                &retrieved_large
+            ));
 
-            log.storage_snapshot("final_hybrid_storage", &hybrid_storage, &hybrid_storage.metrics());
+            log.storage_snapshot(
+                "final_hybrid_storage",
+                &hybrid_storage,
+                &hybrid_storage.metrics(),
+            );
             log.test_end("pass");
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), Box<dyn std::error::Error>>(())
         });
     }
 
@@ -843,14 +988,23 @@ mod tests {
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
         runtime.run(&root, |cx| async {
-            let mut log = CacheStorageTestLogger::new("cache_storage_integration", "stress_and_metrics", Some(cx.clone()));
+            let mut log = CacheStorageTestLogger::new(
+                "cache_storage_integration",
+                "stress_and_metrics",
+                Some(cx.clone()),
+            );
 
             log.phase("setup");
 
             let temp_path = isolation.create_temp_dir();
-            let mut stress_storage = FileStorage::new(temp_path, false).expect("create stress storage");
+            let mut stress_storage =
+                FileStorage::new(temp_path, false).expect("create stress storage");
 
-            log.storage_snapshot("initial_stress_storage", &stress_storage, &stress_storage.metrics());
+            log.storage_snapshot(
+                "initial_stress_storage",
+                &stress_storage,
+                &stress_storage.metrics(),
+            );
 
             log.phase("stress_storage_operations");
 
@@ -859,8 +1013,10 @@ mod tests {
 
             for i in 0..stress_iterations {
                 let content_size = 1024 + i * 256; // Varying sizes
-                let content = CacheContentFactory::binary_blob_content(content_size, (i % 256) as u8);
-                let key = CacheContentFactory::test_cache_key("stress", &format!("item_{:03}", i), None);
+                let content =
+                    CacheContentFactory::binary_blob_content(content_size, (i % 256) as u8);
+                let key =
+                    CacheContentFactory::test_cache_key("stress", &format!("item_{:03}", i), None);
 
                 let location = stress_storage.store(&key, &content).expect("stress store");
                 isolation.track_location(location.clone());
@@ -869,23 +1025,39 @@ mod tests {
 
                 // Verify retrieval works under stress
                 let retrieved = stress_storage.retrieve(&location).expect("stress retrieve");
-                assert!(log.assert_storage_outcome(&format!("stress_integrity_{}", i), &content, &retrieved));
+                assert!(log.assert_storage_outcome(
+                    &format!("stress_integrity_{}", i),
+                    &content,
+                    &retrieved
+                ));
 
                 if i % 5 == 0 {
-                    log.storage_snapshot(&format!("stress_iteration_{}", i), &stress_storage, &stress_storage.metrics());
+                    log.storage_snapshot(
+                        &format!("stress_iteration_{}", i),
+                        &stress_storage,
+                        &stress_storage.metrics(),
+                    );
                 }
             }
 
             log.phase("metrics_validation");
 
             let final_metrics = stress_storage.metrics();
-            assert!(log.assert_storage_outcome("stress_files_count", &(stress_iterations as u64), &final_metrics.files_stored));
-            assert!(log.assert_storage_outcome("stress_total_bytes", &total_bytes, &final_metrics.bytes_stored));
+            assert!(log.assert_storage_outcome(
+                "stress_files_count",
+                &(stress_iterations as u64),
+                &final_metrics.files_stored
+            ));
+            assert!(log.assert_storage_outcome(
+                "stress_total_bytes",
+                &total_bytes,
+                &final_metrics.bytes_stored
+            ));
             assert!(log.assert_storage_outcome("stress_no_errors", &0u64, &final_metrics.errors));
 
             log.storage_snapshot("final_stress_storage", &stress_storage, &final_metrics);
             log.test_end("pass");
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), Box<dyn std::error::Error>>(())
         });
     }
 

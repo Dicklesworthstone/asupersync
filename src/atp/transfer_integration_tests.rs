@@ -6,15 +6,13 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::atp::actor::{TransferActorTopology, TransferChildRole, TransferRegionId};
     use crate::atp::transfer::{
-        TransferActor, TransferActorId, TransferId, TransferManifestRef, TransferProgress,
-        TransferState, TransferCommandKind, PeerCapabilities, TransferFailureKind,
+        PeerCapabilities, TransferActor, TransferActorId, TransferCommandKind, TransferFailureKind,
+        TransferId, TransferManifestRef, TransferProgress, TransferState,
     };
-    use crate::atp::actor::{
-        TransferActorTopology, TransferChildRole, TransferRegionId,
-    };
-    use crate::lab::{LabConfig, LabRuntime};
     use crate::cx::Cx;
+    use crate::lab::{LabConfig, LabRuntime};
     use crate::types::{Budget, Outcome};
     use serde_json::json;
     use std::collections::HashMap;
@@ -120,7 +118,12 @@ mod tests {
             self.transfer_snapshots.push(snapshot);
         }
 
-        fn assert_transfer_state(&self, label: &str, expected_state: TransferState, actor: &TransferActor) -> bool {
+        fn assert_transfer_state(
+            &self,
+            label: &str,
+            expected_state: TransferState,
+            actor: &TransferActor,
+        ) -> bool {
             let actual_state = actor.state();
             let matches = expected_state == actual_state;
 
@@ -144,7 +147,11 @@ mod tests {
         }
 
         fn test_end(&self, result: &str) {
-            let duration_ms = self.start_time.elapsed().unwrap_or(Duration::ZERO).as_millis() as u64;
+            let duration_ms = self
+                .start_time
+                .elapsed()
+                .unwrap_or(Duration::ZERO)
+                .as_millis() as u64;
             eprintln!(
                 "{}",
                 json!({
@@ -186,9 +193,18 @@ mod tests {
             let actor_region = TransferRegionId::new(region_base + 1);
 
             TransferActorTopology::new(supervisor, actor_region)
-                .with_child(TransferRegionId::new(region_base + 2), TransferChildRole::PathRace)
-                .with_child(TransferRegionId::new(region_base + 3), TransferChildRole::Writer)
-                .with_child(TransferRegionId::new(region_base + 4), TransferChildRole::Finalizer)
+                .with_child(
+                    TransferRegionId::new(region_base + 2),
+                    TransferChildRole::PathRace,
+                )
+                .with_child(
+                    TransferRegionId::new(region_base + 3),
+                    TransferChildRole::Writer,
+                )
+                .with_child(
+                    TransferRegionId::new(region_base + 4),
+                    TransferChildRole::Finalizer,
+                )
         }
 
         fn create_test_transfer_id(entropy: u64) -> TransferId {
@@ -217,7 +233,7 @@ mod tests {
             }
         }
 
-        fn create_transfer_actor(actor_id: u32, entropy: u64) -> anyhow::Result<TransferActor> {
+        fn create_transfer_actor(actor_id: u32, entropy: u64) -> Result<TransferActor, Box<dyn std::error::Error>> {
             TransferActor::new(
                 TransferActorId::new(actor_id),
                 Self::create_test_transfer_id(entropy),
@@ -289,7 +305,11 @@ mod tests {
 
             match start_result {
                 Ok(_) => {
-                    assert!(log.assert_transfer_state("started_state", TransferState::Active, &actor));
+                    assert!(log.assert_transfer_state(
+                        "started_state",
+                        TransferState::Active,
+                        &actor
+                    ));
                 }
                 Err(e) => {
                     eprintln!("Transfer start failed: {:?}", e);
@@ -301,7 +321,7 @@ mod tests {
 
             // Simulate transfer progress (real state updates)
             actor.progress.offered_bytes = 10_240; // 10KB offered
-            actor.progress.verified_bytes = 5_120;  // 5KB verified
+            actor.progress.verified_bytes = 5_120; // 5KB verified
             actor.progress.committed_bytes = 2_048; // 2KB committed
             actor.progress.repair_symbols = 3;
 
@@ -338,15 +358,17 @@ mod tests {
             log.phase("transfer_completion");
 
             // Complete the transfer
-            let commit_result = actor.apply(TransferCommandKind::Commit {
-                obligation: None,
-            });
+            let commit_result = actor.apply(TransferCommandKind::Commit { obligation: None });
 
             log.transfer_snapshot("post_commit_state", &actor);
 
             match commit_result {
                 Ok(_) => {
-                    assert!(log.assert_transfer_state("completed_state", TransferState::Committed, &actor));
+                    assert!(log.assert_transfer_state(
+                        "completed_state",
+                        TransferState::Committed,
+                        &actor
+                    ));
                 }
                 Err(e) => {
                     eprintln!("Transfer commit failed: {:?}", e);
@@ -354,7 +376,7 @@ mod tests {
                 }
             }
 
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), Box<dyn std::error::Error>>(())
         });
 
         log.phase("teardown");
@@ -380,7 +402,8 @@ mod tests {
                 let actor = TransferScenarioFactory::create_transfer_actor(
                     200 + i,
                     0x1111222233334444 + i as u64 * 0x1000000000000000,
-                ).expect("create transfer actor");
+                )
+                .expect("create transfer actor");
 
                 isolation.track_actor(actor.actor_id);
                 log.transfer_snapshot(&format!("initial_actor_{}", i), &actor);
@@ -450,7 +473,7 @@ mod tests {
                 );
             }
 
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), Box<dyn std::error::Error>>(())
         });
 
         log.phase("teardown");
@@ -459,7 +482,8 @@ mod tests {
 
     #[test]
     fn transfer_cancellation_and_failure_handling_integration() {
-        let mut log = TransferTestLogger::new("transfer_integration", "cancellation_failure_handling");
+        let mut log =
+            TransferTestLogger::new("transfer_integration", "cancellation_failure_handling");
         let mut isolation = TransferTestIsolation::new();
 
         log.phase("setup");
@@ -494,7 +518,11 @@ mod tests {
 
             match cancel_result {
                 Ok(_) => {
-                    assert!(log.assert_transfer_state("cancelled_state", TransferState::Cancelling, &actor));
+                    assert!(log.assert_transfer_state(
+                        "cancelled_state",
+                        TransferState::Cancelling,
+                        &actor
+                    ));
                 }
                 Err(e) => {
                     eprintln!("Transfer cancellation failed: {:?}", e);
@@ -505,8 +533,9 @@ mod tests {
             log.phase("failure_simulation");
 
             // Create new actor for failure testing
-            let mut failure_actor = TransferScenarioFactory::create_transfer_actor(301, 0xfedcba0987654321)
-                .expect("create failure test actor");
+            let mut failure_actor =
+                TransferScenarioFactory::create_transfer_actor(301, 0xfedcba0987654321)
+                    .expect("create failure test actor");
 
             isolation.track_actor(failure_actor.actor_id);
             log.transfer_snapshot("failure_actor_initial", &failure_actor);
@@ -520,7 +549,11 @@ mod tests {
 
             match fail_result {
                 Ok(_) => {
-                    assert!(log.assert_transfer_state("failed_state", TransferState::Failed, &failure_actor));
+                    assert!(log.assert_transfer_state(
+                        "failed_state",
+                        TransferState::Failed,
+                        &failure_actor
+                    ));
                 }
                 Err(e) => {
                     eprintln!("Transfer failure handling failed: {:?}", e);
@@ -528,7 +561,7 @@ mod tests {
                 }
             }
 
-            Ok::<(), anyhow::Error>(())
+            Ok::<(), Box<dyn std::error::Error>>(())
         });
 
         log.phase("teardown");
