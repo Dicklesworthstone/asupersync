@@ -377,7 +377,7 @@ impl<H: Handler> ErrorHandlerMiddleware<H> {
 }
 
 impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(&self, cx: &crate::Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + 'static>> {
         Box::pin(async move {
         let accept = req
             .headers

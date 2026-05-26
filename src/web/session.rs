@@ -664,7 +664,7 @@ pub struct SessionMiddleware<S: SessionStore, H: Handler> {
 }
 
 impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
-    fn call(&self, cx: &crate::Cx, mut req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(&self, cx: &crate::Cx, mut req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + 'static>> {
         Box::pin(async move {
         // 1. Extract or generate session ID.
         //    If the client-supplied ID is syntactically valid but absent from the

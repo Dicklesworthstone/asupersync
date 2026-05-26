@@ -24,7 +24,7 @@ pub trait Handler: Send + Sync + 'static {
     /// Handle the request and produce a response.
     ///
     /// Async handlers receive a `Cx` for structured concurrency and runtime integration.
-    async fn call(&self, cx: &Cx, req: Request) -> Response;
+    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + 'static>>;
 }
 
 // ─── Handler Implementations ─────────────────────────────────────────────────
@@ -52,8 +52,11 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    async fn call(&self, _cx: &Cx, _req: Request) -> Response {
-        (self.func)().into_response()
+    fn call(&self, _cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+        let func = &self.func;
+        Box::pin(async move {
+            (func)().into_response()
+        })
     }
 }
 
@@ -80,11 +83,14 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    async fn call(&self, _cx: &Cx, req: Request) -> Response {
-        match T1::from_request(req) {
-            Ok(t1) => (self.func)(t1).into_response(),
-            Err(e) => e.into_response(),
-        }
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+        let func = &self.func;
+        Box::pin(async move {
+            match T1::from_request(req) {
+                Ok(t1) => (func)(t1).into_response(),
+                Err(e) => e.into_response(),
+            }
+        })
     }
 }
 
@@ -112,16 +118,19 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    async fn call(&self, _cx: &Cx, req: Request) -> Response {
-        let t1 = match T1::from_request_parts(&req) {
-            Ok(v) => v,
-            Err(e) => return e.into_response(),
-        };
-        let t2 = match T2::from_request(req) {
-            Ok(v) => v,
-            Err(e) => return e.into_response(),
-        };
-        (self.func)(t1, t2).into_response()
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+        let func = &self.func;
+        Box::pin(async move {
+            let t1 = match T1::from_request_parts(&req) {
+                Ok(v) => v,
+                Err(e) => return e.into_response(),
+            };
+            let t2 = match T2::from_request(req) {
+                Ok(v) => v,
+                Err(e) => return e.into_response(),
+            };
+            (func)(t1, t2).into_response()
+        })
     }
 }
 
@@ -150,12 +159,15 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    async fn call(&self, _cx: &Cx, req: Request) -> Response {
-        let (t1, t2, t3) = match extract_arg_3::<T1, T2, T3>(req) {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
-        (self.func)(t1, t2, t3).into_response()
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2, t3) = match extract_arg_3::<T1, T2, T3>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            (func)(t1, t2, t3).into_response()
+        })
     }
 }
 
@@ -185,12 +197,15 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    async fn call(&self, _cx: &Cx, req: Request) -> Response {
-        let (t1, t2, t3, t4) = match extract_arg_4::<T1, T2, T3, T4>(req) {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
-        (self.func)(t1, t2, t3, t4).into_response()
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2, t3, t4) = match extract_arg_4::<T1, T2, T3, T4>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            (func)(t1, t2, t3, t4).into_response()
+        })
     }
 }
 

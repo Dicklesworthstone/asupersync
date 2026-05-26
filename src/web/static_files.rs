@@ -489,7 +489,7 @@ pub struct StaticFilesHandler {
 }
 
 impl Handler for StaticFilesHandler {
-    fn call(&self, _cx: &crate::Cx, req: super::extract::Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(&self, _cx: &crate::Cx, req: super::extract::Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + 'static>> {
         Box::pin(async move {
         let head_only = req.method.eq_ignore_ascii_case("HEAD");
         let if_none_match = req.header("if-none-match").map(str::to_owned);

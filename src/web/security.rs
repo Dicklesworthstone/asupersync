@@ -144,7 +144,7 @@ impl<H: Handler> SecurityHeadersMiddleware<H> {
 }
 
 impl<H: Handler> Handler for SecurityHeadersMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(&self, cx: &crate::Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + 'static>> {
         Box::pin(async move {
             let mut resp = self.inner.call(cx, req).await;
 

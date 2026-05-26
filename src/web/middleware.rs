@@ -305,7 +305,7 @@ impl<H: Handler> CorsMiddleware<H> {
 }
 
 impl<H: Handler> Handler for CorsMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
         Box::pin(async move {
         let Some(origin) = header_value(&req, "origin") else {
             return self.inner.call(cx, req).await;
@@ -437,7 +437,7 @@ impl<H: Handler> TimeoutMiddleware<H> {
 }
 
 impl<H: Handler> Handler for TimeoutMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
         Box::pin(async move {
             let start = (self.time_getter)();
             let resp = self.inner.call(cx, req).await;
@@ -528,7 +528,7 @@ impl<H: Handler> CircuitBreakerMiddleware<H> {
 }
 
 impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
         Box::pin(async move {
         let now = (self.time_getter)();
 
@@ -758,7 +758,7 @@ fn is_idempotent(method: &str) -> bool {
 }
 
 impl<H: Handler> Handler for RetryMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
         Box::pin(async move {
             // Check if retry is appropriate for this method.
             if self.idempotent_only && !is_idempotent(&req.method) {
@@ -1142,7 +1142,7 @@ fn sanitize_and_truncate_id(id: &str, max_length: usize) -> String {
 }
 
 impl<H: Handler> Handler for RequestIdMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, mut req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+    fn call(&self, cx: &crate::Cx, mut req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
         Box::pin(async move {
         let request_id = header_value(&req, &self.header_name).unwrap_or_else(|| {
             let id = self.counter.fetch_add(1, Ordering::Relaxed);
