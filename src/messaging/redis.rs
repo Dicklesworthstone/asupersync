@@ -1645,6 +1645,31 @@ impl Default for RedisConfig {
 }
 
 impl RedisConfig {
+    /// Redact credentials from a Redis URL for safe error reporting.
+    ///
+    /// SECURITY: Prevents password leakage in error messages and logs.
+    /// Converts `redis://user:pass@host:port/db` → `redis://***@host:port/db`
+    fn redact_url_for_errors(url: &str) -> String {
+        // Check for scheme and preserve it
+        let (scheme, rest) = if let Some(rest) = url.strip_prefix("rediss://") {
+            ("rediss://", rest)
+        } else if let Some(rest) = url.strip_prefix("redis://") {
+            ("redis://", rest)
+        } else {
+            // No recognized scheme, redact entire URL to be safe
+            return "[REDACTED_INVALID_URL]".to_string();
+        };
+
+        // Look for userinfo section (anything before '@')
+        if let Some((_userinfo, host_part)) = rest.rsplit_once('@') {
+            // Replace userinfo with redacted placeholder
+            format!("{}***@{}", scheme, host_part)
+        } else {
+            // No credentials in URL, return as-is
+            url.to_string()
+        }
+    }
+
     /// Create config from a Redis URL.
     pub fn from_url(url: &str) -> Result<Self, RedisError> {
         let (url, use_tls) = if let Some(url) = url.strip_prefix("rediss://") {
@@ -1654,7 +1679,7 @@ impl RedisConfig {
         } else {
             return Err(RedisError::InvalidUrl(format!(
                 "URL must start with redis:// or rediss://, got: {}",
-                url
+                Self::redact_url_for_errors(url)
             )));
         };
 
@@ -7633,6 +7658,44 @@ mod tests {
         let config = RedisConfig::from_url("redis://localhost:6379").unwrap();
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 6379);
+    }
+
+    #[test]
+    fn test_redis_url_credential_redaction_in_errors() {
+        // SECURITY TEST: Verify credentials are redacted from error messages
+        // to prevent password leakage in logs/traces (asupersync-0kp34a)
+
+        // Test invalid scheme with credentials
+        let err = RedisConfig::from_url("http://user:secret123@localhost:6379")
+            .expect_err("invalid scheme should fail");
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("***"), "Password should be redacted in error message");
+        assert!(!err_msg.contains("secret123"), "Password should not appear in error message");
+        assert!(!err_msg.contains("user:secret123"), "Full userinfo should not appear in error message");
+
+        // Test redact_url_for_errors function directly
+        assert_eq!(
+            RedisConfig::redact_url_for_errors("redis://user:pass@host:6379/1"),
+            "redis://***@host:6379/1"
+        );
+        assert_eq!(
+            RedisConfig::redact_url_for_errors("rediss://admin:s3cr3t@prod.redis.com:6380"),
+            "rediss://***@prod.redis.com:6380"
+        );
+        assert_eq!(
+            RedisConfig::redact_url_for_errors("redis://localhost:6379"),
+            "redis://localhost:6379"
+        );
+        assert_eq!(
+            RedisConfig::redact_url_for_errors("http://invalid"),
+            "[REDACTED_INVALID_URL]"
+        );
+
+        // Test with complex passwords containing special characters
+        let complex_url = "redis://user:p@ss:w0rd!@localhost:6379";
+        let redacted = RedisConfig::redact_url_for_errors(complex_url);
+        assert_eq!(redacted, "redis://***@localhost:6379");
+        assert!(!redacted.contains("p@ss:w0rd!"));
     }
 
     // Pure data-type tests (wave 13 – CyanBarn)
