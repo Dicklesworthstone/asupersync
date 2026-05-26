@@ -122,7 +122,7 @@
 
 pub mod blocking_pool;
 pub mod builder;
-// pub mod cache;  // TODO: Missing cache.rs file
+pub mod cache;
 pub mod config;
 pub mod deadline_monitor;
 #[cfg(test)]
@@ -185,14 +185,10 @@ pub use builder::{
     BrowserWorkerFallbackTarget, DeadlineMonitoringBuilder, JoinHandle, Runtime, RuntimeBuilder,
     RuntimeHandle,
 };
-// pub use cache::{
-//     ArtifactAbortReceipt, ArtifactCache, ArtifactCacheConfig, ArtifactCacheDecision,
-//     ArtifactCacheEntrySnapshot, ArtifactCacheError, ArtifactGetReceipt, ArtifactHandoff,
-//     ArtifactId, ArtifactMemoryPressureSnapshot, ArtifactOwner, ArtifactPutRequest,
-//     ArtifactPutReservation, ArtifactRedactionClass, ArtifactRedactionMetadata,
-//     ArtifactReplayReference, ArtifactRetentionPolicy, CacheEvictionReason, CacheEvictionRecord,
-//     NumaArtifactHint,
-// };  // TODO: Missing cache.rs file
+pub use cache::{
+    ArtifactCache, ArtifactCacheConfig, ArtifactMemoryPressureSnapshot, ArtifactMetadata,
+    CacheStatistics, EvictionPolicy,
+};
 pub use config::{BlockingPoolConfig, RuntimeConfig, TraceStorageBudget, TraceStorageProfile};
 pub use deadline_monitor::{
     AdaptiveDeadlineConfig, DeadlineMonitor, DeadlineWarning, MonitorConfig, WarningReason,

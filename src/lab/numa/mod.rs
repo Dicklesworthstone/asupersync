@@ -4,7 +4,7 @@
 //! locality inputs so high-core scenarios can replay the same decision on any
 //! machine, including CI workers without NUMA visibility.
 
-// use crate::runtime::cache::ArtifactMemoryPressureSnapshot;  // TODO: Missing cache.rs file
+use crate::runtime::cache::ArtifactMemoryPressureSnapshot;
 use serde::{Deserialize, Serialize};
 
 const BPS_DENOMINATOR: u64 = 10_000;
@@ -15,8 +15,7 @@ pub struct NumaCachePressureInput {
     /// Stable scenario id for replay receipts.
     pub scenario_id: String,
     /// Cache pressure snapshot produced by the runtime artifact cache.
-    // pub cache: ArtifactMemoryPressureSnapshot,  // TODO: Missing cache.rs file
-    pub cache: (),  // Placeholder
+    pub cache: ArtifactMemoryPressureSnapshot,
     /// Per-agent memory budget for this modeled workload.
     pub agent_budget_bytes: u64,
     /// Current resident bytes attributed to the modeled agent.
