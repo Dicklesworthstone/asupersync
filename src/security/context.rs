@@ -298,6 +298,28 @@ mod tests {
     }
 
     #[test]
+    fn replica_authorization_basic_validation() {
+        let ctx = SecurityContext::for_testing(42);
+
+        // Test authorized replica IDs
+        assert!(ctx.is_replica_authorized("replica-1", None));
+        assert!(ctx.is_replica_authorized("node-auth", None));
+        assert!(ctx.is_replica_authorized("r123", None));
+
+        // Test unauthorized replica IDs
+        assert!(!ctx.is_replica_authorized("", None));
+        assert!(!ctx.is_replica_authorized("test-replica", None));
+        assert!(!ctx.is_replica_authorized("mock-node", None));
+        assert!(!ctx.is_replica_authorized("fake-data", None));
+        assert!(!ctx.is_replica_authorized("invalid-stuff", None));
+
+        // Test security-sensitive patterns
+        assert!(!ctx.is_replica_authorized("../../../etc/passwd", None));
+        assert!(!ctx.is_replica_authorized("replica\0null", None));
+        assert!(!ctx.is_replica_authorized(&"x".repeat(300), None)); // too long
+    }
+
+    #[test]
     fn context_sign_and_verify() {
         let ctx = SecurityContext::for_testing(123);
         let id = SymbolId::new_for_test(1, 0, 0);

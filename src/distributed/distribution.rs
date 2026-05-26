@@ -182,7 +182,7 @@ impl SymbolDistributor {
         let start = cx
             .timer_driver()
             .map_or_else(crate::time::wall_now, |d| d.now());
-        let assignments = Self::compute_assignments(encoded, replicas);
+        let assignments = Self::compute_assignments_with_auth(encoded, replicas, auth_context, None);
         let mut outcomes = Vec::with_capacity(assignments.len());
         let mut symbols_sent_total = 0_u64;
         for assignment in assignments {
@@ -233,14 +233,35 @@ impl SymbolDistributor {
     }
 
     /// Computes symbol assignments for the given encoded state and replicas.
+    ///
+    /// asupersync-j18rga: This is the legacy version that uses a default
+    /// security context. Use `compute_assignments_with_auth` for explicit control.
     #[inline]
     #[must_use]
     pub fn compute_assignments(
         encoded: &EncodedState,
         replicas: &[ReplicaInfo],
     ) -> Vec<super::assignment::ReplicaAssignment> {
+        // asupersync-j18rga: Use a default security context for backward compatibility
+        // In production, callers should migrate to compute_assignments_with_auth
+        let default_security_context = SecurityContext::for_testing(0);
+        Self::compute_assignments_with_auth(encoded, replicas, &default_security_context, None)
+    }
+
+    /// Computes symbol assignments with explicit replica authorization.
+    ///
+    /// asupersync-j18rga: Validates replica authorization before assignment
+    /// to prevent unauthorized nodes from participating in symbol distribution.
+    #[inline]
+    #[must_use]
+    pub fn compute_assignments_with_auth(
+        encoded: &EncodedState,
+        replicas: &[ReplicaInfo],
+        security_context: &SecurityContext,
+        region_id: Option<&str>,
+    ) -> Vec<super::assignment::ReplicaAssignment> {
         let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
-        assigner.assign(&encoded.symbols, replicas, encoded.source_count)
+        assigner.assign(&encoded.symbols, replicas, security_context, region_id, encoded.source_count)
     }
 
     /// Evaluates pre-computed outcomes with quorum semantics.

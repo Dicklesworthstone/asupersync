@@ -115,7 +115,7 @@ impl SymbolAssigner {
     /// Striped: symbols are distributed round-robin across replicas.
     fn assign_striped(
         symbols: &[Symbol],
-        replicas: &[ReplicaInfo],
+        replicas: &[&ReplicaInfo],
         k: u16,
     ) -> Vec<ReplicaAssignment> {
         let k_usize = k as usize;
@@ -160,7 +160,7 @@ impl SymbolAssigner {
     /// and deterministic.
     fn assign_minimum_k(
         symbols: &[Symbol],
-        replicas: &[ReplicaInfo],
+        replicas: &[&ReplicaInfo],
         k: u16,
     ) -> Vec<ReplicaAssignment> {
         let k_usize = k as usize;
@@ -198,7 +198,7 @@ impl SymbolAssigner {
     /// currently hold fewer symbols.
     fn assign_weighted(
         symbols: &[Symbol],
-        replicas: &[ReplicaInfo],
+        replicas: &[&ReplicaInfo],
         k: u16,
     ) -> Vec<ReplicaAssignment> {
         let mut assignments: Vec<Vec<usize>> = vec![Vec::new(); replicas.len()];
@@ -309,8 +309,9 @@ mod tests {
         let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
         let symbols = create_test_symbols(10);
         let replicas = create_test_replicas(3);
+        let security_context = SecurityContext::for_testing(42);
 
-        let assignments = assigner.assign(&symbols, &replicas, 5);
+        let assignments = assigner.assign(&symbols, &replicas, &security_context, None, 5);
 
         assert_eq!(assignments.len(), 3);
         for assignment in &assignments {
@@ -736,10 +737,92 @@ mod tests {
         assert_eq!(assigner.strategy(), AssignmentStrategy::Striped);
     }
 
+    // ========== Replica Authorization Tests (asupersync-j18rga) ==========
+
+    #[test]
+    fn replica_authorization_filters_unauthorized_replicas() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
+        let symbols = create_test_symbols(5);
+        let security_context = SecurityContext::for_testing(42);
+
+        // Mix of authorized and unauthorized replica IDs
+        let mut replicas = vec![
+            ReplicaInfo::new("replica-auth-1", "addr1"),     // authorized
+            ReplicaInfo::new("node-auth-2", "addr2"),        // authorized
+            ReplicaInfo::new("r3", "addr3"),                 // authorized
+            ReplicaInfo::new("invalid-test", "addr4"),       // unauthorized (contains "test")
+            ReplicaInfo::new("fake-replica", "addr5"),       // unauthorized (contains "fake")
+            ReplicaInfo::new("", "addr6"),                   // unauthorized (empty ID)
+        ];
+
+        let assignments = assigner.assign(&symbols, &replicas, &security_context, None, 3);
+
+        // Should only get assignments for the 3 authorized replicas
+        assert_eq!(assignments.len(), 3);
+
+        let replica_ids: Vec<_> = assignments.iter().map(|a| &a.replica_id).collect();
+        assert!(replica_ids.contains(&&"replica-auth-1".to_string()));
+        assert!(replica_ids.contains(&&"node-auth-2".to_string()));
+        assert!(replica_ids.contains(&&"r3".to_string()));
+
+        // Unauthorized replicas should not appear in assignments
+        assert!(!replica_ids.contains(&&"invalid-test".to_string()));
+        assert!(!replica_ids.contains(&&"fake-replica".to_string()));
+        assert!(!replica_ids.contains(&&"".to_string()));
+    }
+
+    #[test]
+    fn all_unauthorized_replicas_returns_empty() {
+        let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
+        let symbols = create_test_symbols(5);
+        let security_context = SecurityContext::for_testing(42);
+
+        // All unauthorized replicas
+        let replicas = vec![
+            ReplicaInfo::new("test-replica", "addr1"),       // contains "test"
+            ReplicaInfo::new("mock-node", "addr2"),          // contains "mock"
+            ReplicaInfo::new("", "addr3"),                   // empty ID
+        ];
+
+        let assignments = assigner.assign(&symbols, &replicas, &security_context, None, 3);
+
+        // Should return empty since no replicas are authorized
+        assert!(assignments.is_empty());
+    }
+
+    #[test]
+    fn replica_authorization_preserves_assignment_strategy_semantics() {
+        let symbols = create_test_symbols(12);
+        let security_context = SecurityContext::for_testing(42);
+
+        // All authorized replicas
+        let replicas = vec![
+            ReplicaInfo::new("replica-1", "addr1"),
+            ReplicaInfo::new("replica-2", "addr2"),
+            ReplicaInfo::new("replica-3", "addr3"),
+        ];
+
+        // Test that striped assignment still works correctly with authorization
+        let striped = SymbolAssigner::new(AssignmentStrategy::Striped);
+        let assignments = striped.assign(&symbols, &replicas, &security_context, None, 4);
+
+        // Collect all assigned indices to verify complete assignment
+        let mut all: Vec<usize> = Vec::new();
+        for a in &assignments {
+            all.extend_from_slice(&a.symbol_indices);
+        }
+        all.sort_unstable();
+        all.dedup();
+
+        assert_eq!(all.len(), 12, "all symbols should be assigned exactly once");
+        assert_eq!(assignments.len(), 3, "all authorized replicas should get assignments");
+    }
+
     #[test]
     fn both_empty_returns_empty() {
         let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
-        let assignments = assigner.assign(&[], &[], 5);
+        let security_context = SecurityContext::for_testing(42);
+        let assignments = assigner.assign(&[], &[], &security_context, None, 5);
         assert!(assignments.is_empty());
     }
 
