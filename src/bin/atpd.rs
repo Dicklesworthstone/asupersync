@@ -579,7 +579,9 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
     let pid_content = std::fs::read_to_string(&cli.pid_file)
         .map_err(|e| anyhow::anyhow!("Failed to read PID file: {}", e))?;
 
-    let pid: u32 = pid_content.trim().parse()
+    let pid: u32 = pid_content
+        .trim()
+        .parse()
         .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
 
     #[cfg(unix)]
@@ -602,9 +604,7 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
                 let timeout = Duration::from_secs(10);
 
                 loop {
-                    let check = Command::new("kill")
-                        .args(["-0", &pid.to_string()])
-                        .output();
+                    let check = Command::new("kill").args(["-0", &pid.to_string()]).output();
 
                     if let Ok(output) = check {
                         if !output.status.success() {
@@ -666,16 +666,16 @@ fn show_status(cli: AtpdCli) -> Result<()> {
     let pid_content = std::fs::read_to_string(&cli.pid_file)
         .map_err(|e| anyhow::anyhow!("Failed to read PID file: {}", e))?;
 
-    let pid: u32 = pid_content.trim().parse()
+    let pid: u32 = pid_content
+        .trim()
+        .parse()
         .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
 
     // Check if process is actually running
     #[cfg(unix)]
     {
         use std::process::Command;
-        let status = Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output();
+        let status = Command::new("kill").args(["-0", &pid.to_string()]).output();
 
         match status {
             Ok(output) if output.status.success() => {
@@ -692,7 +692,10 @@ fn show_status(cli: AtpdCli) -> Result<()> {
 
     #[cfg(not(unix))]
     {
-        println!("ATP daemon: UNKNOWN (PID: {}) - status check not supported on this platform", pid);
+        println!(
+            "ATP daemon: UNKNOWN (PID: {}) - status check not supported on this platform",
+            pid
+        );
         println!("PID file: {}", cli.pid_file.display());
     }
 
@@ -881,7 +884,10 @@ fn manage_identity(_cli: AtpdCli, args: IdentityArgs) -> Result<()> {
                             if mode == 0o600 {
                                 println!("  Permissions: ✅ Secure (600)");
                             } else {
-                                println!("  Permissions: ⚠️  Insecure ({:o}) - should be 600", mode);
+                                println!(
+                                    "  Permissions: ⚠️  Insecure ({:o}) - should be 600",
+                                    mode
+                                );
                             }
                         }
                     }
