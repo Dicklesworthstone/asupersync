@@ -30,7 +30,7 @@
 use crate::combinator::{RetryPolicy, calculate_delay};
 
 use parking_lot::Mutex;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -113,6 +113,12 @@ pub struct DbPoolConfig {
     pub max_lifetime: Duration,
     /// Maximum time to wait when acquiring a connection.
     pub connection_timeout: Duration,
+    /// Maximum connections per client (None = unlimited per client).
+    /// br-asupersync-qydi3j: DoS protection against connection exhaustion.
+    pub max_connections_per_client: Option<usize>,
+    /// Enable per-client connection tracking and enforcement.
+    /// br-asupersync-qydi3j: When true, tracks connection usage by client ID.
+    pub enforce_client_quotas: bool,
 }
 
 impl Default for DbPoolConfig {
@@ -124,6 +130,9 @@ impl Default for DbPoolConfig {
             idle_timeout: Duration::from_secs(600),
             max_lifetime: Duration::from_secs(3600),
             connection_timeout: Duration::from_secs(30),
+            // br-asupersync-qydi3j: Conservative defaults for DoS protection
+            max_connections_per_client: Some(3), // Allow up to 3 connections per client by default
+            enforce_client_quotas: true,         // Enable protection by default
         }
     }
 }
@@ -186,6 +195,24 @@ impl DbPoolConfig {
         self.connection_timeout = timeout;
         self
     }
+
+    /// Set the maximum connections per client (None = unlimited).
+    /// br-asupersync-qydi3j: DoS protection against connection exhaustion.
+    #[inline]
+    #[must_use]
+    pub fn max_connections_per_client(mut self, max: Option<usize>) -> Self {
+        self.max_connections_per_client = max;
+        self
+    }
+
+    /// Enable or disable client quota enforcement.
+    /// br-asupersync-qydi3j: Controls per-client connection tracking.
+    #[inline]
+    #[must_use]
+    pub fn enforce_client_quotas(mut self, enforce: bool) -> Self {
+        self.enforce_client_quotas = enforce;
+        self
+    }
 }
 
 // ─── Pool internals ─────────────────────────────────────────────────────────
@@ -219,6 +246,9 @@ struct PoolInner<C> {
     /// Total connections (idle + checked out).
     total: usize,
     closed: bool,
+    /// br-asupersync-qydi3j: Per-client connection count tracking.
+    /// Maps client_id -> count of active connections for that client.
+    client_connections: HashMap<String, usize>,
 }
 
 // ─── DbPool ─────────────────────────────────────────────────────────────────
@@ -305,6 +335,9 @@ pub enum DbPoolError<E: std::error::Error> {
     Connect(E),
     /// Connection validation failed.
     ValidationFailed,
+    /// Client quota exceeded.
+    /// br-asupersync-qydi3j: DoS protection against connection exhaustion.
+    ClientQuotaExceeded(String),
 }
 
 impl<E: std::error::Error> fmt::Display for DbPoolError<E> {
@@ -315,6 +348,7 @@ impl<E: std::error::Error> fmt::Display for DbPoolError<E> {
             Self::Timeout => write!(f, "connection acquisition timed out"),
             Self::Connect(e) => write!(f, "connection failed: {e}"),
             Self::ValidationFailed => write!(f, "connection validation failed"),
+            Self::ClientQuotaExceeded(client) => write!(f, "client quota exceeded for '{client}'"),
         }
     }
 }
@@ -372,6 +406,7 @@ impl<M: ConnectionManager> DbPool<M> {
                 idle: VecDeque::new(),
                 total: 0,
                 closed: false,
+                client_connections: HashMap::new(), // br-asupersync-qydi3j
             }),
             stats: PoolStatCounters::default(),
         }
@@ -494,6 +529,7 @@ impl<M: ConnectionManager> DbPool<M> {
                         conn: Some(valid_conn),
                         pool: self,
                         created_at,
+                        client_id: None, // br-asupersync-qydi3j: legacy get() has no client tracking
                     });
                 }
 
@@ -504,6 +540,7 @@ impl<M: ConnectionManager> DbPool<M> {
                     conn: Some(conn),
                     pool: self,
                     created_at,
+                    client_id: None, // br-asupersync-qydi3j: legacy get() has no client tracking
                 });
             }
 
@@ -524,10 +561,164 @@ impl<M: ConnectionManager> DbPool<M> {
                         pool: self,
                         // br-asupersync-w3g9kb: sync path → wall_now().
                         created_at: crate::time::wall_now(),
+                        client_id: None, // br-asupersync-qydi3j: legacy get() has no client tracking
                     });
                 }
                 Err(e) => {
                     // Drop guard rolls back total count on failure (or panic).
+                    return Err(DbPoolError::Connect(e));
+                }
+            }
+        }
+    }
+
+    /// Acquire a connection from the pool for a specific client.
+    ///
+    /// br-asupersync-qydi3j: DoS protection against connection exhaustion.
+    /// Enforces per-client connection quotas when `enforce_client_quotas` is enabled.
+    pub fn get_for_client(&self, client_id: &str) -> Result<PooledConnection<'_, M>, DbPoolError<M::Error>> {
+        // If client quotas are disabled, delegate to regular get()
+        if !self.config.enforce_client_quotas {
+            return self.get().map(|mut conn| {
+                conn.client_id = Some(client_id.to_string());
+                conn
+            });
+        }
+
+        // Check client quota before attempting acquisition
+        let client_id_owned = client_id.to_string();
+        loop {
+            let conn_to_validate = {
+                let mut inner = self.inner.lock();
+
+                if inner.closed {
+                    return Err(DbPoolError::Closed);
+                }
+
+                // br-asupersync-qydi3j: Enforce per-client connection quota
+                if let Some(max_per_client) = self.config.max_connections_per_client {
+                    let current_count = inner.client_connections.get(&client_id_owned).copied().unwrap_or(0);
+                    if current_count >= max_per_client {
+                        return Err(DbPoolError::ClientQuotaExceeded(client_id_owned));
+                    }
+                }
+
+                // Rest is similar to get() but with client tracking
+                let mut popped = None;
+                if let Some(idle) = inner.idle.pop_front() {
+                    let now = crate::time::wall_now();
+                    if idle.is_expired(&self.config, now) || idle.is_idle_too_long(&self.config, now) {
+                        inner.total = inner.total.saturating_sub(1);
+                        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                        popped = Some((idle.conn, false, idle.created_at));
+                    } else {
+                        popped = Some((idle.conn, true, idle.created_at));
+                    }
+                }
+
+                if popped.is_none() {
+                    if inner.total < self.config.max_size {
+                        inner.total += 1;
+                    } else {
+                        return Err(DbPoolError::Full);
+                    }
+                }
+
+                // br-asupersync-qydi3j: Increment client connection count
+                *inner.client_connections.entry(client_id_owned.clone()).or_insert(0) += 1;
+
+                drop(inner);
+                popped
+            };
+
+            if let Some((conn, needs_validation, created_at)) = conn_to_validate {
+                if !needs_validation {
+                    // Decrement client count since we're discarding this connection
+                    let mut inner = self.inner.lock();
+                    if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            inner.client_connections.remove(&client_id_owned);
+                        }
+                    }
+                    drop(inner);
+
+                    self.manager.disconnect(conn);
+                    continue;
+                }
+
+                // Validate if configured
+                if self.config.validate_on_checkout {
+                    let mut guard = ValidationGuard {
+                        pool: self,
+                        conn: Some(conn),
+                    };
+
+                    let valid = self.manager.is_valid(guard.conn.as_ref().unwrap());
+
+                    if !valid {
+                        // Decrement client count since validation failed
+                        let mut inner = self.inner.lock();
+                        if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                            *count = count.saturating_sub(1);
+                            if *count == 0 {
+                                inner.client_connections.remove(&client_id_owned);
+                            }
+                        }
+                        drop(inner);
+
+                        self.stats.total_validation_failures.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+
+                    let valid_conn = guard.conn.take().unwrap();
+                    self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+                    return Ok(PooledConnection {
+                        conn: Some(valid_conn),
+                        pool: self,
+                        created_at,
+                        client_id: Some(client_id_owned),
+                    });
+                }
+
+                self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+                return Ok(PooledConnection {
+                    conn: Some(conn),
+                    pool: self,
+                    created_at,
+                    client_id: Some(client_id_owned.clone()),
+                });
+            }
+
+            // Create new connection
+            let mut creation_guard = CreationGuard {
+                pool: self,
+                disarmed: false,
+            };
+
+            match self.manager.connect() {
+                Ok(conn) => {
+                    creation_guard.disarmed = true;
+                    self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
+                    self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+                    return Ok(PooledConnection {
+                        conn: Some(conn),
+                        pool: self,
+                        created_at: crate::time::wall_now(),
+                        client_id: Some(client_id_owned),
+                    });
+                }
+                Err(e) => {
+                    // Decrement client count since creation failed
+                    let mut inner = self.inner.lock();
+                    if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            inner.client_connections.remove(&client_id_owned);
+                        }
+                    }
+                    drop(inner);
+
                     return Err(DbPoolError::Connect(e));
                 }
             }
@@ -761,6 +952,8 @@ pub struct PooledConnection<'a, M: ConnectionManager> {
     // br-asupersync-w3g9kb: Time replaces Instant; same values
     // produced by wall_now() in sync paths and cx.now() in async.
     created_at: Time,
+    // br-asupersync-qydi3j: Track client for quota enforcement
+    client_id: Option<String>,
 }
 
 impl<M: ConnectionManager> PooledConnection<'_, M> {
@@ -809,6 +1002,20 @@ impl<M: ConnectionManager> std::ops::DerefMut for PooledConnection<'_, M> {
 impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
     fn drop(&mut self) {
         if let Some(mut conn) = self.conn.take() {
+            // br-asupersync-qydi3j: Decrement client connection count when returning/discarding
+            if let Some(client_id) = &self.client_id {
+                if self.pool.config.enforce_client_quotas {
+                    let mut inner = self.pool.inner.lock();
+                    if let Some(count) = inner.client_connections.get_mut(client_id) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            inner.client_connections.remove(client_id);
+                        }
+                    }
+                    drop(inner);
+                }
+            }
+
             // br-asupersync-5bv5sr: gate the return-to-pool path on the
             // manager's release-time health check. Backends that detect a
             // poisoned protocol state, an open transaction, or any other
