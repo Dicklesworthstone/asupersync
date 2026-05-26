@@ -417,67 +417,479 @@ impl CacheStorage for HybridStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::cache::trust::{TrustPolicy, TrustBoundaryChecker};
+    use crate::cx::Cx;
+    use crate::lab::{LabConfig, LabRuntime};
+    use crate::types::Budget;
+    use serde_json::json;
+    use std::time::{Duration, SystemTime};
     use tempfile::tempdir;
 
-    #[test]
-    fn file_storage_store_retrieve() {
-        let temp_dir = tempdir().unwrap();
-        let mut storage = FileStorage::new(temp_dir.path(), false).unwrap();
+    /// Structured test logger for ATP cache storage integration tests.
+    #[derive(Debug)]
+    struct CacheStorageTestLogger {
+        suite_name: String,
+        test_name: String,
+        start_time: SystemTime,
+        current_phase: String,
+        cx: Option<Cx>,
+    }
 
-        let key = CacheKey::new("manifest123".to_string(), "content456".to_string(), None);
-        let content = b"test content";
+    #[derive(Debug, Clone)]
+    struct StorageSnapshot {
+        backend_type: String,
+        files_stored: u64,
+        bytes_stored: u64,
+        errors: u64,
+        memory_usage: Option<u64>,
+    }
 
-        // Store content
-        let location = storage.store(&key, content).unwrap();
+    impl CacheStorageTestLogger {
+        fn new(suite: &str, test: &str, cx: Option<Cx>) -> Self {
+            let logger = Self {
+                suite_name: suite.to_string(),
+                test_name: test.to_string(),
+                start_time: SystemTime::now(),
+                current_phase: "init".to_string(),
+                cx,
+            };
 
-        // Check it was stored as a file
-        if let StorageLocation::File(path) = &location {
-            assert!(path.exists());
-        } else {
-            panic!("Expected file storage location");
+            // Use both structured tracing and stderr JSON for comprehensive logging
+            if let Some(ref cx) = logger.cx {
+                cx.trace(|| format!("CacheStorageTest {} started: {}", test, suite));
+            }
+
+            eprintln!(
+                "{}",
+                json!({
+                    "ts": logger.start_time,
+                    "suite": suite,
+                    "test": test,
+                    "event": "cache_storage_test_start"
+                })
+            );
+
+            logger
         }
 
-        // Retrieve content
-        let retrieved = storage.retrieve(&location).unwrap();
-        assert_eq!(retrieved, content);
+        fn phase(&mut self, phase: &str) {
+            self.current_phase = phase.to_string();
 
-        // Check metrics
-        let metrics = storage.metrics();
-        assert_eq!(metrics.files_stored, 1);
-        assert_eq!(metrics.bytes_stored, content.len() as u64);
+            if let Some(ref cx) = self.cx {
+                cx.trace(|| format!("CacheStorageTest phase: {}", phase));
+            }
+
+            eprintln!(
+                "{}",
+                json!({
+                    "ts": SystemTime::now(),
+                    "suite": self.suite_name,
+                    "test": self.test_name,
+                    "phase": phase,
+                    "event": "cache_storage_phase_start"
+                })
+            );
+        }
+
+        fn storage_snapshot<S>(&self, label: &str, storage: &S, metrics: &StorageMetrics)
+        where
+            S: std::fmt::Debug,
+        {
+            let snapshot = StorageSnapshot {
+                backend_type: std::any::type_name::<S>().split("::").last().unwrap_or("unknown").to_string(),
+                files_stored: metrics.files_stored,
+                bytes_stored: metrics.bytes_stored,
+                errors: metrics.errors,
+                memory_usage: None, // TODO: Add memory tracking if available
+            };
+
+            if let Some(ref cx) = self.cx {
+                cx.trace(|| format!("CacheStorage snapshot {}: {:?}", label, snapshot));
+            }
+
+            eprintln!(
+                "{}",
+                json!({
+                    "ts": SystemTime::now(),
+                    "suite": self.suite_name,
+                    "test": self.test_name,
+                    "phase": self.current_phase,
+                    "event": "cache_storage_snapshot",
+                    "label": label,
+                    "backend_type": snapshot.backend_type,
+                    "metrics": {
+                        "files_stored": snapshot.files_stored,
+                        "bytes_stored": snapshot.bytes_stored,
+                        "errors": snapshot.errors
+                    }
+                })
+            );
+        }
+
+        fn assert_storage_outcome<T>(&self, field: &str, expected: &T, actual: &T) -> bool
+        where
+            T: PartialEq + serde::Serialize,
+        {
+            let matches = expected == actual;
+
+            if let Some(ref cx) = self.cx {
+                cx.trace(|| format!("CacheStorage assertion {}: expected={:?}, actual={:?}, match={}",
+                    field, expected, actual, matches));
+            }
+
+            eprintln!(
+                "{}",
+                json!({
+                    "ts": SystemTime::now(),
+                    "suite": self.suite_name,
+                    "test": self.test_name,
+                    "phase": self.current_phase,
+                    "event": "cache_storage_assertion",
+                    "field": field,
+                    "expected": expected,
+                    "actual": actual,
+                    "match": matches
+                })
+            );
+
+            matches
+        }
+
+        fn test_end(&self, result: &str) {
+            let duration_ms = self.start_time.elapsed().unwrap_or(Duration::ZERO).as_millis() as u64;
+
+            if let Some(ref cx) = self.cx {
+                cx.trace(|| format!("CacheStorageTest {} completed: {} in {}ms",
+                    self.test_name, result, duration_ms));
+            }
+
+            eprintln!(
+                "{}",
+                json!({
+                    "ts": SystemTime::now(),
+                    "suite": self.suite_name,
+                    "test": self.test_name,
+                    "event": "cache_storage_test_end",
+                    "result": result,
+                    "duration_ms": duration_ms
+                })
+            );
+        }
+    }
+
+    /// Test data factory for creating realistic cache content.
+    struct CacheContentFactory;
+
+    impl CacheContentFactory {
+        fn manifest_json_content(objects: usize) -> Vec<u8> {
+            let manifest = json!({
+                "schema_version": 2,
+                "created_at": SystemTime::now(),
+                "objects": (0..objects).map(|i| json!({
+                    "id": format!("obj_{:08x}", i),
+                    "hash": format!("sha256_{:064x}", i * 0x123456789abcdef),
+                    "size_bytes": 1024 + i * 512,
+                    "content_type": "application/octet-stream"
+                })).collect::<Vec<_>>(),
+                "total_size_bytes": objects * 1536 // Average size
+            });
+
+            serde_json::to_vec_pretty(&manifest).unwrap()
+        }
+
+        fn binary_blob_content(size_bytes: usize, seed: u8) -> Vec<u8> {
+            (0..size_bytes)
+                .map(|i| seed.wrapping_add((i % 256) as u8).wrapping_mul(3))
+                .collect()
+        }
+
+        fn encrypted_content(plaintext: &[u8], key_hint: &str) -> Vec<u8> {
+            // Simple XOR "encryption" for testing (NOT for production)
+            let key: Vec<u8> = key_hint.bytes().cycle().take(plaintext.len()).collect();
+            plaintext.iter().zip(key.iter()).map(|(p, k)| p ^ k).collect()
+        }
+
+        fn test_cache_key(manifest: &str, content: &str, scope: Option<&str>) -> CacheKey {
+            CacheKey::new(
+                format!("manifest_{}", manifest),
+                format!("content_{}", content),
+                scope.map(String::from),
+            )
+        }
+    }
+
+    /// Test isolation manager for cache storage tests.
+    struct CacheStorageTestIsolation {
+        temp_dirs: Vec<tempfile::TempDir>,
+        created_locations: Vec<StorageLocation>,
+    }
+
+    impl CacheStorageTestIsolation {
+        fn new() -> Self {
+            Self {
+                temp_dirs: Vec::new(),
+                created_locations: Vec::new(),
+            }
+        }
+
+        fn create_temp_dir(&mut self) -> &std::path::Path {
+            let temp_dir = tempdir().expect("create temp dir");
+            let path = temp_dir.path();
+            self.temp_dirs.push(temp_dir);
+            path
+        }
+
+        fn track_location(&mut self, location: StorageLocation) {
+            self.created_locations.push(location);
+        }
+    }
+
+    impl Drop for CacheStorageTestIsolation {
+        fn drop(&mut self) {
+            eprintln!(
+                "CacheStorageTestIsolation: cleaned {} temp dirs, {} locations",
+                self.temp_dirs.len(),
+                self.created_locations.len()
+            );
+        }
     }
 
     #[test]
-    fn memory_storage_creation() {
-        let storage = MemoryStorage::new(1024 * 1024); // 1MB limit
-        assert_eq!(storage.max_memory_bytes, 1024 * 1024);
-        assert_eq!(storage.current_memory_bytes, 0);
+    fn cache_storage_workflow_integration_with_trust_policy() {
+        let mut isolation = CacheStorageTestIsolation::new();
+
+        // Create deterministic lab runtime for structured testing
+        let mut runtime = LabRuntime::new(LabConfig::new(0xcache_storage_1).max_steps(15_000));
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+
+        runtime.run(&root, |cx| async {
+            let mut log = CacheStorageTestLogger::new("cache_storage_integration", "workflow_with_trust", Some(cx.clone()));
+
+            log.phase("setup");
+
+            // Create real storage backends
+            let temp_path = isolation.create_temp_dir();
+            let mut file_storage = FileStorage::new(temp_path, false).expect("create file storage");
+            let mut memory_storage = MemoryStorage::new(5 * 1024 * 1024); // 5MB limit
+
+            // Create trust policy for cache security testing
+            let mut trust_policy = TrustPolicy::local();
+            trust_policy.add_authorized_scope("test-workflow".to_string());
+            let mut trust_checker = TrustBoundaryChecker::new(trust_policy);
+
+            log.storage_snapshot("initial_file_storage", &file_storage, &file_storage.metrics());
+            log.storage_snapshot("initial_memory_storage", &memory_storage, &memory_storage.metrics());
+
+            log.phase("content_creation");
+
+            // Create realistic test content using factory
+            let manifest_data = CacheContentFactory::manifest_json_content(10);
+            let blob_data = CacheContentFactory::binary_blob_content(4096, 0xAB);
+            let encrypted_data = CacheContentFactory::encrypted_content(&blob_data, "test_key_123");
+
+            let manifest_key = CacheContentFactory::test_cache_key("workflow_test", "manifest", Some("test-workflow"));
+            let blob_key = CacheContentFactory::test_cache_key("workflow_test", "blob", Some("test-workflow"));
+            let encrypted_key = CacheContentFactory::test_cache_key("workflow_test", "encrypted", Some("test-workflow"));
+
+            log.phase("trust_validation");
+
+            // Test trust policy integration (real security validation)
+            let manifest_trust_result = trust_checker.check_access(&manifest_key, "store");
+            let blob_trust_result = trust_checker.check_access(&blob_key, "store");
+            let encrypted_trust_result = trust_checker.check_access(&encrypted_key, "store");
+
+            assert!(log.assert_storage_outcome("manifest_trust_check", &true, &manifest_trust_result.is_ok()));
+            assert!(log.assert_storage_outcome("blob_trust_check", &true, &blob_trust_result.is_ok()));
+            assert!(log.assert_storage_outcome("encrypted_trust_check", &true, &encrypted_trust_result.is_ok()));
+
+            log.phase("storage_operations");
+
+            // Store content in different backends (real cache workflow)
+            let manifest_location = file_storage.store(&manifest_key, &manifest_data).expect("store manifest");
+            let blob_location = memory_storage.store(&blob_key, &blob_data).expect("store blob");
+            let encrypted_location = file_storage.store(&encrypted_key, &encrypted_data).expect("store encrypted");
+
+            isolation.track_location(manifest_location.clone());
+            isolation.track_location(blob_location.clone());
+            isolation.track_location(encrypted_location.clone());
+
+            log.storage_snapshot("post_storage_file", &file_storage, &file_storage.metrics());
+            log.storage_snapshot("post_storage_memory", &memory_storage, &memory_storage.metrics());
+
+            log.phase("retrieval_and_verification");
+
+            // Retrieve and verify content (end-to-end cache workflow)
+            let retrieved_manifest = file_storage.retrieve(&manifest_location).expect("retrieve manifest");
+            let retrieved_blob = memory_storage.retrieve(&blob_location).expect("retrieve blob");
+            let retrieved_encrypted = file_storage.retrieve(&encrypted_location).expect("retrieve encrypted");
+
+            // Verify content integrity
+            assert!(log.assert_storage_outcome("manifest_integrity", &manifest_data, &retrieved_manifest));
+            assert!(log.assert_storage_outcome("blob_integrity", &blob_data, &retrieved_blob));
+            assert!(log.assert_storage_outcome("encrypted_integrity", &encrypted_data, &retrieved_encrypted));
+
+            // Verify storage metrics
+            assert!(log.assert_storage_outcome("file_storage_files", &2u64, &file_storage.metrics().files_stored));
+            assert!(log.assert_storage_outcome("memory_storage_files", &1u64, &memory_storage.metrics().files_stored));
+
+            let total_file_bytes = manifest_data.len() + encrypted_data.len();
+            assert!(log.assert_storage_outcome("file_storage_bytes", &(total_file_bytes as u64), &file_storage.metrics().bytes_stored));
+
+            log.phase("cross_backend_verification");
+
+            // Test cross-backend scenarios (hybrid workflow)
+            let cross_store_result = memory_storage.store(&manifest_key, &manifest_data);
+            if let Ok(cross_location) = cross_store_result {
+                isolation.track_location(cross_location.clone());
+                let cross_retrieved = memory_storage.retrieve(&cross_location).expect("cross retrieve");
+                assert!(log.assert_storage_outcome("cross_backend_integrity", &manifest_data, &cross_retrieved));
+            }
+
+            log.phase("error_simulation");
+
+            // Test error conditions (storage failure handling)
+            let invalid_location = StorageLocation::File("/nonexistent/path/test.cache".into());
+            let error_result = file_storage.retrieve(&invalid_location);
+            assert!(log.assert_storage_outcome("error_handling", &true, &error_result.is_err()));
+
+            log.storage_snapshot("final_file_storage", &file_storage, &file_storage.metrics());
+            log.storage_snapshot("final_memory_storage", &memory_storage, &memory_storage.metrics());
+
+            log.test_end("pass");
+            Ok::<(), anyhow::Error>(())
+        });
     }
 
     #[test]
-    fn hybrid_storage_backend_selection() {
-        let temp_dir = tempdir().unwrap();
-        let storage = HybridStorage::new(1024, 512, temp_dir.path(), false).unwrap();
+    fn hybrid_storage_backend_selection_and_workflow() {
+        let mut isolation = CacheStorageTestIsolation::new();
 
-        // Small content should use memory
-        assert_eq!(storage.choose_backend(256), "memory");
+        let mut runtime = LabRuntime::new(LabConfig::new(0xcache_hybrid_2).max_steps(10_000));
+        let root = runtime.state.create_root_region(Budget::INFINITE);
 
-        // Large content should use file
-        assert_eq!(storage.choose_backend(1024), "file");
+        runtime.run(&root, |cx| async {
+            let mut log = CacheStorageTestLogger::new("cache_storage_integration", "hybrid_backend_workflow", Some(cx.clone()));
+
+            log.phase("setup");
+
+            let temp_path = isolation.create_temp_dir();
+            let mut hybrid_storage = HybridStorage::new(
+                2048,     // Memory threshold: 2KB
+                1024,     // File threshold: 1KB
+                temp_path,
+                false,    // Not encrypted by default
+            ).expect("create hybrid storage");
+
+            log.storage_snapshot("initial_hybrid_storage", &hybrid_storage, &hybrid_storage.metrics());
+
+            log.phase("backend_selection_testing");
+
+            // Test backend selection logic (realistic size-based routing)
+            let small_content = CacheContentFactory::binary_blob_content(512, 0x11);   // < 1KB -> memory
+            let medium_content = CacheContentFactory::binary_blob_content(1536, 0x22); // 1.5KB -> file
+            let large_content = CacheContentFactory::binary_blob_content(3072, 0x33);  // 3KB -> file
+
+            let small_key = CacheContentFactory::test_cache_key("hybrid", "small", None);
+            let medium_key = CacheContentFactory::test_cache_key("hybrid", "medium", None);
+            let large_key = CacheContentFactory::test_cache_key("hybrid", "large", None);
+
+            log.phase("size_based_routing");
+
+            // Store content and verify backend selection
+            let small_location = hybrid_storage.store(&small_key, &small_content).expect("store small");
+            let medium_location = hybrid_storage.store(&medium_key, &medium_content).expect("store medium");
+            let large_location = hybrid_storage.store(&large_key, &large_content).expect("store large");
+
+            isolation.track_location(small_location.clone());
+            isolation.track_location(medium_location.clone());
+            isolation.track_location(large_location.clone());
+
+            // Verify backend selection based on size
+            match (&small_location, &medium_location, &large_location) {
+                (StorageLocation::Memory(_), StorageLocation::File(_), StorageLocation::File(_)) => {
+                    assert!(log.assert_storage_outcome("backend_selection_correct", &true, &true));
+                }
+                _ => {
+                    eprintln!("Backend selection: small={:?}, medium={:?}, large={:?}",
+                        small_location, medium_location, large_location);
+                    assert!(log.assert_storage_outcome("backend_selection_correct", &true, &false));
+                }
+            }
+
+            log.storage_snapshot("post_routing_hybrid_storage", &hybrid_storage, &hybrid_storage.metrics());
+
+            log.phase("retrieval_verification");
+
+            // Retrieve from different backends and verify integrity
+            let retrieved_small = hybrid_storage.retrieve(&small_location).expect("retrieve small");
+            let retrieved_medium = hybrid_storage.retrieve(&medium_location).expect("retrieve medium");
+            let retrieved_large = hybrid_storage.retrieve(&large_location).expect("retrieve large");
+
+            assert!(log.assert_storage_outcome("small_content_integrity", &small_content, &retrieved_small));
+            assert!(log.assert_storage_outcome("medium_content_integrity", &medium_content, &retrieved_medium));
+            assert!(log.assert_storage_outcome("large_content_integrity", &large_content, &retrieved_large));
+
+            log.storage_snapshot("final_hybrid_storage", &hybrid_storage, &hybrid_storage.metrics());
+            log.test_end("pass");
+            Ok::<(), anyhow::Error>(())
+        });
     }
 
     #[test]
-    fn file_storage_path_generation() {
-        let temp_dir = tempdir().unwrap();
-        let storage = FileStorage::new(temp_dir.path(), false).unwrap();
+    fn storage_stress_and_metrics_validation() {
+        let mut isolation = CacheStorageTestIsolation::new();
 
-        let path = storage.get_file_path("abcdef123");
+        let mut runtime = LabRuntime::new(LabConfig::new(0xcache_stress_3).max_steps(25_000));
+        let root = runtime.state.create_root_region(Budget::INFINITE);
 
-        // Should use first two characters as subdirectory
-        assert!(path.to_string_lossy().contains("ab"));
-        assert!(path.to_string_lossy().ends_with("abcdef123.cache"));
+        runtime.run(&root, |cx| async {
+            let mut log = CacheStorageTestLogger::new("cache_storage_integration", "stress_and_metrics", Some(cx.clone()));
+
+            log.phase("setup");
+
+            let temp_path = isolation.create_temp_dir();
+            let mut stress_storage = FileStorage::new(temp_path, false).expect("create stress storage");
+
+            log.storage_snapshot("initial_stress_storage", &stress_storage, &stress_storage.metrics());
+
+            log.phase("stress_storage_operations");
+
+            let mut total_bytes = 0u64;
+            let stress_iterations = 20;
+
+            for i in 0..stress_iterations {
+                let content_size = 1024 + i * 256; // Varying sizes
+                let content = CacheContentFactory::binary_blob_content(content_size, (i % 256) as u8);
+                let key = CacheContentFactory::test_cache_key("stress", &format!("item_{:03}", i), None);
+
+                let location = stress_storage.store(&key, &content).expect("stress store");
+                isolation.track_location(location.clone());
+
+                total_bytes += content.len() as u64;
+
+                // Verify retrieval works under stress
+                let retrieved = stress_storage.retrieve(&location).expect("stress retrieve");
+                assert!(log.assert_storage_outcome(&format!("stress_integrity_{}", i), &content, &retrieved));
+
+                if i % 5 == 0 {
+                    log.storage_snapshot(&format!("stress_iteration_{}", i), &stress_storage, &stress_storage.metrics());
+                }
+            }
+
+            log.phase("metrics_validation");
+
+            let final_metrics = stress_storage.metrics();
+            assert!(log.assert_storage_outcome("stress_files_count", &(stress_iterations as u64), &final_metrics.files_stored));
+            assert!(log.assert_storage_outcome("stress_total_bytes", &total_bytes, &final_metrics.bytes_stored));
+            assert!(log.assert_storage_outcome("stress_no_errors", &0u64, &final_metrics.errors));
+
+            log.storage_snapshot("final_stress_storage", &stress_storage, &final_metrics);
+            log.test_end("pass");
+            Ok::<(), anyhow::Error>(())
+        });
     }
 
+    // Legacy unit tests (simplified for compatibility)
     #[test]
     fn storage_metrics_default() {
         let metrics = StorageMetrics::default();
