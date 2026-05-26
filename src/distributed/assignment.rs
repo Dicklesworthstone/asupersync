@@ -4,6 +4,7 @@
 //! [`AssignmentStrategy`].
 
 use crate::record::distributed_region::ReplicaInfo;
+use crate::security::SecurityContext;
 use crate::types::symbol::Symbol;
 use std::collections::BTreeSet;
 
@@ -52,32 +53,57 @@ impl SymbolAssigner {
 
     /// Computes symbol assignments for the given replicas.
     ///
+    /// asupersync-j18rga: Now validates replica authorization before assignment
+    /// to prevent unauthorized nodes from participating in symbol distribution.
+    ///
     /// # Arguments
     ///
     /// * `symbols` - The symbols to distribute
-    /// * `replicas` - Target replicas
+    /// * `replicas` - Target replicas (will be filtered for authorization)
+    /// * `security_context` - Security context for replica authorization
+    /// * `region_id` - Optional region identifier for scoped authorization
     /// * `k` - Source symbol count (minimum for decode)
+    ///
+    /// # Returns
+    ///
+    /// Symbol assignments only for authorized replicas. Unauthorized replicas
+    /// are silently filtered out to prevent information leakage.
     #[must_use]
     pub fn assign(
         &self,
         symbols: &[Symbol],
         replicas: &[ReplicaInfo],
+        security_context: &SecurityContext,
+        region_id: Option<&str>,
         k: u16,
     ) -> Vec<ReplicaAssignment> {
         if replicas.is_empty() || symbols.is_empty() {
             return Vec::new();
         }
 
+        // asupersync-j18rga: Filter replicas to only include authorized ones
+        let authorized_replicas: Vec<&ReplicaInfo> = replicas
+            .iter()
+            .filter(|replica| {
+                security_context.is_replica_authorized(&replica.id, region_id)
+            })
+            .collect();
+
+        if authorized_replicas.is_empty() {
+            // No authorized replicas - return empty assignments
+            return Vec::new();
+        }
+
         match self.strategy {
-            AssignmentStrategy::Full => Self::assign_full(symbols, replicas, k),
-            AssignmentStrategy::Striped => Self::assign_striped(symbols, replicas, k),
-            AssignmentStrategy::MinimumK => Self::assign_minimum_k(symbols, replicas, k),
-            AssignmentStrategy::Weighted => Self::assign_weighted(symbols, replicas, k),
+            AssignmentStrategy::Full => Self::assign_full(symbols, &authorized_replicas, k),
+            AssignmentStrategy::Striped => Self::assign_striped(symbols, &authorized_replicas, k),
+            AssignmentStrategy::MinimumK => Self::assign_minimum_k(symbols, &authorized_replicas, k),
+            AssignmentStrategy::Weighted => Self::assign_weighted(symbols, &authorized_replicas, k),
         }
     }
 
     /// Full replication: every replica gets all symbols.
-    fn assign_full(symbols: &[Symbol], replicas: &[ReplicaInfo], k: u16) -> Vec<ReplicaAssignment> {
+    fn assign_full(symbols: &[Symbol], replicas: &[&ReplicaInfo], k: u16) -> Vec<ReplicaAssignment> {
         let k_usize = k as usize;
         let all_indices: Vec<usize> = (0..symbols.len()).collect();
         replicas

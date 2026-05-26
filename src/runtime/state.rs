@@ -183,7 +183,7 @@ impl ReadBiasedDrainingRegionSnapshot {
 
         // Fixed TOCTOU race condition by holding cache validity check atomic
         // with the cache read through double-checking under consistent state
-        let mut final_writes = 0;
+        let mut final_writes;
         loop {
             let writes = self.writes_since_last_read.load(Ordering::Acquire);
             final_writes = writes; // Store for use in fallback path metrics

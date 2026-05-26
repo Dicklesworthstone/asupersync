@@ -509,7 +509,17 @@ where
         let mask = <Caps as cap::CapSetRuntimeMask>::MASK;
         let cx = self.retype::<cap::All>();
         CURRENT_CX_STACK.with(|stack| {
-            stack.borrow_mut().push(CurrentCxFrame { cx, mask });
+            let mut s = stack.borrow_mut();
+            if s.len() >= crate::types::task_context::MAX_CONTEXT_STACK_DEPTH {
+                panic!(
+                    "context stack depth exceeded MAX_CONTEXT_STACK_DEPTH ({}): this prevents \
+                     stack overflow in pathological nesting scenarios. Consider reducing \
+                     nesting depth or restructuring the code to avoid excessive context \
+                     restriction nesting.",
+                    crate::types::task_context::MAX_CONTEXT_STACK_DEPTH
+                );
+            }
+            s.push(CurrentCxFrame { cx, mask });
         });
         CurrentCxGuard {
             pushed: true,
@@ -534,6 +544,16 @@ impl FullCx {
     pub fn push_restriction(mask: cap::CapMask) -> CurrentCxGuard {
         let pushed = CURRENT_CX_STACK.with(|stack| {
             let mut s = stack.borrow_mut();
+            // Check depth limit before attempting to push
+            if s.len() >= crate::types::task_context::MAX_CONTEXT_STACK_DEPTH {
+                panic!(
+                    "context stack depth exceeded MAX_CONTEXT_STACK_DEPTH ({}): this prevents \
+                     stack overflow in pathological nesting scenarios. Consider reducing \
+                     nesting depth or restructuring the code to avoid excessive context \
+                     restriction nesting.",
+                    crate::types::task_context::MAX_CONTEXT_STACK_DEPTH
+                );
+            }
             // Intersect with the current top so a push can only
             // ever narrow, never widen.
             let (cx, intersected_mask) = match s.last() {
@@ -3631,6 +3651,50 @@ mod tests {
         }
         // This call should panic because mask_depth is already at the limit.
         cx.masked(|| {});
+    }
+
+    /// Context stack depth must be bounded to prevent stack overflow.
+    #[test]
+    #[should_panic(expected = "MAX_CONTEXT_STACK_DEPTH")]
+    fn context_stack_depth_exceeds_bound_panics_set_current() {
+        let cx = test_cx();
+
+        // Fill the context stack to the limit manually to avoid deep nesting
+        // during test setup that could cause issues during panic unwinding.
+        CURRENT_CX_STACK.with(|stack| {
+            let mut s = stack.borrow_mut();
+            for _ in 0..crate::types::task_context::MAX_CONTEXT_STACK_DEPTH {
+                s.push(CurrentCxFrame {
+                    cx: cx.clone().retype::<cap::All>(),
+                    mask: cap::CapMask::all()
+                });
+            }
+        });
+
+        // This call should panic because stack is already at the limit.
+        let _guard = cx.set_current_restricted();
+    }
+
+    /// Context stack depth must be bounded to prevent stack overflow (push_restriction variant).
+    #[test]
+    #[should_panic(expected = "MAX_CONTEXT_STACK_DEPTH")]
+    fn context_stack_depth_exceeds_bound_panics_push_restriction() {
+        let cx = test_cx();
+        let _guard = Cx::set_current(Some(cx.clone()));
+
+        // Fill the context stack to the limit manually to avoid deep nesting
+        CURRENT_CX_STACK.with(|stack| {
+            let mut s = stack.borrow_mut();
+            for _ in 0..crate::types::task_context::MAX_CONTEXT_STACK_DEPTH {
+                s.push(CurrentCxFrame {
+                    cx: cx.clone().retype::<cap::All>(),
+                    mask: cap::CapMask::all()
+                });
+            }
+        });
+
+        // This call should panic because stack is already at the limit.
+        let _restriction_guard = FullCx::push_restriction(cap::CapMask::none());
     }
 
     #[test]

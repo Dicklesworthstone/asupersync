@@ -30,6 +30,18 @@ use std::task::Waker;
 /// sections).
 pub const MAX_MASK_DEPTH: u32 = 64;
 
+/// Maximum depth for the thread-local context stack.
+///
+/// Enforces a bounded limit on the depth of nested `set_current_restricted()` and
+/// `push_restriction()` calls to prevent stack overflow in pathological cases.
+/// Exceeding this limit indicates a programming error (excessive nesting of
+/// context restrictions) and will cause a panic.
+///
+/// This limit is set lower than `MAX_MASK_DEPTH` as context stack operations
+/// are typically less common than masking operations, but still allows for
+/// reasonable nesting scenarios.
+pub const MAX_CONTEXT_STACK_DEPTH: usize = 32;
+
 /// State for tracking checkpoint progress.
 ///
 /// This struct tracks progress reporting checkpoints, which are distinct from

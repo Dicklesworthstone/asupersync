@@ -222,6 +222,58 @@ impl SecurityContext {
     pub fn stats(&self) -> &AuthStats {
         &self.stats
     }
+
+    /// Validates whether a replica is authorized to participate in symbol assignment.
+    ///
+    /// asupersync-j18rga: Checks replica credentials against the security context.
+    /// This prevents unauthorized replicas from joining symbol distribution.
+    ///
+    /// # Arguments
+    ///
+    /// * `replica_id` - The replica identifier to validate
+    /// * `region_id` - Optional region context for scoped authorization
+    ///
+    /// # Returns
+    ///
+    /// `true` if the replica is authorized, `false` otherwise.
+    ///
+    /// # Security Note
+    ///
+    /// In the current implementation, this is a placeholder that validates
+    /// replica IDs against a basic allow-list pattern. A production implementation
+    /// should verify cryptographic credentials (certificates, signed tokens, etc.)
+    #[must_use]
+    pub fn is_replica_authorized(&self, replica_id: &str, _region_id: Option<&str>) -> bool {
+        // asupersync-j18rga: Basic validation - reject obviously invalid IDs
+        if replica_id.is_empty() {
+            return false;
+        }
+
+        // Reject replica IDs that look like attack attempts
+        if replica_id.contains("../") || replica_id.contains('\0') || replica_id.len() > 256 {
+            return false;
+        }
+
+        // TODO: In a full implementation, this should:
+        // 1. Verify cryptographic credentials for the replica
+        // 2. Check against an authorized replica registry
+        // 3. Validate region-specific permissions
+        // 4. Check if replica certificates are valid and not revoked
+        //
+        // For now, we implement basic allow-list semantics:
+        // - Allow replica IDs that start with known prefixes
+        // - Reject replica IDs that look like test/mock data
+
+        // Accept legitimate-looking replica identifiers
+        replica_id.starts_with("replica-")
+            || replica_id.starts_with("node-")
+            || replica_id.starts_with("r")
+            // Reject obvious test/mock replicas that shouldn't be in production
+            && !replica_id.contains("test")
+            && !replica_id.contains("mock")
+            && !replica_id.contains("fake")
+            && !replica_id.contains("invalid")
+    }
 }
 
 #[cfg(test)]

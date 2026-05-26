@@ -1,9 +1,11 @@
 //! Snapshot of region state for encoding.
 //!
 //! Captures all information needed to reconstruct a region's state on a
-//! remote replica. Supports deterministic binary serialization.
+//! remote replica. Supports deterministic binary serialization with
+//! cryptographic integrity protection.
 
 use crate::record::region::RegionState;
+use crate::security::{AuthenticationTag, AuthKey};
 use crate::types::{RegionId, TaskId, Time};
 use crate::util::ArenaIndex;
 use std::collections::BTreeMap;
@@ -18,6 +20,9 @@ const SNAP_VERSION: u8 = 2;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 /// FNV-1a prime (64-bit).
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
+
+/// Domain separator for snapshot authentication tags.
+const SNAPSHOT_AUTH_DOMAIN: &[u8] = b"asupersync::distributed::RegionSnapshot::v2";
 
 // ---------------------------------------------------------------------------
 // TaskState (simplified for snapshots)
@@ -99,7 +104,8 @@ pub struct BudgetSnapshot {
 ///
 /// This captures all information needed to reconstruct a region's
 /// state on a remote replica. Supports deterministic binary serialization
-/// via [`to_bytes`](Self::to_bytes) and [`from_bytes`](Self::from_bytes).
+/// via [`to_bytes`](Self::to_bytes) and [`from_bytes`](Self::from_bytes)
+/// with cryptographic integrity protection via HMAC-SHA256 signatures.
 #[derive(Debug, Clone)]
 pub struct RegionSnapshot {
     /// Region identifier.
@@ -128,10 +134,15 @@ pub struct RegionSnapshot {
     pub parent: Option<RegionId>,
     /// Custom metadata for application state.
     pub metadata: Vec<u8>,
+    /// Cryptographic signature over all above fields.
+    pub auth_tag: AuthenticationTag,
 }
 
 impl RegionSnapshot {
     /// Creates an empty snapshot for testing and edge-case handling.
+    ///
+    /// Note: The auth_tag is initialized to zero (invalid). Call
+    /// [`Self::to_bytes_with_key`] to compute a valid signature.
     #[must_use]
     pub fn empty(region_id: RegionId) -> Self {
         Self {
@@ -152,10 +163,14 @@ impl RegionSnapshot {
             cancel_reason: None,
             parent: None,
             metadata: Vec::new(),
+            auth_tag: AuthenticationTag::zero(),
         }
     }
 
-    /// Serializes the snapshot to a deterministic binary format.
+    /// Serializes the snapshot to a deterministic binary format with authentication.
+    ///
+    /// This method computes a fresh HMAC-SHA256 signature over all snapshot
+    /// content using the provided key.
     ///
     /// Format:
     /// - 4 bytes magic (`SNAP`)
@@ -173,8 +188,36 @@ impl RegionSnapshot {
     /// - optional cancel_reason string
     /// - optional parent region_id
     /// - metadata blob
+    /// - 32 bytes HMAC-SHA256 authentication tag
     #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes_with_key(&self, key: &AuthKey) -> Vec<u8> {
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+
+        type HmacSha256 = Hmac<Sha256>;
+
+        // Serialize content without signature
+        let content = self.to_bytes_unsigned();
+
+        // Compute HMAC-SHA256 over content
+        let mut mac = HmacSha256::new_from_slice(key.as_bytes())
+            .expect("HMAC accepts any key length");
+        mac.update(SNAPSHOT_AUTH_DOMAIN);
+        mac.update(&content);
+        let auth_tag: [u8; 32] = mac.finalize().into_bytes().into();
+
+        // Append signature
+        let mut buf = content;
+        buf.extend_from_slice(&auth_tag);
+        buf
+    }
+
+    /// Serializes the snapshot to a deterministic binary format without authentication.
+    ///
+    /// This serializes all fields except auth_tag. Used internally by
+    /// [`Self::to_bytes_with_key`] and [`Self::to_bytes`].
+    #[must_use]
+    pub fn to_bytes_unsigned(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(self.size_estimate());
 
         // Header
@@ -248,12 +291,105 @@ impl RegionSnapshot {
         buf
     }
 
-    /// Deserializes a snapshot from bytes.
+    /// Serializes the snapshot to a deterministic binary format.
+    ///
+    /// This method uses the auth_tag field as stored in the struct, which may be
+    /// zero/invalid. For proper authentication, use [`Self::to_bytes_with_key`].
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = self.to_bytes_unsigned();
+        buf.extend_from_slice(self.auth_tag.as_bytes());
+        buf
+    }
+
+    /// Deserializes a snapshot from bytes with cryptographic verification.
+    ///
+    /// This method verifies the HMAC-SHA256 signature before accepting the snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data is malformed, the version is unsupported,
+    /// or the cryptographic signature verification fails.
+    pub fn from_bytes_with_key(data: &[u8], key: &AuthKey) -> Result<Self, SnapshotError> {
+        use hmac::{Hmac, KeyInit, Mac};
+        use sha2::Sha256;
+
+        type HmacSha256 = Hmac<Sha256>;
+
+        // Must have at least 32 bytes for auth_tag
+        if data.len() < 32 {
+            return Err(SnapshotError::UnexpectedEof);
+        }
+
+        // Split content and signature
+        let content_len = data.len() - 32;
+        let content = &data[..content_len];
+        let auth_tag_bytes = &data[content_len..];
+        let auth_tag = AuthenticationTag::from_bytes(
+            auth_tag_bytes
+                .try_into()
+                .expect("verified 32-byte slice above"),
+        );
+
+        // Check for zero tag (unauthenticated)
+        if auth_tag.is_zero() {
+            return Err(SnapshotError::UnauthenticatedSnapshot);
+        }
+
+        // Verify signature
+        let mut mac = HmacSha256::new_from_slice(key.as_bytes())
+            .expect("HMAC accepts any key length");
+        mac.update(SNAPSHOT_AUTH_DOMAIN);
+        mac.update(content);
+
+        if mac.verify_slice(auth_tag.as_bytes()).is_err() {
+            return Err(SnapshotError::AuthenticationFailed);
+        }
+
+        // Parse the content (without signature)
+        let mut snapshot = Self::from_bytes_unsigned(content)?;
+        snapshot.auth_tag = auth_tag;
+        Ok(snapshot)
+    }
+
+    /// Deserializes a snapshot from bytes without cryptographic verification.
+    ///
+    /// This method reads the auth_tag but does not verify it. For secure
+    /// verification, use [`Self::from_bytes_with_key`].
     ///
     /// # Errors
     ///
     /// Returns an error if the data is malformed or the version is unsupported.
     pub fn from_bytes(data: &[u8]) -> Result<Self, SnapshotError> {
+        // Must have at least 32 bytes for auth_tag
+        if data.len() < 32 {
+            return Err(SnapshotError::UnexpectedEof);
+        }
+
+        // Split content and signature
+        let content_len = data.len() - 32;
+        let content = &data[..content_len];
+        let auth_tag_bytes = &data[content_len..];
+        let auth_tag = AuthenticationTag::from_bytes(
+            auth_tag_bytes
+                .try_into()
+                .expect("verified 32-byte slice above"),
+        );
+
+        // Parse the content (without signature)
+        let mut snapshot = Self::from_bytes_unsigned(content)?;
+        snapshot.auth_tag = auth_tag;
+        Ok(snapshot)
+    }
+
+    /// Deserializes snapshot content without the authentication tag.
+    ///
+    /// Used internally by both [`Self::from_bytes`] and [`Self::from_bytes_with_key`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data is malformed or the version is unsupported.
+    fn from_bytes_unsigned(data: &[u8]) -> Result<Self, SnapshotError> {
         let mut cursor = Cursor::new(data);
 
         // Magic
@@ -375,6 +511,7 @@ impl RegionSnapshot {
             cancel_reason,
             parent,
             metadata,
+            auth_tag: AuthenticationTag::zero(), // Set by caller
         })
     }
 
@@ -403,6 +540,7 @@ impl RegionSnapshot {
         );
         let parent = 1_usize + self.parent.map_or(0, |_| 8);
         let metadata = 4_usize.saturating_add(self.metadata.len());
+        let auth_tag = 32_usize; // HMAC-SHA256 tag
 
         header
             .saturating_add(region_id)
@@ -417,6 +555,7 @@ impl RegionSnapshot {
             .saturating_add(cancel)
             .saturating_add(parent)
             .saturating_add(metadata)
+            .saturating_add(auth_tag)
     }
 
     /// Computes a deterministic hash for deduplication.
@@ -521,6 +660,7 @@ impl RegionSnapshot {
                 .or_else(|| preferred_cancel.1.clone()),
             parent: merge_parent_region(self.parent, other.parent),
             metadata,
+            auth_tag: AuthenticationTag::zero(), // Merged snapshot requires re-signing
         })
     }
 }
@@ -661,6 +801,10 @@ pub enum SnapshotError {
         /// Maximum length this deserialiser will accept.
         max: usize,
     },
+    /// Cryptographic signature verification failed.
+    AuthenticationFailed,
+    /// Zero authentication tag (unauthenticated sentinel).
+    UnauthenticatedSnapshot,
 }
 
 impl std::fmt::Display for SnapshotError {
@@ -682,6 +826,10 @@ impl std::fmt::Display for SnapshotError {
                     f,
                     "snapshot metadata_len ({len} B) exceeds the per-deserialise maximum ({max} B)"
                 )
+            }
+            Self::AuthenticationFailed => write!(f, "snapshot authentication failed"),
+            Self::UnauthenticatedSnapshot => {
+                write!(f, "snapshot contains unauthenticated zero tag")
             }
         }
     }
