@@ -38,9 +38,8 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::task::{Context, Poll};
 
-use crate::cx::{scope::CatchUnwind, Cx, cap};
+use crate::cx::{Cx, cap};
 use crate::error::Error;
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
@@ -161,7 +160,7 @@ impl<'a> RequestRegion<'a> {
     {
         let _cx_guard = Cx::set_current(Some(self.cx.clone()));
         let ctx = RequestContext {
-            cx: self.cx.clone(),
+            cx: &self.cx,
             request: &self.request,
             _not_send_sync: PhantomData,
         };
@@ -1455,8 +1454,11 @@ mod tests {
             struct AsyncTestHandler;
 
             impl crate::web::handler::Handler for AsyncTestHandler {
-                async fn call(&self, _cx: &Cx, req: Request) -> Response {
-                    Response::new(StatusCode::OK, format!("async: {}", req.path).into_bytes())
+                fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+                    let path = req.path.clone();
+                    Box::pin(async move {
+                        Response::new(StatusCode::OK, format!("async: {}", path).into_bytes())
+                    })
                 }
             }
 
