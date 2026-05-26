@@ -180,14 +180,25 @@ impl<T> TrackedSender<T> {
         cx: &'a Cx,
     ) -> Result<TrackedPermit<'a, T>, mpsc::SendError<()>> {
         let permit = self.inner.reserve(cx).await?;
-        let obligation = ObligationToken::<SendPermit>::reserve("TrackedPermit(mpsc)");
+        let obligation = ObligationToken::<SendPermit>::reserve("TrackedPermit(mpsc)", cx.region_id());
         Ok(TrackedPermit { permit, obligation })
     }
 
     /// Non-blocking reserve attempt.
     pub fn try_reserve(&self) -> Result<TrackedPermit<'_, T>, mpsc::SendError<()>> {
         let permit = self.inner.try_reserve()?;
-        let obligation = ObligationToken::<SendPermit>::reserve("TrackedPermit(mpsc)");
+        let obligation = {
+            let region = crate::cx::Cx::current()
+                .map(|cx| cx.region_id())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Cannot create tracked permit outside of task context: \
+                         obligation tokens require region scoping to prevent leaks. \
+                         Use async reserve() method when in async context."
+                    )
+                });
+            ObligationToken::<SendPermit>::reserve("TrackedPermit(mpsc)", region)
+        };
         Ok(TrackedPermit { permit, obligation })
     }
 
@@ -357,7 +368,7 @@ impl<T> TrackedOneshotSender<T> {
     /// (br-asupersync-4taf1b).
     pub fn reserve(self, cx: &Cx) -> Result<TrackedOneshotPermit<T>, oneshot::SendError<()>> {
         let permit = self.inner.reserve(cx)?;
-        let obligation = ObligationToken::<SendPermit>::reserve("TrackedOneshotPermit");
+        let obligation = ObligationToken::<SendPermit>::reserve("TrackedOneshotPermit", cx.region_id());
         Ok(TrackedOneshotPermit { permit, obligation })
     }
 

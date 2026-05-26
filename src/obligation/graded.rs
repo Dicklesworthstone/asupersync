@@ -57,6 +57,7 @@
 //! ```
 
 use crate::record::{ObligationKind, ObligationState};
+use crate::types::RegionId;
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -763,27 +764,65 @@ impl TokenKind for SemaphorePermitKind {
 /// ```compile_fail
 /// use asupersync::obligation::graded::{ObligationToken, SendPermitToken};
 ///
-/// let token: SendPermitToken = ObligationToken::reserve("send");
+/// let token: SendPermitToken = ObligationToken::reserve_test("send");
 /// let committed = token.commit();
 /// let _late_abort = committed.abort();
 /// ```
 #[must_use = "obligation tokens must be consumed via commit() or abort()"]
 pub struct ObligationToken<K: TokenKind> {
     description: String,
+    region: RegionId,
     armed: bool,
     _kind: PhantomData<K>,
 }
 
 impl<K: TokenKind> ObligationToken<K> {
-    /// Reserve a new obligation token with the given description.
+    /// Reserve a new obligation token with the given description and region context.
+    ///
+    /// This method ensures the obligation is properly scoped to a region, preventing
+    /// obligation leaks that could occur if tokens outlive their intended scope.
+    ///
+    /// # Region Validation
+    ///
+    /// The region must be valid and active. Creating obligations outside of proper
+    /// region context violates the "no obligation leaks" invariant.
     #[allow(clippy::double_must_use)]
     #[must_use]
-    pub fn reserve(description: impl Into<String>) -> Self {
+    pub fn reserve(description: impl Into<String>, region: RegionId) -> Self {
+        // Validate that the region is not the root region (which should not hold obligations)
+        // and that we're in a valid execution context. The root region typically has
+        // index 0, generation 0.
+        if region.as_u64() == 0 {
+            panic!(
+                "Cannot create obligation token in root region: obligations must be \
+                 scoped to non-root regions to prevent leaks. Description: {}",
+                description.into()
+            );
+        }
+
         Self {
             description: description.into(),
+            region,
             armed: true,
             _kind: PhantomData,
         }
+    }
+
+    /// Returns the region this obligation is scoped to.
+    #[must_use]
+    pub fn region(&self) -> RegionId {
+        self.region
+    }
+
+    /// Reserve a token for testing with a synthetic test region.
+    ///
+    /// This method should only be used in tests where proper region context
+    /// is not available. Production code should use `reserve()` with a real
+    /// region from the current Cx.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[must_use]
+    pub fn reserve_test(description: impl Into<String>) -> Self {
+        Self::reserve(description, RegionId::new_ephemeral())
     }
 
     /// Reserve a typed token from dynamic obligation metadata.
@@ -798,10 +837,11 @@ impl<K: TokenKind> ObligationToken<K> {
     pub fn try_reserve_kind(
         kind: ObligationKind,
         description: impl Into<String>,
+        region: RegionId,
     ) -> Result<Self, TypedObligationKindError> {
         let expected = K::obligation_kind();
         if kind == expected {
-            Ok(Self::reserve(description))
+            Ok(Self::reserve(description, region))
         } else {
             Err(TypedObligationKindError {
                 expected,
@@ -955,7 +995,7 @@ impl GradedScope {
         description: impl Into<String>,
     ) -> ObligationToken<K> {
         self.on_reserve();
-        ObligationToken::reserve(description)
+        ObligationToken::reserve_test(description)
     }
 
     /// Reserve a typed token from dynamic obligation metadata and record it.
@@ -972,7 +1012,7 @@ impl GradedScope {
         kind: ObligationKind,
         description: impl Into<String>,
     ) -> Result<ObligationToken<K>, TypedObligationKindError> {
-        let token = ObligationToken::try_reserve_kind(kind, description)?;
+        let token = ObligationToken::try_reserve_kind(kind, description, RegionId::new_ephemeral())?;
         self.on_reserve();
         Ok(token)
     }
@@ -1456,7 +1496,7 @@ mod tests {
     #[test]
     fn token_commit_returns_proof() {
         init_test("token_commit_returns_proof");
-        let token: SendPermitToken = ObligationToken::reserve("commit-test");
+        let token: SendPermitToken = ObligationToken::reserve_test("commit-test");
         let proof = token.commit();
         let kind = proof.kind();
         crate::assert_with_log!(
@@ -1471,7 +1511,7 @@ mod tests {
     #[test]
     fn token_abort_returns_proof() {
         init_test("token_abort_returns_proof");
-        let token: AckToken = ObligationToken::reserve("abort-test");
+        let token: AckToken = ObligationToken::reserve_test("abort-test");
         let proof = token.abort();
         let kind = proof.kind();
         crate::assert_with_log!(
@@ -1674,14 +1714,14 @@ mod tests {
     #[should_panic(expected = "OBLIGATION TOKEN LEAKED")]
     fn token_drop_without_consume_panics() {
         init_test("token_drop_without_consume_panics");
-        let _token: SendPermitToken = ObligationToken::reserve("leaked-token");
+        let _token: SendPermitToken = ObligationToken::reserve_test("leaked-token");
         // Dropped without commit or abort — should panic.
     }
 
     #[test]
     fn token_into_raw_disarms() {
         init_test("token_into_raw_disarms");
-        let token: LeaseToken = ObligationToken::reserve("raw-escape");
+        let token: LeaseToken = ObligationToken::reserve_test("raw-escape");
         let raw = token.into_raw();
         let kind = raw.kind;
         crate::assert_with_log!(
@@ -1697,7 +1737,7 @@ mod tests {
     #[test]
     fn committed_proof_bridge() {
         init_test("committed_proof_bridge");
-        let token: SendPermitToken = ObligationToken::reserve("bridge-commit");
+        let token: SendPermitToken = ObligationToken::reserve_test("bridge-commit");
         let committed = token.commit();
         let resolved = committed.into_resolved_proof();
         let r = resolved.resolution();
@@ -1715,7 +1755,7 @@ mod tests {
     #[test]
     fn aborted_proof_bridge() {
         init_test("aborted_proof_bridge");
-        let token: AckToken = ObligationToken::reserve("bridge-abort");
+        let token: AckToken = ObligationToken::reserve_test("bridge-abort");
         let aborted = token.abort();
         let resolved = aborted.into_resolved_proof();
         let r = resolved.resolution();
@@ -1821,7 +1861,7 @@ mod tests {
         init_test("all_four_token_kinds");
 
         // SendPermit
-        let t1: SendPermitToken = ObligationToken::reserve("sp");
+        let t1: SendPermitToken = ObligationToken::reserve_test("sp");
         let p1 = t1.commit();
         let k1 = p1.kind();
         crate::assert_with_log!(
@@ -1832,13 +1872,13 @@ mod tests {
         );
 
         // Ack
-        let t2: AckToken = ObligationToken::reserve("ack");
+        let t2: AckToken = ObligationToken::reserve_test("ack");
         let p2 = t2.abort();
         let k2 = p2.kind();
         crate::assert_with_log!(k2 == ObligationKind::Ack, "Ack", ObligationKind::Ack, k2);
 
         // Lease
-        let t3: LeaseToken = ObligationToken::reserve("lease");
+        let t3: LeaseToken = ObligationToken::reserve_test("lease");
         let p3 = t3.commit();
         let k3 = p3.kind();
         crate::assert_with_log!(
@@ -1849,7 +1889,7 @@ mod tests {
         );
 
         // IoOp
-        let t4: IoOpToken = ObligationToken::reserve("io");
+        let t4: IoOpToken = ObligationToken::reserve_test("io");
         let p4 = t4.abort();
         let k4 = p4.kind();
         crate::assert_with_log!(k4 == ObligationKind::IoOp, "IoOp", ObligationKind::IoOp, k4);
@@ -1980,7 +2020,7 @@ mod tests {
         let mut scope = GradedScope::open("L2");
         scope.on_reserve();
         let before = scope.outstanding();
-        let tok: ObligationToken<SendPermit> = ObligationToken::reserve("L2");
+        let tok: ObligationToken<SendPermit> = ObligationToken::reserve_test("L2");
         let _proof = tok.commit(); // consume token
         scope.on_resolve();
         let after = scope.outstanding();
@@ -1998,7 +2038,7 @@ mod tests {
         let mut scope = GradedScope::open("L3");
         scope.on_reserve();
         let before = scope.outstanding();
-        let tok: ObligationToken<AckKind> = ObligationToken::reserve("L3");
+        let tok: ObligationToken<AckKind> = ObligationToken::reserve_test("L3");
         let _proof = tok.abort();
         scope.on_resolve();
         let after = scope.outstanding();
@@ -2123,11 +2163,11 @@ mod tests {
         let send_commit = <SendPermit as TokenKind>::obligation_kind();
         let ack_abort = <AckKind as TokenKind>::obligation_kind();
 
-        let t1: SendPermitToken = ObligationToken::reserve("send");
+        let t1: SendPermitToken = ObligationToken::reserve_test("send");
         let p1 = t1.commit();
         let pass1 = p1.kind() == send_commit && p1.into_resolved_proof().kind() == send_commit;
 
-        let t2: AckToken = ObligationToken::reserve("ack");
+        let t2: AckToken = ObligationToken::reserve_test("ack");
         let p2 = t2.abort();
         let pass2 = p2.kind() == ack_abort && p2.into_resolved_proof().kind() == ack_abort;
 
@@ -2144,7 +2184,7 @@ mod tests {
         let raw = ob.into_raw();
         let pass_a = raw.kind == ObligationKind::Lease && raw.description == "raw";
 
-        let tok: LeaseToken = ObligationToken::reserve("raw-ts");
+        let tok: LeaseToken = ObligationToken::reserve_test("raw-ts");
         let raw2 = tok.into_raw();
         let pass_b = raw2.kind == ObligationKind::Lease && raw2.description == "raw-ts";
 

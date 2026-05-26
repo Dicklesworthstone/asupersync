@@ -355,7 +355,19 @@ impl Semaphore {
                 // observer that needs the numeric identity; duplicating
                 // it here in heap-allocated form was wasted work on the
                 // synchronization-critical path.
-                obligation: Some(ObligationToken::reserve("semaphore-permit")),
+                obligation: Some({
+                    // Get region from current thread-local context for obligation scoping
+                    let region = crate::cx::Cx::current()
+                        .map(|cx| cx.region_id())
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Cannot acquire semaphore permit outside of task context: \
+                                 obligation tokens require region scoping to prevent leaks. \
+                                 Use async acquire() method when in async context."
+                            )
+                        });
+                    ObligationToken::reserve("semaphore-permit", region)
+                }),
                 semaphore: self,
                 count,
                 release_lock_order_on_drop: true,
@@ -514,7 +526,7 @@ impl<'a> Future for AcquireFuture<'a, '_> {
                 // br-asupersync-13jmt3: static description (see paired
                 // comment in try_acquire); count is exposed via
                 // SemaphorePermit.count.
-                obligation: Some(ObligationToken::reserve("semaphore-permit")),
+                obligation: Some(ObligationToken::reserve("semaphore-permit", self.cx.region_id())),
                 semaphore: self.semaphore,
                 count: self.count,
                 release_lock_order_on_drop: true,
@@ -891,7 +903,17 @@ impl Future for OwnedAcquireFuture {
                 // br-asupersync-13jmt3: static description (see paired
                 // comment in try_acquire); count is exposed via
                 // OwnedSemaphorePermit.count.
-                obligation: Some(ObligationToken::reserve("semaphore-permit")),
+                obligation: Some({
+                    let region = this.cx.as_ref()
+                        .map(|cx| cx.region_id())
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "Cannot acquire owned semaphore permit without context: \
+                                 obligation tokens require region scoping to prevent leaks."
+                            )
+                        });
+                    ObligationToken::reserve("semaphore-permit", region)
+                }),
                 semaphore: this.semaphore.clone(),
                 count: this.count,
             }));

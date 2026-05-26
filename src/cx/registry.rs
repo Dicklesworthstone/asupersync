@@ -145,7 +145,7 @@ impl NameLease {
         let mut description = String::with_capacity(PREFIX.len() + name.len());
         description.push_str(PREFIX);
         description.push_str(&name);
-        let token = ObligationToken::reserve(description);
+        let token = ObligationToken::reserve(description, region);
         Self {
             name,
             holder,
@@ -281,7 +281,7 @@ impl NamePermit {
         let mut description = String::with_capacity(PREFIX.len() + name.len());
         description.push_str(PREFIX);
         description.push_str(&name);
-        let token = ObligationToken::reserve(description);
+        let token = ObligationToken::reserve(description, region);
         Self {
             name,
             holder,
