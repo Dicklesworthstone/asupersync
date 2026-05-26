@@ -39,17 +39,38 @@ impl AuthenticatedSymbol {
     /// `verified` flag never lies: if the tag is the zero sentinel,
     /// the symbol is reported as `is_verified() == false`, forcing
     /// every consumer to either run a real verification step or
-    /// reject the symbol explicitly. This is a runtime invariant
-    /// (the type signature itself is unchanged), so the existing
-    /// zero-sentinel callsites in `typed_symbol.rs` still compile —
-    /// they just stop producing falsely-verified symbols.
+    /// reject the symbol explicitly.
+    ///
+    /// asupersync-8kumb7: Callers should use `new_unauthenticated()` instead of
+    /// passing zero tags to this method, as it makes the lack of authentication explicit.
     #[must_use]
     pub(crate) fn new_verified(symbol: Symbol, tag: AuthenticationTag) -> Self {
+        // asupersync-8kumb7: Log warning for zero tag usage to discourage this pattern
+        if tag.is_zero() {
+            eprintln!("WARNING: AuthenticatedSymbol::new_verified called with zero tag - consider using new_unauthenticated() instead");
+        }
+
         let verified = !tag.is_zero();
         Self {
             symbol,
             tag,
             verified,
+        }
+    }
+
+    /// Creates an explicitly unauthenticated symbol.
+    ///
+    /// This is for encoding paths that have not yet been wired to real authentication keys.
+    /// The symbol is marked as unverified and uses the zero sentinel tag.
+    ///
+    /// This is preferred over `new_verified(symbol, AuthenticationTag::zero())` because
+    /// it makes the lack of authentication explicit in the calling code.
+    #[must_use]
+    pub(crate) fn new_unauthenticated(symbol: Symbol) -> Self {
+        Self {
+            symbol,
+            tag: AuthenticationTag::zero(),
+            verified: false,
         }
     }
 
@@ -150,6 +171,19 @@ mod tests {
             !auth.is_verified(),
             "br-asupersync-srqosl: zero-tag sentinel must not pose as verified"
         );
+    }
+
+    #[test]
+    fn test_new_unauthenticated() {
+        // asupersync-8kumb7: new_unauthenticated() should create a symbol
+        // that is explicitly marked as unverified and uses zero tag
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
+        let auth = AuthenticatedSymbol::new_unauthenticated(symbol.clone());
+
+        assert!(!auth.is_verified(), "unauthenticated symbol must not be verified");
+        assert!(auth.tag().is_zero(), "unauthenticated symbol must use zero tag");
+        assert_eq!(auth.symbol(), &symbol, "symbol data must be preserved");
     }
 
     #[test]

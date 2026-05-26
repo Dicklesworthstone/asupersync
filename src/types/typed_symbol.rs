@@ -9,7 +9,6 @@ use crate::config::EncodingConfig;
 use crate::decoding::{DecodingConfig, DecodingError, DecodingPipeline};
 use crate::encoding::{EncodingError, EncodingPipeline};
 use crate::security::AuthenticatedSymbol;
-use crate::security::tag::AuthenticationTag;
 use crate::transport::{SymbolSink, SymbolSinkExt, SymbolStream, SymbolStreamExt};
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol_set::SymbolSet;
@@ -626,21 +625,12 @@ impl<T: Serialize + 'static> TypedEncoder<T> {
         let symbols = self.encode(object_id, value)?;
         let mut count = 0;
         for symbol in symbols {
-            // br-asupersync-usr4ax: the AuthenticationTag::zero
-            // value is the documented unauthenticated sentinel that
-            // AuthenticationTag::compute() never produces. The
-            // verify() path now fail-closes on it (see
-            // src/security/tag.rs), so any consumer that calls
-            // verify() against this AuthenticatedSymbol gets `false`
-            // regardless of key. This downgrades the silent-bypass
-            // surface to a deterministic rejection. The proper fix
-            // (computing a real HMAC tag with a runtime-managed key)
-            // is a larger refactor — wire a key into TypedEncoder via
-            // a Cx-rooted capability. Until that lands, every
-            // AuthenticatedSymbol leaving this path is verifiably
-            // unauthenticated and downstream cap-aware code rejects.
-            let auth =
-                AuthenticatedSymbol::new_verified(symbol.into_symbol(), AuthenticationTag::zero());
+            // asupersync-8kumb7: Use new_unauthenticated() to make the lack of
+            // authentication explicit. This encoding path has not yet been
+            // wired to a runtime-managed key via Cx-rooted capability.
+            // The AuthenticatedSymbol will be marked as unverified and
+            // downstream cap-aware code will reject it.
+            let auth = AuthenticatedSymbol::new_unauthenticated(symbol.into_symbol());
             sink.send(auth)
                 .await
                 .map_err(|err| EncodingError::ComputationFailed {
@@ -935,11 +925,10 @@ fn feed_typed_symbol<T>(
         });
     }
     let inner_symbol = Symbol::new(raw.id(), payload, raw.kind());
-    // br-asupersync-usr4ax: zero-tag sentinel; downstream verify()
-    // fail-closes on it (src/security/tag.rs). Same caveat as the
-    // TypedEncoder::encode_to_sink callsite above — a full fix routes
-    // a real Cx-anchored AuthKey through the pipeline.
-    let auth = AuthenticatedSymbol::new_verified(inner_symbol, AuthenticationTag::zero());
+    // asupersync-8kumb7: Use new_unauthenticated() to make the lack of
+    // authentication explicit. Same caveat as the TypedEncoder::encode_to_sink
+    // callsite — a full fix routes a real Cx-anchored AuthKey through the pipeline.
+    let auth = AuthenticatedSymbol::new_unauthenticated(inner_symbol);
     let _ = pipeline.feed(auth)?;
     Ok(())
 }
@@ -1228,7 +1217,8 @@ mod tests {
         let auth_symbols = symbols
             .into_iter()
             .map(|symbol| {
-                AuthenticatedSymbol::new_verified(symbol.into_symbol(), AuthenticationTag::zero())
+                // asupersync-8kumb7: Use new_unauthenticated() for test symbols
+                AuthenticatedSymbol::new_unauthenticated(symbol.into_symbol())
             })
             .collect();
         let mut stream = ReadyThenPendingStream::new(auth_symbols);
