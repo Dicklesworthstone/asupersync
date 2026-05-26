@@ -976,14 +976,22 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
         .map(|affinity| ((thread_id.saturating_sub(1)) as usize) % affinity.cohort_count);
 
     // Enforce max_threads atomically to prevent overshoot during concurrent spawns
+    // Fix TOCTOU race: use Acquire/Release ordering to prevent multiple threads
+    // from seeing stale counts and bypassing the limit simultaneously
     loop {
-        let current = inner.active_threads.load(Ordering::Relaxed);
+        let current = inner.active_threads.load(Ordering::Acquire);
         if current >= inner.max_threads {
             return;
         }
+
+        // Double-check limit before increment to prevent TOCTOU bypass
+        if current + 1 > inner.max_threads {
+            return;
+        }
+
         if inner
             .active_threads
-            .compare_exchange_weak(current, current + 1, Ordering::Relaxed, Ordering::Relaxed)
+            .compare_exchange_weak(current, current + 1, Ordering::Release, Ordering::Relaxed)
             .is_ok()
         {
             break;
