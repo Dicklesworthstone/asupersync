@@ -103,14 +103,29 @@ impl RemoteRuntime for VirtualNetworkRuntime {
         destination: &NodeId,
         envelope: MessageEnvelope<RemoteMessage>,
     ) -> Result<(), RemoteError> {
-        // The harness owns sender identity per SimNode. Rewrite protocol-origin fields so
-        // reply routing uses this node's actual ID instead of initialized defaults.
+        // SECURITY: Validate sender identity to prevent node impersonation attacks.
+        // The harness owns sender identity per SimNode. Verify the origin_node matches
+        // this runtime's local_node to prevent spoofing attacks.
         let message = match envelope.payload {
             RemoteMessage::SpawnRequest(mut req) => {
+                // Security check: origin_node must match runtime's identity
+                if req.origin_node.as_str() != "" && req.origin_node != self.local_node {
+                    return Err(RemoteError::TransportError(format!(
+                        "Identity spoofing detected: request origin_node {:?} does not match runtime's local_node {:?}",
+                        req.origin_node, self.local_node
+                    )));
+                }
                 req.origin_node = self.local_node.clone();
                 RemoteMessage::SpawnRequest(req)
             }
             RemoteMessage::CancelRequest(mut cancel) => {
+                // Security check: origin_node must match runtime's identity
+                if cancel.origin_node.as_str() != "" && cancel.origin_node != self.local_node {
+                    return Err(RemoteError::TransportError(format!(
+                        "Identity spoofing detected: cancel origin_node {:?} does not match runtime's local_node {:?}",
+                        cancel.origin_node, self.local_node
+                    )));
+                }
                 cancel.origin_node = self.local_node.clone();
                 RemoteMessage::CancelRequest(cancel)
             }
@@ -2229,5 +2244,106 @@ mod tests {
             "expected skewed clock to merge into receiver"
         );
         assert_eq!(node_b.running_task_count(), 0);
+    }
+
+    #[test]
+    fn identity_spoofing_protection_rejects_mismatched_origin_node() {
+        // Security regression test for asupersync-1f4mlq
+        let node_a = NodeId::new("legitimate-node");
+        let node_b = NodeId::new("victim-node");
+
+        // Create a runtime that claims to be node_a
+        let outbox = Arc::new(Mutex::new(VecDeque::new()));
+        let pending = Arc::new(Mutex::new(BTreeMap::new()));
+        let runtime = VirtualNetworkRuntime {
+            local_node: node_a.clone(),
+            outbox: outbox.clone(),
+            pending_results: pending,
+        };
+
+        // Try to send a message that claims to originate from victim node_b
+        let fake_req = SpawnRequest {
+            remote_task_id: RemoteTaskId::next(),
+            computation: crate::remote::ComputationName::new("test-computation"),
+            input: crate::remote::RemoteInput::new(vec![]),
+            lease: Duration::from_secs(30),
+            idempotency_key: IdempotencyKey::from_raw(42),
+            budget: None,
+            origin_node: node_b.clone(), // SPOOFED IDENTITY
+            origin_region: crate::types::RegionId::new_for_test(0, 0),
+            origin_task: crate::types::TaskId::new_for_test(0, 0),
+        };
+
+        let envelope = MessageEnvelope::new(
+            node_a.clone(),
+            LogicalTime::Zero,
+            RemoteMessage::SpawnRequest(fake_req),
+        );
+
+        // The send_message should reject this spoofed identity
+        let result = runtime.send_message(&NodeId::new("target"), envelope);
+        assert!(result.is_err());
+
+        if let Err(RemoteError::TransportError(msg)) = result {
+            assert!(msg.contains("Identity spoofing detected"));
+            assert!(msg.contains(&format!("{:?}", node_b)));
+            assert!(msg.contains(&format!("{:?}", node_a)));
+        } else {
+            panic!("Expected TransportError with identity spoofing message, got: {:?}", result);
+        }
+
+        // Verify no message was actually sent
+        assert!(outbox.lock().is_empty());
+    }
+
+    #[test]
+    fn legitimate_origin_node_is_allowed() {
+        // Test that legitimate messages (matching origin_node) are allowed
+        let node_a = NodeId::new("legitimate-node");
+
+        let outbox = Arc::new(Mutex::new(VecDeque::new()));
+        let pending = Arc::new(Mutex::new(BTreeMap::new()));
+        let runtime = VirtualNetworkRuntime {
+            local_node: node_a.clone(),
+            outbox: outbox.clone(),
+            pending_results: pending,
+        };
+
+        // Send a message with matching origin_node
+        let legitimate_req = SpawnRequest {
+            remote_task_id: RemoteTaskId::next(),
+            computation: crate::remote::ComputationName::new("test-computation"),
+            input: crate::remote::RemoteInput::new(vec![]),
+            lease: Duration::from_secs(30),
+            idempotency_key: IdempotencyKey::from_raw(43),
+            budget: None,
+            origin_node: node_a.clone(), // LEGITIMATE IDENTITY
+            origin_region: crate::types::RegionId::new_for_test(0, 0),
+            origin_task: crate::types::TaskId::new_for_test(0, 0),
+        };
+
+        let envelope = MessageEnvelope::new(
+            node_a.clone(),
+            LogicalTime::Zero,
+            RemoteMessage::SpawnRequest(legitimate_req),
+        );
+
+        let target = NodeId::new("target");
+        let result = runtime.send_message(&target, envelope);
+        assert!(result.is_ok());
+
+        // Verify message was sent
+        let messages = outbox.lock();
+        assert_eq!(messages.len(), 1);
+
+        let (dest, message) = &messages[0];
+        assert_eq!(dest, &target);
+
+        // Verify the message has the correct origin_node (runtime's local_node)
+        if let RemoteMessage::SpawnRequest(req) = message {
+            assert_eq!(req.origin_node, node_a);
+        } else {
+            panic!("Expected SpawnRequest message");
+        }
     }
 }
