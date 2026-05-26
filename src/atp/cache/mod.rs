@@ -372,12 +372,11 @@ impl AtpCache {
 
     /// Compute content hash for verification.
     fn compute_content_hash(&self, content: &[u8]) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use sha2::{Digest, Sha256};
 
-        let mut hasher = DefaultHasher::new();
-        content.hash(&mut hasher);
-        format!("{:x}", hasher.finish())
+        let mut hasher = Sha256::new();
+        hasher.update(content);
+        format!("{:x}", hasher.finalize())
     }
 
     /// Update access tracking for LRU eviction.
