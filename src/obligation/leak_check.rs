@@ -1864,7 +1864,7 @@ mod tests {
         //   if ok {
         //     permit.send(data);
         //   } else {
-        //     log_error();  // BUG: forgot to cancel permit
+        //     log_error();  // EXAMPLE BUG: forgot to cancel permit
         //   }
         let body = Body::new(
             "leaky_send",
@@ -1976,7 +1976,7 @@ mod tests {
         //   let ack = receive_message();          // v1: Ack
         //   if error {
         //     ack.reject();                       // abort v1
-        //     // BUG: forgot to release lease
+        //     // EXAMPLE BUG: forgot to release lease
         //   } else {
         //     process(data);
         //     ack.acknowledge();                  // commit v1

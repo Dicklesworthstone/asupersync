@@ -420,7 +420,7 @@ mod mutation_tests {
                 MockState::Closing => {
                     *state = MockState::Open;
                     false
-                } // BUG: goes backward!
+                } // INTENTIONAL BUG: goes backward (for metamorphic testing)!
             }
         }
 

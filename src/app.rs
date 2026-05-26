@@ -2478,8 +2478,8 @@ mod tests {
 
     #[test]
     fn stop_region_not_found_does_not_panic() {
-        // BUG: stop() returned Err without defusing the drop bomb, causing
-        // a panic ("APP HANDLE LEAKED") when the handle was later dropped.
+        // REGRESSION TEST: stop() must defuse the drop bomb even when returning Err,
+        // preventing panic ("APP HANDLE LEAKED") when the handle is later dropped.
         init_test("stop_region_not_found_does_not_panic");
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
@@ -2507,7 +2507,8 @@ mod tests {
 
     #[test]
     fn join_region_not_found_does_not_panic() {
-        // Same drop-bomb bug as stop(), but on the join() path.
+        // REGRESSION TEST: join() must defuse the drop bomb even when returning Err,
+        // same as stop() path above.
         init_test("join_region_not_found_does_not_panic");
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);

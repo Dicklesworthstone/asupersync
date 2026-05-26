@@ -565,7 +565,7 @@ mod integration_tests {
                 if !measurements.contains_key(&resource_type) {
                     measurements.insert(resource_type, measurement);
                 }
-                // BUG: ignores updates after first one
+                // INTENTIONAL BUG: ignores updates after first one (for metamorphic testing)
             }
 
             // Bug: non-monotonic degradation (violates MR2)
@@ -573,7 +573,7 @@ mod integration_tests {
                 &self,
                 _resource_type: &ResourceType,
             ) -> DegradationLevel {
-                // BUG: returns degradation unrelated to the measured resource.
+                // INTENTIONAL BUG: returns degradation unrelated to the measured resource (for metamorphic testing).
                 if self.measurements.borrow().len().is_multiple_of(2) {
                     DegradationLevel::Light
                 } else {

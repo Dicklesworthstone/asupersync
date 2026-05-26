@@ -1622,7 +1622,7 @@ mod tests {
         bh.cancel_entry(entry_id, now);
 
         // 6. Verify permit is returned
-        // BUG: Without the fix, this assertion fails because the permit is leaked.
+        // REGRESSION TEST: Without the fix, this assertion fails because the permit is leaked.
         assert_eq!(
             bh.available(),
             1,

@@ -4136,7 +4136,7 @@ mod tests {
 
     #[test]
     fn parse_js_message_dotted_stream_name() {
-        // BUG-1 regression: stream/consumer names with dots should not break
+        // REGRESSION TEST #1: stream/consumer names with dots should not break
         // the ACK reply subject parser.  The format is:
         // $JS.ACK.<stream>.<consumer>.<delivered>.<stream_seq>.<consumer_seq>.<ts>.<pending>
         // With dotted names, there are >9 dot-separated segments.
@@ -4172,7 +4172,7 @@ mod tests {
 
     #[test]
     fn error_detection_no_false_positive() {
-        // BUG-2 regression: a response containing "error" in a data field
+        // REGRESSION TEST #2: a response containing "error" in a data field
         // should NOT be classified as an error.
         let response = r#"{"stream":"error-handler","seq":1}"#;
         assert!(
@@ -4190,7 +4190,7 @@ mod tests {
 
     #[test]
     fn parse_api_error_uses_err_code_for_stream_not_found() {
-        // BUG-4 regression: StreamNotFound should be returned when err_code
+        // REGRESSION TEST #4: StreamNotFound should be returned when err_code
         // is 10059, not when code is 10059.
         let json =
             r#"{"error" : {"code" : 404,"err_code" : 10059,"description" : "stream not found"}}"#;
@@ -4253,7 +4253,7 @@ mod tests {
 
     #[test]
     fn test_extract_json_string_handles_unicode_escape() {
-        // BUG-7 regression: \uXXXX should not truncate the extracted string
+        // REGRESSION TEST #7: \uXXXX should not truncate the extracted string
         let json = r#"{"name" : "hello\u0020world","other":"val"}"#;
         let result = extract_json_string_simple(json, "name");
         assert_eq!(
