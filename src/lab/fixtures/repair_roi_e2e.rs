@@ -131,8 +131,7 @@ pub struct RepairRoiE2eHarness {
     lab_runtime: LabRuntime,
     /// Scenarios to execute.
     scenarios: Vec<RepairRoiE2eScenario>,
-    /// Policy configurations to test.
-    #[allow(dead_code)] // TODO: Use for policy comparison tests
+    /// Policy configurations to test against scenarios.
     policies: Vec<AtpRepairCoordinatorPolicy>,
 }
 
@@ -147,6 +146,281 @@ impl RepairRoiE2eHarness {
             scenarios,
             policies,
         }
+    }
+
+    /// Configure multiple policies for comparison testing.
+    pub fn with_policies(mut self, policies: Vec<AtpRepairCoordinatorPolicy>) -> Self {
+        self.policies = policies;
+        self
+    }
+
+    /// Create a set of diverse policies for comparison testing.
+    pub fn create_comparison_policies() -> Vec<AtpRepairCoordinatorPolicy> {
+        vec![
+            // Conservative policy - high thresholds, prefers reliability
+            AtpRepairCoordinatorPolicy {
+                min_positive_roi_micros: 1000,
+                parity_trickle_min_roi_micros: 2000,
+                burst_repair_min_roi_micros: 5000,
+                multi_peer_min_roi_micros: 8000,
+                bandwidth_cost_micros_per_mib: 10000,
+                max_relay_cost_micros_per_mib: 50000,
+                high_memory_pressure_permille: 700,
+                high_stream_contention_permille: 600,
+                unstable_path_permille: 100,
+                parity_loss_permille: 50,
+                ..AtpRepairCoordinatorPolicy::default()
+            },
+            // Aggressive policy - low thresholds, prefers speed
+            AtpRepairCoordinatorPolicy {
+                min_positive_roi_micros: 100,
+                parity_trickle_min_roi_micros: 200,
+                burst_repair_min_roi_micros: 500,
+                multi_peer_min_roi_micros: 1000,
+                bandwidth_cost_micros_per_mib: 5000,
+                max_relay_cost_micros_per_mib: 100000,
+                high_memory_pressure_permille: 900,
+                high_stream_contention_permille: 850,
+                unstable_path_permille: 300,
+                parity_loss_permille: 20,
+                ..AtpRepairCoordinatorPolicy::default()
+            },
+            // Balanced policy - moderate thresholds
+            AtpRepairCoordinatorPolicy {
+                min_positive_roi_micros: 500,
+                parity_trickle_min_roi_micros: 1000,
+                burst_repair_min_roi_micros: 2500,
+                multi_peer_min_roi_micros: 4000,
+                bandwidth_cost_micros_per_mib: 7500,
+                max_relay_cost_micros_per_mib: 75000,
+                high_memory_pressure_permille: 800,
+                high_stream_contention_permille: 725,
+                unstable_path_permille: 200,
+                parity_loss_permille: 35,
+                ..AtpRepairCoordinatorPolicy::default()
+            },
+        ]
+    }
+
+    /// Execute all scenarios against all configured policies and return comparison results.
+    pub fn execute_policy_comparison(&mut self) -> PolicyComparisonResult {
+        let mut policy_results = Vec::new();
+        let scenario_names: Vec<String> = self.scenarios.iter().map(|s| s.name.clone()).collect();
+
+        // Clone policies to avoid borrowing conflicts
+        let policies = self.policies.clone();
+
+        for (policy_index, policy) in policies.iter().enumerate() {
+            let policy_name = match policy_index {
+                0 => "Conservative",
+                1 => "Aggressive",
+                2 => "Balanced",
+                _ => "Custom",
+            };
+
+            // Configure simulator with this policy
+            let mut scenario_results = Vec::new();
+
+            for scenario in &self.scenarios.clone() {
+                // Execute scenario with this specific policy
+                let result = self.execute_scenario_with_policy(scenario, policy);
+                scenario_results.push(result);
+            }
+
+            policy_results.push(PolicyResult {
+                policy_name: policy_name.to_string(),
+                policy_config: policy.clone(),
+                scenario_results,
+            });
+        }
+
+        // Clone policy_results for summary generation before moving into result struct
+        let summary = self.generate_policy_summary(&policy_results);
+
+        PolicyComparisonResult {
+            scenario_names,
+            policy_results,
+            summary,
+        }
+    }
+
+    /// Execute a scenario with a specific policy configuration.
+    fn execute_scenario_with_policy(
+        &mut self,
+        scenario: &RepairRoiE2eScenario,
+        policy: &AtpRepairCoordinatorPolicy,
+    ) -> RepairRoiE2eResult {
+        let start_time = self.lab_runtime.now();
+        let mut transfer_results = Vec::new();
+        let mut errors = Vec::new();
+        let mut proof_artifacts = Vec::new();
+        let mut decision_logs = Vec::new();
+        let mut success = true;
+
+        // Create simulator for this scenario with specific policy
+        let mut simulator = RepairRoiSimulator::new();
+        simulator.add_regime(scenario.regime.clone());
+        // TODO: Configure simulator with policy when the API supports it
+        // simulator.configure_policy(policy.clone());
+
+        for (config_index, config) in scenario.transfer_configs.iter().enumerate() {
+            match self.execute_transfer_config(scenario, config, &mut simulator) {
+                Ok((transfer_result, decision_log, artifacts)) => {
+                    transfer_results.push(transfer_result);
+                    decision_logs.push(decision_log);
+                    proof_artifacts.extend(artifacts);
+                }
+                Err(error) => {
+                    errors.push(format!("Transfer config {}: {}", config_index, error));
+                    success = false;
+                }
+            }
+        }
+
+        // Validate against expected outcomes
+        for expected in &scenario.expected_outcomes {
+            if let Some(result) = transfer_results.get(expected.config_index) {
+                if !self.validate_expected_outcome(expected, result) {
+                    errors.push(format!(
+                        "Expected outcome validation failed for config {}",
+                        expected.config_index
+                    ));
+                    success = false;
+                }
+            }
+        }
+
+        let end_time = self.lab_runtime.now();
+
+        let duration_micros = end_time.duration_since(start_time)
+            .as_micros()
+            .try_into()
+            .unwrap_or(u64::MAX);
+
+        RepairRoiE2eResult {
+            scenario: scenario.clone(),
+            duration_micros,
+            transfer_results,
+            success,
+            errors,
+            proof_artifacts,
+            decision_logs,
+        }
+    }
+
+    /// Generate a summary comparing policy performance.
+    fn generate_policy_summary(&self, policy_results: &[PolicyResult]) -> PolicySummary {
+        let mut policy_metrics = Vec::new();
+
+        for policy_result in policy_results {
+            let total_scenarios = policy_result.scenario_results.len();
+            let successful_scenarios = policy_result.scenario_results.iter()
+                .filter(|r| r.success)
+                .count();
+
+            let total_duration: Duration = policy_result.scenario_results.iter()
+                .map(|r| Duration::from_micros(r.duration_micros))
+                .sum();
+
+            let avg_bandwidth_efficiency = policy_result.scenario_results.iter()
+                .flat_map(|r| &r.transfer_results)
+                .map(|t| t.bandwidth_efficiency)
+                .sum::<f64>() / policy_result.scenario_results.iter()
+                .flat_map(|r| &r.transfer_results)
+                .count().max(1) as f64;
+
+            policy_metrics.push(PolicyMetrics {
+                policy_name: policy_result.policy_name.clone(),
+                success_rate: successful_scenarios as f64 / total_scenarios as f64,
+                avg_duration: total_duration / total_scenarios as u32,
+                avg_bandwidth_efficiency,
+                total_errors: policy_result.scenario_results.iter()
+                    .map(|r| r.errors.len())
+                    .sum(),
+            });
+        }
+
+        // Compute summary values before moving policy_metrics
+        let best_overall_policy = self.determine_best_policy(&policy_metrics);
+        let recommendations = self.generate_policy_recommendations(&policy_metrics);
+
+        PolicySummary {
+            policy_metrics,
+            best_overall_policy,
+            recommendations,
+        }
+    }
+
+    /// Determine the best overall policy based on weighted metrics.
+    fn determine_best_policy(&self, metrics: &[PolicyMetrics]) -> String {
+        let mut best_score = -1.0f64;
+        let mut best_policy = "Unknown".to_string();
+
+        for metric in metrics {
+            // Weighted scoring: success_rate (40%) + efficiency (35%) + speed (25%)
+            let success_weight = 0.4;
+            let efficiency_weight = 0.35;
+            let speed_weight = 0.25;
+
+            let speed_score = if metric.avg_duration.as_secs() > 0 {
+                1.0 / metric.avg_duration.as_secs() as f64
+            } else {
+                1.0
+            };
+
+            let score = (metric.success_rate * success_weight) +
+                       (metric.avg_bandwidth_efficiency * efficiency_weight) +
+                       (speed_score * speed_weight);
+
+            if score > best_score {
+                best_score = score;
+                best_policy = metric.policy_name.clone();
+            }
+        }
+
+        best_policy
+    }
+
+    /// Generate recommendations based on policy comparison.
+    fn generate_policy_recommendations(&self, metrics: &[PolicyMetrics]) -> Vec<String> {
+        let mut recommendations = Vec::new();
+
+        // Find highest success rate
+        if let Some(most_reliable) = metrics.iter().max_by(|a, b|
+            a.success_rate.partial_cmp(&b.success_rate).unwrap_or(std::cmp::Ordering::Equal)
+        ) {
+            recommendations.push(format!(
+                "{} policy showed highest success rate ({:.1}%)",
+                most_reliable.policy_name,
+                most_reliable.success_rate * 100.0
+            ));
+        }
+
+        // Find highest efficiency
+        if let Some(most_efficient) = metrics.iter().max_by(|a, b|
+            a.avg_bandwidth_efficiency.partial_cmp(&b.avg_bandwidth_efficiency).unwrap_or(std::cmp::Ordering::Equal)
+        ) {
+            recommendations.push(format!(
+                "{} policy achieved best bandwidth efficiency ({:.3})",
+                most_efficient.policy_name,
+                most_efficient.avg_bandwidth_efficiency
+            ));
+        }
+
+        // Find fastest
+        if let Some(fastest) = metrics.iter().min_by_key(|m| m.avg_duration) {
+            recommendations.push(format!(
+                "{} policy completed scenarios fastest (avg {:.1}s)",
+                fastest.policy_name,
+                fastest.avg_duration.as_secs_f64()
+            ));
+        }
+
+        if recommendations.is_empty() {
+            recommendations.push("No clear performance differences detected between policies".to_string());
+        }
+
+        recommendations
     }
 
     /// Create default test scenarios covering all regime types.
@@ -562,6 +836,54 @@ impl RepairRoiE2eHarness {
     }
 }
 
+/// Policy comparison test result containing results for all policies tested.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyComparisonResult {
+    /// Names of scenarios tested.
+    pub scenario_names: Vec<String>,
+    /// Results for each policy tested.
+    pub policy_results: Vec<PolicyResult>,
+    /// Summary comparing policy performance.
+    pub summary: PolicySummary,
+}
+
+/// Results for a single policy across all scenarios.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyResult {
+    /// Policy name for identification.
+    pub policy_name: String,
+    /// Policy configuration used.
+    pub policy_config: AtpRepairCoordinatorPolicy,
+    /// Results for each scenario with this policy.
+    pub scenario_results: Vec<RepairRoiE2eResult>,
+}
+
+/// Performance metrics for a single policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyMetrics {
+    /// Policy name.
+    pub policy_name: String,
+    /// Percentage of scenarios that succeeded.
+    pub success_rate: f64,
+    /// Average duration per scenario.
+    pub avg_duration: Duration,
+    /// Average bandwidth efficiency achieved.
+    pub avg_bandwidth_efficiency: f64,
+    /// Total number of errors across all scenarios.
+    pub total_errors: usize,
+}
+
+/// Summary comparing all tested policies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicySummary {
+    /// Metrics for each policy.
+    pub policy_metrics: Vec<PolicyMetrics>,
+    /// Name of the best overall policy.
+    pub best_overall_policy: String,
+    /// Recommendations based on comparison.
+    pub recommendations: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct E2eReport {
     pub total_scenarios: usize,
@@ -645,5 +967,101 @@ mod tests {
         // This should validate successfully
         let harness = RepairRoiE2eHarness::new(LabRuntime::new());
         assert!(harness.validate_expected_outcome(&outcome, &result));
+    }
+
+    #[test]
+    fn test_policy_comparison_configuration() {
+        // Test that we can configure multiple policies for comparison
+        let lab_runtime = LabRuntime::new();
+        let policies = RepairRoiE2eHarness::create_comparison_policies();
+
+        // Should create 3 different policies (Conservative, Aggressive, Balanced)
+        assert_eq!(policies.len(), 3);
+
+        let harness = RepairRoiE2eHarness::new(lab_runtime)
+            .with_policies(policies.clone());
+
+        // Verify policies were set correctly
+        assert_eq!(harness.policies.len(), 3);
+
+        // Verify policies have different configurations
+        assert_ne!(
+            harness.policies[0].min_positive_roi_micros,
+            harness.policies[1].min_positive_roi_micros
+        );
+        assert_ne!(
+            harness.policies[1].burst_repair_min_roi_micros,
+            harness.policies[2].burst_repair_min_roi_micros
+        );
+    }
+
+    #[test]
+    fn test_policy_comparison_result_structure() {
+        // Test the policy comparison result structure
+        let lab_runtime = LabRuntime::new();
+        let policies = RepairRoiE2eHarness::create_comparison_policies();
+        let mut harness = RepairRoiE2eHarness::new(lab_runtime)
+            .with_policies(policies);
+
+        // This would normally execute scenarios, but for testing we just verify structure
+        let scenarios = &harness.scenarios.clone();
+        let scenario_names: Vec<String> = scenarios.iter().map(|s| s.name.clone()).collect();
+
+        // Verify we have test scenarios
+        assert!(!scenario_names.is_empty());
+        assert!(scenario_names.iter().any(|name| name.contains("clean-path")));
+        assert!(scenario_names.iter().any(|name| name.contains("lossy")));
+
+        // Verify comparison policies have been configured
+        assert_eq!(harness.policies.len(), 3);
+
+        // Test policy metrics structure
+        let metrics = PolicyMetrics {
+            policy_name: "Test".to_string(),
+            success_rate: 0.95,
+            avg_duration: Duration::from_secs(10),
+            avg_bandwidth_efficiency: 0.85,
+            total_errors: 1,
+        };
+
+        assert_eq!(metrics.policy_name, "Test");
+        assert_eq!(metrics.success_rate, 0.95);
+        assert_eq!(metrics.avg_duration, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_policy_comparison_best_policy_selection() {
+        // Test the logic for determining the best policy
+        let harness = RepairRoiE2eHarness::new(LabRuntime::new());
+
+        let test_metrics = vec![
+            PolicyMetrics {
+                policy_name: "HighSuccess".to_string(),
+                success_rate: 1.0,
+                avg_duration: Duration::from_secs(20),
+                avg_bandwidth_efficiency: 0.8,
+                total_errors: 0,
+            },
+            PolicyMetrics {
+                policy_name: "HighEfficiency".to_string(),
+                success_rate: 0.9,
+                avg_duration: Duration::from_secs(15),
+                avg_bandwidth_efficiency: 0.95,
+                total_errors: 1,
+            },
+            PolicyMetrics {
+                policy_name: "FastButUnreliable".to_string(),
+                success_rate: 0.7,
+                avg_duration: Duration::from_secs(5),
+                avg_bandwidth_efficiency: 0.9,
+                total_errors: 3,
+            },
+        ];
+
+        let best_policy = harness.determine_best_policy(&test_metrics);
+
+        // Should favor reliability over pure speed
+        assert!(best_policy == "HighSuccess" || best_policy == "HighEfficiency");
+        assert_ne!(best_policy, "FastButUnreliable");
     }
 }

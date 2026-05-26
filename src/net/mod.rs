@@ -14,9 +14,6 @@ pub mod atp;
 pub mod atp_udp;
 /// DNS resolution with caching and Happy Eyeballs support.
 pub mod dns;
-/// STUN protocol for NAT traversal and ICE candidate gathering.
-#[cfg(not(target_arch = "wasm32"))]
-pub mod stun;
 /// Happy Eyeballs v2 (RFC 8305) concurrent dual-stack connection racing.
 pub mod happy_eyeballs;
 /// Native QUIC protocol core codecs and types (Tokio-free, runtime-agnostic).
@@ -24,6 +21,9 @@ pub mod quic_core;
 /// Native QUIC transport state machines (TLS, recovery, streams).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod quic_native;
+/// STUN protocol for NAT traversal and ICE candidate gathering.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stun;
 /// Native QUIC API surface (T4.1).
 ///
 /// This module intentionally aliases the Tokio-free native QUIC stack so users

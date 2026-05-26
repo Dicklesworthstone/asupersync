@@ -94,7 +94,11 @@ impl AtpTestLogger {
     }
 
     fn test_end(&self, result: &str) {
-        let duration_ms = self.start_time.elapsed().unwrap_or(Duration::ZERO).as_millis() as u64;
+        let duration_ms = self
+            .start_time
+            .elapsed()
+            .unwrap_or(Duration::ZERO)
+            .as_millis() as u64;
         eprintln!(
             "{}",
             json!({
@@ -176,12 +180,24 @@ fn atp_peer_identity_and_session_management_integration() {
         log.phase("identity_verification");
 
         // Verify peer identity behavior (deterministic with same inputs)
-        assert!(log.assert_outcome("peer_deterministic_same_entropy", &peer_entropy1, &peer_entropy2));
+        assert!(log.assert_outcome(
+            "peer_deterministic_same_entropy",
+            &peer_entropy1,
+            &peer_entropy2
+        ));
         assert!(!log.assert_outcome("peer_different_entropy", &peer_entropy1, &peer_entropy3));
 
         // Verify session ID behavior
-        assert!(log.assert_outcome("session_deterministic_same_id", &session_id1.value(), &session_id2.value()));
-        assert!(!log.assert_outcome("session_different_id", &session_id1.value(), &session_id3.value()));
+        assert!(log.assert_outcome(
+            "session_deterministic_same_id",
+            &session_id1.value(),
+            &session_id2.value()
+        ));
+        assert!(!log.assert_outcome(
+            "session_different_id",
+            &session_id1.value(),
+            &session_id3.value()
+        ));
 
         // Verify peer IDs are non-empty and unique
         assert!(!peer_label.to_string().is_empty());

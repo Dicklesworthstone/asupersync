@@ -344,7 +344,10 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(checker.access_log().len(), 1);
         assert!(checker.access_log()[0].allowed);
-        assert_eq!(checker.max_log_entries(), TrustBoundaryChecker::DEFAULT_MAX_LOG_ENTRIES);
+        assert_eq!(
+            checker.max_log_entries(),
+            TrustBoundaryChecker::DEFAULT_MAX_LOG_ENTRIES
+        );
     }
 
     #[test]
@@ -401,7 +404,9 @@ mod tests {
 
         // Add some entries
         for i in 0..3 {
-            checker.check_access(&key, &format!("operation{}", i)).unwrap();
+            checker
+                .check_access(&key, &format!("operation{}", i))
+                .unwrap();
         }
         assert_eq!(checker.access_log().len(), 3);
 
@@ -412,7 +417,9 @@ mod tests {
 
         // Add more entries - should respect original limit
         for i in 0..7 {
-            checker.check_access(&key, &format!("operation{}", i)).unwrap();
+            checker
+                .check_access(&key, &format!("operation{}", i))
+                .unwrap();
         }
         assert_eq!(checker.access_log().len(), 5); // Capped at limit
     }

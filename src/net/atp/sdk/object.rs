@@ -397,23 +397,20 @@ impl ObjectStore for FileSystemObjectStore {
 
         // Create parent directories
         if let Some(parent) = object_path.parent() {
-            try_atp!(
-                crate::fs::create_dir_all(parent).await,
-                |_| AtpError::Disk(DiskError::IoError)
-            );
+            try_atp!(crate::fs::create_dir_all(parent).await, |_| AtpError::Disk(
+                DiskError::IoError
+            ));
         }
 
         // Write object data
-        try_atp!(
-            crate::fs::write(&object_path, &data).await,
-            |_| AtpError::Disk(DiskError::IoError)
-        );
+        try_atp!(crate::fs::write(&object_path, &data).await, |_| {
+            AtpError::Disk(DiskError::IoError)
+        });
 
         // Write object metadata
-        let metadata_json = try_atp!(
-            serde_json::to_vec_pretty(&object),
-            |_| AtpError::Manifest(ManifestError::InvalidFormat)
-        );
+        let metadata_json = try_atp!(serde_json::to_vec_pretty(&object), |_| AtpError::Manifest(
+            ManifestError::InvalidFormat
+        ));
         try_atp!(
             crate::fs::write(&metadata_path, metadata_json).await,
             |_| AtpError::Disk(DiskError::IoError)
@@ -429,10 +426,9 @@ impl ObjectStore for FileSystemObjectStore {
             return AtpOutcome::ok(None);
         }
 
-        let data = try_atp!(
-            crate::fs::read(&object_path).await,
-            |_| AtpError::Disk(DiskError::IoError)
-        );
+        let data = try_atp!(crate::fs::read(&object_path).await, |_| AtpError::Disk(
+            DiskError::IoError
+        ));
 
         // Verify hash matches
         let computed_hash = ObjectHash::from_data(&data);
@@ -450,15 +446,13 @@ impl ObjectStore for FileSystemObjectStore {
             return AtpOutcome::ok(None);
         }
 
-        let metadata_json = try_atp!(
-            crate::fs::read(&metadata_path).await,
-            |_| AtpError::Disk(DiskError::IoError)
-        );
+        let metadata_json = try_atp!(crate::fs::read(&metadata_path).await, |_| AtpError::Disk(
+            DiskError::IoError
+        ));
 
-        let object: AtpObject = try_atp!(
-            serde_json::from_slice(&metadata_json),
-            |_| AtpError::Manifest(ManifestError::InvalidFormat)
-        );
+        let object: AtpObject = try_atp!(serde_json::from_slice(&metadata_json), |_| {
+            AtpError::Manifest(ManifestError::InvalidFormat)
+        });
 
         AtpOutcome::ok(Some(object))
     }
@@ -486,16 +480,13 @@ impl ObjectStore for FileSystemObjectStore {
     async fn list_objects(&self, _cx: &Cx) -> AtpOutcome<Vec<ObjectHash>> {
         let mut hashes = Vec::new();
 
-        let mut read_dir = try_atp!(
-            crate::fs::read_dir(&self.base_path).await,
-            |_| AtpError::Disk(DiskError::IoError)
-        );
+        let mut read_dir = try_atp!(crate::fs::read_dir(&self.base_path).await, |_| {
+            AtpError::Disk(DiskError::IoError)
+        });
 
-        while let Some(entry) = try_atp!(
-            read_dir.next_entry().await,
-            |_| AtpError::Disk(DiskError::IoError)
-        )
-        {
+        while let Some(entry) = try_atp!(read_dir.next_entry().await, |_| AtpError::Disk(
+            DiskError::IoError
+        )) {
             if let Some(name) = entry.file_name().to_str() {
                 if let Ok(hash) = ObjectHash::from_hex(name) {
                     hashes.push(hash);

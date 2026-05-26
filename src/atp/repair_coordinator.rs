@@ -60,8 +60,8 @@ impl Default for RepairCoordinatorConfig {
             decision_logging_level: RepairLoggingLevel::Normal,
             max_decisions_per_minute: 60, // Limit to 1 decision per second
             max_telemetry_per_minute: 120, // Limit to 2 telemetry entries per second
-            max_decision_history: 100, // Reduced from 1000 to prevent memory exhaustion
-            max_telemetry_history: 500, // Reduced from 10000 to prevent memory exhaustion
+            max_decision_history: 100,    // Reduced from 1000 to prevent memory exhaustion
+            max_telemetry_history: 500,   // Reduced from 10000 to prevent memory exhaustion
         }
     }
 }
@@ -433,7 +433,9 @@ impl RepairCoordinator {
     ) -> Result<RepairDecision> {
         // Rate limiting check to prevent economic attacks
         if !self.decision_rate_limiter.check_rate_limit() {
-            return Err(crate::error::Error::new(crate::error::ErrorKind::RateLimited));
+            return Err(crate::error::Error::new(
+                crate::error::ErrorKind::RateLimited,
+            ));
         }
         // Calculate ROI for each applicable repair mode
         let mode_candidates = self.get_applicable_modes(path, transfer);
@@ -517,7 +519,9 @@ impl RepairCoordinator {
     pub fn record_telemetry(&mut self, telemetry: RepairTelemetry) -> Result<()> {
         // Rate limiting check to prevent economic attacks
         if !self.telemetry_rate_limiter.check_rate_limit() {
-            return Err(crate::error::Error::new(crate::error::ErrorKind::RateLimited));
+            return Err(crate::error::Error::new(
+                crate::error::ErrorKind::RateLimited,
+            ));
         }
 
         // Validate telemetry data authenticity to prevent fake data injection
@@ -794,32 +798,45 @@ impl RepairCoordinator {
 
         // Check for impossible values
         if telemetry.actual_roi_ratio < 0.0 || telemetry.actual_roi_ratio > 1000.0 {
-            return Err(crate::error::Error::new(crate::error::ErrorKind::InvalidInput));
+            return Err(crate::error::Error::new(
+                crate::error::ErrorKind::InvalidInput,
+            ));
         }
 
         if telemetry.predicted_roi.roi_ratio < 0.0 || telemetry.predicted_roi.roi_ratio > 1000.0 {
-            return Err(crate::error::Error::new(crate::error::ErrorKind::InvalidInput));
+            return Err(crate::error::Error::new(
+                crate::error::ErrorKind::InvalidInput,
+            ));
         }
 
         // Validate repair symbols counts are reasonable
         if telemetry.repair_symbols_sent == 0 && telemetry.success {
-            return Err(crate::error::Error::new(crate::error::ErrorKind::InvalidInput));
+            return Err(crate::error::Error::new(
+                crate::error::ErrorKind::InvalidInput,
+            ));
         }
 
         if telemetry.repair_symbols_decoded > telemetry.repair_symbols_sent {
-            return Err(crate::error::Error::new(crate::error::ErrorKind::InvalidInput));
+            return Err(crate::error::Error::new(
+                crate::error::ErrorKind::InvalidInput,
+            ));
         }
 
         // Check for time-based anomalies
         let now = SystemTime::now();
         if telemetry.measured_at > now {
-            return Err(crate::error::Error::new(crate::error::ErrorKind::InvalidInput));
+            return Err(crate::error::Error::new(
+                crate::error::ErrorKind::InvalidInput,
+            ));
         }
 
         // Check for excessively old telemetry (could be replay attack)
         if let Ok(age) = now.duration_since(telemetry.measured_at) {
-            if age > Duration::from_secs(3600) { // 1 hour max age
-                return Err(crate::error::Error::new(crate::error::ErrorKind::InvalidInput));
+            if age > Duration::from_secs(3600) {
+                // 1 hour max age
+                return Err(crate::error::Error::new(
+                    crate::error::ErrorKind::InvalidInput,
+                ));
             }
         }
 
@@ -1022,7 +1039,9 @@ mod tests {
             measured_at: SystemTime::now(),
         };
 
-        coordinator.record_telemetry(telemetry).expect("Telemetry recording failed");
+        coordinator
+            .record_telemetry(telemetry)
+            .expect("Telemetry recording failed");
 
         assert_eq!(coordinator.telemetry.len(), 1);
         assert!(coordinator.mode_statistics.contains_key(&RepairMode::Tail));

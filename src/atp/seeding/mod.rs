@@ -603,11 +603,8 @@ mod tests {
             .unwrap();
 
         // Try to access without proper grants - should be denied
-        let result = service.get_seeded_content(
-            "manifest123",
-            "content456",
-            &["wrong-scope".to_string()],
-        );
+        let result =
+            service.get_seeded_content("manifest123", "content456", &["wrong-scope".to_string()]);
         assert!(matches!(result, Err(SeedingError::InsufficientGrants(_))));
 
         // Try to start session without proper grants - should be denied
@@ -627,12 +624,12 @@ mod tests {
             )
             .unwrap();
 
-        let result = service.get_seeded_content(
-            "public-manifest",
-            "content789",
-            &["any-scope".to_string()],
-        );
+        let result =
+            service.get_seeded_content("public-manifest", "content789", &["any-scope".to_string()]);
         // Should not fail due to grants (will fail due to missing cache content)
-        assert!(matches!(result, Ok(None) | Err(SeedingError::CacheError(_))));
+        assert!(matches!(
+            result,
+            Ok(None) | Err(SeedingError::CacheError(_))
+        ));
     }
 }

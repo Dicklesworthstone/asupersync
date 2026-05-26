@@ -574,8 +574,7 @@ impl HandoffVerifier {
                 reason: "Content hash mismatch".to_string(),
                 evidence: format!(
                     "Expected: {}, Computed: {}",
-                    capsule.content_hash,
-                    computed_hash
+                    capsule.content_hash, computed_hash
                 ),
             })
         } else {
@@ -946,7 +945,10 @@ mod tests {
                 );
                 // Check that the evidence includes the hash mismatch details
                 assert!(
-                    reasons.iter().any(|r| r.evidence.contains("Expected:") && r.evidence.contains("Computed:"))
+                    reasons
+                        .iter()
+                        .any(|r| r.evidence.contains("Expected:")
+                            && r.evidence.contains("Computed:"))
                 );
             }
             other => panic!("Expected UnsafeToContinue, got {:?}", other),

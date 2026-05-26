@@ -152,20 +152,18 @@ enum ReaderState {
 impl AtpSession {
     /// Create an ATP writer for streaming large data to the remote peer.
     pub async fn create_writer(&self, cx: &Cx, config: StreamConfig) -> AtpOutcome<AtpWriter> {
-        try_atp!(
-            cx.checkpoint(),
-            |_| AtpError::Platform(PlatformError::OperatingSystemError)
-        );
+        try_atp!(cx.checkpoint(), |_| AtpError::Platform(
+            PlatformError::OperatingSystemError
+        ));
         let _ = config;
         AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
     }
 
     /// Create an ATP reader for receiving streamed data from the remote peer.
     pub async fn create_reader(&self, cx: &Cx, config: StreamConfig) -> AtpOutcome<AtpReader> {
-        try_atp!(
-            cx.checkpoint(),
-            |_| AtpError::Platform(PlatformError::OperatingSystemError)
-        );
+        try_atp!(cx.checkpoint(), |_| AtpError::Platform(
+            PlatformError::OperatingSystemError
+        ));
         let _ = config;
         AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
     }
@@ -199,10 +197,9 @@ impl AtpWriter {
 
         // Send final empty chunk to signal completion
         let final_chunk = StreamChunk::new(Vec::new(), 0, true);
-        try_atp!(
-            self.data_tx.try_send(final_chunk),
-            |_| AtpError::Platform(PlatformError::OperatingSystemError)
-        );
+        try_atp!(self.data_tx.try_send(final_chunk), |_| AtpError::Platform(
+            PlatformError::OperatingSystemError
+        ));
 
         // Cancel the background task
         if let Some(cancel_tx) = self.cancel_tx.take() {
@@ -227,10 +224,9 @@ impl AtpWriter {
         self.state = WriterState::Writing;
 
         let chunk = StreamChunk::new(data, 0, false); // Sequence managed internally
-        try_atp!(
-            self.data_tx.try_send(chunk),
-            |_| AtpError::Platform(PlatformError::OperatingSystemError)
-        );
+        try_atp!(self.data_tx.try_send(chunk), |_| AtpError::Platform(
+            PlatformError::OperatingSystemError
+        ));
 
         self.state = WriterState::Ready;
         AtpOutcome::ok(())

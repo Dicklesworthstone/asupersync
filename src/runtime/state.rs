@@ -763,6 +763,13 @@ pub struct RuntimeState {
     /// Provides comprehensive admission decisions, resource envelope tracking,
     /// and swarm coordination for distributed pressure management.
     swarm_pressure_governor: SwarmPressureGovernor,
+    /// Regions that need state advancement deferred until leak handling completes.
+    ///
+    /// During obligation leak handling, `abort_obligation` calls can trigger
+    /// `advance_region_state`, which may run finalizers that acquire new obligations.
+    /// This violates the quiescence invariant. We defer region state advancement
+    /// until after leak handling completes to prevent reentrancy.
+    deferred_region_advancements: HashSet<RegionId>,
 }
 
 impl std::fmt::Debug for RuntimeState {
@@ -889,6 +896,7 @@ impl RuntimeState {
             debt_monitor: Arc::new(crate::observability::CancellationDebtMonitor::default()),
             resource_monitor,
             swarm_pressure_governor,
+            deferred_region_advancements: HashSet::new(),
         }
     }
 

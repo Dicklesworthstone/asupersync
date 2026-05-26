@@ -317,37 +317,46 @@ impl ReleaseProofAggregator {
         // Bead IDs should be alphanumeric with hyphens/underscores, but not start with hyphen
         if bead_id.is_empty() || bead_id.len() > 64 {
             return Err(AggregatorError::MissingEvidence(
-                "Bead ID must be non-empty and under 64 characters".to_string()
+                "Bead ID must be non-empty and under 64 characters".to_string(),
             ));
         }
 
         // Security: Prevent git argument injection - no leading hyphens
         if bead_id.starts_with('-') {
-            return Err(AggregatorError::MissingEvidence(
-                format!("Bead ID cannot start with hyphen (git argument injection): {}", bead_id)
-            ));
+            return Err(AggregatorError::MissingEvidence(format!(
+                "Bead ID cannot start with hyphen (git argument injection): {}",
+                bead_id
+            )));
         }
 
         // Only allow safe characters: alphanumeric, hyphens, underscores
-        if !bead_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-            return Err(AggregatorError::MissingEvidence(
-                format!("Bead ID contains unsafe characters: {}", bead_id)
-            ));
+        if !bead_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(AggregatorError::MissingEvidence(format!(
+                "Bead ID contains unsafe characters: {}",
+                bead_id
+            )));
         }
 
         // Prevent path traversal patterns
         if bead_id.contains("..") || bead_id.contains('/') || bead_id.contains('\\') {
-            return Err(AggregatorError::MissingEvidence(
-                format!("Bead ID contains path traversal patterns: {}", bead_id)
-            ));
+            return Err(AggregatorError::MissingEvidence(format!(
+                "Bead ID contains path traversal patterns: {}",
+                bead_id
+            )));
         }
 
         // Security: Prevent regex metacharacters that could cause git grep issues
-        let regex_metacharacters = ['*', '?', '[', ']', '^', '$', '|', '(', ')', '{', '}', '+', '.'];
+        let regex_metacharacters = [
+            '*', '?', '[', ']', '^', '$', '|', '(', ')', '{', '}', '+', '.',
+        ];
         if bead_id.chars().any(|c| regex_metacharacters.contains(&c)) {
-            return Err(AggregatorError::MissingEvidence(
-                format!("Bead ID contains regex metacharacters: {}", bead_id)
-            ));
+            return Err(AggregatorError::MissingEvidence(format!(
+                "Bead ID contains regex metacharacters: {}",
+                bead_id
+            )));
         }
 
         Ok(())
@@ -365,22 +374,24 @@ impl ReleaseProofAggregator {
 
     /// Validates file path is within expected directory to prevent path traversal.
     fn validate_file_path(path: &str, allowed_prefix: &str) -> Result<(), AggregatorError> {
-        let canonical_path = std::path::Path::new(path)
-            .canonicalize()
-            .map_err(|e| AggregatorError::MissingEvidence(
-                format!("Invalid file path {}: {}", path, e)
-            ))?;
+        let canonical_path = std::path::Path::new(path).canonicalize().map_err(|e| {
+            AggregatorError::MissingEvidence(format!("Invalid file path {}: {}", path, e))
+        })?;
 
         let canonical_prefix = std::path::Path::new(allowed_prefix)
             .canonicalize()
-            .map_err(|e| AggregatorError::MissingEvidence(
-                format!("Invalid allowed prefix {}: {}", allowed_prefix, e)
-            ))?;
+            .map_err(|e| {
+                AggregatorError::MissingEvidence(format!(
+                    "Invalid allowed prefix {}: {}",
+                    allowed_prefix, e
+                ))
+            })?;
 
         if !canonical_path.starts_with(canonical_prefix) {
-            return Err(AggregatorError::MissingEvidence(
-                format!("Path traversal detected: {} outside {}", path, allowed_prefix)
-            ));
+            return Err(AggregatorError::MissingEvidence(format!(
+                "Path traversal detected: {} outside {}",
+                path, allowed_prefix
+            )));
         }
 
         Ok(())
@@ -416,7 +427,7 @@ impl ReleaseProofAggregator {
         Self::validate_bead_id(&bead_id)?;
         if agent_name.is_empty() || agent_name.len() > 128 {
             return Err(AggregatorError::MissingEvidence(
-                "Agent name must be non-empty and under 128 characters".to_string()
+                "Agent name must be non-empty and under 128 characters".to_string(),
             ));
         }
 
@@ -548,11 +559,16 @@ impl ReleaseProofAggregator {
         let output = Command::new("git")
             .args(&["rev-parse", "HEAD"])
             .output()
-            .map_err(|e| AggregatorError::GitError(format!("Failed to capture git snapshot: {}", e)))?;
+            .map_err(|e| {
+                AggregatorError::GitError(format!("Failed to capture git snapshot: {}", e))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(AggregatorError::GitError(format!("git rev-parse failed: {}", stderr)));
+            return Err(AggregatorError::GitError(format!(
+                "git rev-parse failed: {}",
+                stderr
+            )));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -562,10 +578,10 @@ impl ReleaseProofAggregator {
     fn verify_git_snapshot(&self, expected_hash: &str) -> Result<(), AggregatorError> {
         let current_hash = self.capture_git_snapshot()?;
         if current_hash != expected_hash {
-            return Err(AggregatorError::MissingEvidence(
-                format!("Git state changed during proof generation: expected {} got {}",
-                       expected_hash, current_hash)
-            ));
+            return Err(AggregatorError::MissingEvidence(format!(
+                "Git state changed during proof generation: expected {} got {}",
+                expected_hash, current_hash
+            )));
         }
         Ok(())
     }
@@ -641,9 +657,10 @@ impl ReleaseProofAggregator {
         // If no agent mail data found, this is a verification failure
         // The bead should have had proper file reservations
         if reservations.is_empty() {
-            return Err(AggregatorError::MissingEvidence(
-                format!("No file reservation evidence found for bead {}", bead_id)
-            ));
+            return Err(AggregatorError::MissingEvidence(format!(
+                "No file reservation evidence found for bead {}",
+                bead_id
+            )));
         }
 
         Ok(reservations)
@@ -671,19 +688,26 @@ impl ReleaseProofAggregator {
             .args(&[
                 "log",
                 "--fixed-strings", // Use literal string matching, not regex
-                "--grep", &escaped_bead_pattern,
-                "--grep", &escaped_short_pattern,
+                "--grep",
+                &escaped_bead_pattern,
+                "--grep",
+                &escaped_short_pattern,
                 "--all-match",
                 "--name-only",
                 "--format=COMMIT:%H", // Marker to separate commits from files
                 "--since=30 days ago",
             ])
             .output()
-            .map_err(|e| AggregatorError::GitError(format!("Failed to get touched paths: {}", e)))?;
+            .map_err(|e| {
+                AggregatorError::GitError(format!("Failed to get touched paths: {}", e))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(AggregatorError::GitError(format!("git log failed: {}", stderr)));
+            return Err(AggregatorError::GitError(format!(
+                "git log failed: {}",
+                stderr
+            )));
         }
 
         let git_output = String::from_utf8_lossy(&output.stdout);
@@ -725,8 +749,10 @@ impl ReleaseProofAggregator {
             .args(&[
                 "log",
                 "--fixed-strings", // Use literal string matching, not regex
-                "--grep", &escaped_bead_pattern,
-                "--grep", &escaped_short_pattern,
+                "--grep",
+                &escaped_bead_pattern,
+                "--grep",
+                &escaped_short_pattern,
                 "--all-match",
                 "--format=%H|%s|%an|%at|%D",
                 "--since=30 days ago", // Limit search to recent commits
@@ -736,7 +762,10 @@ impl ReleaseProofAggregator {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(AggregatorError::GitError(format!("git log failed: {}", stderr)));
+            return Err(AggregatorError::GitError(format!(
+                "git log failed: {}",
+                stderr
+            )));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -776,9 +805,10 @@ impl ReleaseProofAggregator {
         }
 
         if commits.is_empty() {
-            return Err(AggregatorError::MissingEvidence(
-                format!("No git commits found for bead {}", bead_id)
-            ));
+            return Err(AggregatorError::MissingEvidence(format!(
+                "No git commits found for bead {}",
+                bead_id
+            )));
         }
 
         Ok(commits)
@@ -838,7 +868,7 @@ impl ReleaseProofAggregator {
         // Security: Validate agent name to prevent potential security issues
         if agent_name.is_empty() || agent_name.len() > 128 {
             return Err(AggregatorError::MissingEvidence(
-                "Agent name must be non-empty and under 128 characters".to_string()
+                "Agent name must be non-empty and under 128 characters".to_string(),
             ));
         }
 
@@ -898,11 +928,17 @@ impl ReleaseProofAggregator {
                 // This is a simplified check - real implementation would parse structured data
                 if content.contains("\"decision\":\"Continue\"") || content.contains("Continue") {
                     decision = Some(HandoffDecision::Continue);
-                } else if content.contains("\"decision\":\"NarrowRefreshRequired\"") || content.contains("NarrowRefreshRequired") {
+                } else if content.contains("\"decision\":\"NarrowRefreshRequired\"")
+                    || content.contains("NarrowRefreshRequired")
+                {
                     decision = Some(HandoffDecision::NarrowRefreshRequired);
-                } else if content.contains("\"decision\":\"CoordinateFirst\"") || content.contains("CoordinateFirst") {
+                } else if content.contains("\"decision\":\"CoordinateFirst\"")
+                    || content.contains("CoordinateFirst")
+                {
                     decision = Some(HandoffDecision::CoordinateFirst);
-                } else if content.contains("\"decision\":\"UnsafeToContinue\"") || content.contains("UnsafeToContinue") {
+                } else if content.contains("\"decision\":\"UnsafeToContinue\"")
+                    || content.contains("UnsafeToContinue")
+                {
                     decision = Some(HandoffDecision::UnsafeToContinue);
                 }
                 break; // Use first found capsule
@@ -1329,10 +1365,10 @@ mod tests {
         // Valid paths within allowed directory should pass
         let valid_file = temp_dir.join("test.json");
         std::fs::write(&valid_file, "test").unwrap();
-        assert!(ReleaseProofAggregator::validate_file_path(
-            valid_file.to_str().unwrap(),
-            temp_path
-        ).is_ok());
+        assert!(
+            ReleaseProofAggregator::validate_file_path(valid_file.to_str().unwrap(), temp_path)
+                .is_ok()
+        );
 
         // Cleanup
         std::fs::remove_dir_all(&temp_dir).unwrap();
@@ -1351,7 +1387,10 @@ mod tests {
         match snapshot_result {
             Ok(hash) => {
                 assert!(!hash.is_empty());
-                assert!(hash.chars().all(|c| c.is_ascii_hexdigit() || c.is_ascii_whitespace()));
+                assert!(
+                    hash.chars()
+                        .all(|c| c.is_ascii_hexdigit() || c.is_ascii_whitespace())
+                );
             }
             Err(_) => {
                 // Not in a git repo or git not available - that's okay for testing

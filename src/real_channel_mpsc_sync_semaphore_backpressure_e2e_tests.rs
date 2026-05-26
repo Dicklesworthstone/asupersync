@@ -263,8 +263,7 @@ mod tests {
                 }
             }
 
-            safe_mutex_lock(&self.backpressure_events)
-                .push_back(event);
+            safe_mutex_lock(&self.backpressure_events).push_back(event);
         }
 
         /// Core method: Permit-gated MPSC sending with full backpressure integration.
@@ -276,9 +275,7 @@ mod tests {
             let producer_id = message.producer_id;
 
             // Update producer tracker
-            if let Some(tracker) = safe_mutex_lock(&self.producer_trackers)
-                .get_mut(&producer_id)
-            {
+            if let Some(tracker) = safe_mutex_lock(&self.producer_trackers).get_mut(&producer_id) {
                 tracker.messages_attempted += 1;
                 tracker.blocked_on_permits = true;
                 tracker.last_operation_time = Instant::now();
@@ -303,9 +300,7 @@ mod tests {
             self.record_backpressure_event(permit_event);
 
             // Update tracker for permit acquisition
-            if let Some(tracker) = safe_mutex_lock(&self.producer_trackers)
-                .get_mut(&producer_id)
-            {
+            if let Some(tracker) = safe_mutex_lock(&self.producer_trackers).get_mut(&producer_id) {
                 tracker.permits_acquired += 1;
                 tracker.blocked_on_permits = false;
                 tracker.blocked_on_mpsc_capacity = true;
@@ -448,13 +443,11 @@ mod tests {
         }
 
         pub fn get_stats_snapshot(&self) -> BackpressureStats {
-            safe_mutex_lock(&self.stats)
-                .clone()
+            safe_mutex_lock(&self.stats).clone()
         }
 
         pub fn get_producer_trackers(&self) -> HashMap<u32, ProducerTracker> {
-            safe_mutex_lock(&self.producer_trackers)
-                .clone()
+            safe_mutex_lock(&self.producer_trackers).clone()
         }
 
         pub fn get_backpressure_events(&self) -> Vec<BackpressureEvent> {
