@@ -52,11 +52,26 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::pin::Pin;
     use std::sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, RwLock, PoisonError,
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
     };
     use std::task::{Context, Poll};
     use tokio::sync::{Barrier, Semaphore as TokioSemaphore};
+
+    /// Helper function to safely access poisoned mutexes in tests
+    ///
+    /// Handles mutex poisoning gracefully by recovering the data from the poisoned mutex.
+    /// This prevents test panics when a test thread panics while holding a mutex lock.
+    fn safe_mutex_lock<T>(mutex: &Arc<Mutex<T>>) -> Result<std::sync::MutexGuard<T>, String> {
+        match mutex.lock() {
+            Ok(guard) => Ok(guard),
+            Err(poisoned) => {
+                // Mutex is poisoned, but we can still recover the data in tests
+                // In production code, this might warrant different handling
+                Ok(poisoned.into_inner())
+            }
+        }
+    }
 
     // ────────────────────────────────────────────────────────────────────────────────
     // MPSC + Semaphore Backpressure Integration Test Framework
@@ -217,7 +232,8 @@ mod tests {
         }
 
         pub fn record_backpressure_event(&self, event: BackpressureEvent) {
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = safe_mutex_lock(&self.stats)
+                .expect("Failed to acquire stats mutex lock");
 
             match event.event_type {
                 BackpressureEventType::PermitAcquired => {
@@ -246,7 +262,9 @@ mod tests {
                 }
             }
 
-            self.backpressure_events.lock().unwrap().push_back(event);
+            safe_mutex_lock(&self.backpressure_events)
+                .expect("Failed to acquire backpressure_events mutex lock")
+                .push_back(event);
         }
 
         /// Core method: Permit-gated MPSC sending with full backpressure integration.
@@ -258,7 +276,9 @@ mod tests {
             let producer_id = message.producer_id;
 
             // Update producer tracker
-            if let Some(tracker) = self.producer_trackers.lock().unwrap().get_mut(&producer_id) {
+            if let Some(tracker) = safe_mutex_lock(&self.producer_trackers)
+                .expect("Failed to acquire producer_trackers mutex lock")
+                .get_mut(&producer_id) {
                 tracker.messages_attempted += 1;
                 tracker.blocked_on_permits = true;
                 tracker.last_operation_time = Instant::now();
@@ -283,7 +303,9 @@ mod tests {
             self.record_backpressure_event(permit_event);
 
             // Update tracker for permit acquisition
-            if let Some(tracker) = self.producer_trackers.lock().unwrap().get_mut(&producer_id) {
+            if let Some(tracker) = safe_mutex_lock(&self.producer_trackers)
+                .expect("Failed to acquire producer_trackers mutex lock")
+                .get_mut(&producer_id) {
                 tracker.permits_acquired += 1;
                 tracker.blocked_on_permits = false;
                 tracker.blocked_on_mpsc_capacity = true;
@@ -341,7 +363,9 @@ mod tests {
 
                     // Update tracker
                     if let Some(tracker) =
-                        self.producer_trackers.lock().unwrap().get_mut(&producer_id)
+                        safe_mutex_lock(&self.producer_trackers)
+                            .expect("Failed to acquire producer_trackers mutex lock")
+                            .get_mut(&producer_id)
                     {
                         tracker.messages_sent += 1;
                         tracker.blocked_on_mpsc_capacity = false;
@@ -410,7 +434,8 @@ mod tests {
 
         pub async fn consume_messages(&self, expected_count: u32) -> Vec<TestMessage> {
             let mut consumed = Vec::new();
-            let mut receiver = self.mpsc_receiver.lock().unwrap();
+            let mut receiver = safe_mutex_lock(&self.mpsc_receiver)
+                .expect("Failed to acquire mpsc_receiver mutex lock");
 
             for _ in 0..expected_count {
                 match timeout(Duration::from_millis(100), receiver.recv()).await {
@@ -426,11 +451,15 @@ mod tests {
         }
 
         pub fn get_stats_snapshot(&self) -> BackpressureStats {
-            self.stats.lock().unwrap().clone()
+            safe_mutex_lock(&self.stats)
+                .expect("Failed to acquire stats mutex lock")
+                .clone()
         }
 
         pub fn get_producer_trackers(&self) -> HashMap<u32, ProducerTracker> {
-            self.producer_trackers.lock().unwrap().clone()
+            safe_mutex_lock(&self.producer_trackers)
+                .expect("Failed to acquire producer_trackers mutex lock")
+                .clone()
         }
 
         pub fn get_backpressure_events(&self) -> Vec<BackpressureEvent> {
