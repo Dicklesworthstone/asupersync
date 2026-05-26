@@ -33,6 +33,97 @@ mod imp {
     use std::time::Duration;
 
     const DEFAULT_ENTRIES: u32 = 256;
+
+    /// Validates a file descriptor for safe use in io_uring operations.
+    ///
+    /// This prevents SQE injection attacks by rejecting file descriptors that
+    /// point to dangerous kernel interfaces or privileged resources.
+    fn validate_safe_fd(raw_fd: RawFd) -> io::Result<()> {
+        // First check if the fd is valid
+        if unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // Get file status to determine fd type
+        let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(raw_fd, &mut stat_buf) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let file_type = stat_buf.st_mode & libc::S_IFMT;
+
+        // Allow safe fd types
+        match file_type {
+            libc::S_IFREG => {
+                // Regular files: check if it's a dangerous kernel interface
+                let mut path_buf = vec![0u8; 256];
+                let proc_path = format!("/proc/self/fd/{}", raw_fd);
+                let proc_cstring = match std::ffi::CString::new(proc_path) {
+                    Ok(s) => s,
+                    Err(_) => return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "invalid fd path",
+                    )),
+                };
+
+                let link_len = unsafe {
+                    libc::readlink(
+                        proc_cstring.as_ptr(),
+                        path_buf.as_mut_ptr() as *mut libc::c_char,
+                        path_buf.len() - 1,
+                    )
+                };
+
+                if link_len > 0 {
+                    path_buf.truncate(link_len as usize);
+                    if let Ok(path_str) = std::str::from_utf8(&path_buf) {
+                        // Reject dangerous kernel interfaces
+                        if path_str.starts_with("/dev/mem") ||
+                           path_str.starts_with("/dev/kmem") ||
+                           path_str.starts_with("/proc/kcore") ||
+                           path_str.starts_with("/proc/vmcore") ||
+                           path_str.starts_with("/sys/") ||
+                           path_str.starts_with("/dev/raw/") {
+                            return Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                "fd points to dangerous kernel interface",
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            libc::S_IFSOCK => Ok(()), // Sockets are generally safe
+            libc::S_IFIFO => Ok(()),  // Pipes are generally safe
+            libc::S_IFCHR => {
+                // Character devices: check for dangerous ones
+                let major = unsafe { libc::major(stat_buf.st_rdev) };
+                let minor = unsafe { libc::minor(stat_buf.st_rdev) };
+
+                match major {
+                    1 => {
+                        // /dev/mem (1,1), /dev/kmem (1,2), /dev/null (1,3), etc.
+                        match minor {
+                            1 | 2 => Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                "character device points to kernel memory interface",
+                            )),
+                            _ => Ok(()), // Allow other character devices like /dev/null
+                        }
+                    }
+                    _ => Ok(()), // Allow other character devices
+                }
+            }
+            libc::S_IFBLK => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "block devices not allowed in io_uring poll operations",
+            )),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsupported file descriptor type for polling",
+            )),
+        }
+    }
     const WAKE_USER_DATA: u64 = u64::MAX;
     const REMOVE_USER_DATA: u64 = u64::MAX - 1;
 
@@ -731,6 +822,9 @@ mod imp {
         interest: Interest,
         user_data: u64,
     ) -> io::Result<()> {
+        // Validate fd to prevent SQE injection attacks
+        validate_safe_fd(raw_fd)?;
+
         let mask = interest_to_poll_mask(interest);
         let entry = opcode::PollAdd::new(types::Fd(raw_fd), mask)
             .build()
@@ -738,6 +832,7 @@ mod imp {
 
         // SAFETY: PollAdd only uses the fd and interest mask; both remain valid
         // for the duration of the poll request (caller ensures fd lifetime).
+        // The fd has been validated above to ensure it's safe for polling.
         unsafe {
             ring.submission().push(&entry).map_err(push_error_to_io)?;
         }
