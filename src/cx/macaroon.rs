@@ -1290,7 +1290,9 @@ impl MacaroonToken {
         pos += 2;
 
         // Prevent unbacked preallocation DoS: a caveat takes at least 3 bytes on the wire.
-        let safe_capacity = caveat_count.min((data.len() - pos) / 3);
+        // Also enforce absolute maximum caveat count to prevent large allocations.
+        const MAX_CAVEATS: usize = 64;
+        let safe_capacity = caveat_count.min((data.len() - pos) / 3).min(MAX_CAVEATS);
         let mut caveats = Vec::with_capacity(safe_capacity);
         for _ in 0..caveat_count {
             if pos >= data.len() {
@@ -3899,6 +3901,86 @@ mod tests {
             }
             Ok(_) => panic!("Deep discharge chain should not verify successfully"),
             Err(other) => panic!("Unexpected error type: {other:?}"),
+        }
+    }
+
+    // ===================================================================
+    // DoS protection fuzz tests for asupersync-4jdqz2
+    // ===================================================================
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+        /// Property: Binary deserialization should never panic or allocate excessive memory
+        /// even with malicious inputs containing large caveat_count values.
+        #[test]
+        fn prop_binary_deserialize_dos_protection(
+            version in any::<u8>(),
+            identifier in ".*{0,100}",
+            location in ".*{0,100}",
+            caveat_count in any::<u16>(),
+            extra_data in prop::collection::vec(any::<u8>(), 0..=10000)
+        ) {
+            // Construct a potentially malformed binary that could trigger DoS
+            let mut data = Vec::new();
+            data.push(version);
+
+            // Add identifier (length-prefixed)
+            let id_bytes = identifier.as_bytes();
+            if id_bytes.len() <= u16::MAX as usize {
+                data.extend(&(id_bytes.len() as u16).to_le_bytes());
+                data.extend(id_bytes);
+
+                // Add location (length-prefixed)
+                let loc_bytes = location.as_bytes();
+                if loc_bytes.len() <= u16::MAX as usize {
+                    data.extend(&(loc_bytes.len() as u16).to_le_bytes());
+                    data.extend(loc_bytes);
+
+                    // Add caveat count (this is the attack vector)
+                    data.extend(&caveat_count.to_le_bytes());
+
+                    // Add some extra data to potentially bypass the /3 heuristic
+                    data.extend(&extra_data);
+
+                    // This should either return None or succeed, but never panic
+                    // or allocate excessive memory due to the MAX_CAVEATS limit
+                    let _result = MacaroonToken::from_binary(&data);
+
+                    // If we get here without panic/OOM, the DoS protection worked
+                }
+            }
+        }
+
+        /// Property: Large data buffers with large caveat counts should be handled safely
+        #[test]
+        fn prop_large_buffer_large_caveat_count_safe(
+            buffer_size in 1024..=65536usize,
+            caveat_count in 10000..=65535u16
+        ) {
+            // Create a large buffer that could bypass the /3 heuristic without the MAX_CAVEATS limit
+            let mut data = Vec::with_capacity(buffer_size);
+            data.push(MACAROON_SCHEMA_VERSION); // valid version
+
+            // Add minimal identifier
+            data.extend(&1u16.to_le_bytes());
+            data.push(b'a'); // 1-byte identifier
+
+            // Add minimal location
+            data.extend(&1u16.to_le_bytes());
+            data.push(b'b'); // 1-byte location
+
+            // Add large caveat count (attack vector)
+            data.extend(&caveat_count.to_le_bytes());
+
+            // Fill remaining buffer with data to make (buffer_size / 3) large
+            while data.len() < buffer_size {
+                data.push(0);
+            }
+
+            // This should not cause excessive memory allocation due to MAX_CAVEATS
+            let _result = MacaroonToken::from_binary(&data);
+            // Success if we don't OOM or panic
         }
     }
 }
