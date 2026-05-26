@@ -119,6 +119,10 @@ pub enum ErrorKind {
     ConnectionRefused,
     /// Transport protocol error.
     ProtocolError,
+    /// Request rate limited by the remote endpoint.
+    RateLimited,
+    /// Invalid input provided to operation.
+    InvalidInput,
 
     // === Distributed Regions ===
     /// Region recovery failed.
@@ -183,7 +187,9 @@ impl ErrorKind {
             | Self::SinkRejected
             | Self::ConnectionLost
             | Self::ConnectionRefused
-            | Self::ProtocolError => ErrorCategory::Transport,
+            | Self::ProtocolError
+            | Self::RateLimited
+            | Self::InvalidInput => ErrorCategory::Transport,
             Self::RecoveryFailed
             | Self::LeaseExpired
             | Self::LeaseRenewalFailed
@@ -192,7 +198,7 @@ impl ErrorKind {
             | Self::NodeUnavailable
             | Self::PartitionDetected => ErrorCategory::Distributed,
             Self::Internal | Self::InvalidStateTransition => ErrorCategory::Internal,
-            Self::ConfigError | Self::User => ErrorCategory::User,
+            Self::ConfigError | Self::User | Self::InvalidInput => ErrorCategory::User,
         }
     }
 
@@ -211,7 +217,8 @@ impl ErrorKind {
             | Self::NodeUnavailable
             | Self::QuorumNotReached
             | Self::ThresholdTimeout
-            | Self::LeaseRenewalFailed => Recoverability::Transient,
+            | Self::LeaseRenewalFailed
+            | Self::RateLimited => Recoverability::Transient,
 
             // Permanent errors - do not retry
             Self::Cancelled
@@ -228,7 +235,8 @@ impl ErrorKind {
             | Self::InvalidStateTransition
             | Self::ProtocolError
             | Self::ConnectionRefused
-            | Self::ConfigError => Recoverability::Permanent,
+            | Self::ConfigError
+            | Self::InvalidInput => Recoverability::Permanent,
 
             // Context-dependent errors
             Self::DeadlineExceeded

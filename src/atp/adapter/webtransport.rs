@@ -276,7 +276,7 @@ impl WebTransportAdapter {
     }
 
     /// Start WebTransport session for object transfer.
-    pub async fn start_session(&mut self, object_id: ObjectId, url: &str) -> Result<String> {
+    pub async fn start_session(&mut self, object_id: ObjectId, _url: &str) -> Result<String> {
         let session_id = format!(
             "wt-{}-{}",
             object_id.to_string(),
