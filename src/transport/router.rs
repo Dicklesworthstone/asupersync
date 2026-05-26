@@ -310,26 +310,69 @@ impl Default for BoundedLoadConfig {
 
 impl BoundedLoadConfig {
     /// Creates a bounded-load capacity policy.
+    ///
+    /// **Security**: Validates configuration parameters to prevent overflow attacks
+    /// (br-asupersync-qfgsh1). Clamps values to safe ranges.
     #[must_use]
     pub const fn new(epsilon_milli: u32, min_capacity: u32, capacity_per_weight: u32) -> Self {
+        // br-asupersync-qfgsh1: Clamp parameters to safe ranges to prevent overflow attacks
+        const MAX_EPSILON_MILLI: u32 = 5_000; // Max 500% overhead
+        const MAX_MIN_CAPACITY: u32 = 10_000; // Reasonable minimum capacity limit
+        const MAX_CAPACITY_PER_WEIGHT: u32 = 1_000; // Reasonable scaling factor
+
         Self {
-            epsilon_milli,
-            min_capacity,
-            capacity_per_weight,
+            epsilon_milli: if epsilon_milli > MAX_EPSILON_MILLI { MAX_EPSILON_MILLI } else { epsilon_milli },
+            min_capacity: if min_capacity > MAX_MIN_CAPACITY { MAX_MIN_CAPACITY } else { min_capacity },
+            capacity_per_weight: if capacity_per_weight > MAX_CAPACITY_PER_WEIGHT { MAX_CAPACITY_PER_WEIGHT } else { capacity_per_weight },
         }
     }
 
     /// Computes the current capacity for an endpoint.
+    ///
+    /// **Security**: Validates inputs and fails safely on overflow to prevent
+    /// routing bypass attacks (br-asupersync-qfgsh1). Returns reasonable capacity
+    /// limits instead of silently allowing unlimited connections.
     #[must_use]
     pub fn capacity_for(&self, endpoint: &Endpoint) -> u32 {
-        let base = endpoint
-            .weight
-            .max(1)
-            .saturating_mul(self.capacity_per_weight.max(1));
-        let scale = 1_000_u64.saturating_add(u64::from(self.epsilon_milli));
-        let scaled = u64::from(base).saturating_mul(scale).div_ceil(1_000);
-        let scaled = u32::try_from(scaled).unwrap_or(u32::MAX);
-        scaled.max(self.min_capacity.max(1))
+        // br-asupersync-qfgsh1: Validate endpoint weight to prevent overflow attacks
+        const MAX_SAFE_WEIGHT: u32 = 10_000; // Reasonable upper bound
+        const MAX_SAFE_EPSILON_MILLI: u32 = 5_000; // Max 500% overhead
+        const MAX_SAFE_CAPACITY_PER_WEIGHT: u32 = 1_000; // Reasonable scaling
+
+        let safe_weight = endpoint.weight.min(MAX_SAFE_WEIGHT).max(1);
+        let safe_epsilon = self.epsilon_milli.min(MAX_SAFE_EPSILON_MILLI);
+        let safe_capacity_per_weight = self.capacity_per_weight.min(MAX_SAFE_CAPACITY_PER_WEIGHT).max(1);
+
+        // br-asupersync-qfgsh1: Use checked arithmetic to detect overflow attempts
+        let base = match safe_weight.checked_mul(safe_capacity_per_weight) {
+            Some(result) => result,
+            None => {
+                // Overflow detected - return bounded capacity instead of unlimited
+                return self.min_capacity.max(1).min(1_000); // Bounded fallback
+            }
+        };
+
+        let scale = 1_000_u64.saturating_add(u64::from(safe_epsilon));
+
+        // br-asupersync-qfgsh1: Use checked arithmetic for scaling calculation
+        let scaled_u64 = match u64::from(base).checked_mul(scale) {
+            Some(product) => product.div_ceil(1_000),
+            None => {
+                // Overflow detected in scaling - return bounded capacity
+                return self.min_capacity.max(1).min(1_000); // Bounded fallback
+            }
+        };
+
+        // br-asupersync-qfgsh1: Safely convert back to u32 with reasonable upper bound
+        let final_capacity = match u32::try_from(scaled_u64) {
+            Ok(capacity) if capacity <= 100_000 => capacity, // Reasonable upper limit
+            _ => {
+                // Value too large or conversion failed - use bounded capacity
+                self.min_capacity.max(1).min(1_000) // Bounded fallback
+            }
+        };
+
+        final_capacity.max(self.min_capacity.max(1))
     }
 
     #[inline]
@@ -4980,5 +5023,55 @@ mod tests {
         let lb2 = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 12345);
         assert_eq!(lb1.hash_ring_salt(), lb2.hash_ring_salt());
         assert_eq!(lb1.hash_ring_salt(), 12345);
+    }
+
+    /// br-asupersync-qfgsh1: Test that capacity overflow attacks are prevented.
+    /// Extreme endpoint weights and configuration parameters should be clamped
+    /// to safe values instead of causing integer overflow or unlimited capacity.
+    #[test]
+    fn bounded_load_config_prevents_capacity_overflow_attacks() {
+        // Test configuration parameter clamping
+        let extreme_config = BoundedLoadConfig::new(
+            u32::MAX, // extreme epsilon_milli
+            u32::MAX, // extreme min_capacity
+            u32::MAX, // extreme capacity_per_weight
+        );
+
+        // Configuration should be clamped to safe values
+        assert!(extreme_config.epsilon_milli <= 5_000);
+        assert!(extreme_config.min_capacity <= 10_000);
+        assert!(extreme_config.capacity_per_weight <= 1_000);
+
+        // Test endpoint weight overflow protection
+        let normal_config = BoundedLoadConfig::new(250, 1, 1);
+
+        // Create endpoint with extreme weight designed to cause overflow
+        let extreme_endpoint = test_endpoint(1).with_weight(u32::MAX);
+
+        // capacity_for should handle overflow safely and return bounded capacity
+        let capacity = normal_config.capacity_for(&extreme_endpoint);
+
+        // Should return a reasonable bounded capacity, not u32::MAX or unlimited
+        assert!(capacity > 0);
+        assert!(capacity <= 100_000); // Should be within reasonable bounds
+        assert!(capacity >= normal_config.min_capacity);
+
+        // Test that normal weights still work correctly
+        let normal_endpoint = test_endpoint(2).with_weight(10);
+        let normal_capacity = normal_config.capacity_for(&normal_endpoint);
+
+        // Normal case should produce expected capacity calculation
+        assert!(normal_capacity >= normal_config.min_capacity);
+        assert!(normal_capacity <= 1_000); // Should be reasonable for weight=10
+
+        // Test that extreme values don't bypass load balancing
+        assert!(normal_config.accepts(&extreme_endpoint)); // Should accept some connections
+
+        // But not unlimited - simulate high connection count
+        let mut high_conn_endpoint = test_endpoint(3).with_weight(u32::MAX);
+        high_conn_endpoint.active_connections.store(100_000, std::sync::atomic::Ordering::Relaxed);
+
+        // With many active connections, should reject further connections
+        assert!(!normal_config.accepts(&high_conn_endpoint));
     }
 }
