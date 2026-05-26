@@ -651,6 +651,7 @@ impl Scenario {
         self.validate_expected_invariants(&mut errors);
         self.validate_minimization(&mut errors);
         self.validate_golden_projection(&mut errors);
+        self.validate_includes(&mut errors);
         errors
     }
 
@@ -1134,6 +1135,77 @@ impl Scenario {
                 field: "golden_projection.redacted".into(),
                 message: "golden projection must be redacted".into(),
             });
+        }
+    }
+
+    fn validate_includes(&self, errors: &mut Vec<ValidationError>) {
+        for (index, include) in self.include.iter().enumerate() {
+            let field = format!("include[{index}].path");
+
+            // Security: Reject empty paths
+            if include.path.is_empty() {
+                errors.push(ValidationError {
+                    field: field.clone(),
+                    message: "include path must not be empty".into(),
+                });
+                continue;
+            }
+
+            // Security: Reject absolute paths
+            if include.path.starts_with('/') || include.path.starts_with('\\') {
+                errors.push(ValidationError {
+                    field: field.clone(),
+                    message: "include path must not be absolute (no leading / or \\)".into(),
+                });
+                continue;
+            }
+
+            // Security: Reject path traversal attempts
+            if include.path.contains("..") {
+                errors.push(ValidationError {
+                    field: field.clone(),
+                    message: "include path must not contain '..' (path traversal attack)".into(),
+                });
+                continue;
+            }
+
+            // Security: Reject paths with null bytes or control characters
+            if include.path.chars().any(|c| c.is_control() || c == '\0') {
+                errors.push(ValidationError {
+                    field: field.clone(),
+                    message: "include path must not contain control characters or null bytes".into(),
+                });
+                continue;
+            }
+
+            // Security: Restrict to reasonable filename characters
+            let allowed_chars = |c: char| {
+                c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '/')
+            };
+            if !include.path.chars().all(allowed_chars) {
+                errors.push(ValidationError {
+                    field: field.clone(),
+                    message: "include path contains invalid characters (only alphanumeric, '.', '_', '-', '/' allowed)".into(),
+                });
+                continue;
+            }
+
+            // Security: Reject excessively long paths
+            if include.path.len() > 255 {
+                errors.push(ValidationError {
+                    field: field.clone(),
+                    message: "include path too long (maximum 255 characters)".into(),
+                });
+                continue;
+            }
+
+            // Security: Require .yaml or .yml extension
+            if !include.path.ends_with(".yaml") && !include.path.ends_with(".yml") {
+                errors.push(ValidationError {
+                    field,
+                    message: "include path must end with .yaml or .yml extension".into(),
+                });
+            }
         }
     }
 
@@ -1815,6 +1887,97 @@ mod tests {
                 .iter()
                 .any(|e| e.field == "golden_projection.redacted")
         );
+    }
+
+    #[test]
+    fn validate_includes_path_traversal_security() {
+        // Test empty path rejection
+        let json = r#"{
+            "id": "test",
+            "include": [{"path": ""}]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("empty")));
+
+        // Test absolute path rejection (Unix style)
+        let json = r#"{
+            "id": "test",
+            "include": [{"path": "/etc/passwd"}]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("absolute")));
+
+        // Test absolute path rejection (Windows style)
+        let json = r#"{
+            "id": "test",
+            "include": [{"path": "\\windows\\system32\\config\\sam"}]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("absolute")));
+
+        // Test path traversal rejection
+        let json = r#"{
+            "id": "test",
+            "include": [{"path": "../../../etc/passwd.yaml"}]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("path traversal")));
+
+        // Test subtler path traversal
+        let json = r#"{
+            "id": "test",
+            "include": [{"path": "configs/../secrets.yaml"}]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("path traversal")));
+
+        // Test control character rejection (null byte)
+        let json = r#"{
+            "id": "test",
+            "include": [{"path": "config .yaml"}]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("control characters")));
+
+        // Test invalid character rejection
+        let json = r#"{
+            "id": "test",
+            "include": [{"path": "config$evil.yaml"}]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("invalid characters")));
+
+        // Test path length limit
+        let long_path = "a".repeat(256) + ".yaml";
+        let json = format!(r#"{{"id": "test", "include": [{{"path": "{}"}}]}}"#, long_path);
+        let s: Scenario = serde_json::from_str(&json).unwrap();
+        let errors = s.validate();
+        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("too long")));
+
+        // Test extension requirement (missing extension)
+        let json = r#"{
+            "id": "test",
+            "include": [{"path": "config.txt"}]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("must end with .yaml or .yml")));
+
+        // Test valid path passes all checks
+        let json = r#"{
+            "id": "test",
+            "include": [{"path": "config/base.yaml"}]
+        }"#;
+        let s: Scenario = serde_json::from_str(json).unwrap();
+        let errors = s.validate();
+        assert!(errors.iter().all(|e| !e.field.starts_with("include[0].path")));
     }
 
     #[test]
