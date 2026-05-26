@@ -433,7 +433,7 @@ impl RepairCoordinator {
     ) -> Result<RepairDecision> {
         // Rate limiting check to prevent economic attacks
         if !self.decision_rate_limiter.check_rate_limit() {
-            return Err(crate::error::Error::msg("Rate limit exceeded for repair decisions"));
+            return Err(crate::error::Error::new(crate::error::ErrorKind::RateLimited));
         }
         // Calculate ROI for each applicable repair mode
         let mode_candidates = self.get_applicable_modes(path, transfer);
@@ -517,7 +517,7 @@ impl RepairCoordinator {
     pub fn record_telemetry(&mut self, telemetry: RepairTelemetry) -> Result<()> {
         // Rate limiting check to prevent economic attacks
         if !self.telemetry_rate_limiter.check_rate_limit() {
-            return Err(crate::error::Error::msg("Rate limit exceeded for telemetry submission"));
+            return Err(crate::error::Error::new(crate::error::ErrorKind::RateLimited));
         }
 
         // Validate telemetry data authenticity to prevent fake data injection
@@ -794,32 +794,32 @@ impl RepairCoordinator {
 
         // Check for impossible values
         if telemetry.actual_roi_ratio < 0.0 || telemetry.actual_roi_ratio > 1000.0 {
-            return Err(crate::error::Error::msg("Invalid ROI ratio in telemetry"));
+            return Err(crate::error::Error::new(crate::error::ErrorKind::InvalidInput));
         }
 
         if telemetry.predicted_roi.roi_ratio < 0.0 || telemetry.predicted_roi.roi_ratio > 1000.0 {
-            return Err(crate::error::Error::msg("Invalid predicted ROI in telemetry"));
+            return Err(crate::error::Error::new(crate::error::ErrorKind::InvalidInput));
         }
 
         // Validate repair symbols counts are reasonable
         if telemetry.repair_symbols_sent == 0 && telemetry.success {
-            return Err(crate::error::Error::msg("Cannot have successful repair with zero symbols sent"));
+            return Err(crate::error::Error::new(crate::error::ErrorKind::InvalidInput));
         }
 
         if telemetry.repair_symbols_decoded > telemetry.repair_symbols_sent {
-            return Err(crate::error::Error::msg("Cannot decode more symbols than were sent"));
+            return Err(crate::error::Error::new(crate::error::ErrorKind::InvalidInput));
         }
 
         // Check for time-based anomalies
         let now = SystemTime::now();
         if telemetry.measured_at > now {
-            return Err(crate::error::Error::msg("Telemetry timestamp is in the future"));
+            return Err(crate::error::Error::new(crate::error::ErrorKind::InvalidInput));
         }
 
         // Check for excessively old telemetry (could be replay attack)
         if let Ok(age) = now.duration_since(telemetry.measured_at) {
             if age > Duration::from_secs(3600) { // 1 hour max age
-                return Err(crate::error::Error::msg("Telemetry data is too old"));
+                return Err(crate::error::Error::new(crate::error::ErrorKind::InvalidInput));
             }
         }
 
