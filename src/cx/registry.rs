@@ -492,6 +492,11 @@ impl std::error::Error for NameLeaseError {}
 
 /// In-memory name registry tracking active name leases.
 ///
+/// Resource limits for name watchers (br-asupersync-ad716k).
+const MAX_WATCHERS_PER_REGION: usize = 1000;
+const MAX_WATCHERS_PER_NAME: usize = 100;
+const MAX_TOTAL_WATCHERS: usize = 10000;
+
 /// Uses deterministic hash maps for O(1) average lookup behavior while
 /// preserving deterministic public outputs via explicit sorting where needed.
 /// All mutations emit [`RegistryEvent`]s for trace visibility.
@@ -623,13 +628,42 @@ impl NameRegistry {
     ///
     /// Watchers receive notifications when the name is acquired or released.
     /// Delivery is deterministic for a fixed schedule and watch set.
+    ///
+    /// # Resource Limits (br-asupersync-ad716k)
+    ///
+    /// Returns `None` if adding this watcher would exceed resource limits:
+    /// - Maximum watchers per region: 1000
+    /// - Maximum watchers per name: 100
+    /// - Maximum total watchers: 10000
+    ///
+    /// This prevents memory exhaustion DoS attacks via unbounded watcher growth.
     pub fn watch_name(
         &mut self,
         name: impl Into<String>,
         watcher: TaskId,
         watcher_region: RegionId,
-    ) -> NameWatchRef {
+    ) -> Option<NameWatchRef> {
         let name = name.into();
+
+        // Check global watcher limit (br-asupersync-ad716k)
+        if self.watchers_by_ref.len() >= MAX_TOTAL_WATCHERS {
+            return None;
+        }
+
+        // Check per-name watcher limit (br-asupersync-ad716k)
+        if let Some(name_watchers) = self.watchers_by_name.get(&name) {
+            if name_watchers.len() >= MAX_WATCHERS_PER_NAME {
+                return None;
+            }
+        }
+
+        // Check per-region watcher limit (br-asupersync-ad716k)
+        if let Some(region_watchers) = self.watchers_by_region.get(&watcher_region) {
+            if region_watchers.len() >= MAX_WATCHERS_PER_REGION {
+                return None;
+            }
+        }
+
         let watch_ref = NameWatchRef(self.next_watch_ref);
         self.next_watch_ref = self
             .next_watch_ref
@@ -651,7 +685,7 @@ impl NameRegistry {
             .entry(watcher_region)
             .or_default()
             .push(watch_ref);
-        watch_ref
+        Some(watch_ref)
     }
 
     /// Remove a name watch reference.
@@ -2102,7 +2136,7 @@ mod tests {
         init_test("name_watch_emits_acquire_and_release");
 
         let mut reg = NameRegistry::new();
-        let watch_ref = reg.watch_name("svc", tid(50), rid(9));
+        let watch_ref = reg.watch_name("svc", tid(50), rid(9)).expect("watcher limit exceeded");
         assert_eq!(reg.name_watcher_count(), 1);
 
         let mut lease = reg
@@ -2142,9 +2176,9 @@ mod tests {
         init_test("name_watch_multiple_watchers_ordered_by_ref");
 
         let mut reg = NameRegistry::new();
-        let w1 = reg.watch_name("svc", tid(10), rid(7));
-        let w2 = reg.watch_name("svc", tid(11), rid(7));
-        let w3 = reg.watch_name("svc", tid(12), rid(8));
+        let w1 = reg.watch_name("svc", tid(10), rid(7)).expect("watcher limit exceeded");
+        let w2 = reg.watch_name("svc", tid(11), rid(7)).expect("watcher limit exceeded");
+        let w3 = reg.watch_name("svc", tid(12), rid(8)).expect("watcher limit exceeded");
 
         let mut lease = reg.register("svc", tid(1), rid(1), Time::ZERO).unwrap();
         let notifications = reg.take_name_notifications();
@@ -2168,8 +2202,8 @@ mod tests {
         init_test("name_watch_region_cleanup_suppresses_release_notifications");
 
         let mut reg = NameRegistry::new();
-        let _closed_region_watch = reg.watch_name("svc", tid(10), rid(1));
-        let open_region_watch = reg.watch_name("svc", tid(11), rid(2));
+        let _closed_region_watch = reg.watch_name("svc", tid(10), rid(1)).expect("watcher limit exceeded");
+        let open_region_watch = reg.watch_name("svc", tid(11), rid(2)).expect("watcher limit exceeded");
 
         let mut lease = reg.register("svc", tid(1), rid(1), Time::ZERO).unwrap();
         let acquired = reg.take_name_notifications();
@@ -2194,8 +2228,8 @@ mod tests {
         init_test("name_watch_task_cleanup_removes_only_dead_task_watchers");
 
         let mut reg = NameRegistry::new();
-        let _closed_task_watch = reg.watch_name("svc", tid(10), rid(1));
-        let live_watch = reg.watch_name("svc", tid(11), rid(1));
+        let _closed_task_watch = reg.watch_name("svc", tid(10), rid(1)).expect("watcher limit exceeded");
+        let live_watch = reg.watch_name("svc", tid(11), rid(1)).expect("watcher limit exceeded");
         assert_eq!(reg.name_watcher_count(), 2);
 
         let removed = reg.cleanup_task(tid(10));
@@ -2273,6 +2307,81 @@ mod tests {
         assert!(debug.contains("RegistryHandle"));
 
         crate::test_complete!("registry_handle_basic");
+    }
+
+    // ---------------------------------------------------------------
+    // Watcher resource limit tests (br-asupersync-ad716k)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_watcher_per_name_limit() {
+        init_test("test_watcher_per_name_limit");
+
+        let mut reg = NameRegistry::new();
+
+        // Add MAX_WATCHERS_PER_NAME watchers for the same name
+        for i in 0..MAX_WATCHERS_PER_NAME {
+            let watch_ref = reg.watch_name(
+                "test_name",
+                TaskId::new_for_test(i as u32, 0),
+                RegionId::new_for_test(i as u32, 0)
+            );
+            assert!(watch_ref.is_some(), "Should allow watcher {i}");
+        }
+
+        // Adding one more should fail
+        let overflow_watch = reg.watch_name(
+            "test_name",
+            TaskId::new_for_test(999, 0),
+            RegionId::new_for_test(999, 0)
+        );
+        assert!(overflow_watch.is_none(), "Should reject watcher beyond per-name limit");
+
+        // But adding for a different name should still work
+        let different_name_watch = reg.watch_name(
+            "different_name",
+            TaskId::new_for_test(1000, 0),
+            RegionId::new_for_test(1000, 0)
+        );
+        assert!(different_name_watch.is_some(), "Should allow watcher for different name");
+
+        crate::test_complete!("test_watcher_per_name_limit");
+    }
+
+    #[test]
+    fn test_watcher_per_region_limit() {
+        init_test("test_watcher_per_region_limit");
+
+        let mut reg = NameRegistry::new();
+        let region = RegionId::new_for_test(1, 0);
+
+        // Add MAX_WATCHERS_PER_REGION watchers for the same region
+        for i in 0..MAX_WATCHERS_PER_REGION {
+            let watch_ref = reg.watch_name(
+                &format!("name_{i}"),
+                TaskId::new_for_test(i as u32, 0),
+                region
+            );
+            assert!(watch_ref.is_some(), "Should allow watcher {i} for region");
+        }
+
+        // Adding one more for the same region should fail
+        let overflow_watch = reg.watch_name(
+            "overflow_name",
+            TaskId::new_for_test(999, 0),
+            region
+        );
+        assert!(overflow_watch.is_none(), "Should reject watcher beyond per-region limit");
+
+        // But adding for a different region should still work
+        let different_region_watch = reg.watch_name(
+            "different_region_name",
+            TaskId::new_for_test(1000, 0),
+            RegionId::new_for_test(2, 0)
+        );
+        assert!(different_region_watch.is_some(), "Should allow watcher for different region");
+
+        crate::test_complete!("test_watcher_per_region_limit");
     }
 
     // ---------------------------------------------------------------
