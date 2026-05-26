@@ -1178,6 +1178,7 @@ impl JetStreamContext {
     ) -> Result<Consumer, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
+        ConsumerConfig::validate_stream_name(stream)?;
         config.validate()?;
         let consumer_name = config.name.clone().unwrap_or_default();
         let subject = if consumer_name.is_empty() {
