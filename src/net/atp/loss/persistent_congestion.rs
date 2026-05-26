@@ -2,7 +2,7 @@
 //!
 //! Implements RFC 9002 persistent congestion detection with ATP enhancements.
 
-use crate::net::quic_native::{PacketNumberSpace, RttEstimator, SentPacketMeta};
+use crate::net::quic_native::{RttEstimator, SentPacketMeta};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -220,7 +220,11 @@ impl PersistentCongestionDetector {
             congestion_window,
         };
 
-        self.record_congestion_event(CongestionEventType::PacketLossBurst, conditions.clone(), now);
+        self.record_congestion_event(
+            CongestionEventType::PacketLossBurst,
+            conditions.clone(),
+            now,
+        );
 
         // Check for persistent congestion
         let is_persistent = loss_span_micros >= threshold_duration;

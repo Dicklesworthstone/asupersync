@@ -11,27 +11,27 @@
 //! - Cancellation-correct with proper obligation tracking
 //! - Deterministic replay and structured logging support
 
+use crate::atp::path::PathCandidateId;
 use crate::cx::Cx;
 use crate::net::atp::protocol::{
-    AtpOutcome, IdempotencyKey, SessionId, TransferTranscript, PeerId,
-    TransferNonce, SessionTraceId, AtpError, AtpCancelReason
+    AtpCancelReason, AtpError, AtpOutcome, IdempotencyKey, PeerId, SessionId, SessionTraceId,
+    TransferNonce, TransferTranscript,
 };
-use crate::atp::path::PathCandidateId;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
 
-pub mod session;
-pub mod transfer;
-pub mod object;
-pub mod stream;
 pub mod diagnostics;
+pub mod object;
+pub mod session;
+pub mod stream;
+pub mod transfer;
 
-pub use session::*;
-pub use transfer::*;
-pub use object::*;
-pub use stream::*;
 pub use diagnostics::*;
+pub use object::*;
+pub use session::*;
+pub use stream::*;
+pub use transfer::*;
 
 /// High-level ATP SDK client for object graph transfers.
 #[derive(Debug, Clone)]
@@ -213,8 +213,8 @@ impl Default for TransferPolicy {
     fn default() -> Self {
         Self {
             max_transfer_size_bytes: 10 * 1024 * 1024 * 1024, // 10GB
-            max_chunk_size_bytes: 1024 * 1024, // 1MB
-            transfer_timeout_ms: 300000, // 5 minutes
+            max_chunk_size_bytes: 1024 * 1024,                // 1MB
+            transfer_timeout_ms: 300000,                      // 5 minutes
             enable_auto_retry: true,
             max_retry_attempts: 3,
             retry_backoff_ms: 1000,

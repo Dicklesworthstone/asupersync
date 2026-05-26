@@ -1002,10 +1002,12 @@ mod tests {
 
         // Should detect burst pattern
         detector.analyze_loss_patterns();
-        assert!(detector
-            .pattern_analyzer
-            .patterns
-            .contains(&LossPattern::Burst));
+        assert!(
+            detector
+                .pattern_analyzer
+                .patterns
+                .contains(&LossPattern::Burst)
+        );
     }
 
     #[test]

@@ -900,7 +900,8 @@ mod tests {
             let mut total = 0u64;
             let mut stack = vec![path.to_path_buf()];
             while let Some(path) = stack.pop() {
-                for entry in std::fs::read_dir(path).unwrap() { // ubs:ignore
+                for entry in std::fs::read_dir(path).unwrap() {
+                    // ubs:ignore
                     let entry = entry.unwrap();
                     let metadata = entry.metadata().unwrap();
                     if metadata.is_file() {
@@ -953,7 +954,8 @@ mod tests {
                 .unwrap_or_default()
                 .as_nanos();
             let source = TransferSource::File {
-                path: std::env::temp_dir().join(format!( // ubs:ignore
+                path: std::env::temp_dir().join(format!(
+                    // ubs:ignore
                     "asupersync_missing_size_{}_{}",
                     std::process::id(), // ubs:ignore
                     nonce

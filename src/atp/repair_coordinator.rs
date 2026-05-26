@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 #[cfg(feature = "tracing-integration")]
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 // Provide no-op tracing macros when tracing is disabled
 #[cfg(not(feature = "tracing-integration"))]

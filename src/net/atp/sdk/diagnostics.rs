@@ -520,7 +520,11 @@ impl PathMonitor {
     async fn monitoring_loop(&mut self, _cx: Cx) {
         while self.monitoring {
             // Simulate path monitoring
-            crate::time::sleep(crate::time::wall_now(), Duration::from_millis(self.interval_ms)).await;
+            crate::time::sleep(
+                crate::time::wall_now(),
+                Duration::from_millis(self.interval_ms),
+            )
+            .await;
 
             // In a real implementation, this would:
             // 1. Check path quality metrics

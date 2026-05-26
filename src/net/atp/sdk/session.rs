@@ -152,7 +152,9 @@ impl AtpSdk {
         options: SessionOptions,
     ) -> AtpOutcome<AtpSession> {
         if cx.checkpoint().is_err() {
-            return AtpOutcome::Err(AtpError::Platform(crate::net::atp::protocol::PlatformError::OperatingSystemError));
+            return AtpOutcome::Err(AtpError::Platform(
+                crate::net::atp::protocol::PlatformError::OperatingSystemError,
+            ));
         }
 
         let nonce = generate_transfer_nonce(cx);
@@ -189,7 +191,9 @@ impl AtpSdk {
             .with_supported_features(&self.get_supported_features())
             .with_required_features(&[AtpFeature::EncryptionPolicy])
             .with_required_actions(&options.required_capabilities);
-        let (server_hello, _server_frame, _server_proof) = match server.accept_client_hello(&hello, &mut policy) {
+        let (server_hello, _server_frame, _server_proof) = match server
+            .accept_client_hello(&hello, &mut policy)
+        {
             Ok(result) => result,
             Err(e) => return AtpOutcome::Err(AtpError::Protocol(session_error_to_protocol(&e))),
         };
@@ -283,7 +287,9 @@ impl AtpSession {
     /// Close the session gracefully.
     pub async fn close(&self, cx: &Cx) -> AtpOutcome<()> {
         if cx.checkpoint().is_err() {
-            return AtpOutcome::Err(AtpError::Platform(crate::net::atp::protocol::PlatformError::OperatingSystemError));
+            return AtpOutcome::Err(AtpError::Platform(
+                crate::net::atp::protocol::PlatformError::OperatingSystemError,
+            ));
         }
         match &self.mode {
             SdkMode::InProcess => AtpOutcome::Err(AtpError::Protocol(
