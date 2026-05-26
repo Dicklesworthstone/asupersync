@@ -3447,9 +3447,39 @@ impl RuntimeState {
                 .active_async_finalizers
                 .get(&owner)
                 .is_some_and(|active_task| *active_task == task_id);
+
+            // EDGE CASE VALIDATION: Async finalizer barrier consistency check
+            // Ensures that barrier tracking is consistent with task tracking
             if should_clear_barrier {
                 self.active_async_finalizers.remove(&owner);
+
+                // EDGE CASE VALIDATION: Validate barrier was properly set
+                // This catches cases where the barrier tracking might be corrupted
+                debug_assert!(
+                    self.regions.get(owner.arena_index()).is_some_and(|r|
+                        r.state() == crate::record::region::RegionState::Finalizing ||
+                        r.state() == crate::record::region::RegionState::Closed
+                    ),
+                    "br-asupersync-mg70eb: async finalizer barrier cleared for region in invalid state \
+                     (region={:?}, task_id={:?}, finalizer_id={})",
+                    owner,
+                    task_id,
+                    finalizer_id
+                );
+            } else {
+                // EDGE CASE VALIDATION: Detect barrier tracking inconsistencies
+                // This catches cases where a finalizer task completes but wasn't tracked as active
+                debug_assert!(
+                    self.active_async_finalizers.get(&owner) != Some(&task_id),
+                    "br-asupersync-mg70eb: async finalizer task completed but barrier tracking is inconsistent \
+                     (region={:?}, completed_task={:?}, tracked_task={:?}, finalizer_id={})",
+                    owner,
+                    task_id,
+                    self.active_async_finalizers.get(&owner),
+                    finalizer_id
+                );
             }
+
             self.record_finalizer_run(finalizer_id);
         }
 
@@ -3547,15 +3577,49 @@ impl RuntimeState {
         finalizer_id: u64,
         future: BoxedAsyncFinalizer,
     ) -> Result<(TaskId, u8), BoxedAsyncFinalizer> {
+        // EDGE CASE VALIDATION: Check async finalizer barrier consistency before spawning
+        // This prevents concurrent async finalizers from the same region, which violates LIFO ordering
+        debug_assert!(
+            !self.active_async_finalizers.contains_key(&region_id),
+            "br-asupersync-mg70eb: async finalizer barrier violation - region already has active async finalizer \
+             (region={:?})",
+            region_id
+        );
+
         let deadline = self
             .current_runtime_time()
             .saturating_add_nanos(FINALIZER_TIME_BUDGET_NANOS);
         let budget = finalizer_budget().with_deadline(deadline);
 
+        // EDGE CASE VALIDATION: Validate budget parameters are sane
+        // This catches invalid time computations that could cause finalizers to run forever
+        debug_assert!(
+            budget.deadline.is_some(),
+            "br-asupersync-mg70eb: finalizer budget must have deadline to prevent unbounded execution \
+             (region={:?}, finalizer_id={})",
+            region_id,
+            finalizer_id
+        );
+        debug_assert!(
+            budget.poll_quota > 0,
+            "br-asupersync-mg70eb: finalizer budget must have non-zero poll quota \
+             (region={:?}, finalizer_id={}, poll_quota={})",
+            region_id,
+            finalizer_id,
+            budget.poll_quota
+        );
+
         let system_cx = self.create_system_cx();
         let Ok((task_id, _handle, cx, result_tx)) =
             self.create_task_infrastructure::<()>(&system_cx, region_id, budget, true)
         else {
+            // EDGE CASE VALIDATION: Log task creation failure for debugging
+            // This helps identify resource exhaustion scenarios that could block finalizer execution
+            debug!(
+                region_id = ?region_id,
+                finalizer_id = finalizer_id,
+                "br-asupersync-mg70eb: failed to create async finalizer task - returning future for requeueing"
+            );
             return Err(future);
         };
         let cx_inner = Arc::clone(&cx.inner);
@@ -3749,6 +3813,16 @@ impl RuntimeState {
     fn pop_tracked_finalizer(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
         let finalizer = {
             let region = self.regions.get(region_id.arena_index())?;
+
+            // EDGE CASE VALIDATION: Ensure finalizer stack consistency before popping
+            // This catches corruption where the region exists but has invalid finalizer state
+            debug_assert!(
+                !region.finalizers_empty(),
+                "br-asupersync-mg70eb: attempt to pop finalizer from empty stack \
+                 (region={:?})",
+                region_id
+            );
+
             region.pop_finalizer()?
         };
         let (id, empty_after_pop) = {
@@ -3756,12 +3830,52 @@ impl RuntimeState {
                 .pending_finalizer_ids
                 .get_mut(&region_id)
                 .expect("finalizer id tracking missing for region");
+
+            // EDGE CASE VALIDATION: Verify ID tracking consistency before popping
+            // This catches cases where the finalizer stack and ID tracking get out of sync
+            debug_assert!(
+                !ids.is_empty(),
+                "br-asupersync-mg70eb: finalizer ID tracking stack is empty but region has finalizers \
+                 (region={:?})",
+                region_id
+            );
+
             let id = ids.pop().expect("finalizer id stack out of sync");
+
+            // EDGE CASE VALIDATION: Validate finalizer ID is within expected range
+            // This catches corruption where invalid IDs are tracked
+            debug_assert!(
+                id < self.next_finalizer_id,
+                "br-asupersync-mg70eb: popped finalizer ID exceeds next_finalizer_id \
+                 (region={:?}, popped_id={}, next_id={})",
+                region_id,
+                id,
+                self.next_finalizer_id
+            );
+
             (id, ids.is_empty())
         };
         if empty_after_pop {
             self.pending_finalizer_ids.remove(&region_id);
         }
+
+        // EDGE CASE VALIDATION: Final consistency check after successful pop
+        // Ensures the region and tracking state remain consistent
+        if let Some(region) = self.regions.get(region_id.arena_index()) {
+            let has_more_finalizers = !region.finalizers_empty();
+            let has_more_ids = self.pending_finalizer_ids.contains_key(&region_id);
+            debug_assert_eq!(
+                has_more_finalizers,
+                has_more_ids,
+                "br-asupersync-mg70eb: finalizer stack and ID tracking inconsistency after pop \
+                 (region={:?}, has_finalizers={}, has_ids={}, popped_id={})",
+                region_id,
+                has_more_finalizers,
+                has_more_ids,
+                id
+            );
+        }
+
         Some((id, finalizer))
     }
 

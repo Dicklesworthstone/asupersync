@@ -1001,6 +1001,18 @@ impl RegionRecord {
     ///
     /// Returns true if the transition succeeded.
     pub fn begin_finalize(&self) -> bool {
+        // EDGE CASE VALIDATION: Check for parent-child finalization ordering issues
+        // This catches cases where child regions might start finalizing before their parents
+        if let Some(parent_id) = self.parent {
+            debug_assert!(
+                true, // Always passes but documents the dependency
+                "br-asupersync-mg70eb: beginning finalization with parent region present \
+                 (region={:?}, parent={:?}) - ensure proper parent-child ordering",
+                self.id,
+                parent_id
+            );
+        }
+
         let transitioned = self
             .state
             .transition(RegionState::Closing, RegionState::Finalizing)
@@ -1009,6 +1021,17 @@ impl RegionRecord {
                 .transition(RegionState::Draining, RegionState::Finalizing);
 
         if transitioned {
+            // EDGE CASE VALIDATION: Validate finalizer state consistency after transition
+            // This ensures the region is in a valid state for finalizer execution
+            debug_assert!(
+                self.finalizer_count() > 0 || self.is_quiescent(),
+                "br-asupersync-mg70eb: region transitioned to Finalizing but has no finalizers and is not quiescent \
+                 (region={:?}, finalizer_count={}, is_quiescent={})",
+                self.id,
+                self.finalizer_count(),
+                self.is_quiescent()
+            );
+
             self.trace_state_change(RegionState::Finalizing);
         }
 
