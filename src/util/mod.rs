@@ -8,6 +8,7 @@ pub mod cache;
 pub mod det_hash;
 pub mod det_rng;
 pub mod entropy;
+pub mod path_security;
 pub mod pool;
 pub mod resource;
 pub mod stack_trace;
@@ -20,6 +21,7 @@ pub use entropy::{
     BrowserEntropy, DetEntropy, EntropySource, OsEntropy, StrictEntropyGuard, ThreadLocalEntropy,
     check_ambient_entropy, disable_strict_entropy, enable_strict_entropy, strict_entropy_enabled,
 };
+pub use path_security::{PathSecurityError, SecurePath, ValidatedPath};
 pub use pool::{Pool, Recyclable, RecyclingPool};
 pub use resource::{
     PoolConfig, PoolExhausted, ResourceLimits, ResourceTracker, SymbolBuffer, SymbolPool,

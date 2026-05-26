@@ -18,6 +18,7 @@ use crate::cli::error::CliError;
 use crate::cli::output::{Output, OutputFormat};
 use crate::cx::Cx;
 use crate::types::Budget;
+use crate::util::path_security::SecurePath;
 use chrono::{DateTime, Utc};
 use serde_json;
 use std::collections::BTreeMap;
@@ -136,13 +137,43 @@ impl AtpWorkflowCoordinator {
     async fn ci_push(&mut self, cx: &Cx, args: AtpCiPushArgs) -> Result<(), CliError> {
         cx.trace("Starting CI artifact push");
 
+        // Create secure path validator for current working directory
+        // This ensures all artifact paths are relative to the current directory
+        let current_dir = std::env::current_dir().map_err(|e| {
+            CliError::new(
+                "path_security_error",
+                "Failed to get current working directory",
+            )
+            .detail(&format!("IO error: {}", e))
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+
+        let secure_path = SecurePath::new(&current_dir).map_err(|e| {
+            CliError::new(
+                "path_security_error",
+                "Failed to create secure path validator",
+            )
+            .detail(&format!("Security error: {}", e))
+            .exit_code(ExitCode::RUNTIME_ERROR)
+        })?;
+
         let mut artifacts = Vec::new();
         let mut total_bytes = 0u64;
         let start_time = std::time::Instant::now();
 
         for path in &args.paths {
-            // Read artifact file
-            let content = tokio::fs::read(path).await.map_err(|e| {
+            // Validate path against directory traversal attacks
+            let validated_path = secure_path.validate_path(path).map_err(|e| {
+                CliError::new(
+                    "path_security_error",
+                    &format!("Path traversal validation failed for: {}", path.display()),
+                )
+                .detail(&format!("Security error: {}", e))
+                .exit_code(ExitCode::RUNTIME_ERROR)
+            })?;
+
+            // Read artifact file using validated path
+            let content = tokio::fs::read(validated_path.as_path()).await.map_err(|e| {
                 CliError::new(
                     "file_read_error",
                     &format!("Failed to read artifact: {}", path.display()),

@@ -4,6 +4,7 @@
 //! CLI flags > local config > daemon policy > defaults
 
 use crate::cli::atp_command_tree::{AtpConfig as CommandAtpConfig, AtpProfile};
+use crate::util::path_security::{PathSecurityError, SecurePath};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -79,21 +80,59 @@ pub struct AtpInstallConfig {
 impl AtpInstallConfig {
     /// Read a persisted ATP installation config from TOML.
     pub fn read_from_file(path: &Path) -> Result<Self, ConfigError> {
-        let content =
-            fs::read_to_string(path).map_err(|e| ConfigError::FileRead(path.to_path_buf(), e))?;
-        toml::from_str(&content).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))
+        Self::read_from_file_secure(path, None)
+    }
+
+    /// Read a persisted ATP installation config from TOML with path validation.
+    pub fn read_from_file_secure(path: &Path, base_dir: Option<&Path>) -> Result<Self, ConfigError> {
+        let validated_path = if let Some(base) = base_dir {
+            // If a base directory is provided, validate the path is within bounds
+            let secure_path = SecurePath::new(base)
+                .map_err(|e| ConfigError::PathSecurity(format!("Failed to create secure path validator: {}", e)))?;
+            let validated = secure_path.validate_path(path)
+                .map_err(|e| ConfigError::PathSecurity(format!("Path traversal validation failed: {}", e)))?;
+            validated.to_path_buf()
+        } else {
+            // If no base directory provided, use the path directly (for backward compatibility)
+            // but log a warning about potential security risk
+            tracing::warn!("Reading config file without path validation: {}", path.display());
+            path.to_path_buf()
+        };
+
+        let content = fs::read_to_string(&validated_path)
+            .map_err(|e| ConfigError::FileRead(validated_path.clone(), e))?;
+        toml::from_str(&content).map_err(|e| ConfigError::Parse(validated_path, e))
     }
 
     /// Write a persisted ATP installation config to TOML.
     pub fn write_to_file(&self, path: &Path) -> Result<(), ConfigError> {
-        if let Some(parent) = path.parent() {
+        self.write_to_file_secure(path, None)
+    }
+
+    /// Write a persisted ATP installation config to TOML with path validation.
+    pub fn write_to_file_secure(&self, path: &Path, base_dir: Option<&Path>) -> Result<(), ConfigError> {
+        let validated_path = if let Some(base) = base_dir {
+            // If a base directory is provided, validate the path is within bounds
+            let secure_path = SecurePath::new(base)
+                .map_err(|e| ConfigError::PathSecurity(format!("Failed to create secure path validator: {}", e)))?;
+            let validated = secure_path.validate_path(path)
+                .map_err(|e| ConfigError::PathSecurity(format!("Path traversal validation failed: {}", e)))?;
+            validated.to_path_buf()
+        } else {
+            // If no base directory provided, use the path directly (for backward compatibility)
+            // but log a warning about potential security risk
+            tracing::warn!("Writing config file without path validation: {}", path.display());
+            path.to_path_buf()
+        };
+
+        if let Some(parent) = validated_path.parent() {
             fs::create_dir_all(parent)
-                .map_err(|e| ConfigError::FileWrite(path.to_path_buf(), e))?;
+                .map_err(|e| ConfigError::FileWrite(validated_path.clone(), e))?;
         }
 
         let content = toml::to_string_pretty(self)
-            .map_err(|e| ConfigError::Serialize(path.to_path_buf(), e))?;
-        fs::write(path, content).map_err(|e| ConfigError::FileWrite(path.to_path_buf(), e))
+            .map_err(|e| ConfigError::Serialize(validated_path.clone(), e))?;
+        fs::write(&validated_path, content).map_err(|e| ConfigError::FileWrite(validated_path, e))
     }
 }
 
@@ -141,9 +180,8 @@ impl ConfigPaths {
     pub fn detect_standard_paths() -> Self {
         #[cfg(unix)]
         {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            let config_dir =
-                std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| format!("{}/.config", home));
+            let home = Self::sanitize_env_path("HOME", "/tmp");
+            let config_dir = Self::sanitize_env_path("XDG_CONFIG_HOME", &format!("{}/.config", home));
 
             Self {
                 daemon_policy: PathBuf::from("/etc/asupersync/atp.toml"),
@@ -154,8 +192,7 @@ impl ConfigPaths {
 
         #[cfg(windows)]
         {
-            let appdata = std::env::var("APPDATA")
-                .unwrap_or_else(|_| r"C:\Users\Default\AppData\Roaming".to_string());
+            let appdata = Self::sanitize_env_path("APPDATA", r"C:\Users\Default\AppData\Roaming");
 
             Self {
                 daemon_policy: PathBuf::from(r"C:\ProgramData\Asupersync\atp.toml"),
@@ -166,7 +203,7 @@ impl ConfigPaths {
 
         #[cfg(target_os = "macos")]
         {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            let home = Self::sanitize_env_path("HOME", "/tmp");
 
             Self {
                 daemon_policy: PathBuf::from("/Library/Application Support/Asupersync/atp.toml"),
@@ -177,6 +214,49 @@ impl ConfigPaths {
                 local_config: PathBuf::from(".atp.toml"),
             }
         }
+    }
+
+    /// Safely read and validate environment variable paths.
+    ///
+    /// SECURITY: Prevents path injection attacks through environment variables
+    /// by validating that paths don't contain dangerous sequences like "../"
+    /// and are within reasonable bounds.
+    fn sanitize_env_path(env_var: &str, default: &str) -> String {
+        let raw_path = std::env::var(env_var).unwrap_or_else(|_| default.to_string());
+
+        // Security checks to prevent path injection
+        if raw_path.contains("..") {
+            eprintln!("Security warning: {} contains suspicious path traversal, using default", env_var);
+            return default.to_string();
+        }
+
+        // Prevent excessively long paths that could cause issues
+        if raw_path.len() > 1024 {
+            eprintln!("Security warning: {} path too long, using default", env_var);
+            return default.to_string();
+        }
+
+        // Prevent null bytes and other control characters
+        if raw_path.contains('\0') || raw_path.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+            eprintln!("Security warning: {} contains invalid characters, using default", env_var);
+            return default.to_string();
+        }
+
+        // On Unix, ensure the path is absolute if not default
+        #[cfg(unix)]
+        if !raw_path.starts_with('/') && raw_path != default {
+            eprintln!("Security warning: {} is not absolute, using default", env_var);
+            return default.to_string();
+        }
+
+        // On Windows, basic drive letter validation
+        #[cfg(windows)]
+        if !raw_path.chars().nth(1).map_or(false, |c| c == ':') && raw_path != default {
+            eprintln!("Security warning: {} is not a valid Windows path, using default", env_var);
+            return default.to_string();
+        }
+
+        raw_path
     }
 }
 
@@ -419,6 +499,9 @@ pub enum ConfigError {
 
     #[error("Configuration validation error: {0}")]
     Validation(String),
+
+    #[error("Path security validation failed: {0}")]
+    PathSecurity(String),
 }
 
 /// Merge two configurations with precedence (second overrides first).
