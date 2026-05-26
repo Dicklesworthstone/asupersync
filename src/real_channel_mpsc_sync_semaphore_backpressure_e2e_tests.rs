@@ -58,17 +58,19 @@ mod tests {
     use std::task::{Context, Poll};
     use tokio::sync::{Barrier, Semaphore as TokioSemaphore};
 
-    /// Helper function to safely access poisoned mutexes in tests
+    /// Helper function to safely access mutexes with poison recovery in tests
     ///
     /// Handles mutex poisoning gracefully by recovering the data from the poisoned mutex.
     /// This prevents test panics when a test thread panics while holding a mutex lock.
-    fn safe_mutex_lock<T>(mutex: &Arc<Mutex<T>>) -> Result<std::sync::MutexGuard<T>, String> {
+    /// Always succeeds by recovering poisoned mutex data for test resilience.
+    fn safe_mutex_lock<T>(mutex: &Arc<Mutex<T>>) -> std::sync::MutexGuard<T> {
         match mutex.lock() {
-            Ok(guard) => Ok(guard),
+            Ok(guard) => guard,
             Err(poisoned) => {
-                // Mutex is poisoned, but we can still recover the data in tests
-                // In production code, this might warrant different handling
-                Ok(poisoned.into_inner())
+                // Mutex is poisoned, but we can recover the data in tests
+                // This logs the poison event but continues execution
+                eprintln!("Warning: Mutex poisoned in test, recovering data");
+                poisoned.into_inner()
             }
         }
     }
@@ -232,8 +234,7 @@ mod tests {
         }
 
         pub fn record_backpressure_event(&self, event: BackpressureEvent) {
-            let mut stats = safe_mutex_lock(&self.stats)
-                .expect("Failed to acquire stats mutex lock");
+            let mut stats = safe_mutex_lock(&self.stats);
 
             match event.event_type {
                 BackpressureEventType::PermitAcquired => {
@@ -263,7 +264,6 @@ mod tests {
             }
 
             safe_mutex_lock(&self.backpressure_events)
-                .expect("Failed to acquire backpressure_events mutex lock")
                 .push_back(event);
         }
 
@@ -277,7 +277,6 @@ mod tests {
 
             // Update producer tracker
             if let Some(tracker) = safe_mutex_lock(&self.producer_trackers)
-                .expect("Failed to acquire producer_trackers mutex lock")
                 .get_mut(&producer_id) {
                 tracker.messages_attempted += 1;
                 tracker.blocked_on_permits = true;
@@ -304,7 +303,6 @@ mod tests {
 
             // Update tracker for permit acquisition
             if let Some(tracker) = safe_mutex_lock(&self.producer_trackers)
-                .expect("Failed to acquire producer_trackers mutex lock")
                 .get_mut(&producer_id) {
                 tracker.permits_acquired += 1;
                 tracker.blocked_on_permits = false;
@@ -364,7 +362,6 @@ mod tests {
                     // Update tracker
                     if let Some(tracker) =
                         safe_mutex_lock(&self.producer_trackers)
-                            .expect("Failed to acquire producer_trackers mutex lock")
                             .get_mut(&producer_id)
                     {
                         tracker.messages_sent += 1;
@@ -434,8 +431,7 @@ mod tests {
 
         pub async fn consume_messages(&self, expected_count: u32) -> Vec<TestMessage> {
             let mut consumed = Vec::new();
-            let mut receiver = safe_mutex_lock(&self.mpsc_receiver)
-                .expect("Failed to acquire mpsc_receiver mutex lock");
+            let mut receiver = safe_mutex_lock(&self.mpsc_receiver);
 
             for _ in 0..expected_count {
                 match timeout(Duration::from_millis(100), receiver.recv()).await {
@@ -452,13 +448,11 @@ mod tests {
 
         pub fn get_stats_snapshot(&self) -> BackpressureStats {
             safe_mutex_lock(&self.stats)
-                .expect("Failed to acquire stats mutex lock")
                 .clone()
         }
 
         pub fn get_producer_trackers(&self) -> HashMap<u32, ProducerTracker> {
             safe_mutex_lock(&self.producer_trackers)
-                .expect("Failed to acquire producer_trackers mutex lock")
                 .clone()
         }
 
