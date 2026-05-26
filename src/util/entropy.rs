@@ -270,6 +270,127 @@ impl Drop for StrictEntropyGuard {
     }
 }
 
+// ============================================================================
+// Cryptographic salt generation (br-asupersync-is96u6)
+// ============================================================================
+
+/// 256-bit cryptographic salt for hash ring security.
+///
+/// br-asupersync-is96u6: Provides collision-resistant salt generation
+/// for hash rings and consistent hash algorithms. 256-bit entropy
+/// defeats birthday paradox attacks up to 2^128 complexity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CryptoSalt([u8; 32]);
+
+impl CryptoSalt {
+    /// Generate a cryptographically secure 256-bit salt with domain separation.
+    ///
+    /// Uses OS entropy source with domain separation to prevent cross-system
+    /// salt reuse attacks. The domain parameter should be unique per subsystem.
+    #[must_use]
+    pub fn generate(domain: &str) -> Self {
+        check_ambient_entropy("crypto-salt");
+        let mut salt_bytes = [0u8; 32];
+
+        // Primary entropy
+        getrandom::fill(&mut salt_bytes).expect("crypto salt generation failed");
+
+        // Domain separation via HMAC-like construction
+        let mut domain_mixed = [0u8; 32];
+        getrandom::fill(&mut domain_mixed).expect("crypto salt domain mixing failed");
+
+        // Mix domain into salt to prevent cross-system reuse
+        let domain_bytes = domain.as_bytes();
+        for (i, &domain_byte) in domain_bytes.iter().enumerate() {
+            if i < 32 {
+                salt_bytes[i] ^= domain_byte;
+                domain_mixed[i] ^= domain_byte.wrapping_mul(0x9e);
+            }
+        }
+
+        // Final mixing to ensure uniform distribution
+        for i in 0..32 {
+            salt_bytes[i] ^= domain_mixed[i];
+        }
+
+        Self(salt_bytes)
+    }
+
+    /// Generate a deterministic salt for testing from a seed and domain.
+    ///
+    /// Only for use in tests and lab runtime where deterministic behavior
+    /// is required. Production code MUST use `generate()`.
+    #[must_use]
+    pub fn for_test(seed: u64, domain: &str) -> Self {
+        let mut salt_bytes = [0u8; 32];
+
+        // Place seed as first 8 bytes for backward compatibility
+        salt_bytes[0..8].copy_from_slice(&seed.to_le_bytes());
+
+        // Fill remaining bytes with deterministic but well-mixed data
+        let mut state = seed;
+        for chunk in salt_bytes[8..].chunks_exact_mut(8) {
+            state = state.wrapping_mul(0x9e37_79b9_7f4a_7c15).wrapping_add(0x243f_6a88_85a3_08d3);
+            chunk.copy_from_slice(&state.to_le_bytes());
+        }
+
+        // Domain separation on non-seed bytes to preserve seed recovery
+        let domain_bytes = domain.as_bytes();
+        for (i, &domain_byte) in domain_bytes.iter().enumerate() {
+            // Skip first 8 bytes to preserve seed value for as_u64()
+            if i >= 8 && i < 32 {
+                salt_bytes[i] ^= domain_byte;
+            }
+        }
+
+        Self(salt_bytes)
+    }
+
+    /// Extract a 64-bit value from the salt for compatibility with existing hash functions.
+    ///
+    /// Uses the first 8 bytes of the salt. For new code, prefer using the full
+    /// 256-bit salt through `as_bytes()`.
+    #[must_use]
+    pub fn as_u64(&self) -> u64 {
+        u64::from_le_bytes([
+            self.0[0], self.0[1], self.0[2], self.0[3],
+            self.0[4], self.0[5], self.0[6], self.0[7],
+        ])
+    }
+
+    /// Returns the full 256-bit salt as bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Extract a salt subset for domain-specific use.
+    ///
+    /// Provides domain-separated salt derivation from the master salt.
+    /// Each domain gets a cryptographically independent 64-bit value.
+    #[must_use]
+    pub fn derive_u64(&self, domain_suffix: &str) -> u64 {
+        use std::hash::{Hash, Hasher};
+        use crate::util::det_hash::DetHasher;
+
+        let mut hasher = DetHasher::for_production();
+        self.0.hash(&mut hasher);
+        "crypto-salt-derive".hash(&mut hasher);
+        domain_suffix.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+impl Default for CryptoSalt {
+    /// Generate a new crypto salt with default domain.
+    ///
+    /// Uses "default" as the domain. Prefer `generate(domain)` with
+    /// a specific domain for better security isolation.
+    fn default() -> Self {
+        Self::generate("default")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(

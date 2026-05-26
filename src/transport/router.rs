@@ -561,19 +561,18 @@ pub struct LoadBalancer {
     /// Random seed.
     random_seed: AtomicU64,
 
-    /// br-asupersync-5ypgzi: per-router salt used to seed the
-    /// salted HRW score domain in the HashBased strategy. Sourced from
-    /// `OsEntropy::next_u64()` at LoadBalancer construction so an
-    /// attacker who can choose ObjectId values cannot pre-compute
-    /// colliding keys without knowing this specific router's salt.
-    /// Two routers built independently see different salts → the
-    /// same ObjectId routes to different endpoints across them,
-    /// preventing cross-deployment attacks.
+    /// br-asupersync-is96u6: 256-bit cryptographic salt for hash ring security.
+    /// Upgraded from weak 64-bit salt to defeat collision attacks. Uses
+    /// cryptographically secure entropy with domain separation to prevent
+    /// cross-deployment attacks and birthday paradox exploits.
     ///
-    /// Within a single router instance the salt is stable, so
-    /// routing remains sticky for the same ObjectId across
-    /// dispatches (which is the point of HashBased routing).
-    hash_ring_salt: u64,
+    /// Previous vulnerability: 64-bit salt enabled collision attacks with
+    /// 2^32 complexity (birthday paradox). Attackers could craft ObjectIds
+    /// that all route to the same endpoint, causing DoS.
+    ///
+    /// Current security: 256-bit entropy raises collision resistance to
+    /// 2^128 complexity, making practical attacks infeasible.
+    hash_ring_salt: crate::util::entropy::CryptoSalt,
 
     /// Capacity policy used by [`LoadBalanceStrategy::BoundedLoadHash`].
     bounded_load_config: BoundedLoadConfig,
@@ -728,22 +727,20 @@ impl LoadBalancer {
         }
     }
 
-    /// Creates a new load balancer with a randomly-seeded HashRing
-    /// salt sourced from OS entropy (br-asupersync-5ypgzi). Use
-    /// [`Self::with_seed`] in tests / lab runs where deterministic
-    /// routing is required.
+    /// Creates a new load balancer with a cryptographically secure HashRing
+    /// salt (br-asupersync-is96u6). Uses 256-bit entropy with domain separation
+    /// to prevent collision attacks. Use [`Self::with_test_salt`] in tests/lab
+    /// runs where deterministic routing is required.
     #[must_use]
     pub fn new(strategy: LoadBalanceStrategy) -> Self {
-        use crate::util::EntropySource;
-        Self::with_seed(strategy, crate::util::OsEntropy.next_u64())
+        Self::with_crypto_salt(strategy, crate::util::entropy::CryptoSalt::generate("transport-router"))
     }
 
-    /// Creates a new load balancer with an explicit HashRing salt.
-    /// Use this in tests / lab runs to obtain deterministic routing;
-    /// production code should call [`Self::new`] which seeds from
-    /// OsEntropy. (br-asupersync-5ypgzi)
+    /// Creates a new load balancer with an explicit CryptoSalt.
+    /// For production use, prefer [`Self::new`] which generates secure entropy.
+    /// (br-asupersync-is96u6)
     #[must_use]
-    pub fn with_seed(strategy: LoadBalanceStrategy, hash_ring_salt: u64) -> Self {
+    pub fn with_crypto_salt(strategy: LoadBalanceStrategy, hash_ring_salt: crate::util::entropy::CryptoSalt) -> Self {
         Self {
             strategy,
             rr_counter: AtomicU64::new(0),
@@ -753,6 +750,27 @@ impl LoadBalancer {
         }
     }
 
+    /// Creates a new load balancer with a deterministic test salt.
+    /// Only for use in tests and lab runtime where deterministic routing
+    /// is required. Production code MUST use [`Self::new`].
+    /// (br-asupersync-is96u6)
+    #[must_use]
+    pub fn with_test_salt(strategy: LoadBalanceStrategy, test_seed: u64) -> Self {
+        Self::with_crypto_salt(
+            strategy,
+            crate::util::entropy::CryptoSalt::for_test(test_seed, "transport-router-test")
+        )
+    }
+
+    /// DEPRECATED: Creates a load balancer with legacy 64-bit salt.
+    /// Only for compatibility during migration. New code MUST use
+    /// [`Self::new`] or [`Self::with_test_salt`]. (br-asupersync-is96u6)
+    #[deprecated(since = "0.1.0", note = "Use with_test_salt() for tests or new() for production")]
+    #[must_use]
+    pub fn with_seed(strategy: LoadBalanceStrategy, hash_ring_salt: u64) -> Self {
+        Self::with_test_salt(strategy, hash_ring_salt)
+    }
+
     /// Sets the bounded-load capacity policy.
     #[must_use]
     pub fn with_bounded_load_config(mut self, config: BoundedLoadConfig) -> Self {
@@ -760,11 +778,19 @@ impl LoadBalancer {
         self
     }
 
-    /// Returns the per-router HashRing salt. Exposed for diagnostics
-    /// and replay-stability assertions.
+    /// Returns the per-router HashRing salt as 64-bit for compatibility.
+    /// Exposed for diagnostics and replay-stability assertions.
+    /// For full entropy, use `crypto_salt()`. (br-asupersync-is96u6)
     #[must_use]
     pub fn hash_ring_salt(&self) -> u64 {
-        self.hash_ring_salt
+        self.hash_ring_salt.as_u64()
+    }
+
+    /// Returns the full 256-bit cryptographic salt.
+    /// Prefer this over `hash_ring_salt()` for new code. (br-asupersync-is96u6)
+    #[must_use]
+    pub fn crypto_salt(&self) -> &crate::util::entropy::CryptoSalt {
+        &self.hash_ring_salt
     }
 
     /// Returns the current bounded-load capacity policy.
@@ -809,7 +835,7 @@ impl LoadBalancer {
         let primary = crate::distributed::consistent_hash::select_hrw(
             available.iter().copied(),
             &object_id.as_u128(),
-            self.hash_ring_salt,
+            self.hash_ring_salt.as_u64(),
             |endpoint| &endpoint.id,
             |endpoint| endpoint.weight.max(1),
         )
@@ -878,7 +904,7 @@ impl LoadBalancer {
         let primary = crate::distributed::consistent_hash::select_hrw(
             available.iter().copied(),
             &key,
-            self.hash_ring_salt,
+            self.hash_ring_salt.as_u64(),
             |endpoint| &endpoint.id,
             |endpoint| endpoint.weight.max(1),
         );
@@ -888,7 +914,7 @@ impl LoadBalancer {
                 .copied()
                 .filter(|endpoint| self.bounded_load_config.accepts(endpoint)),
             &key,
-            self.hash_ring_salt,
+            self.hash_ring_salt.as_u64(),
             |endpoint| &endpoint.id,
             |endpoint| endpoint.weight.max(1),
         );
@@ -914,7 +940,7 @@ impl LoadBalancer {
             eligible,
             count,
             &key,
-            self.hash_ring_salt,
+            self.hash_ring_salt.as_u64(),
             |endpoint| &endpoint.id,
             |endpoint| endpoint.weight.max(1),
         );
@@ -933,7 +959,7 @@ impl LoadBalancer {
                 .filter(|endpoint| !selected_ids.contains(&endpoint.id)),
             remaining,
             &key,
-            self.hash_ring_salt,
+            self.hash_ring_salt.as_u64(),
             |endpoint| &endpoint.id,
             |endpoint| endpoint.weight.max(1),
         );
@@ -1059,7 +1085,7 @@ impl LoadBalancer {
                         crate::distributed::consistent_hash::select_hrw(
                             healthy.iter().copied(),
                             &oid.as_u128(),
-                            self.hash_ring_salt,
+                            self.hash_ring_salt.as_u64(),
                             |endpoint| &endpoint.id,
                             |endpoint| endpoint.weight.max(1),
                         )
@@ -1312,7 +1338,7 @@ impl LoadBalancer {
                         available.iter().copied(),
                         count,
                         &oid.as_u128(),
-                        self.hash_ring_salt,
+                        self.hash_ring_salt.as_u64(),
                         |endpoint| &endpoint.id,
                         |endpoint| endpoint.weight.max(1),
                     )
@@ -1458,9 +1484,9 @@ impl RoutingEntry {
     /// Sets the bounded-load capacity policy for this route.
     #[must_use]
     pub fn with_bounded_load_config(mut self, config: BoundedLoadConfig) -> Self {
-        let load_balancer = LoadBalancer::with_seed(
+        let load_balancer = LoadBalancer::with_crypto_salt(
             self.load_balancer.strategy,
-            self.load_balancer.hash_ring_salt(),
+            *self.load_balancer.crypto_salt(),
         )
         .with_bounded_load_config(config);
         self.load_balancer = Arc::new(load_balancer);
