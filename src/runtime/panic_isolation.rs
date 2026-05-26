@@ -11,8 +11,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use parking_lot::Mutex;
 use std::time::Instant;
 
 static PANIC_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -349,10 +350,7 @@ impl PanicIsolator {
         let threshold = self.config.panic_threshold_per_region?;
         let region_id = self.location_region(location)?;
         let panic_count = {
-            let guard = self
-                .region_panic_counts
-                .lock()
-                .expect("panic counts mutex not poisoned");
+            let guard = self.region_panic_counts.lock();
             guard.get(&region_id).copied().unwrap_or(0)
         };
 
@@ -393,10 +391,7 @@ impl PanicIsolator {
         let Some(region_id) = context.region_id else {
             return;
         };
-        let mut guard = self
-            .region_panic_counts
-            .lock()
-            .expect("panic counts mutex not poisoned");
+        let mut guard = self.region_panic_counts.lock();
         let count = guard.entry(region_id).or_insert(0);
         *count = count.saturating_add(1);
     }
