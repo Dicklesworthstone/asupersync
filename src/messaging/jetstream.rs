@@ -50,6 +50,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicBool};
 
 /// br-asupersync-w7n2qx: client-side cap on stream and consumer name
 /// length, in bytes. Mirrors the upstream `nats-server` 256-byte cap on
@@ -72,6 +73,24 @@ const ACK_TOKEN_TIMEOUT_SECS: u64 = 300; // 5 minutes
 /// Maximum number of recent ack tokens to track for replay prevention
 const MAX_ACK_TOKEN_HISTORY: usize = 10000;
 
+/// Pull rate limiting: minimum interval between consecutive pull requests per consumer (ms)
+const MIN_PULL_INTERVAL_MS: u64 = 50; // 20 requests/second max per consumer
+
+/// Pull rate limiting: exponential backoff base multiplier for rapid requests
+const PULL_BACKOFF_MULTIPLIER: f64 = 1.5;
+
+/// Pull rate limiting: maximum backoff interval (ms)
+const MAX_PULL_BACKOFF_MS: u64 = 5000; // 5 seconds max
+
+/// Dynamic batch sizing: memory pressure threshold to start reducing batch sizes
+const MEMORY_PRESSURE_THRESHOLD_MB: u64 = 512; // Start reducing at 512MB consumer memory usage
+
+/// Dynamic batch sizing: minimum batch size under memory pressure
+const MIN_BATCH_SIZE_UNDER_PRESSURE: usize = 16;
+
+/// System-wide pull request rate limiting: max pull requests per second across all consumers
+const GLOBAL_PULL_RATE_LIMIT: u64 = 1000;
+
 /// br-asupersync-w7n2qx: client-side cap on the `batch` argument to
 /// pull-consumer requests. The pull path pre-allocates
 /// `Vec::with_capacity(batch)` for received messages; without a cap a
@@ -90,6 +109,39 @@ struct AckTokenTracker {
     /// Set of recently used ack tokens with their expiry timestamps
     used_tokens: Mutex<HashSet<(String, u64)>>, // (token_hash, expires_at)
 }
+
+/// Pull request rate limiter to prevent DoS via rapid pull requests.
+/// Implements per-consumer rate limiting with exponential backoff.
+#[derive(Debug)]
+struct PullRateLimiter {
+    /// Timestamp of last pull request (nanoseconds since UNIX_EPOCH)
+    last_pull_ns: AtomicU64,
+    /// Current backoff interval (milliseconds)
+    current_backoff_ms: AtomicU64,
+    /// Number of consecutive rapid requests
+    rapid_request_count: AtomicU64,
+    /// Whether rate limiting is currently active
+    rate_limiting_active: AtomicBool,
+}
+
+/// System-wide pull rate tracker to prevent global DoS attacks
+#[derive(Debug)]
+struct GlobalPullRateTracker {
+    /// Pull request timestamps for the last second (circular buffer)
+    recent_pulls: Vec<u64>,
+    /// Current position in the circular buffer
+    buffer_position: usize,
+    /// Total system memory usage estimate (bytes)
+    estimated_memory_usage: u64,
+}
+
+/// Global pull rate tracker for system-wide DoS protection
+static GLOBAL_PULL_RATE_TRACKER: std::sync::LazyLock<Mutex<GlobalPullRateTracker>> =
+    std::sync::LazyLock::new(|| Mutex::new(GlobalPullRateTracker::new()));
+
+/// Global token tracker for anti-replay protection
+static GLOBAL_ACK_TOKEN_TRACKER: std::sync::LazyLock<AckTokenTracker> =
+    std::sync::LazyLock::new(|| AckTokenTracker::new());
 
 impl AckTokenTracker {
     fn new() -> Self {
@@ -146,6 +198,121 @@ impl AckTokenTracker {
     }
 }
 
+impl PullRateLimiter {
+    fn new() -> Self {
+        Self {
+            last_pull_ns: AtomicU64::new(0),
+            current_backoff_ms: AtomicU64::new(0),
+            rapid_request_count: AtomicU64::new(0),
+            rate_limiting_active: AtomicBool::new(false),
+        }
+    }
+
+    /// Check if a pull request is allowed and update rate limiting state.
+    /// Returns Ok(()) if allowed, Err with delay duration if rate limited.
+    fn check_pull_request(&self, now_ns: u64) -> Result<(), Duration> {
+        let last_pull_ns = self.last_pull_ns.load(Ordering::Relaxed);
+        let time_since_last_ms = (now_ns - last_pull_ns) / 1_000_000; // Convert to milliseconds
+
+        // Check minimum interval
+        if time_since_last_ms < MIN_PULL_INTERVAL_MS {
+            // Rapid request detected - apply exponential backoff
+            let rapid_count = self.rapid_request_count.fetch_add(1, Ordering::Relaxed);
+            let backoff_ms = self.calculate_backoff(rapid_count);
+            self.current_backoff_ms.store(backoff_ms, Ordering::Relaxed);
+            self.rate_limiting_active.store(true, Ordering::Relaxed);
+
+            warn!(
+                "JetStream pull rate limit exceeded - backoff required: {}ms (rapid requests: {})",
+                backoff_ms, rapid_count + 1
+            );
+
+            return Err(Duration::from_millis(backoff_ms));
+        }
+
+        // Check if we need to wait for backoff
+        let current_backoff_ms = self.current_backoff_ms.load(Ordering::Relaxed);
+        if current_backoff_ms > 0 && time_since_last_ms < current_backoff_ms {
+            let remaining_backoff = current_backoff_ms - time_since_last_ms;
+            return Err(Duration::from_millis(remaining_backoff));
+        }
+
+        // Request is allowed - update state
+        self.last_pull_ns.store(now_ns, Ordering::Relaxed);
+
+        // Reset backoff if we've waited long enough
+        if time_since_last_ms > current_backoff_ms * 2 {
+            self.rapid_request_count.store(0, Ordering::Relaxed);
+            self.current_backoff_ms.store(0, Ordering::Relaxed);
+            self.rate_limiting_active.store(false, Ordering::Relaxed);
+        }
+
+        Ok(())
+    }
+
+    fn calculate_backoff(&self, rapid_count: u64) -> u64 {
+        let base_backoff = MIN_PULL_INTERVAL_MS * 2; // Start with 2x minimum interval
+        let exponential_backoff = (base_backoff as f64 * PULL_BACKOFF_MULTIPLIER.powi(rapid_count as i32)) as u64;
+        exponential_backoff.min(MAX_PULL_BACKOFF_MS)
+    }
+
+    fn is_rate_limiting_active(&self) -> bool {
+        self.rate_limiting_active.load(Ordering::Relaxed)
+    }
+}
+
+impl GlobalPullRateTracker {
+    fn new() -> Self {
+        Self {
+            recent_pulls: vec![0; 2000], // Track up to 2000 requests (2x the rate limit)
+            buffer_position: 0,
+            estimated_memory_usage: 0,
+        }
+    }
+
+    /// Check if a global pull request is allowed and update tracking.
+    fn check_global_pull_request(&mut self, now_ns: u64, estimated_batch_memory: u64) -> Result<(), Duration> {
+        let now_ms = now_ns / 1_000_000; // Convert to milliseconds
+        let one_second_ago = now_ms.saturating_sub(1000);
+
+        // Count recent pulls in the last second
+        let recent_count = self.recent_pulls.iter()
+            .filter(|&&timestamp| timestamp > one_second_ago)
+            .count();
+
+        // Check global rate limit
+        if recent_count >= GLOBAL_PULL_RATE_LIMIT as usize {
+            warn!(
+                "JetStream global pull rate limit exceeded: {} requests/second (limit: {})",
+                recent_count, GLOBAL_PULL_RATE_LIMIT
+            );
+            return Err(Duration::from_millis(100)); // Brief delay for global rate limit
+        }
+
+        // Check memory pressure
+        let new_memory_usage = self.estimated_memory_usage + estimated_batch_memory;
+        if new_memory_usage > MEMORY_PRESSURE_THRESHOLD_MB * 1_024 * 1_024 {
+            warn!(
+                "JetStream memory pressure detected: {}MB estimated usage (threshold: {}MB)",
+                new_memory_usage / (1_024 * 1_024), MEMORY_PRESSURE_THRESHOLD_MB
+            );
+            return Err(Duration::from_millis(500)); // Longer delay for memory pressure
+        }
+
+        // Update tracking
+        self.recent_pulls[self.buffer_position] = now_ms;
+        self.buffer_position = (self.buffer_position + 1) % self.recent_pulls.len();
+        self.estimated_memory_usage = new_memory_usage;
+
+        // Cleanup old memory usage estimates (rough approximation)
+        if self.buffer_position % 100 == 0 {
+            self.estimated_memory_usage = self.estimated_memory_usage.saturating_sub(estimated_batch_memory * 50);
+        }
+
+        Ok(())
+    }
+}
+
 /// Global ack token tracker to prevent replay attacks across all consumers
 static ACK_TOKEN_TRACKER: std::sync::OnceLock<AckTokenTracker> = std::sync::OnceLock::new();
 
@@ -183,6 +350,53 @@ fn validate_pull_batch_size(batch: usize) -> Result<(), JsError> {
         )));
     }
     Ok(())
+}
+
+/// Enhanced pull batch size validation with dynamic sizing based on system pressure.
+/// Returns the validated (and potentially clamped) batch size.
+fn validate_and_clamp_pull_batch_size(requested_batch: usize, consumer: &Consumer) -> Result<usize, JsError> {
+    // First apply basic validation
+    validate_pull_batch_size(requested_batch)?;
+
+    // Check if rate limiting is active - reduce batch size under pressure
+    let clamped_batch = if consumer.pull_rate_limiter.is_rate_limiting_active() {
+        let reduced_batch = (requested_batch / 2).max(MIN_BATCH_SIZE_UNDER_PRESSURE);
+        warn!(
+            stream = %consumer.stream,
+            consumer = %consumer.name,
+            requested = requested_batch,
+            clamped = reduced_batch,
+            "JetStream batch size reduced due to rate limiting"
+        );
+        reduced_batch
+    } else {
+        // Check global memory pressure
+        let global_tracker = GLOBAL_PULL_RATE_TRACKER.lock().unwrap();
+        let current_memory_mb = global_tracker.estimated_memory_usage / (1_024 * 1_024);
+
+        if current_memory_mb > MEMORY_PRESSURE_THRESHOLD_MB / 2 {
+            // Under moderate memory pressure - reduce batch size
+            let pressure_factor = (current_memory_mb as f64 / MEMORY_PRESSURE_THRESHOLD_MB as f64).min(1.0);
+            let reduced_batch = ((requested_batch as f64 * (1.0 - pressure_factor * 0.5)) as usize)
+                .max(MIN_BATCH_SIZE_UNDER_PRESSURE);
+
+            if reduced_batch < requested_batch {
+                warn!(
+                    stream = %consumer.stream,
+                    consumer = %consumer.name,
+                    requested = requested_batch,
+                    clamped = reduced_batch,
+                    memory_mb = current_memory_mb,
+                    "JetStream batch size reduced due to memory pressure"
+                );
+            }
+            reduced_batch
+        } else {
+            requested_batch
+        }
+    };
+
+    Ok(clamped_batch)
 }
 
 /// br-asupersync-dpdmsy: a single `JetStreamContext` publishes through
@@ -1294,6 +1508,7 @@ impl JetStreamContext {
             prefix: self.prefix.clone(),
             pending_acks: Arc::new(AtomicUsize::new(0)),
             max_ack_pending: config.max_ack_pending.max(1) as usize,
+            pull_rate_limiter: PullRateLimiter::new(),
         })
     }
 
@@ -1325,6 +1540,7 @@ impl JetStreamContext {
             prefix: self.prefix.clone(),
             pending_acks: Arc::new(AtomicUsize::new(0)),
             max_ack_pending,
+            pull_rate_limiter: PullRateLimiter::new(),
         })
     }
 
@@ -1428,6 +1644,8 @@ pub struct Consumer {
     pending_acks: Arc<AtomicUsize>,
     /// Maximum pending acks allowed (from ConsumerConfig).
     max_ack_pending: usize,
+    /// Pull rate limiter to prevent DoS via rapid pull requests.
+    pull_rate_limiter: PullRateLimiter,
 }
 
 impl fmt::Debug for Consumer {
@@ -1438,6 +1656,7 @@ impl fmt::Debug for Consumer {
             .field("prefix", &self.prefix)
             .field("pending_acks", &self.pending_acks.load(Ordering::Relaxed))
             .field("max_ack_pending", &self.max_ack_pending)
+            .field("rate_limiting_active", &self.pull_rate_limiter.is_rate_limiting_active())
             .finish()
     }
 }
@@ -1447,6 +1666,36 @@ impl Consumer {
     pub const DEFAULT_PULL_TIMEOUT: Duration = Duration::from_secs(30);
     /// Extra time to allow server-side expiry/status messages to arrive.
     const CLIENT_TIMEOUT_SLACK: Duration = Duration::from_millis(100);
+
+    // DoS Protection Implementation (asupersync-uculjz):
+    //
+    // This Consumer implementation includes comprehensive protection against
+    // DoS attacks via pull batch size manipulation:
+    //
+    // 1. Per-Consumer Rate Limiting:
+    //    - Enforces minimum 50ms interval between pull requests per consumer
+    //    - Applies exponential backoff for rapid requests (1.5x multiplier, max 5s)
+    //    - Tracks request history and activates rate limiting on abuse
+    //
+    // 2. Dynamic Batch Size Clamping:
+    //    - Reduces batch sizes by up to 50% under rate limiting pressure
+    //    - Monitors global memory usage and clamps batches under memory pressure
+    //    - Maintains minimum viable batch size (16 messages) for functionality
+    //
+    // 3. Global Rate Limiting:
+    //    - System-wide limit of 1000 pull requests/second across all consumers
+    //    - Tracks recent request timestamps in circular buffer
+    //    - Prevents cascade failure from overwhelming the JetStream cluster
+    //
+    // 4. Memory Pressure Monitoring:
+    //    - Estimates memory usage per pull request (2KB per message)
+    //    - Triggers progressive batch size reduction above 256MB threshold
+    //    - Rejects requests that would exceed 512MB total memory usage
+    //
+    // 5. Exponential Backoff Strategy:
+    //    - Rapid requests trigger progressively longer delays
+    //    - Automatic recovery when request rate normalizes
+    //    - Prevents both rapid-fire attacks and legitimate traffic starvation
 
     /// Get the consumer name.
     #[must_use]
@@ -1551,7 +1800,33 @@ impl Consumer {
     ) -> Result<Vec<JsMessage>, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
-        validate_pull_batch_size(batch)?;
+        // DoS Protection Step 1: Rate limiting check
+        let now_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+
+        if let Err(delay) = self.pull_rate_limiter.check_pull_request(now_ns) {
+            return Err(JsError::InvalidConfig(format!(
+                "JetStream pull request rate limited - retry after {}ms",
+                delay.as_millis()
+            )));
+        }
+
+        // DoS Protection Step 2: Enhanced batch size validation with dynamic clamping
+        let effective_batch = validate_and_clamp_pull_batch_size(batch, self)?;
+
+        // DoS Protection Step 3: Global rate limiting and memory pressure check
+        let estimated_batch_memory = effective_batch as u64 * 2048; // Rough estimate: 2KB per message
+        {
+            let mut global_tracker = GLOBAL_PULL_RATE_TRACKER.lock().unwrap();
+            if let Err(delay) = global_tracker.check_global_pull_request(now_ns, estimated_batch_memory) {
+                return Err(JsError::InvalidConfig(format!(
+                    "JetStream global rate limit or memory pressure - retry after {}ms",
+                    delay.as_millis()
+                )));
+            }
+        }
 
         let subject = format!(
             "{}.CONSUMER.MSG.NEXT.{}.{}",
@@ -1565,7 +1840,7 @@ impl Consumer {
             let clamped = if nanos > max { max } else { nanos };
             clamped as i64
         };
-        let request = build_pull_request_json(batch, expires, None);
+        let request = build_pull_request_json(effective_batch, expires, None);
 
         // Subscribe to get batch responses
         let mut sub = client
@@ -1580,8 +1855,8 @@ impl Consumer {
             return Err(err.into());
         }
 
-        let mut messages = Vec::with_capacity(batch);
-        let mut pull_state = PullSubscriberState::new(batch);
+        let mut messages = Vec::with_capacity(effective_batch);
+        let mut pull_state = PullSubscriberState::new(effective_batch);
         let now = cx
             .timer_driver()
             .map_or_else(wall_now, |driver| driver.now());
@@ -1599,7 +1874,7 @@ impl Consumer {
                 break;
             }
 
-            while pull_state.is_active() && pull_state.received() < batch {
+            while pull_state.is_active() && pull_state.received() < effective_batch {
                 let Some(msg) = sub.try_next() else {
                     break;
                 };
@@ -2244,6 +2519,7 @@ pub fn fuzz_create_test_consumer(max_ack_pending: usize) -> Consumer {
         prefix: "$JS.API".to_string(),
         pending_acks: Arc::new(AtomicUsize::new(0)),
         max_ack_pending: max_ack_pending.max(1),
+        pull_rate_limiter: PullRateLimiter::new(),
     }
 }
 
@@ -4630,6 +4906,7 @@ mod tests {
                 prefix: "$JS.API".to_string(),
                 pending_acks: Arc::clone(&pending_acks),
                 max_ack_pending: 1000,
+                pull_rate_limiter: PullRateLimiter::new(),
             };
             let messages = [
                 JsMessage {
@@ -4995,6 +5272,7 @@ mod tests {
                         prefix: "$JS.API".to_string(),
                         pending_acks: Arc::new(AtomicUsize::new(0)),
                         max_ack_pending: 1000,
+                        pull_rate_limiter: PullRateLimiter::new(),
                     };
 
                     let messages = consumer
@@ -6011,6 +6289,203 @@ mod tests {
             true,
             "JetStream allows returning zero messages when none available"
         );
+    }
+
+    /// AUDIT MODULE: JetStream DoS protection and rate limiting compliance
+    ///
+    /// AUDIT FINDING: DoS protection implemented against pull batch size attacks
+    /// via per-consumer rate limiting, global rate limiting, dynamic batch sizing,
+    /// and memory pressure monitoring to prevent service degradation.
+    mod pull_dos_protection_audit {
+        use super::*;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        #[test]
+        fn audit_pull_rate_limiter_enforces_minimum_interval() {
+            let limiter = PullRateLimiter::new();
+            let now_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+
+            // First request should succeed
+            assert!(limiter.check_pull_request(now_ns).is_ok());
+
+            // Immediate second request should be rate limited
+            let result = limiter.check_pull_request(now_ns + 1_000_000); // 1ms later
+            assert!(result.is_err());
+
+            // Request after minimum interval should succeed
+            let later_ns = now_ns + (MIN_PULL_INTERVAL_MS * 1_000_000) + 1_000_000; // MIN_PULL_INTERVAL_MS + 1ms
+            assert!(limiter.check_pull_request(later_ns).is_ok());
+        }
+
+        #[test]
+        fn audit_pull_rate_limiter_applies_exponential_backoff() {
+            let limiter = PullRateLimiter::new();
+            let now_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+
+            // Make rapid requests to trigger escalating backoff
+            let _ = limiter.check_pull_request(now_ns);
+
+            let rapid_1 = limiter.check_pull_request(now_ns + 1_000_000);
+            assert!(rapid_1.is_err());
+            let delay_1 = rapid_1.unwrap_err().as_millis();
+
+            let rapid_2 = limiter.check_pull_request(now_ns + 2_000_000);
+            assert!(rapid_2.is_err());
+            let delay_2 = rapid_2.unwrap_err().as_millis();
+
+            // Second delay should be larger than first (exponential backoff)
+            assert!(
+                delay_2 > delay_1,
+                "Exponential backoff should increase delay: {} -> {}",
+                delay_1,
+                delay_2
+            );
+
+            // Delays should not exceed maximum
+            assert!(delay_1 <= MAX_PULL_BACKOFF_MS as u128);
+            assert!(delay_2 <= MAX_PULL_BACKOFF_MS as u128);
+        }
+
+        #[test]
+        fn audit_global_rate_tracker_enforces_system_wide_limits() {
+            let mut tracker = GlobalPullRateTracker::new();
+            let now_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+
+            // Should accept requests under global limit
+            let mut successful_requests = 0;
+            for i in 0..100 {
+                let request_time = now_ns + (i * 1_000_000); // 1ms apart
+                if tracker.check_global_pull_request(request_time, 1024).is_ok() {
+                    successful_requests += 1;
+                }
+            }
+
+            assert!(
+                successful_requests > 0,
+                "Should accept some requests under normal conditions"
+            );
+            assert!(
+                successful_requests <= GLOBAL_PULL_RATE_LIMIT as usize,
+                "Should not exceed global rate limit"
+            );
+        }
+
+        #[test]
+        fn audit_global_rate_tracker_prevents_memory_exhaustion() {
+            let mut tracker = GlobalPullRateTracker::new();
+            let now_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+
+            // Simulate memory pressure by requesting large memory allocation
+            let large_memory = (MEMORY_PRESSURE_THRESHOLD_MB + 100) * 1_024 * 1_024; // Exceed threshold
+
+            let result = tracker.check_global_pull_request(now_ns, large_memory);
+            assert!(
+                result.is_err(),
+                "Should reject requests that would cause memory pressure"
+            );
+        }
+
+        #[test]
+        fn audit_dynamic_batch_sizing_reduces_under_pressure() {
+            let consumer = fuzz_create_test_consumer(1000);
+
+            // Activate rate limiting to simulate pressure
+            let now_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+
+            // Trigger rate limiting by making rapid requests
+            let _ = consumer.pull_rate_limiter.check_pull_request(now_ns);
+            let _ = consumer.pull_rate_limiter.check_pull_request(now_ns + 1_000_000); // Rapid request
+
+            // Check that rate limiting is active
+            assert!(
+                consumer.pull_rate_limiter.is_rate_limiting_active(),
+                "Rate limiting should be active after rapid requests"
+            );
+
+            // Batch size should be reduced under pressure
+            let requested_batch = 1000;
+            let clamped_batch = validate_and_clamp_pull_batch_size(requested_batch, &consumer)
+                .expect("Should validate");
+
+            assert!(
+                clamped_batch < requested_batch,
+                "Batch size should be reduced under rate limiting pressure: {} -> {}",
+                requested_batch,
+                clamped_batch
+            );
+
+            assert!(
+                clamped_batch >= MIN_BATCH_SIZE_UNDER_PRESSURE,
+                "Clamped batch size should not go below minimum: {}",
+                clamped_batch
+            );
+        }
+
+        #[test]
+        fn audit_validate_and_clamp_batch_respects_base_limits() {
+            let consumer = fuzz_create_test_consumer(1000);
+
+            // Should reject zero batch size
+            assert!(validate_and_clamp_pull_batch_size(0, &consumer).is_err());
+
+            // Should reject oversized batch
+            let oversized = MAX_PULL_BATCH + 1;
+            assert!(validate_and_clamp_pull_batch_size(oversized, &consumer).is_err());
+
+            // Should accept valid batch size
+            let valid_batch = 512;
+            let result = validate_and_clamp_pull_batch_size(valid_batch, &consumer)
+                .expect("Should validate");
+            assert_eq!(result, valid_batch);
+        }
+
+        #[test]
+        fn audit_pull_dos_protection_integration() {
+            // This test verifies end-to-end DoS protection in pull_with_timeout
+            // by checking that rapid requests are properly rate limited
+
+            // Note: This is a compile-time and logic verification test
+            // Full integration testing would require a mock NATS server
+
+            let consumer = fuzz_create_test_consumer(1000);
+
+            // Verify consumer has rate limiter initialized
+            assert!(!consumer.pull_rate_limiter.is_rate_limiting_active());
+
+            // Test rate limiting activation
+            let now_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos() as u64;
+
+            let _ = consumer.pull_rate_limiter.check_pull_request(now_ns);
+            let rapid_result = consumer.pull_rate_limiter.check_pull_request(now_ns + 1_000_000);
+
+            assert!(
+                rapid_result.is_err(),
+                "DoS protection should reject rapid pull requests"
+            );
+
+            assert!(
+                consumer.pull_rate_limiter.is_rate_limiting_active(),
+                "Rate limiting should be active after rapid requests"
+            );
+        }
     }
 
     /// AUDIT MODULE: JetStream durable consumer name validation compliance
