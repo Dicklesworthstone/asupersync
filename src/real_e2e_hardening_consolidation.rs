@@ -13,6 +13,7 @@
 #[cfg(all(test, feature = "real-service-e2e"))]
 mod analysis {
     use super::*;
+    use rcgen;
 
     /// Analysis of e2e test issues found across the test suite
     #[derive(Debug)]
@@ -328,15 +329,62 @@ mod hardened_examples {
         .expect("Supervision integration test failed");
     }
 
+    // Shared test TLS material - generated once and cached for consistency
+    static TEST_TLS_MATERIAL: std::sync::OnceLock<(crate::tls::Certificate, crate::tls::PrivateKey)> =
+        std::sync::OnceLock::new();
+
+    fn generate_test_tls_material() -> &'static (crate::tls::Certificate, crate::tls::PrivateKey) {
+        TEST_TLS_MATERIAL.get_or_init(|| {
+            // Generate a single key pair for both certificate and private key
+            let key_pair = rcgen::KeyPair::generate().expect("key generation");
+
+            // Set up certificate parameters
+            let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])
+                .expect("valid localhost SAN");
+            params.is_ca = rcgen::IsCa::ExplicitNoCa;
+            params.distinguished_name
+                .push(rcgen::DnType::CommonName, "asupersync-test-server");
+            params.key_usages.push(rcgen::KeyUsagePurpose::DigitalSignature);
+            params.extended_key_usages.push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
+            params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+            params.not_after = rcgen::date_time_ymd(2035, 1, 1);
+
+            // Generate certificate using the key pair
+            let cert = params.self_signed(&key_pair).expect("certificate generation");
+            let certificate = crate::tls::Certificate::from_der(cert.der().as_ref().to_vec());
+            let private_key = crate::tls::PrivateKey::from_pkcs8_der(key_pair.serialize_der());
+
+            (certificate, private_key)
+        })
+    }
+
     // Helper functions for test setup (would be in test utilities)
     fn test_certificate() -> crate::tls::Certificate {
-        // Would provide test certificate in real implementation
-        unimplemented!("Test certificate generation needed")
+        // Return certificate from shared TLS material (same key pair as private key)
+        generate_test_tls_material().0.clone()
     }
 
     fn test_private_key() -> crate::tls::PrivateKey {
-        // Would provide test private key in real implementation
-        unimplemented!("Test private key generation needed")
+        // Return private key from shared TLS material (same key pair as certificate)
+        generate_test_tls_material().1.clone()
+    }
+
+    #[test]
+    fn test_tls_certificate_and_key_generation() {
+        // Verify that test_certificate() and test_private_key() work
+        let cert = test_certificate();
+        let key = test_private_key();
+
+        // Basic validation: certificate and key should be created successfully
+        assert!(cert.as_der().len() > 0, "Certificate should have non-empty DER data");
+
+        // Verify we can call the functions multiple times and get the same result
+        // (due to OnceLock caching)
+        let cert2 = test_certificate();
+        let key2 = test_private_key();
+
+        assert_eq!(cert.as_der(), cert2.as_der(), "Certificate should be deterministic");
+        // Note: PrivateKey doesn't expose comparison, but both should be from same cached source
     }
 }
 
