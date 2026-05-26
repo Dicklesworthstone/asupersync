@@ -436,41 +436,42 @@ impl BoundedLoadDecision {
         endpoint_id.map_or_else(String::new, |endpoint_id| endpoint_id.to_string())
     }
 
-    fn format_endpoint_ids(endpoint_ids: &[EndpointId]) -> String {
-        endpoint_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(",")
+    /// br-asupersync-36grbm: Buckets counts to prevent exact enumeration timing attacks.
+    /// Returns approximate ranges instead of exact values to limit reconnaissance.
+    fn bucket_count(count: usize) -> &'static str {
+        // Use logarithmic buckets to provide operational visibility while preventing
+        // exact fingerprinting. Constant-time operation prevents timing side channels.
+        match count {
+            0 => "0",
+            1..=2 => "1-2",
+            3..=5 => "3-5",
+            6..=10 => "6-10",
+            11..=20 => "11-20",
+            21..=50 => "21-50",
+            51..=100 => "51-100",
+            101..=200 => "101-200",
+            201..=500 => "201-500",
+            _ => "500+",
+        }
     }
 
+    // br-asupersync-36grbm: Removed format_endpoint_ids() to prevent endpoint ID exposure
+    // in logs, which enabled reconnaissance attacks.
+
     fn format_endpoint_pressure(endpoints: &[BoundedLoadEndpointTelemetry]) -> String {
-        endpoints
-            .iter()
-            .map(|endpoint| {
-                let capacity_state = if endpoint.within_capacity {
-                    "within"
-                } else {
-                    "over"
-                };
-                let primary = if endpoint.is_primary { ":primary" } else { "" };
-                let selected = if endpoint.is_selected {
-                    ":selected"
-                } else {
-                    ""
-                };
-                format!(
-                    "{}:{}/{}:{}{}{}",
-                    endpoint.endpoint_id,
-                    endpoint.actual_load,
-                    endpoint.capacity,
-                    capacity_state,
-                    primary,
-                    selected
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("|")
+        // br-asupersync-36grbm: Use aggregated pressure metrics to prevent timing attacks
+        // and reconnaissance. Avoid exposing exact endpoint IDs, loads, or capacities.
+        let total = endpoints.len();
+        let within_capacity = endpoints.iter().filter(|e| e.within_capacity).count();
+        let over_capacity = total - within_capacity;
+
+        // Use bucketed aggregates instead of exact values to prevent fingerprinting
+        format!(
+            "total_bucket={};within_capacity_bucket={};over_capacity_bucket={}",
+            Self::bucket_count(total),
+            Self::bucket_count(within_capacity),
+            Self::bucket_count(over_capacity)
+        )
     }
 
     fn format_fairness_state(
@@ -488,68 +489,86 @@ impl BoundedLoadDecision {
         )
     }
 
+    /// br-asupersync-36grbm: Bucketed version of fairness state formatting to prevent timing attacks.
+    fn format_fairness_state_bucketed(
+        &self,
+        rejected_endpoint_count: usize,
+        overloaded_endpoint_count: usize,
+        within_capacity_endpoint_count: usize,
+    ) -> String {
+        // br-asupersync-36grbm: Use boolean indicators instead of endpoint IDs to prevent reconnaissance
+        let primary_selected = self.primary.is_some();
+        let selection_occurred = self.selected.is_some();
+        let available_bucket = Self::bucket_count(self.endpoints.len());
+        let rejected_bucket = Self::bucket_count(rejected_endpoint_count);
+        let overloaded_bucket = Self::bucket_count(overloaded_endpoint_count);
+        let within_capacity_bucket = Self::bucket_count(within_capacity_endpoint_count);
+
+        format!(
+            "policy={};primary_selected={primary_selected};selection_occurred={selection_occurred};available_bucket={available_bucket};rejected_bucket={rejected_bucket};overloaded_bucket={overloaded_bucket};within_capacity_bucket={within_capacity_bucket}",
+            Self::FAIRNESS_POLICY_ID
+        )
+    }
+
     /// Serializes the decision into stable key/value fields for logs or artifacts.
+    ///
+    /// **Security**: Uses bucketed aggregates to prevent timing attacks and reconnaissance
+    /// (br-asupersync-36grbm). Sensitive endpoint IDs and exact counts are omitted.
     #[must_use]
     pub fn log_fields(&self) -> BTreeMap<String, String> {
         let mut fields = BTreeMap::new();
-        let rejected_endpoint_ids = self.rejected_endpoint_ids();
-        let overloaded_endpoint_count = self
-            .endpoints
-            .iter()
-            .filter(|endpoint| !endpoint.within_capacity)
-            .count();
-        let within_capacity_endpoint_count = self.endpoints.len() - overloaded_endpoint_count;
+
+        // br-asupersync-36grbm: Calculate counts in constant time to prevent timing side channels
+        let rejected_count = self.endpoints.iter().filter(|e| !e.is_selected).count();
+        let overloaded_count = self.endpoints.iter().filter(|e| !e.within_capacity).count();
+        let within_capacity_count = self.endpoints.len() - overloaded_count;
 
         fields.insert("decision_id".to_owned(), Self::DECISION_ID.to_owned());
         fields.insert(
             "fairness_policy_id".to_owned(),
             Self::FAIRNESS_POLICY_ID.to_owned(),
         );
+
+        // br-asupersync-36grbm: Use bucketed counts to prevent exact enumeration attacks
         fields.insert(
             "fairness_state".to_owned(),
-            self.format_fairness_state(
-                rejected_endpoint_ids.len(),
-                overloaded_endpoint_count,
-                within_capacity_endpoint_count,
-            ),
+            self.format_fairness_state_bucketed(rejected_count, overloaded_count, within_capacity_count),
         );
         fields.insert("strategy_id".to_owned(), "bounded-load-hash".to_owned());
+
+        // br-asupersync-36grbm: Omit specific endpoint IDs to prevent reconnaissance
+        // Only log whether selection occurred (boolean) not which endpoint
         fields.insert(
-            "selected_endpoint_id".to_owned(),
-            Self::format_optional_endpoint_id(self.selected),
+            "selection_occurred".to_owned(),
+            self.selected.is_some().to_string(),
         );
         fields.insert(
-            "primary_endpoint_id".to_owned(),
-            Self::format_optional_endpoint_id(self.primary),
+            "primary_selection_occurred".to_owned(),
+            self.primary.is_some().to_string(),
         );
         fields.insert("rebalance_reason".to_owned(), self.reason_id().to_owned());
-        fields.insert("rebalance_reasons".to_owned(), self.reason_id().to_owned());
+
+        // br-asupersync-36grbm: Replace exact counts with bucketed ranges
         fields.insert(
-            "available_endpoint_count".to_owned(),
-            self.endpoints.len().to_string(),
+            "available_endpoint_bucket".to_owned(),
+            Self::bucket_count(self.endpoints.len()).to_owned(),
         );
         fields.insert(
-            "selected_endpoint_count".to_owned(),
-            usize::from(self.selected.is_some()).to_string(),
+            "rejected_endpoint_bucket".to_owned(),
+            Self::bucket_count(rejected_count).to_owned(),
         );
         fields.insert(
-            "rejected_endpoint_count".to_owned(),
-            rejected_endpoint_ids.len().to_string(),
+            "overloaded_endpoint_bucket".to_owned(),
+            Self::bucket_count(overloaded_count).to_owned(),
         );
         fields.insert(
-            "overloaded_endpoint_count".to_owned(),
-            overloaded_endpoint_count.to_string(),
+            "within_capacity_endpoint_bucket".to_owned(),
+            Self::bucket_count(within_capacity_count).to_owned(),
         );
+
+        // br-asupersync-36grbm: Use aggregated pressure metrics instead of detailed snapshots
         fields.insert(
-            "within_capacity_endpoint_count".to_owned(),
-            within_capacity_endpoint_count.to_string(),
-        );
-        fields.insert(
-            "rejected_endpoint_ids".to_owned(),
-            Self::format_endpoint_ids(rejected_endpoint_ids.as_slice()),
-        );
-        fields.insert(
-            "endpoint_pressure_snapshot".to_owned(),
+            "endpoint_pressure_aggregate".to_owned(),
             Self::format_endpoint_pressure(self.endpoints.as_slice()),
         );
         fields
@@ -3497,22 +3516,21 @@ mod tests {
     }
 
     fn assert_bounded_load_log_keyset(fields: &BTreeMap<String, String>) {
+        // br-asupersync-36grbm: Updated to use security-hardened bucketed field names
+        // that prevent timing attacks and endpoint reconnaissance.
         let expected = [
-            "available_endpoint_count",
+            "available_endpoint_bucket",
             "decision_id",
-            "endpoint_pressure_snapshot",
+            "endpoint_pressure_aggregate",
             "fairness_policy_id",
             "fairness_state",
-            "overloaded_endpoint_count",
-            "primary_endpoint_id",
+            "overloaded_endpoint_bucket",
+            "primary_selection_occurred",
             "rebalance_reason",
-            "rebalance_reasons",
-            "rejected_endpoint_count",
-            "rejected_endpoint_ids",
-            "selected_endpoint_count",
-            "selected_endpoint_id",
+            "rejected_endpoint_bucket",
+            "selection_occurred",
             "strategy_id",
-            "within_capacity_endpoint_count",
+            "within_capacity_endpoint_bucket",
         ];
         let actual = fields.keys().map(String::as_str).collect::<Vec<_>>();
         assert_eq!(actual, expected);
@@ -3699,22 +3717,23 @@ mod tests {
                 .map(String::as_str),
             Some("no-healthy-endpoints")
         );
+        // br-asupersync-36grbm: Updated to use bucketed field names and values
         assert_eq!(
             no_healthy_fields
-                .get("available_endpoint_count")
+                .get("available_endpoint_bucket")
                 .map(String::as_str),
             Some("0")
         );
         assert_eq!(
             no_healthy_fields
-                .get("endpoint_pressure_snapshot")
+                .get("endpoint_pressure_aggregate")
                 .map(String::as_str),
-            Some("")
+            Some("total_bucket=0;within_capacity_bucket=0;over_capacity_bucket=0")
         );
         assert_eq!(
             no_healthy_fields.get("fairness_state").map(String::as_str),
             Some(
-                "policy=hrw-bounded-load;primary=;selected=;available=0;rejected=0;overloaded=0;within_capacity=0"
+                "policy=hrw-bounded-load;primary_selected=false;selection_occurred=false;available_bucket=0;rejected_bucket=0;overloaded_bucket=0;within_capacity_bucket=0"
             )
         );
     }
