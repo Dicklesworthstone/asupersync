@@ -2057,16 +2057,29 @@ impl ThreeLaneScheduler {
         // Cancel is the highest-priority lane. Check wake_state for deduplication
         // before injecting to avoid duplicate dispatch from multiple lanes.
         //
-        // KNOWN RACE CONDITION (TOCTOU): There's a window between checking wake_state.notify()
-        // and calling inject_cancel() where another thread could modify task state.
-        // This could lead to double-scheduling or scheduling completed tasks.
-        // TODO: Make injection atomic with deduplication check in global injector.
-        let should_schedule = self.with_task_table_ref(|tt| {
-            tt.task(task)
-                .is_none_or(|record| record.wake_state.notify())
+        // Atomic check-and-inject: both the wake_state check and injection happen
+        // under the same task table lock to prevent TOCTOU races.
+        let injected = self.with_task_table_ref(|tt| {
+            match tt.task(task) {
+                Some(record) => {
+                    if record.wake_state.notify() {
+                        // Task state allows scheduling, inject while holding lock
+                        self.global.inject_cancel(task, priority);
+                        true
+                    } else {
+                        // Task already scheduled or completed, skip injection
+                        false
+                    }
+                }
+                None => {
+                    // Task record doesn't exist (e.g., in tests), allow injection
+                    self.global.inject_cancel(task, priority);
+                    true
+                }
+            }
         });
-        if should_schedule {
-            self.global.inject_cancel(task, priority);
+
+        if injected {
             self.record_scheduler_evidence_enqueue(task);
             self.wake_one();
         }
@@ -2078,14 +2091,29 @@ impl ThreeLaneScheduler {
     /// If the task is already scheduled, this is a no-op.
     /// If the task record doesn't exist (e.g., in tests), allows injection.
     pub fn inject_timed(&self, task: TaskId, deadline: Time) {
-        // KNOWN RACE CONDITION (TOCTOU): Same issue as inject_cancel - checking
-        // wake_state.notify() and then acting on the result creates a race window.
-        let should_schedule = self.with_task_table_ref(|tt| {
-            tt.task(task)
-                .is_none_or(|record| record.wake_state.notify())
+        // Atomic check-and-inject: both the wake_state check and injection happen
+        // under the same task table lock to prevent TOCTOU races.
+        let injected = self.with_task_table_ref(|tt| {
+            match tt.task(task) {
+                Some(record) => {
+                    if record.wake_state.notify() {
+                        // Task state allows scheduling, inject while holding lock
+                        self.global.inject_timed(task, deadline);
+                        true
+                    } else {
+                        // Task already scheduled or completed, skip injection
+                        false
+                    }
+                }
+                None => {
+                    // Task record doesn't exist (e.g., in tests), allow injection
+                    self.global.inject_timed(task, deadline);
+                    true
+                }
+            }
         });
-        if should_schedule {
-            self.global.inject_timed(task, deadline);
+
+        if injected {
             self.record_scheduler_evidence_enqueue(task);
             self.wake_one();
         }
@@ -2142,10 +2170,30 @@ impl ThreeLaneScheduler {
     /// owner thread. Injecting them globally would allow them to be stolen
     /// by the wrong worker, causing data loss.
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
-        let (should_schedule, is_local) = self.with_task_table_ref(|tt| {
-            tt.task(task).map_or((true, false), |record| {
-                (record.wake_state.notify(), record.is_local())
-            })
+        // Atomic check-and-inject: both the wake_state check and injection happen
+        // under the same task table lock to prevent TOCTOU races.
+        let (injected, is_local) = self.with_task_table_ref(|tt| {
+            match tt.task(task) {
+                Some(record) => {
+                    let is_local = record.is_local();
+                    if is_local {
+                        // Local tasks cannot be globally injected
+                        (false, true)
+                    } else if record.wake_state.notify() {
+                        // Task state allows scheduling, inject while holding lock
+                        self.inject_global_ready_checked(task, priority);
+                        (true, false)
+                    } else {
+                        // Task already scheduled or completed, skip injection
+                        (false, false)
+                    }
+                }
+                None => {
+                    // Task record doesn't exist (e.g., in tests), allow injection
+                    self.inject_global_ready_checked(task, priority);
+                    (true, false)
+                }
+            }
         });
 
         // SAFETY: Local (!Send) tasks must only be polled on their owner worker.
@@ -2162,9 +2210,7 @@ impl ThreeLaneScheduler {
             return;
         }
 
-        // KNOWN RACE CONDITION (TOCTOU): Same issue as other injection methods.
-        if should_schedule {
-            self.inject_global_ready_checked(task, priority);
+        if injected {
             trace!(
                 ?task,
                 priority, "inject_ready: task injected into global ready queue"
@@ -2183,10 +2229,30 @@ impl ThreeLaneScheduler {
     /// cancel handlers) that must execute even during suspected deadlock conditions.
     /// Regular application tasks should use `inject_ready()`.
     pub fn inject_ready_bypass_governor(&self, task: TaskId, priority: u8) {
-        let (should_schedule, is_local) = self.with_task_table_ref(|tt| {
-            tt.task(task).map_or((true, false), |record| {
-                (record.wake_state.notify(), record.is_local())
-            })
+        // Atomic check-and-inject: both the wake_state check and injection happen
+        // under the same task table lock to prevent TOCTOU races.
+        let (injected, is_local) = self.with_task_table_ref(|tt| {
+            match tt.task(task) {
+                Some(record) => {
+                    let is_local = record.is_local();
+                    if is_local {
+                        // Local tasks cannot be globally injected
+                        (false, true)
+                    } else if record.wake_state.notify() {
+                        // Task state allows scheduling, inject while holding lock
+                        self.global.inject_ready(task, priority);
+                        (true, false)
+                    } else {
+                        // Task already scheduled or completed, skip injection
+                        (false, false)
+                    }
+                }
+                None => {
+                    // Task record doesn't exist (e.g., in tests), allow injection
+                    self.global.inject_ready(task, priority);
+                    (true, false)
+                }
+            }
         });
 
         debug_assert!(
@@ -2201,8 +2267,7 @@ impl ThreeLaneScheduler {
             return;
         }
 
-        // KNOWN RACE CONDITION (TOCTOU): Same issue as other injection methods.
-        if should_schedule {
+        if injected {
             self.governor_bypass_spawns.fetch_add(1, Ordering::Release);
 
             trace!(
