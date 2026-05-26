@@ -34,6 +34,96 @@
 - **Tests affected:** ATP-SECURITY-002
 - **Review date:** 2026-05-26
 
+## ATP Capability Security Model Conformance Divergences
+
+### DISC-CAP-001: Global state access prevention pending
+- **Reference:** ATP Capability Model Section 7.1.2 - No ambient authority requirements
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Operations may access global state without capability validation
+- **Resolution:** WILL-FIX — implement global state access prevention mechanisms
+- **Tests affected:** ATP-CAP-002
+- **Review date:** 2026-05-26
+
+### DISC-CAP-002: Capability validation not implemented
+- **Reference:** ATP Capability Model Section 7.1.3 - Cx capability validation
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Missing runtime validation of Cx capabilities before operations
+- **Resolution:** WILL-FIX — implement Cx capability validation system
+- **Tests affected:** ATP-CAP-003
+- **Review date:** 2026-05-26
+
+### DISC-CAP-003: Cache operation scoping missing
+- **Reference:** ATP Capability Model Section 7.2.1 - Cache authorization scoping
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Cache operations not scoped to authorized regions - privilege escalation risk
+- **Resolution:** WILL-FIX — implement cache operation authorization scoping
+- **Tests affected:** ATP-CAP-004
+- **Review date:** 2026-05-26
+
+### DISC-CAP-004: Seeding operation scoping missing
+- **Reference:** ATP Capability Model Section 7.2.2 - Seeding capability scoping
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Unauthorized seeding operations possible without capability validation
+- **Resolution:** WILL-FIX — implement seeding operation capability scoping
+- **Tests affected:** ATP-CAP-005
+- **Review date:** 2026-05-26
+
+### DISC-CAP-005: Relay operation scoping missing  
+- **Reference:** ATP Capability Model Section 7.2.3 - Relay trust boundary scoping
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Relay operations not scoped to trust boundaries - trust domain violations
+- **Resolution:** WILL-FIX — implement relay operation trust boundary enforcement
+- **Tests affected:** ATP-CAP-006
+- **Review date:** 2026-05-26
+
+### DISC-CAP-006: Trust chain validation missing
+- **Reference:** ATP Capability Model Section 7.3.2 - Cross-boundary trust chain validation
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Cross-boundary operations bypass trust chain validation
+- **Resolution:** WILL-FIX — implement trust chain validation for cross-boundary operations
+- **Tests affected:** ATP-CAP-008
+- **Review date:** 2026-05-26
+
+### DISC-CAP-007: Transfer capability validation missing
+- **Reference:** ATP Capability Model Section 7.4.1 - Transfer capability requirements
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Transfer operations proceed without required capability validation
+- **Resolution:** WILL-FIX — implement transfer capability validation
+- **Tests affected:** ATP-CAP-009
+- **Review date:** 2026-05-26
+
+### DISC-CAP-008: Session capability validation missing
+- **Reference:** ATP Capability Model Section 7.4.2 - Session authentication capabilities
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Sessions created without authentication capability validation
+- **Resolution:** WILL-FIX — implement session capability validation
+- **Tests affected:** ATP-CAP-010
+- **Review date:** 2026-05-26
+
+### DISC-CAP-009: Authorization denial mechanisms missing
+- **Reference:** ATP Capability Model Section 7.5.1 - Authorization denial enforcement
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Operations not denied when lacking proper authorization
+- **Resolution:** WILL-FIX — implement authorization denial mechanisms
+- **Tests affected:** ATP-CAP-011
+- **Review date:** 2026-05-26
+
+### DISC-CAP-010: Authorization audit missing
+- **Reference:** ATP Capability Model Section 7.5.2 - Authorization failure auditing
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Authorization failures not audited - security visibility gap
+- **Resolution:** WILL-FIX — implement authorization audit logging
+- **Tests affected:** ATP-CAP-012
+- **Review date:** 2026-05-26
+
+### DISC-CAP-011: Resource isolation missing
+- **Reference:** ATP Capability Model Section 7.6.1 - Capability-based resource isolation
+- **Our impl:** Placeholder test with XFAIL status
+- **Impact:** Resource access not isolated by capability scope
+- **Resolution:** WILL-FIX — implement capability-based resource isolation
+- **Tests affected:** ATP-CAP-013
+- **Review date:** 2026-05-26
+
 ## RaptorQ RFC 6330 Conformance Divergences
 
 ### DISC-001: GF(256) inverse operation for zero element
