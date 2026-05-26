@@ -739,8 +739,9 @@ impl ContractChecker {
         self.check_always_eventually_resolved(trace_end);
 
         // Temporal Logic: Check AlwaysImpliesTrackable for all obligations
-        for id in self.obligations.keys() {
-            self.check_always_implies_trackable(*id, trace_end);
+        let obligation_ids: Vec<_> = self.obligations.keys().cloned().collect();
+        for id in obligation_ids {
+            self.check_always_implies_trackable(id, trace_end);
         }
     }
 

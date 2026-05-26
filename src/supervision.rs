@@ -1804,6 +1804,27 @@ impl RestartHistory {
         self.restarts.push(now);
     }
 
+    /// Atomically check if restart is allowed and record it if so.
+    ///
+    /// Returns the restart decision with attempt number and delay if restart is allowed,
+    /// or None if restart budget is exhausted. This prevents race conditions during
+    /// concurrent failures by combining the check-and-record operations atomically.
+    pub fn try_record_restart(&mut self, now: u64) -> Option<(u32, Option<Duration>)> {
+        // Check if restart is allowed first
+        if !self.can_restart(now) {
+            return None;
+        }
+
+        // Get attempt number and delay BEFORE recording to ensure consistency
+        let attempt = self.recent_restart_count(now) as u32 + 1;
+        let delay = self.next_delay(now);
+
+        // Now record the restart
+        self.record_restart(now);
+
+        Some((attempt, delay))
+    }
+
     /// Get the number of restarts within the current window.
     #[must_use]
     pub fn recent_restart_count(&self, now: u64) -> usize {
@@ -3229,14 +3250,31 @@ impl Supervisor {
                     );
                 }
 
-                // Derive the delay from the current in-window restart count
-                // before mutating history. Backoff is zero-based for the
-                // restart being scheduled now; recording first would shift the
-                // first restart from attempt 0 to attempt 1 and over-delay
-                // every subsequent restart decision.
-                let attempt = history.recent_restart_count(now) as u32 + 1;
-                let delay = history.next_delay(now);
-                history.record_restart(now);
+                // Atomically record restart and get attempt/delay to prevent race conditions
+                // during concurrent failures where multiple threads could read the same
+                // restart count and both record restarts, exceeding intended limits.
+                let (attempt, delay) = match history.try_record_restart(now) {
+                    Some((attempt, delay)) => (attempt, delay),
+                    None => {
+                        // Restart limit exceeded - this check should have been caught above
+                        // but we double-check here for safety in concurrent scenarios
+                        return (
+                            SupervisionDecision::Stop {
+                                task_id,
+                                region_id,
+                                reason: StopReason::RestartBudgetExhausted {
+                                    total_restarts: u32::try_from(history.recent_restart_count(now))
+                                        .unwrap_or(u32::MAX),
+                                    window: config.window,
+                                },
+                            },
+                            BindingConstraint::WindowExhausted {
+                                max_restarts: config.max_restarts,
+                                window: config.window,
+                            },
+                        );
+                    }
+                };
 
                 (
                     SupervisionDecision::Restart {
