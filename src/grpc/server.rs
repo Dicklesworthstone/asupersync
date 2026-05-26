@@ -2,7 +2,7 @@
 //!
 //! Provides the server-side infrastructure for hosting gRPC services.
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
@@ -35,17 +35,21 @@ struct StreamState {
 
 /// br-asupersync-8vn9iu: Per-connection state tracking to enforce
 /// stream limits and idle timeouts, preventing connection hoarding attacks.
+///
+/// br-asupersync-tnvxx3: Uses internal Mutex for thread-safe access to
+/// active_streams, allowing concurrent operations from ConnectionRegistry.
 #[derive(Debug)]
 pub struct ConnectionState {
     /// Active streams on this connection, keyed by stream ID.
-    active_streams: HashMap<u32, StreamState>,
+    /// Protected by Mutex to allow thread-safe concurrent access.
+    active_streams: Mutex<HashMap<u32, StreamState>>,
 }
 
 impl ConnectionState {
     /// Create new connection state.
     pub fn new() -> Self {
         Self {
-            active_streams: HashMap::new(),
+            active_streams: Mutex::new(HashMap::new()),
         }
     }
 
@@ -53,17 +57,19 @@ impl ConnectionState {
     ///
     /// Returns `Err` if the connection already has too many active streams.
     /// Returns the registration timestamp on success for race condition protection.
-    pub fn add_stream(&mut self, stream_id: u32, max_concurrent: u32) -> Result<Instant, String> {
-        if self.active_streams.len() >= max_concurrent as usize {
+    /// br-asupersync-tnvxx3: Thread-safe method using internal Mutex.
+    pub fn add_stream(&self, stream_id: u32, max_concurrent: u32) -> Result<Instant, String> {
+        let mut active_streams = self.active_streams.lock();
+        if active_streams.len() >= max_concurrent as usize {
             return Err(format!(
                 "connection exceeds max_concurrent_streams: {} >= {}",
-                self.active_streams.len(),
+                active_streams.len(),
                 max_concurrent
             ));
         }
 
         let now = wall_clock_instant_now();
-        self.active_streams.insert(
+        active_streams.insert(
             stream_id,
             StreamState {
                 last_activity: now,
@@ -74,25 +80,31 @@ impl ConnectionState {
     }
 
     /// Update the last activity time for a stream.
-    pub fn update_stream_activity(&mut self, stream_id: u32) {
-        if let Some(stream) = self.active_streams.get_mut(&stream_id) {
+    /// br-asupersync-tnvxx3: Thread-safe method using internal Mutex.
+    pub fn update_stream_activity(&self, stream_id: u32) {
+        let mut active_streams = self.active_streams.lock();
+        if let Some(stream) = active_streams.get_mut(&stream_id) {
             stream.last_activity = wall_clock_instant_now();
         }
     }
 
     /// Remove a stream from this connection (when it completes normally).
-    pub fn remove_stream(&mut self, stream_id: u32) {
-        self.active_streams.remove(&stream_id);
+    /// br-asupersync-tnvxx3: Thread-safe method using internal Mutex.
+    pub fn remove_stream(&self, stream_id: u32) {
+        let mut active_streams = self.active_streams.lock();
+        active_streams.remove(&stream_id);
     }
 
     /// Clean up idle streams that have exceeded the timeout.
     ///
     /// Returns the list of stream IDs that were removed due to idle timeout.
-    pub fn cleanup_idle_streams(&mut self, idle_timeout: Duration) -> Vec<u32> {
+    /// br-asupersync-tnvxx3: Thread-safe method using internal Mutex.
+    pub fn cleanup_idle_streams(&self, idle_timeout: Duration) -> Vec<u32> {
         let now = wall_clock_instant_now();
         let mut removed = Vec::new();
 
-        self.active_streams.retain(|&stream_id, stream| {
+        let mut active_streams = self.active_streams.lock();
+        active_streams.retain(|&stream_id, stream| {
             let idle_duration = now.duration_since(stream.last_activity);
             if idle_duration > idle_timeout {
                 removed.push(stream_id);
@@ -106,8 +118,23 @@ impl ConnectionState {
     }
 
     /// Get the number of active streams.
+    /// br-asupersync-tnvxx3: Thread-safe method using internal Mutex.
     pub fn active_stream_count(&self) -> usize {
-        self.active_streams.len()
+        let active_streams = self.active_streams.lock();
+        active_streams.len()
+    }
+
+    /// Remove a stream only if it was registered at the specified timestamp.
+    /// br-asupersync-tnvxx3: Thread-safe method for timestamp-validated removal.
+    pub fn remove_stream_if_owned(&self, stream_id: u32, registered_at: Instant) {
+        let mut active_streams = self.active_streams.lock();
+        if let Some(stream_state) = active_streams.get(&stream_id) {
+            if stream_state.registered_at == registered_at {
+                active_streams.remove(&stream_id);
+            }
+            // If timestamps don't match, the stream was already cleaned up
+            // by timeout or replaced by a new registration - safe to ignore
+        }
     }
 }
 
@@ -116,29 +143,36 @@ impl ConnectionState {
 ///
 /// br-asupersync-8vn9iu: This prevents connection hoarding attacks where
 /// clients open many connections with idle bidirectional streams.
+///
+/// br-asupersync-tnvxx3: Uses RwLock instead of Mutex to allow concurrent
+/// reads and reduce lock contention under high load. Write locks only needed
+/// for connection add/remove; read locks sufficient for stream operations.
 #[derive(Debug)]
 pub struct ConnectionRegistry {
     /// Connection states keyed by connection identifier.
-    connections: Mutex<HashMap<String, ConnectionState>>,
+    /// Uses RwLock to allow concurrent reads and per-connection modifications.
+    connections: RwLock<HashMap<String, ConnectionState>>,
 }
 
 impl ConnectionRegistry {
     /// Create a new connection registry.
     pub fn new() -> Self {
         Self {
-            connections: Mutex::new(HashMap::new()),
+            connections: RwLock::new(HashMap::new()),
         }
     }
 
     /// Register a new connection.
+    /// br-asupersync-tnvxx3: Uses write lock since we're modifying the HashMap.
     pub fn add_connection(&self, connection_id: String) {
-        let mut connections = self.connections.lock();
+        let mut connections = self.connections.write();
         connections.insert(connection_id, ConnectionState::new());
     }
 
     /// Remove a connection and all its streams.
+    /// br-asupersync-tnvxx3: Uses write lock since we're modifying the HashMap.
     pub fn remove_connection(&self, connection_id: &str) {
-        let mut connections = self.connections.lock();
+        let mut connections = self.connections.write();
         connections.remove(connection_id);
     }
 
@@ -147,6 +181,10 @@ impl ConnectionRegistry {
     /// Returns the registration timestamp on success, or an error if the stream
     /// cannot be added due to limits. The entire operation (cleanup + add) is
     /// atomic under the connection registry lock to prevent race conditions.
+    ///
+    /// br-asupersync-tnvxx3: Uses read lock since we only modify connection state,
+    /// not the HashMap structure. This allows concurrent stream operations on
+    /// different connections.
     pub fn enforce_stream_limits(
         &self,
         connection_id: &str,
@@ -154,9 +192,9 @@ impl ConnectionRegistry {
         max_concurrent: u32,
         idle_timeout: Option<Duration>,
     ) -> Result<Instant, String> {
-        let mut connections = self.connections.lock();
+        let connections = self.connections.read();
         let connection = connections
-            .get_mut(connection_id)
+            .get(connection_id)
             .ok_or_else(|| format!("connection not registered: {}", connection_id))?;
 
         // Clean up idle streams first (atomic with stream addition)
@@ -177,17 +215,19 @@ impl ConnectionRegistry {
     }
 
     /// Update stream activity timestamp.
+    /// br-asupersync-tnvxx3: Uses read lock since ConnectionState is internally synchronized.
     pub fn update_stream_activity(&self, connection_id: &str, stream_id: u32) {
-        let mut connections = self.connections.lock();
-        if let Some(connection) = connections.get_mut(connection_id) {
+        let connections = self.connections.read();
+        if let Some(connection) = connections.get(connection_id) {
             connection.update_stream_activity(stream_id);
         }
     }
 
     /// Remove a stream when it completes normally.
+    /// br-asupersync-tnvxx3: Uses read lock since ConnectionState is internally synchronized.
     pub fn remove_stream(&self, connection_id: &str, stream_id: u32) {
-        let mut connections = self.connections.lock();
-        if let Some(connection) = connections.get_mut(connection_id) {
+        let connections = self.connections.read();
+        if let Some(connection) = connections.get(connection_id) {
             connection.remove_stream(stream_id);
         }
     }
@@ -198,23 +238,19 @@ impl ConnectionRegistry {
     /// could both attempt to remove the same stream ID. The timestamp validation
     /// ensures we only remove the stream if it matches the specific registration
     /// we're responsible for.
+    /// br-asupersync-tnvxx3: Uses read lock since ConnectionState is internally synchronized.
     pub fn remove_stream_if_owned(&self, connection_id: &str, stream_id: u32, registered_at: Instant) {
-        let mut connections = self.connections.lock();
-        if let Some(connection) = connections.get_mut(connection_id) {
-            // Only remove if the stream exists and was registered at the expected time
-            if let Some(stream_state) = connection.active_streams.get(&stream_id) {
-                if stream_state.registered_at == registered_at {
-                    connection.remove_stream(stream_id);
-                }
-                // If timestamps don't match, the stream was already cleaned up
-                // by timeout or replaced by a new registration - safe to ignore
-            }
+        let connections = self.connections.read();
+        if let Some(connection) = connections.get(connection_id) {
+            connection.remove_stream_if_owned(stream_id, registered_at);
         }
     }
 
     /// Get statistics for debugging/monitoring.
+    /// br-asupersync-tnvxx3: Uses read lock for read-only operation, allowing
+    /// concurrent stats collection without blocking stream operations.
     pub fn get_stats(&self) -> (usize, usize) {
-        let connections = self.connections.lock();
+        let connections = self.connections.read();
         let connection_count = connections.len();
         let total_streams: usize = connections
             .values()
@@ -2915,6 +2951,190 @@ mod tests {
         assert!(format!("{status}").contains("CRLF"));
 
         crate::test_complete!("test_dispatch_unary_rejects_header_injection_before_handler");
+    }
+
+    // =========================================================================
+    // br-asupersync-tnvxx3: ConnectionRegistry Concurrent Access Tests
+    // =========================================================================
+
+    #[test]
+    fn test_connection_registry_concurrent_operations() {
+        init_test("test_connection_registry_concurrent_operations");
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        let connection_id = "test-connection".to_string();
+
+        // Add connection
+        registry.add_connection(connection_id.clone());
+
+        // Test concurrent stream operations
+        let registry_clone = Arc::clone(&registry);
+        let connection_id_clone = connection_id.clone();
+
+        // Spawn thread that performs stream operations
+        let handle = std::thread::spawn(move || {
+            for i in 0..100 {
+                let stream_id = i;
+                // Add stream
+                let result = registry_clone.enforce_stream_limits(&connection_id_clone, stream_id, 200, None);
+                if result.is_ok() {
+                    // Update stream activity
+                    registry_clone.update_stream_activity(&connection_id_clone, stream_id);
+                    // Remove stream
+                    registry_clone.remove_stream(&connection_id_clone, stream_id);
+                }
+            }
+        });
+
+        // Main thread also performs operations concurrently
+        for i in 100..200 {
+            let stream_id = i;
+            let result = registry.enforce_stream_limits(&connection_id, stream_id, 200, None);
+            if result.is_ok() {
+                registry.update_stream_activity(&connection_id, stream_id);
+                registry.remove_stream(&connection_id, stream_id);
+            }
+
+            // Also test stats collection during operations
+            let (_conn_count, _stream_count) = registry.get_stats();
+        }
+
+        handle.join().expect("thread should complete successfully");
+
+        // Verify final state
+        let (conn_count, stream_count) = registry.get_stats();
+        assert_eq!(conn_count, 1);
+        assert_eq!(stream_count, 0); // All streams should be removed
+
+        crate::test_complete!("test_connection_registry_concurrent_operations");
+    }
+
+    #[test]
+    fn test_connection_registry_concurrent_read_write() {
+        init_test("test_connection_registry_concurrent_read_write");
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        let connection_count = 10;
+
+        // Add multiple connections
+        for i in 0..connection_count {
+            registry.add_connection(format!("connection-{}", i));
+        }
+
+        let registry_clone = Arc::clone(&registry);
+
+        // Spawn reader thread that continuously reads stats
+        let reader_handle = std::thread::spawn(move || {
+            for _ in 0..1000 {
+                let (_conn_count, _stream_count) = registry_clone.get_stats();
+                // Verify stats are reasonable
+                std::thread::yield_now();
+            }
+        });
+
+        // Main thread adds/removes streams concurrently with reader
+        for i in 0..connection_count {
+            let connection_id = format!("connection-{}", i);
+
+            // Add some streams
+            for stream_id in 0..5 {
+                let _ = registry.enforce_stream_limits(&connection_id, stream_id, 50, None);
+            }
+
+            // Remove some streams
+            for stream_id in 0..3 {
+                registry.remove_stream(&connection_id, stream_id);
+            }
+        }
+
+        reader_handle.join().expect("reader thread should complete successfully");
+
+        crate::test_complete!("test_connection_registry_concurrent_read_write");
+    }
+
+    #[test]
+    fn test_connection_state_thread_safety() {
+        init_test("test_connection_state_thread_safety");
+
+        let connection_state = Arc::new(ConnectionState::new());
+        let num_threads = 4;
+        let streams_per_thread = 25;
+
+        let mut handles = Vec::new();
+
+        // Spawn multiple threads that add/remove streams concurrently
+        for thread_id in 0..num_threads {
+            let state = Arc::clone(&connection_state);
+            let handle = std::thread::spawn(move || {
+                for i in 0..streams_per_thread {
+                    let stream_id = (thread_id * streams_per_thread) + i;
+
+                    // Add stream
+                    if let Ok(_timestamp) = state.add_stream(stream_id, 200) {
+                        // Update activity
+                        state.update_stream_activity(stream_id);
+                        // Remove stream
+                        state.remove_stream(stream_id);
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("thread should complete successfully");
+        }
+
+        // Verify final state is consistent
+        assert_eq!(connection_state.active_stream_count(), 0);
+
+        crate::test_complete!("test_connection_state_thread_safety");
+    }
+
+    #[test]
+    fn test_connection_registry_no_deadlocks_under_load() {
+        init_test("test_connection_registry_no_deadlocks_under_load");
+
+        let registry = Arc::new(ConnectionRegistry::new());
+        let num_connections = 5;
+        let num_threads = 8;
+
+        // Add connections
+        for i in 0..num_connections {
+            registry.add_connection(format!("conn-{}", i));
+        }
+
+        let mut handles = Vec::new();
+
+        // Spawn threads that perform mixed operations
+        for thread_id in 0..num_threads {
+            let reg = Arc::clone(&registry);
+            let handle = std::thread::spawn(move || {
+                for i in 0..50 {
+                    let conn_id = format!("conn-{}", i % num_connections);
+                    let stream_id = (thread_id * 50) + i;
+
+                    // Mix of operations
+                    let _ = reg.enforce_stream_limits(&conn_id, stream_id, 100, None);
+                    reg.update_stream_activity(&conn_id, stream_id);
+                    let _ = reg.get_stats();
+                    reg.remove_stream(&conn_id, stream_id);
+
+                    if i % 10 == 0 {
+                        std::thread::yield_now();
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for completion with timeout to detect deadlocks
+        for handle in handles {
+            handle.join().expect("no deadlocks should occur");
+        }
+
+        crate::test_complete!("test_connection_registry_no_deadlocks_under_load");
     }
 
     // =========================================================================
