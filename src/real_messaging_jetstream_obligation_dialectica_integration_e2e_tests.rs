@@ -1208,10 +1208,22 @@ mod tests {
         for reason in reasons {
             match reason {
                 ConsumerLag { lag_amount } => assert!(lag_amount > 0),
-                BackpressureDetected => assert!(true),
-                ProofTimeout => assert!(true),
-                SequenceViolation => assert!(true),
-                ManualTrigger => assert!(true),
+                BackpressureDetected => {
+                    // Test that BackpressureDetected variant is properly constructed
+                    assert!(matches!(reason, BackpressureDetected));
+                }
+                ProofTimeout => {
+                    // Test that ProofTimeout variant is properly constructed
+                    assert!(matches!(reason, ProofTimeout));
+                }
+                SequenceViolation => {
+                    // Test that SequenceViolation variant is properly constructed
+                    assert!(matches!(reason, SequenceViolation));
+                }
+                ManualTrigger => {
+                    // Test that ManualTrigger variant is properly constructed
+                    assert!(matches!(reason, ManualTrigger));
+                }
             }
         }
     }

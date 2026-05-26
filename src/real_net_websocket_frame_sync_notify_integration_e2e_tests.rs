@@ -1169,7 +1169,10 @@ mod tests {
 
         for result in results {
             match result {
-                ValidWake => assert!(true),
+                ValidWake => {
+                    // Test that ValidWake variant is properly constructed
+                    assert!(matches!(result, ValidWake));
+                }
                 SpuriousWake { reason } => assert!(!reason.is_empty()),
                 MissedWake { expected_frame } => assert!(expected_frame.0 > 0),
                 DelayedWake { delay } => assert!(delay > Duration::ZERO),
