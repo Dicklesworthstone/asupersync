@@ -1346,7 +1346,14 @@ fn apply_numeric_env_override(
             apply_value(policy, value);
         }
         NumericEnvOverride::Invalid => {
-            mark_override(&mut policy.override_mask);
+            // SECURITY: Fail closed on invalid environment values to prevent
+            // attackers from bypassing security thresholds by setting malformed
+            // values that mark overrides as active while keeping default values.
+            panic!(
+                "Invalid environment variable value for {key}. \
+                 Expected a valid usize, found malformed value. \
+                 Set the variable to a valid number or unset it entirely."
+            );
         }
     }
 }
