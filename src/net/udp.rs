@@ -33,6 +33,10 @@ pub const UDP_RENDEZVOUS_MAX_ID_BYTES: usize = 128;
 pub const UDP_RENDEZVOUS_MAX_CANDIDATES: usize = 16;
 /// Maximum bounded probe-attempt budget accepted from one UDP rendezvous exchange.
 pub const UDP_RENDEZVOUS_MAX_ATTEMPTS: u8 = 32;
+/// Maximum packet size accepted by recv_batch_from to prevent DoS via unbounded allocation.
+pub const UDP_MAX_PACKET_SIZE: usize = 1024 * 1024; // 1MB per packet
+/// Maximum batch size accepted by recv_batch_from to prevent DoS via unbounded allocation.
+pub const UDP_MAX_BATCH_SIZE: usize = 1000;
 
 /// Platform family backing the UDP socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1239,6 +1243,20 @@ impl UdpSocket {
                 return Err(empty_udp_receive_buffer_error("recv_batch_from"));
             }
 
+            // Prevent DoS via unbounded memory allocation (asupersync-z30chg)
+            if max_packets > UDP_MAX_BATCH_SIZE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("max_packets ({}) exceeds UDP_MAX_BATCH_SIZE ({})", max_packets, UDP_MAX_BATCH_SIZE)
+                ));
+            }
+            if packet_size > UDP_MAX_PACKET_SIZE {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("packet_size ({}) exceeds UDP_MAX_PACKET_SIZE ({})", packet_size, UDP_MAX_PACKET_SIZE)
+                ));
+            }
+
             let mut first = vec![0u8; packet_size];
             let (bytes_read, src_addr) = self.recv_from(&mut first).await?;
             first.truncate(bytes_read);
@@ -1399,9 +1417,11 @@ impl<'a> RecvStream<'a> {
         // A zero-length UDP receive buffer can consume and discard a queued
         // datagram while yielding an empty payload. Clamp to one byte so
         // callers never silently drop the entire datagram body by accident.
+        // Also clamp to UDP_MAX_PACKET_SIZE to prevent DoS via unbounded allocation.
+        let clamped_size = buf_size.max(1).min(UDP_MAX_PACKET_SIZE);
         Self {
             socket,
-            buf: vec![0u8; buf_size.max(1)],
+            buf: vec![0u8; clamped_size],
         }
     }
 }
@@ -2065,6 +2085,43 @@ mod tests {
                 Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
             ));
             assert!(poll_recv_socket.registration.is_none());
+        });
+    }
+
+    #[test]
+    fn udp_dos_prevention() {
+        future::block_on(async {
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+            // Test recv_batch_from DoS prevention - packet_size limit
+            let result = socket.recv_batch_from(1, UDP_MAX_PACKET_SIZE + 1).await;
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("packet_size"));
+            assert!(err.to_string().contains("UDP_MAX_PACKET_SIZE"));
+
+            // Test recv_batch_from DoS prevention - max_packets limit
+            let result = socket.recv_batch_from(UDP_MAX_BATCH_SIZE + 1, 1024).await;
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(err.to_string().contains("max_packets"));
+            assert!(err.to_string().contains("UDP_MAX_BATCH_SIZE"));
+
+            // Test RecvStream DoS prevention - buffer size is clamped
+            let mut socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let stream = RecvStream::new(&mut socket, usize::MAX);
+            // Buffer should be clamped to UDP_MAX_PACKET_SIZE, not usize::MAX
+            assert_eq!(stream.buf.len(), UDP_MAX_PACKET_SIZE);
+
+            let stream_small = RecvStream::new(&mut socket, 0);
+            // Buffer should be at least 1 byte
+            assert_eq!(stream_small.buf.len(), 1);
+
+            let stream_normal = RecvStream::new(&mut socket, 512);
+            // Normal size should pass through unchanged
+            assert_eq!(stream_normal.buf.len(), 512);
         });
     }
 }
