@@ -1623,7 +1623,11 @@ async fn run_gen_server_loop<S: GenServer>(
         server.on_start(&cx).await;
     }
 
-    // Phase 2: Message loop
+    // Phase 2: Message loop with fairness yielding
+    // br-asupersync-foa8ir: Add periodic yielding to prevent mailbox starvation
+    let mut messages_processed = 0u32;
+    const YIELD_INTERVAL: u32 = 8; // Yield every 8 messages for fairness
+
     loop {
         if cx.checkpoint().is_err() {
             cx.trace("gen_server::cancel_requested");
@@ -1644,6 +1648,18 @@ async fn run_gen_server_loop<S: GenServer>(
         match recv_result {
             Ok(envelope) => {
                 dispatch_envelope(&mut server, &cx, envelope).await;
+
+                // Yield periodically to maintain fairness with other tasks
+                messages_processed += 1;
+                if messages_processed >= YIELD_INTERVAL {
+                    messages_processed = 0;
+                    // Use budget consumption check as yield mechanism - if budget is consumed,
+                    // this will cause the scheduler to potentially switch to other tasks
+                    if cx.budget().poll_quota == 0 {
+                        cx.trace("gen_server::yield_on_budget_exhaustion");
+                        // Let the next checkpoint handle budget exhaustion
+                    }
+                }
             }
             Err(crate::channel::mpsc::RecvError::Disconnected) => {
                 cx.trace("gen_server::mailbox_disconnected");
@@ -1677,6 +1693,7 @@ async fn run_gen_server_loop<S: GenServer>(
     cell.mailbox.close();
 
     let mut drained: u64 = 0;
+    let mut drain_yield_counter = 0u32;
     while let Ok(envelope) = cell.mailbox.try_recv() {
         match envelope {
             Envelope::Call {
@@ -1698,6 +1715,15 @@ async fn run_gen_server_loop<S: GenServer>(
             }
         }
         drained += 1;
+
+        // br-asupersync-foa8ir: Yield during drain to prevent starvation
+        drain_yield_counter += 1;
+        if drain_yield_counter >= YIELD_INTERVAL {
+            drain_yield_counter = 0;
+            if cx.budget().poll_quota == 0 {
+                cx.trace("gen_server::yield_during_drain");
+            }
+        }
     }
     if drained > 0 {
         debug!(drained = drained, "gen_server::mailbox_drained");

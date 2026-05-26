@@ -737,6 +737,11 @@ impl ContractChecker {
 
         // Temporal Logic: Check AlwaysEventuallyResolved
         self.check_always_eventually_resolved(trace_end);
+
+        // Temporal Logic: Check AlwaysImpliesTrackable for all obligations
+        for id in self.obligations.keys() {
+            self.check_always_implies_trackable(*id, trace_end);
+        }
     }
 
     /// Check AlwaysEventuallyResolved: obligations should resolve within time bound.

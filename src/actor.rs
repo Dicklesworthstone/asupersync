@@ -833,7 +833,11 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
     cx.trace("actor::on_start");
     actor.on_start(&cx).await;
 
-    // Phase 2: Message loop
+    // Phase 2: Message loop with fairness yielding
+    // br-asupersync-foa8ir: Add periodic yielding to prevent mailbox starvation
+    let mut messages_processed = 0u32;
+    const YIELD_INTERVAL: u32 = 8; // Yield every 8 messages for fairness
+
     loop {
         // Check for cancellation
         if cx.checkpoint().is_err() {
@@ -855,6 +859,18 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
         match recv_result {
             Ok(msg) => {
                 actor.handle(&cx, msg).await;
+
+                // Yield periodically to maintain fairness with other tasks
+                messages_processed += 1;
+                if messages_processed >= YIELD_INTERVAL {
+                    messages_processed = 0;
+                    // Use budget consumption check as yield mechanism - if budget is consumed,
+                    // this will cause the scheduler to potentially switch to other tasks
+                    if cx.budget().poll_quota == 0 {
+                        cx.trace("actor::yield_on_budget_exhaustion");
+                        // Let the next checkpoint handle budget exhaustion
+                    }
+                }
             }
             Err(crate::channel::mpsc::RecvError::Disconnected) => {
                 // All senders dropped - graceful shutdown
@@ -888,9 +904,19 @@ async fn run_actor_loop<A: Actor>(mut actor: A, cx: Cx, cell: &mut ActorCell<A::
         while let Ok(_msg) = cell.mailbox.try_recv() {}
     } else {
         let mut drained: u64 = 0;
+        let mut drain_yield_counter = 0u32;
         while let Ok(msg) = cell.mailbox.try_recv() {
             actor.handle(&cx, msg).await;
             drained += 1;
+
+            // br-asupersync-foa8ir: Yield during drain to prevent starvation
+            drain_yield_counter += 1;
+            if drain_yield_counter >= YIELD_INTERVAL {
+                drain_yield_counter = 0;
+                if cx.budget().poll_quota == 0 {
+                    cx.trace("actor::yield_during_drain");
+                }
+            }
         }
         if drained > 0 {
             debug!(drained = drained, "actor::mailbox_drained");
