@@ -5,6 +5,7 @@ use crate::cx::Cx;
 use crate::types::Outcome;
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// Client for ATP mailbox operations.
 #[derive(Debug)]
@@ -12,8 +13,8 @@ pub struct MailboxClient {
     /// Client configuration
     config: MailboxConfig,
 
-    /// Active transfers
-    active_transfers: HashMap<MailboxTransferId, TransferState>,
+    /// Active transfers (protected by mutex for concurrent access)
+    active_transfers: Mutex<HashMap<MailboxTransferId, TransferState>>,
 
     /// Relay client for communication
     relay_client: Option<RelayClient>,
@@ -30,7 +31,7 @@ impl MailboxClient {
     pub async fn new(config: MailboxConfig) -> MailboxResult<Self> {
         Ok(Self {
             config: config.clone(),
-            active_transfers: HashMap::new(),
+            active_transfers: Mutex::new(HashMap::new()),
             relay_client: None,
             encryption_key: config.encryption_key,
             quota_manager: QuotaManager::new(config.quota_limit),
@@ -46,13 +47,19 @@ impl MailboxClient {
     ) -> MailboxResult<MailboxTransferId> {
         let transfer_id = MailboxTransferId::new();
 
-        // Check quota
-        self.quota_manager.check_quota(data.len() as u64)?;
+        // Atomic quota check and insertion to prevent race conditions
+        {
+            let mut active_transfers = self.active_transfers.lock().unwrap();
+
+            // Check quota while holding the lock to prevent concurrent quota violations
+            self.quota_manager.check_quota(data.len() as u64)?;
+
+            // Insert into active transfers atomically
+            active_transfers.insert(transfer_id, TransferState::Uploading);
+        }
 
         // Placeholder implementation
         cx.trace(&format!("Sending {} bytes to peer {} via mailbox", data.len(), peer_id.as_str()));
-
-        self.active_transfers.insert(transfer_id, TransferState::Uploading);
 
         Ok(transfer_id)
     }
