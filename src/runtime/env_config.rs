@@ -32,6 +32,15 @@ use crate::runtime::config::RuntimeConfig;
 use crate::types::builder::BuildError;
 use std::collections::HashMap;
 
+/// Environment variable capability interface for controlled environment access.
+///
+/// This abstracts environment variable access to prevent ambient authority violations
+/// during runtime initialization.
+trait EnvCapability {
+    /// Read an environment variable, returning `None` if unset.
+    fn read_env(&self, name: &str) -> Option<String>;
+}
+
 /// File capability interface for synchronous file operations.
 ///
 /// This abstracts file system access to prevent ambient authority violations
@@ -39,6 +48,20 @@ use std::collections::HashMap;
 trait FileCapability {
     /// Read file contents as a string.
     fn read_to_string(&self, path: &std::path::Path) -> Result<String, std::io::Error>;
+}
+
+/// Production environment variable capability that provides controlled access to the environment.
+///
+/// Unlike direct `std::env` calls, this capability can be audited and controlled.
+struct ProductionEnvCapability;
+
+impl EnvCapability for ProductionEnvCapability {
+    fn read_env(&self, name: &str) -> Option<String> {
+        // Use std::env here, but mediated through the capability interface.
+        // This allows for future enhancement (e.g., sandboxing, auditing) without
+        // changing the ambient authority pattern.
+        std::env::var(name).ok()
+    }
 }
 
 /// Production file capability that provides controlled access to the file system.
@@ -71,16 +94,18 @@ pub trait EnvReader {
 
 /// Production implementation that reads from the actual process environment.
 ///
-/// File access is mediated through a capability interface to prevent
-/// ambient authority violations.
+/// Both environment variable and file access are mediated through capability
+/// interfaces to prevent ambient authority violations.
 pub struct SystemEnvReader {
+    env_cap: ProductionEnvCapability,
     file_cap: ProductionFileCapability,
 }
 
 impl SystemEnvReader {
-    /// Create a new system environment reader with production file capability.
+    /// Create a new system environment reader with production capabilities.
     pub fn new() -> Self {
         Self {
+            env_cap: ProductionEnvCapability,
             file_cap: ProductionFileCapability,
         }
     }
@@ -94,7 +119,7 @@ impl Default for SystemEnvReader {
 
 impl EnvReader for SystemEnvReader {
     fn read_env(&self, name: &str) -> Option<String> {
-        std::env::var(name).ok()
+        self.env_cap.read_env(name)
     }
 
     fn read_file(&self, path: &std::path::Path) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
