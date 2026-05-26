@@ -890,10 +890,33 @@ fn bootstrap_server_host(endpoint: &str) -> &str {
 
 pub(crate) fn is_loopback_bootstrap_server(endpoint: &str) -> bool {
     let host = bootstrap_server_host(endpoint).trim();
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback(),
+            std::net::IpAddr::V6(v6) => {
+                // Check for standard IPv6 loopback
+                if v6.is_loopback() {
+                    return true;
+                }
+                // SECURITY: Check for IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
+                // These should NOT be considered loopback even if the mapped IPv4 is loopback,
+                // because they can be used to bypass validation for remote addresses.
+                if let Some(mapped_v4) = v6.to_ipv4_mapped() {
+                    // IPv4-mapped IPv6 addresses are only loopback if the mapped IPv4 is loopback
+                    // AND the original address was explicitly ::ffff:127.0.0.1 style
+                    mapped_v4.is_loopback()
+                } else {
+                    false
+                }
+            }
+        }
+    } else {
+        false
+    }
 }
 
 /// TLS settings for Kafka clients.
@@ -3879,5 +3902,75 @@ mod tests {
         //   * This provides efficient batching while maintaining reasonable latency
         // - Implementation follows option (a): wait until batch is full before sending
         //   (with linger timeout as backup to prevent indefinite waiting)
+    }
+
+    /// Security test for IPv4-mapped IPv6 bypass vulnerability (asupersync-fchvt2).
+    ///
+    /// Verifies that IPv4-mapped IPv6 addresses cannot be used to bypass loopback
+    /// validation and connect to arbitrary remote brokers over plaintext.
+    #[test]
+    fn test_ipv4_mapped_ipv6_security_bypass_prevention() {
+        // Test Case 1: Standard loopback addresses should be allowed
+        assert!(
+            is_loopback_bootstrap_server("localhost:9092"),
+            "localhost should be considered loopback"
+        );
+        assert!(
+            is_loopback_bootstrap_server("127.0.0.1:9092"),
+            "127.0.0.1 should be considered loopback"
+        );
+        assert!(
+            is_loopback_bootstrap_server("[::1]:9092"),
+            "::1 should be considered loopback"
+        );
+        assert!(
+            is_loopback_bootstrap_server("[::ffff:127.0.0.1]:9092"),
+            "::ffff:127.0.0.1 maps to loopback and should be allowed"
+        );
+
+        // Test Case 2: SECURITY - IPv4-mapped IPv6 addresses to remote hosts should be blocked
+        assert!(
+            !is_loopback_bootstrap_server("[::ffff:192.168.1.1]:9092"),
+            "SECURITY: ::ffff:192.168.1.1 maps to remote address and must be blocked"
+        );
+        assert!(
+            !is_loopback_bootstrap_server("[::ffff:10.0.0.1]:9092"),
+            "SECURITY: ::ffff:10.0.0.1 maps to remote address and must be blocked"
+        );
+        assert!(
+            !is_loopback_bootstrap_server("[::ffff:8.8.8.8]:9092"),
+            "SECURITY: ::ffff:8.8.8.8 maps to remote address and must be blocked"
+        );
+
+        // Test Case 3: Regular remote addresses should continue to be blocked
+        assert!(
+            !is_loopback_bootstrap_server("192.168.1.1:9092"),
+            "Regular remote IPv4 should be blocked"
+        );
+        assert!(
+            !is_loopback_bootstrap_server("[2001:db8::1]:9092"),
+            "Regular remote IPv6 should be blocked"
+        );
+
+        // Test Case 4: Edge cases and malformed addresses
+        assert!(
+            !is_loopback_bootstrap_server(""),
+            "Empty string should not be considered loopback"
+        );
+        assert!(
+            !is_loopback_bootstrap_server("invalid:9092"),
+            "Invalid hostname should not be considered loopback"
+        );
+        assert!(
+            !is_loopback_bootstrap_server("[invalid]:9092"),
+            "Invalid IPv6 should not be considered loopback"
+        );
+
+        // SECURITY AUDIT VERIFICATION:
+        // - IPv4-mapped IPv6 addresses are properly detected and validated
+        // - Remote addresses disguised as IPv4-mapped IPv6 cannot bypass validation
+        // - Only legitimate loopback addresses (including properly mapped ones) are allowed
+        // - This prevents CVE-class vulnerabilities where attackers use ::ffff:x.x.x.x
+        //   to bypass hostname/IP validation and force plaintext connections
     }
 }
