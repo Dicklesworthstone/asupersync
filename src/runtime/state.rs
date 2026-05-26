@@ -2257,6 +2257,16 @@ impl RuntimeState {
         for id in leak_ids {
             self.in_flight_leak_ids.remove(&id);
         }
+
+        // Process deferred region advancements after leak handling completes.
+        // This prevents reentrancy during finalizer execution that could violate
+        // the quiescence invariant.
+        if self.handling_leaks == 0 && !self.deferred_region_advancements.is_empty() {
+            let deferred_regions: Vec<RegionId> = self.deferred_region_advancements.drain().collect();
+            for region_id in deferred_regions {
+                self.advance_region_state(region_id);
+            }
+        }
     }
 
     /// Creates and registers an obligation for the given task and region.
@@ -2541,7 +2551,14 @@ impl RuntimeState {
             region_record.resolve_obligation();
         }
 
-        self.advance_region_state(info.region);
+        // During leak handling, defer region state advancement to prevent reentrancy.
+        // Finalizers run by advance_region_state could acquire new obligations, violating
+        // the quiescence invariant and triggering recursive leak handling.
+        if self.handling_leaks > 0 {
+            self.deferred_region_advancements.insert(info.region);
+        } else {
+            self.advance_region_state(info.region);
+        }
 
         Ok(info.duration)
     }
