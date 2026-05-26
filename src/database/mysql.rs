@@ -177,6 +177,23 @@ impl MySqlError {
         ) || matches!(self.server_code(), Some(2006 | 2013))
     }
 
+    /// Returns detailed error information for server-side logging and debugging.
+    ///
+    /// This method exposes full MySQL error details including error codes, SQL states,
+    /// and raw error messages that are sanitized in the public Display implementation
+    /// to prevent database schema reconnaissance attacks.
+    #[must_use]
+    pub fn debug_details(&self) -> String {
+        match self {
+            Self::Server {
+                code,
+                sql_state,
+                message,
+            } => format!("MySQL error [{}] ({}): {}", code, sql_state, message),
+            _ => self.to_string(), // Other error types are not sanitized
+        }
+    }
+
     /// Returns `true` if this error is transient and may succeed on retry.
     ///
     /// Transient errors: deadlock (1213), lock wait timeout (1205),
@@ -205,9 +222,26 @@ impl fmt::Display for MySqlError {
             Self::AuthenticationFailed(msg) => write!(f, "MySQL authentication failed: {msg}"),
             Self::Server {
                 code,
-                sql_state,
-                message,
-            } => write!(f, "MySQL error [{code}] ({sql_state}): {message}"),
+                sql_state: _,
+                message: _,
+            } => {
+                // Sanitize MySQL errors for client responses to prevent schema reconnaissance.
+                // Full error details should be logged server-side via debug_details() method.
+                match *code {
+                    1045 => write!(f, "Authentication failed"),
+                    1046 => write!(f, "No database selected"),
+                    1049 => write!(f, "Database does not exist"),
+                    1050 => write!(f, "Table already exists"),
+                    1051 => write!(f, "Table does not exist"),
+                    1054 => write!(f, "Column not found"),
+                    1062 => write!(f, "Duplicate entry"),
+                    1064 => write!(f, "SQL syntax error"),
+                    1146 => write!(f, "Table does not exist"),
+                    1364 => write!(f, "Field missing default value"),
+                    1452 => write!(f, "Foreign key constraint failed"),
+                    _ => write!(f, "Database operation failed"),
+                }
+            }
             Self::Cancelled(reason) => write!(f, "MySQL operation cancelled: {reason}"),
             Self::ConnectionClosed => write!(f, "MySQL connection is closed"),
             Self::ColumnNotFound(name) => write!(f, "Column not found: {name}"),
@@ -5984,6 +6018,48 @@ mod tests {
         let text = format!("{err}");
         assert!(text.contains("waiting for commit"));
         assert!(!text.contains("CancelReason"));
+    }
+
+    #[test]
+    fn test_mysql_server_error_sanitization() {
+        // Test that Server errors are sanitized in Display output to prevent schema reconnaissance
+        let server_err = MySqlError::Server {
+            code: 1054,
+            sql_state: "42S22".to_string(),
+            message: "Unknown column 'secret_password' in 'field list'".to_string(),
+        };
+
+        // Display output should be sanitized (no table/column names exposed)
+        let display_output = format!("{}", server_err);
+        assert_eq!(display_output, "Column not found");
+        assert!(!display_output.contains("secret_password"));
+        assert!(!display_output.contains("field list"));
+        assert!(!display_output.contains("42S22"));
+
+        // debug_details() should provide full error information for server-side logging
+        let debug_output = server_err.debug_details();
+        assert_eq!(debug_output, "MySQL error [1054] (42S22): Unknown column 'secret_password' in 'field list'");
+        assert!(debug_output.contains("secret_password"));
+        assert!(debug_output.contains("field list"));
+        assert!(debug_output.contains("42S22"));
+        assert!(debug_output.contains("1054"));
+
+        // Test other common error codes are sanitized
+        let syntax_err = MySqlError::Server {
+            code: 1064,
+            sql_state: "42000".to_string(),
+            message: "You have an error in your SQL syntax; check the manual that corresponds to your MySQL server version for the right syntax to use near 'DROP TABLE users' at line 1".to_string(),
+        };
+        assert_eq!(format!("{}", syntax_err), "SQL syntax error");
+        assert!(!format!("{}", syntax_err).contains("DROP TABLE users"));
+
+        // Test unknown error codes get generic message
+        let unknown_err = MySqlError::Server {
+            code: 9999,
+            sql_state: "HY000".to_string(),
+            message: "Some unknown database error".to_string(),
+        };
+        assert_eq!(format!("{}", unknown_err), "Database operation failed");
     }
 
     #[test]
