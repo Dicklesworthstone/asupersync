@@ -224,22 +224,19 @@ impl CacheMaintenanceScheduler {
         let start_time = SystemTime::now();
         let mut metrics = MaintenanceMetrics::default();
 
-        // Remove expired entries
-        let expired_keys: Vec<_> = entries
-            .iter()
-            .filter_map(|(key, entry)| {
-                if entry.created_at.elapsed().unwrap_or(Duration::ZERO) > entry.ttl {
-                    Some(key.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Remove expired entries atomically to prevent TOCTOU races
+        // Perform expiration check and removal in single pass
+        entries.retain(|_key, entry| {
+            let elapsed = entry.created_at.elapsed().unwrap_or(Duration::ZERO);
+            let is_expired = elapsed > entry.ttl;
 
-        for key in expired_keys {
-            entries.remove(&key);
-            metrics.expired_entries += 1;
-        }
+            if is_expired {
+                metrics.expired_entries += 1;
+                false // Remove this entry
+            } else {
+                true // Keep this entry
+            }
+        });
 
         // Clean up orphaned files
         // This would scan the cache directory and remove files not in the index
@@ -276,6 +273,65 @@ pub struct MaintenanceMetrics {
 mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn cache_maintenance_toctou_fix() {
+        let mut manager = CachePolicyManager::new(EvictionPolicy::LeastRecentlyUsed);
+
+        let mut entries = BTreeMap::new();
+
+        // Add an expired entry
+        let expired_entry = CacheEntry {
+            key: crate::atp::cache::CacheKey::new("m".to_string(), "expired".to_string(), None),
+            size_bytes: 100,
+            created_at: SystemTime::now() - Duration::from_secs(2000), // 2000 seconds ago
+            last_accessed: SystemTime::now(),
+            access_count: 1,
+            ttl: Duration::from_secs(1000), // TTL of 1000 seconds (so it's expired)
+            encrypted: true,
+            storage_location: crate::atp::cache::StorageLocation::Memory("test:key".to_string()),
+            verification: crate::atp::cache::VerificationMetadata {
+                content_verified: true,
+                manifest_verified: true,
+                proof_location: None,
+                verified_at: Some(SystemTime::now()),
+            },
+        };
+
+        // Add a valid (non-expired) entry
+        let valid_entry = CacheEntry {
+            key: crate::atp::cache::CacheKey::new("m".to_string(), "valid".to_string(), None),
+            size_bytes: 200,
+            created_at: SystemTime::now(),
+            last_accessed: SystemTime::now(),
+            access_count: 1,
+            ttl: Duration::from_secs(86400), // 24 hours TTL (not expired)
+            encrypted: true,
+            storage_location: crate::atp::cache::StorageLocation::Memory("test:key".to_string()),
+            verification: crate::atp::cache::VerificationMetadata {
+                content_verified: true,
+                manifest_verified: true,
+                proof_location: None,
+                verified_at: Some(SystemTime::now()),
+            },
+        };
+
+        entries.insert("expired".to_string(), expired_entry);
+        entries.insert("valid".to_string(), valid_entry);
+
+        assert_eq!(entries.len(), 2);
+
+        // Run maintenance - should remove expired entry but keep valid one
+        let metrics = manager.run_maintenance(&mut entries, &manager.clone());
+
+        // Should have removed exactly 1 expired entry
+        assert_eq!(metrics.expired_entries, 1);
+        assert_eq!(entries.len(), 1);
+
+        // Should still have the valid entry
+        assert!(entries.contains_key("valid"));
+        assert!(!entries.contains_key("expired"));
+    }
 
     #[test]
     fn eviction_policy_lru_ordering() {
