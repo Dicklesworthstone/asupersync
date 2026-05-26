@@ -870,6 +870,7 @@ impl RegionBridge {
             state: self.local.state(),
             timestamp: now,
             sequence: self.sequence,
+            vector_clock: crate::trace::distributed::vclock::VectorClock::new(),
             origin_id: self.snapshot_origin_id,
             epoch: self.snapshot_epoch,
             tasks,

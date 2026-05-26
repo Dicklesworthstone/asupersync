@@ -6,6 +6,7 @@
 
 use crate::record::region::RegionState;
 use crate::security::{AuthenticationTag, AuthKey};
+use crate::trace::distributed::vclock::VectorClock;
 use crate::types::{RegionId, TaskId, Time};
 use crate::util::ArenaIndex;
 use sha2::{Digest, Sha256};
@@ -145,6 +146,12 @@ pub struct RegionSnapshot {
     pub timestamp: Time,
     /// Snapshot sequence number (monotonic within region).
     pub sequence: u64,
+    /// Vector clock for causal ordering across distributed replicas.
+    ///
+    /// Tracks happened-before relationships between snapshots from different
+    /// nodes, enabling proper causality preservation during CRDT merge operations.
+    /// Replaces simple sequence numbers for distributed consistency.
+    pub vector_clock: VectorClock,
     /// Originating snapshot authority / bridge incarnation.
     pub origin_id: u64,
     /// Monotonic epoch for the originating authority branch.
@@ -179,6 +186,7 @@ impl RegionSnapshot {
             state: RegionState::Open,
             timestamp: Time::ZERO,
             sequence: 0,
+            vector_clock: VectorClock::new(),
             origin_id: 0,
             epoch: 0,
             tasks: Vec::new(),
@@ -208,6 +216,7 @@ impl RegionSnapshot {
     /// - 1 byte state
     /// - 8 bytes timestamp (nanos u64)
     /// - 8 bytes sequence (u64)
+    /// - vector clock (variable length, bincode)
     /// - 8 bytes origin_id (u64)
     /// - 8 bytes epoch (u64)
     /// - 4 bytes task count, then per task: 8+1+1 bytes
@@ -264,6 +273,9 @@ impl RegionSnapshot {
 
         // Sequence
         buf.extend_from_slice(&self.sequence.to_le_bytes());
+
+        // Vector clock (variable length, prefixed with length)
+        write_vector_clock(&mut buf, &self.vector_clock);
 
         // Provenance
         buf.extend_from_slice(&self.origin_id.to_le_bytes());
@@ -448,6 +460,9 @@ impl RegionSnapshot {
         // Sequence
         let sequence = cursor.read_u64()?;
 
+        // Vector clock
+        let vector_clock = cursor.read_vector_clock()?;
+
         // Provenance
         let origin_id = cursor.read_u64()?;
         let epoch = cursor.read_u64()?;
@@ -527,6 +542,7 @@ impl RegionSnapshot {
             state,
             timestamp,
             sequence,
+            vector_clock,
             origin_id,
             epoch,
             tasks,
@@ -552,6 +568,10 @@ impl RegionSnapshot {
         let state = 1_usize;
         let timestamp = 8_usize;
         let sequence = 8_usize;
+        let vector_clock = 4_usize.saturating_add(
+            // Estimate: 4 bytes length + (node_count * (8 bytes NodeId + 8 bytes counter))
+            self.vector_clock.node_count().saturating_mul(16)
+        );
         let provenance = 16_usize;
         let tasks = 4_usize.saturating_add(self.tasks.len().saturating_mul(10)); // count + per-task (8+1+1)
         let children = 4_usize.saturating_add(self.children.len().saturating_mul(8));
@@ -576,6 +596,7 @@ impl RegionSnapshot {
             .saturating_add(state)
             .saturating_add(timestamp)
             .saturating_add(sequence)
+            .saturating_add(vector_clock)
             .saturating_add(provenance)
             .saturating_add(tasks)
             .saturating_add(children)
@@ -677,6 +698,7 @@ impl RegionSnapshot {
             state: max_region_state(self.state, other.state),
             timestamp: self.timestamp.max(other.timestamp),
             sequence: self.sequence.max(other.sequence),
+            vector_clock: self.vector_clock.merge(&other.vector_clock),
             origin_id,
             epoch,
             tasks: tasks.into_values().collect(),
@@ -855,6 +877,15 @@ pub enum SnapshotError {
         /// The invalid generation value.
         generation: u32,
     },
+    /// Vector clock data is corrupted or invalid.
+    InvalidVectorClock,
+    /// Vector clock size exceeds the configured maximum.
+    VectorClockTooLarge {
+        /// Length the snapshot frame claimed.
+        len: usize,
+        /// Maximum length this deserialiser will accept.
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for SnapshotError {
@@ -887,6 +918,15 @@ impl std::fmt::Display for SnapshotError {
             Self::InvalidTaskId { index, generation } => {
                 write!(f, "invalid TaskId arena index={index}, generation={generation}")
             },
+            Self::InvalidVectorClock => {
+                write!(f, "vector clock data is corrupted or invalid")
+            },
+            Self::VectorClockTooLarge { len, max } => {
+                write!(
+                    f,
+                    "vector clock size ({len} B) exceeds the per-deserialise maximum ({max} B)"
+                )
+            },
         }
     }
 }
@@ -899,6 +939,13 @@ impl std::fmt::Display for SnapshotError {
 /// production workloads (typically < 64 KiB) while keeping per-frame allocation
 /// small enough that a coordinated 1k-peer flood remains containable.
 pub const MAX_METADATA_LEN: usize = 16 * 1024 * 1024;
+
+/// Hard cap on the size of serialized vector clock data in a snapshot frame.
+///
+/// Enforced BEFORE allocation to prevent DoS attacks where crafted snapshots
+/// claim enormous vector clock sizes. 64 KiB is generous for realistic
+/// distributed systems (supports ~5000 nodes with 8-byte NodeId + 8-byte counter).
+pub const MAX_VECTOR_CLOCK_LEN: usize = 64 * 1024;
 
 impl std::error::Error for SnapshotError {}
 
@@ -955,6 +1002,14 @@ fn write_optional_string(buf: &mut Vec<u8>, value: Option<&str>) {
         }
         None => buf.push(0),
     }
+}
+
+fn write_vector_clock(buf: &mut Vec<u8>, clock: &VectorClock) {
+    // Serialize using bincode for deterministic binary representation
+    let clock_bytes = bincode::serde::encode_to_vec(clock, bincode::config::legacy())
+        .expect("VectorClock should always serialize successfully");
+    write_u32(buf, u32::try_from(clock_bytes.len()).expect("vector clock exceeds u32::MAX"));
+    buf.extend_from_slice(&clock_bytes);
 }
 
 
@@ -1062,6 +1117,23 @@ impl<'a> Cursor<'a> {
             flag => Err(SnapshotError::InvalidPresenceFlag(flag)),
         }
     }
+
+    fn read_vector_clock(&mut self) -> Result<VectorClock, SnapshotError> {
+        let len = self.read_u32()? as usize;
+
+        // Bound vector clock size to prevent DoS attacks
+        if len > MAX_VECTOR_CLOCK_LEN {
+            return Err(SnapshotError::VectorClockTooLarge {
+                len,
+                max: MAX_VECTOR_CLOCK_LEN,
+            });
+        }
+
+        let bytes = self.read_exact(len)?;
+        bincode::serde::decode_from_slice(bytes, bincode::config::legacy())
+            .map(|(decoded, _)| decoded)
+            .map_err(|_| SnapshotError::InvalidVectorClock)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1086,6 +1158,7 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::from_secs(100),
             sequence: 1,
+            vector_clock: VectorClock::new(),
             origin_id: 11,
             epoch: 3,
             tasks: vec![TaskSnapshot {
@@ -1113,6 +1186,7 @@ mod tests {
             state: RegionState::Closing,
             timestamp: Time::from_secs(999),
             sequence: 42,
+            vector_clock: VectorClock::new(),
             origin_id: 77,
             epoch: 9,
             tasks: vec![
@@ -1372,6 +1446,7 @@ mod tests {
             state,
             timestamp: Time::from_secs(timestamp_secs),
             sequence,
+            vector_clock: VectorClock::new(),
             origin_id: 1,
             epoch: 1,
             tasks: tasks
@@ -1734,6 +1809,7 @@ mod tests {
             state: RegionState::Closing,
             timestamp: Time::from_secs(timestamp_secs),
             sequence: u64::from(sequence),
+            vector_clock: VectorClock::new(),
             origin_id: 1,
             epoch: 1,
             tasks: vec![],
