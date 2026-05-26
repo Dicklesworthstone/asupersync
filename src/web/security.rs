@@ -13,7 +13,7 @@
 //! | `x-frame-options` | `DENY` | Prevent clickjacking |
 //! | `referrer-policy` | `strict-origin-when-cross-origin` | Control referrer leakage |
 //! | `strict-transport-security` | `max-age=31536000; includeSubDomains` | Enforce HTTPS (HSTS) |
-//! | `content-security-policy` | *(none by default)* | Restrict content sources |
+//! | `content-security-policy` | `default-src 'self'; script-src 'self'; ...` | Restrict content sources (XSS protection) |
 //! | `permissions-policy` | *(none by default)* | Control browser features |
 
 use super::extract::Request;
@@ -60,7 +60,8 @@ impl Default for SecurityPolicy {
             frame_options: Some("DENY".to_string()),
             referrer_policy: Some("strict-origin-when-cross-origin".to_string()),
             hsts: Some("max-age=31536000; includeSubDomains".to_string()),
-            content_security_policy: None,
+            // asupersync-7kjtmf: provide safe CSP default to prevent XSS
+            content_security_policy: Some("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'".to_string()),
             permissions_policy: None,
             hide_server_header: true,
         }

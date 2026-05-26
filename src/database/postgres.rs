@@ -3639,6 +3639,12 @@ impl PgConnection {
                         10 => {
                             // AuthenticationSASL
                             let mechanisms = Self::read_sasl_mechanisms(&mut reader)?;
+
+                            // SECURITY: Validate server only advertises acceptable SCRAM mechanisms
+                            // Reject any SASL mechanism list containing non-SCRAM mechanisms to prevent
+                            // downgrade attacks where server claims to support weak auth methods
+                            Self::validate_sasl_mechanisms(&mechanisms)?;
+
                             // Channel-binding selection (br-asupersync-7n2xsi):
                             //   * If TLS is in use AND the server advertised
                             //     SCRAM-SHA-256-PLUS, use -PLUS with
@@ -3782,6 +3788,45 @@ impl PgConnection {
             mechanisms.push(mech.to_string());
         }
         Ok(mechanisms)
+    }
+
+    /// Validate that server only advertises acceptable SCRAM mechanisms.
+    ///
+    /// This prevents downgrade attacks where a malicious server advertises
+    /// weak authentication mechanisms alongside SCRAM to signal it accepts
+    /// downgraded authentication. We enforce SCRAM-SHA-256 or better only.
+    fn validate_sasl_mechanisms(mechanisms: &[String]) -> Result<(), PgError> {
+        // Reject empty mechanism list
+        if mechanisms.is_empty() {
+            return Err(PgError::UnsupportedAuth(
+                "Server advertised no SASL mechanisms".to_string(),
+            ));
+        }
+
+        // Check that all mechanisms are acceptable SCRAM variants
+        const ACCEPTABLE_MECHANISMS: &[&str] = &["SCRAM-SHA-256", "SCRAM-SHA-256-PLUS"];
+
+        for mechanism in mechanisms {
+            if !ACCEPTABLE_MECHANISMS.contains(&mechanism.as_str()) {
+                return Err(PgError::UnsupportedAuth(format!(
+                    "Server advertised unacceptable SASL mechanism '{}'. Only SCRAM-SHA-256 and SCRAM-SHA-256-PLUS are allowed to prevent downgrade attacks",
+                    mechanism
+                )));
+            }
+        }
+
+        // Ensure at least one SCRAM mechanism is available
+        let has_scram = mechanisms.iter().any(|m|
+            m == "SCRAM-SHA-256" || m == "SCRAM-SHA-256-PLUS"
+        );
+
+        if !has_scram {
+            return Err(PgError::UnsupportedAuth(
+                "Server must support SCRAM-SHA-256 or SCRAM-SHA-256-PLUS".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Perform SCRAM authentication. The `cb` parameter chooses between
@@ -8958,6 +9003,97 @@ mod tests {
                 // Correct: This sets GS2 'n' flag (no channel binding)
             }
             _ => panic!("Expected None for no TLS"),
+        }
+    }
+
+    #[test]
+    fn test_validate_sasl_mechanisms_accepts_scram_sha256() {
+        let mechanisms = vec!["SCRAM-SHA-256".to_string()];
+        PgConnection::validate_sasl_mechanisms(&mechanisms)
+            .expect("Should accept SCRAM-SHA-256");
+    }
+
+    #[test]
+    fn test_validate_sasl_mechanisms_accepts_scram_sha256_plus() {
+        let mechanisms = vec!["SCRAM-SHA-256-PLUS".to_string()];
+        PgConnection::validate_sasl_mechanisms(&mechanisms)
+            .expect("Should accept SCRAM-SHA-256-PLUS");
+    }
+
+    #[test]
+    fn test_validate_sasl_mechanisms_accepts_both_scram_variants() {
+        let mechanisms = vec!["SCRAM-SHA-256".to_string(), "SCRAM-SHA-256-PLUS".to_string()];
+        PgConnection::validate_sasl_mechanisms(&mechanisms)
+            .expect("Should accept both SCRAM variants");
+    }
+
+    #[test]
+    fn test_validate_sasl_mechanisms_rejects_plain() {
+        let mechanisms = vec!["PLAIN".to_string()];
+        let result = PgConnection::validate_sasl_mechanisms(&mechanisms);
+
+        match result {
+            Err(PgError::UnsupportedAuth(msg)) => {
+                assert!(msg.contains("unacceptable SASL mechanism 'PLAIN'"));
+                assert!(msg.contains("Only SCRAM-SHA-256 and SCRAM-SHA-256-PLUS are allowed"));
+            }
+            other => panic!("Expected UnsupportedAuth error for PLAIN, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_sasl_mechanisms_rejects_login() {
+        let mechanisms = vec!["LOGIN".to_string()];
+        let result = PgConnection::validate_sasl_mechanisms(&mechanisms);
+
+        match result {
+            Err(PgError::UnsupportedAuth(msg)) => {
+                assert!(msg.contains("unacceptable SASL mechanism 'LOGIN'"));
+                assert!(msg.contains("downgrade attacks"));
+            }
+            other => panic!("Expected UnsupportedAuth error for LOGIN, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_sasl_mechanisms_rejects_mixed_with_weak() {
+        // This is the key test - server advertises SCRAM + weak mechanisms
+        let mechanisms = vec!["PLAIN".to_string(), "SCRAM-SHA-256".to_string()];
+        let result = PgConnection::validate_sasl_mechanisms(&mechanisms);
+
+        match result {
+            Err(PgError::UnsupportedAuth(msg)) => {
+                assert!(msg.contains("unacceptable SASL mechanism 'PLAIN'"));
+                assert!(msg.contains("prevent downgrade attacks"));
+            }
+            other => panic!("Expected UnsupportedAuth error for mixed mechanisms, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_sasl_mechanisms_rejects_empty_list() {
+        let mechanisms = vec![];
+        let result = PgConnection::validate_sasl_mechanisms(&mechanisms);
+
+        match result {
+            Err(PgError::UnsupportedAuth(msg)) => {
+                assert!(msg.contains("Server advertised no SASL mechanisms"));
+            }
+            other => panic!("Expected UnsupportedAuth error for empty list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_sasl_mechanisms_rejects_non_scram_only() {
+        let mechanisms = vec!["DIGEST-MD5".to_string(), "CRAM-MD5".to_string()];
+        let result = PgConnection::validate_sasl_mechanisms(&mechanisms);
+
+        match result {
+            Err(PgError::UnsupportedAuth(msg)) => {
+                assert!(msg.contains("unacceptable SASL mechanism"));
+                assert!(msg.contains("SCRAM-SHA-256"));
+            }
+            other => panic!("Expected UnsupportedAuth error for non-SCRAM mechanisms, got {other:?}"),
         }
     }
 
