@@ -25,10 +25,14 @@
 //! - No acceptable encoding is negotiated.
 //! - The negotiated encoding is `identity`.
 
+use std::pin::Pin;
+use std::future::Future;
+
 use crate::http::compress::{
     ContentEncoding, DEFAULT_MAX_COMPRESSED_SIZE, make_compressor_with_output_limit,
     negotiate_encoding,
 };
+use crate::Cx;
 
 use super::extract::Request;
 use super::handler::Handler;
@@ -139,12 +143,13 @@ impl<H: Handler> CompressionMiddleware<H> {
 }
 
 impl<H: Handler> Handler for CompressionMiddleware<H> {
-    fn call(&self, req: Request) -> Response {
+    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
         // Extract accept-encoding before passing the request.
         let accept_encoding = req.header("accept-encoding").map(str::to_owned);
         let request_sensitivity = RequestCompressionSensitivity::from_request(&req);
 
-        let mut resp = self.inner.call(req);
+        let mut resp = self.inner.call(cx, req).await;
 
         // Skip compression for special status codes.
         if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
@@ -266,6 +271,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
         append_vary_token(&mut resp, "accept-encoding");
 
         resp
+        })
     }
 }
 

@@ -489,7 +489,8 @@ pub struct StaticFilesHandler {
 }
 
 impl Handler for StaticFilesHandler {
-    fn call(&self, req: super::extract::Request) -> Response {
+    fn call(&self, _cx: &crate::Cx, req: super::extract::Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
         let head_only = req.method.eq_ignore_ascii_case("HEAD");
         let if_none_match = req.header("if-none-match").map(str::to_owned);
         let range_header = req.header("range");
@@ -517,6 +518,7 @@ impl Handler for StaticFilesHandler {
             response.body = Bytes::new();
         }
         response
+        })
     }
 }
 

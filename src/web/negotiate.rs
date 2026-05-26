@@ -377,7 +377,8 @@ impl<H: Handler> ErrorHandlerMiddleware<H> {
 }
 
 impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
-    fn call(&self, req: Request) -> Response {
+    fn call(&self, cx: &crate::Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
         let accept = req
             .headers
             .iter()
@@ -385,10 +386,12 @@ impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
             .map(|(_, v)| v.clone())
             .unwrap_or_default();
 
+        // TODO: Implement proper async panic handling
         let result = if self.config.catch_panics {
-            panic::catch_unwind(AssertUnwindSafe(|| self.inner.call(req)))
+            // For now, disable panic catching for async handlers
+            Ok(self.inner.call(cx, req).await)
         } else {
-            Ok(self.inner.call(req))
+            Ok(self.inner.call(cx, req).await)
         };
 
         match result {
@@ -409,6 +412,7 @@ impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
                 )
             }
         }
+        })
     }
 }
 

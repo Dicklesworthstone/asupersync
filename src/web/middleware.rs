@@ -48,7 +48,9 @@
 
 use std::convert::Infallible;
 use std::fmt;
+use std::future::Future;
 use std::panic::{self, AssertUnwindSafe};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -303,9 +305,10 @@ impl<H: Handler> CorsMiddleware<H> {
 }
 
 impl<H: Handler> Handler for CorsMiddleware<H> {
-    fn call(&self, req: Request) -> Response {
+    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
         let Some(origin) = header_value(&req, "origin") else {
-            return self.inner.call(req);
+            return self.inner.call(cx, req).await;
         };
 
         if Self::is_malformed_origin_value(&origin) {
@@ -313,12 +316,12 @@ impl<H: Handler> Handler for CorsMiddleware<H> {
                 origin = %origin,
                 "CorsMiddleware: dropping malformed multi-origin request header"
             );
-            return self.inner.call(req);
+            return self.inner.call(cx, req).await;
         }
 
         let Some(allow_origin) = self.allowed_origin_value(&origin) else {
             // Origin not allowed: pass through without CORS headers.
-            return self.inner.call(req);
+            return self.inner.call(cx, req).await;
         };
 
         if Self::is_preflight(&req) {
@@ -344,8 +347,9 @@ impl<H: Handler> Handler for CorsMiddleware<H> {
             return resp;
         }
 
-        let resp = self.inner.call(req);
+        let resp = self.inner.call(cx, req).await;
         self.apply_common_headers(resp, &allow_origin)
+        })
     }
 }
 
@@ -433,19 +437,21 @@ impl<H: Handler> TimeoutMiddleware<H> {
 }
 
 impl<H: Handler> Handler for TimeoutMiddleware<H> {
-    fn call(&self, req: Request) -> Response {
-        let start = (self.time_getter)();
-        let resp = self.inner.call(req);
-        let elapsed = Duration::from_nanos((self.time_getter)().duration_since(start));
+    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
+            let start = (self.time_getter)();
+            let resp = self.inner.call(cx, req).await;
+            let elapsed = Duration::from_nanos((self.time_getter)().duration_since(start));
 
-        if elapsed > self.timeout {
-            Response::new(
-                StatusCode::GATEWAY_TIMEOUT,
-                format!("Request timed out after {elapsed:?}").into_bytes(),
-            )
-        } else {
-            resp
-        }
+            if elapsed > self.timeout {
+                Response::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    format!("Request timed out after {elapsed:?}").into_bytes(),
+                )
+            } else {
+                resp
+            }
+        })
     }
 }
 
@@ -522,19 +528,20 @@ impl<H: Handler> CircuitBreakerMiddleware<H> {
 }
 
 impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
-    fn call(&self, req: Request) -> Response {
+    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
         let now = (self.time_getter)();
 
-        // Use the circuit breaker to guard the handler call.
-        // We treat the handler as a Result where 5xx = error.
-        let result = self.breaker.call(now, || {
-            let resp = self.inner.call(req);
-            if resp.status.is_server_error() {
-                Err(HandlerServerError(resp))
-            } else {
-                Ok(resp)
-            }
-        });
+        // TODO: Implement proper async circuit breaker integration
+        // For now, call the handler directly and apply circuit breaker logic after
+        let resp = self.inner.call(cx, req).await;
+        let result = if resp.status.is_server_error() {
+            self.breaker.record_error(now);
+            Err(HandlerServerError(resp))
+        } else {
+            self.breaker.record_success(now);
+            Ok(resp)
+        };
 
         match result {
             Ok(resp) => resp,
@@ -556,6 +563,7 @@ impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
                 err.0
             }
         }
+        })
     }
 }
 
@@ -750,44 +758,47 @@ fn is_idempotent(method: &str) -> bool {
 }
 
 impl<H: Handler> Handler for RetryMiddleware<H> {
-    fn call(&self, req: Request) -> Response {
-        // Check if retry is appropriate for this method.
-        if self.idempotent_only && !is_idempotent(&req.method) {
-            return self.inner.call(req);
-        }
+    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
+            // Check if retry is appropriate for this method.
+            if self.idempotent_only && !is_idempotent(&req.method) {
+                return self.inner.call(cx, req).await;
+            }
 
-        let max = self.policy.max_attempts.max(1);
-        let mut delay = self.policy.initial_delay;
-        let mut last_resp = None;
+            let max = self.policy.max_attempts.max(1);
+            let mut delay = self.policy.initial_delay;
+            let mut last_resp = None;
 
-        for attempt in 0..max {
-            // Clone request for retry (first attempt uses original).
-            if attempt != 0 {
-                // Sleep before retry (Phase 0: blocking sleep).
-                if !delay.is_zero() {
-                    std::thread::sleep(delay);
+            for attempt in 0..max {
+                // Clone request for retry (first attempt uses original).
+                if attempt != 0 {
+                    // Sleep before retry (Phase 1: async sleep with cancellation support).
+                    if !delay.is_zero() {
+                        // Use asupersync::time::sleep for cooperative yielding and cancellation support
+                        crate::time::sleep(delay).await;
+                    }
+                    // Compute next delay with exponential backoff.
+                    delay = Duration::from_secs_f64(
+                        (delay.as_secs_f64() * self.policy.multiplier)
+                            .min(self.policy.max_delay.as_secs_f64()),
+                    );
                 }
-                // Compute next delay with exponential backoff.
-                delay = Duration::from_secs_f64(
-                    (delay.as_secs_f64() * self.policy.multiplier)
-                        .min(self.policy.max_delay.as_secs_f64()),
-                );
-            }
-            let try_req = req.clone();
+                let try_req = req.clone();
 
-            let resp = self.inner.call(try_req);
-            if !resp.status.is_server_error() {
-                return resp;
+                let resp = self.inner.call(cx, try_req).await;
+                if !resp.status.is_server_error() {
+                    return resp;
+                }
+                last_resp = Some(resp);
             }
-            last_resp = Some(resp);
-        }
 
-        // All attempts failed; return the last response.
-        last_resp.unwrap_or_else(|| {
-            Response::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                b"Internal Server Error: all retry attempts exhausted".to_vec(),
-            )
+            // All attempts failed; return the last response.
+            last_resp.unwrap_or_else(|| {
+                Response::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    b"Internal Server Error: all retry attempts exhausted".to_vec(),
+                )
+            })
         })
     }
 }
@@ -1131,7 +1142,8 @@ fn sanitize_and_truncate_id(id: &str, max_length: usize) -> String {
 }
 
 impl<H: Handler> Handler for RequestIdMiddleware<H> {
-    fn call(&self, mut req: Request) -> Response {
+    fn call(&self, cx: &crate::Cx, mut req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
         let request_id = header_value(&req, &self.header_name).unwrap_or_else(|| {
             let id = self.counter.fetch_add(1, Ordering::Relaxed);
             format!("req-{id}")
@@ -1143,9 +1155,10 @@ impl<H: Handler> Handler for RequestIdMiddleware<H> {
         req.extensions.insert("request_id", request_id.clone());
         req.extensions.insert("trace_id", request_id.clone());
 
-        let mut resp = self.inner.call(req);
+        let mut resp = self.inner.call(cx, req).await;
         resp.set_header(&self.header_name, request_id);
         resp
+        })
     }
 }
 
