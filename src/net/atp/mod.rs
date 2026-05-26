@@ -51,3 +51,7 @@ pub use quic::*;
 
 // H3 adapter for WebTransport support
 pub mod h3;
+
+// Test utilities for ATP module testing
+#[cfg(test)]
+pub mod test_utils;
