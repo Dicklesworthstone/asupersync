@@ -1454,7 +1454,7 @@ mod tests {
             struct AsyncTestHandler;
 
             impl crate::web::handler::Handler for AsyncTestHandler {
-                fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + 'static>> {
+                fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
                     let path = req.path.clone();
                     Box::pin(async move {
                         Response::new(StatusCode::OK, format!("async: {}", path).into_bytes())

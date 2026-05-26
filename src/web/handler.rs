@@ -24,7 +24,7 @@ pub trait Handler: Send + Sync + 'static {
     /// Handle the request and produce a response.
     ///
     /// Async handlers receive a `Cx` for structured concurrency and runtime integration.
-    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + 'static>>;
+    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>;
 }
 
 // ─── Handler Implementations ─────────────────────────────────────────────────
