@@ -34,10 +34,13 @@
 //! ```
 
 use std::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll};
 
-use crate::cx::{Cx, cap};
+use crate::cx::{scope::CatchUnwind, Cx, cap};
 use crate::error::Error;
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
@@ -138,6 +141,90 @@ impl<'a> RequestRegion<'a> {
         }
     }
 
+    /// Execute an async handler within this request region.
+    ///
+    /// Phase 1: Async implementation with full asupersync runtime integration.
+    /// The handler receives a `Cx` for structured concurrency and executes
+    /// within the request region. On any exit path, the region is closed and
+    /// cleanup occurs.
+    ///
+    /// # Cancel-race semantics
+    ///
+    /// Same as [`run`](Self::run): cancellation is checked before the handler
+    /// runs, but a completed async response is always returned even if cancel
+    /// arrived during execution.
+    #[inline]
+    pub async fn run_async<F, Fut>(self, handler: F) -> RegionOutcome
+    where
+        F: FnOnce(&RequestContext<'_>) -> Fut + Send,
+        Fut: std::future::Future<Output = Response> + Send,
+    {
+        let _cx_guard = Cx::set_current(Some(self.cx.clone()));
+        let ctx = RequestContext {
+            cx: self.cx.clone(),
+            request: &self.request,
+            _not_send_sync: PhantomData,
+        };
+
+        // Pre-handler check: a cancelled region must not start new work.
+        if self.cx.checkpoint().is_err() {
+            return RegionOutcome::Cancelled;
+        }
+
+        // br-asupersync-hwdzlm: Use CatchUnwind for proper async panic isolation
+        let handler_future = CatchUnwind {
+            inner: handler(&ctx),
+        };
+
+        // Execute the handler with async panic isolation
+        match handler_future.await {
+            // br-asupersync-hwdzlm: commit the response even if cancel
+            // arrived during execution. The handler's completed work is a
+            // discharged obligation; dropping the Response here would
+            // silently lose state the caller needs.
+            Ok(response) => RegionOutcome::Ok(response),
+            Err(panic_payload) => {
+                let message = extract_panic_message(&panic_payload);
+                RegionOutcome::Panicked(message)
+            }
+        }
+    }
+
+    /// Execute an async Handler implementation within this request region.
+    ///
+    /// Phase 1: Integration with the async Handler trait for web framework usage.
+    /// This is the primary method used by routers and middleware.
+    #[inline]
+    pub async fn run_handler<H>(self, handler: &H) -> RegionOutcome
+    where
+        H: crate::web::handler::Handler,
+    {
+        let _cx_guard = Cx::set_current(Some(self.cx.clone()));
+
+        // Pre-handler check: a cancelled region must not start new work.
+        if self.cx.checkpoint().is_err() {
+            return RegionOutcome::Cancelled;
+        }
+
+        // br-asupersync-hwdzlm: Use CatchUnwind for proper async panic isolation
+        let handler_future = CatchUnwind {
+            inner: handler.call(&self.cx, self.request),
+        };
+
+        // Execute the handler with async panic isolation
+        match handler_future.await {
+            // br-asupersync-hwdzlm: commit the response even if cancel
+            // arrived during execution. The handler's completed work is a
+            // discharged obligation; dropping the Response here would
+            // silently lose state the caller needs.
+            Ok(response) => RegionOutcome::Ok(response),
+            Err(panic_payload) => {
+                let message = extract_panic_message(&panic_payload);
+                RegionOutcome::Panicked(message)
+            }
+        }
+    }
+
     /// Execute a synchronous handler within this request region.
     ///
     /// This is an alternative to [`run`](Self::run) for handlers that return a
@@ -145,7 +232,7 @@ impl<'a> RequestRegion<'a> {
     /// capability context. On any exit path, the region is closed and cleanup
     /// occurs.
     ///
-    /// The async counterpart will be introduced in Phase 1+.
+    /// br-asupersync-hwdzlm: The async counterpart is `run_async_result` below.
     #[inline]
     #[allow(clippy::result_large_err)]
     pub fn run_sync<F>(self, handler: F) -> RegionOutcome
@@ -168,6 +255,53 @@ impl<'a> RequestRegion<'a> {
 
         match result {
             // br-asupersync-bmc8m5: commit handler output (Ok or Err
+            // application-level result) even if cancel arrived during
+            // execution. Discarding completed work on the cancel race
+            // would silently drop state the caller has already paid
+            // for. The cancel signal stays observable on the cx; the
+            // caller can read it post-hoc if it needs that signal.
+            Ok(Ok(response)) => RegionOutcome::Ok(response),
+            Ok(Err(err)) => RegionOutcome::Error(err),
+            Err(panic_payload) => {
+                let message = extract_panic_message(&panic_payload);
+                RegionOutcome::Panicked(message)
+            }
+        }
+    }
+
+    /// Execute an async handler that returns Result<Response, Error> within this request region.
+    ///
+    /// br-asupersync-hwdzlm: Phase 1 async implementation - the async counterpart
+    /// to `run_sync()`. Provides the same panic isolation and error handling
+    /// semantics but for async handlers that return `Future<Output = Result<Response, Error>>`.
+    ///
+    /// This integrates with asupersync's structured concurrency and handles
+    /// both application-level errors (Err) and panics with proper isolation.
+    pub async fn run_async_result<F, Fut>(self, handler: F) -> RegionOutcome
+    where
+        F: FnOnce(&RequestContext<'_>) -> Fut,
+        Fut: Future<Output = Result<Response, Error>>,
+    {
+        let _cx_guard = Cx::set_current(Some(self.cx.clone()));
+        let ctx = RequestContext {
+            cx: &self.cx,
+            request: &self.request,
+            _not_send_sync: PhantomData,
+        };
+
+        // Pre-handler check: a cancelled region must not start new work.
+        if self.cx.checkpoint().is_err() {
+            return RegionOutcome::Cancelled;
+        }
+
+        // Create panic-isolated future using CatchUnwind
+        let handler_future = CatchUnwind {
+            inner: handler(&ctx),
+        };
+
+        // Execute the handler with async panic isolation
+        match handler_future.await {
+            // br-asupersync-hwdzlm: commit handler output (Ok or Err
             // application-level result) even if cancel arrived during
             // execution. Discarding completed work on the cancel race
             // would silently drop state the caller has already paid
@@ -1268,6 +1402,95 @@ mod tests {
             fn drop(&mut self) {
                 self.counter.fetch_add(1, Ordering::SeqCst);
             }
+        }
+    }
+
+    // ─── Async Request Region Tests ────────────────────────────────────────────
+
+    mod async_tests {
+        use super::*;
+        use crate::test_utils::run_test_with_cx;
+
+        /// Test basic async handler execution
+        #[test]
+        fn async_run_success() {
+            run_test_with_cx(|cx| async move {
+                let req = test_request("GET", "/async-hello");
+                let region = RequestRegion::new(&cx, req);
+
+                let outcome = region.run_async(|ctx| async move {
+                    assert_eq!(ctx.method(), "GET");
+                    assert_eq!(ctx.path(), "/async-hello");
+                    Response::new(StatusCode::OK, b"async ok".to_vec())
+                }).await;
+
+                assert!(outcome.is_ok());
+                let resp = outcome.into_response();
+                assert_eq!(resp.status, StatusCode::OK);
+                assert_eq!(&resp.body[..], b"async ok");
+            });
+        }
+
+        /// Test async handler with cancellation
+        #[test]
+        fn async_run_with_cancellation() {
+            run_test_with_cx(|cx| async move {
+                let req = test_request("GET", "/cancel-test");
+                let region = RequestRegion::new(&cx, req);
+
+                // Set cancellation before running
+                cx.set_cancel_requested(true);
+
+                let outcome = region.run_async(|_ctx| async move {
+                    Response::new(StatusCode::OK, b"should not execute".to_vec())
+                }).await;
+
+                assert!(outcome.is_cancelled());
+            });
+        }
+
+        /// Test async handler with Handler trait
+        #[test]
+        fn async_run_handler_success() {
+            struct AsyncTestHandler;
+
+            impl crate::web::handler::Handler for AsyncTestHandler {
+                async fn call(&self, _cx: &Cx, req: Request) -> Response {
+                    Response::new(StatusCode::OK, format!("async: {}", req.path).into_bytes())
+                }
+            }
+
+            run_test_with_cx(|cx| async move {
+                let req = test_request("POST", "/handler-test");
+                let region = RequestRegion::new(&cx, req);
+                let handler = AsyncTestHandler;
+
+                let outcome = region.run_handler(&handler).await;
+
+                assert!(outcome.is_ok());
+                let resp = outcome.into_response();
+                assert_eq!(resp.status, StatusCode::OK);
+                assert_eq!(&resp.body[..], b"async: /handler-test");
+            });
+        }
+
+        /// Test async handler with request context integration
+        #[test]
+        fn async_context_integration() {
+            run_test_with_cx(|cx| async move {
+                let req = test_request("GET", "/context");
+                let region = RequestRegion::new(&cx, req);
+
+                let outcome = region.run_async(|ctx| async move {
+                    // Verify context provides access to Cx and cancellation
+                    let can_cancel = ctx.cx().checkpoint().is_ok();
+                    assert!(can_cancel, "Context should provide access to cancellation");
+
+                    Response::new(StatusCode::OK, b"context ok".to_vec())
+                }).await;
+
+                assert!(outcome.is_ok());
+            });
         }
     }
 }
