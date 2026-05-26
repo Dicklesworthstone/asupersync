@@ -100,6 +100,7 @@ impl StunClient {
     }
 
     /// Send STUN binding request to discover reflexive address.
+    #[allow(dead_code)]
     async fn send_binding_request(&self, _cx: &Cx, _server: SocketAddr) -> Outcome<SocketAddr, StunError> {
         // TODO: Implement STUN message encoding/decoding
         // TODO: Send UDP packet with STUN binding request
