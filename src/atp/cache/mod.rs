@@ -376,7 +376,7 @@ impl AtpCache {
 
         let mut hasher = Sha256::new();
         hasher.update(content);
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     /// Update access tracking for LRU eviction.
