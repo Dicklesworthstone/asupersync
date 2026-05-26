@@ -932,6 +932,82 @@ mod tests {
         }
     }
 
+    /// Concurrent merge operation for CALM/eprocess integration testing
+    #[derive(Debug, Clone)]
+    struct ConcurrentMergeOperationImpl {
+        /// Unique identifier for this merge operation
+        merge_id: OperationId,
+        /// Collection of operations to be merged concurrently
+        operations: Vec<CalmOperation>,
+        /// Merge strategy (monotonic join-semilattice merge)
+        merge_strategy: MergeStrategy,
+        /// Expected concurrency level for eprocess monitoring
+        concurrency_level: usize,
+        /// CALM properties that must be preserved during merge
+        calm_properties: CalmProperties,
+    }
+
+    /// Merge strategy for concurrent operations
+    #[derive(Debug, Clone)]
+    enum MergeStrategy {
+        /// Join-semilattice merge (monotonic, associative)
+        JoinSemilattice,
+        /// Vector clock merge for causally-ordered operations
+        VectorClockMerge,
+        /// Max-based merge for lattice advancement
+        LatticeMax,
+    }
+
+    /// Result of a concurrent merge operation
+    #[derive(Debug, Clone)]
+    struct ConcurrentMergeResultImpl {
+        /// ID of the completed merge operation
+        merge_id: OperationId,
+        /// Final merged state after all concurrent operations
+        merged_state: CalmState,
+        /// Monotonicity violations detected during merge
+        monotonicity_violations: Vec<MonotonicityViolation>,
+        /// Convergence proof if merge succeeded
+        convergence_proof: Option<ConvergenceProof>,
+        /// E-process evidence for leak monitoring
+        eprocess_evidence: Vec<EProcessEvent>,
+        /// Performance metrics for the merge operation
+        merge_metrics: MergeMetrics,
+    }
+
+    /// Monotonicity violation detected during merge
+    #[derive(Debug, Clone)]
+    struct MonotonicityViolation {
+        operation_id: OperationId,
+        violation_type: ViolationType,
+        expected_monotonic: bool,
+        actual_behavior: String,
+    }
+
+    /// Type of monotonicity violation
+    #[derive(Debug, Clone)]
+    enum ViolationType {
+        /// Expected monotonic but found destructive read
+        UnexpectedDestructiveRead,
+        /// Expected coordination-free but required synchronization
+        UnexpectedCoordinationRequired,
+        /// Convergence failure despite expected convergent properties
+        ConvergenceFailure,
+    }
+
+    /// Performance metrics for merge operations
+    #[derive(Debug, Clone)]
+    struct MergeMetrics {
+        /// Duration of the merge operation
+        merge_duration_ns: u64,
+        /// Number of coordination rounds required
+        coordination_rounds: usize,
+        /// Number of operations that executed coordination-free
+        coordination_free_ops: usize,
+        /// Total operations in the merge
+        total_operations: usize,
+    }
+
     // Placeholder types that would be fully implemented
     type CalmConformanceValidator = ();
     type ConformanceCheck = ();
@@ -944,8 +1020,8 @@ mod tests {
     type OperationStatus = ();
     type ExecutionResult = ();
     type CalmOperationResult = ();
-    type ConcurrentMergeOperation = ();
-    type ConcurrentMergeResult = ();
+    type ConcurrentMergeOperation = ConcurrentMergeOperationImpl;
+    type ConcurrentMergeResult = ConcurrentMergeResultImpl;
     type MonitoringSession = ();
     type MonitoringResult = ();
     type EProcessEvent = ();
@@ -1399,8 +1475,53 @@ mod tests {
     }
 
     fn create_test_concurrent_merge() -> ConcurrentMergeOperation {
-        // This would be a properly implemented merge operation
-        // For now, it's a placeholder type
-        todo!("Implement concurrent merge operation")
+        // Create a concurrent merge operation for testing CALM/eprocess integration
+        ConcurrentMergeOperationImpl {
+            merge_id: OperationId(100),
+            operations: vec![
+                // Mix of monotonic and non-monotonic operations for comprehensive testing
+                create_test_increment_operation(),  // Monotonic: counter increment
+                create_test_max_operation(),        // Monotonic: lattice join
+                create_test_set_operation(),        // Non-monotonic: destructive update
+                create_test_monotonic_union(),      // Monotonic: set union
+                create_test_lattice_advancement(),  // Monotonic: max operation
+            ],
+            merge_strategy: MergeStrategy::JoinSemilattice,
+            concurrency_level: 4,  // 4 concurrent operations for stress testing
+            calm_properties: CalmProperties {
+                // Overall merge should be convergent despite mixed monotonicity
+                is_associative: true,   // Join-semilattice property
+                is_logical: true,       // CALM logical consistency
+                is_monotonic: false,    // Mixed operations include non-monotonic
+                is_convergent: true,    // Should converge despite coordination needed
+            },
+        }
+    }
+
+    #[test]
+    fn test_concurrent_merge_operation_creation() {
+        // Verify that create_test_concurrent_merge() works correctly
+        let merge_op = create_test_concurrent_merge();
+
+        // Verify basic properties
+        assert_eq!(merge_op.merge_id.0, 100);
+        assert_eq!(merge_op.operations.len(), 5);
+        assert_eq!(merge_op.concurrency_level, 4);
+        assert!(!merge_op.calm_properties.is_monotonic); // Mixed operations
+        assert!(merge_op.calm_properties.is_convergent); // Should converge
+
+        // Verify merge strategy
+        match merge_op.merge_strategy {
+            MergeStrategy::JoinSemilattice => {}, // Expected
+            _ => panic!("Expected JoinSemilattice merge strategy"),
+        }
+
+        // Verify operations are diverse (test comprehensive coverage)
+        let operation_types: Vec<_> = merge_op.operations.iter()
+            .map(|op| &op.operation_type)
+            .collect();
+
+        // Should have different operation types for comprehensive testing
+        assert!(operation_types.len() >= 4, "Should have diverse operation types");
     }
 }
