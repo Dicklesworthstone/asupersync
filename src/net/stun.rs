@@ -96,7 +96,7 @@ impl StunClient {
         // TODO: Implement STUN binding request/response
         // For now, return host candidate as foundation
 
-        Ok(vec![host_candidate])
+        Outcome::ok(vec![host_candidate])
     }
 
     /// Send STUN binding request to discover reflexive address.
@@ -104,7 +104,7 @@ impl StunClient {
         // TODO: Implement STUN message encoding/decoding
         // TODO: Send UDP packet with STUN binding request
         // TODO: Parse response to extract XOR-MAPPED-ADDRESS
-        Err(StunError::NotImplemented)
+        Outcome::err(StunError::NotImplemented)
     }
 
     /// Get discovered candidates.
