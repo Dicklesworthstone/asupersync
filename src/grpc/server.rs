@@ -28,6 +28,9 @@ fn wall_clock_instant_now() -> Instant {
 struct StreamState {
     /// Last activity timestamp (when the stream last sent data).
     last_activity: Instant,
+    /// Registration timestamp (when the stream was first registered).
+    /// Used to prevent race conditions in cleanup operations.
+    registered_at: Instant,
 }
 
 /// br-asupersync-8vn9iu: Per-connection state tracking to enforce
@@ -49,7 +52,8 @@ impl ConnectionState {
     /// Register a new stream on this connection.
     ///
     /// Returns `Err` if the connection already has too many active streams.
-    pub fn add_stream(&mut self, stream_id: u32, max_concurrent: u32) -> Result<(), String> {
+    /// Returns the registration timestamp on success for race condition protection.
+    pub fn add_stream(&mut self, stream_id: u32, max_concurrent: u32) -> Result<Instant, String> {
         if self.active_streams.len() >= max_concurrent as usize {
             return Err(format!(
                 "connection exceeds max_concurrent_streams: {} >= {}",
@@ -58,13 +62,15 @@ impl ConnectionState {
             ));
         }
 
+        let now = wall_clock_instant_now();
         self.active_streams.insert(
             stream_id,
             StreamState {
-                last_activity: wall_clock_instant_now(),
+                last_activity: now,
+                registered_at: now,
             },
         );
-        Ok(())
+        Ok(now)
     }
 
     /// Update the last activity time for a stream.
@@ -138,20 +144,22 @@ impl ConnectionRegistry {
 
     /// Enforce stream limits and idle timeouts for a specific connection.
     ///
-    /// Returns an error if the stream cannot be added due to limits.
+    /// Returns the registration timestamp on success, or an error if the stream
+    /// cannot be added due to limits. The entire operation (cleanup + add) is
+    /// atomic under the connection registry lock to prevent race conditions.
     pub fn enforce_stream_limits(
         &self,
         connection_id: &str,
         stream_id: u32,
         max_concurrent: u32,
         idle_timeout: Option<Duration>,
-    ) -> Result<(), String> {
+    ) -> Result<Instant, String> {
         let mut connections = self.connections.lock();
         let connection = connections
             .get_mut(connection_id)
             .ok_or_else(|| format!("connection not registered: {}", connection_id))?;
 
-        // Clean up idle streams first
+        // Clean up idle streams first (atomic with stream addition)
         if let Some(timeout) = idle_timeout {
             let removed_streams = connection.cleanup_idle_streams(timeout);
             if !removed_streams.is_empty() {
@@ -164,7 +172,7 @@ impl ConnectionRegistry {
             }
         }
 
-        // Try to add the new stream
+        // Try to add the new stream (returns registration timestamp)
         connection.add_stream(stream_id, max_concurrent)
     }
 
@@ -181,6 +189,26 @@ impl ConnectionRegistry {
         let mut connections = self.connections.lock();
         if let Some(connection) = connections.get_mut(connection_id) {
             connection.remove_stream(stream_id);
+        }
+    }
+
+    /// Remove a stream only if it was registered at the specified timestamp.
+    ///
+    /// This prevents race conditions where cleanup operations and Drop guards
+    /// could both attempt to remove the same stream ID. The timestamp validation
+    /// ensures we only remove the stream if it matches the specific registration
+    /// we're responsible for.
+    pub fn remove_stream_if_owned(&self, connection_id: &str, stream_id: u32, registered_at: Instant) {
+        let mut connections = self.connections.lock();
+        if let Some(connection) = connections.get_mut(connection_id) {
+            // Only remove if the stream exists and was registered at the expected time
+            if let Some(stream_state) = connection.active_streams.get(&stream_id) {
+                if stream_state.registered_at == registered_at {
+                    connection.remove_stream(stream_id);
+                }
+                // If timestamps don't match, the stream was already cleaned up
+                // by timeout or replaced by a new registration - safe to ignore
+            }
         }
     }
 
@@ -212,16 +240,23 @@ impl ConnectionRegistry {
 /// window. This guard removes the registration from its `Drop`, so
 /// cleanup runs whether the dispatch returns Ok, returns Err, panics,
 /// or is cancelled mid-await.
+///
+/// SECURITY: The guard tracks registration timestamp to prevent
+/// double-removal race conditions where timeout cleanup and Drop
+/// could both attempt to remove the same stream ID.
 struct StreamRegistrationGuard {
     registry: Arc<ConnectionRegistry>,
     connection_id: String,
     stream_id: u32,
+    /// Timestamp when this stream was registered, used to validate
+    /// removal against race conditions with cleanup operations.
+    registered_at: Instant,
 }
 
 impl Drop for StreamRegistrationGuard {
     fn drop(&mut self) {
         self.registry
-            .remove_stream(&self.connection_id, self.stream_id);
+            .remove_stream_if_owned(&self.connection_id, self.stream_id, self.registered_at);
     }
 }
 
@@ -1139,17 +1174,20 @@ impl Server {
         // ── Phase 0: Stream enforcement (br-asupersync-8vn9iu). ─────────
         // Enforce per-connection stream limits and idle timeouts BEFORE
         // metadata validation and interceptor chain execution.
-        if let Err(limit_error) = self.connection_registry.enforce_stream_limits(
+        let registered_at = match self.connection_registry.enforce_stream_limits(
             &connection_id,
             stream_id,
             self.config.max_concurrent_streams,
             self.config.stream_idle_timeout,
         ) {
-            return Err(Status::resource_exhausted(format!(
-                "stream limit enforcement failed: {}",
-                limit_error
-            )));
-        }
+            Ok(timestamp) => timestamp,
+            Err(limit_error) => {
+                return Err(Status::resource_exhausted(format!(
+                    "stream limit enforcement failed: {}",
+                    limit_error
+                )));
+            }
+        };
 
         // br-asupersync-wix48k: cleanup runs on Drop, not after the
         // await. A pre-fix `registry.remove_stream(...)` placed AFTER
@@ -1157,10 +1195,15 @@ impl Server {
         // awaiting future was cancelled mid-handler (the RST_STREAM
         // path), leaking the stream registration into active_streams
         // until the next idle sweep — a connection-level DoS primitive.
+        //
+        // SECURITY FIX: The guard now tracks the registration timestamp
+        // to prevent race conditions where multiple cleanup operations
+        // could attempt to remove the same stream ID.
         let _stream_guard = StreamRegistrationGuard {
             registry: Arc::clone(&self.connection_registry),
             connection_id: connection_id.clone(),
             stream_id,
+            registered_at,
         };
 
         // Dispatch the actual request using the existing logic.
