@@ -467,8 +467,17 @@ fn pl_g1_04_try_wait_before_exit() {
 fn pl_g1_05_try_wait_after_exit() {
     let mut child = Command::new("true").spawn().expect("true should spawn");
 
-    // Spin until try_wait returns Some (child has exited)
+    // Spin until try_wait returns Some (child has exited) with timeout
+    let start_time = std::time::Instant::now();
+    let timeout_duration = std::time::Duration::from_secs(10); // 10 seconds should be enough for 'true' command
+
     let status = loop {
+        // Check for timeout to prevent infinite busy-wait
+        if start_time.elapsed() > timeout_duration {
+            let _ = child.kill(); // Try to kill the child
+            panic!("Child process timed out after {:?}", timeout_duration);
+        }
+
         match child.try_wait().expect("try_wait should not error") {
             Some(s) => break s,
             None => std::thread::sleep(std::time::Duration::from_millis(10)),

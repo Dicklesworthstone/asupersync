@@ -59,7 +59,9 @@ fn wall_clock_is_monotonic_through_trait_dispatch() {
 
     let mut prev = source.now();
     for _ in 0..100 {
-        std::hint::spin_loop();
+        // Use a small sleep instead of pure spin loop to reduce CPU usage
+        // while still testing monotonicity under time progression
+        std::thread::sleep(std::time::Duration::from_nanos(1));
         let curr = source.now();
         assert!(
             curr >= prev,

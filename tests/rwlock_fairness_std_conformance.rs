@@ -102,8 +102,19 @@ fn test_async_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult 
             // Manual polling approach to simulate blocking
             let mut read_future = rwlock.read(&cx);
 
-            // Simple polling loop
+            // Add timeout to prevent unbounded busy-wait
+            let start_time = std::time::Instant::now();
+            let timeout_duration = Duration::from_secs(30); // Reasonable timeout for test
+
             loop {
+                // Check for timeout to prevent infinite busy-wait
+                if start_time.elapsed() > timeout_duration {
+                    panic!(
+                        "Reader thread {} timed out after {:?} waiting for read lock",
+                        thread_id, timeout_duration
+                    );
+                }
+
                 let waker = Waker::noop();
                 let mut context = Context::from_waker(waker);
 
@@ -147,7 +158,19 @@ fn test_async_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult 
             let mut write_future = rwlock.write(&cx);
 
             // Simple polling loop
+            // Add timeout to prevent unbounded busy-wait
+            let start_time = std::time::Instant::now();
+            let timeout_duration = Duration::from_secs(30); // Reasonable timeout for test
+
             loop {
+                // Check for timeout to prevent infinite busy-wait
+                if start_time.elapsed() > timeout_duration {
+                    panic!(
+                        "Writer thread {} timed out after {:?} waiting for write lock",
+                        thread_id, timeout_duration
+                    );
+                }
+
                 let waker = Waker::noop();
                 let mut context = Context::from_waker(waker);
 
