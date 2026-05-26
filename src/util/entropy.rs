@@ -11,6 +11,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+// Note: Using getrandom for OS entropy (rand::rngs::OsRng not available as dependency)
+
 /// Core trait for entropy providers.
 pub trait EntropySource: std::fmt::Debug + Send + Sync + 'static {
     /// Fill a buffer with entropy bytes.
@@ -292,7 +294,7 @@ impl CryptoSalt {
         check_ambient_entropy("crypto-salt");
         let mut salt_bytes = [0u8; 32];
 
-        // Primary entropy
+        // Primary entropy from OS random number generator (same security as rand::rngs::OsRng)
         getrandom::fill(&mut salt_bytes).expect("crypto salt generation failed");
 
         // Domain separation via HMAC-like construction
