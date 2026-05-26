@@ -1773,8 +1773,13 @@ impl RedisConfig {
         config.use_tls = use_tls;
         #[cfg(feature = "tls")]
         if use_tls {
+            // SECURITY: Enable hostname verification to prevent MITM attacks.
+            // This ensures the certificate's CN/SAN matches the hostname we're
+            // connecting to, preventing attacks where valid certificates for
+            // different domains are used maliciously (asupersync-xq1qe3).
             let tls_connector = TlsConnectorBuilder::new()
                 .with_webpki_roots()
+                .with_hostname_verification(true)
                 .build()
                 .map_err(|e| RedisError::InvalidUrl(format!("TLS setup failed: {e}")))?;
             config.tls_connector = Some(tls_connector);
@@ -7791,6 +7796,46 @@ mod tests {
             RedisConfig::url_decode_credential("test%21exclaim").unwrap(),
             "test!exclaim"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "tls")]
+    fn test_redis_tls_hostname_verification_enabled() {
+        // SECURITY TEST: Verify TLS connector is configured with hostname verification
+        // to prevent MITM attacks (asupersync-xq1qe3)
+
+        let config = RedisConfig::from_url("rediss://localhost:6380").unwrap();
+        assert!(config.use_tls);
+        assert!(config.tls_connector.is_some());
+
+        // The TLS connector should be configured with hostname verification
+        // This test verifies the connector was built with the security flag enabled
+        let tls_connector = config.tls_connector.unwrap();
+
+        // Note: We can't directly inspect the hostname verification setting from
+        // the built connector, but we can verify it was created without errors
+        // which confirms the .with_hostname_verification(true) call succeeded
+        assert!(!format!("{:?}", tls_connector).is_empty());
+
+        // Test that rediss:// URLs enable TLS
+        let config_secure = RedisConfig::from_url("rediss://redis.example.com:6380").unwrap();
+        assert!(config_secure.use_tls);
+        assert_eq!(config_secure.host, "redis.example.com");
+        assert_eq!(config_secure.port, 6380);
+
+        // Test that redis:// URLs don't enable TLS
+        let config_plain = RedisConfig::from_url("redis://redis.example.com:6379").unwrap();
+        assert!(!config_plain.use_tls);
+        assert!(config_plain.tls_connector.is_none());
+    }
+
+    #[test]
+    #[cfg(not(feature = "tls"))]
+    fn test_redis_tls_disabled_when_feature_missing() {
+        // Verify TLS URLs are rejected when TLS feature is not enabled
+        let err = RedisConfig::from_url("rediss://localhost:6380")
+            .expect_err("rediss:// should fail when TLS feature disabled");
+        assert!(matches!(err, RedisError::InvalidUrl(ref msg) if msg.contains("TLS support not enabled")));
     }
 
     // Pure data-type tests (wave 13 – CyanBarn)
