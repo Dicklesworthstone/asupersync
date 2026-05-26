@@ -7,6 +7,7 @@
 //! before endpoint, CLI, daemon, or relay code depends on it.
 
 pub mod actor;
+pub mod adapter;
 pub mod autotune;
 #[cfg(feature = "benchmark-adapters")]
 pub mod benchmark;
@@ -52,6 +53,12 @@ pub mod verifier;
 pub mod verify;
 pub mod writer;
 
+pub use adapter::{
+    AdapterConfig, AdapterManager, AdapterMetadata, AdapterNegotiation, AdapterParity,
+    AdapterSession, AdapterSpecificConfig, AdapterType, CaveatReporting, CertValidationMode,
+    DowngradePolicy, DowngradeReason, FeatureSupport, PerformanceCaveat, RequiredFeature,
+    SessionStats, TransportPath,
+};
 pub use autotune::{
     ATP_AUTOTUNE_APPLICATION_RECEIPT_SCHEMA_VERSION, ATP_AUTOTUNE_DECISION_RECEIPT_SCHEMA_VERSION,
     ATP_AUTOTUNE_METRIC_NAMES, AtpAutotuneApplicationOutcome, AtpAutotuneApplicationReceipt,
