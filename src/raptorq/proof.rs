@@ -759,6 +759,13 @@ fn map_systematic_param_error(err: SystematicParamError) -> ProofArtifactDistrib
             requested,
             max_supported,
         },
+        SystematicParamError::KPrimeExceedsU32 {
+            k_prime,
+            max_u32,
+        } => ProofArtifactDistributionError::UnsupportedSourceBlock {
+            requested: k_prime,
+            max_supported: max_u32,
+        },
     }
 }
 

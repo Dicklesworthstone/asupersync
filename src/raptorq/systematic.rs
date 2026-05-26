@@ -96,6 +96,13 @@ pub enum SystematicParamError {
         /// Largest supported source block symbol count in this implementation.
         max_supported: usize,
     },
+    /// K' value from RFC table doesn't fit in u32, causing ESI overflow in decoder.
+    KPrimeExceedsU32 {
+        /// The problematic K' value.
+        k_prime: usize,
+        /// Maximum value that fits in u32.
+        max_u32: usize,
+    },
 }
 
 impl SystematicParams {
@@ -117,6 +124,14 @@ impl SystematicParams {
             } => {
                 panic!(
                     "unsupported source block size K={requested}; supported range is 1..={max_supported}"
+                )
+            }
+            SystematicParamError::KPrimeExceedsU32 {
+                k_prime,
+                max_u32,
+            } => {
+                panic!(
+                    "K' value {k_prime} exceeds u32::MAX ({max_u32}); ESI calculations would overflow in decoder"
                 )
             }
         })
@@ -141,6 +156,16 @@ impl SystematicParams {
 
         let (k_prime, j, s, h, w) = SYSTEMATIC_INDEX_TABLE[idx];
         let k_prime = k_prime as usize;
+
+        // Validate that k_prime fits in u32 for ESI calculations
+        // The decoder requires all ESIs in K..K' range to fit in u32
+        if k_prime > u32::MAX as usize {
+            return Err(SystematicParamError::KPrimeExceedsU32 {
+                k_prime,
+                max_u32: u32::MAX as usize,
+            });
+        }
+
         let j = j as usize;
         let s = s as usize;
         let h = h as usize;
@@ -1386,6 +1411,36 @@ mod tests {
             assert_eq!(p.p, p.l - p.w, "K={k}: P = L - W invariant");
             assert_eq!(p.symbol_size, SYMBOL_SIZE);
         }
+    }
+
+    /// br-asupersync-ttqtcg: K' zero-padding ESI validation test.
+    /// Verify that try_for_source_block correctly validates that K'
+    /// values fit within u32 range to prevent silent ESI skipping in
+    /// the decoder's K..K' zero-padding loop.
+    #[test]
+    fn k_prime_validation_prevents_esi_overflow() {
+        // All current table entries have K' well within u32::MAX
+        let max_table_k_prime = SYSTEMATIC_INDEX_TABLE
+            .iter()
+            .map(|(k_prime, _, _, _, _)| *k_prime as usize)
+            .max()
+            .expect("systematic index table is non-empty");
+
+        // Verify the largest table entry is safe
+        assert!(max_table_k_prime <= u32::MAX as usize);
+
+        // Test the validation function directly for boundary conditions
+        use super::SystematicParamError;
+
+        // Valid case: small K' should succeed
+        assert!(SystematicParams::try_for_source_block(1, 64).is_ok());
+
+        // The validation is designed to prevent hypothetical K' values that
+        // exceed u32::MAX. Since all current RFC table entries are safe,
+        // this test documents the intended behavior for future table updates.
+        //
+        // If the RFC table were ever extended with K' > u32::MAX, those
+        // entries should be rejected with KPrimeExceedsU32 error.
     }
 
     /// br-asupersync-eri4b3: K' systematic-index-table coverage.

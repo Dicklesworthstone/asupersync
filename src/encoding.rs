@@ -324,6 +324,14 @@ fn validate_source_block_k(
                 "block of {block_len} bytes with symbol_size {symbol_size} requires unsupported source block K={requested}; supported range is 1..={max_supported}"
             ),
         },
+        SystematicParamError::KPrimeExceedsU32 {
+            k_prime,
+            max_u32,
+        } => EncodingError::InvalidConfig {
+            reason: format!(
+                "block of {block_len} bytes with symbol_size {symbol_size} requires K'={k_prime} which exceeds u32::MAX ({max_u32}); ESI calculations would overflow"
+            ),
+        },
     })
 }
 
