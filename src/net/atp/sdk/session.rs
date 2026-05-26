@@ -3,8 +3,8 @@
 use super::{AtpSdk, SdkMode, SessionConfig};
 use crate::cx::Cx;
 use crate::net::atp::protocol::{
-    AtpError, AtpFeature, AtpOutcome, CapabilityAction, CapabilityGrant, CapabilityGrantId,
-    CapabilityScope, ClientHello, NegotiatedSession, PeerId, ProtocolError, SessionContextKind,
+    AtpError, AtpFeature, AtpOutcome, CapabilityAction, CapabilityGrant,
+    ClientHello, NegotiatedSession, PeerId, ProtocolError, SessionContextKind,
     SessionError, SessionId, SessionNegotiator, SessionPolicy, SessionProofArtifact,
     SessionTraceId, TransferNonce,
 };
