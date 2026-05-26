@@ -639,6 +639,13 @@ pub enum ValidationError {
     },
     /// No participants declared.
     NoParticipants,
+    /// Potential livelock detected: loop can recurse infinitely without progress.
+    Livelock {
+        /// The label of the problematic loop.
+        label: String,
+        /// Description of why this loop might not make progress.
+        reason: String,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -687,6 +694,9 @@ impl fmt::Display for ValidationError {
                 write!(f, "duplicate participant declaration '{name}'")
             }
             Self::NoParticipants => write!(f, "no participants declared"),
+            Self::Livelock { label, reason } => {
+                write!(f, "potential livelock in loop '{label}': {reason}")
+            }
         }
     }
 }
@@ -702,6 +712,7 @@ impl GlobalProtocol {
     /// 5. Parallel branches have disjoint participants
     /// 6. At least one participant declared
     /// 7. Protocol is non-empty
+    /// 8. Livelock freedom (bounded recursion analysis)
     pub fn validate(&self) -> Vec<ValidationError> {
         let mut errors = Vec::new();
 
@@ -806,6 +817,8 @@ impl GlobalProtocol {
                         label: label.clone(),
                     });
                 }
+                // Livelock analysis: check if the loop can make progress
+                self.check_livelock(label, body, errors);
                 self.validate_interaction(body, declared, loop_labels, errors);
                 // Remove the label after validating the body so it doesn't
                 // leak into sibling interactions (e.g. Seq siblings, Choice
@@ -877,6 +890,128 @@ impl GlobalProtocol {
                     branch: branch_name,
                     first_sender: Some(first_sender),
                 });
+            }
+        }
+    }
+
+    /// Check for potential livelock in a loop body.
+    ///
+    /// Livelock occurs when a loop can recurse infinitely without making progress.
+    /// This method detects several classes of livelock:
+    /// 1. Immediate infinite recursion (body is just a Continue to the same label)
+    /// 2. Progress-free loops (no communication actions, only control flow leading to Continue)
+    /// 3. Unbounded recursion paths (loop has execution paths with no guaranteed termination)
+    fn check_livelock(
+        &self,
+        loop_label: &str,
+        body: &Interaction,
+        errors: &mut Vec<ValidationError>,
+    ) {
+        // Check for immediate infinite recursion: loop body is just "continue self"
+        if let Interaction::Continue { label } = body {
+            if label == loop_label {
+                errors.push(ValidationError::Livelock {
+                    label: loop_label.to_string(),
+                    reason: "loop body is just 'continue' to itself (immediate infinite recursion)".to_string(),
+                });
+                return;
+            }
+        }
+
+        // Check for progress-free loops: analyze if the body can lead to Continue
+        // without any communication actions that could change state
+        let progress_analysis = self.analyze_loop_progress(body, loop_label);
+
+        if progress_analysis.has_continue_path && !progress_analysis.has_progress_guarantee {
+            let reason = if progress_analysis.comm_count == 0 {
+                "loop body contains no communication actions but has paths leading to recursion".to_string()
+            } else {
+                format!(
+                    "loop body has {} communication(s) but no guaranteed progress on recursion paths",
+                    progress_analysis.comm_count
+                )
+            };
+
+            errors.push(ValidationError::Livelock {
+                label: loop_label.to_string(),
+                reason,
+            });
+        }
+    }
+
+    /// Analyze whether a loop body can make progress or might livelock.
+    fn analyze_loop_progress(&self, interaction: &Interaction, target_label: &str) -> LoopProgressAnalysis {
+        let mut analysis = LoopProgressAnalysis::new();
+        self.analyze_progress_recursive(interaction, target_label, &mut analysis, false);
+        analysis
+    }
+
+    /// Recursively analyze interaction for progress guarantees.
+    fn analyze_progress_recursive(
+        &self,
+        interaction: &Interaction,
+        target_label: &str,
+        analysis: &mut LoopProgressAnalysis,
+        in_choice_branch: bool,
+    ) {
+        match interaction {
+            Interaction::Comm { then, .. } => {
+                analysis.comm_count += 1;
+                // Communication is progress - if we must go through this to reach Continue,
+                // then we have a progress guarantee
+                if !in_choice_branch {
+                    analysis.has_progress_guarantee = true;
+                }
+                self.analyze_progress_recursive(then, target_label, analysis, in_choice_branch);
+            }
+            Interaction::Continue { label } => {
+                if label == target_label {
+                    analysis.has_continue_path = true;
+                }
+            }
+            Interaction::Choice { then_branch, else_branch, .. } => {
+                // Both branches need to be analyzed separately
+                // Progress is only guaranteed if ALL paths have progress
+                let mut then_analysis = LoopProgressAnalysis::new();
+                let mut else_analysis = LoopProgressAnalysis::new();
+
+                self.analyze_progress_recursive(then_branch, target_label, &mut then_analysis, true);
+                self.analyze_progress_recursive(else_branch, target_label, &mut else_analysis, true);
+
+                // Merge results: we have continue path if either branch has it
+                analysis.has_continue_path |= then_analysis.has_continue_path || else_analysis.has_continue_path;
+                analysis.comm_count += then_analysis.comm_count + else_analysis.comm_count;
+
+                // Progress is guaranteed only if both branches that lead to Continue have progress
+                if then_analysis.has_continue_path && else_analysis.has_continue_path {
+                    analysis.has_progress_guarantee = then_analysis.has_progress_guarantee && else_analysis.has_progress_guarantee;
+                } else if then_analysis.has_continue_path {
+                    analysis.has_progress_guarantee = then_analysis.has_progress_guarantee;
+                } else if else_analysis.has_continue_path {
+                    analysis.has_progress_guarantee = else_analysis.has_progress_guarantee;
+                }
+            }
+            Interaction::Loop { body, .. } => {
+                // Nested loops - analyze their body
+                self.analyze_progress_recursive(body, target_label, analysis, in_choice_branch);
+            }
+            Interaction::Seq { first, second } => {
+                self.analyze_progress_recursive(first, target_label, analysis, in_choice_branch);
+                self.analyze_progress_recursive(second, target_label, analysis, in_choice_branch);
+            }
+            Interaction::Par { left, right } => {
+                self.analyze_progress_recursive(left, target_label, analysis, in_choice_branch);
+                self.analyze_progress_recursive(right, target_label, analysis, in_choice_branch);
+            }
+            Interaction::Compensate { forward, compensate } => {
+                self.analyze_progress_recursive(forward, target_label, analysis, in_choice_branch);
+                self.analyze_progress_recursive(compensate, target_label, analysis, in_choice_branch);
+            }
+            Interaction::End => {
+                // End provides progress (termination)
+                if !in_choice_branch {
+                    analysis.has_progress_guarantee = true;
+                }
             }
         }
     }
