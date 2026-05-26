@@ -8,14 +8,12 @@
 use crate::cx::Cx;
 use crate::net::quic_core::ConnectionId;
 use crate::net::quic_native::{
-    NativeQuicConnection, NativeQuicConnectionConfig, NativeQuicConnectionError,
-    ReceivedPacket, OutgoingPacket,
+    NativeQuicConnection, NativeQuicConnectionConfig, OutgoingPacket, ReceivedPacket,
 };
 use crate::time::Sleep;
-use std::time::Instant;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::time::Instant;
 
 /// Connection routing table that maps connection IDs to active QUIC connections.
 #[derive(Debug)]
@@ -118,8 +116,14 @@ impl std::fmt::Display for ConnectionRouterError {
         match self {
             Self::Cancelled => write!(f, "operation cancelled"),
             Self::ConnectionNotFound(cid) => write!(f, "connection not found: {cid:?}"),
-            Self::InvalidConnectionState { connection_id, reason } => {
-                write!(f, "invalid connection state for {connection_id:?}: {reason}")
+            Self::InvalidConnectionState {
+                connection_id,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "invalid connection state for {connection_id:?}: {reason}"
+                )
             }
             Self::ConnectionCreationFailed(msg) => write!(f, "connection creation failed: {msg}"),
             Self::TimerSchedulingFailed(msg) => write!(f, "timer scheduling failed: {msg}"),
@@ -315,7 +319,10 @@ impl ConnectionRouter {
     /// 1. Parse the QUIC packet header
     /// 2. Extract the destination connection ID
     /// 3. Handle different packet types (Initial, Handshake, 1-RTT)
-    fn extract_connection_id(&self, packet: &ReceivedPacket) -> Result<ConnectionId, ConnectionRouterError> {
+    fn extract_connection_id(
+        &self,
+        packet: &ReceivedPacket,
+    ) -> Result<ConnectionId, ConnectionRouterError> {
         // For now, create a deterministic connection ID from source address
         // This is NOT correct QUIC behavior but serves as a placeholder
         let addr_bytes = match packet.src_addr {
@@ -353,8 +360,7 @@ impl ConnectionRouter {
 
         // Create connection ID from counter
         let id_bytes = id.to_be_bytes();
-        ConnectionId::new(&id_bytes)
-            .expect("Connection ID from counter should always be valid")
+        ConnectionId::new(&id_bytes).expect("Connection ID from counter should always be valid")
     }
 }
 
@@ -432,7 +438,10 @@ impl QuicTimerScheduler {
     /// Wait for the next timer to fire.
     ///
     /// Returns the deadline that was reached, or None if no timer was scheduled.
-    pub async fn wait_for_timer(&mut self, cx: &Cx) -> Result<Option<Instant>, ConnectionRouterError> {
+    pub async fn wait_for_timer(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<Option<Instant>, ConnectionRouterError> {
         if cx.checkpoint().is_err() {
             return Err(ConnectionRouterError::Cancelled);
         }
@@ -470,8 +479,8 @@ impl Default for QuicTimerScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::run_test_with_cx;
     use crate::net::quic_native::StreamRole;
+    use crate::test_utils::run_test_with_cx;
 
     #[test]
     fn test_connection_router_creation() {
@@ -505,7 +514,8 @@ mod tests {
             let connection_id = router.allocate_connection_id();
             let peer_addr = "127.0.0.1:12345".parse().unwrap();
 
-            router.create_connection(&cx, connection_id, peer_addr, false)
+            router
+                .create_connection(&cx, connection_id, peer_addr, false)
                 .await
                 .expect("connection creation should succeed");
 
@@ -523,7 +533,8 @@ mod tests {
             assert_eq!(scheduler.current_deadline(), None);
 
             let deadline = Instant::now() + std::time::Duration::from_millis(10);
-            scheduler.schedule_timer(&cx, deadline)
+            scheduler
+                .schedule_timer(&cx, deadline)
                 .await
                 .expect("timer scheduling should succeed");
 

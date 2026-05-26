@@ -5,16 +5,16 @@
 //! visibility across concurrent AI agent operations on high-core machines.
 
 use crate::cx::Cx;
-use crate::sync::Mutex;
-use crate::types::{Budget, RegionId, TaskId, TraceId};
 use crate::error::Result;
+use crate::sync::Mutex;
+use crate::types::RegionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use super::handoff_verifier::{HandoffVerifier, SessionMetadata};
-use super::release_proof_aggregator::{ReleaseProofAggregator, AggregatorConfig};
+use super::release_proof_aggregator::ReleaseProofAggregator;
 
 /// Core Agent Swarm Control Plane for coordinating multi-agent workflows.
 #[derive(Debug)]
@@ -376,15 +376,18 @@ impl AgentSwarmControlPlane {
     /// Create a new Agent Swarm Control Plane instance.
     pub fn new(config: ControlPlaneConfig) -> Result<Self> {
         let admission_controller = Arc::new(AdmissionController::new(config.admission_config)?);
-        let validation_coordinator = Arc::new(ValidationCoordinator::new(config.validation_config)?);
-        let handoff_verifier = Arc::new(Mutex::new(HandoffVerifier::new(config.handoff_config)?));
+        let validation_coordinator =
+            Arc::new(ValidationCoordinator::new(config.validation_config)?);
+        let handoff_verifier = Arc::new(Mutex::new(HandoffVerifier::new()));
         // Create a basic aggregator config for now
         let aggregator_config = super::release_proof_aggregator::AggregatorConfig {
-            max_beads_per_aggregation: config.proof_config.max_beads_per_aggregation,
-            aggregation_timeout: config.proof_config.aggregation_timeout,
-            enable_validation: config.proof_config.enable_validation,
+            max_evidence_age: Duration::from_secs(3600),
+            max_commit_age: Duration::from_secs(3600 * 24),
+            require_remote_rch: true,
+            redact_sensitive: false,
+            output_retention_days: 7,
         };
-        let proof_aggregator = Arc::new(Mutex::new(ReleaseProofAggregator::new(aggregator_config)?));
+        let proof_aggregator = Arc::new(Mutex::new(ReleaseProofAggregator::new(aggregator_config)));
         let agent_registry = Arc::new(Mutex::new(AgentRegistry::new()));
         let pressure_monitor = Arc::new(PressureMonitor::new(config.pressure_config)?);
         let metrics = Arc::new(Mutex::new(ControlPlaneMetrics::new()));
@@ -416,9 +419,7 @@ impl AgentSwarmControlPlane {
         }
 
         // Check resource availability
-        let can_admit = self.admission_controller
-            .can_admit_agent(&request)
-            .await?;
+        let can_admit = self.admission_controller.can_admit_agent(&request).await?;
 
         if !can_admit {
             return Ok(AgentAdmissionResult::Rejected {
@@ -431,7 +432,14 @@ impl AgentSwarmControlPlane {
         let agent_region = RegionId::new_ephemeral();
         let session = AgentSession {
             agent_id: request.agent_id.clone(),
-            session_id: format!("session-{}-{}", request.agent_id, SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()),
+            session_id: format!(
+                "session-{}-{}",
+                request.agent_id,
+                SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+            ),
             agent_region,
             allocated_resources: request.resource_requirements.clone(),
             started_at: SystemTime::now(),
@@ -479,7 +487,7 @@ impl AgentSwarmControlPlane {
             registry.active_agents.keys().cloned().collect::<Vec<_>>()
         };
 
-        for agent_id in active_sessions {
+        for _agent_id in active_sessions {
             // Signal agent shutdown and wait for graceful termination
             // Implementation would depend on agent communication protocol
         }
@@ -572,8 +580,8 @@ impl AdmissionController {
         })
     }
 
-    pub async fn can_admit_agent(&self, request: &AgentAdmissionRequest) -> Result<bool> {
-        let current_usage = self.current_usage.lock().await;
+    pub async fn can_admit_agent(&self, cx: &Cx, request: &AgentAdmissionRequest) -> Result<bool> {
+        let current_usage = self.current_usage.lock(cx).await?;
         // Implementation would check resource constraints
         Ok(current_usage.cpu_cores_allocated + request.resource_requirements.cpu_cores <= 64.0)
     }
@@ -605,12 +613,28 @@ impl AgentRegistry {
 }
 
 impl PressureMonitor {
-    pub fn new(config: PressureMonitorConfig) -> Result<Self> {
+    pub fn new(_config: PressureMonitorConfig) -> Result<Self> {
         Ok(Self {
-            cpu_thresholds: PressureThresholds { warning_threshold: 0.7, critical_threshold: 0.85, emergency_threshold: 0.95 },
-            memory_thresholds: PressureThresholds { warning_threshold: 0.75, critical_threshold: 0.90, emergency_threshold: 0.98 },
-            disk_thresholds: PressureThresholds { warning_threshold: 0.80, critical_threshold: 0.90, emergency_threshold: 0.95 },
-            network_thresholds: PressureThresholds { warning_threshold: 0.70, critical_threshold: 0.85, emergency_threshold: 0.95 },
+            cpu_thresholds: PressureThresholds {
+                warning_threshold: 0.7,
+                critical_threshold: 0.85,
+                emergency_threshold: 0.95,
+            },
+            memory_thresholds: PressureThresholds {
+                warning_threshold: 0.75,
+                critical_threshold: 0.90,
+                emergency_threshold: 0.98,
+            },
+            disk_thresholds: PressureThresholds {
+                warning_threshold: 0.80,
+                critical_threshold: 0.90,
+                emergency_threshold: 0.95,
+            },
+            network_thresholds: PressureThresholds {
+                warning_threshold: 0.70,
+                critical_threshold: 0.85,
+                emergency_threshold: 0.95,
+            },
             current_pressure: Arc::new(Mutex::new(SystemPressure::default())),
         })
     }
@@ -703,7 +727,7 @@ impl Default for ProofAggregationMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Outcome, Budget};
+    use crate::types::{Budget, Outcome};
 
     #[test]
     fn test_control_plane_metrics_creation() {
@@ -734,9 +758,9 @@ mod tests {
             agent_id: "test-agent".to_string(),
             resource_requirements: ResourceRequirements {
                 cpu_cores: 2.0,
-                memory_bytes: 1024 * 1024 * 1024, // 1GB
+                memory_bytes: 1024 * 1024 * 1024,    // 1GB
                 disk_bytes: 10 * 1024 * 1024 * 1024, // 10GB
-                network_bandwidth: 1000000, // 1MB/s
+                network_bandwidth: 1000000,          // 1MB/s
                 estimated_duration: Some(Duration::from_secs(3600)),
             },
             required_capabilities: vec![],
@@ -746,8 +770,8 @@ mod tests {
         };
 
         let serialized = serde_json::to_string(&request).expect("Failed to serialize");
-        let deserialized: AgentAdmissionRequest = serde_json::from_str(&serialized)
-            .expect("Failed to deserialize");
+        let deserialized: AgentAdmissionRequest =
+            serde_json::from_str(&serialized).expect("Failed to deserialize");
 
         assert_eq!(request.agent_id, deserialized.agent_id);
         assert_eq!(request.priority, deserialized.priority);

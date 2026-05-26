@@ -9,7 +9,7 @@ pub mod masque;
 pub mod tcptls;
 pub mod webtransport;
 
-use crate::atp::object::{ManifestId, ObjectId};
+use crate::atp::object::ObjectId;
 use crate::error::{Error, ErrorKind, Result};
 use crate::types::TraceId;
 use serde::{Deserialize, Serialize};
@@ -649,7 +649,7 @@ impl AdapterManager {
     /// Build adapter metadata.
     fn build_adapter_metadata(
         &self,
-        adapter_type: AdapterType,
+        _adapter_type: AdapterType,
         trace_id: TraceId,
     ) -> AdapterMetadata {
         AdapterMetadata {

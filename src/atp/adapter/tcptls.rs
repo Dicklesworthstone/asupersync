@@ -3,17 +3,14 @@
 //! Provides ATP-over-TCP/TLS for maximum connectivity compatibility at the cost
 //! of performance. Includes head-of-line blocking warnings and diagnostic caveats.
 
-use super::super::{
-    AdapterNegotiation, AdapterType, FeatureSupport, PerformanceCaveat, SessionStats,
-};
-use crate::Cx;
+use super::super::{AdapterNegotiation, AdapterType, FeatureSupport, PerformanceCaveat};
 use crate::atp::object::ObjectId;
 use crate::error::{Error, ErrorKind, Result};
-use crate::time::Sleep;
+use crate::time::{Sleep, wall_now};
 use crate::types::TraceId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 /// TCP/TLS fallback adapter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,7 +339,7 @@ impl TcpTlsAdapter {
     pub async fn connect(&mut self, object_id: ObjectId, endpoint: &str) -> Result<String> {
         let connection_id = format!(
             "tcptls-{}-{}",
-            object_id.as_string(),
+            object_id.to_string(),
             SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -370,14 +367,14 @@ impl TcpTlsAdapter {
 
         // Simulate TCP connect time
         let tcp_delay = Duration::from_millis(80);
-        Sleep::new(Instant::now() + tcp_delay).await;
+        Sleep::new(wall_now() + tcp_delay).await;
 
         connection.state = ConnectionState::TlsHandshaking;
         connection.stats.connect_time = tcp_delay;
 
         // Simulate TLS handshake
         let handshake_delay = Duration::from_millis(120);
-        Sleep::new(Instant::now() + handshake_delay).await;
+        Sleep::new(wall_now() + handshake_delay).await;
 
         connection.state = ConnectionState::Ready;
         connection.stats.handshake_time = handshake_delay;
@@ -439,7 +436,7 @@ impl TcpTlsAdapter {
             Duration::from_millis(0)
         };
 
-        Sleep::new(Instant::now() + base_delay + hol_penalty).await;
+        Sleep::new(wall_now() + base_delay + hol_penalty).await;
 
         // Update statistics
         connection.stats.bytes_sent += data.len() as u64;
@@ -476,7 +473,7 @@ impl TcpTlsAdapter {
 
         // Simulate frame reception
         let delay = Duration::from_millis(15);
-        Sleep::new(Instant::now() + delay).await;
+        Sleep::new(wall_now() + delay).await;
 
         // Simulate received frame
         let frame_data = vec![0xAA, 0xBB, 0xCC, 0xDD]; // Mock ATP frame
@@ -492,7 +489,7 @@ impl TcpTlsAdapter {
             connection.state = ConnectionState::Closing;
 
             // Simulate connection close time
-            Sleep::new(Instant::now() + Duration::from_millis(50)).await;
+            Sleep::new(wall_now() + Duration::from_millis(50)).await;
 
             connection.state = ConnectionState::Closed;
 
@@ -547,7 +544,7 @@ impl TcpTlsAdapter {
                 cert_validation: CertValidationMode::Full,
                 security_flags: vec!["TCP".to_string(), "TLS".to_string()],
             },
-            replay_pointer: Some(format!("tcptls-trace-{}", trace_id.as_u64())),
+            replay_pointer: Some(format!("tcptls-trace-{}", trace_id.as_u128())),
         }
     }
 

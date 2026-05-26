@@ -36,7 +36,7 @@
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 #[cfg(test)]
 use proptest::prelude::*;

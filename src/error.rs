@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::observability::SpanId;
+use crate::sync::LockError;
 use crate::types::symbol::{ObjectId, SymbolId};
 use crate::types::{CancelReason, RegionId, TaskId};
 
@@ -895,6 +896,17 @@ impl<T> From<SendError<T>> for Error {
             SendError::Disconnected(_) => Self::new(ErrorKind::ChannelClosed),
             SendError::Full(_) => Self::new(ErrorKind::ChannelFull),
             SendError::Cancelled(_) => Self::new(ErrorKind::Cancelled),
+        }
+    }
+}
+
+impl From<LockError> for Error {
+    fn from(e: LockError) -> Self {
+        match e {
+            LockError::Poisoned => Self::new(ErrorKind::InvalidStateTransition),
+            LockError::Cancelled => Self::new(ErrorKind::Cancelled),
+            LockError::TimedOut(_) => Self::new(ErrorKind::ThresholdTimeout),
+            LockError::PolledAfterCompletion => Self::new(ErrorKind::InvalidStateTransition),
         }
     }
 }

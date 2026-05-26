@@ -12,13 +12,12 @@ use crate::cx::Cx;
 use crate::net::quic_native::{
     ConnectionRouter, ConnectionRouterError, ConnectionRouterStats, NativeQuicConnectionConfig,
     OutgoingPacket, QuicTimerScheduler, QuicUdpEndpoint, QuicUdpEndpointConfig,
-    QuicUdpEndpointError, ReceivedPacket, RoutingResult,
+    QuicUdpEndpointError, RoutingResult,
 };
 use crate::time::sleep;
-use std::time::Instant;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 /// Complete managed QUIC endpoint with connection routing and timer integration.
 #[derive(Debug)]
@@ -228,7 +227,7 @@ impl ManagedQuicEndpoint {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or(std::time::Duration::ZERO)
-                    .as_nanos() as u64
+                    .as_nanos() as u64,
             );
             sleep(now, Duration::from_millis(1)).await;
         }
@@ -297,7 +296,9 @@ impl ManagedQuicEndpoint {
                         )
                         .await
                     {
-                        cx.trace(&format!("Failed to create connection {connection_id:?}: {e}"));
+                        cx.trace(&format!(
+                            "Failed to create connection {connection_id:?}: {e}"
+                        ));
                         continue;
                     }
 
@@ -341,10 +342,7 @@ impl ManagedQuicEndpoint {
         // Check if timer fired
         if let Some(_deadline) = self.timer_scheduler.wait_for_timer(cx).await? {
             let now = Instant::now();
-            let outgoing_packets = self
-                .connection_router
-                .process_timer_events(cx, now)
-                .await?;
+            let outgoing_packets = self.connection_router.process_timer_events(cx, now).await?;
 
             if !outgoing_packets.is_empty() {
                 let result = self.udp_endpoint.send_batch(cx, &outgoing_packets).await?;
@@ -420,15 +418,23 @@ mod tests {
             let mut config = ManagedEndpointConfig::default();
             config.max_connections = 0;
 
-            let result = ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config).await;
-            assert!(matches!(result, Err(ManagedEndpointError::InvalidConfig(_))));
+            let result =
+                ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config).await;
+            assert!(matches!(
+                result,
+                Err(ManagedEndpointError::InvalidConfig(_))
+            ));
 
             // Test packet_batch_size = 0
             let mut config = ManagedEndpointConfig::default();
             config.packet_batch_size = 0;
 
-            let result = ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config).await;
-            assert!(matches!(result, Err(ManagedEndpointError::InvalidConfig(_))));
+            let result =
+                ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config).await;
+            assert!(matches!(
+                result,
+                Err(ManagedEndpointError::InvalidConfig(_))
+            ));
         });
     }
 
@@ -436,12 +442,16 @@ mod tests {
     fn test_endpoint_shutdown() {
         run_test_with_cx(|cx| async move {
             let config = ManagedEndpointConfig::default();
-            let mut endpoint = ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config)
-                .await
-                .expect("bind should succeed");
+            let mut endpoint =
+                ManagedQuicEndpoint::bind(&cx, "127.0.0.1:0".parse().unwrap(), config)
+                    .await
+                    .expect("bind should succeed");
 
             // Shutdown should complete without error
-            endpoint.shutdown(&cx).await.expect("shutdown should succeed");
+            endpoint
+                .shutdown(&cx)
+                .await
+                .expect("shutdown should succeed");
             assert!(endpoint.shutting_down);
         });
     }

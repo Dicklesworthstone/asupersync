@@ -5,11 +5,11 @@
 //! and repair mode economics across tail, lossy, resume, relay, and swarm scenarios.
 
 use crate::atp::object::ObjectId;
-use crate::atp::repair_scheduler::{MultiSourceRepairScheduler, PeerScoringWeights};
-use crate::error::{Error, ErrorKind, Result};
-use crate::types::{TraceId, Time};
+use crate::atp::repair_scheduler::MultiSourceRepairScheduler;
+use crate::error::Result;
+use crate::types::TraceId;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 #[cfg(feature = "tracing-integration")]
 use tracing::{debug, info, warn};
@@ -21,10 +21,6 @@ macro_rules! debug {
 }
 #[cfg(not(feature = "tracing-integration"))]
 macro_rules! info {
-    ($($arg:tt)*) => {};
-}
-#[cfg(not(feature = "tracing-integration"))]
-macro_rules! warn {
     ($($arg:tt)*) => {};
 }
 
@@ -413,16 +409,25 @@ impl RepairCoordinator {
                 roi_ratio: 0.0,
                 confidence: 1.0,
             },
-            reasoning: format!("No repair mode meets ROI threshold {:.2}", self.config.min_roi_threshold),
+            reasoning: format!(
+                "No repair mode meets ROI threshold {:.2}",
+                self.config.min_roi_threshold
+            ),
             factors: RepairDecisionFactors {
                 path_quality: self.assess_path_quality(path),
                 loss_impact: path.loss_rate,
                 bdp_impact: (path.bdp_bytes as f64) / (64.0 * 1024.0), // Normalize to 64KB chunks
-                relay_cost_impact: if path.uses_relay { path.relay_cost_per_byte } else { 0.0 },
+                relay_cost_impact: if path.uses_relay {
+                    path.relay_cost_per_byte
+                } else {
+                    0.0
+                },
                 resume_benefit: if transfer.is_resume { 1.0 } else { 0.0 },
                 multi_source_benefit: if transfer.available_peers > 1 {
                     (transfer.available_peers as f64).log2() / 4.0
-                } else { 0.0 },
+                } else {
+                    0.0
+                },
                 resource_pressure: (transfer.cpu_pressure + transfer.memory_pressure) / 2.0,
             },
             decided_at: SystemTime::now(),
@@ -449,12 +454,15 @@ impl RepairCoordinator {
         let stats = self.mode_statistics.entry(telemetry.mode).or_default();
 
         stats.usage_count += 1;
-        stats.avg_predicted_roi = (stats.avg_predicted_roi * (stats.usage_count - 1) as f64 +
-                                  telemetry.predicted_roi.roi_ratio) / stats.usage_count as f64;
-        stats.avg_actual_roi = (stats.avg_actual_roi * (stats.usage_count - 1) as f64 +
-                               telemetry.actual_roi_ratio) / stats.usage_count as f64;
-        stats.success_rate = (stats.success_rate * (stats.usage_count - 1) as f64 +
-                             if telemetry.success { 1.0 } else { 0.0 }) / stats.usage_count as f64;
+        stats.avg_predicted_roi = (stats.avg_predicted_roi * (stats.usage_count - 1) as f64
+            + telemetry.predicted_roi.roi_ratio)
+            / stats.usage_count as f64;
+        stats.avg_actual_roi = (stats.avg_actual_roi * (stats.usage_count - 1) as f64
+            + telemetry.actual_roi_ratio)
+            / stats.usage_count as f64;
+        stats.success_rate = (stats.success_rate * (stats.usage_count - 1) as f64
+            + if telemetry.success { 1.0 } else { 0.0 })
+            / stats.usage_count as f64;
         stats.last_updated = SystemTime::now();
 
         self.telemetry.push(telemetry);
@@ -478,7 +486,11 @@ impl RepairCoordinator {
 
     // Private helper methods
 
-    fn get_applicable_modes(&self, path: &PathCharacteristics, transfer: &TransferState) -> Vec<RepairMode> {
+    fn get_applicable_modes(
+        &self,
+        path: &PathCharacteristics,
+        transfer: &TransferState,
+    ) -> Vec<RepairMode> {
         let mut modes = vec![RepairMode::Off]; // Always consider no repair
 
         // Tail repair for nearly complete transfers
@@ -487,7 +499,8 @@ impl RepairCoordinator {
         }
 
         // Lossy repair for high loss rates
-        if path.loss_rate > 0.01 { // > 1% loss
+        if path.loss_rate > 0.01 {
+            // > 1% loss
             modes.push(RepairMode::Lossy);
         }
 
@@ -507,7 +520,8 @@ impl RepairCoordinator {
         }
 
         // High BDP for satellite/high-latency links
-        if path.is_high_latency || path.bdp_bytes > 1_000_000 { // > 1MB BDP
+        if path.is_high_latency || path.bdp_bytes > 1_000_000 {
+            // > 1MB BDP
             modes.push(RepairMode::HighBDP);
         }
 
@@ -519,7 +533,12 @@ impl RepairCoordinator {
         modes
     }
 
-    fn calculate_roi(&self, mode: RepairMode, path: &PathCharacteristics, transfer: &TransferState) -> Result<RepairRoi> {
+    fn calculate_roi(
+        &self,
+        mode: RepairMode,
+        path: &PathCharacteristics,
+        transfer: &TransferState,
+    ) -> Result<RepairRoi> {
         if mode == RepairMode::Off {
             return Ok(RepairRoi {
                 expected_time_saved: Duration::ZERO,
@@ -556,8 +575,8 @@ impl RepairCoordinator {
         // Calculate benefit and cost scores
         let time_benefit = expected_time_saved.as_secs_f64();
         let bandwidth_benefit = if path.uses_relay {
-            (transfer.missing_bytes as f64 * path.relay_cost_per_byte *
-             (1.0 - overhead_multiplier)).max(0.0)
+            (transfer.missing_bytes as f64 * path.relay_cost_per_byte * (1.0 - overhead_multiplier))
+                .max(0.0)
         } else {
             0.0
         };
@@ -570,12 +589,17 @@ impl RepairCoordinator {
 
         let cost_score = cpu_cost + bandwidth_cost + coordination_cost_score + 1.0; // Base cost
 
-        let roi_ratio = if cost_score > 0.0 { benefit_score / cost_score } else { 0.0 };
+        let roi_ratio = if cost_score > 0.0 {
+            benefit_score / cost_score
+        } else {
+            0.0
+        };
 
         // Calculate confidence based on available data and path stability
-        let confidence = (path.stability_score * 0.5 +
-                         (transfer.retransmit_attempts.min(10) as f64 / 10.0) * 0.3 +
-                         0.2).min(1.0);
+        let confidence = (path.stability_score * 0.5
+            + (transfer.retransmit_attempts.min(10) as f64 / 10.0) * 0.3
+            + 0.2)
+            .min(1.0);
 
         Ok(RepairRoi {
             expected_time_saved,
@@ -591,14 +615,23 @@ impl RepairCoordinator {
         })
     }
 
-    fn estimate_retransmit_time(&self, path: &PathCharacteristics, transfer: &TransferState) -> Duration {
+    fn estimate_retransmit_time(
+        &self,
+        path: &PathCharacteristics,
+        transfer: &TransferState,
+    ) -> Duration {
         // Simple estimate: RTT * number of missing chunks * loss probability
         let base_time = Duration::from_millis(path.rtt_ms as u64 * transfer.missing_chunks as u64);
         let loss_multiplier = 1.0 + path.loss_rate * 2.0; // Account for retransmissions due to loss
         Duration::from_millis((base_time.as_millis() as f64 * loss_multiplier) as u64)
     }
 
-    fn estimate_repair_time(&self, mode: RepairMode, path: &PathCharacteristics, _transfer: &TransferState) -> Duration {
+    fn estimate_repair_time(
+        &self,
+        mode: RepairMode,
+        path: &PathCharacteristics,
+        _transfer: &TransferState,
+    ) -> Duration {
         // Estimate based on repair mode overhead and coordination
         let base_time = Duration::from_millis(path.rtt_ms as u64 / 2); // Half RTT for parallel repair
         let mode_multiplier = mode.typical_overhead_multiplier() + 1.0;
@@ -612,11 +645,20 @@ impl RepairCoordinator {
         (latency_score + loss_score + stability_score) / 3.0
     }
 
-    fn generate_reasoning(&self, mode: RepairMode, roi: &RepairRoi, path: &PathCharacteristics, transfer: &TransferState) -> String {
+    fn generate_reasoning(
+        &self,
+        mode: RepairMode,
+        roi: &RepairRoi,
+        path: &PathCharacteristics,
+        transfer: &TransferState,
+    ) -> String {
         let mut reasons = Vec::new();
 
         if roi.expected_time_saved > Duration::from_millis(100) {
-            reasons.push(format!("saves {:.1}s vs retransmit", roi.expected_time_saved.as_secs_f64()));
+            reasons.push(format!(
+                "saves {:.1}s vs retransmit",
+                roi.expected_time_saved.as_secs_f64()
+            ));
         }
 
         if path.loss_rate > 0.01 {
@@ -638,20 +680,36 @@ impl RepairCoordinator {
         if reasons.is_empty() {
             format!("{} - {}", mode.description(), roi.summary())
         } else {
-            format!("{} - {} ({})", mode.description(), roi.summary(), reasons.join(", "))
+            format!(
+                "{} - {} ({})",
+                mode.description(),
+                roi.summary(),
+                reasons.join(", ")
+            )
         }
     }
 
-    fn analyze_decision_factors(&self, _mode: RepairMode, path: &PathCharacteristics, transfer: &TransferState) -> RepairDecisionFactors {
+    fn analyze_decision_factors(
+        &self,
+        _mode: RepairMode,
+        path: &PathCharacteristics,
+        transfer: &TransferState,
+    ) -> RepairDecisionFactors {
         RepairDecisionFactors {
             path_quality: self.assess_path_quality(path),
             loss_impact: path.loss_rate,
             bdp_impact: (path.bdp_bytes as f64) / (64.0 * 1024.0),
-            relay_cost_impact: if path.uses_relay { path.relay_cost_per_byte } else { 0.0 },
+            relay_cost_impact: if path.uses_relay {
+                path.relay_cost_per_byte
+            } else {
+                0.0
+            },
             resume_benefit: if transfer.is_resume { 1.0 } else { 0.0 },
             multi_source_benefit: if transfer.available_peers > 1 {
                 (transfer.available_peers as f64).log2() / 4.0
-            } else { 0.0 },
+            } else {
+                0.0
+            },
             resource_pressure: (transfer.cpu_pressure + transfer.memory_pressure) / 2.0,
         }
     }
@@ -661,15 +719,23 @@ impl RepairCoordinator {
             RepairLoggingLevel::Off => {}
             RepairLoggingLevel::Normal => {
                 if decision.mode != RepairMode::Off {
-                    info!("Repair decision: {:?} - {}", decision.mode, decision.reasoning);
+                    info!(
+                        "Repair decision: {:?} - {}",
+                        decision.mode, decision.reasoning
+                    );
                 }
             }
             RepairLoggingLevel::Verbose => {
-                info!("Repair decision: {:?} - {}", decision.mode, decision.reasoning);
+                info!(
+                    "Repair decision: {:?} - {}",
+                    decision.mode, decision.reasoning
+                );
             }
             RepairLoggingLevel::Debug => {
-                debug!("Repair decision: {:?} - {} (ROI: {:.2})",
-                       decision.mode, decision.reasoning, decision.roi.roi_ratio);
+                debug!(
+                    "Repair decision: {:?} - {} (ROI: {:.2})",
+                    decision.mode, decision.reasoning, decision.roi.roi_ratio
+                );
             }
         }
     }
@@ -720,8 +786,14 @@ mod tests {
 
     #[test]
     fn test_repair_mode_descriptions() {
-        assert_eq!(RepairMode::Off.description(), "no repair - exact retransmission only");
-        assert_eq!(RepairMode::Tail.description(), "tail repair for last missing chunks");
+        assert_eq!(
+            RepairMode::Off.description(),
+            "no repair - exact retransmission only"
+        );
+        assert_eq!(
+            RepairMode::Tail.description(),
+            "tail repair for last missing chunks"
+        );
         assert!(RepairMode::Swarm.requires_multi_source());
         assert!(!RepairMode::Tail.requires_multi_source());
     }
@@ -793,12 +865,8 @@ mod tests {
         let transfer = create_test_transfer();
         let object_id = ObjectId::from("test-object");
 
-        let decision = coordinator.decide_repair_mode(
-            object_id,
-            &path,
-            &transfer,
-            TraceId::new(),
-        )?;
+        let decision =
+            coordinator.decide_repair_mode(object_id, &path, &transfer, TraceId::new())?;
 
         // Should make a decision
         assert!(!decision.reasoning.is_empty());

@@ -4,7 +4,10 @@
 //! tunneling through HTTP/3 CONNECT-UDP proxies for enterprise egress and NAT
 //! traversal scenarios where direct QUIC is blocked.
 
-use crate::{Cx, time::Sleep};
+use crate::{
+    Cx,
+    time::{Sleep, wall_now},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -172,7 +175,7 @@ impl MasqueAdapter {
         cx.trace("masque_tunnel_establish");
 
         // Simulate network delay for tunnel establishment
-        Sleep::new(start_time + Duration::from_millis(100)).await;
+        Sleep::new(wall_now() + Duration::from_millis(100)).await;
 
         let tunnel = MasqueTunnel {
             tunnel_id: tunnel_id.clone(),
@@ -189,17 +192,18 @@ impl MasqueAdapter {
         };
 
         let setup_latency = start_time.elapsed();
+
+        // Check for overhead warnings before moving tunnel
+        if tunnel.overhead_ratio > self.config.overhead_warning_threshold {
+            cx.trace("masque_overhead_warning");
+        }
+
         self.tunnels.insert(tunnel_id.clone(), tunnel);
 
         // Update statistics
         self.stats.active_tunnels = self.tunnels.len();
         self.stats.total_tunnels_created += 1;
         self.stats.avg_setup_latency = (self.stats.avg_setup_latency + setup_latency) / 2;
-
-        // Check for overhead warnings
-        if tunnel.overhead_ratio > self.config.overhead_warning_threshold {
-            cx.trace("masque_overhead_warning");
-        }
 
         Ok(tunnel_id)
     }
@@ -281,7 +285,7 @@ impl MasqueAdapter {
                 tunnel_id: tunnel_id.to_string(),
             })?;
 
-        let session_duration = tunnel.established_at.elapsed();
+        let _session_duration = tunnel.established_at.elapsed();
 
         cx.trace("masque_tunnel_closed");
 
@@ -300,7 +304,7 @@ impl MasqueAdapter {
     /// Perform health check on proxy connection.
     pub async fn health_check(&self, cx: &Cx) -> Result<MasqueHealthStatus, MasqueError> {
         // Simulate proxy health check
-        Sleep::new(Instant::now() + Duration::from_millis(50)).await;
+        Sleep::new(wall_now() + Duration::from_millis(50)).await;
 
         let status = MasqueHealthStatus {
             proxy_reachable: true,

@@ -4,14 +4,13 @@
 //! ATP's verification, stream semantics, and proof generation capabilities.
 
 use super::{AdapterNegotiation, AdapterType, FeatureSupport, PerformanceCaveat, SessionStats};
-use crate::Cx;
 use crate::atp::object::ObjectId;
 use crate::error::{Error, ErrorKind, Result};
-use crate::time::Sleep;
+use crate::time::{Sleep, wall_now};
 use crate::types::TraceId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 /// WebTransport-specific configuration parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,7 +279,7 @@ impl WebTransportAdapter {
     pub async fn start_session(&mut self, object_id: ObjectId, url: &str) -> Result<String> {
         let session_id = format!(
             "wt-{}-{}",
-            object_id.as_string(),
+            object_id.to_string(),
             SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -302,7 +301,7 @@ impl WebTransportAdapter {
         self.stats.last_updated = SystemTime::now();
 
         // Simulate connection establishment delay
-        Sleep::new(Instant::now() + Duration::from_millis(100)).await;
+        Sleep::new(wall_now() + Duration::from_millis(100)).await;
 
         // Update session to connected state
         if let Some(session) = self.sessions.get_mut(&session_id) {
@@ -380,7 +379,7 @@ impl WebTransportAdapter {
         session.session_stats.bytes_sent += data.len() as u64;
 
         // Simulate network delay
-        Sleep::new(Instant::now() + Duration::from_millis(5)).await;
+        Sleep::new(wall_now() + Duration::from_millis(5)).await;
 
         Ok(())
     }
@@ -490,7 +489,7 @@ impl WebTransportAdapter {
                     "SOP".to_string(), // Same-Origin Policy
                 ],
             },
-            replay_pointer: Some(format!("webtransport-trace-{}", trace_id.as_u64())),
+            replay_pointer: Some(format!("webtransport-trace-{}", trace_id.as_u128())),
         }
     }
 }
