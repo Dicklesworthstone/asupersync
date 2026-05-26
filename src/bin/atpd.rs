@@ -586,60 +586,62 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
 
     #[cfg(unix)]
     {
-        use std::process::Command;
         use std::time::Instant;
 
-        // Send SIGTERM for graceful shutdown
+        // Send SIGTERM for graceful shutdown using native libc call
         info!("Sending SIGTERM to process {}", pid);
-        let term_result = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .output();
 
-        match term_result {
-            Ok(output) if output.status.success() => {
-                println!("Sent shutdown signal to ATP daemon (PID: {})", pid);
+        // SECURITY FIX: Use native libc::kill instead of external command to prevent injection
+        let term_result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
 
-                // Wait for graceful shutdown (up to 10 seconds)
-                let start = Instant::now();
-                let timeout = Duration::from_secs(10);
+        if term_result == 0 {
+            println!("Sent shutdown signal to ATP daemon (PID: {})", pid);
 
-                loop {
-                    let check = Command::new("kill").args(["-0", &pid.to_string()]).output();
+            // Wait for graceful shutdown (up to 10 seconds)
+            let start = Instant::now();
+            let timeout = Duration::from_secs(10);
 
-                    if let Ok(output) = check {
-                        if !output.status.success() {
-                            // Process has stopped
-                            break;
-                        }
-                    }
+            loop {
+                // Check if process still exists using native libc call (signal 0)
+                let check_result = unsafe { libc::kill(pid as libc::pid_t, 0) };
 
-                    if start.elapsed() > timeout {
-                        warn!("Graceful shutdown timeout, sending SIGKILL");
-                        let _ = Command::new("kill")
-                            .args(["-KILL", &pid.to_string()])
-                            .output();
-                        break;
-                    }
-
-                    std::thread::sleep(Duration::from_millis(100));
+                if check_result != 0 {
+                    // Process has stopped (kill returns -1 if process doesn't exist)
+                    break;
                 }
 
-                // Remove PID file
-                if let Err(e) = std::fs::remove_file(&cli.pid_file) {
-                    warn!("Failed to remove PID file: {}", e);
-                } else {
-                    info!("Removed PID file");
+                if start.elapsed() > timeout {
+                    warn!("Graceful shutdown timeout, sending SIGKILL");
+                    let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                    break;
                 }
 
-                println!("ATP daemon stopped successfully");
+                std::thread::sleep(Duration::from_millis(100));
             }
-            Ok(_) => {
-                println!("Process {} not found (may have already stopped)", pid);
-                // Clean up stale PID file
-                let _ = std::fs::remove_file(&cli.pid_file);
+
+            // Remove PID file
+            if let Err(e) = std::fs::remove_file(&cli.pid_file) {
+                warn!("Failed to remove PID file: {}", e);
+            } else {
+                info!("Removed PID file");
             }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Failed to stop daemon: {}", e));
+
+            println!("ATP daemon stopped successfully");
+        } else {
+            // Check errno for specific error
+            let errno = unsafe { *libc::__errno_location() };
+            match errno {
+                libc::ESRCH => {
+                    println!("Process {} not found (may have already stopped)", pid);
+                    // Clean up stale PID file
+                    let _ = std::fs::remove_file(&cli.pid_file);
+                }
+                libc::EPERM => {
+                    return Err(anyhow::anyhow!("Permission denied: cannot send signal to process {}", pid));
+                }
+                _ => {
+                    return Err(anyhow::anyhow!("Failed to send signal to process {}: errno {}", pid, errno));
+                }
             }
         }
     }
@@ -671,20 +673,25 @@ fn show_status(cli: AtpdCli) -> Result<()> {
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
 
-    // Check if process is actually running
+    // Check if process is actually running using native libc call
     #[cfg(unix)]
     {
-        use std::process::Command;
-        let status = Command::new("kill").args(["-0", &pid.to_string()]).output();
-
-        match status {
-            Ok(output) if output.status.success() => {
-                println!("ATP daemon: RUNNING (PID: {})", pid);
-                println!("PID file: {}", cli.pid_file.display());
-                println!("Config file: {}", cli.config.display());
+        let is_running = unsafe {
+            let result = libc::kill(pid as libc::pid_t, 0);
+            if result == 0 {
+                true
+            } else {
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                errno != libc::ESRCH // Process exists if error is not "no such process"
             }
-            _ => {
-                println!("ATP daemon: STOPPED (stale PID file)");
+        };
+
+        if is_running {
+            println!("ATP daemon: RUNNING (PID: {})", pid);
+            println!("PID file: {}", cli.pid_file.display());
+            println!("Config file: {}", cli.config.display());
+        } else {
+            println!("ATP daemon: STOPPED (stale PID file)");
                 warn!("PID file exists but process {} is not running", pid);
             }
         }
