@@ -22,6 +22,7 @@ use crate::record::distributed_region::{
     ReplicaInfo, StateTransition, TransitionReason,
 };
 use crate::record::region::{RegionRecord, RegionState};
+use crate::remote::NodeId;
 use crate::types::budget::Budget;
 use crate::types::cancel::CancelReason;
 use crate::types::{RegionId, TaskId, Time};
@@ -524,7 +525,8 @@ impl RegionBridge {
     ) -> Self {
         let replication_factor = config.replication_factor;
         let consistency = config.write_consistency;
-        let distributed = DistributedRegionRecord::new(id, config, parent, budget);
+        let local_node_id = NodeId::new("local-node");
+        let distributed = DistributedRegionRecord::new(id, config, parent, budget, local_node_id);
         Self {
             local: RegionRecord::new(id, parent, budget),
             distributed: Some(distributed),
@@ -580,7 +582,8 @@ impl RegionBridge {
                     sync_timeout: max_lag,
                     ..Default::default()
                 };
-                let distributed = DistributedRegionRecord::new(id, dist_config, parent, budget);
+                let local_node_id = NodeId::new("local-node");
+                let distributed = DistributedRegionRecord::new(id, dist_config, parent, budget, local_node_id);
                 Self {
                     local: RegionRecord::new(id, parent, budget),
                     distributed: Some(distributed),
@@ -1098,11 +1101,13 @@ impl RegionBridge {
         let replication_factor = config.replication_factor;
         let consistency = config.write_consistency;
 
+        let local_node_id = NodeId::new("local-node");
         let distributed = DistributedRegionRecord::new(
             self.local.id,
             config,
             self.local.parent,
             self.local.budget(),
+            local_node_id,
         );
 
         let previous_mode = self.mode;

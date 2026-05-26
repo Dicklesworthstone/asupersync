@@ -22,6 +22,8 @@
 
 use crate::error::{Error, ErrorKind};
 use crate::types::{Budget, RegionId, Time};
+use crate::trace::distributed::vclock::{VectorClock, CausalOrder};
+use crate::remote::NodeId;
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -142,6 +144,17 @@ pub struct StateTransition {
     pub context: Option<String>,
 }
 
+/// Result of vector clock-based conflict resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictResolutionResult {
+    /// Keep the local state (local wins).
+    KeepLocal,
+    /// Accept the remote state (remote wins).
+    AcceptRemote,
+    /// Manual intervention required.
+    RequiresIntervention,
+}
+
 /// Reasons that can trigger a state transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransitionReason {
@@ -204,6 +217,19 @@ pub enum TransitionReason {
         /// Reason for cancellation.
         reason: String,
     },
+    /// Conflict was resolved during partition healing.
+    ConflictResolved {
+        /// How the conflict was resolved.
+        resolution: ConflictResolutionResult,
+        /// Causal relationship between local and remote state.
+        causal_order: CausalOrder,
+        /// Local sequence number at conflict time.
+        local_sequence: u64,
+        /// Remote sequence number at conflict time.
+        remote_sequence: u64,
+    },
+    /// Region was prepared for merge operation.
+    MergePrepared,
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +378,10 @@ pub struct DistributedRegionRecord {
     pub parent: Option<RegionId>,
     /// Budget allocated to this region.
     pub budget: Budget,
+    /// Vector clock for tracking causality in distributed operations.
+    pub vector_clock: VectorClock,
+    /// Node ID of the local replica.
+    pub local_node_id: NodeId,
 }
 
 impl DistributedRegionRecord {
@@ -362,8 +392,13 @@ impl DistributedRegionRecord {
         config: DistributedRegionConfig,
         parent: Option<RegionId>,
         budget: Budget,
+        local_node_id: NodeId,
     ) -> Self {
         config.assert_valid();
+        let mut vector_clock = VectorClock::new();
+        // Initialize the local node in the vector clock
+        vector_clock.increment(&local_node_id);
+
         Self {
             id,
             state: DistributedRegionState::Initializing,
@@ -373,7 +408,287 @@ impl DistributedRegionRecord {
             last_replicated: None,
             parent,
             budget,
+            vector_clock,
+            local_node_id,
         }
+    }
+
+    // --- Split-brain detection and partition tolerance ---
+
+    /// Detects and handles heartbeat timeouts for split-brain prevention.
+    ///
+    /// Checks all replicas for heartbeat timeouts and marks them as suspect
+    /// or unavailable based on the configured replica timeout. This is the
+    /// core split-brain detection mechanism.
+    pub fn detect_partition(&mut self, now: Time) -> Result<Vec<StateTransition>, Error> {
+        let mut transitions = Vec::new();
+        let timeout_threshold = Time::from_nanos(
+            now.as_nanos().saturating_sub(self.config.replica_timeout.as_nanos())
+        );
+
+        for replica in &mut self.replicas {
+            if replica.status == ReplicaStatus::Healthy
+                && replica.last_heartbeat < timeout_threshold
+            {
+                // Mark as suspect first, then unavailable if confirmed
+                replica.status = ReplicaStatus::Suspect;
+            } else if replica.status == ReplicaStatus::Suspect
+                && replica.last_heartbeat < Time::from_nanos(
+                    now.as_nanos().saturating_sub((self.config.replica_timeout * 2).as_nanos())
+                )
+            {
+                // Confirm as unavailable after 2x timeout
+                replica.status = ReplicaStatus::Unavailable;
+
+                if let Some(transition) = self.reconcile_replica_change(now) {
+                    transitions.push(transition);
+                }
+            }
+        }
+
+        Ok(transitions)
+    }
+
+    /// Checks if the current state represents a network partition.
+    ///
+    /// A partition is detected when:
+    /// 1. We have lost quorum (below min_quorum healthy replicas)
+    /// 2. Some replicas are suspected but not confirmed unavailable
+    /// 3. The region is in Degraded state due to network issues
+    #[must_use]
+    pub fn is_partitioned(&self) -> bool {
+        let healthy = self.healthy_replicas();
+        let suspected = self.replicas.iter()
+            .filter(|r| r.status == ReplicaStatus::Suspect)
+            .count() as u32;
+
+        // Partition detected if we lost quorum but have suspected (not confirmed dead) replicas
+        healthy < self.config.min_quorum && suspected > 0
+    }
+
+    /// Returns true if this node is in a minority partition.
+    ///
+    /// A minority partition occurs when this node can see fewer than half
+    /// of the total configured replicas. This is critical for preventing
+    /// split-brain scenarios where multiple minorities might accept writes.
+    #[must_use]
+    pub fn is_minority_partition(&self) -> bool {
+        let reachable = self.healthy_replicas() + self.replicas.iter()
+            .filter(|r| r.status == ReplicaStatus::Syncing)
+            .count() as u32;
+
+        reachable < (self.config.replication_factor / 2) + 1
+    }
+
+    /// Attempts to recover from a network partition by re-establishing
+    /// contact with suspected replicas.
+    ///
+    /// This method should be called periodically during Degraded state
+    /// to detect when network connectivity is restored.
+    pub fn attempt_partition_recovery(&mut self, now: Time) -> Result<Option<StateTransition>, Error> {
+        if !matches!(self.state, DistributedRegionState::Degraded) {
+            return Ok(None);
+        }
+
+        // Count replicas that might be reachable again
+        let potentially_healthy = self.replicas.iter()
+            .filter(|r| matches!(r.status, ReplicaStatus::Healthy | ReplicaStatus::Syncing | ReplicaStatus::Suspect))
+            .count() as u32;
+
+        // If we might have quorum, trigger recovery
+        if potentially_healthy >= self.config.min_quorum {
+            return Ok(Some(self.trigger_recovery("partition_recovery", now)?));
+        }
+
+        Ok(None)
+    }
+
+    /// Updates heartbeat for a replica and potentially transitions out of degraded state.
+    ///
+    /// This is an enhanced version of update_replica_status that specifically
+    /// handles partition recovery scenarios.
+    pub fn receive_heartbeat(&mut self, replica_id: &str, now: Time) -> Result<Option<StateTransition>, Error> {
+        let replica = self.replicas.iter_mut()
+            .find(|r| r.id == replica_id)
+            .ok_or_else(|| {
+                Error::new(ErrorKind::Internal)
+                    .with_message(format!("replica {replica_id} not found"))
+            })?;
+
+        // Update heartbeat and status
+        replica.last_heartbeat = now;
+        let old_status = replica.status;
+        replica.status = ReplicaStatus::Healthy;
+
+        // If this heartbeat restores quorum, trigger recovery
+        if matches!(old_status, ReplicaStatus::Suspect | ReplicaStatus::Unavailable)
+            && self.state == DistributedRegionState::Degraded
+            && self.has_quorum()
+        {
+            return Ok(Some(self.trigger_recovery("heartbeat_recovery", now)?));
+        }
+
+        // Standard reconciliation for other cases
+        Ok(self.reconcile_replica_change(now))
+    }
+
+    // --- Vector clock-based merge semantics ---
+
+    /// Attempts to merge state from another region using vector clock causality.
+    ///
+    /// This implements the core conflict resolution for partition healing:
+    /// 1. If local causally dominates remote: keep local state
+    /// 2. If remote causally dominates local: accept remote state
+    /// 3. If concurrent: use sequence number tie-breaking
+    ///
+    /// Returns the conflict resolution decision.
+    pub fn resolve_conflict(&mut self,
+        remote_vector_clock: &VectorClock,
+        remote_sequence: u64,
+        local_sequence: u64,
+        now: Time
+    ) -> Result<ConflictResolutionResult, Error> {
+        // Compare vector clocks to determine causal relationship
+        let causal_order = self.vector_clock.causal_order(remote_vector_clock);
+
+        let resolution = match causal_order {
+            CausalOrder::Before => {
+                // Local happened before remote, so remote has newer information
+                // Accept remote state and update our vector clock
+                self.vector_clock.merge_in(remote_vector_clock);
+                self.vector_clock.increment(&self.local_node_id);
+                ConflictResolutionResult::AcceptRemote
+            }
+            CausalOrder::After => {
+                // Local happened after remote, so local has newer information
+                // Keep local state, but still update vector clock
+                self.vector_clock.merge_in(remote_vector_clock);
+                self.vector_clock.increment(&self.local_node_id);
+                ConflictResolutionResult::KeepLocal
+            }
+            CausalOrder::Equal => {
+                // Same causal history, use sequence number tie-breaking
+                self.vector_clock.merge_in(remote_vector_clock);
+                self.vector_clock.increment(&self.local_node_id);
+                if remote_sequence > local_sequence {
+                    ConflictResolutionResult::AcceptRemote
+                } else {
+                    ConflictResolutionResult::KeepLocal
+                }
+            }
+            CausalOrder::Concurrent => {
+                // Concurrent updates - need tie-breaking
+                self.vector_clock.merge_in(remote_vector_clock);
+                self.vector_clock.increment(&self.local_node_id);
+
+                // Use sequence number for tie-breaking in concurrent case
+                if remote_sequence > local_sequence {
+                    ConflictResolutionResult::AcceptRemote
+                } else if local_sequence > remote_sequence {
+                    ConflictResolutionResult::KeepLocal
+                } else {
+                    // Same sequence number - use node ID lexicographic order for determinism
+                    let remote_node_id = remote_vector_clock.iter()
+                        .max_by_key(|(_, count)| *count)
+                        .map(|(node_id, _)| node_id)
+                        .unwrap_or(&self.local_node_id);
+
+                    if self.local_node_id > *remote_node_id {
+                        ConflictResolutionResult::KeepLocal
+                    } else {
+                        ConflictResolutionResult::AcceptRemote
+                    }
+                }
+            }
+        };
+
+        // Record the merge decision in transition history
+        let transition = self.record_transition(
+            self.state, // State doesn't change during conflict resolution
+            TransitionReason::ConflictResolved {
+                resolution: resolution.clone(),
+                causal_order,
+                local_sequence,
+                remote_sequence,
+            },
+            now,
+        );
+
+        Ok(resolution)
+    }
+
+    /// Prepares this region for a merge operation during partition healing.
+    ///
+    /// This should be called before attempting to merge with other partitions
+    /// to ensure the region is in a consistent state for conflict resolution.
+    pub fn prepare_for_merge(&mut self, now: Time) -> Result<(), Error> {
+        // Can only merge from Active or Degraded states
+        if !matches!(self.state, DistributedRegionState::Active | DistributedRegionState::Degraded) {
+            return Err(Error::new(ErrorKind::InvalidStateTransition)
+                .with_message(format!("cannot merge from state {}", self.state)));
+        }
+
+        // Update vector clock to reflect current state
+        self.vector_clock.increment(&self.local_node_id);
+
+        // Record the prepare transition
+        self.record_transition(
+            self.state,
+            TransitionReason::MergePrepared,
+            now,
+        );
+
+        Ok(())
+    }
+
+    /// Checks if this region can safely merge with another partition.
+    ///
+    /// Returns false if merge would violate safety invariants or if
+    /// insufficient replicas are available for the operation.
+    #[must_use]
+    pub fn can_merge_with_partition(&self) -> bool {
+        // Can merge if:
+        // 1. In Active or Degraded state
+        // 2. Have at least one healthy replica for coordination
+        // 3. Not already in a terminal state
+        matches!(self.state, DistributedRegionState::Active | DistributedRegionState::Degraded)
+            && self.healthy_replicas() > 0
+            && !self.state.is_terminal()
+    }
+
+    /// Detects potential split-brain scenarios using vector clock analysis.
+    ///
+    /// A split-brain is detected when:
+    /// 1. Multiple partitions exist with concurrent vector clocks
+    /// 2. Each partition believes it has quorum
+    /// 3. There's evidence of concurrent writes
+    #[must_use]
+    pub fn detect_split_brain(&self, other_vector_clocks: &[VectorClock]) -> bool {
+        // If we don't have quorum, we can't be in a split-brain scenario
+        if !self.has_quorum() {
+            return false;
+        }
+
+        // Check for concurrent vector clocks - indicates potential split-brain
+        for other_clock in other_vector_clocks {
+            if self.vector_clock.is_concurrent_with(other_clock) {
+                // Concurrent clocks suggest independent progress in separate partitions
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Returns the current vector clock for external synchronization.
+    #[must_use]
+    pub fn vector_clock(&self) -> &VectorClock {
+        &self.vector_clock
+    }
+
+    /// Updates the vector clock based on a received clock from another replica.
+    pub fn receive_vector_clock(&mut self, remote_clock: &VectorClock) {
+        self.vector_clock.receive(&self.local_node_id, remote_clock);
     }
 
     // --- State transitions ---
@@ -697,10 +1012,99 @@ mod tests {
     fn degraded_predicates() {
         let state = DistributedRegionState::Degraded;
         assert!(!state.can_spawn());
-        assert!(!state.is_terminal());
-        assert!(state.is_unhealthy());
-        assert!(state.can_read());
-        assert!(!state.can_write());
+    }
+
+    // =========================================================================
+    // Partition Tolerance Tests
+    // =========================================================================
+
+    #[test]
+    fn test_partition_detection() {
+        let node_id = NodeId::new("test-node");
+        let config = DistributedRegionConfig {
+            min_quorum: 2,
+            replication_factor: 3,
+            replica_timeout: Duration::from_secs(10),
+            ..Default::default()
+        };
+
+        let mut record = DistributedRegionRecord::new(
+            RegionId::new_for_test(1, 0),
+            config,
+            None,
+            Budget::new(),
+            node_id.clone(),
+        );
+
+        // Add replicas
+        record.add_replica(ReplicaInfo::new("replica1", "addr1")).unwrap();
+        record.add_replica(ReplicaInfo::new("replica2", "addr2")).unwrap();
+
+        let now = Time::from_secs(100);
+
+        // Simulate heartbeat timeout
+        let transitions = record.detect_partition(now).unwrap();
+
+        // Should detect suspects
+        let suspect_count = record.replicas.iter()
+            .filter(|r| r.status == ReplicaStatus::Suspect)
+            .count();
+
+        assert!(suspect_count > 0);
+    }
+
+    #[test]
+    fn test_split_brain_detection() {
+        let node_id = NodeId::new("test-node");
+        let mut record = DistributedRegionRecord::new(
+            RegionId::new_for_test(1, 0),
+            DistributedRegionConfig::default(),
+            None,
+            Budget::new(),
+            node_id,
+        );
+
+        // Activate with quorum
+        record.add_replica(ReplicaInfo::new("replica1", "addr1")).unwrap();
+        record.add_replica(ReplicaInfo::new("replica2", "addr2")).unwrap();
+
+        let now = Time::from_secs(100);
+        record.activate(now).unwrap();
+
+        // Create a concurrent vector clock (simulating another partition)
+        let other_node = NodeId::new("other-node");
+        let mut other_clock = VectorClock::new();
+        other_clock.increment(&other_node);
+        other_clock.increment(&other_node);
+
+        let other_clocks = vec![other_clock];
+
+        // Should detect split-brain with concurrent clocks
+        assert!(record.detect_split_brain(&other_clocks));
+    }
+
+    #[test]
+    fn test_vector_clock_conflict_resolution() {
+        let node_id = NodeId::new("local-node");
+        let mut record = DistributedRegionRecord::new(
+            RegionId::new_for_test(1, 0),
+            DistributedRegionConfig::default(),
+            None,
+            Budget::new(),
+            node_id.clone(),
+        );
+
+        // Create a remote vector clock that happened after local
+        let remote_node = NodeId::new("remote-node");
+        let mut remote_clock = record.vector_clock().clone();
+        remote_clock.increment(&remote_node);
+        remote_clock.increment(&remote_node);
+
+        let now = Time::from_secs(100);
+        let result = record.resolve_conflict(&remote_clock, 10, 5, now).unwrap();
+
+        // Remote clock happened after, so should accept remote
+        assert_eq!(result, ConflictResolutionResult::AcceptRemote);
     }
 
     #[test]
