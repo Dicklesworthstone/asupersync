@@ -310,13 +310,21 @@ impl ReleaseProofAggregator {
     ///
     /// Security: Ensures bead_id contains only safe characters and prevents:
     /// - Command injection in git commands
+    /// - Git argument injection attacks
     /// - Path traversal in file operations
     /// - Other injection vectors
     fn validate_bead_id(bead_id: &str) -> Result<(), AggregatorError> {
-        // Bead IDs should be alphanumeric with hyphens only
+        // Bead IDs should be alphanumeric with hyphens/underscores, but not start with hyphen
         if bead_id.is_empty() || bead_id.len() > 64 {
             return Err(AggregatorError::MissingEvidence(
                 "Bead ID must be non-empty and under 64 characters".to_string()
+            ));
+        }
+
+        // Security: Prevent git argument injection - no leading hyphens
+        if bead_id.starts_with('-') {
+            return Err(AggregatorError::MissingEvidence(
+                format!("Bead ID cannot start with hyphen (git argument injection): {}", bead_id)
             ));
         }
 
@@ -334,7 +342,25 @@ impl ReleaseProofAggregator {
             ));
         }
 
+        // Security: Prevent regex metacharacters that could cause git grep issues
+        let regex_metacharacters = ['*', '?', '[', ']', '^', '$', '|', '(', ')', '{', '}', '+', '.'];
+        if bead_id.chars().any(|c| regex_metacharacters.contains(&c)) {
+            return Err(AggregatorError::MissingEvidence(
+                format!("Bead ID contains regex metacharacters: {}", bead_id)
+            ));
+        }
+
         Ok(())
+    }
+
+    /// Escapes a bead ID pattern for safe use in git grep to prevent injection attacks.
+    ///
+    /// Security: Even after validation, we escape the pattern to prevent any
+    /// git-specific interpretation issues and use fixed-string matching.
+    fn escape_git_pattern(pattern: &str) -> String {
+        // Use git's fixed-string matching to prevent regex interpretation
+        // This escapes any characters that might have special meaning to git
+        format!("{}", pattern.replace("\\", "\\\\").replace("\"", "\\\""))
     }
 
     /// Validates file path is within expected directory to prevent path traversal.
@@ -635,13 +661,18 @@ impl ReleaseProofAggregator {
         let bead_pattern = format!("br-{}", bead_id);
         let short_pattern = bead_id;
 
+        // Security: Use escaped patterns and fixed-string matching to prevent git injection
+        let escaped_bead_pattern = Self::escape_git_pattern(&bead_pattern);
+        let escaped_short_pattern = Self::escape_git_pattern(&short_pattern);
+
         // Security: Atomic operation - get commits and their changed files in one git command
         // This prevents TOCTOU attacks where git state changes between separate operations
         let output = Command::new("git")
             .args(&[
                 "log",
-                "--grep", &bead_pattern,
-                "--grep", &short_pattern,
+                "--fixed-strings", // Use literal string matching, not regex
+                "--grep", &escaped_bead_pattern,
+                "--grep", &escaped_short_pattern,
                 "--all-match",
                 "--name-only",
                 "--format=COMMIT:%H", // Marker to separate commits from files
@@ -685,12 +716,17 @@ impl ReleaseProofAggregator {
         let bead_pattern = format!("br-{}", bead_id);
         let short_pattern = bead_id;
 
+        // Security: Use escaped patterns and fixed-string matching to prevent git injection
+        let escaped_bead_pattern = Self::escape_git_pattern(&bead_pattern);
+        let escaped_short_pattern = Self::escape_git_pattern(&short_pattern);
+
         // Search for commits mentioning the bead ID in various formats
         let output = Command::new("git")
             .args(&[
                 "log",
-                "--grep", &bead_pattern,
-                "--grep", &short_pattern,
+                "--fixed-strings", // Use literal string matching, not regex
+                "--grep", &escaped_bead_pattern,
+                "--grep", &escaped_short_pattern,
                 "--all-match",
                 "--format=%H|%s|%an|%at|%D",
                 "--since=30 days ago", // Limit search to recent commits
