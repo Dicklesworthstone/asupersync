@@ -45,6 +45,7 @@ pub mod sdk;
 pub mod seeding;
 pub mod stream_object;
 pub mod sync;
+pub mod timing_security;
 pub mod transfer;
 #[cfg(feature = "tokio-compat")]
 pub mod transfer_actor;
