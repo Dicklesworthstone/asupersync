@@ -643,7 +643,8 @@ impl ReleaseProofAggregator {
             return Err(AggregatorError::GitError(format!("git log failed: {}", stderr)));
         }
 
-        let commit_hashes: Vec<&str> = String::from_utf8_lossy(&output.stdout)
+        let commit_output = String::from_utf8_lossy(&output.stdout);
+        let commit_hashes: Vec<&str> = commit_output
             .lines()
             .filter(|line| !line.trim().is_empty())
             .collect();
