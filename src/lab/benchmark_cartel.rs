@@ -489,14 +489,61 @@ impl BenchmarkCartel {
         }
     }
 
-    /// Load baseline results from storage
+    /// Get current git commit hash for baseline validation
+    fn get_current_commit_hash() -> Result<String> {
+        std::process::Command::new("git")
+            .args(&["rev-parse", "HEAD"])
+            .output()
+            .map_err(|e| anyhow::Error::new(e).context("Failed to get current commit hash"))
+            .and_then(|output| {
+                if output.status.success() {
+                    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                } else {
+                    Err(anyhow::Error::msg("git rev-parse failed"))
+                }
+            })
+    }
+
+    /// Check if baseline is compatible with current codebase
+    fn is_baseline_compatible(baseline: &BenchmarkResult, current_commit: &str) -> (bool, String) {
+        let baseline_commit = &baseline.metadata.environment.commit_hash;
+
+        // Exact match is always compatible
+        if baseline_commit == current_commit {
+            return (true, "Exact commit match".to_string());
+        }
+
+        // If baseline commit is empty or unknown, consider it stale
+        if baseline_commit.is_empty() || baseline_commit == "unknown" {
+            return (false, "Baseline has no commit hash - likely stale".to_string());
+        }
+
+        // Different commits are potentially incompatible
+        // In a production system, you might check if commits are on the same branch
+        // or within a certain time window, but for safety we'll warn about any mismatch
+        (false, format!("Commit mismatch: baseline={}, current={}",
+                       &baseline_commit[..8.min(baseline_commit.len())],
+                       &current_commit[..8.min(current_commit.len())]))
+    }
+
+    /// Load baseline results from storage with validation
     pub async fn load_baselines(&self, baseline_dir: &Path) -> Result<()> {
         if !baseline_dir.exists() {
             warn!("Baseline directory does not exist: {}", baseline_dir.display());
             return Ok(());
         }
 
+        // br-asupersync-q92qqo: Get current commit hash for baseline validation
+        let current_commit = Self::get_current_commit_hash()
+            .unwrap_or_else(|e| {
+                warn!("Failed to get current commit hash: {}", e);
+                "unknown".to_string()
+            });
+
         let mut baseline_store = self.baseline_store.write().await;
+        let mut loaded_count = 0;
+        let mut skipped_count = 0;
+        let mut stale_baselines = Vec::new();
 
         let mut entries = tokio::fs::read_dir(baseline_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
@@ -504,13 +551,38 @@ impl BenchmarkCartel {
             if path.extension().map_or(false, |ext| ext == "json") {
                 if let Ok(content) = tokio::fs::read_to_string(&path).await {
                     if let Ok(result) = serde_json::from_str::<BenchmarkResult>(&content) {
-                        baseline_store.insert(result.name.clone(), result);
+                        // br-asupersync-q92qqo: Validate baseline compatibility
+                        let (compatible, reason) = Self::is_baseline_compatible(&result, &current_commit);
+
+                        if compatible {
+                            baseline_store.insert(result.name.clone(), result);
+                            loaded_count += 1;
+                        } else {
+                            warn!("Skipping incompatible baseline '{}': {}", result.name, reason);
+                            stale_baselines.push((result.name.clone(), reason));
+                            skipped_count += 1;
+                        }
+                    } else {
+                        warn!("Failed to parse baseline file: {}", path.display());
                     }
+                } else {
+                    warn!("Failed to read baseline file: {}", path.display());
                 }
             }
         }
 
-        info!("Loaded {} baseline results", baseline_store.len());
+        info!("Loaded {} compatible baseline results, skipped {} incompatible baselines",
+              loaded_count, skipped_count);
+
+        if !stale_baselines.is_empty() {
+            warn!("Found {} stale baselines that may cause false regression alerts or miss real regressions:",
+                  stale_baselines.len());
+            for (name, reason) in stale_baselines {
+                warn!("  - {}: {}", name, reason);
+            }
+            warn!("Consider regenerating baselines for current commit to ensure reliable CI/CD benchmarks");
+        }
+
         Ok(())
     }
 

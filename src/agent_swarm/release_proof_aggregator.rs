@@ -619,56 +619,46 @@ impl ReleaseProofAggregator {
         // Security: Validate bead ID to prevent command injection attacks
         Self::validate_bead_id(bead_id)?;
 
-        // Analyze git history and file changes to determine touched paths
+        // Security: Use atomic git command to prevent TOCTOU attacks
+        // Collect both commits and their changed files in a single operation
         use std::process::Command;
 
         let bead_pattern = format!("br-{}", bead_id);
         let short_pattern = bead_id;
 
-        // First get the commits for this bead
+        // Security: Atomic operation - get commits and their changed files in one git command
+        // This prevents TOCTOU attacks where git state changes between separate operations
         let output = Command::new("git")
             .args(&[
                 "log",
                 "--grep", &bead_pattern,
                 "--grep", &short_pattern,
                 "--all-match",
-                "--format=%H",
+                "--name-only",
+                "--format=COMMIT:%H", // Marker to separate commits from files
                 "--since=30 days ago",
             ])
             .output()
-            .map_err(|e| AggregatorError::GitError(format!("Failed to get commits: {}", e)))?;
+            .map_err(|e| AggregatorError::GitError(format!("Failed to get touched paths: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(AggregatorError::GitError(format!("git log failed: {}", stderr)));
         }
 
-        let commit_output = String::from_utf8_lossy(&output.stdout);
-        let commit_hashes: Vec<&str> = commit_output
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .collect();
-
-        if commit_hashes.is_empty() {
-            return Ok(vec![]); // No commits found for this bead
-        }
-
-        // Get files changed in those commits
+        let git_output = String::from_utf8_lossy(&output.stdout);
         let mut all_paths = std::collections::HashSet::new();
+        let mut in_commit_files = false;
 
-        for hash in commit_hashes {
-            let output = Command::new("git")
-                .args(&["show", "--name-only", "--format=", hash])
-                .output()
-                .map_err(|e| AggregatorError::GitError(format!("Failed to get changed files: {}", e)))?;
-
-            if output.status.success() {
-                let paths = String::from_utf8_lossy(&output.stdout);
-                for path_str in paths.lines() {
-                    if !path_str.trim().is_empty() {
-                        all_paths.insert(PathBuf::from(path_str.trim()));
-                    }
-                }
+        // Parse atomic git output to extract file paths
+        for line in git_output.lines() {
+            let line = line.trim();
+            if line.starts_with("COMMIT:") {
+                in_commit_files = true; // Next lines will be file paths for this commit
+            } else if line.is_empty() {
+                in_commit_files = false; // End of this commit's files
+            } else if in_commit_files && !line.is_empty() {
+                all_paths.insert(PathBuf::from(line));
             }
         }
 
