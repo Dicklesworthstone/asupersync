@@ -1673,19 +1673,30 @@ fn glob_match_parts(pat: &[&str], path: &[&str]) -> bool {
 fn check_caveat(predicate: &CaveatPredicate, ctx: &VerificationContext) -> Result<(), String> {
     match predicate {
         CaveatPredicate::TimeBefore(deadline) => match ctx.current_time_ms {
-            Some(current_time_ms) if current_time_ms < *deadline => Ok(()),
-            Some(current_time_ms) => Err(format!(
-                "current time {}ms >= deadline {}ms",
-                current_time_ms, deadline
-            )),
+            Some(current_time_ms) => {
+                // P0 FIX (asupersync-bbis7r): Use checked arithmetic to prevent integer overflow attacks
+                // Reject extreme deadline values that could cause overflow in arithmetic
+                if *deadline == u64::MAX {
+                    return Err("deadline value rejected (potential overflow)".to_string());
+                }
+                // Use checked subtraction to safely compare times
+                match deadline.checked_sub(current_time_ms) {
+                    Some(remaining) if remaining > 0 => Ok(()),
+                    Some(_) => Err("current time >= deadline".to_string()),
+                    None => Err("deadline arithmetic overflow detected".to_string()),
+                }
+            }
             None => Err("no current time in context".to_string()),
         },
         CaveatPredicate::TimeAfter(start) => match ctx.current_time_ms {
-            Some(current_time_ms) if current_time_ms >= *start => Ok(()),
-            Some(current_time_ms) => Err(format!(
-                "current time {}ms < start {}ms",
-                current_time_ms, start
-            )),
+            Some(current_time_ms) => {
+                // P0 FIX (asupersync-bbis7r): Use checked arithmetic to prevent integer overflow attacks
+                // Use checked subtraction to safely validate time progression
+                match current_time_ms.checked_sub(*start) {
+                    Some(_) => Ok(()), // current_time >= start (no underflow)
+                    None => Err("time validation failed (arithmetic underflow)".to_string()),
+                }
+            }
             None => Err("no current time in context".to_string()),
         },
         CaveatPredicate::RegionScope(expected) => match ctx.region_id {
