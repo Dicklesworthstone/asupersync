@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use smallvec::SmallVec;
 
+use crate::Cx;
 use super::extract::{Extensions, Request};
 use super::handler::Handler;
 use super::response::{IntoResponse, Response, StatusCode};
@@ -95,17 +96,17 @@ impl MethodRouter {
     }
 
     /// Dispatch a request to the appropriate method handler.
-    fn dispatch(&self, req: Request) -> Response {
+    async fn dispatch(&self, cx: &Cx, req: Request) -> Response {
         // Fast path: method is already uppercase (true for virtually all HTTP traffic).
         if let Some(handler) = self.handlers.get(&req.method) {
-            return handler.call(req);
+            return handler.call(cx, req).await;
         }
         // Slow path: case-insensitive fallback (allocates only if needed).
         let upper = req.method.to_uppercase();
-        self.handlers.get(&upper).map_or_else(
-            || StatusCode::METHOD_NOT_ALLOWED.into_response(),
-            |handler| handler.call(req),
-        )
+        match self.handlers.get(&upper) {
+            Some(handler) => handler.call(cx, req).await,
+            None => StatusCode::METHOD_NOT_ALLOWED.into_response(),
+        }
     }
 }
 
@@ -371,7 +372,7 @@ impl Router {
     /// Top-level routes are selected by path specificity. Nested routers are
     /// selected by longest matching prefix after top-level route selection.
     #[must_use]
-    pub fn handle(&self, mut req: Request) -> Response {
+    pub async fn handle(&self, cx: &Cx, mut req: Request) -> Response {
         req.extensions.extend_from(&self.extensions);
 
         // Pick the most specific top-level route. First-registered only wins
@@ -393,7 +394,7 @@ impl Router {
         }
         if let Some((_, method_router, params)) = best_route {
             req.path_params = params;
-            return method_router.dispatch(req);
+            return method_router.dispatch(cx, req).await;
         }
 
         // Check nested routers.
@@ -409,12 +410,12 @@ impl Router {
         }
         if let Some((_, router, sub_path)) = best_nested_match {
             req.path = sub_path;
-            return router.handle(req);
+            return router.handle(cx, req).await;
         }
 
         // Fallback.
         if let Some(handler) = &self.fallback {
-            return handler.call(req);
+            return handler.call(cx, req).await;
         }
 
         StatusCode::NOT_FOUND.into_response()
