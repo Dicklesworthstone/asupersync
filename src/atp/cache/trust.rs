@@ -79,7 +79,15 @@ impl TrustPolicy {
     pub fn check_access(&self, key: &CacheKey) -> Result<(), CacheError> {
         // Check grant scope authorization if specified
         if let Some(scope) = &key.grant_scope {
-            if !self.authorized_scopes.is_empty() && !self.authorized_scopes.contains(scope) {
+            // Security: When no scopes are authorized, only allow explicit public access
+            if self.authorized_scopes.is_empty() {
+                if scope != "public" && scope != "public-read" {
+                    return Err(CacheError::TrustViolation(format!(
+                        "No authorized scopes configured, only public content allowed. Requested scope: {}",
+                        scope
+                    )));
+                }
+            } else if !self.authorized_scopes.contains(scope) {
                 return Err(CacheError::TrustViolation(format!(
                     "Unauthorized grant scope: {}",
                     scope
@@ -321,6 +329,65 @@ mod tests {
         assert!(summary.encryption_required);
         assert!(!summary.public_content_allowed);
         assert_eq!(summary.authorized_scope_count, 0);
+    }
+
+    #[test]
+    fn empty_authorized_scopes_security() {
+        // Test trust policy with empty authorized scopes (default state)
+        let policy = TrustPolicy::default(); // Has empty authorized_scopes
+
+        // Public content should be allowed
+        let public_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            Some("public".to_string()),
+        );
+        assert!(policy.check_access(&public_key).is_ok());
+
+        let public_read_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            Some("public-read".to_string()),
+        );
+        assert!(policy.check_access(&public_read_key).is_ok());
+
+        // Private scopes should be rejected when no scopes are authorized
+        let private_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            Some("private-scope".to_string()),
+        );
+        let result = policy.check_access(&private_key);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(CacheError::TrustViolation(_))));
+
+        // Content with no scope should be allowed (no scope check)
+        let no_scope_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            None,
+        );
+        assert!(policy.check_access(&no_scope_key).is_ok());
+
+        // When scopes ARE configured, they should be enforced
+        let mut policy_with_scopes = TrustPolicy::default();
+        policy_with_scopes.add_authorized_scope("allowed-scope".to_string());
+
+        let allowed_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            Some("allowed-scope".to_string()),
+        );
+        assert!(policy_with_scopes.check_access(&allowed_key).is_ok());
+
+        let unauthorized_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            Some("unauthorized-scope".to_string()),
+        );
+        let result = policy_with_scopes.check_access(&unauthorized_key);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(CacheError::TrustViolation(_))));
     }
 
     #[test]
