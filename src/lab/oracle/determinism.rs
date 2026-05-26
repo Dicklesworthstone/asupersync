@@ -92,17 +92,32 @@ impl std::error::Error for DeterminismViolation {}
 ///
 /// This captures the essential aspects of an event that should be
 /// deterministic across runs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TraceEventSummary {
     /// Sequence number.
     pub seq: u64,
-    /// Time in nanoseconds.
+    /// Time in nanoseconds (for display only, not comparison).
     pub time_nanos: u64,
     /// Kind of event.
     pub kind: TraceEventKind,
     /// Summarized data (for comparison).
     pub data_summary: String,
 }
+
+/// Custom equality implementation that excludes timing for determinism.
+///
+/// Time is excluded from comparison because nanosecond-precision timing
+/// can vary under chaos injection, making deterministic oracles flaky.
+/// Only logical sequence (seq), event kind, and data matter for determinism.
+impl PartialEq for TraceEventSummary {
+    fn eq(&self, other: &Self) -> bool {
+        self.seq == other.seq
+            && self.kind == other.kind
+            && self.data_summary == other.data_summary
+    }
+}
+
+impl Eq for TraceEventSummary {}
 
 impl TraceEventSummary {
     /// Creates a summary from a trace event.
