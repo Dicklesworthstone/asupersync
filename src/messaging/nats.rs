@@ -1289,6 +1289,11 @@ pub struct NatsClient {
     state: Arc<SharedState>,
     next_sid: AtomicU64,
     connected: bool,
+    /// br-asupersync-8nx7g9: preserve TLS requirement established during
+    /// initial connection to prevent TLS downgrade attacks during reconnection.
+    /// Once TLS is determined to be required (by client config OR initial
+    /// server INFO), it remains required for all subsequent reconnections.
+    tls_required_on_connect: bool,
 }
 
 impl fmt::Debug for NatsClient {
@@ -1329,6 +1334,7 @@ impl NatsClient {
             state: Arc::new(SharedState::new()),
             next_sid: AtomicU64::new(1),
             connected: false,
+            tls_required_on_connect: false, // Will be set after TLS evaluation
         };
 
         // Read initial INFO from server
@@ -1354,7 +1360,12 @@ impl NatsClient {
         //
         // Aborting here drops `client` (which closes the TcpStream via
         // its Drop impl) so no CONNECT bytes ever hit the wire.
-        if info.tls_required || client.config.require_tls {
+
+        // br-asupersync-8nx7g9: preserve TLS requirement decision for reconnection
+        let tls_required = info.tls_required || client.config.require_tls;
+        client.tls_required_on_connect = tls_required;
+
+        if tls_required {
             cx.trace(&format!(
                 "nats: TLS required (server={}, client={}); refusing to \
                  send CONNECT in cleartext",
@@ -1591,8 +1602,36 @@ impl NatsClient {
         // Read initial INFO from server
         let info = self.read_info(cx).await?;
 
-        // Check TLS requirements
-        if info.tls_required || self.config.require_tls {
+        // br-asupersync-8nx7g9: CRITICAL security fix - prevent TLS downgrade during reconnection
+        // Use the TLS requirement established during initial connection rather than
+        // re-evaluating from potentially manipulated server INFO. This prevents
+        // attackers from downgrading TLS requirements during reconnection.
+        //
+        // Original issue: Reconnection re-read server INFO and could be manipulated
+        // by attackers to advertise tls_required=false, bypassing original security policy.
+        //
+        // Fix: Preserve the effective TLS requirement from initial connection.
+        // If TLS was required initially, it remains required for all reconnections.
+        if self.tls_required_on_connect {
+            cx.trace(&format!(
+                "nats: reconnection TLS requirement preserved from initial connection \
+                 (server_info_claims={}, client_config={}); refusing plaintext reconnect",
+                info.tls_required, self.config.require_tls
+            ));
+            return Err(NatsError::TlsRequired {
+                server_required: self.tls_required_on_connect,
+                client_required: self.config.require_tls,
+            });
+        }
+
+        // Additional defense: Current client config still enforces TLS
+        // (covers cases where admin updated config to be more strict after initial connection)
+        if self.config.require_tls {
+            cx.trace(&format!(
+                "nats: reconnection blocked by current client TLS requirement \
+                 (config.require_tls=true, server_claims={})",
+                info.tls_required
+            ));
             return Err(NatsError::TlsRequired {
                 server_required: info.tls_required,
                 client_required: self.config.require_tls,
