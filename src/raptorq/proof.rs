@@ -766,6 +766,13 @@ fn map_systematic_param_error(err: SystematicParamError) -> ProofArtifactDistrib
             requested: k_prime,
             max_supported: max_u32,
         },
+        SystematicParamError::RfcTableInvariantViolation {
+            invariant,
+            details,
+        } => ProofArtifactDistributionError::UnsupportedSourceBlock {
+            requested: 0,
+            max_supported: 0, // Placeholder values since this is a table corruption error
+        },
     }
 }
 

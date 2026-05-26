@@ -87,7 +87,7 @@ pub enum SystematicError {
 }
 
 /// Explicit lookup failure for source block parameter derivation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SystematicParamError {
     /// Requested `K` is larger than the maximum K' covered by RFC 6330 Table 2.
     UnsupportedSourceBlockSize {
@@ -140,6 +140,14 @@ impl SystematicParams {
             } => {
                 panic!(
                     "K' value {k_prime} exceeds u32::MAX ({max_u32}); ESI calculations would overflow in decoder"
+                )
+            }
+            SystematicParamError::RfcTableInvariantViolation {
+                invariant,
+                details,
+            } => {
+                panic!(
+                    "RFC 6330 table invariant violation: {invariant} - {details}"
                 )
             }
         })

@@ -332,6 +332,14 @@ fn validate_source_block_k(
                 "block of {block_len} bytes with symbol_size {symbol_size} requires K'={k_prime} which exceeds u32::MAX ({max_u32}); ESI calculations would overflow"
             ),
         },
+        SystematicParamError::RfcTableInvariantViolation {
+            invariant,
+            details,
+        } => EncodingError::InvalidConfig {
+            reason: format!(
+                "block of {block_len} bytes with symbol_size {symbol_size} triggers RFC 6330 table invariant violation: {invariant} - {details}"
+            ),
+        },
     })
 }
 

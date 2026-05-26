@@ -458,11 +458,11 @@ fn normalize_permille_generic<const N: usize>(scores: [u32; N], zero_total: [u16
     let mut remainders = [(0usize, 0u32); N];
     let mut assigned = 0u32;
     for (index, score) in scores.iter().copied().enumerate() {
-        let scaled = score.checked_mul(PERMILLE_SCALE).unwrap_or(usize::MAX);
+        let scaled = score.checked_mul(PERMILLE_SCALE).unwrap_or(u32::MAX);
         let base = scaled / total;
         // Cap to u16::MAX if base exceeds u16 range (pathological case)
         normalized[index] = u16::try_from(base).unwrap_or(u16::MAX);
-        assigned = assigned.checked_add(base).unwrap_or(usize::MAX);
+        assigned = assigned.checked_add(base).unwrap_or(u32::MAX);
         remainders[index] = (index, scaled % total);
     }
 

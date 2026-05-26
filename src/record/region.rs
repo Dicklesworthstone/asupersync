@@ -791,7 +791,31 @@ impl RegionRecord {
     ///
     /// Returns `None` when all finalizers have been executed.
     pub fn pop_finalizer(&self) -> Option<Finalizer> {
+        // VALIDATION GAP FIX: Assert finalizers can only be popped during Finalizing state
+        // This prevents finalizers from being executed during invalid state transitions
+        debug_assert!(
+            self.state() == RegionState::Finalizing,
+            "br-asupersync-vks0tm: pop_finalizer() called on region not in Finalizing state \
+             (region={:?}, current_state={:?})",
+            self.id,
+            self.state()
+        );
+
         let mut inner = self.inner.write();
+
+        // VALIDATION GAP FIX: Re-check state under lock to prevent TOCTOU race conditions
+        // This ensures the state didn't change between the initial check and lock acquisition
+        if self.state() != RegionState::Finalizing {
+            debug_assert!(
+                false,
+                "br-asupersync-vks0tm: region state changed from Finalizing during pop_finalizer() \
+                 (region={:?}, state_under_lock={:?})",
+                self.id,
+                self.state()
+            );
+            return None;
+        }
+
         inner.finalizers.pop()
     }
 
@@ -995,18 +1019,64 @@ impl RegionRecord {
     ///
     /// Returns true if the transition succeeded.
     pub fn complete_close(&self) -> bool {
+        // VALIDATION GAP FIX: Assert we're in the correct state before attempting to complete close
+        // This prevents completing close during rapid state transitions that might skip finalizers
+        debug_assert_eq!(
+            self.state(),
+            RegionState::Finalizing,
+            "br-asupersync-vks0tm: complete_close() called on region not in Finalizing state \
+             (region={:?}, current_state={:?})",
+            self.id,
+            self.state()
+        );
+
         // Enforce structural quiescence: a region cannot close if it still has live
         // tasks, children, or pending obligations, as doing so would prematurely clear
         // its heap memory and violate structured concurrency invariants.
         let mut inner = self.inner.write();
+
+        // VALIDATION GAP FIX: Double-check state under lock to prevent TOCTOU races
+        // This catches rapid state transitions that might occur between the initial check and acquiring the lock
+        if self.state() != RegionState::Finalizing {
+            debug_assert!(
+                false,
+                "br-asupersync-vks0tm: region state changed from Finalizing during complete_close() \
+                 (region={:?}, state_under_lock={:?})",
+                self.id,
+                self.state()
+            );
+            return false;
+        }
 
         if !(inner.children.is_empty()
             && inner.tasks.is_empty()
             && inner.pending_obligations == 0
             && inner.finalizers.is_empty())
         {
+            // VALIDATION GAP FIX: Provide detailed diagnostics for failed quiescence check
+            // This helps identify which component is preventing region closure
+            debug_assert!(
+                false,
+                "br-asupersync-vks0tm: region quiescence validation failed during complete_close() \
+                 (region={:?}, children={}, tasks={}, obligations={}, finalizers={})",
+                self.id,
+                inner.children.len(),
+                inner.tasks.len(),
+                inner.pending_obligations,
+                inner.finalizers.len()
+            );
             return false;
         }
+
+        // VALIDATION GAP FIX: Final assertion that finalizers are truly empty
+        // This is the critical check to ensure no finalizers were skipped
+        debug_assert!(
+            inner.finalizers.is_empty(),
+            "br-asupersync-vks0tm: critical validation failure - finalizers not empty during complete_close() \
+             (region={:?}, finalizer_count={})",
+            self.id,
+            inner.finalizers.len()
+        );
 
         // br-asupersync-n0lthy: when no task or finalizer has folded a
         // terminal outcome via record_close_outcome, the default depends

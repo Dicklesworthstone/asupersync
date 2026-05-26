@@ -3809,6 +3809,19 @@ impl RuntimeState {
 
     fn run_sync_finalizers_tracked(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
         loop {
+            // VALIDATION GAP FIX: Assert region is in Finalizing state before executing finalizers
+            // This prevents finalizers from running during invalid state transitions
+            if let Some(region) = self.regions.get(region_id.arena_index()) {
+                debug_assert_eq!(
+                    region.state(),
+                    crate::record::region::RegionState::Finalizing,
+                    "br-asupersync-vks0tm: finalizer execution must only occur in Finalizing state \
+                     (region={:?}, current_state={:?})",
+                    region_id,
+                    region.state()
+                );
+            }
+
             let (finalizer_id, finalizer) = self.pop_tracked_finalizer(region_id)?;
 
             match finalizer {
@@ -3818,6 +3831,23 @@ impl RuntimeState {
                         RegionEvent::FinalizerStarted,
                         "sync finalizer start",
                     );
+
+                    // VALIDATION GAP FIX: Re-validate state after popping but before execution
+                    // This catches rapid state transitions that might skip finalizers
+                    if let Some(region) = self.regions.get(region_id.arena_index()) {
+                        if region.state() != crate::record::region::RegionState::Finalizing {
+                            // Region state changed unexpectedly - this is a critical validation failure
+                            panic!(
+                                "br-asupersync-vks0tm: critical finalizer validation gap detected - \
+                                 region state changed from Finalizing to {:?} during finalizer execution \
+                                 (region={:?}, finalizer_id={})",
+                                region.state(),
+                                region_id,
+                                finalizer_id
+                            );
+                        }
+                    }
+
                     // Run synchronously, catching panics to ensure remaining
                     // finalizers still execute and the region is not permanently
                     // stuck in Finalizing state.
@@ -3833,9 +3863,37 @@ impl RuntimeState {
                             ));
                         }
                     }
+
+                    // VALIDATION GAP FIX: Validate state is still consistent after execution
+                    // This ensures the finalizer didn't cause invalid state transitions
+                    if let Some(region) = self.regions.get(region_id.arena_index()) {
+                        debug_assert!(
+                            region.state() == crate::record::region::RegionState::Finalizing
+                            || region.state() == crate::record::region::RegionState::Closed,
+                            "br-asupersync-vks0tm: finalizer execution left region in invalid state \
+                             (region={:?}, state_after_finalizer={:?}, finalizer_id={})",
+                            region_id,
+                            region.state(),
+                            finalizer_id
+                        );
+                    }
+
                     self.record_finalizer_run(finalizer_id);
                 }
                 Finalizer::Async(_) => {
+                    // VALIDATION GAP FIX: Validate async finalizers also respect state transitions
+                    if let Some(region) = self.regions.get(region_id.arena_index()) {
+                        debug_assert_eq!(
+                            region.state(),
+                            crate::record::region::RegionState::Finalizing,
+                            "br-asupersync-vks0tm: async finalizer must be scheduled only in Finalizing state \
+                             (region={:?}, current_state={:?}, finalizer_id={})",
+                            region_id,
+                            region.state(),
+                            finalizer_id
+                        );
+                    }
+
                     // Stop and return the async barrier
                     return Some((finalizer_id, finalizer));
                 }
@@ -3868,8 +3926,30 @@ impl RuntimeState {
             return false;
         }
 
-        // All finalizers must be done
+        // VALIDATION GAP FIX: Strengthen finalizer completion validation
+        // This catches cases where finalizers might have been skipped due to rapid state transitions
         if !region.finalizers_empty() {
+            // Additional validation: ensure we have proper tracking for pending finalizers
+            debug_assert!(
+                self.pending_finalizer_ids.contains_key(&region_id)
+                || region.finalizer_count() == 0,
+                "br-asupersync-vks0tm: finalizer tracking inconsistency detected - \
+                 region has finalizers but no tracked IDs (region={:?}, finalizer_count={})",
+                region_id,
+                region.finalizer_count()
+            );
+            return false;
+        }
+
+        // VALIDATION GAP FIX: Ensure finalizer ID tracking is properly cleaned up
+        // This prevents leaked tracking state from interfering with future operations
+        if self.pending_finalizer_ids.contains_key(&region_id) {
+            debug_assert!(
+                false,
+                "br-asupersync-vks0tm: finalizer ID tracking leak detected - \
+                 region reports no finalizers but tracking still exists (region={:?})",
+                region_id
+            );
             return false;
         }
 
