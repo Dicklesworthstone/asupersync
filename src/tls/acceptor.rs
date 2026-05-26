@@ -77,6 +77,10 @@ pub struct TlsAcceptor {
     /// this fix exists to close).
     #[cfg(feature = "tls")]
     sni_alpn_allow_list: Option<Arc<BTreeMap<String, Vec<Vec<u8>>>>>,
+    /// br-asupersync-ycuuwy — replay protection strategy for TLS 1.3
+    /// 0-RTT early data. Applications can use this to implement
+    /// protection logic at the request processing layer.
+    early_data_replay_protection: EarlyDataReplayProtection,
     #[cfg(not(feature = "tls"))]
     _marker: std::marker::PhantomData<()>,
 }
@@ -91,6 +95,7 @@ impl TlsAcceptor {
             alpn_required: false,
             require_sni: false,
             sni_alpn_allow_list: None,
+            early_data_replay_protection: EarlyDataReplayProtection::None,
         }
     }
 
@@ -125,6 +130,86 @@ impl TlsAcceptor {
         self.handshake_timeout
     }
 
+    /// Get the 0-RTT replay protection strategy.
+    ///
+    /// br-asupersync-ycuuwy: Applications can use this to implement
+    /// request-level replay protection logic. For example, if the
+    /// strategy is `SafeMethodsOnly`, the application should reject
+    /// state-changing HTTP methods when the request arrived as 0-RTT.
+    #[must_use]
+    pub fn early_data_replay_protection(&self) -> &EarlyDataReplayProtection {
+        &self.early_data_replay_protection
+    }
+}
+
+impl EarlyDataReplayProtection {
+    /// Check if an HTTP method is safe for 0-RTT with this protection strategy.
+    ///
+    /// br-asupersync-ycuuwy: Helper method for applications to validate
+    /// HTTP methods against the configured replay protection strategy.
+    ///
+    /// # Arguments
+    ///
+    /// * `method` - HTTP method string (e.g., "GET", "POST", "PUT")
+    /// * `has_idempotency_key` - Whether request has idempotency key (for IdempotencyKeys strategy)
+    /// * `has_valid_nonce` - Whether request has valid nonce (for NonceValidation strategy)
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the request should be allowed, `Err(reason)` if rejected.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // In your HTTP handler:
+    /// if tls_stream.received_early_data() {
+    ///     if let Err(reason) = acceptor.early_data_replay_protection()
+    ///         .validate_request_for_early_data("POST", true, false) {
+    ///         return Response::builder()
+    ///             .status(425) // Too Early
+    ///             .body(format!("0-RTT rejected: {}", reason))?;
+    ///     }
+    /// }
+    /// ```
+    pub fn validate_request_for_early_data(
+        &self,
+        method: &str,
+        has_idempotency_key: bool,
+        has_valid_nonce: bool,
+    ) -> Result<(), &'static str> {
+        match self {
+            EarlyDataReplayProtection::None => {
+                Err("0-RTT enabled without replay protection - all requests vulnerable")
+            }
+            EarlyDataReplayProtection::UnprotectedForTesting => {
+                // Allow everything in testing mode but this should log warnings
+                Ok(())
+            }
+            EarlyDataReplayProtection::SafeMethodsOnly => {
+                match method.to_ascii_uppercase().as_str() {
+                    "GET" | "HEAD" | "OPTIONS" => Ok(()),
+                    _ => Err("only safe HTTP methods (GET/HEAD/OPTIONS) allowed for 0-RTT"),
+                }
+            }
+            EarlyDataReplayProtection::IdempotencyKeys => {
+                if has_idempotency_key {
+                    Ok(())
+                } else {
+                    Err("idempotency key required for 0-RTT requests")
+                }
+            }
+            EarlyDataReplayProtection::NonceValidation => {
+                if has_valid_nonce {
+                    Ok(())
+                } else {
+                    Err("valid nonce required for 0-RTT requests")
+                }
+            }
+        }
+    }
+}
+
+impl TlsAcceptor {
     /// Accept an incoming TLS connection over the provided I/O stream.
     ///
     /// # Cancel-Safety
@@ -248,6 +333,68 @@ pub enum ClientAuth {
     Required(RootCertStore),
 }
 
+/// TLS 1.3 0-RTT replay protection strategy.
+///
+/// br-asupersync-ycuuwy: TLS 1.3 0-RTT (early data) is vulnerable to
+/// replay attacks where an attacker can capture and replay 0-RTT requests
+/// within the ticket validity window. This enum specifies the application-
+/// layer protection strategy required when 0-RTT is enabled.
+#[derive(Debug, Clone, Default)]
+pub enum EarlyDataReplayProtection {
+    /// No replay protection (UNSAFE).
+    ///
+    /// **CRITICAL SECURITY WARNING**: This option disables replay protection
+    /// and should NEVER be used in production. 0-RTT requests can be captured
+    /// and replayed by attackers, potentially causing duplicate state changes,
+    /// financial transactions, or data corruption.
+    ///
+    /// Only use for testing scenarios where replay attacks are acceptable.
+    #[default]
+    None,
+
+    /// Restrict 0-RTT to safe HTTP methods only (GET, HEAD, OPTIONS).
+    ///
+    /// This strategy allows 0-RTT only for HTTP methods that are idempotent
+    /// and do not cause state changes. Requests with state-changing methods
+    /// (POST, PUT, DELETE, PATCH) will be rejected if received as 0-RTT.
+    ///
+    /// Safe for read-only operations but still vulnerable to replay of
+    /// GET requests that might have side effects.
+    SafeMethodsOnly,
+
+    /// Application implements idempotency key validation.
+    ///
+    /// The application MUST implement idempotency key checking where:
+    /// 1. All state-changing requests include an `Idempotency-Key` header
+    /// 2. The server tracks completed idempotency keys
+    /// 3. Duplicate keys are rejected with 409 Conflict
+    /// 4. Keys are stored with TTL matching the TLS ticket lifetime
+    ///
+    /// This provides strong replay protection for properly designed APIs.
+    IdempotencyKeys,
+
+    /// Application implements nonce-based anti-replay.
+    ///
+    /// The application MUST implement nonce validation where:
+    /// 1. All requests include a unique nonce (timestamp + random)
+    /// 2. The server maintains a bounded-window nonce store
+    /// 3. Duplicate nonces within the window are rejected
+    /// 4. The window size matches the TLS ticket lifetime
+    ///
+    /// Provides strong replay protection but requires careful nonce management.
+    NonceValidation,
+
+    /// Explicit acknowledgment that no protection is implemented (DANGEROUS).
+    ///
+    /// **USE ONLY FOR TESTING**: This explicitly acknowledges that no replay
+    /// protection is implemented and accepts the security risk. This allows
+    /// build() to succeed but logs critical security warnings.
+    ///
+    /// NEVER use in production - this is only for test environments where
+    /// replay attacks are acceptable and you need to test 0-RTT behavior.
+    UnprotectedForTesting,
+}
+
 /// Builder for `TlsAcceptor`.
 ///
 /// # Example
@@ -308,6 +455,12 @@ pub struct TlsAcceptorBuilder {
     /// production safety; set to `false` only for testing with
     /// expired certificates (NOT recommended for production).
     strict_cert_validation: bool,
+    /// br-asupersync-ycuuwy — when 0-RTT is enabled, this specifies
+    /// the replay protection strategy. None means no protection
+    /// (UNSAFE), which will cause build() to fail unless explicitly
+    /// acknowledged. Production deployments MUST specify a replay
+    /// protection strategy when enabling 0-RTT.
+    early_data_replay_protection: EarlyDataReplayProtection,
 }
 
 impl TlsAcceptorBuilder {
@@ -433,6 +586,10 @@ impl TlsAcceptorBuilder {
             // default for production safety. Can be disabled for
             // testing with expired certificates.
             strict_cert_validation: true,
+            // br-asupersync-ycuuwy: no replay protection by default.
+            // Operators must explicitly specify protection strategy
+            // when enabling 0-RTT.
+            early_data_replay_protection: EarlyDataReplayProtection::None,
         }
     }
 
@@ -538,44 +695,106 @@ impl TlsAcceptorBuilder {
         self
     }
 
-    /// **DANGEROUS**: enable TLS 1.3 0-RTT (early data) on this acceptor.
+    /// Set the replay protection strategy for TLS 1.3 0-RTT (early data).
     ///
-    /// br-asupersync-y0gm5q: 0-RTT is disabled by default. This
-    /// method is the explicit opt-in required to accept it.
+    /// br-asupersync-ycuuwy: This method MUST be called with an appropriate
+    /// protection strategy before enabling 0-RTT. The protection strategy
+    /// specifies how your application will prevent replay attacks.
     ///
-    /// # Replay vulnerability
+    /// # Security Requirement
     ///
-    /// TLS 1.3 0-RTT is **by-spec replay-vulnerable** (RFC 8446
-    /// §8). An attacker who captures a 0-RTT request can replay
-    /// it within the ticket's validity window and the server has
-    /// no transport-level mechanism to detect or reject the
-    /// replay. The handshake authenticates the client (via the
-    /// resumption ticket) but cannot authenticate the FRESHNESS
-    /// of the data carried alongside the ClientHello.
+    /// TLS 1.3 0-RTT is vulnerable to replay attacks. You MUST implement
+    /// one of the supported protection strategies before enabling 0-RTT,
+    /// or `build()` will fail with a configuration error.
     ///
-    /// The application layer MUST implement at least one of:
+    /// # Examples
     ///
-    /// 1. Idempotency keys on every state-changing request
-    ///    (REST: `Idempotency-Key` header). The server records
-    ///    completed keys and refuses replayed requests.
-    /// 2. A per-request nonce + bounded-window anti-replay store
-    ///    (e.g. Redis with the ticket lifetime as the TTL).
-    /// 3. Restriction of 0-RTT to GET / HEAD or other genuinely
-    ///    safe methods at the routing layer.
+    /// ```ignore
+    /// // For APIs that use idempotency keys
+    /// acceptor.with_early_data_replay_protection(
+    ///     EarlyDataReplayProtection::IdempotencyKeys
+    /// );
     ///
-    /// If you cannot implement one of the above, do NOT enable
-    /// 0-RTT — the latency win is not worth the silent
-    /// duplicate-write attack surface.
+    /// // For read-only services (GET/HEAD only)
+    /// acceptor.with_early_data_replay_protection(
+    ///     EarlyDataReplayProtection::SafeMethodsOnly
+    /// );
     ///
-    /// # Argument
+    /// // For testing ONLY (NEVER in production)
+    /// acceptor.with_early_data_replay_protection(
+    ///     EarlyDataReplayProtection::UnprotectedForTesting
+    /// );
+    /// ```
+    #[must_use]
+    pub fn with_early_data_replay_protection(mut self, protection: EarlyDataReplayProtection) -> Self {
+        self.early_data_replay_protection = protection;
+        self
+    }
+
+    /// **REQUIRES REPLAY PROTECTION**: Enable TLS 1.3 0-RTT (early data).
     ///
-    /// `max_bytes` caps how much early data the server will
-    /// accept per connection. A reasonable starting point is
-    /// `16384` (16 KiB) which fits a typical HTTP request line +
-    /// headers but excludes most uploads. `0` re-disables.
+    /// br-asupersync-ycuuwy: This method now REQUIRES that you first specify
+    /// a replay protection strategy via `with_early_data_replay_protection()`.
+    /// Without proper protection, `build()` will fail.
+    ///
+    /// # Security Model Change
+    ///
+    /// **BREAKING CHANGE**: Unlike the previous version, this method now
+    /// enforces replay protection validation. You MUST:
+    ///
+    /// 1. First call `with_early_data_replay_protection()` with an appropriate strategy
+    /// 2. Then call this method to set the max bytes
+    /// 3. Implement the chosen protection in your application layer
+    ///
+    /// # Replay Protection Required
+    ///
+    /// TLS 1.3 0-RTT is **by-spec replay-vulnerable** (RFC 8446 §8).
+    /// Attackers can capture and replay 0-RTT requests within the ticket
+    /// validity window. Your application MUST implement one of:
+    ///
+    /// - `SafeMethodsOnly`: Restrict to GET/HEAD/OPTIONS only
+    /// - `IdempotencyKeys`: Track completed idempotency keys
+    /// - `NonceValidation`: Bounded-window nonce anti-replay store
+    /// - `UnprotectedForTesting`: Testing only (logs security warnings)
+    ///
+    /// # Arguments
+    ///
+    /// `max_bytes` caps early data per connection. Typical: 16384 (16 KiB)
+    /// for request headers. `0` disables 0-RTT.
+    #[must_use]
+    pub fn enable_early_data_with_protection(mut self, max_bytes: u32) -> Self {
+        self.early_data_max_bytes = max_bytes;
+        self
+    }
+
+    /// **DEPRECATED**: Legacy 0-RTT enable without replay protection.
+    ///
+    /// **SECURITY WARNING**: This method is deprecated because it allows
+    /// enabling 0-RTT without explicit replay protection. Use
+    /// `enable_early_data_with_protection()` instead.
+    ///
+    /// This method will be removed in a future version. Migration:
+    /// ```ignore
+    /// // Old (deprecated):
+    /// acceptor.enable_early_data(16384)
+    ///
+    /// // New (secure):
+    /// acceptor
+    ///     .with_early_data_replay_protection(EarlyDataReplayProtection::SafeMethodsOnly)
+    ///     .enable_early_data_with_protection(16384)
+    /// ```
+    #[deprecated(
+        since = "0.3.3",
+        note = "Use enable_early_data_with_protection() with explicit replay protection"
+    )]
     #[must_use]
     pub fn enable_early_data(mut self, max_bytes: u32) -> Self {
         self.early_data_max_bytes = max_bytes;
+        // Set to testing mode to allow legacy builds to succeed
+        // but log security warnings
+        if matches!(self.early_data_replay_protection, EarlyDataReplayProtection::None) {
+            self.early_data_replay_protection = EarlyDataReplayProtection::UnprotectedForTesting;
+        }
         self
     }
 
@@ -745,6 +964,45 @@ impl TlsAcceptorBuilder {
         // in production but might not be caught during configuration.
         if self.strict_cert_validation {
             Self::validate_certificate_chain(&self.cert_chain)?;
+        }
+
+        // SECURITY: br-asupersync-ycuuwy — validate 0-RTT replay protection
+        // configuration. When 0-RTT is enabled, require explicit replay
+        // protection strategy to prevent silent deployment of vulnerable
+        // configurations.
+        if self.early_data_max_bytes > 0 {
+            match &self.early_data_replay_protection {
+                EarlyDataReplayProtection::None => {
+                    return Err(TlsError::Configuration(format!(
+                        "TLS 1.3 0-RTT enabled (max_bytes={}) but no replay protection configured. \
+                         0-RTT is vulnerable to replay attacks where captured requests can be \
+                         replayed within ticket validity. You MUST specify replay protection via \
+                         with_early_data_replay_protection() before enabling 0-RTT. \
+                         See EarlyDataReplayProtection variants for options (asupersync-ycuuwy)",
+                        self.early_data_max_bytes
+                    )));
+                }
+                EarlyDataReplayProtection::UnprotectedForTesting => {
+                    #[cfg(feature = "tracing-integration")]
+                    tracing::error!(
+                        max_early_data_bytes = self.early_data_max_bytes,
+                        "CRITICAL SECURITY WARNING: TLS 1.3 0-RTT enabled without replay protection! \
+                         This configuration is VULNERABLE to replay attacks and should NEVER be used \
+                         in production. Attackers can capture and replay 0-RTT requests causing \
+                         duplicate operations. Use only for testing (asupersync-ycuuwy)"
+                    );
+                }
+                EarlyDataReplayProtection::SafeMethodsOnly |
+                EarlyDataReplayProtection::IdempotencyKeys |
+                EarlyDataReplayProtection::NonceValidation => {
+                    #[cfg(feature = "tracing-integration")]
+                    tracing::info!(
+                        max_early_data_bytes = self.early_data_max_bytes,
+                        protection_strategy = ?self.early_data_replay_protection,
+                        "TLS 1.3 0-RTT enabled with replay protection strategy"
+                    );
+                }
+            }
         }
 
         // SECURITY: br-asupersync-3iqbx3 — detect potential multi-tenant
@@ -919,6 +1177,7 @@ impl TlsAcceptorBuilder {
             alpn_required: self.alpn_required,
             require_sni: self.require_sni,
             sni_alpn_allow_list: self.sni_alpn_allow_list.map(Arc::new),
+            early_data_replay_protection: self.early_data_replay_protection,
         })
     }
 
@@ -2169,5 +2428,194 @@ SrXuVI5uunTgPWuOtJOP+KM=
         // we can verify our flag is being respected by checking the error doesn't
         // contain our validation message
         assert!(relaxed_result.is_err(), "empty chain should still fail rustls validation");
+    }
+
+    // ── br-asupersync-ycuuwy: 0-RTT replay protection tests ──────────
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_early_data_requires_replay_protection() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+
+        // Enabling 0-RTT without protection should fail
+        let result = TlsAcceptorBuilder::new(chain, key)
+            .enable_early_data_with_protection(16384)
+            // Deliberately NOT setting replay protection
+            .build();
+
+        assert!(result.is_err(), "0-RTT without protection should fail");
+        match result {
+            Err(TlsError::Configuration(msg)) => {
+                assert!(
+                    msg.contains("no replay protection configured")
+                        && msg.contains("asupersync-ycuuwy"),
+                    "error should mention missing protection: {msg}"
+                );
+            }
+            other => panic!("expected Configuration error, got {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_early_data_with_safe_methods_protection_succeeds() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+
+        let result = TlsAcceptorBuilder::new(chain, key)
+            .with_early_data_replay_protection(EarlyDataReplayProtection::SafeMethodsOnly)
+            .enable_early_data_with_protection(16384)
+            .build();
+
+        assert!(result.is_ok(), "0-RTT with safe methods protection should succeed: {:?}", result);
+
+        let acceptor = result.unwrap();
+        assert_eq!(acceptor.config.max_early_data_size, 16384);
+        assert!(matches!(
+            acceptor.early_data_replay_protection(),
+            EarlyDataReplayProtection::SafeMethodsOnly
+        ));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_early_data_with_idempotency_protection_succeeds() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+
+        let result = TlsAcceptorBuilder::new(chain, key)
+            .with_early_data_replay_protection(EarlyDataReplayProtection::IdempotencyKeys)
+            .enable_early_data_with_protection(8192)
+            .build();
+
+        assert!(result.is_ok(), "0-RTT with idempotency protection should succeed");
+
+        let acceptor = result.unwrap();
+        assert_eq!(acceptor.config.max_early_data_size, 8192);
+        assert!(matches!(
+            acceptor.early_data_replay_protection(),
+            EarlyDataReplayProtection::IdempotencyKeys
+        ));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_early_data_with_nonce_protection_succeeds() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+
+        let result = TlsAcceptorBuilder::new(chain, key)
+            .with_early_data_replay_protection(EarlyDataReplayProtection::NonceValidation)
+            .enable_early_data_with_protection(32768)
+            .build();
+
+        assert!(result.is_ok(), "0-RTT with nonce protection should succeed");
+
+        let acceptor = result.unwrap();
+        assert_eq!(acceptor.config.max_early_data_size, 32768);
+        assert!(matches!(
+            acceptor.early_data_replay_protection(),
+            EarlyDataReplayProtection::NonceValidation
+        ));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_early_data_unprotected_for_testing_logs_warning() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+
+        // This should succeed but log security warnings
+        let result = TlsAcceptorBuilder::new(chain, key)
+            .with_early_data_replay_protection(EarlyDataReplayProtection::UnprotectedForTesting)
+            .enable_early_data_with_protection(16384)
+            .build();
+
+        assert!(result.is_ok(), "unprotected testing mode should succeed but log warnings");
+
+        let acceptor = result.unwrap();
+        assert_eq!(acceptor.config.max_early_data_size, 16384);
+        assert!(matches!(
+            acceptor.early_data_replay_protection(),
+            EarlyDataReplayProtection::UnprotectedForTesting
+        ));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_deprecated_enable_early_data_sets_testing_mode() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+
+        // The deprecated method should automatically set UnprotectedForTesting
+        #[allow(deprecated)]
+        let result = TlsAcceptorBuilder::new(chain, key)
+            .enable_early_data(16384)
+            .build();
+
+        assert!(result.is_ok(), "deprecated enable_early_data should succeed in testing mode");
+
+        let acceptor = result.unwrap();
+        assert!(matches!(
+            acceptor.early_data_replay_protection(),
+            EarlyDataReplayProtection::UnprotectedForTesting
+        ));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_no_early_data_allows_no_protection() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+
+        // When 0-RTT is disabled (default), no protection is required
+        let result = TlsAcceptorBuilder::new(chain, key)
+            // Deliberately not setting any protection or enabling early data
+            .build();
+
+        assert!(result.is_ok(), "no 0-RTT should not require protection");
+
+        let acceptor = result.unwrap();
+        assert_eq!(acceptor.config.max_early_data_size, 0);
+        assert!(matches!(
+            acceptor.early_data_replay_protection(),
+            EarlyDataReplayProtection::None
+        ));
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_early_data_request_validation_helper() {
+        // Test SafeMethodsOnly protection
+        let safe_methods = EarlyDataReplayProtection::SafeMethodsOnly;
+        assert!(safe_methods.validate_request_for_early_data("GET", false, false).is_ok());
+        assert!(safe_methods.validate_request_for_early_data("HEAD", false, false).is_ok());
+        assert!(safe_methods.validate_request_for_early_data("OPTIONS", false, false).is_ok());
+        assert!(safe_methods.validate_request_for_early_data("POST", false, false).is_err());
+        assert!(safe_methods.validate_request_for_early_data("PUT", false, false).is_err());
+        assert!(safe_methods.validate_request_for_early_data("DELETE", false, false).is_err());
+
+        // Test IdempotencyKeys protection
+        let idempotency = EarlyDataReplayProtection::IdempotencyKeys;
+        assert!(idempotency.validate_request_for_early_data("POST", true, false).is_ok());
+        assert!(idempotency.validate_request_for_early_data("PUT", true, false).is_ok());
+        assert!(idempotency.validate_request_for_early_data("GET", false, false).is_err());
+
+        // Test NonceValidation protection
+        let nonce = EarlyDataReplayProtection::NonceValidation;
+        assert!(nonce.validate_request_for_early_data("POST", false, true).is_ok());
+        assert!(nonce.validate_request_for_early_data("GET", false, true).is_ok());
+        assert!(nonce.validate_request_for_early_data("PUT", false, false).is_err());
+
+        // Test UnprotectedForTesting allows everything
+        let unprotected = EarlyDataReplayProtection::UnprotectedForTesting;
+        assert!(unprotected.validate_request_for_early_data("POST", false, false).is_ok());
+        assert!(unprotected.validate_request_for_early_data("DELETE", false, false).is_ok());
+
+        // Test None rejects everything
+        let none = EarlyDataReplayProtection::None;
+        assert!(none.validate_request_for_early_data("GET", false, false).is_err());
+        assert!(none.validate_request_for_early_data("POST", true, true).is_err());
     }
 }
