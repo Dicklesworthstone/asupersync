@@ -760,6 +760,85 @@ impl PriorityInversionOracle {
         self.next_inversion_id.store(1, Ordering::Relaxed);
         self.next_resource_id.store(1, Ordering::Relaxed);
     }
+
+    /// Detects global fairness composition violations due to work stealing
+    ///
+    /// br-asupersync-te2u3m: Checks for cases where per-worker local fairness
+    /// bounds don't guarantee global fairness due to work-stealing dependencies.
+    /// This can lead to priority inversions that extend beyond any single
+    /// worker's fairness bounds, violating cancel preemption invariants.
+    pub fn detect_global_fairness_violations(&self) -> Vec<PriorityInversion> {
+        let tasks = self.tasks.read();
+        let mut violations = Vec::new();
+
+        // Group tasks by worker to analyze cross-worker dependencies
+        let mut worker_tasks: HashMap<Option<WorkerId>, Vec<&TaskState>> = HashMap::new();
+        for task_state in tasks.values() {
+            worker_tasks
+                .entry(task_state.worker_id)
+                .or_insert_with(Vec::new)
+                .push(task_state);
+        }
+
+        // Look for high-priority tasks on one worker being delayed while
+        // lower-priority tasks run on another worker due to work stealing
+        for (worker_a, tasks_a) in &worker_tasks {
+            for (worker_b, tasks_b) in &worker_tasks {
+                if worker_a == worker_b || worker_a.is_none() || worker_b.is_none() {
+                    continue;
+                }
+
+                // Find cases where Worker A has high-priority task blocked
+                // while Worker B runs lower-priority work
+                for task_a in tasks_a {
+                    if task_a.blocked_on.is_some() {
+                        for task_b in tasks_b {
+                            if task_b.blocked_on.is_none() // task_b is running
+                                && task_a.priority > task_b.priority
+                                && (task_a.priority - task_b.priority) >= self.config.priority_threshold
+                            {
+                                // Global fairness violation detected
+                                let inversion_id = InversionId::new(
+                                    self.next_inversion_id.fetch_add(1, Ordering::Relaxed),
+                                );
+
+                                let impact = InversionImpact {
+                                    delay_us: 0, // Would need timing data to calculate
+                                    affected_tasks: 1,
+                                    severity: match task_a.priority - task_b.priority {
+                                        1..=50 => InversionSeverity::Minor,
+                                        51..=100 => InversionSeverity::Moderate,
+                                        101..=200 => InversionSeverity::Severe,
+                                        _ => InversionSeverity::Critical,
+                                    },
+                                    throughput_impact: 0.1 * f64::from(task_a.priority - task_b.priority),
+                                    fairness_impact: 0.2 * f64::from(task_a.priority - task_b.priority),
+                                };
+
+                                let violation = PriorityInversion {
+                                    inversion_id,
+                                    blocked_task: task_a.task_id,
+                                    blocked_priority: task_a.priority,
+                                    blocking_task: task_b.task_id,
+                                    blocking_priority: task_b.priority,
+                                    resource: ResourceId::new(0), // No specific resource, it's a scheduling issue
+                                    start_time: task_a.start_time,
+                                    duration: None,
+                                    inversion_type: InversionType::WorkStealing,
+                                    task_chain: vec![task_a.task_id, task_b.task_id],
+                                    impact,
+                                };
+
+                                violations.push(violation);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        violations
+    }
 }
 
 impl Default for PriorityInversionOracle {

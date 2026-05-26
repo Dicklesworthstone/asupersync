@@ -100,13 +100,30 @@
 //! least every `E_c(k) + 1` scheduling steps, giving a worst-case non-cancel
 //! stall of O(`E_c`) dispatch cycles per worker.
 //!
-//! ## Cross-worker note
+//! ## Cross-worker note (br-asupersync-te2u3m)
 //!
-//! Fairness is enforced per-worker. Cluster-wide fairness is the conjunction of
-//! these worker-local bounds over the workers that can actually observe the
-//! eligible work. Work stealing operates only on ready work, so it composes
-//! with the cancel/timed fairness bounds as load sharing, not as a proof of
-//! global priority order.
+//! **IMPORTANT LIMITATION**: Fairness is enforced per-worker only. These
+//! worker-local bounds DO NOT guarantee global fairness due to work stealing
+//! dependencies that can create cross-worker priority inversions.
+//!
+//! **Global Priority Inversion Risk**: A high-priority task stolen by Worker A
+//! may be blocked by Worker A's local cancel streak, while a lower-priority
+//! task runs on Worker B. This violates global priority order despite both
+//! workers satisfying their local fairness bounds.
+//!
+//! **Cancel Preemption Invariant Violation**: The per-worker cancel preemption
+//! guarantee does not compose globally. Priority inversions can extend beyond
+//! any single worker's `E_c(k)` bound when work stealing creates dependencies
+//! between workers with different cancel streak states.
+//!
+//! **Mitigation**: Callers requiring strict global priority order should:
+//! 1. Use single-worker deployment (disables work stealing)
+//! 2. Monitor global priority inversion via fairness monitoring
+//! 3. Consider task affinity to reduce steal-induced dependencies
+//!
+//! This limitation is inherent to the load-balancing vs. strict-priority tradeoff
+//! in multi-worker schedulers. Work stealing operates only on ready work for
+//! performance, but sacrifices global priority guarantees.
 
 use crate::cancel::progress_certificate::{DrainPhase, ProgressCertificate};
 use crate::obligation::lyapunov::{
