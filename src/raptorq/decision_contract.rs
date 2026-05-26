@@ -192,7 +192,7 @@ impl RaptorQDecisionContract {
             + inactivation * 6 / 10
             + overhead * 4 / 10
             + budget_penalty;
-        let healthy = HEALTHY_FLOOR.max(PERMILLE_SCALE.saturating_sub(healthy_penalty));
+        let healthy = HEALTHY_FLOOR.max(PERMILLE_SCALE.checked_sub(healthy_penalty).unwrap_or(0));
         let degraded =
             100 + density * 9 / 20 + inactivation * 7 / 20 + overhead / 4 + u32::from(conflict) / 5;
         let regression = 40
@@ -458,15 +458,15 @@ fn normalize_permille_generic<const N: usize>(scores: [u32; N], zero_total: [u16
     let mut remainders = [(0usize, 0u32); N];
     let mut assigned = 0u32;
     for (index, score) in scores.iter().copied().enumerate() {
-        let scaled = score.saturating_mul(PERMILLE_SCALE);
+        let scaled = score.checked_mul(PERMILLE_SCALE).unwrap_or(usize::MAX);
         let base = scaled / total;
         // Cap to u16::MAX if base exceeds u16 range (pathological case)
         normalized[index] = u16::try_from(base).unwrap_or(u16::MAX);
-        assigned = assigned.saturating_add(base);
+        assigned = assigned.checked_add(base).unwrap_or(usize::MAX);
         remainders[index] = (index, scaled % total);
     }
 
-    let mut remaining = usize::try_from(PERMILLE_SCALE.saturating_sub(assigned)).unwrap_or(0); // fallback to 0 if conversion fails
+    let mut remaining = usize::try_from(PERMILLE_SCALE.checked_sub(assigned).unwrap_or(0)).unwrap_or(0); // fallback to 0 if conversion fails
     remainders.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     for (index, remainder) in remainders {
         if remaining == 0 || remainder == 0 {

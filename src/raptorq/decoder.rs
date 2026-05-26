@@ -1019,8 +1019,8 @@ fn choose_low_level_decoder_policy(
     }
 
     let hard_gate = n_cols >= HARD_REGIME_MIN_COLS
-        && (features.density_permille >= HARD_REGIME_DENSITY_PERCENT.saturating_mul(10)
-            || n_rows <= n_cols.saturating_add(HARD_REGIME_NEAR_SQUARE_EXTRA_ROWS));
+        && (features.density_permille >= HARD_REGIME_DENSITY_PERCENT.checked_mul(10).unwrap_or(usize::MAX)
+            || n_rows <= n_cols.checked_add(HARD_REGIME_NEAR_SQUARE_EXTRA_ROWS).unwrap_or(usize::MAX));
     if !hard_gate {
         return DecoderPolicyDecision {
             mode: DecoderPolicyMode::ConservativeBaseline,
@@ -1034,7 +1034,7 @@ fn choose_low_level_decoder_policy(
     }
 
     let block_gate = n_cols >= BLOCK_SCHUR_MIN_COLS
-        && features.density_permille >= BLOCK_SCHUR_MIN_DENSITY_PERCENT.saturating_mul(10)
+        && features.density_permille >= BLOCK_SCHUR_MIN_DENSITY_PERCENT.checked_mul(10).unwrap_or(usize::MAX)
         && n_cols > BLOCK_SCHUR_TRAILING_COLS;
     if !block_gate {
         block_schur_loss = u32::MAX;
@@ -1133,7 +1133,7 @@ fn sparse_update_column_capacity(n_cols: usize) -> usize {
     }
 
     let threshold =
-        n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR) / HYBRID_SPARSE_COST_DENOMINATOR;
+        n_cols.checked_mul(HYBRID_SPARSE_COST_NUMERATOR).unwrap_or(usize::MAX) / HYBRID_SPARSE_COST_DENOMINATOR;
     threshold.max(1).min(n_cols)
 }
 
@@ -1149,7 +1149,7 @@ fn sparse_update_columns_if_beneficial(
 
     // Equivalent threshold to should_use_sparse_row_update(pivot_nnz, n_cols).
     let threshold =
-        n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR) / HYBRID_SPARSE_COST_DENOMINATOR;
+        n_cols.checked_mul(HYBRID_SPARSE_COST_NUMERATOR).unwrap_or(usize::MAX) / HYBRID_SPARSE_COST_DENOMINATOR;
     scratch.clear();
 
     if n_cols <= SMALL_ROW_DENSE_FASTPATH_COLS {
@@ -2990,8 +2990,8 @@ mod tests {
         if n_cols == 0 {
             return false;
         }
-        pivot_nnz.saturating_mul(HYBRID_SPARSE_COST_DENOMINATOR)
-            <= n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR)
+        pivot_nnz.checked_mul(HYBRID_SPARSE_COST_DENOMINATOR).unwrap_or(usize::MAX)
+            <= n_cols.checked_mul(HYBRID_SPARSE_COST_NUMERATOR).unwrap_or(usize::MAX)
     }
 
     /// Test-only: collects nonzero column indices from a pivot row.
