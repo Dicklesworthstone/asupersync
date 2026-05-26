@@ -2,6 +2,19 @@
 //!
 //! Tags are fixed-size 32-byte HMAC-SHA256 message authentication codes over a
 //! symbol's canonical identity and payload bytes.
+//!
+//! # Security Properties (asupersync-mjn8rx)
+//!
+//! This module provides constant-time authentication to prevent timing attacks:
+//!
+//! - **Constant-time verification**: All tag comparisons use `subtle::ConstantTimeEq`
+//!   to prevent timing side-channels that could leak information about valid tags.
+//! - **Constant-time zero detection**: Zero-tag rejection uses constant-time `is_zero()`
+//!   to prevent attackers from distinguishing zero vs. non-zero tags via timing.
+//! - **Unified verification path**: All verification branches take the same time
+//!   regardless of tag content or validity outcome.
+//! - **No early returns**: Verification always computes the expected HMAC and
+//!   performs all checks before returning, eliminating timing-based oracles.
 
 use crate::security::key::AuthKey;
 use crate::types::{Symbol, SymbolKind};
@@ -415,5 +428,81 @@ mod tests {
             "valid tag must pass verification"
         );
         assert!(!valid_tag.is_zero(), "valid tag must not report as zero");
+    }
+
+    #[test]
+    fn test_constant_time_security_properties() {
+        // Security test for constant-time operations to prevent timing attacks
+        let key = AuthKey::from_seed(0xDEADBEEF);
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![1, 2, 3, 4, 5], SymbolKind::Source);
+
+        // Create tags with varying bit patterns to test constant-time behavior
+        let valid_tag = AuthenticationTag::compute(&key, &symbol);
+        let zero_tag = AuthenticationTag::zero();
+        let mut almost_valid = *valid_tag.as_bytes();
+        almost_valid[31] ^= 1; // Flip last bit
+        let almost_valid_tag = AuthenticationTag::from_bytes(almost_valid);
+
+        // All verify calls should take constant time regardless of tag content
+        // We can't easily measure timing in a unit test, but we verify behavior
+
+        // Test 1: Valid tag verification
+        assert!(valid_tag.verify(&key, &symbol));
+
+        // Test 2: Zero tag verification (constant-time zero check)
+        assert!(!zero_tag.verify(&key, &symbol));
+
+        // Test 3: Almost-valid tag verification (constant-time HMAC check)
+        assert!(!almost_valid_tag.verify(&key, &symbol));
+
+        // Test 4: Wrong symbol verification (constant-time with wrong input)
+        let wrong_symbol = Symbol::new(id, vec![9, 8, 7], SymbolKind::Source);
+        assert!(!valid_tag.verify(&key, &wrong_symbol));
+
+        // Test 5: Constant-time equality comparison
+        assert_eq!(valid_tag, valid_tag);
+        assert_ne!(valid_tag, zero_tag);
+        assert_ne!(valid_tag, almost_valid_tag);
+        assert_ne!(zero_tag, almost_valid_tag);
+    }
+
+    #[test]
+    fn test_tag_forgery_resistance() {
+        // Security test to verify authentication tags resist forgery attempts
+        let key = AuthKey::from_seed(0x1337CAFE);
+        let id = SymbolId::new_for_test(42, 0, 0);
+        let symbol = Symbol::new(id, vec![0xDE, 0xAD, 0xBE, 0xEF], SymbolKind::Source);
+
+        let valid_tag = AuthenticationTag::compute(&key, &symbol);
+
+        // Test 1: Different key should not verify the same tag
+        let different_key = AuthKey::from_seed(0xCAFEBABE);
+        assert!(!valid_tag.verify(&different_key, &symbol),
+                "Tag should not verify with different key");
+
+        // Test 2: Modified symbol should not verify with same tag
+        let modified_symbol = Symbol::new(id, vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42], SymbolKind::Source);
+        assert!(!valid_tag.verify(&key, &modified_symbol),
+                "Tag should not verify with modified symbol");
+
+        // Test 3: Different symbol kind should not verify
+        let repair_symbol = Symbol::new(id, vec![0xDE, 0xAD, 0xBE, 0xEF], SymbolKind::Repair);
+        assert!(!valid_tag.verify(&key, &repair_symbol),
+                "Tag should not verify with different symbol kind");
+
+        // Test 4: All-bits-flipped tag should not verify
+        let mut flipped_bytes = *valid_tag.as_bytes();
+        for byte in &mut flipped_bytes {
+            *byte = !*byte;
+        }
+        let flipped_tag = AuthenticationTag::from_bytes(flipped_bytes);
+        assert!(!flipped_tag.verify(&key, &symbol),
+                "Completely flipped tag should not verify");
+
+        // Test 5: Zero tag should never verify (even if computed tag is zero by chance)
+        let zero_tag = AuthenticationTag::zero();
+        assert!(!zero_tag.verify(&key, &symbol),
+                "Zero tag must never verify");
     }
 }

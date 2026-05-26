@@ -14,7 +14,8 @@
 //! - Separate capability domains for audit collection vs audit validation
 
 use std::collections::HashSet;
-use crate::types::{RegionId, Time};
+use std::time::Instant;
+use crate::types::RegionId;
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind};
 use super::ambient::{AmbientCategory, AmbientFinding, Severity, KNOWN_FINDINGS};
@@ -30,7 +31,7 @@ pub struct MetaAuditor {
     /// Capability domain for audit operations.
     pub audit_domain: AuditDomain,
     /// Last validation timestamp to detect tampering.
-    pub last_validated: Time,
+    pub last_validated: Instant,
     /// Cryptographic hash of KNOWN_FINDINGS for integrity checking.
     pub findings_hash: u64,
 }
@@ -78,7 +79,7 @@ impl MetaAuditor {
     /// The meta-auditor is region-scoped and cannot escalate capabilities across
     /// region boundaries. Each audit operation must be explicitly authorized by
     /// the region's capability context.
-    pub fn new(region_id: RegionId, domain: AuditDomain, now: Time) -> Self {
+    pub fn new(region_id: RegionId, domain: AuditDomain, now: Instant) -> Self {
         let findings_hash = compute_findings_hash(KNOWN_FINDINGS);
         Self {
             region_id,
@@ -104,7 +105,7 @@ impl MetaAuditor {
     ) -> Result<CapabilityEscalationResult, Error> {
         // Validate this audit operation is authorized by the region's capability context
         if !self.is_operation_authorized(cx) {
-            return Err(Error::new(ErrorKind::PermissionDenied)
+            return Err(Error::new(ErrorKind::AdmissionDenied)
                 .with_message("Meta-audit operation not authorized by region capability context"));
         }
 
@@ -141,7 +142,7 @@ impl MetaAuditor {
         }
 
         // Update validation timestamp
-        self.last_validated = cx.time().instant_now();
+        self.last_validated = Instant::now();
         Ok(CapabilityEscalationResult::Clean)
     }
 
@@ -171,7 +172,7 @@ impl MetaAuditor {
         };
 
         if !allowed {
-            return Err(Error::new(ErrorKind::PermissionDenied)
+            return Err(Error::new(ErrorKind::AdmissionDenied)
                 .with_message(format!(
                     "Operation {:?} not allowed in domain {:?} - capability escalation attempt",
                     requested_operation, self.audit_domain
@@ -193,7 +194,7 @@ impl MetaAuditor {
     ) -> Result<MetaAuditor, Error> {
         // Verify we have authority to create a constrained context
         if self.audit_domain != AuditDomain::Meta {
-            return Err(Error::new(ErrorKind::PermissionDenied)
+            return Err(Error::new(ErrorKind::AdmissionDenied)
                 .with_message("Only Meta domain can create constrained audit contexts"));
         }
 
@@ -207,7 +208,7 @@ impl MetaAuditor {
         Ok(MetaAuditor {
             region_id: target_region,
             audit_domain: constrained_domain,
-            last_validated: cx.time().instant_now(),
+            last_validated: Instant::now(),
             findings_hash: self.findings_hash, // Inherit current findings hash
         })
     }
@@ -218,7 +219,7 @@ impl MetaAuditor {
         // Check that the operation is running within the proper region context
         // This would typically check cx.current_region() == self.region_id
         // For now, we'll do a basic sanity check
-        cx.budget().remaining_nanos() > 0 // Must have valid budget from proper Cx
+        cx.budget().remaining_cost().unwrap_or(0) > 0 // Must have valid budget from proper Cx
     }
 
     fn can_audit_cross_region(&self, _cx: &Cx, _target_region: RegionId) -> bool {
@@ -346,7 +347,14 @@ fn compute_findings_hash(findings: &[AmbientFinding]) -> u64 {
         finding.line.hash(&mut hasher);
         finding.evidence_pattern.hash(&mut hasher);
         finding.exempt.hash(&mut hasher);
-        finding.severity.hash(&mut hasher);
+        // Hash severity as its discriminant value
+        let severity_value = match finding.severity {
+            Severity::Critical => 0u8,
+            Severity::High => 1u8,
+            Severity::Medium => 2u8,
+            Severity::Low => 3u8,
+        };
+        severity_value.hash(&mut hasher);
         // Don't hash description or exemption_reason as they can change without security impact
     }
 
@@ -362,13 +370,13 @@ pub fn create_meta_auditor_for_region(
     cx: &Cx,
 ) -> Result<MetaAuditor, Error> {
     // Start with validation domain for most operations
-    let auditor = MetaAuditor::new(region_id, AuditDomain::Validation, cx.time().instant_now());
+    let auditor = MetaAuditor::new(region_id, AuditDomain::Validation, Instant::now());
 
     // Validate the auditor creation is authorized
     if auditor.is_operation_authorized(cx) {
         Ok(auditor)
     } else {
-        Err(Error::new(ErrorKind::PermissionDenied)
+        Err(Error::new(ErrorKind::AdmissionDenied)
             .with_message("Not authorized to create meta-auditor in this region"))
     }
 }
@@ -376,12 +384,13 @@ pub fn create_meta_auditor_for_region(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Budget, RegionId};
+    use crate::types::RegionId;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn meta_auditor_creation() {
         let region_id = RegionId::new_for_test(1, 0);
-        let now = Time::from_secs(1000);
+        let now = Instant::now();
 
         let auditor = MetaAuditor::new(region_id, AuditDomain::Collection, now);
 
@@ -394,7 +403,7 @@ mod tests {
     #[test]
     fn domain_isolation_enforcement() {
         let region_id = RegionId::new_for_test(1, 0);
-        let now = Time::from_secs(1000);
+        let now = Instant::now();
 
         let collection_auditor = MetaAuditor::new(region_id, AuditDomain::Collection, now);
         let validation_auditor = MetaAuditor::new(region_id, AuditDomain::Validation, now);
@@ -427,7 +436,7 @@ mod tests {
     fn constrained_context_creation() {
         let region_id = RegionId::new_for_test(1, 0);
         let target_region = RegionId::new_for_test(2, 0);
-        let now = Time::from_secs(1000);
+        let now = Instant::now();
 
         // Only Meta domain should be able to create constrained contexts
         let meta_auditor = MetaAuditor::new(region_id, AuditDomain::Meta, now);
@@ -450,7 +459,7 @@ mod tests {
     fn cross_region_escalation_detection() {
         let audit_region = RegionId::new_for_test(1, 0);
         let target_region = RegionId::new_for_test(2, 0);
-        let now = Time::from_secs(1000);
+        let now = Instant::now();
 
         // Collection domain should not be able to audit cross-region
         let collection_auditor = MetaAuditor::new(audit_region, AuditDomain::Collection, now);
@@ -464,7 +473,7 @@ mod tests {
     #[test]
     fn suspicious_findings_detection() {
         let region_id = RegionId::new_for_test(1, 0);
-        let now = Time::from_secs(1000);
+        let now = Instant::now();
 
         let auditor = MetaAuditor::new(region_id, AuditDomain::Meta, now);
         let suspicious = auditor.detect_suspicious_findings_changes();
