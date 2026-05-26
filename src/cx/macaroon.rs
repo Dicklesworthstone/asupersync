@@ -1286,14 +1286,22 @@ impl MacaroonToken {
         if pos + 2 > data.len() {
             return None;
         }
-        let caveat_count = u16::from_le_bytes(data[pos..pos + 2].try_into().ok()?) as usize;
+        let caveat_count_raw = u16::from_le_bytes(data[pos..pos + 2].try_into().ok()?) as usize;
         pos += 2;
 
-        // Prevent unbacked preallocation DoS: a caveat takes at least 3 bytes on the wire.
-        // Also enforce absolute maximum caveat count to prevent large allocations.
+        // SECURITY: Prevent unbounded memory DoS by enforcing hard limit on caveat count.
+        // Previous vulnerability: safe_capacity was bounded but loop ran for full caveat_count,
+        // allowing attackers to cause memory exhaustion via excessive iterations.
         const MAX_CAVEATS: usize = 64;
-        let safe_capacity = caveat_count.min((data.len() - pos) / 3).min(MAX_CAVEATS);
-        let mut caveats = Vec::with_capacity(safe_capacity);
+
+        // Reject macaroons with excessive caveat counts immediately
+        if caveat_count_raw > MAX_CAVEATS {
+            return None;
+        }
+
+        // Additional bounds check: verify sufficient data for minimum caveat size
+        let caveat_count = caveat_count_raw.min((data.len() - pos) / 3);
+        let mut caveats = Vec::with_capacity(caveat_count);
         for _ in 0..caveat_count {
             if pos >= data.len() {
                 return None;
