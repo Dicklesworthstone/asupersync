@@ -65,6 +65,7 @@ pub mod rfc6330_tests;
 pub mod runner;
 pub mod tests;
 pub mod traceability;
+pub mod atp_security;
 
 pub use bench::{
     BenchAllocSnapshot, BenchAllocStats, BenchCategory, BenchComparisonResult,
@@ -170,6 +171,34 @@ pub use traceability::{
     TraceabilityMatrixBuilder, TraceabilityScan, TraceabilityScanError, requirements_from_entries,
     scan_conformance_attributes,
 };
+pub use atp_security::{
+    AtpSecurityContract, atp_security_conformance_tests, atp_security_coverage_matrix,
+};
+
+// ============================================================================
+// Requirement Levels
+// ============================================================================
+
+/// RFC 2119 requirement levels for conformance testing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RequirementLevel {
+    /// MUST requirements - mandatory for conformance.
+    Must,
+    /// SHOULD requirements - recommended but not mandatory.
+    Should,
+    /// MAY requirements - optional features.
+    May,
+}
+
+impl fmt::Display for RequirementLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RequirementLevel::Must => write!(f, "MUST"),
+            RequirementLevel::Should => write!(f, "SHOULD"),
+            RequirementLevel::May => write!(f, "MAY"),
+        }
+    }
+}
 
 // ============================================================================
 // Test Result Types
@@ -266,6 +295,8 @@ pub enum TestCategory {
     Time,
     /// Cancellation mechanisms.
     Cancel,
+    /// Security and capability enforcement.
+    Security,
 }
 
 impl fmt::Display for TestCategory {
@@ -277,6 +308,7 @@ impl fmt::Display for TestCategory {
             TestCategory::Sync => write!(f, "sync"),
             TestCategory::Time => write!(f, "time"),
             TestCategory::Cancel => write!(f, "cancel"),
+            TestCategory::Security => write!(f, "security"),
         }
     }
 }
