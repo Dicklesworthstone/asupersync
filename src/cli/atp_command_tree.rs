@@ -65,6 +65,21 @@ pub enum AtpCommand {
 
     /// Configure ATP profiles and settings
     Config(AtpConfigArgs),
+
+    /// CI artifact management workflows
+    Ci(AtpCiArgs),
+
+    /// Dataset distribution and seeding workflows
+    Dataset(AtpDatasetArgs),
+
+    /// Fuzz corpus synchronization workflows
+    Fuzz(AtpFuzzArgs),
+
+    /// Release bundle distribution workflows
+    Release(AtpReleaseArgs),
+
+    /// Proof bundle archival workflows
+    Archive(AtpArchiveArgs),
 }
 
 /// ATP transfer profile for optimized defaults.
@@ -468,6 +483,547 @@ pub struct AtpConfigArgs {
     pub scope: String,
 }
 
+/// CI artifact management command arguments.
+#[derive(Args, Debug)]
+pub struct AtpCiArgs {
+    #[command(subcommand)]
+    pub action: AtpCiAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AtpCiAction {
+    /// Push build artifacts to artifact cache
+    Push(AtpCiPushArgs),
+    /// Pull artifacts from cache
+    Pull(AtpCiPullArgs),
+    /// Clean up old artifacts
+    Clean(AtpCiCleanArgs),
+    /// List cached artifacts
+    List(AtpCiListArgs),
+    /// Show artifact cache status
+    Status(AtpCiStatusArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AtpCiPushArgs {
+    /// Artifact paths to push
+    #[arg(value_name = "PATHS")]
+    pub paths: Vec<PathBuf>,
+    /// Build ID or CI run identifier
+    #[arg(long = "build-id")]
+    pub build_id: String,
+    /// Artifact tags for classification
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+    /// Retention policy (e.g., "7d", "30d", "permanent")
+    #[arg(long = "retention", default_value = "30d")]
+    pub retention: String,
+    /// Compression level (0-9)
+    #[arg(long = "compression", default_value = "6")]
+    pub compression_level: u8,
+    /// Enable deduplication across builds
+    #[arg(long = "dedupe", action = clap::ArgAction::SetTrue)]
+    pub dedupe: bool,
+    /// Capability scope for access control
+    #[arg(long = "scope")]
+    pub scope: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpCiPullArgs {
+    /// Build ID to pull artifacts from
+    #[arg(long = "build-id")]
+    pub build_id: Option<String>,
+    /// Artifact tags to filter by
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+    /// Destination directory
+    #[arg(long = "dest", default_value = ".")]
+    pub destination: PathBuf,
+    /// Only pull if newer than local copy
+    #[arg(long = "if-newer", action = clap::ArgAction::SetTrue)]
+    pub if_newer: bool,
+    /// Verify artifact integrity
+    #[arg(long = "verify", action = clap::ArgAction::SetTrue)]
+    pub verify: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpCiCleanArgs {
+    /// Clean artifacts older than duration
+    #[arg(long = "older-than")]
+    pub older_than: Option<String>,
+    /// Clean by build ID pattern
+    #[arg(long = "build-pattern")]
+    pub build_pattern: Option<String>,
+    /// Dry run mode
+    #[arg(long = "dry-run", action = clap::ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpCiListArgs {
+    /// Filter by tag
+    #[arg(long = "tag")]
+    pub tag: Option<String>,
+    /// Show only recent artifacts
+    #[arg(long = "recent", default_value = "7d")]
+    pub recent: String,
+    /// Show detailed information
+    #[arg(long = "verbose", action = clap::ArgAction::SetTrue)]
+    pub verbose: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpCiStatusArgs {
+    /// Show cache usage statistics
+    #[arg(long = "stats", action = clap::ArgAction::SetTrue)]
+    pub stats: bool,
+    /// Show cache health metrics
+    #[arg(long = "health", action = clap::ArgAction::SetTrue)]
+    pub health: bool,
+}
+
+/// Dataset distribution command arguments.
+#[derive(Args, Debug)]
+pub struct AtpDatasetArgs {
+    #[command(subcommand)]
+    pub action: AtpDatasetAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AtpDatasetAction {
+    /// Seed a dataset into the swarm network
+    Seed(AtpDatasetSeedArgs),
+    /// Get a dataset from the swarm
+    Get(AtpDatasetGetArgs),
+    /// List available datasets
+    List(AtpDatasetListArgs),
+    /// Show dataset status and seeding health
+    Status(AtpDatasetStatusArgs),
+    /// Pin a dataset for local availability
+    Pin(AtpDatasetPinArgs),
+    /// Unpin a dataset to allow garbage collection
+    Unpin(AtpDatasetUnpinArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AtpDatasetSeedArgs {
+    /// Dataset directory to seed
+    #[arg(value_name = "PATH")]
+    pub path: PathBuf,
+    /// Dataset identifier
+    #[arg(long = "id")]
+    pub dataset_id: String,
+    /// Dataset metadata (JSON)
+    #[arg(long = "metadata")]
+    pub metadata: Option<String>,
+    /// Chunk size optimized for dataset type
+    #[arg(long = "chunk-size")]
+    pub chunk_size: Option<u64>,
+    /// Enable versioning
+    #[arg(long = "version")]
+    pub version: Option<String>,
+    /// Swarm replication factor
+    #[arg(long = "replication", default_value = "3")]
+    pub replication_factor: u32,
+    /// Access control capability
+    #[arg(long = "access-scope")]
+    pub access_scope: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpDatasetGetArgs {
+    /// Dataset identifier
+    #[arg(value_name = "DATASET_ID")]
+    pub dataset_id: String,
+    /// Specific version to get
+    #[arg(long = "version")]
+    pub version: Option<String>,
+    /// Destination directory
+    #[arg(long = "dest")]
+    pub destination: Option<PathBuf>,
+    /// Partial download by pattern
+    #[arg(long = "pattern")]
+    pub pattern: Option<String>,
+    /// Resume incomplete download
+    #[arg(long = "resume", action = clap::ArgAction::SetTrue)]
+    pub resume: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpDatasetListArgs {
+    /// Filter by dataset pattern
+    #[arg(long = "pattern")]
+    pub pattern: Option<String>,
+    /// Show only locally available
+    #[arg(long = "local", action = clap::ArgAction::SetTrue)]
+    pub local_only: bool,
+    /// Include dataset metadata
+    #[arg(long = "metadata", action = clap::ArgAction::SetTrue)]
+    pub include_metadata: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpDatasetStatusArgs {
+    /// Specific dataset ID
+    #[arg(value_name = "DATASET_ID")]
+    pub dataset_id: Option<String>,
+    /// Show swarm health metrics
+    #[arg(long = "swarm", action = clap::ArgAction::SetTrue)]
+    pub swarm_health: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpDatasetPinArgs {
+    /// Dataset ID to pin
+    #[arg(value_name = "DATASET_ID")]
+    pub dataset_id: String,
+    /// Pin specific version
+    #[arg(long = "version")]
+    pub version: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpDatasetUnpinArgs {
+    /// Dataset ID to unpin
+    #[arg(value_name = "DATASET_ID")]
+    pub dataset_id: String,
+    /// Unpin specific version
+    #[arg(long = "version")]
+    pub version: Option<String>,
+}
+
+/// Fuzz corpus synchronization command arguments.
+#[derive(Args, Debug)]
+pub struct AtpFuzzArgs {
+    #[command(subcommand)]
+    pub action: AtpFuzzAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AtpFuzzAction {
+    /// Sync corpus to shared storage
+    Sync(AtpFuzzSyncArgs),
+    /// Pull latest corpus updates
+    Pull(AtpFuzzPullArgs),
+    /// Push local corpus changes
+    Push(AtpFuzzPushArgs),
+    /// Merge corpus from multiple fuzzers
+    Merge(AtpFuzzMergeArgs),
+    /// Minimize corpus while preserving coverage
+    Minimize(AtpFuzzMinimizeArgs),
+    /// Show corpus statistics
+    Stats(AtpFuzzStatsArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AtpFuzzSyncArgs {
+    /// Corpus directory path
+    #[arg(value_name = "CORPUS_PATH")]
+    pub corpus_path: PathBuf,
+    /// Fuzzer target identifier
+    #[arg(long = "target")]
+    pub target: String,
+    /// Sync strategy: push, pull, or bidirectional
+    #[arg(long = "strategy", default_value = "bidirectional")]
+    pub strategy: String,
+    /// Exclude patterns for test cases
+    #[arg(long = "exclude")]
+    pub exclude: Vec<String>,
+    /// Enable real-time synchronization
+    #[arg(long = "watch", action = clap::ArgAction::SetTrue)]
+    pub watch: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpFuzzPushArgs {
+    /// Local corpus directory
+    #[arg(value_name = "CORPUS_PATH")]
+    pub corpus_path: PathBuf,
+    /// Fuzzer target identifier
+    #[arg(long = "target")]
+    pub target: String,
+    /// Only push new/changed test cases
+    #[arg(long = "incremental", action = clap::ArgAction::SetTrue)]
+    pub incremental: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpFuzzPullArgs {
+    /// Local corpus directory
+    #[arg(value_name = "CORPUS_PATH")]
+    pub corpus_path: PathBuf,
+    /// Fuzzer target identifier
+    #[arg(long = "target")]
+    pub target: String,
+    /// Pull only test cases newer than timestamp
+    #[arg(long = "since")]
+    pub since: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpFuzzMergeArgs {
+    /// Source corpus directories to merge
+    #[arg(value_name = "SOURCES")]
+    pub sources: Vec<PathBuf>,
+    /// Output merged corpus directory
+    #[arg(long = "output")]
+    pub output: PathBuf,
+    /// Deduplication strategy
+    #[arg(long = "dedupe", default_value = "content-hash")]
+    pub dedupe_strategy: String,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpFuzzMinimizeArgs {
+    /// Corpus directory to minimize
+    #[arg(value_name = "CORPUS_PATH")]
+    pub corpus_path: PathBuf,
+    /// Fuzzer target for coverage analysis
+    #[arg(long = "target")]
+    pub target: String,
+    /// Coverage threshold to maintain
+    #[arg(long = "coverage-threshold", default_value = "0.95")]
+    pub coverage_threshold: f64,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpFuzzStatsArgs {
+    /// Corpus directory to analyze
+    #[arg(value_name = "CORPUS_PATH")]
+    pub corpus_path: Option<PathBuf>,
+    /// Show per-fuzzer statistics
+    #[arg(long = "per-target", action = clap::ArgAction::SetTrue)]
+    pub per_target: bool,
+    /// Include coverage analysis
+    #[arg(long = "coverage", action = clap::ArgAction::SetTrue)]
+    pub coverage: bool,
+}
+
+/// Release bundle distribution command arguments.
+#[derive(Args, Debug)]
+pub struct AtpReleaseArgs {
+    #[command(subcommand)]
+    pub action: AtpReleaseAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AtpReleaseAction {
+    /// Package and distribute a release bundle
+    Publish(AtpReleasePublishArgs),
+    /// Download and install a release
+    Install(AtpReleaseInstallArgs),
+    /// List available releases
+    List(AtpReleaseListArgs),
+    /// Show release information
+    Info(AtpReleaseInfoArgs),
+    /// Verify release bundle integrity
+    Verify(AtpReleaseVerifyArgs),
+    /// Create differential update package
+    Diff(AtpReleaseDiffArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AtpReleasePublishArgs {
+    /// Release artifacts directory
+    #[arg(value_name = "RELEASE_PATH")]
+    pub release_path: PathBuf,
+    /// Release version identifier
+    #[arg(long = "version")]
+    pub version: String,
+    /// Release channel (stable, beta, alpha)
+    #[arg(long = "channel", default_value = "stable")]
+    pub channel: String,
+    /// Release metadata file
+    #[arg(long = "metadata")]
+    pub metadata_file: Option<PathBuf>,
+    /// Code signing certificate
+    #[arg(long = "sign-cert")]
+    pub sign_cert: Option<PathBuf>,
+    /// Target platforms
+    #[arg(long = "platform")]
+    pub platforms: Vec<String>,
+    /// Minimum client version required
+    #[arg(long = "min-client")]
+    pub min_client_version: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpReleaseInstallArgs {
+    /// Release identifier to install
+    #[arg(value_name = "RELEASE_ID")]
+    pub release_id: String,
+    /// Specific version to install
+    #[arg(long = "version")]
+    pub version: Option<String>,
+    /// Installation directory
+    #[arg(long = "dest")]
+    pub destination: Option<PathBuf>,
+    /// Force reinstallation
+    #[arg(long = "force", action = clap::ArgAction::SetTrue)]
+    pub force: bool,
+    /// Verify signatures
+    #[arg(long = "verify", action = clap::ArgAction::SetTrue)]
+    pub verify: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpReleaseListArgs {
+    /// Filter by release pattern
+    #[arg(long = "pattern")]
+    pub pattern: Option<String>,
+    /// Channel to list
+    #[arg(long = "channel")]
+    pub channel: Option<String>,
+    /// Show only latest versions
+    #[arg(long = "latest", action = clap::ArgAction::SetTrue)]
+    pub latest_only: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpReleaseInfoArgs {
+    /// Release identifier
+    #[arg(value_name = "RELEASE_ID")]
+    pub release_id: String,
+    /// Specific version
+    #[arg(long = "version")]
+    pub version: Option<String>,
+    /// Show detailed manifest
+    #[arg(long = "manifest", action = clap::ArgAction::SetTrue)]
+    pub show_manifest: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpReleaseVerifyArgs {
+    /// Release bundle path
+    #[arg(value_name = "BUNDLE_PATH")]
+    pub bundle_path: PathBuf,
+    /// Trusted certificate authorities
+    #[arg(long = "ca-cert")]
+    pub ca_certs: Vec<PathBuf>,
+    /// Strict verification mode
+    #[arg(long = "strict", action = clap::ArgAction::SetTrue)]
+    pub strict: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpReleaseDiffArgs {
+    /// Previous version path
+    #[arg(long = "from")]
+    pub from_path: PathBuf,
+    /// New version path
+    #[arg(long = "to")]
+    pub to_path: PathBuf,
+    /// Output differential package
+    #[arg(long = "output")]
+    pub output: PathBuf,
+    /// Differential algorithm
+    #[arg(long = "algorithm", default_value = "bsdiff")]
+    pub algorithm: String,
+}
+
+/// Proof bundle archival command arguments.
+#[derive(Args, Debug)]
+pub struct AtpArchiveArgs {
+    #[command(subcommand)]
+    pub action: AtpArchiveAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AtpArchiveAction {
+    /// Store proof bundle in long-term archive
+    Store(AtpArchiveStoreArgs),
+    /// Retrieve proof bundle from archive
+    Retrieve(AtpArchiveRetrieveArgs),
+    /// List archived proof bundles
+    List(AtpArchiveListArgs),
+    /// Verify archived bundle integrity
+    Verify(AtpArchiveVerifyArgs),
+    /// Compact archive storage
+    Compact(AtpArchiveCompactArgs),
+    /// Export archive to external storage
+    Export(AtpArchiveExportArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct AtpArchiveStoreArgs {
+    /// Proof bundle file to archive
+    #[arg(value_name = "BUNDLE_PATH")]
+    pub bundle_path: PathBuf,
+    /// Archive identifier
+    #[arg(long = "id")]
+    pub archive_id: Option<String>,
+    /// Retention policy
+    #[arg(long = "retention")]
+    pub retention: Option<String>,
+    /// Archive tier (hot, warm, cold)
+    #[arg(long = "tier", default_value = "warm")]
+    pub tier: String,
+    /// Metadata tags
+    #[arg(long = "tag")]
+    pub tags: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpArchiveRetrieveArgs {
+    /// Archive identifier
+    #[arg(value_name = "ARCHIVE_ID")]
+    pub archive_id: String,
+    /// Output directory
+    #[arg(long = "dest")]
+    pub destination: Option<PathBuf>,
+    /// Retrieve to temporary location
+    #[arg(long = "temp", action = clap::ArgAction::SetTrue)]
+    pub temporary: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpArchiveListArgs {
+    /// Filter by tag
+    #[arg(long = "tag")]
+    pub tag: Option<String>,
+    /// Show only recent archives
+    #[arg(long = "since")]
+    pub since: Option<String>,
+    /// Archive tier filter
+    #[arg(long = "tier")]
+    pub tier: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpArchiveVerifyArgs {
+    /// Archive identifier to verify
+    #[arg(value_name = "ARCHIVE_ID")]
+    pub archive_id: String,
+    /// Deep verification mode
+    #[arg(long = "deep", action = clap::ArgAction::SetTrue)]
+    pub deep: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpArchiveCompactArgs {
+    /// Tier to compact
+    #[arg(long = "tier")]
+    pub tier: Option<String>,
+    /// Dry run mode
+    #[arg(long = "dry-run", action = clap::ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct AtpArchiveExportArgs {
+    /// Archive identifiers to export
+    #[arg(value_name = "ARCHIVE_IDS")]
+    pub archive_ids: Vec<String>,
+    /// Export destination
+    #[arg(long = "dest")]
+    pub destination: PathBuf,
+    /// Export format
+    #[arg(long = "format", default_value = "tar.gz")]
+    pub format: String,
+}
+
 /// Re-export ATP command args from the args module
 pub use super::args::{AtpDoctorArgs, AtpProofArgs, AtpReplayArgs, AtpVerifyArgs};
 
@@ -679,4 +1235,361 @@ pub struct AtpBenchSystemInfo {
     pub network_interface: String,
     /// Test timestamp.
     pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// JSON output schema for ATP CI commands.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpCiOutput {
+    /// CI operation result summary.
+    pub summary: AtpCiSummary,
+    /// Affected artifacts.
+    pub artifacts: Vec<AtpCiArtifact>,
+    /// Cache statistics.
+    pub cache_stats: Option<AtpCiCacheStats>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpCiSummary {
+    /// Operation performed.
+    pub operation: String,
+    /// Number of artifacts processed.
+    pub artifacts_processed: u32,
+    /// Total bytes transferred.
+    pub bytes_transferred: u64,
+    /// Operation duration in seconds.
+    pub duration_seconds: f64,
+    /// Success status.
+    pub success: bool,
+    /// Error message if failed.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpCiArtifact {
+    /// Artifact identifier.
+    pub id: String,
+    /// Build ID this artifact belongs to.
+    pub build_id: String,
+    /// Artifact path.
+    pub path: String,
+    /// Size in bytes.
+    pub size_bytes: u64,
+    /// Content hash for deduplication.
+    pub content_hash: String,
+    /// Artifact tags.
+    pub tags: Vec<String>,
+    /// Upload/modification timestamp.
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Expiration timestamp.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpCiCacheStats {
+    /// Total cache size in bytes.
+    pub total_size_bytes: u64,
+    /// Number of stored artifacts.
+    pub artifact_count: u32,
+    /// Cache hit ratio.
+    pub hit_ratio: f64,
+    /// Deduplication savings in bytes.
+    pub dedup_savings_bytes: u64,
+    /// Available cache space in bytes.
+    pub available_space_bytes: u64,
+}
+
+/// JSON output schema for ATP dataset commands.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpDatasetOutput {
+    /// Dataset operation result summary.
+    pub summary: AtpDatasetSummary,
+    /// Affected datasets.
+    pub datasets: Vec<AtpDatasetInfo>,
+    /// Swarm health metrics.
+    pub swarm_health: Option<AtpSwarmHealth>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpDatasetSummary {
+    /// Operation performed.
+    pub operation: String,
+    /// Number of datasets processed.
+    pub datasets_processed: u32,
+    /// Total data size in bytes.
+    pub total_size_bytes: u64,
+    /// Transfer rate in bytes per second.
+    pub transfer_rate_bps: Option<u64>,
+    /// Success status.
+    pub success: bool,
+    /// Error message if failed.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpDatasetInfo {
+    /// Dataset unique identifier.
+    pub id: String,
+    /// Dataset version.
+    pub version: Option<String>,
+    /// Dataset size in bytes.
+    pub size_bytes: u64,
+    /// Number of files.
+    pub file_count: u32,
+    /// Dataset metadata.
+    pub metadata: BTreeMap<String, serde_json::Value>,
+    /// Availability across swarm nodes.
+    pub availability: f64,
+    /// Replication factor.
+    pub replication_factor: u32,
+    /// Seeding health score.
+    pub health_score: f64,
+    /// Last update timestamp.
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    /// Local pin status.
+    pub pinned: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpSwarmHealth {
+    /// Number of active seeding nodes.
+    pub active_nodes: u32,
+    /// Average node uptime.
+    pub avg_uptime_hours: f64,
+    /// Network bandwidth utilization.
+    pub bandwidth_utilization: f64,
+    /// Chunk availability across nodes.
+    pub chunk_availability: f64,
+    /// Node geographic distribution.
+    pub geo_distribution: Vec<AtpNodeRegion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpNodeRegion {
+    /// Geographic region.
+    pub region: String,
+    /// Number of nodes in region.
+    pub node_count: u32,
+    /// Regional bandwidth capacity.
+    pub bandwidth_capacity_bps: u64,
+}
+
+/// JSON output schema for ATP fuzz commands.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpFuzzOutput {
+    /// Fuzz operation result summary.
+    pub summary: AtpFuzzSummary,
+    /// Corpus statistics.
+    pub corpus_stats: AtpFuzzCorpusStats,
+    /// Coverage analysis.
+    pub coverage: Option<AtpFuzzCoverage>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpFuzzSummary {
+    /// Operation performed.
+    pub operation: String,
+    /// Fuzzer target.
+    pub target: String,
+    /// Test cases processed.
+    pub test_cases_processed: u32,
+    /// Sync duration in seconds.
+    pub duration_seconds: f64,
+    /// Success status.
+    pub success: bool,
+    /// Error message if failed.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpFuzzCorpusStats {
+    /// Total test cases in corpus.
+    pub total_test_cases: u32,
+    /// New test cases added.
+    pub new_test_cases: u32,
+    /// Duplicate test cases removed.
+    pub duplicates_removed: u32,
+    /// Total corpus size in bytes.
+    pub total_size_bytes: u64,
+    /// Average test case size.
+    pub avg_case_size_bytes: u64,
+    /// Corpus growth rate (cases per day).
+    pub growth_rate: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpFuzzCoverage {
+    /// Coverage percentage achieved.
+    pub coverage_percent: f64,
+    /// Number of unique code paths.
+    pub unique_paths: u32,
+    /// Edge coverage count.
+    pub edge_coverage: u32,
+    /// Function coverage count.
+    pub function_coverage: u32,
+    /// Coverage map file path.
+    pub coverage_map_path: Option<String>,
+}
+
+/// JSON output schema for ATP release commands.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpReleaseOutput {
+    /// Release operation result summary.
+    pub summary: AtpReleaseSummary,
+    /// Release information.
+    pub releases: Vec<AtpReleaseInfo>,
+    /// Distribution metrics.
+    pub distribution_metrics: Option<AtpReleaseMetrics>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpReleaseSummary {
+    /// Operation performed.
+    pub operation: String,
+    /// Number of releases processed.
+    pub releases_processed: u32,
+    /// Total release size in bytes.
+    pub total_size_bytes: u64,
+    /// Distribution success rate.
+    pub success_rate: f64,
+    /// Operation success status.
+    pub success: bool,
+    /// Error message if failed.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpReleaseInfo {
+    /// Release identifier.
+    pub id: String,
+    /// Version string.
+    pub version: String,
+    /// Release channel.
+    pub channel: String,
+    /// Release size in bytes.
+    pub size_bytes: u64,
+    /// Supported platforms.
+    pub platforms: Vec<String>,
+    /// Release metadata.
+    pub metadata: BTreeMap<String, serde_json::Value>,
+    /// Code signature verification.
+    pub signature_valid: Option<bool>,
+    /// Download count.
+    pub download_count: u64,
+    /// Publication timestamp.
+    pub published_at: chrono::DateTime<chrono::Utc>,
+    /// Minimum client version.
+    pub min_client_version: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpReleaseMetrics {
+    /// Active downloads across all releases.
+    pub active_downloads: u32,
+    /// Total download bandwidth utilization.
+    pub bandwidth_utilization_bps: u64,
+    /// Geographic distribution of downloads.
+    pub geographic_distribution: Vec<AtpDownloadRegion>,
+    /// Platform distribution.
+    pub platform_distribution: BTreeMap<String, u32>,
+    /// Version adoption rates.
+    pub version_adoption: BTreeMap<String, f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpDownloadRegion {
+    /// Geographic region.
+    pub region: String,
+    /// Download count in region.
+    pub download_count: u64,
+    /// Regional bandwidth usage.
+    pub bandwidth_bps: u64,
+}
+
+/// JSON output schema for ATP archive commands.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpArchiveOutput {
+    /// Archive operation result summary.
+    pub summary: AtpArchiveSummary,
+    /// Archive entries.
+    pub archives: Vec<AtpArchiveEntry>,
+    /// Storage tier statistics.
+    pub storage_stats: Option<AtpArchiveStorageStats>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpArchiveSummary {
+    /// Operation performed.
+    pub operation: String,
+    /// Number of archives processed.
+    pub archives_processed: u32,
+    /// Total archived data in bytes.
+    pub total_size_bytes: u64,
+    /// Compression ratio achieved.
+    pub compression_ratio: f64,
+    /// Operation success status.
+    pub success: bool,
+    /// Error message if failed.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpArchiveEntry {
+    /// Archive unique identifier.
+    pub id: String,
+    /// Original bundle path.
+    pub bundle_path: String,
+    /// Archive size in bytes.
+    pub size_bytes: u64,
+    /// Compressed size in bytes.
+    pub compressed_size_bytes: u64,
+    /// Storage tier.
+    pub tier: String,
+    /// Archive tags.
+    pub tags: Vec<String>,
+    /// Checksum for integrity.
+    pub checksum: String,
+    /// Archive timestamp.
+    pub archived_at: chrono::DateTime<chrono::Utc>,
+    /// Expiration timestamp.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Last verification timestamp.
+    pub last_verified_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpArchiveStorageStats {
+    /// Storage usage per tier.
+    pub tier_usage: BTreeMap<String, AtpTierStats>,
+    /// Total archive count.
+    pub total_archives: u32,
+    /// Total storage used in bytes.
+    pub total_storage_bytes: u64,
+    /// Available storage in bytes.
+    pub available_storage_bytes: u64,
+    /// Integrity check status.
+    pub integrity_check_status: AtpIntegrityStatus,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpTierStats {
+    /// Number of archives in tier.
+    pub archive_count: u32,
+    /// Storage usage in bytes.
+    pub usage_bytes: u64,
+    /// Average access latency.
+    pub avg_access_latency_ms: f64,
+    /// Cost per GB per month.
+    pub cost_per_gb_month: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtpIntegrityStatus {
+    /// Last integrity check timestamp.
+    pub last_check_at: chrono::DateTime<chrono::Utc>,
+    /// Archives verified successfully.
+    pub verified_archives: u32,
+    /// Archives with integrity issues.
+    pub failed_archives: u32,
+    /// Pending verification count.
+    pub pending_verification: u32,
 }

@@ -61,6 +61,7 @@ pub mod args;
 pub mod atp_command_tree;
 pub mod atp_config;
 pub mod atp_user_journey;
+pub mod atp_workflows;
 pub mod completion;
 pub mod doctor;
 pub mod error;
@@ -76,11 +77,28 @@ pub use args::{
     AtpDoctorArgs, AtpProofArgs, AtpReplayArgs, AtpVerifyArgs, COMMON_ARGS_HELP, CommonArgs,
     parse_color_choice, parse_output_format,
 };
+pub use atp_command_tree::{
+    AtpArchiveAction, AtpArchiveArgs, AtpArchiveCompactArgs, AtpArchiveEntry, AtpArchiveExportArgs,
+    AtpArchiveListArgs, AtpArchiveOutput, AtpArchiveRetrieveArgs, AtpArchiveStorageStats,
+    AtpArchiveStoreArgs, AtpArchiveSummary, AtpArchiveVerifyArgs, AtpCiAction, AtpCiArgs,
+    AtpCiArtifact, AtpCiCacheStats, AtpCiCleanArgs, AtpCiListArgs, AtpCiOutput, AtpCiPullArgs,
+    AtpCiPushArgs, AtpCiStatusArgs, AtpCiSummary, AtpCommand, AtpConfig, AtpDatasetAction,
+    AtpDatasetArgs, AtpDatasetGetArgs, AtpDatasetInfo, AtpDatasetListArgs, AtpDatasetOutput,
+    AtpDatasetPinArgs, AtpDatasetSeedArgs, AtpDatasetStatusArgs, AtpDatasetSummary,
+    AtpDatasetUnpinArgs, AtpDownloadRegion, AtpFuzzAction, AtpFuzzArgs, AtpFuzzCorpusStats,
+    AtpFuzzCoverage, AtpFuzzMergeArgs, AtpFuzzMinimizeArgs, AtpFuzzOutput, AtpFuzzPullArgs,
+    AtpFuzzPushArgs, AtpFuzzStatsArgs, AtpFuzzSummary, AtpFuzzSyncArgs, AtpIntegrityStatus,
+    AtpNodeRegion, AtpProfile, AtpReleaseAction, AtpReleaseArgs, AtpReleaseDiffArgs,
+    AtpReleaseInfo, AtpReleaseInfoArgs, AtpReleaseInstallArgs, AtpReleaseListArgs,
+    AtpReleaseMetrics, AtpReleaseOutput, AtpReleasePublishArgs, AtpReleaseSummary,
+    AtpReleaseVerifyArgs, AtpSwarmHealth, AtpTierStats, ConflictStrategy,
+};
 pub use atp_user_journey::{
     ATP_USER_JOURNEY_CONTRACT_VERSION, ATP_USER_JOURNEY_REQUIRED_LOG_FIELDS,
     AtpUserJourneyContract, AtpUserJourneyScenario, atp_user_journey_contract,
     atp_user_journey_required_log_fields, atp_user_journey_scenarios,
 };
+pub use atp_workflows::AtpWorkflowCoordinator;
 pub use completion::{Completable, CompletionItem, Shell, generate_completions};
 pub use doctor::{
     AgentSwarmGitStatus, AgentSwarmProofFrontierItem, AgentSwarmRchStatus,
