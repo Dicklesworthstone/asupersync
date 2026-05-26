@@ -94,7 +94,7 @@ tls-webpki-roots = ["tls", "dep:webpki-roots"]
 # Enable CLI tooling (trace inspection).
 cli = ["dep:clap", "dep:time", "trace-compression", "dep:serde_yaml", "dep:chrono", "dep:env_logger", "config-file"]
 # Enable SQLite async wrapper with blocking pool integration.
-sqlite = ["dep:rusqlite"]
+sqlite = ["dep:rusqlite", "dep:sqlparser"]
 # Enable PostgreSQL async client with wire protocol.
 postgres = []
 # Enable MySQL async client with wire protocol.
@@ -231,6 +231,8 @@ env_logger = { version = "0.11", optional = true }
 serde_yaml = { version = "0.9", optional = true }
 # SQLite async wrapper - bundled by default for portability
 rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+# SQL parser for secure SQL surface validation (asupersync-dn5hn8)
+sqlparser = { version = "0.52", optional = true }
 # SHA-256 for HMAC-SHA256 (Macaroon caveat chains) and PostgreSQL SCRAM
 sha2 = "0.11"
 # HMAC for Macaroon capability token verification (bd-2lqyk.2)

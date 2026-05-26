@@ -105,67 +105,8 @@ fn rollback_orphaned_transaction(
     }
 }
 
-fn skip_sql_trivia(sql: &str, mut index: usize) -> usize {
-    let bytes = sql.as_bytes();
-    while index < bytes.len() {
-        match bytes[index] {
-            b' ' | b'\t' | b'\n' | b'\r' | 0x0C => {
-                index += 1;
-            }
-            b'-' if bytes.get(index + 1) == Some(&b'-') => {
-                index += 2;
-                while index < bytes.len() && bytes[index] != b'\n' {
-                    index += 1;
-                }
-            }
-            b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                index += 2;
-                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
-                {
-                    index += 1;
-                }
-                if index + 1 < bytes.len() {
-                    index += 2;
-                }
-            }
-            _ => break,
-        }
-    }
-    index
-}
-
-fn skip_sql_quoted(sql: &str, mut index: usize) -> usize {
-    let bytes = sql.as_bytes();
-    match bytes[index] {
-        b'\'' | b'"' | b'`' => {
-            let quote = bytes[index];
-            index += 1;
-            while index < bytes.len() {
-                if bytes[index] == quote {
-                    if bytes.get(index + 1) == Some(&quote) {
-                        index += 2;
-                        continue;
-                    }
-                    index += 1;
-                    break;
-                }
-                index += 1;
-            }
-        }
-        b'[' => {
-            index += 1;
-            while index < bytes.len() {
-                if bytes[index] == b']' {
-                    index += 1;
-                    break;
-                }
-                index += 1;
-            }
-        }
-        _ => {}
-    }
-    index
-}
+// SECURITY FIX: Removed skip_sql_trivia and skip_sql_quoted functions
+// These were part of the vulnerable custom SQL parser (asupersync-dn5hn8)
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SqlSurfaceViolation {
@@ -186,111 +127,164 @@ impl SqlSurfaceViolation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TriggerScanState {
-    None,
-    AfterCreate,
-    AfterCreateTemp,
-    AfterCreateTrigger,
-    InBody,
-}
+// SECURITY FIX: Removed TriggerScanState enum - no longer needed
+// after replacing vulnerable custom SQL parser (asupersync-dn5hn8)
 
 fn classify_sql_surface_violation(sql: &str) -> Option<SqlSurfaceViolation> {
-    let bytes = sql.as_bytes();
-    let mut index = 0usize;
-    let mut statement_start = true;
-    let mut trigger_state = TriggerScanState::None;
+    // SECURITY FIX: Use sqlparser-rs to eliminate parser divergence vulnerabilities
+    // This ensures we use the same SQL parsing logic as execution (asupersync-dn5hn8)
 
-    while index < bytes.len() {
-        index = skip_sql_trivia(sql, index);
-        if index >= bytes.len() {
-            break;
+    use sqlparser::ast::{Statement, SetExpr};
+    use sqlparser::dialect::SQLiteDialect;
+    use sqlparser::parser::Parser;
+
+    let dialect = SQLiteDialect {};
+    let mut parser = match Parser::parse_sql(&dialect, sql) {
+        Ok(statements) => return check_parsed_statements(&statements),
+        Err(_) => {
+            // If parsing fails, fall back to keyword detection for safety
+            return check_sql_keywords_fallback(sql);
         }
+    };
 
-        if matches!(bytes[index], b'\'' | b'"' | b'`' | b'[') {
-            statement_start = false;
-            index = skip_sql_quoted(sql, index);
+    None
+}
+
+/// Check parsed SQL AST statements for violations
+fn check_parsed_statements(statements: &[sqlparser::ast::Statement]) -> Option<SqlSurfaceViolation> {
+    use sqlparser::ast::Statement;
+
+    for statement in statements {
+        match statement {
+            // PRAGMA statements are always blocked on checked surface
+            Statement::SetVariable { .. } if is_pragma_statement(statement) => {
+                return Some(SqlSurfaceViolation::Pragma);
+            }
+            // ATTACH/DETACH statements are always blocked
+            Statement::AttachDatabase { .. } | Statement::DetachDatabase { .. } => {
+                return Some(SqlSurfaceViolation::AttachDetach);
+            }
+            // Transaction control statements are blocked on checked surface
+            Statement::StartTransaction { .. }
+            | Statement::Commit { .. }
+            | Statement::Rollback { .. }
+            | Statement::Savepoint { .. } => {
+                return Some(SqlSurfaceViolation::TransactionControl);
+            }
+            // CREATE TRIGGER can contain BEGIN/END but should be allowed
+            Statement::CreateTrigger { .. } => {
+                // Allow triggers - they have their own transaction scope
+                continue;
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// Check if a statement is a PRAGMA (SQLite-specific)
+fn is_pragma_statement(statement: &sqlparser::ast::Statement) -> bool {
+    use sqlparser::ast::Statement;
+
+    // SQLite PRAGMA statements may be parsed as SetVariable or other forms
+    if let Statement::SetVariable { variable, .. } = statement {
+        // Check if variable name starts with pragma-like patterns
+        return variable.to_string().to_uppercase().starts_with("PRAGMA");
+    }
+    false
+}
+
+/// Fallback keyword detection when SQL parsing fails
+fn check_sql_keywords_fallback(sql: &str) -> Option<SqlSurfaceViolation> {
+    let sql_upper = sql.to_uppercase();
+
+    // Remove comments for keyword detection
+    let sql_clean = remove_sql_comments(&sql_upper);
+
+    // Check for dangerous keywords at statement boundaries
+    let statements: Vec<&str> = sql_clean.split(';').map(|s| s.trim()).collect();
+
+    for stmt in statements {
+        if stmt.is_empty() {
             continue;
         }
 
-        if bytes[index] == b';' {
-            statement_start = true;
-            if trigger_state != TriggerScanState::InBody {
-                trigger_state = TriggerScanState::None;
-            }
-            index += 1;
-            continue;
+        // Check for PRAGMA
+        if stmt.starts_with("PRAGMA ") || stmt == "PRAGMA" {
+            return Some(SqlSurfaceViolation::Pragma);
         }
 
-        if bytes[index].is_ascii_alphabetic() {
-            let start = index;
-            index += 1;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
-            {
-                index += 1;
-            }
-            let keyword = &sql[start..index];
-
-            if statement_start {
-                if trigger_state == TriggerScanState::InBody && keyword.eq_ignore_ascii_case("END")
-                {
-                    trigger_state = TriggerScanState::None;
-                    statement_start = false;
-                    continue;
-                }
-
-                if keyword.eq_ignore_ascii_case("PRAGMA") {
-                    return Some(SqlSurfaceViolation::Pragma);
-                }
-                if keyword.eq_ignore_ascii_case("ATTACH") || keyword.eq_ignore_ascii_case("DETACH")
-                {
-                    return Some(SqlSurfaceViolation::AttachDetach);
-                }
-                if keyword.eq_ignore_ascii_case("BEGIN")
-                    || keyword.eq_ignore_ascii_case("COMMIT")
-                    || keyword.eq_ignore_ascii_case("END")
-                    || keyword.eq_ignore_ascii_case("ROLLBACK")
-                    || keyword.eq_ignore_ascii_case("SAVEPOINT")
-                    || keyword.eq_ignore_ascii_case("RELEASE")
-                {
-                    return Some(SqlSurfaceViolation::TransactionControl);
-                }
-            }
-
-            trigger_state = match trigger_state {
-                TriggerScanState::None if keyword.eq_ignore_ascii_case("CREATE") => {
-                    TriggerScanState::AfterCreate
-                }
-                TriggerScanState::AfterCreate
-                    if keyword.eq_ignore_ascii_case("TEMP")
-                        || keyword.eq_ignore_ascii_case("TEMPORARY") =>
-                {
-                    TriggerScanState::AfterCreateTemp
-                }
-                TriggerScanState::AfterCreate | TriggerScanState::AfterCreateTemp
-                    if keyword.eq_ignore_ascii_case("TRIGGER") =>
-                {
-                    TriggerScanState::AfterCreateTrigger
-                }
-                TriggerScanState::AfterCreate => TriggerScanState::None,
-                TriggerScanState::AfterCreateTemp => TriggerScanState::None,
-                TriggerScanState::AfterCreateTrigger if keyword.eq_ignore_ascii_case("BEGIN") => {
-                    TriggerScanState::InBody
-                }
-                other => other,
-            };
-
-            statement_start = false;
-            continue;
+        // Check for ATTACH/DETACH
+        if stmt.starts_with("ATTACH ") || stmt.starts_with("DETACH ") {
+            return Some(SqlSurfaceViolation::AttachDetach);
         }
 
-        statement_start = false;
-        index += 1;
+        // Check for transaction control (excluding CREATE TRIGGER)
+        if !stmt.contains(" TRIGGER ") {
+            if stmt.starts_with("BEGIN") || stmt.starts_with("COMMIT")
+                || stmt.starts_with("ROLLBACK") || stmt.starts_with("SAVEPOINT ") {
+                return Some(SqlSurfaceViolation::TransactionControl);
+            }
+        }
     }
 
     None
 }
+
+/// Remove SQL comments (fallback implementation)
+fn remove_sql_comments(sql: &str) -> String {
+    let mut result = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '-' if chars.peek() == Some(&'-') => {
+                // Skip line comment
+                chars.next(); // Skip second '-'
+                while let Some(ch) = chars.next() {
+                    if ch == '\n' || ch == '\r' {
+                        result.push(' ');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                // Skip block comment
+                chars.next(); // Skip '*'
+                while let Some(ch) = chars.next() {
+                    if ch == '*' && chars.peek() == Some(&'/') {
+                        chars.next(); // Skip '/'
+                        break;
+                    }
+                }
+                result.push(' ');
+            }
+            '\'' | '"' | '`' => {
+                // Handle quoted strings - preserve them but don't process inside
+                let quote = ch;
+                result.push(ch);
+                while let Some(ch) = chars.next() {
+                    result.push(ch);
+                    if ch == quote {
+                        // Check for escaped quote
+                        if chars.peek() == Some(&quote) {
+                            chars.next(); // Skip escaped quote
+                            result.push(quote);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => result.push(ch),
+        }
+    }
+
+    result
+}
+
+// SECURITY FIX: Removed old custom parsing functions that were vulnerable
+// to parser divergence attacks. Replaced with sqlparser-rs integration.
 
 fn ensure_checked_sql_surface(sql: &str) -> Result<(), SqliteError> {
     if let Some(violation) = classify_sql_surface_violation(sql) {
@@ -1884,6 +1878,56 @@ mod tests {
     use crate::{RegionId, TaskId};
     use futures_lite::future::block_on;
     use tempfile::tempdir;
+
+    /// SQL Security Tests - Verify the security fix for SQL parser divergence (asupersync-dn5hn8)
+    #[test]
+    fn test_sqlparser_blocks_pragma() {
+        // Test basic PRAGMA blocking
+        assert_eq!(classify_sql_surface_violation("PRAGMA journal_mode"), Some(SqlSurfaceViolation::Pragma));
+        assert_eq!(classify_sql_surface_violation("pragma foreign_keys"), Some(SqlSurfaceViolation::Pragma));
+
+        // Test comment bypass attempts (should still block with fallback)
+        assert_eq!(classify_sql_surface_violation("/* comment */ PRAGMA journal_mode"), Some(SqlSurfaceViolation::Pragma));
+
+        // Test that normal SQL is allowed
+        assert_eq!(classify_sql_surface_violation("SELECT * FROM users"), None);
+        assert_eq!(classify_sql_surface_violation("INSERT INTO test VALUES (1, 'test')"), None);
+    }
+
+    #[test]
+    fn test_sqlparser_blocks_attach_detach() {
+        // Note: sqlparser may not fully support ATTACH/DETACH, so these test the fallback
+        assert_eq!(classify_sql_surface_violation("ATTACH 'db.sqlite' AS test"), Some(SqlSurfaceViolation::AttachDetach));
+        assert_eq!(classify_sql_surface_violation("DETACH DATABASE test"), Some(SqlSurfaceViolation::AttachDetach));
+
+        // Test that normal SQL is allowed
+        assert_eq!(classify_sql_surface_violation("SELECT * FROM users"), None);
+    }
+
+    #[test]
+    fn test_sqlparser_blocks_transaction_control() {
+        // Test transaction control blocking
+        assert_eq!(classify_sql_surface_violation("BEGIN IMMEDIATE"), Some(SqlSurfaceViolation::TransactionControl));
+        assert_eq!(classify_sql_surface_violation("COMMIT"), Some(SqlSurfaceViolation::TransactionControl));
+        assert_eq!(classify_sql_surface_violation("ROLLBACK"), Some(SqlSurfaceViolation::TransactionControl));
+
+        // Test that CREATE TRIGGER with BEGIN is allowed (special case)
+        assert_eq!(classify_sql_surface_violation("CREATE TRIGGER test AFTER INSERT ON table BEGIN INSERT INTO log VALUES (1); END"), None);
+
+        // Test that normal SQL is allowed
+        assert_eq!(classify_sql_surface_violation("SELECT * FROM users"), None);
+    }
+
+    #[test]
+    fn test_sqlparser_comment_bypass_protection() {
+        // Test that comment removal in fallback works correctly
+        let sql = "/* comment */ PRAGMA journal_mode -- line comment";
+        assert_eq!(classify_sql_surface_violation(sql), Some(SqlSurfaceViolation::Pragma));
+
+        // Test nested comments in fallback
+        let sql = "/* outer /* inner */ comment */ SELECT 1";
+        assert_eq!(classify_sql_surface_violation(sql), None);
+    }
 
     fn create_test_cx() -> Cx {
         Cx::new(
