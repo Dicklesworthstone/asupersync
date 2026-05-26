@@ -3778,62 +3778,64 @@ impl RuntimeState {
             match state {
                 crate::record::region::RegionState::Closing
                 | crate::record::region::RegionState::Draining => {
-                    // Transition to Finalizing only once child regions and tasks are gone.
-                    // KNOWN RACE CONDITION (TOCTOU): Between checking child/task counts and
-                    // calling begin_finalize(), another thread could add children/tasks or
-                    // modify region state. This could lead to invalid state transitions.
-                    // TODO: Hold region lock across entire check-and-transition operation.
+                    // Fixed TOCTOU race: Let begin_finalize() do atomic check-and-transition
+                    // instead of separate count checks that could become stale.
                     let transition_to_finalizing = {
                         let Some(region) = self.regions.get(region_id.arena_index()) else {
                             break;
                         };
-                        let no_children = region.child_count() == 0;
-                        let no_tasks = region.task_count() == 0;
-                        if no_children && no_tasks {
-                            // Validate protocol transition to Finalizing
-                            let context = RegionContext {
-                                region_id,
-                                parent_region: region.parent,
-                                created_at: region.created_at,
-                                validation_level: CancelValidationLevel::Basic,
-                            };
-                            let validation_result = self.validate_region_protocol_transition(
-                                region_id,
-                                RegionEvent::RequestClose, // Use RequestClose for finalization
-                                &context,
-                            );
-                            if matches!(
-                                validation_result,
-                                TransitionResult::Invalid { .. }
-                                    | TransitionResult::InvariantViolation { .. }
-                            ) {
-                                log_cancel_protocol_violation(
-                                    "region finalize transition",
-                                    &validation_result,
-                                );
-                                // Continue with transition but log violation
-                            }
 
-                            let transition = {
-                                let old_state = region.state();
-                                if region.begin_finalize() {
-                                    Some((old_state, region.state()))
-                                } else {
-                                    None
-                                }
-                            };
-                            if let Some((old_state, new_state)) = transition {
-                                self.note_read_biased_region_snapshot_transition(
-                                    old_state, new_state,
-                                );
-                                true
+                        // Validate protocol transition to Finalizing
+                        let context = RegionContext {
+                            region_id,
+                            parent_region: region.parent,
+                            created_at: region.created_at,
+                            validation_level: CancelValidationLevel::Basic,
+                        };
+                        let validation_result = self.validate_region_protocol_transition(
+                            region_id,
+                            RegionEvent::RequestClose, // Use RequestClose for finalization
+                            &context,
+                        );
+                        if matches!(
+                            validation_result,
+                            TransitionResult::Invalid { .. }
+                                | TransitionResult::InvariantViolation { .. }
+                        ) {
+                            log_cancel_protocol_violation(
+                                "region finalize transition",
+                                &validation_result,
+                            );
+                            // Continue with transition but log violation
+                        }
+
+                        // Atomic check-and-transition: begin_finalize() internally validates
+                        // that child_count() == 0 && task_count() == 0 under proper locking
+                        let transition = {
+                            let old_state = region.state();
+                            if region.begin_finalize() {
+                                Some((old_state, region.state()))
                             } else {
-                                false
+                                None
                             }
+                        };
+                        if let Some((old_state, new_state)) = transition {
+                            self.note_read_biased_region_snapshot_transition(
+                                old_state, new_state,
+                            );
+                            true
                         } else {
-                            if !no_children
-                                && region.state() == crate::record::region::RegionState::Closing
-                            {
+                            false
+                        }
+                    };
+
+                    // Check if region needs to transition to Draining (has children but is Closing)
+                    let Some(region) = self.regions.get(region_id.arena_index()) else {
+                        break;
+                    };
+                    if region.child_count() > 0
+                        && region.state() == crate::record::region::RegionState::Closing
+                    {
                                 // Validate protocol transition to Draining
                                 let context = RegionContext {
                                     region_id,
@@ -3871,9 +3873,6 @@ impl RuntimeState {
                                     super::epoch_tracker::ModuleId::RegionTable,
                                 );
                             }
-                            false
-                        }
-                    };
 
                     if transition_to_finalizing {
                         self.notify_runtime_epoch_advance(
