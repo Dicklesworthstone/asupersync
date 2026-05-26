@@ -8,6 +8,7 @@ use crate::record::region::RegionState;
 use crate::security::{AuthenticationTag, AuthKey};
 use crate::types::{RegionId, TaskId, Time};
 use crate::util::ArenaIndex;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 /// Magic bytes for snapshot binary format.
@@ -16,13 +17,41 @@ const SNAP_MAGIC: &[u8; 4] = b"SNAP";
 /// Current binary format version.
 const SNAP_VERSION: u8 = 2;
 
-/// FNV-1a offset basis (64-bit).
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-/// FNV-1a prime (64-bit).
-const FNV_PRIME: u64 = 0x0100_0000_01b3;
 
 /// Domain separator for snapshot authentication tags.
 const SNAPSHOT_AUTH_DOMAIN: &[u8] = b"asupersync::distributed::RegionSnapshot::v2";
+
+/// Cryptographic content hash for snapshot integrity and deduplication.
+///
+/// Uses SHA-256 to prevent collision attacks that could allow malicious
+/// snapshots to appear as legitimate duplicates during CRDT merge operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContentHash([u8; 32]);
+
+impl ContentHash {
+    /// Returns the raw 32-byte hash value.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Returns the hash as a 64-character lowercase hex string.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        let mut out = String::with_capacity(64);
+        use std::fmt::Write;
+        for byte in &self.0 {
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    }
+}
+
+impl std::fmt::Display for ContentHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_hex())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // TaskState (simplified for snapshots)
@@ -562,9 +591,16 @@ impl RegionSnapshot {
     ///
     /// Uses FNV-1a on the serialized bytes.
     #[must_use]
-    pub fn content_hash(&self) -> u64 {
+    /// Computes a cryptographic SHA-256 hash of the snapshot content.
+    ///
+    /// This prevents collision attacks where malicious snapshots could be
+    /// crafted to have the same hash as legitimate snapshots, bypassing
+    /// deduplication and allowing injection of forged region state.
+    pub fn content_hash(&self) -> ContentHash {
         let bytes = self.to_bytes();
-        fnv1a_64(&bytes)
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        ContentHash(hasher.finalize().into())
     }
 
     /// Merges two snapshots for the same region using CRDT-style join semantics.
@@ -901,15 +937,6 @@ fn write_optional_string(buf: &mut Vec<u8>, value: Option<&str>) {
     }
 }
 
-/// FNV-1a 64-bit hash.
-fn fnv1a_64(data: &[u8]) -> u64 {
-    let mut hash = FNV_OFFSET;
-    for &byte in data {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
 
 // ---------------------------------------------------------------------------
 // Deserialization cursor
@@ -1112,7 +1139,7 @@ mod tests {
         let payload = json!({
             "format_version": SNAP_VERSION,
             "byte_len": bytes.len(),
-            "content_hash_hex": format!("{:016x}", snapshot.content_hash()),
+            "content_hash_hex": snapshot.content_hash().to_hex(),
             "region_id": region_id_json(snapshot.region_id),
             "state": format!("{:?}", snapshot.state),
             "timestamp_nanos": snapshot.timestamp.as_nanos(),
