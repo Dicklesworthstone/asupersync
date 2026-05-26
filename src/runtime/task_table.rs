@@ -568,6 +568,10 @@ impl TaskTable {
     pub fn get_stored_future(&mut self, task_id: TaskId) -> Option<&mut StoredTask> {
         self.tasks.get(task_id.arena_index())?;
         let slot = task_id.arena_index().index() as usize;
+        // SAFETY: Bounds check prevents memory corruption from crafted task IDs
+        if slot >= self.stored_futures.len() {
+            return None;
+        }
         self.stored_futures.get_mut(slot)?.as_mut()
     }
 
@@ -578,6 +582,10 @@ impl TaskTable {
     pub fn remove_stored_future(&mut self, task_id: TaskId) -> Option<StoredTask> {
         self.tasks.get(task_id.arena_index())?;
         let slot = task_id.arena_index().index() as usize;
+        // SAFETY: Bounds check prevents memory corruption from crafted task IDs
+        if slot >= self.stored_futures.len() {
+            return None;
+        }
         let taken = self.stored_futures.get_mut(slot)?.take();
         if taken.is_some() {
             self.stored_future_len -= 1;
