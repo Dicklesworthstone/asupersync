@@ -234,6 +234,23 @@ impl ReflectionService {
     /// * `Anonymous` → `Ok(())`.
     #[allow(dead_code)]
     fn check_auth(&self, method: &str) -> Result<(), Status> {
+        // SECURITY FIX (br-asupersync-tlp8m9): Require REMOTE capability for all reflection access.
+        // Reflection exposes service schemas and method signatures, which aids attackers in
+        // understanding API surfaces. REMOTE capability is required since reflection is
+        // primarily used by external debugging tools (grpcurl, grpcui, etc.).
+        let Some(cx) = Cx::current() else {
+            return Err(Status::unauthenticated(
+                "reflection: no Cx in scope for capability check",
+            ));
+        };
+
+        if !cx.has_remote() {
+            return Err(Status::permission_denied(format!(
+                "reflection.{method}: requires REMOTE capability — \
+                reflection access is restricted to contexts with remote debugging privileges"
+            )));
+        }
+
         match &self.auth {
             ReflectionAuthMode::Locked => Err(Status::permission_denied(format!(
                 "reflection.{method}: service is in Locked mode — call \
@@ -241,11 +258,6 @@ impl ReflectionService {
                  dev/test before serving reflection RPCs"
             ))),
             ReflectionAuthMode::Required(auth) => {
-                let Some(cx) = Cx::current() else {
-                    return Err(Status::unauthenticated(
-                        "reflection: auth callback installed but no Cx in scope",
-                    ));
-                };
                 auth(&cx, method)
             }
             ReflectionAuthMode::Anonymous => Ok(()),
@@ -722,5 +734,115 @@ mod tests {
             .with_auth(|_cx, _method| Ok(()));
         assert!(reflection.auth_installed());
         crate::test_complete!("mi4hzh_with_auth_reports_installed");
+    }
+
+    // =====================================================================
+    // br-asupersync-tlp8m9: capability-based reflection access control
+    // =====================================================================
+
+    #[test]
+    fn tlp8m9_reflection_requires_remote_capability() {
+        init_test("tlp8m9_reflection_requires_remote_capability");
+
+        // Create a reflection service in anonymous mode (would normally allow access)
+        let reflection = ReflectionService::new()
+            .register_for_test()
+            .allow_anonymous();
+
+        // Test without REMOTE capability using a restricted context
+        let restricted_cx = crate::cx::Cx::for_testing_no_caps();
+        let result = crate::cx::Cx::run_with_current(restricted_cx, || {
+            reflection.list_services()
+        });
+
+        // Should be denied due to missing REMOTE capability
+        assert!(result.is_err(), "list_services should fail without REMOTE capability");
+        if let Err(status) = result {
+            assert_eq!(status.code(), super::super::status::Code::PermissionDenied);
+            assert!(
+                status.message().contains("requires REMOTE capability"),
+                "Error message should mention REMOTE capability: {}",
+                status.message()
+            );
+        }
+
+        crate::test_complete!("tlp8m9_reflection_requires_remote_capability");
+    }
+
+    #[test]
+    fn tlp8m9_reflection_allows_with_remote_capability() {
+        init_test("tlp8m9_reflection_allows_with_remote_capability");
+
+        // Create a reflection service in anonymous mode
+        let reflection = ReflectionService::new()
+            .register_for_test()
+            .allow_anonymous();
+
+        // Test with REMOTE capability using full testing context
+        let full_cx = crate::cx::Cx::for_testing();
+        let result = crate::cx::Cx::run_with_current(full_cx, || {
+            reflection.list_services()
+        });
+
+        // Should succeed with REMOTE capability
+        assert!(result.is_ok(), "list_services should succeed with REMOTE capability");
+
+        crate::test_complete!("tlp8m9_reflection_allows_with_remote_capability");
+    }
+
+    #[test]
+    fn tlp8m9_capability_check_applies_to_all_methods() {
+        init_test("tlp8m9_capability_check_applies_to_all_methods");
+
+        let reflection = ReflectionService::new()
+            .register_for_test()
+            .allow_anonymous();
+
+        let restricted_cx = crate::cx::Cx::for_testing_no_caps();
+
+        // Test that capability check applies to both list_services and describe_service
+        let list_result = crate::cx::Cx::run_with_current(restricted_cx.clone(), || {
+            reflection.list_services()
+        });
+        let describe_result = crate::cx::Cx::run_with_current(restricted_cx, || {
+            reflection.describe_service("test.TestService")
+        });
+
+        // Both should be denied
+        assert!(list_result.is_err(), "list_services should fail without REMOTE");
+        assert!(describe_result.is_err(), "describe_service should fail without REMOTE");
+
+        crate::test_complete!("tlp8m9_capability_check_applies_to_all_methods");
+    }
+
+    #[test]
+    fn tlp8m9_capability_check_with_auth_callback() {
+        init_test("tlp8m9_capability_check_with_auth_callback");
+
+        // Create reflection service with auth callback that would normally deny
+        let reflection = ReflectionService::new()
+            .register_for_test()
+            .with_auth(|_cx, method| {
+                Err(super::super::status::Status::permission_denied(format!("denied: {method}")))
+            });
+
+        let restricted_cx = crate::cx::Cx::for_testing_no_caps();
+
+        // Even though auth callback would deny, capability check should happen first
+        let result = crate::cx::Cx::run_with_current(restricted_cx, || {
+            reflection.list_services()
+        });
+
+        assert!(result.is_err());
+        if let Err(status) = result {
+            // Should get capability error, not auth callback error
+            assert!(
+                status.message().contains("requires REMOTE capability"),
+                "Should get capability error, not auth callback error: {}",
+                status.message()
+            );
+        }
+
+        crate::test_complete!("tlp8m9_capability_check_with_auth_callback");
     }
 }

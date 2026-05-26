@@ -973,14 +973,74 @@ impl ServerBuilder {
         self
     }
 
-    /// Enable the built-in reflection service.
+    /// Enable the built-in reflection service with authentication callback.
+    ///
+    /// SECURITY: This method requires an explicit authentication callback to gate
+    /// reflection access. The callback receives the current Cx and method name
+    /// and should return Ok(()) to allow access or Err(Status) to deny.
     ///
     /// The reflection registry captures descriptors for all currently
     /// registered services and continues to track additional services added to
     /// this builder after reflection is enabled.
+    ///
+    /// For development/testing without authentication, use [`Self::enable_reflection_anonymous`].
+    #[must_use]
+    pub fn enable_reflection_with_auth<F>(mut self, auth_callback: F) -> Self
+    where
+        F: Fn(&Cx, &str) -> Result<(), Status> + Send + Sync + 'static,
+    {
+        let reflection = self.reflection.take().unwrap_or_default().with_auth(auth_callback);
+        for service in self.services.values() {
+            if service.descriptor().full_name() != ReflectionService::NAME {
+                reflection.register_handler(service.as_ref());
+            }
+        }
+        self.services.insert(
+            ReflectionService::NAME.to_string(),
+            Arc::new(reflection.clone()),
+        );
+        self.reflection = Some(reflection);
+        self
+    }
+
+    /// Enable the built-in reflection service for development/testing WITHOUT authentication.
+    ///
+    /// SECURITY WARNING: This method explicitly disables authentication for reflection
+    /// endpoints, exposing complete service schemas to any client. Only use this for
+    /// development, testing, or when reflection access is protected by other means
+    /// (e.g., network segmentation).
+    ///
+    /// For production deployments, use [`Self::enable_reflection_with_auth`] instead.
+    #[must_use]
+    pub fn enable_reflection_anonymous(mut self) -> Self {
+        let reflection = self.reflection.take().unwrap_or_default().allow_anonymous();
+        for service in self.services.values() {
+            if service.descriptor().full_name() != ReflectionService::NAME {
+                reflection.register_handler(service.as_ref());
+            }
+        }
+        self.services.insert(
+            ReflectionService::NAME.to_string(),
+            Arc::new(reflection.clone()),
+        );
+        self.reflection = Some(reflection);
+        self
+    }
+
+    /// Enable the built-in reflection service (DEPRECATED).
+    ///
+    /// DEPRECATED: This method creates a reflection service in Locked mode that
+    /// rejects all requests. Use `enable_reflection_with_auth()` for production
+    /// or `enable_reflection_anonymous()` for development/testing.
+    ///
+    /// This method will be removed in a future version.
+    #[deprecated(
+        since = "0.3.3",
+        note = "Use enable_reflection_with_auth() or enable_reflection_anonymous() to make auth choice explicit"
+    )]
     #[must_use]
     pub fn enable_reflection(mut self) -> Self {
-        let reflection = self.reflection.take().unwrap_or_default();
+        let reflection = self.reflection.take().unwrap_or_default(); // Defaults to Locked mode
         for service in self.services.values() {
             if service.descriptor().full_name() != ReflectionService::NAME {
                 reflection.register_handler(service.as_ref());
@@ -2075,11 +2135,11 @@ mod tests {
     }
 
     #[test]
-    fn test_server_builder_enable_reflection() {
-        init_test("test_server_builder_enable_reflection");
+    fn test_server_builder_enable_reflection_anonymous() {
+        init_test("test_server_builder_enable_reflection_anonymous");
         let server = Server::builder()
             .add_service(TestService)
-            .enable_reflection()
+            .enable_reflection_anonymous()
             .build();
 
         let has_reflection = server.get_service(ReflectionService::NAME).is_some();
@@ -2089,14 +2149,32 @@ mod tests {
         crate::assert_with_log!(has_test, "test service retained", true, has_test);
         let has_refl = names.contains(&ReflectionService::NAME);
         crate::assert_with_log!(has_refl, "reflection service listed", true, has_refl);
-        crate::test_complete!("test_server_builder_enable_reflection");
+        crate::test_complete!("test_server_builder_enable_reflection_anonymous");
+    }
+
+    #[test]
+    fn test_server_builder_enable_reflection_with_auth() {
+        init_test("test_server_builder_enable_reflection_with_auth");
+        let server = Server::builder()
+            .add_service(TestService)
+            .enable_reflection_with_auth(|_cx, _method| Ok(()))
+            .build();
+
+        let has_reflection = server.get_service(ReflectionService::NAME).is_some();
+        crate::assert_with_log!(has_reflection, "reflection exists", true, has_reflection);
+        let names = server.service_names();
+        let has_test = names.contains(&"test.TestService");
+        crate::assert_with_log!(has_test, "test service retained", true, has_test);
+        let has_refl = names.contains(&ReflectionService::NAME);
+        crate::assert_with_log!(has_refl, "reflection service listed", true, has_refl);
+        crate::test_complete!("test_server_builder_enable_reflection_with_auth");
     }
 
     #[test]
     fn test_server_builder_reflection_tracks_late_registration() {
         init_test("test_server_builder_reflection_tracks_late_registration");
         let server = Server::builder()
-            .enable_reflection()
+            .enable_reflection_anonymous() // Updated to use explicit method
             .add_service(TestService)
             .build();
 
@@ -2105,6 +2183,84 @@ mod tests {
         let has_service = server.get_service("test.TestService").is_some();
         crate::assert_with_log!(has_service, "late service exists", true, has_service);
         crate::test_complete!("test_server_builder_reflection_tracks_late_registration");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_deprecated_enable_reflection_defaults_to_locked() {
+        init_test("test_deprecated_enable_reflection_defaults_to_locked");
+        let server = Server::builder()
+            .add_service(TestService)
+            .enable_reflection() // Deprecated method
+            .build();
+
+        // Verify reflection service is registered
+        let has_reflection = server.get_service(ReflectionService::NAME).is_some();
+        crate::assert_with_log!(has_reflection, "reflection exists", true, has_reflection);
+
+        // Test that a default (locked) reflection service rejects requests
+        let locked_reflection = ReflectionService::new(); // Default is Locked mode
+        let result = locked_reflection.list_services();
+        crate::assert_with_log!(result.is_err(), "locked reflection should fail", true, result.is_err());
+
+        if let Err(status) = result {
+            let is_permission_denied = status.code() == super::super::status::Code::PermissionDenied;
+            crate::assert_with_log!(is_permission_denied, "should be PermissionDenied", true, is_permission_denied);
+            let message_contains_with_auth = status.message().contains(".with_auth");
+            let message_contains_allow_anonymous = status.message().contains(".allow_anonymous");
+            crate::assert_with_log!(
+                message_contains_with_auth && message_contains_allow_anonymous,
+                "error should mention both auth options",
+                true,
+                message_contains_with_auth && message_contains_allow_anonymous
+            );
+        }
+
+        crate::test_complete!("test_deprecated_enable_reflection_defaults_to_locked");
+    }
+
+    #[test]
+    fn test_reflection_auth_callback_enforcement() {
+        init_test("test_reflection_auth_callback_enforcement");
+
+        // Test with auth callback that denies access
+        let reflection = ReflectionService::new()
+            .with_auth(|_cx, method| {
+                Err(Status::permission_denied(format!("denied: {method}")))
+            });
+
+        // Should be denied by auth callback
+        let result = reflection.list_services();
+        crate::assert_with_log!(result.is_err(), "auth callback should deny", true, result.is_err());
+
+        if let Err(status) = result {
+            let is_permission_denied = status.code() == super::super::status::Code::PermissionDenied;
+            crate::assert_with_log!(is_permission_denied, "should be PermissionDenied", true, is_permission_denied);
+            let message_contains_denied = status.message().contains("denied:");
+            crate::assert_with_log!(message_contains_denied, "message should contain 'denied:'", true, message_contains_denied);
+        }
+
+        crate::test_complete!("test_reflection_auth_callback_enforcement");
+    }
+
+    #[test]
+    fn test_reflection_anonymous_allows_access() {
+        init_test("test_reflection_anonymous_allows_access");
+
+        let reflection = ReflectionService::new()
+            .allow_anonymous()
+            .register_handler(&TestService);
+
+        // Should be allowed in anonymous mode
+        let result = reflection.list_services();
+        crate::assert_with_log!(result.is_ok(), "anonymous should allow", true, result.is_ok());
+
+        if let Ok(services) = result {
+            let has_test_service = services.contains(&"test.TestService".to_string());
+            crate::assert_with_log!(has_test_service, "should list test service", true, has_test_service);
+        }
+
+        crate::test_complete!("test_reflection_anonymous_allows_access");
     }
 
     #[test]
