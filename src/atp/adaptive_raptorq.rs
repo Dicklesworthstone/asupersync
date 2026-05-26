@@ -179,7 +179,7 @@ impl AdaptiveRaptorQPolicy {
             if should_repair { "REPAIR" } else { "NO_REPAIR" },
             result.recommended_mode,
             result.roi_estimate.roi_ratio,
-            threshold_used
+            mode_threshold
         );
 
         Ok(result)
