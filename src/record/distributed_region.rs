@@ -423,7 +423,8 @@ impl DistributedRegionRecord {
     pub fn detect_partition(&mut self, now: Time) -> Result<Vec<StateTransition>, Error> {
         let mut transitions = Vec::new();
         let timeout_threshold = Time::from_nanos(
-            now.as_nanos().saturating_sub(self.config.replica_timeout.as_nanos())
+            u64::try_from(now.as_nanos().saturating_sub(self.config.replica_timeout.as_nanos()))
+                .unwrap_or(u64::MAX)
         );
 
         for replica in &mut self.replicas {
@@ -434,7 +435,8 @@ impl DistributedRegionRecord {
                 replica.status = ReplicaStatus::Suspect;
             } else if replica.status == ReplicaStatus::Suspect
                 && replica.last_heartbeat < Time::from_nanos(
-                    now.as_nanos().saturating_sub((self.config.replica_timeout * 2).as_nanos())
+                    u64::try_from(now.as_nanos().saturating_sub((self.config.replica_timeout * 2).as_nanos()))
+                        .unwrap_or(u64::MAX)
                 )
             {
                 // Confirm as unavailable after 2x timeout

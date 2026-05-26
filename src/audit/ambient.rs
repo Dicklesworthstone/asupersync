@@ -70,10 +70,12 @@ pub enum AmbientCategory {
 /// Severity of the finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
-    /// Informational — documented, low risk.
-    Info,
-    /// Warning — should be addressed but not blocking.
-    Warning,
+    /// Low — minimal risk, informational.
+    Low,
+    /// Medium — moderate risk, should be addressed eventually.
+    Medium,
+    /// High — significant risk, should be addressed soon.
+    High,
     /// Critical — breaks capability invariants, must be fixed.
     Critical,
 }
@@ -89,7 +91,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         line: 38,
         evidence_pattern: "std::time::Instant::now()",
         category: AmbientCategory::Time,
-        severity: Severity::Info,
+        severity: Severity::Low,
         description: "WallClock epoch initialization",
         exempt: true,
         exemption_reason: Some("Timer driver is the time provider"),
@@ -99,7 +101,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         line: 62,
         evidence_pattern: "Instant::now()",
         category: AmbientCategory::Time,
-        severity: Severity::Info,
+        severity: Severity::Low,
         description: "Instant::now() in blocking pool timeout",
         exempt: true,
         exemption_reason: Some("Blocking pool operates outside async runtime"),
@@ -110,7 +112,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         line: 623,
         evidence_pattern: "std::thread::spawn",
         category: AmbientCategory::Spawn,
-        severity: Severity::Warning,
+        severity: Severity::Medium,
         description: "Fallback timer thread in Sleep::poll()",
         exempt: true,
         exemption_reason: Some("Documented fallback; used only when no timer driver"),
@@ -120,7 +122,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         line: 972,
         evidence_pattern: "thread::Builder::new()",
         category: AmbientCategory::Spawn,
-        severity: Severity::Info,
+        severity: Severity::Low,
         description: "Worker thread spawning in blocking pool",
         exempt: true,
         exemption_reason: Some("Blocking pool requires real OS threads by design"),
@@ -134,7 +136,7 @@ pub const KNOWN_FINDINGS: &[AmbientFinding] = &[
         line: 134,
         evidence_pattern: "TcpListener::bind",
         category: AmbientCategory::Io,
-        severity: Severity::Warning,
+        severity: Severity::Medium,
         description: "TcpListener::bind in DebugServer::start()",
         exempt: true,
         exemption_reason: Some("Debug server is intentionally outside runtime"),
@@ -653,8 +655,8 @@ mod tests {
 
     #[test]
     fn severity_ordering() {
-        assert!(Severity::Info < Severity::Warning);
-        assert!(Severity::Warning < Severity::Critical);
+        assert!(Severity::Low < Severity::Medium);
+        assert!(Severity::Medium < Severity::Critical);
     }
 
     // ── Enhanced detection tests (br-asupersync-51e9yb) ────────────────────
@@ -719,7 +721,7 @@ mod tests {
     #[test]
     fn count_functions_include_capability_validation() {
         // Test that count functions include proper capability validation
-        let warning_count = crate::audit::ambient::count_by_severity(Severity::Warning);
+        let warning_count = crate::audit::ambient::count_by_severity(Severity::Medium);
         let unresolved_count = crate::audit::ambient::unresolved_count();
 
         // These should complete without panicking, indicating capability validation passed
@@ -1579,7 +1581,7 @@ fn production_path() {
 
     #[test]
     fn severity_debug_clone_copy() {
-        let s = Severity::Warning;
+        let s = Severity::Medium;
         let dbg = format!("{s:?}");
         assert!(dbg.contains("Warning"), "{dbg}");
         let copied = s;

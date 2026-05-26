@@ -183,9 +183,13 @@ impl SecureDaemonController {
                 if self.is_our_daemon_process(process) {
                     return Ok(DaemonProcessInfo {
                         pid: Some(pid),
-                        command: process.cmd().join(" ").into(),
+                        command: process.cmd().iter()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .into(),
                         working_dir: process.cwd().unwrap_or_else(|| std::path::Path::new("/")).to_path_buf(),
-                        user: format!("{:?}", process.user_id().unwrap_or(&sysinfo::Uid::from_raw(0))),
+                        user: format!("{:?}", process.user_id().map(|uid| uid.to_string()).unwrap_or_else(|| "0".to_string())),
                         cpu_usage: process.cpu_usage(),
                         memory_usage: process.memory(),
                         start_time: Some(Instant::now()), // Approximate start time

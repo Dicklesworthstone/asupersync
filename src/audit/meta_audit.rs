@@ -349,10 +349,10 @@ fn compute_findings_hash(findings: &[AmbientFinding]) -> u64 {
         finding.exempt.hash(&mut hasher);
         // Hash severity as its discriminant value
         let severity_value = match finding.severity {
-            Severity::Critical => 0u8,
-            Severity::High => 1u8,
-            Severity::Medium => 2u8,
-            Severity::Low => 3u8,
+            Severity::Low => 0u8,
+            Severity::Medium => 1u8,
+            Severity::High => 2u8,
+            Severity::Critical => 3u8,
         };
         severity_value.hash(&mut hasher);
         // Don't hash description or exemption_reason as they can change without security impact

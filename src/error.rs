@@ -123,6 +123,8 @@ pub enum ErrorKind {
     RateLimited,
     /// Invalid input provided to operation.
     InvalidInput,
+    /// Operation failed to complete successfully.
+    OperationFailed,
 
     // === Distributed Regions ===
     /// Region recovery failed.
@@ -189,7 +191,8 @@ impl ErrorKind {
             | Self::ConnectionRefused
             | Self::ProtocolError
             | Self::RateLimited
-            | Self::InvalidInput => ErrorCategory::Transport,
+            | Self::InvalidInput
+            | Self::OperationFailed => ErrorCategory::Transport,
             Self::RecoveryFailed
             | Self::LeaseExpired
             | Self::LeaseRenewalFailed
@@ -256,6 +259,7 @@ impl ErrorKind {
             | Self::LeaseExpired
             | Self::CoordinationFailed
             | Self::PartitionDetected
+            | Self::OperationFailed
             | Self::User => Recoverability::Unknown,
         }
     }

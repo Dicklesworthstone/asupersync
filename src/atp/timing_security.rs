@@ -91,9 +91,12 @@ impl PrecisionTimer {
         if self.tsc_available {
             self.read_tsc_ns()
         } else {
-            // Fallback to Instant::now() for non-x86_64 platforms
-            let now = Instant::now();
-            now.duration_since(Instant::now() - now).as_nanos() as u64
+            // Fallback to SystemTime for non-x86_64 platforms
+            // Use nanoseconds since UNIX epoch
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64
         }
     }
 
