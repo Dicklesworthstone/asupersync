@@ -420,6 +420,23 @@ impl Default for AtpdConfig {
     }
 }
 
+/// Load daemon configuration from file or return default config
+fn load_daemon_config(config_path: &PathBuf) -> Result<AtpdConfig> {
+    if config_path.exists() {
+        let content = std::fs::read_to_string(config_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read config file: {}", e))?;
+
+        let config: AtpdConfig = toml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config file: {}", e))?;
+
+        Ok(config)
+    } else {
+        // Return default configuration
+        warn!("Config file not found, using default configuration");
+        Ok(AtpdConfig::default())
+    }
+}
+
 fn main() -> Result<()> {
     let cli = AtpdCli::parse();
 
@@ -549,22 +566,136 @@ async fn run_daemon_service(
     Ok(())
 }
 
-fn stop_daemon(_cli: AtpdCli) -> Result<()> {
+fn stop_daemon(cli: AtpdCli) -> Result<()> {
     info!("Stopping ATP daemon...");
-    // TODO: Implement daemon stop logic
-    // - Send stop signal to running daemon
-    // - Wait for graceful shutdown
-    // - Remove PID file
-    println!("ATP daemon stop requested (not yet implemented)");
+
+    // Check if PID file exists
+    if !cli.pid_file.exists() {
+        println!("ATP daemon is not running (no PID file found)");
+        return Ok(());
+    }
+
+    // Read PID from file
+    let pid_content = std::fs::read_to_string(&cli.pid_file)
+        .map_err(|e| anyhow::anyhow!("Failed to read PID file: {}", e))?;
+
+    let pid: u32 = pid_content.trim().parse()
+        .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        use std::time::Instant;
+
+        // Send SIGTERM for graceful shutdown
+        info!("Sending SIGTERM to process {}", pid);
+        let term_result = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .output();
+
+        match term_result {
+            Ok(output) if output.status.success() => {
+                println!("Sent shutdown signal to ATP daemon (PID: {})", pid);
+
+                // Wait for graceful shutdown (up to 10 seconds)
+                let start = Instant::now();
+                let timeout = Duration::from_secs(10);
+
+                loop {
+                    let check = Command::new("kill")
+                        .args(["-0", &pid.to_string()])
+                        .output();
+
+                    if let Ok(output) = check {
+                        if !output.status.success() {
+                            // Process has stopped
+                            break;
+                        }
+                    }
+
+                    if start.elapsed() > timeout {
+                        warn!("Graceful shutdown timeout, sending SIGKILL");
+                        let _ = Command::new("kill")
+                            .args(["-KILL", &pid.to_string()])
+                            .output();
+                        break;
+                    }
+
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+
+                // Remove PID file
+                if let Err(e) = std::fs::remove_file(&cli.pid_file) {
+                    warn!("Failed to remove PID file: {}", e);
+                } else {
+                    info!("Removed PID file");
+                }
+
+                println!("ATP daemon stopped successfully");
+            }
+            Ok(_) => {
+                println!("Process {} not found (may have already stopped)", pid);
+                // Clean up stale PID file
+                let _ = std::fs::remove_file(&cli.pid_file);
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to stop daemon: {}", e));
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        println!("Daemon stop not supported on this platform");
+        println!("Manual process termination required for PID: {}", pid);
+    }
+
     Ok(())
 }
 
-fn show_status(_cli: AtpdCli) -> Result<()> {
+fn show_status(cli: AtpdCli) -> Result<()> {
     info!("Checking ATP daemon status...");
-    // TODO: Implement status check
-    // - Check if daemon is running
-    // - Show basic stats
-    println!("ATP daemon status check (not yet implemented)");
+
+    // Check if PID file exists
+    if !cli.pid_file.exists() {
+        println!("ATP daemon: STOPPED (no PID file found)");
+        return Ok(());
+    }
+
+    // Read PID from file
+    let pid_content = std::fs::read_to_string(&cli.pid_file)
+        .map_err(|e| anyhow::anyhow!("Failed to read PID file: {}", e))?;
+
+    let pid: u32 = pid_content.trim().parse()
+        .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
+
+    // Check if process is actually running
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        let status = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output();
+
+        match status {
+            Ok(output) if output.status.success() => {
+                println!("ATP daemon: RUNNING (PID: {})", pid);
+                println!("PID file: {}", cli.pid_file.display());
+                println!("Config file: {}", cli.config.display());
+            }
+            _ => {
+                println!("ATP daemon: STOPPED (stale PID file)");
+                warn!("PID file exists but process {} is not running", pid);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        println!("ATP daemon: UNKNOWN (PID: {}) - status check not supported on this platform", pid);
+        println!("PID file: {}", cli.pid_file.display());
+    }
+
     Ok(())
 }
 
@@ -611,15 +742,88 @@ fn init_daemon(_cli: AtpdCli, args: InitArgs) -> Result<()> {
     Ok(())
 }
 
-fn show_diagnostics(_cli: AtpdCli) -> Result<()> {
+fn show_diagnostics(cli: AtpdCli) -> Result<()> {
     info!("Showing ATP daemon diagnostics...");
-    // TODO: Implement diagnostics display
-    // - Show daemon health
-    // - Show transfer statistics
-    // - Show peer directory
-    // - Show cache status
-    // - Show journal status
-    println!("ATP daemon diagnostics (not yet implemented)");
+
+    println!("=== ATP Daemon Diagnostics ===");
+    println!();
+
+    // Daemon status
+    println!("📊 Daemon Status:");
+    if cli.pid_file.exists() {
+        match std::fs::read_to_string(&cli.pid_file) {
+            Ok(pid_content) => {
+                if let Ok(pid) = pid_content.trim().parse::<u32>() {
+                    #[cfg(unix)]
+                    {
+                        use std::process::Command;
+                        let running = Command::new("kill")
+                            .args(["-0", &pid.to_string()])
+                            .output()
+                            .map(|o| o.status.success())
+                            .unwrap_or(false);
+
+                        if running {
+                            println!("  Status: ✅ RUNNING (PID: {})", pid);
+                        } else {
+                            println!("  Status: ❌ STOPPED (stale PID file)");
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        println!("  Status: ❓ UNKNOWN (PID: {})", pid);
+                    }
+                } else {
+                    println!("  Status: ❌ INVALID PID file");
+                }
+            }
+            Err(_) => println!("  Status: ❌ Cannot read PID file"),
+        }
+    } else {
+        println!("  Status: ⭕ STOPPED (no PID file)");
+    }
+
+    println!("  Config: {}", cli.config.display());
+    println!("  PID file: {}", cli.pid_file.display());
+    println!();
+
+    // Configuration info
+    println!("⚙️  Configuration:");
+    if cli.config.exists() {
+        match std::fs::read_to_string(&cli.config) {
+            Ok(content) => {
+                println!("  Config file: ✅ Found ({} bytes)", content.len());
+                // Try to parse as TOML for validation
+                match toml::from_str::<toml::Value>(&content) {
+                    Ok(_) => println!("  Config syntax: ✅ Valid TOML"),
+                    Err(e) => println!("  Config syntax: ❌ Invalid TOML: {}", e),
+                }
+            }
+            Err(e) => println!("  Config file: ❌ Cannot read: {}", e),
+        }
+    } else {
+        println!("  Config file: ⚠️  Not found (will use defaults)");
+    }
+    println!();
+
+    // System info
+    println!("🖥️  System Information:");
+    println!("  Platform: {}", std::env::consts::OS);
+    println!("  Architecture: {}", std::env::consts::ARCH);
+
+    // Try to get hostname from environment or system
+    let hostname = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    println!("  Hostname: {}", hostname);
+    println!();
+
+    // Future placeholder sections (not yet implemented)
+    println!("📈 Transfer Statistics: (not yet available)");
+    println!("🤝 Peer Directory: (not yet available)");
+    println!("💾 Cache Status: (not yet available)");
+    println!("📋 Journal Status: (not yet available)");
+
     Ok(())
 }
 
@@ -627,8 +831,71 @@ fn manage_identity(_cli: AtpdCli, args: IdentityArgs) -> Result<()> {
     match args.action {
         IdentityAction::Show => {
             info!("Showing daemon identity...");
-            // TODO: Show current identity
-            println!("Identity show (not yet implemented)");
+
+            // Load daemon configuration to find data directory
+            let config = load_daemon_config(&_cli.config)?;
+
+            let identity_dir = config.storage.data_dir.join("identity");
+            let peer_id_file = identity_dir.join("peer_id");
+            let private_key_file = identity_dir.join("private_key");
+
+            println!("=== ATP Daemon Identity ===");
+            println!();
+
+            println!("📁 Identity Directory:");
+            println!("  Path: {}", identity_dir.display());
+            if identity_dir.exists() {
+                println!("  Status: ✅ Exists");
+            } else {
+                println!("  Status: ❌ Not found");
+                return Ok(());
+            }
+            println!();
+
+            println!("🆔 Peer Identity:");
+            if peer_id_file.exists() {
+                match std::fs::read_to_string(&peer_id_file) {
+                    Ok(peer_id) => {
+                        println!("  Peer ID: {}", peer_id.trim());
+                        println!("  Status: ✅ Valid");
+                    }
+                    Err(e) => println!("  Status: ❌ Cannot read peer ID: {}", e),
+                }
+            } else {
+                println!("  Status: ❌ Peer ID file not found");
+            }
+            println!();
+
+            println!("🔑 Private Key:");
+            if private_key_file.exists() {
+                match std::fs::metadata(&private_key_file) {
+                    Ok(metadata) => {
+                        println!("  Status: ✅ Present ({} bytes)", metadata.len());
+
+                        // Check file permissions on Unix
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let perms = metadata.permissions();
+                            let mode = perms.mode() & 0o777;
+                            if mode == 0o600 {
+                                println!("  Permissions: ✅ Secure (600)");
+                            } else {
+                                println!("  Permissions: ⚠️  Insecure ({:o}) - should be 600", mode);
+                            }
+                        }
+                    }
+                    Err(e) => println!("  Status: ❌ Cannot access: {}", e),
+                }
+            } else {
+                println!("  Status: ❌ Private key file not found");
+            }
+            println!();
+
+            if !peer_id_file.exists() || !private_key_file.exists() {
+                println!("💡 To generate a new identity, run:");
+                println!("   atpd identity generate");
+            }
         }
         IdentityAction::Generate => {
             info!("Generating new daemon identity...");
