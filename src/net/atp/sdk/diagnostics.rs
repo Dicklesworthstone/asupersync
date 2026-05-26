@@ -1,13 +1,11 @@
 //! ATP diagnostics and path troubleshooting.
 
-use super::{AtpSdk, AtpSession, TransferId};
+use super::{AtpSdk, AtpSession};
 use crate::atp::path::PathCandidateId;
 use crate::cx::Cx;
-use crate::net::atp::protocol::{
-    AtpError, AtpOutcome, PathError, PeerId, SessionId, TransferNonce,
-};
+use crate::net::atp::protocol::{AtpOutcome, PeerId};
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Comprehensive path diagnosis result.

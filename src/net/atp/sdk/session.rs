@@ -1,6 +1,6 @@
 //! ATP session management and lifecycle.
 
-use super::{AtpSdk, SdkMode, SessionConfig, TransferId};
+use super::{AtpSdk, SdkMode, SessionConfig};
 use crate::cx::Cx;
 use crate::net::atp::protocol::{
     AtpError, AtpFeature, AtpOutcome, CapabilityAction, CapabilityGrant, CapabilityGrantId,
@@ -8,7 +8,6 @@ use crate::net::atp::protocol::{
     SessionError, SessionId, SessionNegotiator, SessionPolicy, SessionProofArtifact,
     SessionTraceId, TransferNonce,
 };
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// High-level session handle for ATP transfers.

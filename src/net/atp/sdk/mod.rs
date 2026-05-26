@@ -11,15 +11,8 @@
 //! - Cancellation-correct with proper obligation tracking
 //! - Deterministic replay and structured logging support
 
-use crate::atp::path::PathCandidateId;
-use crate::cx::Cx;
-use crate::net::atp::protocol::{
-    AtpCancelReason, AtpError, AtpOutcome, IdempotencyKey, PeerId, SessionId, SessionTraceId,
-    TransferNonce, TransferTranscript,
-};
+use crate::net::atp::protocol::PeerId;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use std::sync::Arc;
 
 pub mod diagnostics;
 pub mod object;

@@ -6,7 +6,6 @@ use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::atp::protocol::{AtpError, AtpOutcome, PlatformError, ProtocolError};
 use crate::obligation::graded::{GradedObligation, Resolution};
-use crate::record::ObligationKind;
 use futures_lite::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
