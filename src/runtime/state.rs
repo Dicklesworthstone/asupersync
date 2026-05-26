@@ -1864,7 +1864,7 @@ impl RuntimeState {
 
         // Check if caller has authorization to spawn in this region
         if let Some(root_key) = self.get_spawn_authorization_key() {
-            if let Err(verification_error) = caller_cx.verify_capability(
+            if let Err(_verification_error) = caller_cx.verify_capability(
                 &root_key,
                 &spawn_capability,
                 &verification_context,

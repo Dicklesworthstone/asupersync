@@ -334,7 +334,8 @@ pub mod error {
                 | SpawnError::RegionNotFound(_)
                 | SpawnError::RegionClosed(_)
                 | SpawnError::LocalSchedulerUnavailable
-                | SpawnError::NameRegistrationFailed { .. } => SporkSeverity::Permanent,
+                | SpawnError::NameRegistrationFailed { .. }
+                | SpawnError::AuthorizationDenied { .. } => SporkSeverity::Permanent,
             }
         }
 
