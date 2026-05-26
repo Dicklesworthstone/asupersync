@@ -5,6 +5,7 @@
 //! abstraction that the router uses to invoke handlers.
 
 use std::future::Future;
+use std::pin::Pin;
 
 use crate::Cx;
 use crate::runtime::{Runtime, RuntimeBuilder};
@@ -17,9 +18,13 @@ use super::response::{IntoResponse, Response, StatusCode};
 ///
 /// This trait is implemented for async functions with up to 4 extractor
 /// parameters. The last parameter may consume the request body.
+///
+/// Phase 1: Now supports async handlers with asupersync runtime integration.
 pub trait Handler: Send + Sync + 'static {
     /// Handle the request and produce a response.
-    fn call(&self, req: Request) -> Response;
+    ///
+    /// Async handlers receive a `Cx` for structured concurrency and runtime integration.
+    async fn call(&self, cx: &Cx, req: Request) -> Response;
 }
 
 // ─── Handler Implementations ─────────────────────────────────────────────────
@@ -47,7 +52,7 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, _req: Request) -> Response {
+    async fn call(&self, _cx: &Cx, _req: Request) -> Response {
         (self.func)().into_response()
     }
 }
@@ -75,7 +80,7 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, req: Request) -> Response {
+    async fn call(&self, _cx: &Cx, req: Request) -> Response {
         match T1::from_request(req) {
             Ok(t1) => (self.func)(t1).into_response(),
             Err(e) => e.into_response(),
@@ -107,7 +112,7 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, req: Request) -> Response {
+    async fn call(&self, _cx: &Cx, req: Request) -> Response {
         let t1 = match T1::from_request_parts(&req) {
             Ok(v) => v,
             Err(e) => return e.into_response(),
@@ -145,7 +150,7 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, req: Request) -> Response {
+    async fn call(&self, _cx: &Cx, req: Request) -> Response {
         let (t1, t2, t3) = match extract_arg_3::<T1, T2, T3>(req) {
             Ok(v) => v,
             Err(resp) => return resp,
@@ -180,7 +185,7 @@ where
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, req: Request) -> Response {
+    async fn call(&self, _cx: &Cx, req: Request) -> Response {
         let (t1, t2, t3, t4) = match extract_arg_4::<T1, T2, T3, T4>(req) {
             Ok(v) => v,
             Err(resp) => return resp,
@@ -238,33 +243,6 @@ where
     Ok((t1, t2, t3, t4))
 }
 
-#[inline]
-pub(crate) fn run_async_handler_with_runtime_cx<F, Fut, Res>(f: F) -> Response
-where
-    F: FnOnce(Cx) -> Fut,
-    Fut: Future<Output = Res>,
-    Res: IntoResponse,
-{
-    let ambient_cx = Cx::current();
-    let runtime_cx = ambient_cx
-        .clone()
-        .filter(|_| Runtime::current_handle().is_some())
-        .or_else(|| Runtime::current_request_cx_with_budget(Budget::INFINITE));
-    if let Some(runtime_cx) = runtime_cx {
-        return Runtime::block_on_current_with_cx(runtime_cx.clone(), f(runtime_cx)).map_or_else(
-            || Response::empty(StatusCode::INTERNAL_SERVER_ERROR),
-            IntoResponse::into_response,
-        );
-    }
-
-    let rt = match RuntimeBuilder::current_thread().build() {
-        Ok(rt) => rt,
-        Err(_) => return Response::empty(StatusCode::INTERNAL_SERVER_ERROR),
-    };
-
-    let cx = ambient_cx.unwrap_or_else(|| rt.request_cx_with_budget(Budget::INFINITE));
-    rt.block_on_with_cx(cx.clone(), f(cx)).into_response()
-}
 
 /// Wrapper for async handlers that receive a [`Cx`] and no extractors.
 pub struct AsyncCxFnHandler<F> {
@@ -281,12 +259,17 @@ impl<F> AsyncCxFnHandler<F> {
 impl<F, Fut, Res> Handler for AsyncCxFnHandler<F>
 where
     F: Fn(Cx) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Res>,
+    Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, _req: Request) -> Response {
-        run_async_handler_with_runtime_cx(|cx| (self.func)(cx))
+    fn call(&self, cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
+        let func = &self.func;
+        Box::pin(async move {
+            let result = func(cx).await;
+            result.into_response()
+        })
     }
 }
 
@@ -310,16 +293,21 @@ impl<F, Fut, Res, T1> Handler for AsyncCxFnHandler1<F, T1>
 where
     F: Fn(Cx, T1) -> Fut + Send + Sync + 'static,
     T1: FromRequest + Send + Sync + 'static,
-    Fut: Future<Output = Res>,
+    Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, req: Request) -> Response {
-        let t1 = match extract_arg_1::<T1>(req) {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
-        run_async_handler_with_runtime_cx(|cx| (self.func)(cx, t1))
+    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
+        let func = &self.func;
+        Box::pin(async move {
+            let t1 = match extract_arg_1::<T1>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let result = func(cx, t1).await;
+            result.into_response()
+        })
     }
 }
 
@@ -344,16 +332,21 @@ where
     F: Fn(Cx, T1, T2) -> Fut + Send + Sync + 'static,
     T1: FromRequestParts + Send + Sync + 'static,
     T2: FromRequest + Send + Sync + 'static,
-    Fut: Future<Output = Res>,
+    Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, req: Request) -> Response {
-        let (t1, t2) = match extract_arg_2::<T1, T2>(req) {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
-        run_async_handler_with_runtime_cx(|cx| (self.func)(cx, t1, t2))
+    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2) = match extract_arg_2::<T1, T2>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let result = func(cx, t1, t2).await;
+            result.into_response()
+        })
     }
 }
 
@@ -379,16 +372,21 @@ where
     T1: FromRequestParts + Send + Sync + 'static,
     T2: FromRequestParts + Send + Sync + 'static,
     T3: FromRequest + Send + Sync + 'static,
-    Fut: Future<Output = Res>,
+    Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, req: Request) -> Response {
-        let (t1, t2, t3) = match extract_arg_3::<T1, T2, T3>(req) {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
-        run_async_handler_with_runtime_cx(|cx| (self.func)(cx, t1, t2, t3))
+    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2, t3) = match extract_arg_3::<T1, T2, T3>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let result = func(cx, t1, t2, t3).await;
+            result.into_response()
+        })
     }
 }
 
@@ -415,16 +413,21 @@ where
     T2: FromRequestParts + Send + Sync + 'static,
     T3: FromRequestParts + Send + Sync + 'static,
     T4: FromRequest + Send + Sync + 'static,
-    Fut: Future<Output = Res>,
+    Fut: Future<Output = Res> + Send,
     Res: IntoResponse,
 {
     #[inline]
-    fn call(&self, req: Request) -> Response {
-        let (t1, t2, t3, t4) = match extract_arg_4::<T1, T2, T3, T4>(req) {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
-        run_async_handler_with_runtime_cx(|cx| (self.func)(cx, t1, t2, t3, t4))
+    fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        let cx = cx.clone();
+        let func = &self.func;
+        Box::pin(async move {
+            let (t1, t2, t3, t4) = match extract_arg_4::<T1, T2, T3, T4>(req) {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let result = func(cx, t1, t2, t3, t4).await;
+            result.into_response()
+        })
     }
 }
 
@@ -446,6 +449,7 @@ mod tests {
     use std::thread;
 
     use crate::bytes::Bytes;
+    use crate::runtime::Runtime;
     use crate::time::TimerDriverHandle;
     use crate::web::extract::{Json, Path, Query};
     use crate::web::response::StatusCode;
@@ -457,8 +461,9 @@ mod tests {
         }
 
         let handler = FnHandler::new(index);
+        let cx = Cx::for_testing();
         let req = Request::new("GET", "/");
-        let resp = handler.call(req);
+        let resp = Runtime::block_on_current(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::OK);
     }
 
@@ -469,10 +474,11 @@ mod tests {
         }
 
         let handler = FnHandler1::<_, Path<String>>::new(get_user);
+        let cx = Cx::for_testing();
         let mut params = std::collections::HashMap::new();
         params.insert("id".to_string(), "42".to_string());
         let req = Request::new("GET", "/users/42").with_path_params(params);
-        let resp = handler.call(req);
+        let resp = Runtime::block_on_current(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::OK);
     }
 
@@ -483,8 +489,9 @@ mod tests {
         }
 
         let handler = FnHandler1::<_, Path<String>>::new(get_user);
+        let cx = Cx::for_testing();
         let req = Request::new("GET", "/"); // no path params
-        let resp = handler.call(req);
+        let resp = Runtime::block_on_current(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     }
 
@@ -517,7 +524,8 @@ mod tests {
             .with_query("tenant=green")
             .with_header("x-request-id", "req-123");
 
-        let resp = handler.call(req);
+        let cx = Cx::for_testing();
+        let resp = Runtime::block_on_current(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),
@@ -559,7 +567,8 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(Bytes::from_static(br#"{"event":"created"}"#));
 
-        let resp = handler.call(req);
+        let cx = Cx::for_testing();
+        let resp = Runtime::block_on_current(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),
@@ -575,7 +584,8 @@ mod tests {
         }
 
         let handler = AsyncCxFnHandler::new(index);
-        let resp = handler.call(Request::new("GET", "/"));
+        let cx = Cx::for_testing();
+        let resp = Runtime::block_on_current(handler.call(&cx, Request::new("GET", "/")));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),
@@ -601,7 +611,8 @@ mod tests {
         }
 
         let handler = AsyncCxFnHandler::new(inspect);
-        let resp = handler.call(Request::new("GET", "/inspect"));
+        let cx = Cx::for_testing();
+        let resp = Runtime::block_on_current(handler.call(&cx, Request::new("GET", "/inspect")));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
     }
@@ -639,7 +650,7 @@ mod tests {
 
         runtime.block_on_with_cx(request_cx, async move {
             let handler = AsyncCxFnHandler::new(inspect);
-            let resp = handler.call(Request::new("GET", "/ambient"));
+            let resp = handler.call(&request_cx, Request::new("GET", "/ambient")).await;
             assert_eq!(resp.status, StatusCode::OK);
             assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
 
@@ -668,7 +679,8 @@ mod tests {
                     }
                 });
 
-                let resp = handler.call(Request::new("GET", "/thread-local-runtime"));
+                let cx = Cx::for_testing();
+                let resp = Runtime::block_on_current(handler.call(&cx, Request::new("GET", "/thread-local-runtime")));
                 assert_eq!(resp.status, StatusCode::OK);
             })
         };
@@ -705,7 +717,8 @@ mod tests {
             "ok"
         });
 
-        let resp = handler.call(Request::new("GET", "/ambient-no-runtime"));
+        let cx = Cx::for_testing();
+        let resp = Runtime::block_on_current(handler.call(&cx, Request::new("GET", "/ambient-no-runtime")));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
 
@@ -725,7 +738,8 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("id".to_string(), "7".to_string());
         let req = Request::new("GET", "/users/7").with_path_params(params);
-        let resp = handler.call(req);
+        let cx = Cx::for_testing();
+        let resp = Runtime::block_on_current(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),
@@ -755,7 +769,8 @@ mod tests {
             .with_query("tenant=blue")
             .with_header("content-type", "application/json")
             .with_body(Bytes::from_static(br#"{"name":"alice"}"#));
-        let resp = handler.call(req);
+        let cx = Cx::for_testing();
+        let resp = Runtime::block_on_current(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::CREATED);
     }
 
@@ -780,7 +795,8 @@ mod tests {
         let req = Request::new("POST", "/users")
             .with_query("tenant=blue")
             .with_body(Bytes::from_static(br#"{"name":"alice"}"#));
-        let resp = handler.call(req);
+        let cx = Cx::for_testing();
+        let resp = Runtime::block_on_current(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),
@@ -823,7 +839,8 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(Bytes::from_static(br#"{"event":"created"}"#));
 
-        let resp = handler.call(req);
+        let cx = Cx::for_testing();
+        let resp = Runtime::block_on_current(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),
