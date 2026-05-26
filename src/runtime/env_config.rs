@@ -30,6 +30,115 @@
 
 use crate::runtime::config::RuntimeConfig;
 use crate::types::builder::BuildError;
+use std::collections::HashMap;
+
+/// File capability interface for synchronous file operations.
+///
+/// This abstracts file system access to prevent ambient authority violations
+/// during runtime initialization.
+trait FileCapability {
+    /// Read file contents as a string.
+    fn read_to_string(&self, path: &std::path::Path) -> Result<String, std::io::Error>;
+}
+
+/// Production file capability that provides controlled access to the file system.
+///
+/// Unlike direct `std::fs` calls, this capability can be audited and controlled.
+struct ProductionFileCapability;
+
+impl FileCapability for ProductionFileCapability {
+    fn read_to_string(&self, path: &std::path::Path) -> Result<String, std::io::Error> {
+        // Use std::fs here, but mediated through the capability interface.
+        // This allows for future enhancement (e.g., sandboxing, auditing) without
+        // changing the ambient authority pattern.
+        std::fs::read_to_string(path)
+    }
+}
+
+/// Abstracts environment variable access to prevent ambient authority violations.
+///
+/// This trait allows environment variable reading to be dependency-injected,
+/// enabling testing with mock environments and preventing direct ambient
+/// access to the process environment.
+pub trait EnvReader {
+    /// Read an environment variable, returning `None` if unset.
+    fn read_env(&self, name: &str) -> Option<String>;
+
+    /// Read a file, returning an error if it fails.
+    /// This is needed for TOML config file reading.
+    fn read_file(&self, path: &std::path::Path) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// Production implementation that reads from the actual process environment.
+///
+/// File access is mediated through a capability interface to prevent
+/// ambient authority violations.
+pub struct SystemEnvReader {
+    file_cap: ProductionFileCapability,
+}
+
+impl SystemEnvReader {
+    /// Create a new system environment reader with production file capability.
+    pub fn new() -> Self {
+        Self {
+            file_cap: ProductionFileCapability,
+        }
+    }
+}
+
+impl Default for SystemEnvReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EnvReader for SystemEnvReader {
+    fn read_env(&self, name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+
+    fn read_file(&self, path: &std::path::Path) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Use the file capability instead of direct std::fs access
+        self.file_cap.read_to_string(path).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    }
+}
+
+/// Test implementation that reads from a provided map.
+pub struct TestEnvReader {
+    env_vars: HashMap<String, String>,
+    files: HashMap<std::path::PathBuf, String>,
+}
+
+impl TestEnvReader {
+    /// Create a new test environment reader with the given environment variables.
+    pub fn new(env_vars: HashMap<String, String>) -> Self {
+        Self {
+            env_vars,
+            files: HashMap::new(),
+        }
+    }
+
+    /// Add a file that can be read by this reader.
+    pub fn with_file(mut self, path: impl Into<std::path::PathBuf>, content: String) -> Self {
+        self.files.insert(path.into(), content);
+        self
+    }
+}
+
+impl EnvReader for TestEnvReader {
+    fn read_env(&self, name: &str) -> Option<String> {
+        self.env_vars.get(name).cloned()
+    }
+
+    fn read_file(&self, path: &std::path::Path) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.files.get(path)
+            .cloned()
+            .ok_or_else(|| {
+                let msg = format!("Test file not found: {}", path.display());
+                Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, msg)) as Box<dyn std::error::Error + Send + Sync>
+            })
+    }
+}
 
 /// Environment variable name for worker thread count.
 pub const ENV_WORKER_THREADS: &str = "ASUPERSYNC_WORKER_THREADS";
@@ -64,57 +173,53 @@ pub const ENV_ADAPTIVE_CANCEL_EPOCH_STEPS: &str = "ASUPERSYNC_ADAPTIVE_CANCEL_EP
 ///
 /// Only variables that are set in the environment are applied.
 /// Returns an error if a variable is set but contains an unparseable value.
-pub fn apply_env_overrides(config: &mut RuntimeConfig) -> Result<(), BuildError> {
-    if let Some(val) = read_env(ENV_WORKER_THREADS) {
+pub fn apply_env_overrides(config: &mut RuntimeConfig, env_reader: &dyn EnvReader) -> Result<(), BuildError> {
+    if let Some(val) = env_reader.read_env(ENV_WORKER_THREADS) {
         config.worker_threads = parse_usize(ENV_WORKER_THREADS, &val)?;
     }
-    if let Some(val) = read_env(ENV_TASK_QUEUE_DEPTH) {
+    if let Some(val) = env_reader.read_env(ENV_TASK_QUEUE_DEPTH) {
         config.global_queue_limit = parse_usize(ENV_TASK_QUEUE_DEPTH, &val)?;
     }
-    if let Some(val) = read_env(ENV_THREAD_STACK_SIZE) {
+    if let Some(val) = env_reader.read_env(ENV_THREAD_STACK_SIZE) {
         config.thread_stack_size = parse_usize(ENV_THREAD_STACK_SIZE, &val)?;
     }
-    if let Some(val) = read_env(ENV_THREAD_NAME_PREFIX) {
+    if let Some(val) = env_reader.read_env(ENV_THREAD_NAME_PREFIX) {
         config.thread_name_prefix = val;
     }
-    if let Some(val) = read_env(ENV_STEAL_BATCH_SIZE) {
+    if let Some(val) = env_reader.read_env(ENV_STEAL_BATCH_SIZE) {
         config.steal_batch_size = parse_usize(ENV_STEAL_BATCH_SIZE, &val)?;
     }
-    if let Some(val) = read_env(ENV_BLOCKING_MIN_THREADS) {
+    if let Some(val) = env_reader.read_env(ENV_BLOCKING_MIN_THREADS) {
         config.blocking.min_threads = parse_usize(ENV_BLOCKING_MIN_THREADS, &val)?;
     }
-    if let Some(val) = read_env(ENV_BLOCKING_MAX_THREADS) {
+    if let Some(val) = env_reader.read_env(ENV_BLOCKING_MAX_THREADS) {
         config.blocking.max_threads = parse_usize(ENV_BLOCKING_MAX_THREADS, &val)?;
     }
-    if let Some(val) = read_env(ENV_ENABLE_PARKING) {
+    if let Some(val) = env_reader.read_env(ENV_ENABLE_PARKING) {
         config.enable_parking = parse_bool(ENV_ENABLE_PARKING, &val)?;
     }
-    if let Some(val) = read_env(ENV_POLL_BUDGET) {
+    if let Some(val) = env_reader.read_env(ENV_POLL_BUDGET) {
         config.poll_budget = parse_u32(ENV_POLL_BUDGET, &val)?;
     }
-    if let Some(val) = read_env(ENV_CANCEL_LANE_MAX_STREAK) {
+    if let Some(val) = env_reader.read_env(ENV_CANCEL_LANE_MAX_STREAK) {
         config.cancel_lane_max_streak = parse_usize(ENV_CANCEL_LANE_MAX_STREAK, &val)?;
     }
-    if let Some(val) = read_env(ENV_ENABLE_GOVERNOR) {
+    if let Some(val) = env_reader.read_env(ENV_ENABLE_GOVERNOR) {
         config.enable_governor = parse_bool(ENV_ENABLE_GOVERNOR, &val)?;
     }
-    if let Some(val) = read_env(ENV_GOVERNOR_INTERVAL) {
+    if let Some(val) = env_reader.read_env(ENV_GOVERNOR_INTERVAL) {
         config.governor_interval = parse_u32(ENV_GOVERNOR_INTERVAL, &val)?;
     }
-    if let Some(val) = read_env(ENV_ENABLE_ADAPTIVE_CANCEL_STREAK) {
+    if let Some(val) = env_reader.read_env(ENV_ENABLE_ADAPTIVE_CANCEL_STREAK) {
         config.enable_adaptive_cancel_streak = parse_bool(ENV_ENABLE_ADAPTIVE_CANCEL_STREAK, &val)?;
     }
-    if let Some(val) = read_env(ENV_ADAPTIVE_CANCEL_EPOCH_STEPS) {
+    if let Some(val) = env_reader.read_env(ENV_ADAPTIVE_CANCEL_EPOCH_STEPS) {
         config.adaptive_cancel_streak_epoch_steps =
             parse_u32(ENV_ADAPTIVE_CANCEL_EPOCH_STEPS, &val)?;
     }
     Ok(())
 }
 
-/// Read an environment variable, returning `None` if unset.
-fn read_env(name: &str) -> Option<String> {
-    std::env::var(name).ok()
-}
 
 fn parse_usize(var_name: &str, val: &str) -> Result<usize, BuildError> {
     val.trim().parse::<usize>().map_err(|e| {
@@ -279,8 +384,8 @@ pub fn parse_toml_str(toml_str: &str) -> Result<RuntimeTomlConfig, BuildError> {
 
 /// Read and parse a TOML file into a [`RuntimeTomlConfig`].
 #[cfg(feature = "config-file")]
-pub fn parse_toml_file(path: &std::path::Path) -> Result<RuntimeTomlConfig, BuildError> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
+pub fn parse_toml_file(path: &std::path::Path, env_reader: &dyn EnvReader) -> Result<RuntimeTomlConfig, BuildError> {
+    let content = env_reader.read_file(path).map_err(|e| {
         BuildError::custom(format!(
             "failed to read config file {}: {e}",
             path.display()
@@ -737,7 +842,7 @@ max_threads = 128
 
     #[test]
     fn toml_file_not_found() {
-        let result = parse_toml_file(std::path::Path::new("/nonexistent/config.toml"));
+        let result = parse_toml_file(std::path::Path::new("/nonexistent/config.toml"), &SystemEnvReader::new());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("failed to read"));
@@ -757,7 +862,7 @@ poll_budget = 64
         )
         .unwrap();
 
-        let parsed = parse_toml_file(&path).unwrap();
+        let parsed = parse_toml_file(&path, &SystemEnvReader::new()).unwrap();
         let mut config = RuntimeConfig::default();
         apply_toml_config(&mut config, &parsed);
         assert_eq!(config.worker_threads, 2);

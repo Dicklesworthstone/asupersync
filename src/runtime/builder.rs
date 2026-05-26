@@ -2649,7 +2649,7 @@ impl RuntimeBuilder {
     /// See [`env_config`](super::env_config) for the full list of supported variables.
     #[allow(clippy::result_large_err)]
     pub fn with_env_overrides(mut self) -> Result<Self, Error> {
-        crate::runtime::env_config::apply_env_overrides(&mut self.config).map_err(|e| {
+        crate::runtime::env_config::apply_env_overrides(&mut self.config, &crate::runtime::env_config::SystemEnvReader::new()).map_err(|e| {
             Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
         })?;
         Ok(self)
@@ -2672,7 +2672,7 @@ impl RuntimeBuilder {
     #[allow(clippy::result_large_err)]
     pub fn from_toml(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
         let toml_config =
-            crate::runtime::env_config::parse_toml_file(path.as_ref()).map_err(|e| {
+            crate::runtime::env_config::parse_toml_file(path.as_ref(), &crate::runtime::env_config::SystemEnvReader::new()).map_err(|e| {
                 Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
             })?;
         let mut config = RuntimeConfig::default();
