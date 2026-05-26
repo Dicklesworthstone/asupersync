@@ -1546,6 +1546,28 @@ pub trait AsyncConnectionManager: Send + Sync + 'static {
 
     /// Called when a connection is permanently removed from the pool.
     fn disconnect(&self, _conn: Self::Connection) {}
+
+    /// Check if a connection has authentication state for a specific client.
+    ///
+    /// br-asupersync-80525g: Validation bypass fix - adds authentication state checking to async pool.
+    /// Returns Some(client_id) if the connection is authenticated for a specific client,
+    /// None if it's in a clean/unauthenticated state. Implementations should check
+    /// connection-specific authentication state (e.g., active sessions, user context, database roles).
+    fn authentication_state(&self, _conn: &Self::Connection) -> Option<String> {
+        // Default: no authentication state tracking
+        None
+    }
+
+    /// Clear authentication state from a connection.
+    ///
+    /// br-asupersync-80525g: Validation bypass fix - adds authentication state clearing to async pool.
+    /// Called to reset a connection to clean/unauthenticated state before returning to pool
+    /// for potential reuse by different clients. Return true if successfully cleared,
+    /// false if connection should be discarded.
+    fn clear_authentication_state(&self, _conn: &mut Self::Connection) -> bool {
+        // Default: assume no authentication state to clear
+        true
+    }
 }
 
 // ─── AsyncDbPool ─────────────────────────────────────────────────────────────
@@ -1606,6 +1628,9 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 idle: VecDeque::new(),
                 total: 0,
                 closed: false,
+                // br-asupersync-80525g: Validation bypass fix - add client tracking to async pool
+                client_connections: HashMap::new(),
+                client_retry_state: HashMap::new(),
             }),
             stats: PoolStatCounters::default(),
         }
@@ -1696,6 +1721,19 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     continue;
                 }
 
+                // br-asupersync-80525g: Validation bypass fix - check authentication state for async pool
+                // For async get() without client_id, only reuse clean connections
+                if self.config.validate_authentication_state && idle.authenticated_for.is_some() {
+                    {
+                        let mut inner = self.inner.lock();
+                        inner.total = inner.total.saturating_sub(1);
+                    }
+                    self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("SECURITY: Async pool discarding connection with authentication state for anonymous get()");
+                    self.manager.disconnect(idle.conn);
+                    continue;
+                }
+
                 if self.config.validate_on_checkout {
                     let mut guard = AsyncValidationGuard {
                         pool: self,
@@ -1767,6 +1805,257 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 }
                 Outcome::Err(e) => return Err(DbPoolError::Connect(e)),
                 Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                    return Err(DbPoolError::Timeout);
+                }
+            }
+        }
+    }
+
+    /// Acquire a connection from the pool for a specific client.
+    ///
+    /// br-asupersync-80525g: Validation bypass fix - adds client-specific connection acquisition to async pool.
+    /// Enforces per-client connection quotas when `enforce_client_quotas` is enabled and validates
+    /// authentication state to prevent cross-user connection reuse.
+    pub async fn get_for_client(
+        &self,
+        cx: &Cx,
+        client_id: &str,
+    ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
+        // If client quotas are disabled, delegate to regular get()
+        if !self.config.enforce_client_quotas {
+            return self.get(cx).await.map(|mut conn| {
+                conn.client_id = Some(client_id.to_string());
+                conn
+            });
+        }
+
+        let client_id_owned = client_id.to_string();
+        loop {
+            if cx.checkpoint().is_err() {
+                return Err(DbPoolError::Timeout);
+            }
+
+            let candidate = {
+                let mut inner = self.inner.lock();
+                if inner.closed {
+                    return Err(DbPoolError::Closed);
+                }
+
+                // br-asupersync-80525g: Enforce per-client connection quota for async pool
+                if let Some(max_per_client) = self.config.max_connections_per_client {
+                    let current_count = inner.client_connections.get(&client_id_owned).copied().unwrap_or(0);
+                    if current_count >= max_per_client {
+                        return Err(DbPoolError::ClientQuotaExceeded(client_id_owned));
+                    }
+                }
+
+                // Try to get an idle connection with authentication state validation
+                let mut candidate = inner.idle.pop_front();
+                if let Some(ref idle) = candidate {
+                    if self.config.validate_authentication_state {
+                        // Authentication state validation: check for cross-user reuse
+                        match &idle.authenticated_for {
+                            Some(auth_client) if auth_client != &client_id_owned => {
+                                // SECURITY: Connection authenticated for different client - must not reuse
+                                eprintln!("SECURITY: Async pool discarding connection authenticated for '{}' requested by '{}'", auth_client, client_id_owned);
+                                candidate = None; // Force discard and creation of new connection
+                            }
+                            _ => {
+                                // Clean connection or same client - safe to reuse
+                            }
+                        }
+                    }
+                }
+
+                if candidate.is_none() {
+                    if inner.total >= self.config.max_size {
+                        return Err(DbPoolError::Full);
+                    }
+                    inner.total += 1;
+                }
+
+                // br-asupersync-80525g: Increment client connection count for async pool
+                *inner.client_connections.entry(client_id_owned.clone()).or_insert(0) += 1;
+
+                candidate
+            };
+
+            if let Some(idle) = candidate {
+                let now = cx.now();
+                let is_expired = idle.is_expired(&self.config, now);
+                let is_stale = idle.is_idle_too_long(&self.config, now);
+
+                if is_expired || is_stale {
+                    // Decrement client count since we're discarding this connection
+                    {
+                        let mut inner = self.inner.lock();
+                        if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                            *count = count.saturating_sub(1);
+                            if *count == 0 {
+                                inner.client_connections.remove(&client_id_owned);
+                            }
+                        }
+                        inner.total = inner.total.saturating_sub(1);
+                    }
+                    self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                    self.manager.disconnect(idle.conn);
+                    continue;
+                }
+
+                if self.config.validate_on_checkout {
+                    let mut guard = AsyncValidationGuard {
+                        pool: self,
+                        conn: Some(idle.conn),
+                    };
+
+                    let valid = self
+                        .manager
+                        .is_valid(cx, guard.conn.as_mut().unwrap())
+                        .await;
+
+                    if cx.checkpoint().is_err() {
+                        // Decrement client count on cancellation
+                        let mut inner = self.inner.lock();
+                        if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                            *count = count.saturating_sub(1);
+                            if *count == 0 {
+                                inner.client_connections.remove(&client_id_owned);
+                            }
+                        }
+                        return Err(DbPoolError::Timeout);
+                    }
+
+                    if !valid {
+                        // Decrement client count since validation failed
+                        {
+                            let mut inner = self.inner.lock();
+                            if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                                *count = count.saturating_sub(1);
+                                if *count == 0 {
+                                    inner.client_connections.remove(&client_id_owned);
+                                }
+                            }
+                        }
+                        self.stats.total_validation_failures.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+
+                    let mut valid_conn = guard.conn.take().unwrap();
+
+                    // br-asupersync-80525g: Additional authentication state validation after basic validation
+                    if self.config.validate_authentication_state {
+                        let current_auth_state = self.manager.authentication_state(&valid_conn);
+                        match (&current_auth_state, &idle.authenticated_for) {
+                            (Some(current_client), Some(expected_client)) if current_client != expected_client => {
+                                // Authentication state mismatch - connection shows different auth than expected
+                                let mut inner = self.inner.lock();
+                                if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                                    *count = count.saturating_sub(1);
+                                    if *count == 0 {
+                                        inner.client_connections.remove(&client_id_owned);
+                                    }
+                                }
+                                drop(inner);
+                                self.stats.total_validation_failures.fetch_add(1, Ordering::Relaxed);
+                                self.manager.disconnect(valid_conn);
+                                return Err(DbPoolError::AuthenticationMismatch {
+                                    expected: expected_client.clone(),
+                                    found: current_client.clone(),
+                                });
+                            }
+                            (Some(current_client), None) if current_client != &client_id_owned => {
+                                // Connection has unexpected authentication state - try to clear it
+                                if !self.manager.clear_authentication_state(&mut valid_conn) {
+                                    // Failed to clear auth state - discard connection
+                                    let mut inner = self.inner.lock();
+                                    if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                                        *count = count.saturating_sub(1);
+                                        if *count == 0 {
+                                            inner.client_connections.remove(&client_id_owned);
+                                        }
+                                    }
+                                    drop(inner);
+                                    self.stats.total_validation_failures.fetch_add(1, Ordering::Relaxed);
+                                    self.manager.disconnect(valid_conn);
+                                    continue;
+                                }
+                            }
+                            _ => {
+                                // Authentication state is acceptable
+                            }
+                        }
+                    }
+
+                    self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+                    return Ok(AsyncPooledConnection {
+                        conn: Some(valid_conn),
+                        pool: self,
+                        created_at: idle.created_at,
+                        client_id: Some(client_id_owned),
+                    });
+                }
+
+                self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+                return Ok(AsyncPooledConnection {
+                    conn: Some(idle.conn),
+                    pool: self,
+                    created_at: idle.created_at,
+                    client_id: Some(client_id_owned.clone()),
+                });
+            }
+
+            // Create new connection
+            let mut creation_guard = AsyncCreationGuard {
+                pool: self,
+                disarmed: false,
+            };
+
+            match self.manager.connect(cx).await {
+                Outcome::Ok(conn) => {
+                    if cx.checkpoint().is_err() {
+                        // Decrement client count since we're cancelling
+                        let mut inner = self.inner.lock();
+                        if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                            *count = count.saturating_sub(1);
+                            if *count == 0 {
+                                inner.client_connections.remove(&client_id_owned);
+                            }
+                        }
+                        drop(inner);
+                        self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                        self.manager.disconnect(conn);
+                        return Err(DbPoolError::Timeout);
+                    }
+                    creation_guard.disarmed = true;
+                    self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
+                    self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+                    return Ok(AsyncPooledConnection {
+                        conn: Some(conn),
+                        pool: self,
+                        created_at: cx.now(),
+                        client_id: Some(client_id_owned),
+                    });
+                }
+                Outcome::Err(e) => {
+                    // Decrement client count since creation failed
+                    let mut inner = self.inner.lock();
+                    if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            inner.client_connections.remove(&client_id_owned);
+                        }
+                    }
+                    return Err(DbPoolError::Connect(e));
+                }
+                Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                    // Decrement client count on cancellation/panic
+                    let mut inner = self.inner.lock();
+                    if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            inner.client_connections.remove(&client_id_owned);
+                        }
+                    }
                     return Err(DbPoolError::Timeout);
                 }
             }
@@ -1849,11 +2138,21 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             conn: Some(conn),
             pool: self,
             created_at,
+            client_id: None, // br-asupersync-80525g: legacy get() has no client tracking
         })
     }
 
     /// Return a connection to the pool.
-    fn return_connection(&self, conn: M::Connection, created_at: Time) {
+    fn return_connection(&self, conn: M::Connection, created_at: Time, client_id: Option<String>) {
+        // br-asupersync-80525g: Validation bypass fix - determine authentication state for async pool
+        let authenticated_for = if self.config.validate_authentication_state {
+            // If authentication validation is enabled, check current auth state
+            self.manager.authentication_state(&conn)
+        } else {
+            // If validation disabled, preserve the client_id that was using this connection
+            client_id
+        };
+
         let conn_to_disconnect = {
             let mut inner = self.inner.lock();
             if inner.closed {
@@ -1867,6 +2166,8 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     // path has no Cx; wall_now() is the runtime-time
                     // abstraction.
                     last_used: crate::time::wall_now(),
+                    // br-asupersync-80525g: Validation bypass fix - track authentication state
+                    authenticated_for,
                 });
                 None
             }
@@ -1880,9 +2181,26 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
     /// Discard a connection instead of returning it to the pool.
     fn discard_connection(&self, conn: M::Connection) {
+        self.discard_connection_with_client(conn, None);
+    }
+
+    /// br-asupersync-80525g: Internal method to discard connection with client tracking.
+    fn discard_connection_with_client(&self, conn: M::Connection, client_id: Option<String>) {
         {
             let mut inner = self.inner.lock();
             inner.total = inner.total.saturating_sub(1);
+
+            // br-asupersync-80525g: Update client connection count on discard
+            if let Some(ref client) = client_id {
+                if self.config.enforce_client_quotas {
+                    if let Some(count) = inner.client_connections.get_mut(client) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            inner.client_connections.remove(client);
+                        }
+                    }
+                }
+            }
         }
         self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
         self.manager.disconnect(conn);
@@ -1901,7 +2219,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 .fetch_add(drained as u64, Ordering::Relaxed);
         }
         drop(inner);
-        // br-asupersync-sxhome: Use safe disconnect to prevent resource leaks during close
+        // br-asupersync-80525g: Use safe disconnect to prevent resource leaks during async pool close
         let mut failed_disconnects = 0;
         for entry in idle {
             if !self.safe_disconnect(entry.conn) {
@@ -1912,7 +2230,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         // If any disconnects failed during close, log the security event
         if failed_disconnects > 0 {
             eprintln!(
-                "SECURITY: {} disconnect failures during pool close - potential resource leaks",
+                "SECURITY: {} disconnect failures during async pool close - potential resource leaks",
                 failed_disconnects
             );
         }
@@ -1922,6 +2240,33 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         self.inner.lock().closed
+    }
+
+    /// Safely disconnect a connection with proper error handling and resource cleanup.
+    ///
+    /// br-asupersync-80525g: Validation bypass fix - adds safe disconnect to async pool
+    /// to ensure connection disconnect failures don't leave the pool in an inconsistent state.
+    /// Returns true if disconnect succeeded, false if it failed.
+    fn safe_disconnect(&self, conn: M::Connection) -> bool {
+        // Use std::panic::catch_unwind to handle disconnect panics
+        let disconnect_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.manager.disconnect(conn);
+        }));
+
+        match disconnect_result {
+            Ok(()) => {
+                // Disconnect succeeded
+                true
+            }
+            Err(_panic_info) => {
+                // Disconnect panicked - this is a resource leak
+                self.stats.total_disconnect_failures.fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "SECURITY WARNING: Async pool connection disconnect failed (panic) - potential resource leak detected"
+                );
+                false
+            }
+        }
     }
 }
 
@@ -1955,6 +2300,8 @@ pub struct AsyncPooledConnection<'a, M: AsyncConnectionManager> {
     // br-asupersync-w3g9kb: Time replaces Instant; populated by
     // cx.now() at finish_async_checkout.
     created_at: Time,
+    // br-asupersync-80525g: Validation bypass fix - track client for quota enforcement
+    client_id: Option<String>,
 }
 
 impl<M: AsyncConnectionManager> AsyncPooledConnection<'_, M> {
@@ -1972,14 +2319,14 @@ impl<M: AsyncConnectionManager> AsyncPooledConnection<'_, M> {
     /// Explicitly return the connection to the pool.
     pub fn return_to_pool(mut self) {
         if let Some(conn) = self.conn.take() {
-            self.pool.return_connection(conn, self.created_at);
+            self.pool.return_connection(conn, self.created_at, self.client_id.clone());
         }
     }
 
     /// Discard this connection instead of returning it.
     pub fn discard(mut self) {
         if let Some(conn) = self.conn.take() {
-            self.pool.discard_connection(conn);
+            self.pool.discard_connection_with_client(conn, self.client_id.clone());
         }
     }
 }
@@ -2001,15 +2348,44 @@ impl<M: AsyncConnectionManager> std::ops::DerefMut for AsyncPooledConnection<'_,
 impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
     fn drop(&mut self) {
         if let Some(mut conn) = self.conn.take() {
+            // br-asupersync-80525g: Decrement client connection count when dropping
+            if let Some(client_id) = &self.client_id {
+                if self.pool.config.enforce_client_quotas {
+                    let mut inner = self.pool.inner.lock();
+                    if let Some(count) = inner.client_connections.get_mut(client_id) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            inner.client_connections.remove(client_id);
+                        }
+                    }
+                    drop(inner);
+                }
+            }
+
             // br-asupersync-5bv5sr: gate on the manager's release-time
             // health check; discard rather than return-to-pool when the
             // backend reports the connection is in a state that would
             // poison the next caller (open transaction, half-drained
             // result set, protocol desync).
             if self.pool.manager.release_check(&mut conn) {
-                self.pool.return_connection(conn, self.created_at);
+                self.pool.return_connection(conn, self.created_at, self.client_id.clone());
             } else {
-                self.pool.discard_connection(conn);
+                // br-asupersync-80525g: Use safe disconnect for unhealthy connections
+                if !self.pool.safe_disconnect(conn) {
+                    // If disconnect fails, client count was already decremented above,
+                    // so we need to restore it
+                    if let Some(ref client_id) = self.client_id {
+                        if self.pool.config.enforce_client_quotas {
+                            let mut inner = self.pool.inner.lock();
+                            let count = inner.client_connections.entry(client_id.clone()).or_insert(0);
+                            *count += 1;
+                            eprintln!(
+                                "SECURITY: Async pool disconnect failure in Drop - client count restored for '{}'",
+                                client_id
+                            );
+                        }
+                    }
+                }
             }
         }
     }
