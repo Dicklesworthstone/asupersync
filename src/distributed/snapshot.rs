@@ -28,6 +28,20 @@ const SNAPSHOT_AUTH_DOMAIN: &[u8] = b"asupersync::distributed::RegionSnapshot::v
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContentHash([u8; 32]);
 
+/// Maximum arena slot index admitted by the v2 snapshot wire format.
+///
+/// Snapshot v2 carries raw `(index, generation)` pairs, not a serialized arena
+/// allocation table. Deserialization therefore cannot prove liveness against a
+/// source arena. It can, and does, enforce this fail-closed wire-admission
+/// bound before reconstructing `RegionId` or `TaskId` handles.
+const SNAPSHOT_ARENA_ID_MAX_INDEX: u32 = 1_000_000;
+
+/// Maximum arena generation admitted by the v2 snapshot wire format.
+///
+/// See [`SNAPSHOT_ARENA_ID_MAX_INDEX`] for why this is a deterministic
+/// admission contract rather than an arena-liveness proof.
+const SNAPSHOT_ARENA_ID_MAX_GENERATION: u32 = 10_000;
+
 impl ContentHash {
     /// Returns the raw 32-byte hash value.
     #[must_use]
@@ -1072,10 +1086,7 @@ impl<'a> Cursor<'a> {
         let index = self.read_u32()?;
         let generation = self.read_u32()?;
 
-        // SECURITY: Basic bounds checking to prevent arena spoofing attacks
-        // where malicious snapshots contain arbitrary index/generation pairs.
-        // TODO: Add proper arena allocation validation in future iteration.
-        if index > 1_000_000 || generation > 10_000 {
+        if !snapshot_arena_id_is_admissible(index, generation) {
             return Err(SnapshotError::InvalidRegionId { index, generation });
         }
 
@@ -1086,10 +1097,7 @@ impl<'a> Cursor<'a> {
         let index = self.read_u32()?;
         let generation = self.read_u32()?;
 
-        // SECURITY: Basic bounds checking to prevent arena spoofing attacks
-        // where malicious snapshots contain arbitrary index/generation pairs.
-        // TODO: Add proper arena allocation validation in future iteration.
-        if index > 1_000_000 || generation > 10_000 {
+        if !snapshot_arena_id_is_admissible(index, generation) {
             return Err(SnapshotError::InvalidTaskId { index, generation });
         }
 
@@ -1143,9 +1151,119 @@ impl<'a> Cursor<'a> {
     }
 }
 
+#[inline]
+const fn snapshot_arena_id_is_admissible(index: u32, generation: u32) -> bool {
+    index <= SNAPSHOT_ARENA_ID_MAX_INDEX && generation <= SNAPSHOT_ARENA_ID_MAX_GENERATION
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod arena_id_validation_tests {
+    use super::*;
+
+    fn arena_id_bytes(index: u32, generation: u32) -> [u8; 8] {
+        let mut bytes = [0u8; 8];
+        bytes[..4].copy_from_slice(&index.to_le_bytes());
+        bytes[4..].copy_from_slice(&generation.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn snapshot_arena_id_contract_accepts_boundary_values() {
+        assert!(snapshot_arena_id_is_admissible(
+            SNAPSHOT_ARENA_ID_MAX_INDEX,
+            SNAPSHOT_ARENA_ID_MAX_GENERATION
+        ));
+
+        let bytes = arena_id_bytes(
+            SNAPSHOT_ARENA_ID_MAX_INDEX,
+            SNAPSHOT_ARENA_ID_MAX_GENERATION,
+        );
+        let region_id = Cursor::new(&bytes)
+            .read_region_id()
+            .expect("boundary RegionId must decode");
+        let task_id = Cursor::new(&bytes)
+            .read_task_id()
+            .expect("boundary TaskId must decode");
+
+        assert_eq!(region_id.arena_index().index(), SNAPSHOT_ARENA_ID_MAX_INDEX);
+        assert_eq!(
+            region_id.arena_index().generation(),
+            SNAPSHOT_ARENA_ID_MAX_GENERATION
+        );
+        assert_eq!(task_id.arena_index().index(), SNAPSHOT_ARENA_ID_MAX_INDEX);
+        assert_eq!(
+            task_id.arena_index().generation(),
+            SNAPSHOT_ARENA_ID_MAX_GENERATION
+        );
+    }
+
+    #[test]
+    fn read_region_id_rejects_index_above_wire_contract() {
+        let index = SNAPSHOT_ARENA_ID_MAX_INDEX + 1;
+        let generation = 0;
+        let bytes = arena_id_bytes(index, generation);
+
+        assert_eq!(
+            Cursor::new(&bytes).read_region_id().unwrap_err(),
+            SnapshotError::InvalidRegionId { index, generation }
+        );
+    }
+
+    #[test]
+    fn read_region_id_rejects_generation_above_wire_contract() {
+        let index = 0;
+        let generation = SNAPSHOT_ARENA_ID_MAX_GENERATION + 1;
+        let bytes = arena_id_bytes(index, generation);
+
+        assert_eq!(
+            Cursor::new(&bytes).read_region_id().unwrap_err(),
+            SnapshotError::InvalidRegionId { index, generation }
+        );
+    }
+
+    #[test]
+    fn read_task_id_rejects_index_above_wire_contract() {
+        let index = SNAPSHOT_ARENA_ID_MAX_INDEX + 1;
+        let generation = 0;
+        let bytes = arena_id_bytes(index, generation);
+
+        assert_eq!(
+            Cursor::new(&bytes).read_task_id().unwrap_err(),
+            SnapshotError::InvalidTaskId { index, generation }
+        );
+    }
+
+    #[test]
+    fn read_task_id_rejects_generation_above_wire_contract() {
+        let index = 0;
+        let generation = SNAPSHOT_ARENA_ID_MAX_GENERATION + 1;
+        let bytes = arena_id_bytes(index, generation);
+
+        assert_eq!(
+            Cursor::new(&bytes).read_task_id().unwrap_err(),
+            SnapshotError::InvalidTaskId { index, generation }
+        );
+    }
+
+    #[test]
+    fn snapshot_decode_rejects_root_region_index_above_wire_contract() {
+        let index = SNAPSHOT_ARENA_ID_MAX_INDEX + 1;
+        let generation = 0;
+        let mut bytes = RegionSnapshot::empty(RegionId::new_for_test(1, 0)).to_bytes();
+        let root_region_index_offset = SNAP_MAGIC.len() + 1;
+        bytes[root_region_index_offset..root_region_index_offset + 4]
+            .copy_from_slice(&index.to_le_bytes());
+
+        assert_eq!(
+            RegionSnapshot::from_bytes(&bytes).unwrap_err(),
+            SnapshotError::InvalidRegionId { index, generation }
+        );
+    }
+}
 
 #[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod tests {
