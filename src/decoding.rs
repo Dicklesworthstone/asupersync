@@ -908,6 +908,16 @@ fn decode_block(
                         "decoded output verification failed at symbol {esi}, byte {byte_index}: expected 0x{expected:02x}, actual 0x{actual:02x}"
                     ),
                 },
+                RaptorDecodeError::ComputeBudgetExhausted { operations_limit } => {
+                    DecodingError::ComputeLimitExceeded {
+                        limit: operations_limit,
+                    }
+                },
+                RaptorDecodeError::EsiRateLimitExceeded { limit } => {
+                    DecodingError::RateLimitExceeded {
+                        limit,
+                    }
+                },
             };
             return Err(mapped);
         }

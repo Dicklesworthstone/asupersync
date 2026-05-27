@@ -309,7 +309,8 @@ impl ErrorKind {
             | Self::LeaseExpired
             | Self::PartitionDetected
             | Self::ConfigError
-            | Self::InvalidInput => RecoveryAction::Propagate,
+            | Self::InvalidInput
+            | Self::OperationFailed => RecoveryAction::Propagate,
 
             // Escalate - serious problem, should cancel related work
             Self::ObligationLeak

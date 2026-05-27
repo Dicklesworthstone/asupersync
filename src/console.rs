@@ -567,7 +567,7 @@ fn sanitize_ansi_escape_sequences(input: &str) -> String {
                 // ANSI sequence filtered out - don't add to output
             }
             // Control characters (except safe whitespace)
-            '\x00'..='\x08' | '\x0E'..='\x1F' | '\x7F' => {
+            '\x00'..='\x08' | '\u{b}'..='\u{c}' | '\x0E'..='\x1F' | '\x7F' | '\u{80}'..='\u{9f}' => {
                 // Filter out control characters that could be dangerous
             }
             // Safe characters: printable + safe whitespace (\t, \n, \r, space)
