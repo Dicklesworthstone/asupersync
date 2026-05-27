@@ -588,14 +588,14 @@ impl RegionLeakOracle {
 
     /// Called when a region has fully closed
     pub fn on_region_closed(&mut self, region_id: RegionId) {
-        let mut closed_new_region = false;
-        if let Some(region) = self.regions.get_mut(&region_id)
-            && region.state != RegionLifecycleState::Closed
-        {
-            region.state = RegionLifecycleState::Closed;
-            region.last_activity = (self.time_source)();
-            closed_new_region = true;
-        }
+        let closed_new_region = match self.regions.get_mut(&region_id) {
+            Some(region) if region.state != RegionLifecycleState::Closed => {
+                region.state = RegionLifecycleState::Closed;
+                region.last_activity = (self.time_source)();
+                true
+            }
+            _ => false,
+        };
 
         if closed_new_region {
             self.total_regions_closed += 1;

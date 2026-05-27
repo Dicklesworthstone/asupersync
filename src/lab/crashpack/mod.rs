@@ -623,7 +623,7 @@ impl AtpCrashpack {
             cmd.push_str(&format!(" --oracle {}", shell_arg(&result.oracle_name)));
         }
 
-        cmd.push_str("\n");
+        cmd.push('\n');
         Ok(cmd)
     }
 }
@@ -694,8 +694,7 @@ fn evidence_for_oracle_result(result: &TransferOracleResult) -> EvidenceEntry {
         .violations
         .iter()
         .max_by_key(|violation| severity_rank(&violation.severity))
-        .map(|violation| severity_label(&violation.severity))
-        .unwrap_or("none");
+        .map_or("none", |violation| severity_label(&violation.severity));
 
     EvidenceEntry {
         invariant: result.oracle_name.clone(),

@@ -72,7 +72,7 @@ impl PbftConfig {
 
     /// Check if we have enough replicas for given fault tolerance.
     pub fn is_valid(&self) -> bool {
-        self.replica_count >= 3 * self.fault_tolerance + 1
+        self.replica_count > 3 * self.fault_tolerance
     }
 
     /// Get the minimum number of signatures needed for a quorum.

@@ -1811,6 +1811,26 @@ mod tests {
                 "expected": expected,
                 "actual": actual,
             }),
+            FailureReason::ComputeBudgetExhausted {
+                used,
+                requested,
+                max,
+            } => json!({
+                "kind": "ComputeBudgetExhausted",
+                "used": used,
+                "requested": requested,
+                "max": max,
+            }),
+            FailureReason::EsiRateLimitExceeded {
+                esi,
+                column_count,
+                max_columns,
+            } => json!({
+                "kind": "EsiRateLimitExceeded",
+                "esi": esi,
+                "column_count": column_count,
+                "max_columns": max_columns,
+            }),
         }
     }
 

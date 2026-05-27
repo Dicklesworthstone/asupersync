@@ -3,6 +3,7 @@
 //! Provides CLI-friendly and structured output for network metrics, path quality,
 //! and pressure model data.
 
+use crate::observability::metrics::HistogramSnapshot;
 use crate::observability::network_truth::{NetworkTruthCollector, PathQuality, PressureModel};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -147,33 +148,11 @@ impl NetworkDiagnosticReporter {
     pub fn generate_report(&self) -> NetworkDiagnosticReport {
         let metrics = self.collector.metrics();
         let pressure = self.collector.get_pressure_model().unwrap_or_default();
+        let paths = self.collector.path_qualities();
 
         // Generate metric snapshots
-        let rtt_snapshot = MetricSnapshot {
-            count: metrics.rtt.count(),
-            sum: metrics.rtt.sum(),
-            mean: if metrics.rtt.count() > 0 {
-                metrics.rtt.sum() / metrics.rtt.count() as f64
-            } else {
-                0.0
-            },
-            p50: None, // TODO: Add percentile support for Arc<Histogram>
-            p95: None, // TODO: Add percentile support for Arc<Histogram>
-            p99: None, // TODO: Add percentile support for Arc<Histogram>
-        };
-
-        let ack_delay_snapshot = MetricSnapshot {
-            count: metrics.ack_delay.count(),
-            sum: metrics.ack_delay.sum(),
-            mean: if metrics.ack_delay.count() > 0 {
-                metrics.ack_delay.sum() / metrics.ack_delay.count() as f64
-            } else {
-                0.0
-            },
-            p50: None, // TODO: Add percentile support for Arc<Histogram>
-            p95: None, // TODO: Add percentile support for Arc<Histogram>
-            p99: None, // TODO: Add percentile support for Arc<Histogram>
-        };
+        let rtt_snapshot = MetricSnapshot::from_histogram(metrics.rtt.snapshot());
+        let ack_delay_snapshot = MetricSnapshot::from_histogram(metrics.ack_delay.snapshot());
 
         let metric_snapshots = NetworkMetricSnapshots {
             rtt_stats: rtt_snapshot,
@@ -198,15 +177,16 @@ impl NetworkDiagnosticReporter {
         let summary = NetworkSummary {
             health_score,
             limiting_factor,
-            active_paths: 0, // TODO: Get from path quality map
-            avg_rtt_ms: metric_snapshots.rtt_stats.mean * 1000.0, // Convert to ms
+            active_paths: paths.len(),
+            avg_rtt_ms: average_path_rtt_ms(&paths)
+                .unwrap_or(metric_snapshots.rtt_stats.mean * 1000.0),
             recent_loss_events: metric_snapshots.loss_events,
             pressure_level,
         };
 
         NetworkDiagnosticReport {
             summary,
-            paths: BTreeMap::new(), // TODO: Get from collector
+            paths,
             pressure,
             metrics: metric_snapshots,
             timestamp: std::time::SystemTime::now(),
@@ -247,14 +227,13 @@ impl NetworkDiagnosticReporter {
         factors
             .into_iter()
             .max_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(pressure_level, factor)| {
+            .map_or(LimitingFactor::None, |(pressure_level, factor)| {
                 if pressure_level > 0.3 {
                     factor
                 } else {
                     LimitingFactor::None
                 }
             })
-            .unwrap_or(LimitingFactor::None)
     }
 
     fn calculate_health_score(
@@ -267,7 +246,7 @@ impl NetworkDiagnosticReporter {
         let pressure_impact = 1.0 - pressure.overall;
 
         // Clamp to 0.0-1.0 range
-        pressure_impact.max(0.0).min(1.0)
+        pressure_impact.clamp(0.0, 1.0)
     }
 
     fn classify_pressure_level(&self, pressure: &PressureModel) -> PressureLevel {
@@ -307,7 +286,7 @@ impl NetworkDiagnosticCli {
         let report = self.reporter.generate_report();
 
         let mut explanation = String::new();
-        explanation.push_str(&format!("=== ATP Network Diagnostics ===\n\n"));
+        explanation.push_str("=== ATP Network Diagnostics ===\n\n");
 
         explanation.push_str(&format!(
             "Overall Health: {}/100\n",
@@ -330,7 +309,7 @@ impl NetworkDiagnosticCli {
         if let Some(p95) = report.metrics.rtt_stats.p95 {
             explanation.push_str(&format!(", {:.1}ms p95", p95 * 1000.0));
         }
-        explanation.push_str("\n");
+        explanation.push('\n');
 
         explanation.push_str(&format!(
             "  Loss: {} events\n",
@@ -396,11 +375,59 @@ impl NetworkDiagnosticCli {
     }
 }
 
+impl MetricSnapshot {
+    fn from_histogram(snapshot: HistogramSnapshot) -> Self {
+        let mean = if snapshot.count > 0 {
+            snapshot.sum / snapshot.count as f64
+        } else {
+            0.0
+        };
+
+        Self {
+            count: snapshot.count,
+            sum: snapshot.sum,
+            mean,
+            p50: histogram_quantile(&snapshot, 0.50),
+            p95: histogram_quantile(&snapshot, 0.95),
+            p99: histogram_quantile(&snapshot, 0.99),
+        }
+    }
+}
+
+fn histogram_quantile(snapshot: &HistogramSnapshot, quantile: f64) -> Option<f64> {
+    if !(0.0..=1.0).contains(&quantile) || snapshot.count == 0 {
+        return None;
+    }
+
+    let rank = ((snapshot.count as f64) * quantile).ceil().max(1.0) as u64;
+    let mut cumulative = 0_u64;
+
+    for (index, bucket_count) in snapshot.bucket_counts.iter().enumerate() {
+        cumulative = cumulative.saturating_add(*bucket_count);
+        if cumulative >= rank {
+            return snapshot.bucket_boundaries.get(index).copied();
+        }
+    }
+
+    None
+}
+
+fn average_path_rtt_ms(paths: &BTreeMap<String, PathQuality>) -> Option<f64> {
+    if paths.is_empty() {
+        return None;
+    }
+
+    let sum_seconds = paths
+        .values()
+        .map(|quality| quality.rtt_estimate.value.max(0.0))
+        .sum::<f64>();
+    Some((sum_seconds / paths.len() as f64) * 1000.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::observability::network_truth::NetworkTruthCollector;
-    use std::time::Duration;
 
     #[test]
     fn test_diagnostic_report_generation() {

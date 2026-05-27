@@ -28,8 +28,11 @@ use crate::record::distributed_region::{
     ReplicaInfo, ReplicaStatus, TransitionReason,
 };
 use crate::record::region::RegionState;
-use crate::security::AuthenticatedSymbol;
+use crate::remote::NodeId;
+use crate::security::key::AuthKey;
 use crate::security::tag::AuthenticationTag;
+use crate::security::{AuthenticatedSymbol, SecurityContext};
+use crate::trace::distributed::VectorClock;
 use crate::types::budget::Budget;
 use crate::types::symbol::{ObjectId, ObjectParams};
 use crate::types::{Outcome, RegionId, TaskId, Time};
@@ -59,8 +62,15 @@ fn happy_path_encode_assign_distribute_decode() {
 
     // Assign to 3 replicas using Full strategy.
     let replicas = create_test_replicas(3);
+    let security = authorized_security_context(&replicas);
     let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
-    let assignments = assigner.assign(&encoded.symbols, &replicas, encoded.source_count);
+    let assignments = assigner.assign(
+        &encoded.symbols,
+        &replicas,
+        &security,
+        None,
+        encoded.source_count,
+    );
 
     assert_eq!(assignments.len(), 3);
     for a in &assignments {
@@ -130,7 +140,8 @@ fn quorum_loss_degrades_then_recovers() {
         allow_degraded: true,
         ..Default::default()
     };
-    let mut record = DistributedRegionRecord::new(id, config, None, Budget::default());
+    let mut record =
+        DistributedRegionRecord::new(id, config, None, Budget::default(), local_node_id());
 
     // Add 3 replicas and activate.
     for i in 0..3 {
@@ -303,6 +314,7 @@ fn snapshot_roundtrip_preserves_all_fields() {
         state: RegionState::Open,
         timestamp: Time::from_secs(12345),
         sequence: 42,
+        vector_clock: VectorClock::new(),
         origin_id: 1,
         epoch: 1,
         tasks: vec![
@@ -332,6 +344,7 @@ fn snapshot_roundtrip_preserves_all_fields() {
         cancel_reason: Some("deadline exceeded".to_string()),
         parent: Some(RegionId::new_for_test(0, 0)),
         metadata: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        auth_tag: AuthenticationTag::zero(),
     };
 
     // Encode → decode roundtrip.
@@ -432,7 +445,8 @@ fn bridge_close_distributed_from_initializing() {
 fn distributed_record_close_lifecycle() {
     let id = RegionId::new_for_test(1, 0);
     let config = DistributedRegionConfig::default();
-    let mut record = DistributedRegionRecord::new(id, config, None, Budget::default());
+    let mut record =
+        DistributedRegionRecord::new(id, config, None, Budget::default(), local_node_id());
 
     // Add replicas and activate.
     record.add_replica(ReplicaInfo::new("r0", "addr0")).unwrap();
@@ -554,11 +568,12 @@ fn assignment_strategies_provide_minimum_coverage() {
     let snapshot = make_rich_snapshot();
     let encoded = encode_snapshot(&snapshot);
     let replicas = create_test_replicas(5);
+    let security = authorized_security_context(&replicas);
     let k = encoded.source_count;
 
     // Full: every replica gets all symbols.
     let full = SymbolAssigner::new(AssignmentStrategy::Full);
-    let full_assignments = full.assign(&encoded.symbols, &replicas, k);
+    let full_assignments = full.assign(&encoded.symbols, &replicas, &security, None, k);
     for a in &full_assignments {
         assert_eq!(a.symbol_indices.len(), encoded.symbols.len());
         assert!(a.can_decode);
@@ -566,7 +581,7 @@ fn assignment_strategies_provide_minimum_coverage() {
 
     // Striped: symbols distributed across replicas.
     let striped = SymbolAssigner::new(AssignmentStrategy::Striped);
-    let striped_assignments = striped.assign(&encoded.symbols, &replicas, k);
+    let striped_assignments = striped.assign(&encoded.symbols, &replicas, &security, None, k);
     let total_assigned: usize = striped_assignments
         .iter()
         .map(|a| a.symbol_indices.len())
@@ -575,7 +590,7 @@ fn assignment_strategies_provide_minimum_coverage() {
 
     // MinimumK: each replica gets at least K symbols.
     let min_k = SymbolAssigner::new(AssignmentStrategy::MinimumK);
-    let min_k_assignments = min_k.assign(&encoded.symbols, &replicas, k);
+    let min_k_assignments = min_k.assign(&encoded.symbols, &replicas, &security, None, k);
     for a in &min_k_assignments {
         assert!(
             a.symbol_indices.len() >= k as usize,
@@ -587,7 +602,7 @@ fn assignment_strategies_provide_minimum_coverage() {
     // Weighted: with equal replica loads, symbols should still be assigned
     // exactly once and remain roughly balanced.
     let weighted = SymbolAssigner::new(AssignmentStrategy::Weighted);
-    let weighted_assignments = weighted.assign(&encoded.symbols, &replicas, k);
+    let weighted_assignments = weighted.assign(&encoded.symbols, &replicas, &security, None, k);
     let total_weighted: usize = weighted_assignments
         .iter()
         .map(|a| a.symbol_indices.len())
@@ -964,7 +979,8 @@ fn distributed_record_full_lifecycle() {
         allow_degraded: true,
         ..Default::default()
     };
-    let mut record = DistributedRegionRecord::new(id, config, None, Budget::default());
+    let mut record =
+        DistributedRegionRecord::new(id, config, None, Budget::default(), local_node_id());
 
     // Add replica.
     record.add_replica(ReplicaInfo::new("r0", "addr0")).unwrap();
@@ -1001,7 +1017,8 @@ fn distributed_record_full_lifecycle() {
 fn distributed_record_transition_history_tracked() {
     let id = RegionId::new_for_test(1, 0);
     let config = DistributedRegionConfig::default();
-    let mut record = DistributedRegionRecord::new(id, config, None, Budget::default());
+    let mut record =
+        DistributedRegionRecord::new(id, config, None, Budget::default(), local_node_id());
 
     record.add_replica(ReplicaInfo::new("r0", "addr0")).unwrap();
     record.add_replica(ReplicaInfo::new("r1", "addr1")).unwrap();
@@ -1029,6 +1046,7 @@ fn make_rich_snapshot() -> RegionSnapshot {
         state: RegionState::Open,
         timestamp: Time::from_secs(100),
         sequence: 7,
+        vector_clock: VectorClock::new(),
         origin_id: 1,
         epoch: 1,
         tasks: vec![
@@ -1053,7 +1071,22 @@ fn make_rich_snapshot() -> RegionSnapshot {
         cancel_reason: None,
         parent: Some(RegionId::new_for_test(0, 0)),
         metadata: vec![1, 2, 3],
+        auth_tag: AuthenticationTag::zero(),
     }
+}
+
+fn local_node_id() -> NodeId {
+    NodeId::new("test-local")
+}
+
+fn authorized_security_context(replicas: &[ReplicaInfo]) -> SecurityContext {
+    let security = SecurityContext::new(AuthKey::from_seed(0xD157_71B0));
+    for replica in replicas {
+        security
+            .authorize_replica(&replica.id, None)
+            .expect("test replica id should authorize");
+    }
+    security
 }
 
 fn encode_snapshot(snapshot: &RegionSnapshot) -> EncodedState {

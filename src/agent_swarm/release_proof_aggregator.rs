@@ -5,8 +5,14 @@
 
 use crate::observability::metrics::{Counter, Gauge, Histogram};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const AGENT_MAIL_ARCHIVE_ENV: &str = "ASUPERSYNC_AGENT_MAIL_ARCHIVE";
+const GENERIC_AGENT_MAIL_ARCHIVE_ENV: &str = "AGENT_MAIL_PROJECT_ARCHIVE";
+const MAX_AGENT_MAIL_SCAN_FILES: usize = 25_000;
+const MAX_EVIDENCE_TEXT_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Custom serde module for SystemTime serialization.
 mod system_time_serde {
@@ -290,6 +296,19 @@ pub struct ReleaseProofAggregator {
     metrics: AggregatorMetrics,
 }
 
+#[derive(Debug, Deserialize)]
+struct AgentMailReservationRecord {
+    id: serde_json::Value,
+    agent: String,
+    path_pattern: String,
+    exclusive: bool,
+    reason: Option<String>,
+    created_ts: String,
+    expires_ts: String,
+    #[serde(default)]
+    released_ts: Option<String>,
+}
+
 /// Metrics for the aggregator.
 #[derive(Debug)]
 pub struct AggregatorMetrics {
@@ -369,7 +388,7 @@ impl ReleaseProofAggregator {
     fn escape_git_pattern(pattern: &str) -> String {
         // Use git's fixed-string matching to prevent regex interpretation
         // This escapes any characters that might have special meaning to git
-        format!("{}", pattern.replace("\\", "\\\\").replace("\"", "\\\""))
+        pattern.replace('\\', "\\\\").replace('"', "\\\"")
     }
 
     /// Validates file path is within expected directory to prevent path traversal.
@@ -557,7 +576,7 @@ impl ReleaseProofAggregator {
         use std::process::Command;
 
         let output = Command::new("git")
-            .args(&["rev-parse", "HEAD"])
+            .args(["rev-parse", "HEAD"])
             .output()
             .map_err(|e| {
                 AggregatorError::GitError(format!("Failed to capture git snapshot: {}", e))
@@ -586,6 +605,171 @@ impl ReleaseProofAggregator {
         Ok(())
     }
 
+    fn agent_mail_project_archive_dir() -> Option<PathBuf> {
+        for env_name in [AGENT_MAIL_ARCHIVE_ENV, GENERIC_AGENT_MAIL_ARCHIVE_ENV] {
+            if let Ok(value) = std::env::var(env_name) {
+                let path = PathBuf::from(value);
+                if path.is_dir() {
+                    return Some(path);
+                }
+            }
+        }
+
+        let slug = Self::current_project_slug()?;
+        let home = std::env::var_os("HOME").map(PathBuf::from)?;
+        let archive = home
+            .join(".mcp_agent_mail_git_mailbox_repo")
+            .join("projects")
+            .join(slug);
+        archive.is_dir().then_some(archive)
+    }
+
+    fn current_project_slug() -> Option<String> {
+        let current_dir = std::env::current_dir().ok()?;
+        let components: Vec<String> = current_dir
+            .components()
+            .filter_map(|component| {
+                let segment = component.as_os_str().to_string_lossy();
+                let cleaned: String = segment
+                    .chars()
+                    .filter_map(|ch| {
+                        if ch.is_ascii_alphanumeric() {
+                            Some(ch.to_ascii_lowercase())
+                        } else if matches!(ch, '-' | '_' | '.') {
+                            Some('-')
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                (!cleaned.is_empty()).then_some(cleaned)
+            })
+            .collect();
+        (!components.is_empty()).then(|| components.join("-"))
+    }
+
+    fn parse_utc_system_time(value: &str) -> Option<SystemTime> {
+        let value = value.trim();
+        let (date, time_and_offset) = value.split_once('T')?;
+        let mut date_parts = date.split('-');
+        let year = date_parts.next()?.parse::<i32>().ok()?;
+        let month = date_parts.next()?.parse::<u32>().ok()?;
+        let day = date_parts.next()?.parse::<u32>().ok()?;
+        if date_parts.next().is_some() {
+            return None;
+        }
+
+        let (time, offset_seconds) = Self::split_rfc3339_time_and_offset(time_and_offset)?;
+        let mut time_parts = time.split(':');
+        let hour = time_parts.next()?.parse::<u32>().ok()?;
+        let minute = time_parts.next()?.parse::<u32>().ok()?;
+        let second_text = time_parts.next()?;
+        if time_parts.next().is_some() {
+            return None;
+        }
+        let second = second_text
+            .split('.')
+            .next()
+            .and_then(|text| text.parse::<u32>().ok())?;
+        if !(1..=12).contains(&month)
+            || !(1..=31).contains(&day)
+            || hour > 23
+            || minute > 59
+            || second > 60
+        {
+            return None;
+        }
+
+        let days = Self::days_from_civil(year, month, day)?;
+        let local_seconds = days
+            .checked_mul(86_400)?
+            .checked_add(i64::from(hour) * 3_600)?
+            .checked_add(i64::from(minute) * 60)?
+            .checked_add(i64::from(second))?;
+        let utc_seconds = local_seconds.checked_sub(offset_seconds)?;
+        if utc_seconds < 0 {
+            return None;
+        }
+        u64::try_from(utc_seconds)
+            .ok()
+            .map(Self::system_time_from_unix_seconds)
+    }
+
+    fn split_rfc3339_time_and_offset(value: &str) -> Option<(&str, i64)> {
+        if let Some(time) = value.strip_suffix('Z') {
+            return Some((time, 0));
+        }
+        let offset_index = value
+            .char_indices()
+            .skip(1)
+            .find_map(|(index, ch)| matches!(ch, '+' | '-').then_some(index))?;
+        let (time, offset) = value.split_at(offset_index);
+        let sign = if offset.starts_with('+') { 1 } else { -1 };
+        let mut parts = offset[1..].split(':');
+        let hours = parts.next()?.parse::<i64>().ok()?;
+        let minutes = parts.next()?.parse::<i64>().ok()?;
+        if parts.next().is_some() || hours > 23 || minutes > 59 {
+            return None;
+        }
+        Some((time, sign * (hours * 3_600 + minutes * 60)))
+    }
+
+    fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+        let year = i64::from(year) - i64::from(month <= 2);
+        let era = if year >= 0 { year } else { year - 399 } / 400;
+        let year_of_era = year - era * 400;
+        let month = i64::from(month);
+        let day = i64::from(day);
+        let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+        if !(0..=365).contains(&day_of_year) {
+            return None;
+        }
+        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        Some(era * 146_097 + day_of_era - 719_468)
+    }
+
+    fn system_time_from_unix_seconds(seconds: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(seconds)
+    }
+
+    fn read_evidence_text(path: &Path) -> Option<String> {
+        let metadata = std::fs::metadata(path).ok()?;
+        if !metadata.is_file() || metadata.len() > MAX_EVIDENCE_TEXT_BYTES {
+            return None;
+        }
+        std::fs::read_to_string(path).ok()
+    }
+
+    fn collect_files_with_extensions(root: &Path, extensions: &[&str]) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            if files.len() >= MAX_AGENT_MAIL_SCAN_FILES {
+                break;
+            }
+            let Ok(entries) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if entry_path.is_dir() {
+                    stack.push(entry_path);
+                    continue;
+                }
+                let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) else {
+                    continue;
+                };
+                if extensions.contains(&extension) {
+                    files.push(entry_path);
+                    if files.len() >= MAX_AGENT_MAIL_SCAN_FILES {
+                        break;
+                    }
+                }
+            }
+        }
+        files
+    }
+
     /// Collects file reservation evidence for the bead.
     fn collect_reservation_evidence(
         &self,
@@ -594,68 +778,89 @@ impl ReleaseProofAggregator {
         // Security: Validate bead ID to prevent path traversal attacks
         Self::validate_bead_id(bead_id)?;
 
-        // Search for reservations that mention this bead ID in the reason field
-        // In a real implementation, this would query the Agent Mail system
-        // For now, we implement a file-based search through .beads/ directory
-
-        let mut reservations = vec![];
-
-        // Try to find Agent Mail thread data for this bead
-        let bead_thread_pattern = format!("br-{}", bead_id);
-
-        // Search through available agent mail data (if any)
-        // This is a simplified implementation that would need to integrate with actual Agent Mail
-        let agent_mail_dir = ".agent_mail";
-
-        // Security: Validate agent mail directory exists and is safe
-        if let Ok(entries) = std::fs::read_dir(agent_mail_dir) {
-            for entry in entries.flatten() {
-                let entry_path = entry.path();
-
-                // Security: Validate file path is within agent mail directory
-                if let Some(path_str) = entry_path.to_str() {
-                    if let Err(_) = Self::validate_file_path(path_str, agent_mail_dir) {
-                        continue; // Skip files outside allowed directory
-                    }
-
-                    // Only read files with safe extensions
-                    if let Some(extension) = entry_path.extension() {
-                        if extension != "json" && extension != "txt" && extension != "log" {
-                            continue; // Skip potentially dangerous file types
-                        }
-                    }
-
-                    // Security: Handle file read gracefully to avoid TOCTOU issues
-                    // File may have been removed/changed between directory read and file read
-                    match std::fs::read_to_string(&entry_path) {
-                        Ok(content) => {
-                            if content.contains(&bead_thread_pattern) {
-                                // Found reservation data for this bead
-                                // In practice, would parse actual Agent Mail reservation records
-                                let now = SystemTime::now();
-                                reservations.push(FileReservation {
-                                    agent: "detected-agent".to_string(),
-                                    patterns: vec!["src/**".to_string()], // Would parse from actual data
-                                    exclusive: true,
-                                    ttl_seconds: 3600, // Would get from actual reservation
-                                    reason: bead_thread_pattern.clone(),
-                                    acquired_at: now,
-                                    released_at: None,
-                                });
-                            }
-                        }
-                        Err(_) => {
-                            // File read failed - may have been removed or changed permissions
-                            // This is acceptable for evidence collection, just skip this file
-                            continue;
-                        }
-                    }
-                }
-            }
+        let Some(agent_mail_archive) = Self::agent_mail_project_archive_dir() else {
+            return Err(AggregatorError::MissingEvidence(
+                "Agent Mail archive not found for current project".to_string(),
+            ));
+        };
+        let reservation_dir = agent_mail_archive.join("file_reservations");
+        if !reservation_dir.is_dir() {
+            return Err(AggregatorError::MissingEvidence(format!(
+                "Agent Mail reservation directory not found: {}",
+                reservation_dir.display()
+            )));
         }
 
-        // If no agent mail data found, this is a verification failure
-        // The bead should have had proper file reservations
+        let bead_thread_pattern = format!("br-{}", bead_id);
+        let mut reservations = Vec::new();
+        let mut grouped: BTreeMap<(String, String, bool, u64, String), FileReservation> =
+            BTreeMap::new();
+
+        for path in Self::collect_files_with_extensions(&reservation_dir, &["json"]) {
+            let Some(content) = Self::read_evidence_text(&path) else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_str::<AgentMailReservationRecord>(&content) else {
+                continue;
+            };
+            let reason = record.reason.unwrap_or_default();
+            if !reason.contains(&bead_thread_pattern) && !reason.contains(bead_id) {
+                continue;
+            }
+
+            let acquired_at = Self::parse_utc_system_time(&record.created_ts).ok_or_else(|| {
+                AggregatorError::EvidenceCollection(format!(
+                    "reservation {} has invalid created_ts {}",
+                    record.id, record.created_ts
+                ))
+            })?;
+            let expires_at = Self::parse_utc_system_time(&record.expires_ts).ok_or_else(|| {
+                AggregatorError::EvidenceCollection(format!(
+                    "reservation {} has invalid expires_ts {}",
+                    record.id, record.expires_ts
+                ))
+            })?;
+            let ttl_seconds = expires_at
+                .duration_since(acquired_at)
+                .unwrap_or_default()
+                .as_secs();
+            let released_at = record
+                .released_ts
+                .as_deref()
+                .and_then(Self::parse_utc_system_time);
+            let key = (
+                record.agent.clone(),
+                reason.clone(),
+                record.exclusive,
+                ttl_seconds,
+                released_at
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map_or_else(String::new, |duration| duration.as_secs().to_string()),
+            );
+
+            grouped
+                .entry(key)
+                .and_modify(|reservation| {
+                    reservation.patterns.push(record.path_pattern.clone());
+                    reservation.patterns.sort();
+                    reservation.patterns.dedup();
+                    if reservation.acquired_at > acquired_at {
+                        reservation.acquired_at = acquired_at;
+                    }
+                })
+                .or_insert_with(|| FileReservation {
+                    agent: record.agent,
+                    patterns: vec![record.path_pattern],
+                    exclusive: record.exclusive,
+                    ttl_seconds,
+                    reason,
+                    acquired_at,
+                    released_at,
+                });
+        }
+
+        reservations.extend(grouped.into_values());
+
         if reservations.is_empty() {
             return Err(AggregatorError::MissingEvidence(format!(
                 "No file reservation evidence found for bead {}",
@@ -680,19 +885,18 @@ impl ReleaseProofAggregator {
 
         // Security: Use escaped patterns and fixed-string matching to prevent git injection
         let escaped_bead_pattern = Self::escape_git_pattern(&bead_pattern);
-        let escaped_short_pattern = Self::escape_git_pattern(&short_pattern);
+        let escaped_short_pattern = Self::escape_git_pattern(short_pattern);
 
         // Security: Atomic operation - get commits and their changed files in one git command
         // This prevents TOCTOU attacks where git state changes between separate operations
         let output = Command::new("git")
-            .args(&[
+            .args([
                 "log",
                 "--fixed-strings", // Use literal string matching, not regex
                 "--grep",
-                &escaped_bead_pattern,
+                escaped_bead_pattern.as_str(),
                 "--grep",
-                &escaped_short_pattern,
-                "--all-match",
+                escaped_short_pattern.as_str(),
                 "--name-only",
                 "--format=COMMIT:%H", // Marker to separate commits from files
                 "--since=30 days ago",
@@ -742,18 +946,17 @@ impl ReleaseProofAggregator {
 
         // Security: Use escaped patterns and fixed-string matching to prevent git injection
         let escaped_bead_pattern = Self::escape_git_pattern(&bead_pattern);
-        let escaped_short_pattern = Self::escape_git_pattern(&short_pattern);
+        let escaped_short_pattern = Self::escape_git_pattern(short_pattern);
 
         // Search for commits mentioning the bead ID in various formats
         let output = Command::new("git")
-            .args(&[
+            .args([
                 "log",
                 "--fixed-strings", // Use literal string matching, not regex
                 "--grep",
-                &escaped_bead_pattern,
+                escaped_bead_pattern.as_str(),
                 "--grep",
-                &escaped_short_pattern,
-                "--all-match",
+                escaped_short_pattern.as_str(),
                 "--format=%H|%s|%an|%at|%D",
                 "--since=30 days ago", // Limit search to recent commits
             ])
@@ -782,17 +985,14 @@ impl ReleaseProofAggregator {
                 let message = parts[1].to_string();
                 let author = parts[2].to_string();
                 let timestamp_str = parts[3];
-                let refs = if parts.len() > 4 { parts[4] } else { "" };
-
                 // Parse timestamp
                 let timestamp = if let Ok(ts) = timestamp_str.parse::<u64>() {
-                    SystemTime::UNIX_EPOCH + Duration::from_secs(ts)
+                    Self::system_time_from_unix_seconds(ts)
                 } else {
                     SystemTime::now()
                 };
 
-                // Check if commit was pushed (appears in remote refs)
-                let pushed = refs.contains("origin/") || refs.contains("remote/");
+                let pushed = self.commit_is_pushed(&hash)?;
 
                 commits.push(CommitRecord {
                     hash,
@@ -814,6 +1014,31 @@ impl ReleaseProofAggregator {
         Ok(commits)
     }
 
+    fn commit_is_pushed(&self, commit_hash: &str) -> Result<bool, AggregatorError> {
+        use std::process::Command;
+
+        let output = Command::new("git")
+            .args([
+                "branch",
+                "-r",
+                "--contains",
+                commit_hash,
+                "--format=%(refname)",
+            ])
+            .output()
+            .map_err(|err| {
+                AggregatorError::GitError(format!(
+                    "failed to query remote refs for commit {commit_hash}: {err}"
+                ))
+            })?;
+        if !output.status.success() {
+            return Ok(false);
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.trim().starts_with("refs/remotes/")))
+    }
+
     /// Collects RCH command evidence for the bead.
     fn collect_rch_evidence(
         &self,
@@ -822,9 +1047,187 @@ impl ReleaseProofAggregator {
         // Security: Validate bead ID to prevent potential security issues
         Self::validate_bead_id(bead_id)?;
 
-        // TODO: Query RCH logs or artifacts for command evidence
-        // When implemented, this should search for RCH commands associated with the bead_id
-        Ok(vec![])
+        let Some(agent_mail_archive) = Self::agent_mail_project_archive_dir() else {
+            return Ok(Vec::new());
+        };
+        let messages_dir = agent_mail_archive.join("messages");
+        if !messages_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+
+        let bead_thread_pattern = format!("br-{}", bead_id);
+        let mut records = Vec::new();
+        let mut seen = HashSet::new();
+
+        for path in Self::collect_files_with_extensions(&messages_dir, &["md", "txt", "log"]) {
+            let Some(content) = Self::read_evidence_text(&path) else {
+                continue;
+            };
+            if !content.contains(bead_id) && !content.contains(&bead_thread_pattern) {
+                continue;
+            }
+            let started_at = Self::message_created_at(&content)
+                .or_else(|| {
+                    std::fs::metadata(&path)
+                        .ok()
+                        .and_then(|metadata| metadata.modified().ok())
+                })
+                .unwrap_or_else(SystemTime::now);
+            for record in Self::extract_rch_records_from_message(&content, started_at) {
+                let key = format!(
+                    "{}|{:?}|{}",
+                    record.command, record.started_at, record.exit_code
+                );
+                if seen.insert(key) {
+                    records.push(record);
+                }
+            }
+        }
+
+        records.sort_by(|left, right| {
+            left.started_at
+                .cmp(&right.started_at)
+                .then_with(|| left.command.cmp(&right.command))
+        });
+        Ok(records)
+    }
+
+    fn message_created_at(content: &str) -> Option<SystemTime> {
+        content.lines().find_map(|line| {
+            let line = line.strip_prefix("## ")?;
+            let timestamp = line.split(" — ").next()?.trim();
+            Self::parse_utc_system_time(timestamp)
+        })
+    }
+
+    fn extract_rch_records_from_message(
+        content: &str,
+        started_at: SystemTime,
+    ) -> Vec<RchCommandRecord> {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut records = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            let Some(command) = Self::extract_rch_command(line) else {
+                continue;
+            };
+            let context_start = index.saturating_sub(8);
+            let context_end = lines.len().min(index.saturating_add(16));
+            let context = lines[context_start..context_end].join("\n");
+            let exit_code = Self::infer_rch_exit_code(&context);
+            records.push(RchCommandRecord {
+                command,
+                exit_code,
+                remote_required: true,
+                worker: Self::infer_rch_worker(&context),
+                duration: Self::infer_rch_duration(&context).unwrap_or_default(),
+                started_at,
+                output_summary: Self::summarize_rch_context(&context),
+            });
+        }
+        records
+    }
+
+    fn extract_rch_command(line: &str) -> Option<String> {
+        let rch_index = line.find("rch exec")?;
+        let suffix = &line[rch_index..];
+        let command = suffix
+            .split('`')
+            .next()
+            .unwrap_or(suffix)
+            .trim()
+            .trim_matches(|ch| matches!(ch, '"' | '\'' | '`'));
+        (!command.is_empty()).then(|| command.to_string())
+    }
+
+    fn infer_rch_exit_code(context: &str) -> i32 {
+        let lower = context.to_ascii_lowercase();
+        if lower.contains("exit=0")
+            || lower.contains("exit 0")
+            || lower.contains("passed")
+            || lower.contains("success")
+            || lower.contains("finished `")
+        {
+            return 0;
+        }
+        if lower.contains("sigkill")
+            || lower.contains("exit=101")
+            || lower.contains("exit 101")
+            || lower.contains("failed")
+            || lower.contains("error:")
+            || lower.contains("remote proof required but unavailable")
+        {
+            return 101;
+        }
+        -1
+    }
+
+    fn infer_rch_worker(context: &str) -> Option<String> {
+        for line in context.lines() {
+            if let Some(worker) = line
+                .split("Selected worker:")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+            {
+                return Some(
+                    worker
+                        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                        .to_string(),
+                );
+            }
+            if let Some(worker) = line
+                .split("[RCH] remote")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+            {
+                return Some(
+                    worker
+                        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+                        .to_string(),
+                );
+            }
+        }
+        None
+    }
+
+    fn infer_rch_duration(context: &str) -> Option<Duration> {
+        for line in context.lines() {
+            if let Some(ms_text) = line
+                .split("Remote command finished:")
+                .nth(1)
+                .and_then(|rest| rest.split(" in ").nth(1))
+                .and_then(|rest| rest.split("ms").next())
+                && let Ok(ms) = ms_text.trim().parse::<u64>()
+            {
+                return Some(Duration::from_millis(ms));
+            }
+            if let Some(seconds_text) = line
+                .split("[RCH] remote")
+                .nth(1)
+                .and_then(|rest| rest.rsplit_once('(').map(|(_, tail)| tail))
+                .and_then(|tail| tail.split('s').next())
+                && let Ok(seconds) = seconds_text.trim().parse::<f64>()
+            {
+                return Some(Duration::from_secs_f64(seconds));
+            }
+        }
+        None
+    }
+
+    fn summarize_rch_context(context: &str) -> String {
+        let mut summary = context
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.is_empty() && !trimmed.starts_with("```")
+            })
+            .take(12)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        if summary.len() > 512 {
+            summary.truncate(512);
+            summary.push_str("...[truncated]");
+        }
+        summary
     }
 
     /// Detects the first blocker encountered.
@@ -872,9 +1275,52 @@ impl ReleaseProofAggregator {
             ));
         }
 
-        // TODO: Query lease system for agent receipts
-        // When implemented, this should search for lease receipts associated with the agent_name
-        Ok(vec![])
+        let Some(agent_mail_archive) = Self::agent_mail_project_archive_dir() else {
+            return Ok(Vec::new());
+        };
+        let reservation_dir = agent_mail_archive.join("file_reservations");
+        if !reservation_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+
+        let now = SystemTime::now();
+        let mut receipts = Vec::new();
+        for path in Self::collect_files_with_extensions(&reservation_dir, &["json"]) {
+            let Some(content) = Self::read_evidence_text(&path) else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_str::<AgentMailReservationRecord>(&content) else {
+                continue;
+            };
+            if record.agent != agent_name {
+                continue;
+            }
+            let Some(acquired_at) = Self::parse_utc_system_time(&record.created_ts) else {
+                continue;
+            };
+            let Some(expires_at) = Self::parse_utc_system_time(&record.expires_ts) else {
+                continue;
+            };
+            let released_at = record
+                .released_ts
+                .as_deref()
+                .and_then(Self::parse_utc_system_time);
+            receipts.push(LeaseReceipt {
+                lease_type: "file_reservation".to_string(),
+                lease_id: record.id.to_string().trim_matches('"').to_string(),
+                agent: record.agent,
+                acquired_at,
+                expires_at,
+                active: released_at.is_none() && expires_at > now,
+            });
+        }
+
+        receipts.sort_by(|left, right| {
+            left.acquired_at
+                .cmp(&right.acquired_at)
+                .then_with(|| left.lease_id.cmp(&right.lease_id))
+        });
+        Ok(receipts)
     }
 
     /// Checks handoff capsule status for the bead.
@@ -924,23 +1370,7 @@ impl ReleaseProofAggregator {
                     }
                 }
 
-                // Look for decision indicators in the capsule content
-                // This is a simplified check - real implementation would parse structured data
-                if content.contains("\"decision\":\"Continue\"") || content.contains("Continue") {
-                    decision = Some(HandoffDecision::Continue);
-                } else if content.contains("\"decision\":\"NarrowRefreshRequired\"")
-                    || content.contains("NarrowRefreshRequired")
-                {
-                    decision = Some(HandoffDecision::NarrowRefreshRequired);
-                } else if content.contains("\"decision\":\"CoordinateFirst\"")
-                    || content.contains("CoordinateFirst")
-                {
-                    decision = Some(HandoffDecision::CoordinateFirst);
-                } else if content.contains("\"decision\":\"UnsafeToContinue\"")
-                    || content.contains("UnsafeToContinue")
-                {
-                    decision = Some(HandoffDecision::UnsafeToContinue);
-                }
+                decision = Self::parse_handoff_decision(&content);
                 break; // Use first found capsule
             }
         }
@@ -950,7 +1380,7 @@ impl ReleaseProofAggregator {
             use std::process::Command;
 
             let output = Command::new("git")
-                .args(&["notes", "show", "--ref=handoff", "HEAD"])
+                .args(["notes", "show", "--ref=handoff", "HEAD"])
                 .output();
 
             if let Ok(output) = output {
@@ -958,15 +1388,7 @@ impl ReleaseProofAggregator {
                     let notes = String::from_utf8_lossy(&output.stdout);
                     if notes.contains(bead_id) {
                         found_capsule = true;
-                        if notes.contains("Continue") {
-                            decision = Some(HandoffDecision::Continue);
-                        } else if notes.contains("NarrowRefreshRequired") {
-                            decision = Some(HandoffDecision::NarrowRefreshRequired);
-                        } else if notes.contains("CoordinateFirst") {
-                            decision = Some(HandoffDecision::CoordinateFirst);
-                        } else if notes.contains("UnsafeToContinue") {
-                            decision = Some(HandoffDecision::UnsafeToContinue);
-                        }
+                        decision = Self::parse_handoff_decision(&notes);
                     }
                 }
             }
@@ -979,17 +1401,76 @@ impl ReleaseProofAggregator {
         })
     }
 
+    fn parse_handoff_decision(content: &str) -> Option<HandoffDecision> {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(content)
+            && let Some(decision) = value.get("decision").and_then(serde_json::Value::as_str)
+        {
+            return Self::handoff_decision_from_str(decision);
+        }
+        [
+            "Continue",
+            "NarrowRefreshRequired",
+            "CoordinateFirst",
+            "UnsafeToContinue",
+        ]
+        .iter()
+        .find_map(|candidate| {
+            content
+                .contains(candidate)
+                .then(|| Self::handoff_decision_from_str(candidate))
+                .flatten()
+        })
+    }
+
+    fn handoff_decision_from_str(value: &str) -> Option<HandoffDecision> {
+        match value {
+            "Continue" => Some(HandoffDecision::Continue),
+            "NarrowRefreshRequired" => Some(HandoffDecision::NarrowRefreshRequired),
+            "CoordinateFirst" => Some(HandoffDecision::CoordinateFirst),
+            "UnsafeToContinue" => Some(HandoffDecision::UnsafeToContinue),
+            _ => None,
+        }
+    }
+
     /// Collects git reference information from commits.
     fn collect_git_refs(&self, commits: &[CommitRecord]) -> Result<Vec<GitRef>, AggregatorError> {
-        let mut refs = vec![];
+        use std::process::Command;
+
+        let mut refs = Vec::new();
+        let mut seen = HashSet::new();
         for commit in commits {
-            if commit.pushed {
-                refs.push(GitRef {
-                    ref_name: "refs/heads/main".to_string(),
-                    commit_hash: commit.hash.clone(),
-                    pushed: true,
-                    pushed_at: commit.timestamp,
-                });
+            let output = Command::new("git")
+                .args([
+                    "branch",
+                    "-r",
+                    "--contains",
+                    commit.hash.as_str(),
+                    "--format=%(refname)",
+                ])
+                .output()
+                .map_err(|err| {
+                    AggregatorError::GitError(format!(
+                        "failed to query pushed refs for commit {}: {err}",
+                        commit.hash
+                    ))
+                })?;
+            if !output.status.success() {
+                continue;
+            }
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let ref_name = line.trim();
+                if !ref_name.starts_with("refs/remotes/") {
+                    continue;
+                }
+                let key = format!("{ref_name}:{}", commit.hash);
+                if seen.insert(key) {
+                    refs.push(GitRef {
+                        ref_name: ref_name.to_string(),
+                        commit_hash: commit.hash.clone(),
+                        pushed: true,
+                        pushed_at: commit.timestamp,
+                    });
+                }
             }
         }
         Ok(refs)
@@ -1009,22 +1490,22 @@ impl ReleaseProofAggregator {
             return Ok(ProofStatus::Blocked);
         }
 
-        // Check if remote RCH proofs are required and missing
-        if self.config.require_remote_rch {
-            let has_remote_proof = rch_commands
-                .iter()
-                .any(|cmd| cmd.remote_required && cmd.exit_code == 0);
-            if !has_remote_proof && !rch_commands.is_empty() {
-                return Ok(ProofStatus::MissingRemoteProof);
-            }
-        }
-
         // Check for local fallbacks
         let has_local_fallback = rch_commands
             .iter()
             .any(|cmd| cmd.worker.is_none() && cmd.remote_required);
         if has_local_fallback {
             return Ok(ProofStatus::LocalFallback);
+        }
+
+        // Check if remote RCH proofs are required and missing
+        if self.config.require_remote_rch {
+            let has_remote_proof = rch_commands
+                .iter()
+                .any(|cmd| cmd.remote_required && cmd.worker.is_some() && cmd.exit_code == 0);
+            if !has_remote_proof {
+                return Ok(ProofStatus::MissingRemoteProof);
+            }
         }
 
         // Check if evidence is stale
@@ -1078,7 +1559,7 @@ impl ReleaseProofAggregator {
             }
         };
 
-        (age_factor + commit_freshness) / 2.0
+        f64::midpoint(age_factor, commit_freshness)
     }
 
     /// Redacts sensitive information from the proof record.
@@ -1206,6 +1687,47 @@ mod tests {
     }
 
     #[test]
+    fn test_proof_status_requires_remote_when_no_rch_evidence_exists() {
+        let config = AggregatorConfig::default();
+        let aggregator = ReleaseProofAggregator::new(config);
+        let handoff_status = HandoffStatus {
+            capsule_exists: false,
+            decision: None,
+            last_updated: SystemTime::now(),
+        };
+
+        let status = aggregator
+            .determine_proof_status(&[], &[], None, &handoff_status, &[])
+            .unwrap();
+
+        assert_eq!(status, ProofStatus::MissingRemoteProof);
+    }
+
+    #[test]
+    fn test_rch_message_parser_extracts_worker_exit_and_duration() {
+        let started_at = SystemTime::now();
+        let message = r#"
+## 2026-05-27T12:43:18.938024Z — HazyRidge → MossyPond
+
+Command:
+`rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target cargo check -p asupersync --lib`
+
+2026-05-27T12:43:18Z INFO Selected worker: vmi1167313 at ubuntu@154.12.232.219
+Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 07s
+Remote command finished: exit=0 in 188296ms
+[RCH] remote vmi1167313 (234.3s)
+"#;
+
+        let records = ReleaseProofAggregator::extract_rch_records_from_message(message, started_at);
+
+        assert_eq!(records.len(), 1);
+        assert!(records[0].command.starts_with("rch exec -- env"));
+        assert_eq!(records[0].exit_code, 0);
+        assert_eq!(records[0].worker.as_deref(), Some("vmi1167313"));
+        assert_eq!(records[0].duration, Duration::from_millis(188_296));
+    }
+
+    #[test]
     fn test_proof_status_determination_blocked() {
         let config = AggregatorConfig::default();
         let aggregator = ReleaseProofAggregator::new(config);
@@ -1234,6 +1756,7 @@ mod tests {
     fn test_proof_status_determination_stale() {
         let config = AggregatorConfig {
             max_commit_age: Duration::from_secs(60), // 1 minute
+            require_remote_rch: false,
             ..AggregatorConfig::default()
         };
         let aggregator = ReleaseProofAggregator::new(config);
@@ -1357,7 +1880,7 @@ mod tests {
 
     #[test]
     fn test_file_path_validation() {
-        // Create a temporary directory for testing
+        // Create an isolated directory for testing
         let temp_dir = std::env::temp_dir().join("test_aggregator");
         std::fs::create_dir_all(&temp_dir).unwrap();
         let temp_path = temp_dir.to_str().unwrap();

@@ -262,12 +262,12 @@ impl NetworkTruthCollector {
 
     /// Updates congestion window size.
     pub fn update_congestion_window(&self, bytes: u64) {
-        self.metrics.congestion_window.set(bytes as i64);
+        self.metrics.congestion_window.set(bytes.cast_signed());
     }
 
     /// Updates bytes in flight.
     pub fn update_bytes_in_flight(&self, bytes: u64) {
-        self.metrics.bytes_in_flight.set(bytes as i64);
+        self.metrics.bytes_in_flight.set(bytes.cast_signed());
     }
 
     /// Updates buffer pressure (0.0-1.0).
@@ -331,6 +331,15 @@ impl NetworkTruthCollector {
     /// Gets current path quality for a given path.
     pub fn get_path_quality(&self, path_id: &str) -> Option<PathQuality> {
         self.path_qualities.lock().ok()?.get(path_id).cloned()
+    }
+
+    /// Returns a point-in-time snapshot of all known path quality assessments.
+    #[must_use]
+    pub fn path_qualities(&self) -> BTreeMap<String, PathQuality> {
+        self.path_qualities
+            .lock()
+            .map(|qualities| qualities.clone())
+            .unwrap_or_default()
     }
 
     /// Updates the pressure model.

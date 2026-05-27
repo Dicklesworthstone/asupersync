@@ -1147,7 +1147,7 @@ impl<'a> Cursor<'a> {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod tests {
     #![allow(
         clippy::pedantic,

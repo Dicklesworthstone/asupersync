@@ -330,6 +330,6 @@ impl MessageCertificate {
     }
 
     pub fn is_valid(&self, f: usize) -> bool {
-        self.signatures.len() >= 2 * f + 1
+        self.signatures.len() > 2 * f
     }
 }

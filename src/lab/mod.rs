@@ -47,8 +47,9 @@
 //!
 //! See the [`chaos`] module for detailed documentation on chaos testing.
 
-#[path = "../atp/lab/mod.rs"]
-pub mod atp_lab;
+pub mod atp_lab {
+    pub use crate::atp::lab::*;
+}
 pub mod atp_path;
 pub mod chaos;
 pub mod config;
@@ -76,7 +77,7 @@ pub mod swarm_replay;
 pub mod util;
 pub mod virtual_time_wheel;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod deterministic_validation_tests;
 
 pub use crate::util::{

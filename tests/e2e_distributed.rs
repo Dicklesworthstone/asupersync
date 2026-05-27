@@ -27,7 +27,9 @@ use asupersync::record::distributed_region::{
     ReplicaInfo, ReplicaStatus,
 };
 use asupersync::record::region::RegionState;
+use asupersync::remote::NodeId;
 use asupersync::security::{AuthenticatedSymbol, AuthenticationTag, SecurityContext};
+use asupersync::trace::distributed::vclock::VectorClock;
 use asupersync::types::budget::Budget;
 use asupersync::types::{Outcome, RegionId, TaskId, Time};
 use asupersync::util::DetRng;
@@ -44,6 +46,7 @@ fn make_region_snapshot() -> RegionSnapshot {
         state: RegionState::Open,
         timestamp: Time::from_secs(100),
         sequence: 7,
+        vector_clock: VectorClock::new(),
         origin_id: 1,
         epoch: 1,
         tasks: vec![
@@ -73,6 +76,7 @@ fn make_region_snapshot() -> RegionSnapshot {
         cancel_reason: None,
         parent: Some(RegionId::new_for_test(0, 0)),
         metadata: vec![0xCA, 0xFE, 0xBA, 0xBE],
+        auth_tag: AuthenticationTag::zero(),
     }
 }
 
@@ -137,7 +141,13 @@ impl TestCluster {
         replicas: Vec<ReplicaInfo>,
         now: Time,
     ) -> Self {
-        let mut record = DistributedRegionRecord::new(id, config, None, Budget::default());
+        let mut record = DistributedRegionRecord::new(
+            id,
+            config,
+            None,
+            Budget::default(),
+            NodeId::new("e2e-test-node"),
+        );
         for replica in replicas {
             record.add_replica(replica).unwrap();
         }
@@ -283,6 +293,7 @@ fn e2e_full_encode_distribute_recover_pipeline() {
     // Phase 3: Assign with all 3 strategies
     test_phase!("Assign");
     let replicas = test_replicas(3);
+    let security_context = SecurityContext::for_testing(42);
 
     for strategy in [
         AssignmentStrategy::Full,
@@ -295,6 +306,8 @@ fn e2e_full_encode_distribute_recover_pipeline() {
         let assignments = assigner.assign(
             &encoded_state.symbols,
             &replicas,
+            &security_context,
+            None,
             encoded_state.source_count,
         );
         assert_eq!(assignments.len(), 3);
@@ -388,7 +401,13 @@ fn e2e_full_encode_distribute_recover_pipeline() {
         allow_degraded: true,
         ..Default::default()
     };
-    let mut record = DistributedRegionRecord::new(id, dist_config, None, Budget::default());
+    let mut record = DistributedRegionRecord::new(
+        id,
+        dist_config,
+        None,
+        Budget::default(),
+        NodeId::new("e2e-test-node"),
+    );
     for i in 0..3 {
         record
             .add_replica(ReplicaInfo::new(
@@ -500,7 +519,13 @@ fn e2e_quorum_loss_and_recovery() {
         allow_degraded: true,
         ..Default::default()
     };
-    let mut record = DistributedRegionRecord::new(id, config, None, Budget::default());
+    let mut record = DistributedRegionRecord::new(
+        id,
+        config,
+        None,
+        Budget::default(),
+        NodeId::new("e2e-test-node"),
+    );
 
     for i in 0..3 {
         record
@@ -550,7 +575,13 @@ fn e2e_replica_rejoin_after_partition() {
         allow_degraded: true,
         ..Default::default()
     };
-    let mut record = DistributedRegionRecord::new(id, config, None, Budget::default());
+    let mut record = DistributedRegionRecord::new(
+        id,
+        config,
+        None,
+        Budget::default(),
+        NodeId::new("e2e-test-node"),
+    );
 
     for i in 0..3 {
         record

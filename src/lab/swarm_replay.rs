@@ -1064,7 +1064,7 @@ pub fn plan_swarm_admission_wave(
         bounded_queue_estimate,
         recommendation,
         starvation_risk,
-        &first_blocker,
+        first_blocker.as_deref(),
     );
 
     Ok(SwarmWhatIfPlan {
@@ -2452,7 +2452,7 @@ fn what_if_log(
     bounded_queue_estimate: usize,
     recommendation: SwarmWhatIfRecommendation,
     starvation_risk: SwarmWhatIfStarvationRisk,
-    first_blocker: &Option<String>,
+    first_blocker: Option<&str>,
 ) -> Vec<String> {
     let mut lines = vec![
         format!(

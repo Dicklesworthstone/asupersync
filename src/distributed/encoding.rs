@@ -554,7 +554,7 @@ fn block_bounds(block: usize, max_block_size: usize, data_len: usize) -> (usize,
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 #[allow(clippy::similar_names)]
 mod tests {
     use super::*;

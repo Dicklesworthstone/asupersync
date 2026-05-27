@@ -1115,14 +1115,8 @@ fn choose_low_level_decoder_policy(
     }
 
     let hard_gate = n_cols >= HARD_REGIME_MIN_COLS
-        && (features.density_permille
-            >= HARD_REGIME_DENSITY_PERCENT
-                .checked_mul(10)
-                .unwrap_or(usize::MAX)
-            || n_rows
-                <= n_cols
-                    .checked_add(HARD_REGIME_NEAR_SQUARE_EXTRA_ROWS)
-                    .unwrap_or(usize::MAX));
+        && (features.density_permille >= HARD_REGIME_DENSITY_PERCENT.saturating_mul(10)
+            || n_rows <= n_cols.saturating_add(HARD_REGIME_NEAR_SQUARE_EXTRA_ROWS));
     if !hard_gate {
         return DecoderPolicyDecision {
             mode: DecoderPolicyMode::ConservativeBaseline,
@@ -1136,10 +1130,7 @@ fn choose_low_level_decoder_policy(
     }
 
     let block_gate = n_cols >= BLOCK_SCHUR_MIN_COLS
-        && features.density_permille
-            >= BLOCK_SCHUR_MIN_DENSITY_PERCENT
-                .checked_mul(10)
-                .unwrap_or(usize::MAX)
+        && features.density_permille >= BLOCK_SCHUR_MIN_DENSITY_PERCENT.saturating_mul(10)
         && n_cols > BLOCK_SCHUR_TRAILING_COLS;
     if !block_gate {
         block_schur_loss = u32::MAX;
@@ -1169,7 +1160,7 @@ const fn decoder_policy_mode_label(mode: DecoderPolicyMode) -> &'static str {
     }
 }
 
-fn apply_policy_decision_to_stats(stats: &mut DecodeStats, decision: DecoderPolicyDecision) {
+fn apply_policy_decision_to_stats(stats: &mut DecodeStats, decision: &DecoderPolicyDecision) {
     stats.policy_mode = Some(decoder_policy_mode_label(decision.mode));
     stats.policy_reason = Some(decision.reason);
     stats.policy_replay_ref = Some(POLICY_REPLAY_REF);
@@ -1237,10 +1228,8 @@ fn sparse_update_column_capacity(n_cols: usize) -> usize {
         return 0;
     }
 
-    let threshold = n_cols
-        .checked_mul(HYBRID_SPARSE_COST_NUMERATOR)
-        .unwrap_or(usize::MAX)
-        / HYBRID_SPARSE_COST_DENOMINATOR;
+    let threshold =
+        n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR) / HYBRID_SPARSE_COST_DENOMINATOR;
     threshold.max(1).min(n_cols)
 }
 
@@ -1255,10 +1244,8 @@ fn sparse_update_columns_if_beneficial(
     }
 
     // Equivalent threshold to should_use_sparse_row_update(pivot_nnz, n_cols).
-    let threshold = n_cols
-        .checked_mul(HYBRID_SPARSE_COST_NUMERATOR)
-        .unwrap_or(usize::MAX)
-        / HYBRID_SPARSE_COST_DENOMINATOR;
+    let threshold =
+        n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR) / HYBRID_SPARSE_COST_DENOMINATOR;
     scratch.clear();
 
     if n_cols <= SMALL_ROW_DENSE_FASTPATH_COLS {
@@ -2345,7 +2332,7 @@ impl InactivationDecoder {
             unsupported_cols,
             inactivation_pressure_permille,
         );
-        apply_policy_decision_to_stats(&mut state.stats, decision);
+        apply_policy_decision_to_stats(&mut state.stats, &decision);
         let mut hard_regime = !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline);
         let mut hard_plan = match decision.mode {
             DecoderPolicyMode::ConservativeBaseline | DecoderPolicyMode::HighSupportFirst => {
@@ -2651,7 +2638,7 @@ impl InactivationDecoder {
             unsupported_cols,
             inactivation_pressure_permille,
         );
-        apply_policy_decision_to_stats(&mut state.stats, decision);
+        apply_policy_decision_to_stats(&mut state.stats, &decision);
         let mut hard_regime = !matches!(decision.mode, DecoderPolicyMode::ConservativeBaseline);
         let mut hard_plan = match decision.mode {
             DecoderPolicyMode::ConservativeBaseline | DecoderPolicyMode::HighSupportFirst => {
@@ -2972,13 +2959,13 @@ fn rebuild_dense_matrix_from_equations(
         // on malformed inputs that bypass the upstream sizing.
         let row_off = row
             .checked_mul(n_cols)
-            .ok_or_else(|| DecodeError::SingularMatrix { row: eq_idx })?;
+            .ok_or(DecodeError::SingularMatrix { row: eq_idx })?;
         for &(col, coef) in &equations[eq_idx].terms {
             if let Some(dense_col) = dense_col_index(col_to_dense, col) {
                 let off = row_off
                     .checked_add(dense_col)
                     .filter(|&o| o < a.len())
-                    .ok_or_else(|| DecodeError::SingularMatrix { row: eq_idx })?;
+                    .ok_or(DecodeError::SingularMatrix { row: eq_idx })?;
                 a[off] = coef;
             }
         }
@@ -2998,7 +2985,7 @@ fn snapshot_dense_rhs(rows: &[Vec<u8>], symbol_size: usize) -> Result<Vec<u8>, D
     let total = rows
         .len()
         .checked_mul(symbol_size)
-        .ok_or_else(|| DecodeError::SingularMatrix { row: rows.len() })?;
+        .ok_or(DecodeError::SingularMatrix { row: rows.len() })?;
     let mut snapshot = vec![0u8; total];
     for (row_idx, row) in rows.iter().enumerate() {
         debug_assert_eq!(row.len(), symbol_size);

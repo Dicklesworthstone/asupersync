@@ -505,7 +505,7 @@ impl AgentTaskProofBundle {
             "# Safety level: {:?}\n",
             self.replay_instructions.safety_level
         ));
-        script.push_str("\n");
+        script.push('\n');
 
         script.push_str("set -euo pipefail\n\n");
 
@@ -533,7 +533,7 @@ impl AgentTaskProofBundle {
                 script.push_str("if [[ ! $REPLY =~ ^[Yy]$ ]]; then exit 1; fi\n");
             }
         }
-        script.push_str("\n");
+        script.push('\n');
 
         // Set environment variables
         if !self.replay_instructions.environment_variables.is_empty() {
@@ -541,7 +541,7 @@ impl AgentTaskProofBundle {
             for (key, value) in &self.replay_instructions.environment_variables {
                 script.push_str(&format!("export {}={}\n", key, shell_escape(value)));
             }
-            script.push_str("\n");
+            script.push('\n');
         }
 
         // Add manual setup instructions
@@ -554,7 +554,7 @@ impl AgentTaskProofBundle {
             for instruction in &self.replay_instructions.manual_setup_instructions {
                 script.push_str(&format!("# - {}\n", instruction));
             }
-            script.push_str("\n");
+            script.push('\n');
         }
 
         // Add commands by safety category
@@ -564,7 +564,7 @@ impl AgentTaskProofBundle {
                 script.push_str(&format!("echo \"Running: {}\"\n", cmd));
                 script.push_str(&format!("{}\n", cmd));
             }
-            script.push_str("\n");
+            script.push('\n');
         }
 
         if !self.replay_instructions.remote_required_commands.is_empty() {
@@ -573,7 +573,7 @@ impl AgentTaskProofBundle {
                 script.push_str(&format!("echo \"Remote required: {}\"\n", cmd));
                 script.push_str(&format!("# {}\n", cmd));
             }
-            script.push_str("\n");
+            script.push('\n');
         }
 
         if !self
@@ -598,7 +598,7 @@ impl AgentTaskProofBundle {
     }
 
     fn generate_command_summary(&self) -> String {
-        let mut summary = format!("Agent Task Command Summary\n");
+        let mut summary = "Agent Task Command Summary\n".to_string();
         summary.push_str(&format!("Agent: {}\n", self.agent_id));
         summary.push_str(&format!("Objective: {}\n", self.objective));
         summary.push_str(&format!("Commands executed: {}\n\n", self.commands.len()));
@@ -625,7 +625,7 @@ impl AgentTaskProofBundle {
                     ));
                 }
             }
-            summary.push_str("\n");
+            summary.push('\n');
         }
 
         summary
@@ -645,7 +645,7 @@ impl AgentTaskProofBundle {
             "Concurrent Change: {}\n",
             blocker.concurrent_change
         ));
-        report.push_str("\n");
+        report.push('\n');
 
         if blocker.concurrent_change {
             report.push_str(
@@ -804,7 +804,7 @@ fn truncate_output(output: &str, max_chars: usize) -> String {
     } else {
         format!(
             "{}... [truncated]",
-            &output[..max_chars].replace('\n', "\\n")
+            output[..max_chars].replace('\n', "\\n")
         )
     }
 }

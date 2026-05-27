@@ -394,16 +394,9 @@ impl ConstraintMatrix {
     pub fn zeros(rows: usize, cols: usize) -> Self {
         // Prevent arithmetic overflow by checking for unreasonably large matrices
         const MAX_MATRIX_SIZE: usize = 1024 * 1024 * 1024; // 1GB max
-        let n = rows.checked_mul(cols).unwrap_or_else(|| {
-            #[cfg(feature = "tracing-integration")]
-            tracing::error!(
-                "ConstraintMatrix::zeros: rows*cols overflow: {rows} * {cols}, \
-                 clamping to maximum size"
-            );
-            MAX_MATRIX_SIZE
-        });
+        let n = rows.saturating_mul(cols).min(MAX_MATRIX_SIZE);
         Self {
-            data: vec![Gf256::ZERO; n.min(MAX_MATRIX_SIZE)],
+            data: vec![Gf256::ZERO; n],
             rows,
             cols,
         }
@@ -1140,7 +1133,7 @@ impl SystematicEncoder {
         // Advance cursor - handle overflow gracefully
         let actual_count = result.len(); // Use actual symbols generated, not requested count
         let count_u32 = u32::try_from(actual_count).unwrap_or(u32::MAX);
-        self.next_repair_esi = start_esi.checked_add(count_u32).unwrap_or(u32::MAX);
+        self.next_repair_esi = start_esi.saturating_add(count_u32);
         if count != 0 {
             self.systematic_emitted = true;
         }
@@ -1450,9 +1443,6 @@ mod tests {
 
         // Verify the largest table entry is safe
         assert!(max_table_k_prime <= u32::MAX as usize);
-
-        // Test the validation function directly for boundary conditions
-        use super::SystematicParamError;
 
         // Valid case: small K' should succeed
         assert!(SystematicParams::try_for_source_block(1, 64).is_ok());
@@ -2915,7 +2905,7 @@ mod tests {
         };
         let dbg = format!("{e:?}");
         assert!(dbg.contains("UnsupportedSourceBlockSize"), "{dbg}");
-        let copied: SystematicParamError = e;
+        let copied: SystematicParamError = e.clone();
         let cloned = e;
         assert_eq!(copied, cloned);
     }

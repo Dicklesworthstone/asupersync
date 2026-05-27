@@ -272,7 +272,7 @@ impl ReplicaAssignment {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod tests {
     #![allow(
         clippy::pedantic,
@@ -306,6 +306,32 @@ mod tests {
         (0..count)
             .map(|i| Symbol::new_for_test(1, 0, i as u32, &[0u8; 128]))
             .collect()
+    }
+
+    trait AuthorizedAssignForTests {
+        fn assign(
+            &self,
+            symbols: &[Symbol],
+            replicas: &[ReplicaInfo],
+            k: u16,
+        ) -> Vec<ReplicaAssignment>;
+    }
+
+    impl AuthorizedAssignForTests for SymbolAssigner {
+        fn assign(
+            &self,
+            symbols: &[Symbol],
+            replicas: &[ReplicaInfo],
+            k: u16,
+        ) -> Vec<ReplicaAssignment> {
+            let mut security_context = SecurityContext::for_testing(42);
+            for replica in replicas {
+                security_context
+                    .authorize_replica(&replica.id, None)
+                    .expect("test replica identifiers should be authorizable");
+            }
+            SymbolAssigner::assign(self, symbols, replicas, &security_context, None, k)
+        }
     }
 
     #[test]

@@ -745,7 +745,7 @@ mod tests {
     use super::*;
 
     fn create_test_capsule() -> HandoffCapsule {
-        HandoffCapsule {
+        let mut capsule = HandoffCapsule {
             session_meta: SessionMetadata {
                 agent_id: "test-agent".to_string(),
                 session_duration: Duration::from_secs(3600),
@@ -783,8 +783,14 @@ mod tests {
             pushed_commits: vec![],
             remaining_risks: vec![],
             created_at: SystemTime::now(),
-            content_hash: "valid-hash".to_string(),
-        }
+            content_hash: String::new(),
+        };
+        refresh_content_hash(&mut capsule);
+        capsule
+    }
+
+    fn refresh_content_hash(capsule: &mut HandoffCapsule) {
+        capsule.content_hash = HandoffVerifier::new().compute_content_hash(capsule);
     }
 
     #[test]
@@ -806,6 +812,7 @@ mod tests {
         // Make docs receipt old
         capsule.session_meta.docs_receipts[0].read_at =
             SystemTime::now() - Duration::from_secs(7200); // 2 hours ago
+        refresh_content_hash(&mut capsule);
 
         match verifier.verify_handoff(&capsule) {
             HandoffDecision::NarrowRefreshRequired { refresh_targets } => {
@@ -821,6 +828,7 @@ mod tests {
         let mut capsule = create_test_capsule();
 
         capsule.git_state.current_branch = "feature-branch".to_string();
+        refresh_content_hash(&mut capsule);
 
         match verifier.verify_handoff(&capsule) {
             HandoffDecision::UnsafeToContinue { reasons } => {
@@ -845,6 +853,7 @@ mod tests {
             priority: MessagePriority::Critical,
             received_at: SystemTime::now(),
         });
+        refresh_content_hash(&mut capsule);
 
         match verifier.verify_handoff(&capsule) {
             HandoffDecision::UnsafeToContinue { reasons } => {
@@ -869,6 +878,7 @@ mod tests {
             expires_at: SystemTime::now() - Duration::from_secs(60), // Expired
             reason: "test".to_string(),
         });
+        refresh_content_hash(&mut capsule);
 
         match verifier.verify_handoff(&capsule) {
             HandoffDecision::CoordinateFirst {
@@ -893,6 +903,7 @@ mod tests {
             competing_agents: vec!["agent1".to_string(), "agent2".to_string()],
             severity: ConflictSeverity::Medium,
         });
+        refresh_content_hash(&mut capsule);
 
         match verifier.verify_handoff(&capsule) {
             HandoffDecision::CoordinateFirst {
@@ -982,6 +993,7 @@ mod tests {
             expected_completion: None,
             command_type: ProofCommandType::Test,
         });
+        refresh_content_hash(&mut capsule);
 
         match verifier.verify_handoff(&capsule) {
             HandoffDecision::UnsafeToContinue { reasons } => {

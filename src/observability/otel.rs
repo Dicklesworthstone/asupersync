@@ -8100,7 +8100,9 @@ pub mod otlp_request_builder {
 #[cfg(all(test, feature = "metrics", feature = "tracing-integration"))]
 mod otlp_wire_format_tests {
     use super::span_semantics::{SpanConformanceConfig, TestSpan};
-    use super::{MetricLabels, MetricsSnapshot};
+    use super::{
+        MetricLabels, MetricsSnapshot, OtlpLogRecord, PrivacyConfig, otlp_request_builder,
+    };
     use opentelemetry::trace::{SpanKind as ApiSpanKind, Status as ApiStatus};
     use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
     use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -9203,22 +9205,19 @@ mod otlp_wire_format_tests {
         );
 
         // Extract attributes from both requests for comparison
-        let extract_counter_attributes =
-            |request: &otlp_request_builder::ExportMetricsServiceRequest| -> Vec<String> {
-                request.resource_metrics[0].scope_metrics[0]
-                    .metrics
-                    .iter()
-                    .find(|m| m.name == "http_requests_total")
-                    .and_then(|m| m.data.as_ref())
-                    .and_then(|data| match data {
-                        otlp_request_builder::metric::Data::Sum(sum) => {
-                            Some(&sum.data_points[0].attributes)
-                        }
-                        _ => None,
-                    })
-                    .map(|attrs| attrs.iter().map(|kv| kv.key.clone()).collect())
-                    .unwrap_or_default()
-            };
+        let extract_counter_attributes = |request: &ExportMetricsServiceRequest| -> Vec<String> {
+            request.resource_metrics[0].scope_metrics[0]
+                .metrics
+                .iter()
+                .find(|m| m.name == "http_requests_total")
+                .and_then(|m| m.data.as_ref())
+                .and_then(|data| match data {
+                    metric::Data::Sum(sum) => Some(&sum.data_points[0].attributes),
+                    _ => None,
+                })
+                .map(|attrs| attrs.iter().map(|kv| kv.key.clone()).collect())
+                .unwrap_or_default()
+        };
 
         let attrs_no_privacy = extract_counter_attributes(&request_no_privacy);
         let attrs_with_privacy = extract_counter_attributes(&request_with_privacy);
@@ -9279,17 +9278,13 @@ mod otlp_wire_format_tests {
             .with_drop_attribute("auth.token");
 
         // Create a mock log entry with both safe and sensitive fields
-        let mock_entry = LogEntry::new(
-            LogLevel::Info,
-            "user action completed",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap(),
-        )
-        .with_field("action", "login")
-        .with_field("user.email", "sensitive@example.com") // Should be filtered
-        .with_field("api.key", "secret-key-12345") // Should be filtered
-        .with_field("auth.token", "bearer-token-xyz") // Should be filtered
-        .with_field("user.id", "12345") // Should be kept
-        .with_field("request.path", "/api/login"); // Should be kept
+        let mock_entry = LogEntry::new(LogLevel::Info, "user action completed")
+            .with_field("action", "login")
+            .with_field("user.email", "sensitive@example.com") // Should be filtered
+            .with_field("api.key", "secret-key-12345") // Should be filtered
+            .with_field("auth.token", "bearer-token-xyz") // Should be filtered
+            .with_field("user.id", "12345") // Should be kept
+            .with_field("request.path", "/api/login"); // Should be kept
 
         let observed_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)

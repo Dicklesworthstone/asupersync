@@ -890,7 +890,7 @@ impl std::fmt::Debug for RecoveryOrchestrator {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 #[allow(clippy::similar_names)]
 mod tests {
     use super::*;

@@ -2276,7 +2276,7 @@ mod tests {
 
         let envelope = MessageEnvelope::new(
             node_a.clone(),
-            LogicalTime::Zero,
+            LogicalTime::Vector(VectorClock::new()),
             RemoteMessage::SpawnRequest(fake_req),
         );
 
@@ -2327,7 +2327,7 @@ mod tests {
 
         let envelope = MessageEnvelope::new(
             node_a.clone(),
-            LogicalTime::Zero,
+            LogicalTime::Vector(VectorClock::new()),
             RemoteMessage::SpawnRequest(legitimate_req),
         );
 

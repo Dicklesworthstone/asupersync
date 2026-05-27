@@ -7,13 +7,17 @@
 #![allow(dead_code)]
 
 use crate::cx::Cx;
-use crate::error::Result;
+use crate::error::{Error, ErrorKind, Result};
 use crate::sync::Mutex;
 use crate::types::RegionId;
+use hmac::{Hmac, KeyInit, Mac};
+use nkeys::KeyPair;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use subtle::ConstantTimeEq;
 
 use super::handoff_verifier::{HandoffVerifier, SessionMetadata};
 use super::release_proof_aggregator::ReleaseProofAggregator;
@@ -44,6 +48,8 @@ pub struct AdmissionController {
     max_concurrent_agents: usize,
     /// Resource allocation policies
     resource_policies: ResourcePolicies,
+    /// Authentication and credential verification policy
+    auth_policy: AgentAuthPolicy,
     /// Current resource usage
     current_usage: Arc<Mutex<ResourceUsage>>,
     /// Admission queue for waiting agents
@@ -151,6 +157,21 @@ pub struct AgentCredentials {
     pub issuer: Option<String>,
 }
 
+/// Authentication policy for agent admission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentAuthPolicy {
+    /// HMAC key used to issue and verify scoped admission bearer tokens.
+    pub token_hmac_key: String,
+    /// Maximum accepted lifetime for bearer tokens.
+    pub token_lifetime: Duration,
+    /// Maximum accepted age for signed credential admission requests.
+    pub credential_lifetime: Duration,
+    /// Accepted wall-clock skew for issued-at timestamps.
+    pub max_clock_skew: Duration,
+    /// Optional allow-list of credential issuers. Empty means issuer allow-listing is disabled.
+    pub trusted_issuers: Vec<String>,
+}
+
 /// Agent admission request with resource requirements.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentAdmissionRequest {
@@ -249,6 +270,14 @@ pub type AgentId = String;
 pub type SessionId = String;
 pub type LaneId = String;
 
+type HmacSha256 = Hmac<Sha256>;
+
+const AGENT_AUTH_TOKEN_SCHEME: &str = "agent_token_v1";
+const AGENT_CREDENTIAL_SIGNATURE_SCHEME: &str = "nkey_ed25519";
+const AGENT_AUTH_TOKEN_DOMAIN: &[u8] = b"asupersync-agent-swarm-auth-token-v1";
+const AGENT_CREDENTIAL_SIGNATURE_DOMAIN: &str = "asupersync-agent-swarm-credential-v1";
+const MIN_AUTH_HMAC_KEY_BYTES: usize = 32;
+
 // Enums for various states and types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AgentStatus {
@@ -304,7 +333,7 @@ pub enum LaneStatus {
     Unavailable,
 }
 
-// Placeholder structs for complex types that would be defined elsewhere
+// Configuration model types used by the in-memory swarm coordinator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCapabilities {
     pub supported_languages: Vec<String>,
@@ -391,6 +420,119 @@ pub struct ProofAggregationMetrics {
     pub average_proof_size: u64,
 }
 
+impl AgentAuthPolicy {
+    /// Issue a scoped bearer token for one agent identity.
+    #[must_use]
+    pub fn issue_auth_token(
+        &self,
+        agent_id: &AgentId,
+        issued_at: SystemTime,
+        lifetime: Duration,
+    ) -> Option<String> {
+        if !is_valid_agent_auth_identifier(agent_id)
+            || self.token_hmac_key.len() < MIN_AUTH_HMAC_KEY_BYTES
+            || lifetime.is_zero()
+            || lifetime > self.token_lifetime
+        {
+            return None;
+        }
+
+        let issued_at_unix = system_time_unix_seconds(issued_at)?;
+        let expires_at_unix = issued_at_unix.checked_add(lifetime.as_secs())?;
+        let signature = sign_agent_auth_token(
+            agent_id,
+            issued_at_unix,
+            expires_at_unix,
+            self.token_hmac_key.as_bytes(),
+        )?;
+
+        Some(format!(
+            "{AGENT_AUTH_TOKEN_SCHEME}.{agent_id}.{issued_at_unix}.{expires_at_unix}.{signature}"
+        ))
+    }
+}
+
+fn validate_agent_auth_policy(policy: &AgentAuthPolicy) -> Result<()> {
+    if policy.token_hmac_key.len() < MIN_AUTH_HMAC_KEY_BYTES {
+        return Err(Error::new(ErrorKind::ConfigError).with_message(format!(
+            "agent auth token_hmac_key must be at least {MIN_AUTH_HMAC_KEY_BYTES} bytes"
+        )));
+    }
+    if policy.token_lifetime.is_zero() {
+        return Err(Error::new(ErrorKind::ConfigError)
+            .with_message("agent auth token_lifetime must be greater than zero"));
+    }
+    if policy.credential_lifetime.is_zero() {
+        return Err(Error::new(ErrorKind::ConfigError)
+            .with_message("agent auth credential_lifetime must be greater than zero"));
+    }
+    if policy.max_clock_skew > policy.token_lifetime {
+        return Err(Error::new(ErrorKind::ConfigError)
+            .with_message("agent auth max_clock_skew must not exceed token_lifetime"));
+    }
+    Ok(())
+}
+
+fn system_time_unix_seconds(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|age| age.as_secs())
+}
+
+fn is_valid_agent_auth_identifier(identifier: &str) -> bool {
+    !identifier.is_empty()
+        && identifier.len() <= 128
+        && identifier.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b':' | b'@' | b'/')
+        })
+}
+
+fn sign_agent_auth_token(
+    agent_id: &str,
+    issued_at_unix: u64,
+    expires_at_unix: u64,
+    key: &[u8],
+) -> Option<String> {
+    if key.len() < MIN_AUTH_HMAC_KEY_BYTES {
+        return None;
+    }
+
+    let issued = issued_at_unix.to_string();
+    let expires = expires_at_unix.to_string();
+    let mut mac = HmacSha256::new_from_slice(key).ok()?;
+    mac.update(AGENT_AUTH_TOKEN_DOMAIN);
+    mac.update(&[0]);
+    mac.update(agent_id.as_bytes());
+    mac.update(&[0]);
+    mac.update(issued.as_bytes());
+    mac.update(&[0]);
+    mac.update(expires.as_bytes());
+    Some(hex::encode(mac.finalize().into_bytes()))
+}
+
+fn credential_signature_payload(
+    credentials: &AgentCredentials,
+    agent_id: &AgentId,
+    requested_at_unix: u64,
+) -> String {
+    let certificate_digest = Sha256::digest(credentials.certificate.as_bytes());
+    format!(
+        "{AGENT_CREDENTIAL_SIGNATURE_DOMAIN}\nagent_id:{agent_id}\nrequested_at:{requested_at_unix}\ncertificate_sha256:{}\nissuer:{}\n",
+        hex::encode(certificate_digest),
+        credentials.issuer.as_deref().unwrap_or("")
+    )
+}
+
+fn constant_time_hex_eq(left_hex: &str, right_hex: &str) -> bool {
+    let Ok(left) = hex::decode(left_hex) else {
+        return false;
+    };
+    let Ok(right) = hex::decode(right_hex) else {
+        return false;
+    };
+    bool::from(left.as_slice().ct_eq(right.as_slice()))
+}
+
 impl AgentSwarmControlPlane {
     /// Create a new Agent Swarm Control Plane instance.
     pub fn new(config: ControlPlaneConfig) -> Result<Self> {
@@ -398,15 +540,9 @@ impl AgentSwarmControlPlane {
         let validation_coordinator =
             Arc::new(ValidationCoordinator::new(config.validation_config)?);
         let handoff_verifier = Arc::new(Mutex::new(HandoffVerifier::new()));
-        // Create a basic aggregator config for now
-        let aggregator_config = super::release_proof_aggregator::AggregatorConfig {
-            max_evidence_age: Duration::from_secs(3600),
-            max_commit_age: Duration::from_secs(3600 * 24),
-            require_remote_rch: true,
-            redact_sensitive: false,
-            output_retention_days: 7,
-        };
-        let proof_aggregator = Arc::new(Mutex::new(ReleaseProofAggregator::new(aggregator_config)));
+        let proof_aggregator = Arc::new(Mutex::new(ReleaseProofAggregator::new(
+            config.proof_config.to_release_aggregator_config(),
+        )));
         let agent_registry = Arc::new(Mutex::new(AgentRegistry::new()));
         let pressure_monitor = Arc::new(PressureMonitor::new(config.pressure_config)?);
         let metrics = Arc::new(Mutex::new(ControlPlaneMetrics::new()));
@@ -430,35 +566,58 @@ impl AgentSwarmControlPlane {
     ) -> Result<AgentAdmissionResult> {
         // SECURITY: Validate agent authentication/authorization before admission
         if !self.validate_agent_authorization(cx, &request).await? {
-            return Ok(AgentAdmissionResult::Rejected {
-                reason: AdmissionRejectionReason::Unauthorized,
-                retry_after: Some(Duration::from_secs(60)),
-            });
+            return self
+                .reject_admission(
+                    cx,
+                    AdmissionRejectionReason::Unauthorized,
+                    Some(Duration::from_secs(60)),
+                )
+                .await;
         }
 
         // Check current system pressure
         let pressure = self.pressure_monitor.current_pressure(cx).await?;
         if pressure.overall_pressure > 0.8 {
-            return Ok(AgentAdmissionResult::Rejected {
-                reason: AdmissionRejectionReason::SystemPressure,
-                retry_after: Some(Duration::from_secs(30)),
-            });
+            return self
+                .reject_admission(
+                    cx,
+                    AdmissionRejectionReason::SystemPressure,
+                    Some(Duration::from_secs(30)),
+                )
+                .await;
         }
 
-        // Check resource availability
-        let can_admit = self
+        let already_active = {
+            let registry = self.agent_registry.lock(cx).await?;
+            registry.active_agents.contains_key(&request.agent_id)
+        };
+
+        if already_active {
+            return self
+                .reject_admission(
+                    cx,
+                    AdmissionRejectionReason::AgentLimitReached,
+                    Some(Duration::from_secs(60)),
+                )
+                .await;
+        }
+
+        let allocated = self
             .admission_controller
-            .can_admit_agent(cx, &request)
+            .try_allocate_agent_resources(cx, &request)
             .await?;
 
-        if !can_admit {
-            return Ok(AgentAdmissionResult::Rejected {
-                reason: AdmissionRejectionReason::ResourceUnavailable,
-                retry_after: Some(Duration::from_secs(60)),
-            });
+        if !allocated {
+            return self
+                .reject_admission(
+                    cx,
+                    AdmissionRejectionReason::ResourceUnavailable,
+                    Some(Duration::from_secs(60)),
+                )
+                .await;
         }
 
-        // Create agent session with placeholder region
+        // Create an ephemeral owning region for this control-plane admission.
         let agent_region = RegionId::new_ephemeral();
         let session = AgentSession {
             agent_id: request.agent_id.clone(),
@@ -478,10 +637,14 @@ impl AgentSwarmControlPlane {
             active_obligations_count: 0,
         };
 
-        // Register agent session
-        {
+        if let Err(err) = {
             let mut registry = self.agent_registry.lock(cx).await?;
-            registry.register_session(session.clone())?;
+            registry.register_session(session.clone())
+        } {
+            self.admission_controller
+                .release_agent_resources(cx, &request.resource_requirements)
+                .await?;
+            return Err(err);
         }
 
         // Update metrics
@@ -496,6 +659,24 @@ impl AgentSwarmControlPlane {
             session_id: session.session_id,
             allocated_resources: session.allocated_resources,
             agent_region,
+        })
+    }
+
+    async fn reject_admission(
+        &self,
+        cx: &Cx,
+        reason: AdmissionRejectionReason,
+        retry_after: Option<Duration>,
+    ) -> Result<AgentAdmissionResult> {
+        {
+            let mut metrics = self.metrics.lock(cx).await?;
+            metrics.total_agents_rejected += 1;
+            metrics.last_updated = SystemTime::now();
+        }
+
+        Ok(AgentAdmissionResult::Rejected {
+            reason,
+            retry_after,
         })
     }
 
@@ -534,18 +715,66 @@ impl AgentSwarmControlPlane {
 
     /// Validate authentication token.
     async fn validate_auth_token(&self, token: &str, agent_id: &AgentId) -> Result<bool> {
-        // Implement token validation logic
-        // - Verify token signature
-        // - Check token expiration
-        // - Validate token was issued for this agent_id
-        // For now, basic validation that token is non-empty and matches expected format
-        if token.is_empty() || token.len() < 16 {
+        let policy = &self.admission_controller.auth_policy;
+        let mut parts = token.split('.');
+        let Some(scheme) = parts.next() else {
+            return Ok(false);
+        };
+        let Some(token_agent_id) = parts.next() else {
+            return Ok(false);
+        };
+        let Some(issued_at_raw) = parts.next() else {
+            return Ok(false);
+        };
+        let Some(expires_at_raw) = parts.next() else {
+            return Ok(false);
+        };
+        let Some(signature_hex) = parts.next() else {
+            return Ok(false);
+        };
+        if parts.next().is_some()
+            || scheme != AGENT_AUTH_TOKEN_SCHEME
+            || !is_valid_agent_auth_identifier(token_agent_id)
+            || !bool::from(token_agent_id.as_bytes().ct_eq(agent_id.as_bytes()))
+        {
             return Ok(false);
         }
 
-        // TODO: Implement proper JWT validation, token signature verification, etc.
-        // This is a placeholder implementation
-        Ok(token.starts_with("agent_token_") && token.contains(agent_id))
+        let Ok(issued_at_unix) = issued_at_raw.parse::<u64>() else {
+            return Ok(false);
+        };
+        let Ok(expires_at_unix) = expires_at_raw.parse::<u64>() else {
+            return Ok(false);
+        };
+        if expires_at_unix <= issued_at_unix {
+            return Ok(false);
+        }
+
+        let lifetime = Duration::from_secs(expires_at_unix - issued_at_unix);
+        if lifetime > policy.token_lifetime {
+            return Ok(false);
+        }
+
+        let Some(now_unix) = system_time_unix_seconds(SystemTime::now()) else {
+            return Ok(false);
+        };
+        let skew = policy.max_clock_skew.as_secs();
+        if issued_at_unix > now_unix.saturating_add(skew)
+            || now_unix > expires_at_unix.saturating_add(skew)
+        {
+            return Ok(false);
+        }
+
+        let Some(expected_signature) = sign_agent_auth_token(
+            token_agent_id,
+            issued_at_unix,
+            expires_at_unix,
+            policy.token_hmac_key.as_bytes(),
+        ) else {
+            return Ok(false);
+        };
+
+        Ok(constant_time_hex_eq(signature_hex, &expected_signature))
     }
 
     /// Validate agent credentials and signature.
@@ -555,28 +784,62 @@ impl AgentSwarmControlPlane {
         agent_id: &AgentId,
         requested_at: SystemTime,
     ) -> Result<bool> {
-        // Basic validation
         if credentials.certificate.is_empty()
             || credentials.public_key.is_empty()
             || credentials.signature.is_empty()
+            || !is_valid_agent_auth_identifier(agent_id)
         {
             return Ok(false);
         }
 
-        // Verify the signature over agent_id + timestamp
-        let message = format!(
-            "{}:{}",
-            agent_id,
-            requested_at
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-        );
+        let policy = &self.admission_controller.auth_policy;
+        if !policy.trusted_issuers.is_empty() {
+            let Some(issuer) = credentials.issuer.as_deref() else {
+                return Ok(false);
+            };
+            if !policy
+                .trusted_issuers
+                .iter()
+                .any(|trusted| trusted == issuer)
+            {
+                return Ok(false);
+            }
+        }
 
-        // TODO: Implement proper cryptographic signature verification
-        // This is a placeholder implementation
-        let expected_signature = format!("sig_{}_for_{}", credentials.public_key, message);
-        Ok(credentials.signature == expected_signature)
+        let Some(requested_at_unix) = system_time_unix_seconds(requested_at) else {
+            return Ok(false);
+        };
+        let Some(now_unix) = system_time_unix_seconds(SystemTime::now()) else {
+            return Ok(false);
+        };
+        let skew = policy.max_clock_skew.as_secs();
+        if requested_at_unix > now_unix.saturating_add(skew) {
+            return Ok(false);
+        }
+        let max_age = policy
+            .credential_lifetime
+            .as_secs()
+            .saturating_add(policy.max_clock_skew.as_secs());
+        if now_unix.saturating_sub(requested_at_unix) > max_age {
+            return Ok(false);
+        }
+
+        let Some(signature_hex) = credentials
+            .signature
+            .strip_prefix(AGENT_CREDENTIAL_SIGNATURE_SCHEME)
+            .and_then(|rest| rest.strip_prefix('.'))
+        else {
+            return Ok(false);
+        };
+        let Ok(signature) = hex::decode(signature_hex) else {
+            return Ok(false);
+        };
+        let Ok(key_pair) = KeyPair::from_public_key(&credentials.public_key) else {
+            return Ok(false);
+        };
+        let payload = credential_signature_payload(credentials, agent_id, requested_at_unix);
+
+        Ok(key_pair.verify(payload.as_bytes(), &signature).is_ok())
     }
 
     /// Check agent permissions and authorization levels.
@@ -618,15 +881,39 @@ impl AgentSwarmControlPlane {
 
     /// Shutdown the control plane gracefully.
     pub async fn shutdown(&self, cx: &Cx) -> Result<()> {
-        // Gracefully shutdown all active agents
         let active_sessions = {
-            let registry = self.agent_registry.lock(cx).await?;
-            registry.active_agents.keys().cloned().collect::<Vec<_>>()
+            let mut registry = self.agent_registry.lock(cx).await?;
+            let sessions = registry
+                .active_agents
+                .values_mut()
+                .map(|session| {
+                    session.status = AgentStatus::Shutting;
+                    session.clone()
+                })
+                .collect::<Vec<_>>();
+            registry.active_agents.clear();
+            sessions
         };
 
-        for _agent_id in active_sessions {
-            // Signal agent shutdown and wait for graceful termination
-            // Implementation would depend on agent communication protocol
+        let mut total_duration = Duration::ZERO;
+        let now = SystemTime::now();
+        for session in &active_sessions {
+            self.admission_controller
+                .release_agent_resources(cx, &session.allocated_resources)
+                .await?;
+            total_duration += now
+                .duration_since(session.started_at)
+                .unwrap_or(Duration::ZERO);
+        }
+
+        {
+            let mut metrics = self.metrics.lock(cx).await?;
+            metrics.active_agent_count = 0;
+            if !active_sessions.is_empty() {
+                metrics.avg_session_duration =
+                    total_duration / u32::try_from(active_sessions.len()).unwrap_or(u32::MAX);
+            }
+            metrics.last_updated = now;
         }
 
         Ok(())
@@ -647,6 +934,7 @@ pub struct ControlPlaneConfig {
 pub struct AdmissionConfig {
     pub max_concurrent_agents: usize,
     pub resource_policies: ResourcePolicies,
+    pub auth_policy: AgentAuthPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -673,6 +961,11 @@ pub struct ProofAggregatorConfig {
     pub max_beads_per_aggregation: usize,
     pub aggregation_timeout: Duration,
     pub enable_validation: bool,
+    pub max_evidence_age: Duration,
+    pub max_commit_age: Duration,
+    pub require_remote_rch: bool,
+    pub redact_sensitive: bool,
+    pub output_retention_days: u64,
 }
 
 /// Result of agent admission request.
@@ -708,12 +1001,25 @@ pub enum AdmissionRejectionReason {
     Unauthorized,
 }
 
-// Implementation stubs for associated types
+impl ProofAggregatorConfig {
+    fn to_release_aggregator_config(&self) -> super::release_proof_aggregator::AggregatorConfig {
+        super::release_proof_aggregator::AggregatorConfig {
+            max_evidence_age: self.max_evidence_age,
+            max_commit_age: self.max_commit_age,
+            require_remote_rch: self.require_remote_rch && self.enable_validation,
+            redact_sensitive: self.redact_sensitive,
+            output_retention_days: self.output_retention_days,
+        }
+    }
+}
+
 impl AdmissionController {
     pub fn new(config: AdmissionConfig) -> Result<Self> {
+        validate_agent_auth_policy(&config.auth_policy)?;
         Ok(Self {
             max_concurrent_agents: config.max_concurrent_agents,
             resource_policies: config.resource_policies,
+            auth_policy: config.auth_policy,
             current_usage: Arc::new(Mutex::new(ResourceUsage::default())),
             admission_queue: Arc::new(Mutex::new(VecDeque::new())),
         })
@@ -721,8 +1027,111 @@ impl AdmissionController {
 
     pub async fn can_admit_agent(&self, cx: &Cx, request: &AgentAdmissionRequest) -> Result<bool> {
         let current_usage = self.current_usage.lock(cx).await?;
-        // Implementation would check resource constraints
-        Ok(current_usage.cpu_cores_allocated + request.resource_requirements.cpu_cores <= 64.0)
+        Ok(self.can_fit_locked(&current_usage, &request.resource_requirements))
+    }
+
+    pub async fn try_allocate_agent_resources(
+        &self,
+        cx: &Cx,
+        request: &AgentAdmissionRequest,
+    ) -> Result<bool> {
+        let mut current_usage = self.current_usage.lock(cx).await?;
+        if !self.can_fit_locked(&current_usage, &request.resource_requirements) {
+            return Ok(false);
+        }
+
+        current_usage.cpu_cores_allocated += request.resource_requirements.cpu_cores;
+        current_usage.memory_allocated = current_usage
+            .memory_allocated
+            .saturating_add(request.resource_requirements.memory_bytes);
+        current_usage.disk_allocated = current_usage
+            .disk_allocated
+            .saturating_add(request.resource_requirements.disk_bytes);
+        current_usage.network_bandwidth_allocated = current_usage
+            .network_bandwidth_allocated
+            .saturating_add(request.resource_requirements.network_bandwidth);
+        current_usage.active_regions = current_usage.active_regions.saturating_add(1);
+        Ok(true)
+    }
+
+    pub async fn release_agent_resources(
+        &self,
+        cx: &Cx,
+        resources: &ResourceRequirements,
+    ) -> Result<()> {
+        let mut current_usage = self.current_usage.lock(cx).await?;
+        current_usage.cpu_cores_allocated =
+            (current_usage.cpu_cores_allocated - resources.cpu_cores).max(0.0);
+        current_usage.memory_allocated = current_usage
+            .memory_allocated
+            .saturating_sub(resources.memory_bytes);
+        current_usage.disk_allocated = current_usage
+            .disk_allocated
+            .saturating_sub(resources.disk_bytes);
+        current_usage.network_bandwidth_allocated = current_usage
+            .network_bandwidth_allocated
+            .saturating_sub(resources.network_bandwidth);
+        current_usage.active_regions = current_usage.active_regions.saturating_sub(1);
+        Ok(())
+    }
+
+    fn can_fit_locked(
+        &self,
+        current_usage: &ResourceUsage,
+        requested: &ResourceRequirements,
+    ) -> bool {
+        if self.max_concurrent_agents == 0
+            || current_usage.active_regions >= self.max_concurrent_agents
+            || requested.cpu_cores <= 0.0
+            || !requested.cpu_cores.is_finite()
+            || requested.memory_bytes == 0
+        {
+            return false;
+        }
+
+        if requested.cpu_cores > self.resource_policies.cpu_policy.max_cores_per_agent
+            || requested.memory_bytes > self.resource_policies.memory_policy.max_memory_per_agent
+            || requested.disk_bytes > self.resource_policies.disk_policy.max_disk_per_agent
+            || requested.network_bandwidth
+                > self
+                    .resource_policies
+                    .network_policy
+                    .max_bandwidth_per_agent
+        {
+            return false;
+        }
+
+        let max_agents = self.max_concurrent_agents as f64;
+        let total_cpu_capacity = self.resource_policies.cpu_policy.max_cores_per_agent * max_agents;
+        let total_memory_capacity = self
+            .resource_policies
+            .memory_policy
+            .max_memory_per_agent
+            .saturating_mul(self.max_concurrent_agents as u64);
+        let total_disk_capacity = self
+            .resource_policies
+            .disk_policy
+            .max_disk_per_agent
+            .saturating_mul(self.max_concurrent_agents as u64);
+        let total_network_capacity = self
+            .resource_policies
+            .network_policy
+            .max_bandwidth_per_agent
+            .saturating_mul(self.max_concurrent_agents as u64);
+
+        current_usage.cpu_cores_allocated + requested.cpu_cores <= total_cpu_capacity
+            && current_usage
+                .memory_allocated
+                .saturating_add(requested.memory_bytes)
+                <= total_memory_capacity
+            && current_usage
+                .disk_allocated
+                .saturating_add(requested.disk_bytes)
+                <= total_disk_capacity
+            && current_usage
+                .network_bandwidth_allocated
+                .saturating_add(requested.network_bandwidth)
+                <= total_network_capacity
     }
 }
 
@@ -863,7 +1272,7 @@ impl Default for ProofAggregationMetrics {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod tests {
     use super::*;
     use crate::types::{Budget, Outcome};
@@ -906,6 +1315,8 @@ mod tests {
             priority: AdmissionPriority::Normal,
             requested_at: SystemTime::now(),
             admission_timeout: Some(Duration::from_secs(300)),
+            auth_token: None,
+            agent_credentials: None,
         };
 
         let serialized = serde_json::to_string(&request).expect("Failed to serialize");

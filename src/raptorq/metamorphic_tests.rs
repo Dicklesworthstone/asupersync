@@ -1587,7 +1587,8 @@ fn mr_parameter_boundary_symmetry() {
         for (k_low, k_high) in boundary_k_pairs {
             let symbol_size = 32; // Fixed to focus on K behavior
 
-            let (data, k_actual_low, _, symbols_low) = encode_symbols(k_low * symbol_size, seed, repair_overhead);
+            let (_data, k_actual_low, _, symbols_low) =
+                encode_symbols(k_low * symbol_size, seed, repair_overhead);
             let (_, k_actual_high, _, symbols_high) = encode_symbols(k_high * symbol_size, seed ^ 0x1111, repair_overhead);
 
             if k_actual_low >= 10 && k_actual_high >= 10 && k_actual_low != k_actual_high {
@@ -1701,7 +1702,8 @@ fn mr_minimal_viable_round_trip() {
     )| {
         // Generate test data and encode
         let data = generate_test_data(k * symbol_size, seed);
-        let (original_data, k_actual, symbol_size_actual, symbols) = encode_symbols(data.len(), seed, 0.5);
+        let (_original_data, k_actual, symbol_size_actual, symbols) =
+            encode_symbols(data.len(), seed, 0.5);
 
         if symbols.len() >= k_actual && k_actual >= 10 {
             let received = symbols_to_received(&symbols, k_actual);
@@ -1881,7 +1883,7 @@ fn mr_zero_byte_boundary_round_trip() {
 
                 if outcome.source_symbols > 0 && !symbols.is_empty() {
                     // Try to decode with just the source symbols
-                    let received = symbols_to_received(symbols, outcome.source_symbols);
+                    let _received = symbols_to_received(symbols, outcome.source_symbols);
                     let decode_result = decode_payload(
                         symbols,
                         outcome.source_symbols,
@@ -2914,7 +2916,7 @@ fn mr_bytes_clone_independence() {
 
             // Test that slicing one doesn't affect the other
             if data.len() > 1 {
-                let slice1 = bytes1.slice(1..);
+                let _slice1 = bytes1.slice(1..);
                 prop_assert_eq!(
                     bytes2.as_ref(), data.as_slice(),
                     "Slicing cloned Bytes affected original clone"

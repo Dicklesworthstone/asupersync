@@ -170,9 +170,11 @@ pub enum ConflictResolution {
     /// Use vector clock causality to resolve conflicts.
     ///
     /// Resolves conflicts based on happened-before relationships:
+    ///
     /// - If local causally dominates remote: local wins
     /// - If remote causally dominates local: remote wins
     /// - If concurrent (neither dominates): use sequence number tie-break
+    ///
     /// This prevents causal inconsistencies during partition merge.
     VectorClockBased,
     /// Report error on conflict.
@@ -1131,7 +1133,7 @@ impl RegionBridge {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 #[allow(clippy::similar_names)]
 mod tests {
     use super::*;

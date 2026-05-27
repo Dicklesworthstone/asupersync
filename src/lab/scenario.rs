@@ -1199,7 +1199,13 @@ impl Scenario {
             }
 
             // Security: Require .yaml or .yml extension
-            if !include.path.ends_with(".yaml") && !include.path.ends_with(".yml") {
+            let has_yaml_extension = std::path::Path::new(&include.path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("yaml") || extension.eq_ignore_ascii_case("yml")
+                });
+            if !has_yaml_extension {
                 errors.push(ValidationError {
                     field,
                     message: "include path must end with .yaml or .yml extension".into(),

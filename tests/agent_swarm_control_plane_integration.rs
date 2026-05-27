@@ -3,27 +3,45 @@
 //! Tests the core agent admission, resource allocation, validation coordination,
 //! and proof aggregation workflows under realistic multi-agent scenarios.
 
-use anyhow::Result;
 use asupersync::agent_swarm::{
-    AdmissionController, AdmissionPriority, AgentAdmissionRequest, AgentAdmissionResult,
-    AgentSwarmControlPlane, ControlPlaneConfig, PressureMonitor, ResourceRequirements,
-    SystemPressure, ValidationCoordinator,
+    AdmissionPriority, AgentAdmissionRequest, AgentAdmissionResult, AgentAuthPolicy,
+    AgentSwarmControlPlane, ControlPlaneConfig, ResourceRequirements, SystemPressure,
 };
 use asupersync::cx::Cx;
-use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::types::{Budget, Outcome};
 use std::time::{Duration, SystemTime};
+
+type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+const TEST_AUTH_KEY: &str = "agent-swarm-control-plane-test-auth-key-32-bytes-minimum";
+
+fn test_auth_policy() -> AgentAuthPolicy {
+    AgentAuthPolicy {
+        token_hmac_key: TEST_AUTH_KEY.to_string(),
+        token_lifetime: Duration::from_secs(900),
+        credential_lifetime: Duration::from_secs(900),
+        max_clock_skew: Duration::from_secs(30),
+        trusted_issuers: Vec::new(),
+    }
+}
+
+fn agent_auth_token(agent_id: &str) -> String {
+    test_auth_policy()
+        .issue_auth_token(
+            &agent_id.to_string(),
+            SystemTime::now(),
+            Duration::from_secs(300),
+        )
+        .expect("test auth policy should issue token")
+}
 
 /// Test basic agent admission and resource allocation.
 #[test]
-fn test_agent_admission_basic() -> Result<()> {
+fn test_agent_admission_basic() -> TestResult {
     asupersync::test_utils::init_test_logging();
 
-    // Create deterministic lab runtime for consistent E2E testing
-    let mut runtime = LabRuntime::new(LabConfig::new(0x5157_9001).max_steps(50_000));
-    let root = runtime.state.create_root_region(Budget::INFINITE);
-
-    runtime.run(&root, |cx| async {
+    let cx = Cx::for_testing();
+    let cx = &cx;
+    futures_lite::future::block_on(async {
         // Create control plane configuration
         let config = create_test_config();
         let control_plane = AgentSwarmControlPlane::new(config)?;
@@ -42,7 +60,7 @@ fn test_agent_admission_basic() -> Result<()> {
             priority: AdmissionPriority::Normal,
             requested_at: SystemTime::now(),
             admission_timeout: Some(Duration::from_secs(300)),
-            auth_token: Some("agent_token_test-agent-1".to_string()),
+            auth_token: Some(agent_auth_token("test-agent-1")),
             agent_credentials: None,
         };
 
@@ -54,7 +72,7 @@ fn test_agent_admission_basic() -> Result<()> {
             AgentAdmissionResult::Admitted {
                 session_id,
                 allocated_resources,
-                agent_region,
+                agent_region: _,
             } => {
                 assert!(session_id.starts_with("session-test-agent-1"));
                 assert_eq!(allocated_resources.cpu_cores, 2.0);
@@ -66,27 +84,72 @@ fn test_agent_admission_basic() -> Result<()> {
         }
 
         // Check control plane metrics
-        let metrics = control_plane.metrics().await;
+        let metrics = control_plane.metrics(cx).await?;
         assert_eq!(metrics.total_agents_admitted, 1);
         assert_eq!(metrics.active_agent_count, 1);
         assert_eq!(metrics.total_agents_rejected, 0);
 
-        Ok(())
-    });
+        Ok::<(), asupersync::Error>(())
+    })?;
+
+    Ok(())
+}
+
+/// Test forged bearer tokens are rejected before resource allocation.
+#[test]
+fn test_agent_admission_rejects_forged_token() -> TestResult {
+    asupersync::test_utils::init_test_logging();
+
+    let cx = Cx::for_testing();
+    let cx = &cx;
+    futures_lite::future::block_on(async {
+        let config = create_test_config();
+        let control_plane = AgentSwarmControlPlane::new(config)?;
+
+        let admission_request = AgentAdmissionRequest {
+            agent_id: "test-agent-forged".to_string(),
+            resource_requirements: ResourceRequirements {
+                cpu_cores: 1.0,
+                memory_bytes: 512 * 1024 * 1024,
+                disk_bytes: 1024 * 1024 * 1024,
+                network_bandwidth: 50_000,
+                estimated_duration: Some(Duration::from_secs(600)),
+            },
+            required_capabilities: vec![],
+            priority: AdmissionPriority::Normal,
+            requested_at: SystemTime::now(),
+            admission_timeout: Some(Duration::from_secs(300)),
+            auth_token: Some("agent_token_test-agent-forged".to_string()),
+            agent_credentials: None,
+        };
+
+        let result = control_plane.admit_agent(cx, admission_request).await?;
+        match result {
+            AgentAdmissionResult::Rejected { reason, .. } => assert_eq!(
+                reason,
+                asupersync::agent_swarm::AdmissionRejectionReason::Unauthorized
+            ),
+            AgentAdmissionResult::Admitted { .. } => panic!("forged token was admitted"),
+        }
+
+        let metrics = control_plane.metrics(cx).await?;
+        assert_eq!(metrics.total_agents_rejected, 1);
+        assert_eq!(metrics.active_agent_count, 0);
+
+        Ok::<(), asupersync::Error>(())
+    })?;
 
     Ok(())
 }
 
 /// Test agent admission under system pressure.
 #[test]
-fn test_agent_admission_under_pressure() -> Result<()> {
+fn test_agent_admission_under_pressure() -> TestResult {
     asupersync::test_utils::init_test_logging();
 
-    // Create deterministic lab runtime for consistent E2E testing
-    let mut runtime = LabRuntime::new(LabConfig::new(0x5157_9002).max_steps(50_000));
-    let root = runtime.state.create_root_region(Budget::INFINITE);
-
-    runtime.run(&root, |cx| async {
+    let cx = Cx::for_testing();
+    let cx = &cx;
+    futures_lite::future::block_on(async {
         let config = create_test_config();
         let control_plane = AgentSwarmControlPlane::new(config)?;
 
@@ -101,7 +164,7 @@ fn test_agent_admission_under_pressure() -> Result<()> {
             measured_at: SystemTime::now(),
         };
 
-        control_plane.update_pressure(high_pressure).await?;
+        control_plane.update_pressure(cx, high_pressure).await?;
 
         // Create an agent admission request
         let admission_request = AgentAdmissionRequest {
@@ -117,7 +180,7 @@ fn test_agent_admission_under_pressure() -> Result<()> {
             priority: AdmissionPriority::Low,
             requested_at: SystemTime::now(),
             admission_timeout: Some(Duration::from_secs(300)),
-            auth_token: Some("agent_token_test-agent-pressure".to_string()),
+            auth_token: Some(agent_auth_token("test-agent-pressure")),
             agent_credentials: None,
         };
 
@@ -142,30 +205,28 @@ fn test_agent_admission_under_pressure() -> Result<()> {
         }
 
         // Check metrics show rejection
-        let metrics = control_plane.metrics().await;
+        let metrics = control_plane.metrics(cx).await?;
         assert_eq!(metrics.total_agents_rejected, 1);
 
-        Ok(())
-    });
+        Ok::<(), asupersync::Error>(())
+    })?;
 
     Ok(())
 }
 
 /// Test multiple concurrent agent admissions.
 #[test]
-fn test_concurrent_agent_admissions() -> Result<()> {
+fn test_concurrent_agent_admissions() -> TestResult {
     asupersync::test_utils::init_test_logging();
 
-    // Create deterministic lab runtime for consistent E2E testing
-    let mut runtime = LabRuntime::new(LabConfig::new(0x5157_9003).max_steps(50_000));
-    let root = runtime.state.create_root_region(Budget::INFINITE);
-
-    runtime.run(&root, |cx| async {
+    let cx = Cx::for_testing();
+    let cx = &cx;
+    futures_lite::future::block_on(async {
         let config = create_test_config();
         let control_plane = AgentSwarmControlPlane::new(config)?;
 
         // Create multiple admission requests
-        let mut admission_futures = vec![];
+        let mut admission_requests = vec![];
 
         for i in 0..5 {
             let agent_id = format!("concurrent-agent-{}", i);
@@ -182,17 +243,26 @@ fn test_concurrent_agent_admissions() -> Result<()> {
                 priority: AdmissionPriority::Normal,
                 requested_at: SystemTime::now(),
                 admission_timeout: Some(Duration::from_secs(300)),
-                auth_token: Some(format!("agent_token_{}", agent_id)),
+                auth_token: Some(agent_auth_token(&agent_id)),
                 agent_credentials: None,
             };
 
-            let control_plane_ref = &control_plane;
-            admission_futures
-                .push(async move { control_plane_ref.admit_agent(cx, admission_request).await });
+            admission_requests.push(admission_request);
         }
 
         // Wait for all admissions to complete
-        let results = futures::future::join_all(admission_futures).await;
+        let f0 = control_plane.admit_agent(cx, admission_requests[0].clone());
+        let f1 = control_plane.admit_agent(cx, admission_requests[1].clone());
+        let f2 = control_plane.admit_agent(cx, admission_requests[2].clone());
+        let f3 = control_plane.admit_agent(cx, admission_requests[3].clone());
+        let f4 = control_plane.admit_agent(cx, admission_requests[4].clone());
+        let ((r0, r1), (r2, r3)) = futures_lite::future::zip(
+            futures_lite::future::zip(f0, f1),
+            futures_lite::future::zip(f2, f3),
+        )
+        .await;
+        let r4 = f4.await;
+        let results = vec![r0, r1, r2, r3, r4];
 
         // Count successful and failed admissions
         let mut admitted_count = 0;
@@ -217,26 +287,24 @@ fn test_concurrent_agent_admissions() -> Result<()> {
         );
 
         // Check final metrics
-        let metrics = control_plane.metrics().await;
+        let metrics = control_plane.metrics(cx).await?;
         assert_eq!(metrics.total_agents_admitted as usize, admitted_count);
         assert_eq!(metrics.total_agents_rejected as usize, rejected_count);
 
-        Ok(())
-    });
+        Ok::<(), asupersync::Error>(())
+    })?;
 
     Ok(())
 }
 
 /// Test control plane graceful shutdown.
 #[test]
-fn test_control_plane_shutdown() -> Result<()> {
+fn test_control_plane_shutdown() -> TestResult {
     asupersync::test_utils::init_test_logging();
 
-    // Create deterministic lab runtime for consistent E2E testing
-    let mut runtime = LabRuntime::new(LabConfig::new(0x5157_9004).max_steps(50_000));
-    let root = runtime.state.create_root_region(Budget::INFINITE);
-
-    runtime.run(&root, |cx| async {
+    let cx = Cx::for_testing();
+    let cx = &cx;
+    futures_lite::future::block_on(async {
         let config = create_test_config();
         let control_plane = AgentSwarmControlPlane::new(config)?;
 
@@ -255,7 +323,7 @@ fn test_control_plane_shutdown() -> Result<()> {
                 priority: AdmissionPriority::Normal,
                 requested_at: SystemTime::now(),
                 admission_timeout: Some(Duration::from_secs(300)),
-                auth_token: Some(format!("agent_token_shutdown-test-agent-{}", i)),
+                auth_token: Some(agent_auth_token(&format!("shutdown-test-agent-{}", i))),
                 agent_credentials: None,
             };
 
@@ -263,29 +331,28 @@ fn test_control_plane_shutdown() -> Result<()> {
         }
 
         // Verify agents were admitted
-        let metrics_before = control_plane.metrics().await;
+        let metrics_before = control_plane.metrics(cx).await?;
         assert_eq!(metrics_before.active_agent_count, 3);
 
         // Graceful shutdown
         control_plane.shutdown(cx).await?;
 
-        // After shutdown, the control plane should still be queryable
-        let metrics_after = control_plane.metrics().await;
-        // Implementation would update metrics during shutdown
-        // but for this test we just verify the call succeeds
+        let metrics_after = control_plane.metrics(cx).await?;
+        assert_eq!(metrics_after.active_agent_count, 0);
 
-        Ok(())
-    });
+        Ok::<(), asupersync::Error>(())
+    })?;
 
     Ok(())
 }
 
 /// Create a test configuration for the control plane.
 fn create_test_config() -> ControlPlaneConfig {
-    use asupersync::agent_swarm::{
+    use asupersync::agent_swarm::control_plane::{
         AdmissionConfig, CpuAllocationPolicy, DiskAllocationPolicy, HandoffVerifierConfig,
         LanePolicies, MemoryAllocationPolicy, NetworkAllocationPolicy, PressureMonitorConfig,
-        PressureThresholds, ProofRoutingConfig, ResourcePolicies, ValidationCoordinatorConfig,
+        PressureThresholds, ProofAggregatorConfig, ProofRoutingConfig, ResourcePolicies,
+        ValidationCoordinatorConfig,
     };
     use std::collections::HashMap;
 
@@ -310,6 +377,7 @@ fn create_test_config() -> ControlPlaneConfig {
                     qos_enabled: true,
                 },
             },
+            auth_policy: test_auth_policy(),
         },
         validation_config: ValidationCoordinatorConfig {
             max_validation_lanes: 8,
@@ -326,10 +394,15 @@ fn create_test_config() -> ControlPlaneConfig {
             session_timeout: Duration::from_secs(3600),
             verification_policy: "strict".to_string(),
         },
-        proof_config: asupersync::agent_swarm::AggregatorConfig {
+        proof_config: ProofAggregatorConfig {
             max_beads_per_aggregation: 100,
             aggregation_timeout: Duration::from_secs(300),
             enable_validation: true,
+            max_evidence_age: Duration::from_secs(3600),
+            max_commit_age: Duration::from_secs(86_400),
+            require_remote_rch: true,
+            redact_sensitive: true,
+            output_retention_days: 30,
         },
         pressure_config: PressureMonitorConfig {
             monitoring_interval: Duration::from_secs(30),
@@ -363,14 +436,12 @@ mod agent_swarm_e2e_tests {
 
     /// End-to-end test simulating a realistic agent swarm workflow.
     #[test]
-    fn test_e2e_agent_swarm_workflow() -> Result<()> {
+    fn test_e2e_agent_swarm_workflow() -> TestResult {
         asupersync::test_utils::init_test_logging();
 
-        // Create deterministic lab runtime for consistent E2E testing
-        let mut runtime = LabRuntime::new(LabConfig::new(0x5157_9005).max_steps(100_000));
-        let root = runtime.state.create_root_region(Budget::INFINITE);
-
-        runtime.run(&root, |cx| async {
+        let cx = Cx::for_testing();
+        let cx = &cx;
+        futures_lite::future::block_on(async {
             let config = create_test_config();
             let control_plane = AgentSwarmControlPlane::new(config)?;
 
@@ -391,7 +462,7 @@ mod agent_swarm_e2e_tests {
                     priority: AdmissionPriority::Normal,
                     requested_at: SystemTime::now(),
                     admission_timeout: Some(Duration::from_secs(300)),
-                    auth_token: Some(format!("agent_token_e2e-agent-{}", i)),
+                    auth_token: Some(agent_auth_token(&format!("e2e-agent-{}", i))),
                     agent_credentials: None,
                 };
 
@@ -416,7 +487,7 @@ mod agent_swarm_e2e_tests {
                 measured_at: SystemTime::now(),
             };
 
-            control_plane.update_pressure(medium_pressure).await?;
+            control_plane.update_pressure(cx, medium_pressure).await?;
 
             // Phase 3: High priority agent admission during pressure
             let high_priority_request = AgentAdmissionRequest {
@@ -432,7 +503,7 @@ mod agent_swarm_e2e_tests {
                 priority: AdmissionPriority::Critical,
                 requested_at: SystemTime::now(),
                 admission_timeout: Some(Duration::from_secs(300)),
-                auth_token: Some("agent_token_critical_agent_e2e-critical".to_string()),
+                auth_token: Some(agent_auth_token("critical_agent_e2e-critical")),
                 agent_credentials: None,
             };
 
@@ -450,7 +521,7 @@ mod agent_swarm_e2e_tests {
             }
 
             // Phase 4: Verify final state
-            let final_metrics = control_plane.metrics().await;
+            let final_metrics = control_plane.metrics(cx).await?;
             assert!(
                 final_metrics.total_agents_admitted > 0,
                 "Some agents should have been admitted"
@@ -463,8 +534,8 @@ mod agent_swarm_e2e_tests {
             // Phase 5: Graceful shutdown
             control_plane.shutdown(cx).await?;
 
-            Ok(())
-        });
+            Ok::<(), asupersync::Error>(())
+        })?;
 
         Ok(())
     }

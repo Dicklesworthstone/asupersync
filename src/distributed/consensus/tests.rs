@@ -3,9 +3,7 @@
 use crate::cx::Cx;
 use crate::error::Result;
 use crate::types::Time;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use super::pbft::{PbftConfig, PbftConsensus, PbftMessage, PbftNode, PbftTransport};
 use super::types::{ConsensusRequest, ReplicaId, SequenceNumber, ViewNumber};
@@ -47,39 +45,60 @@ impl MockTransport {
 }
 
 impl PbftTransport for MockTransport {
-    fn send_to_replica(&self, _replica_id: &ReplicaId, message: PbftMessage) -> Result<()> {
-        if self.fail_sends {
-            return Err(crate::error::Error::new(
-                crate::error::ErrorKind::ConnectionLost,
-            ));
-        }
+    fn send_to_replica(
+        &self,
+        _replica_id: &ReplicaId,
+        message: PbftMessage,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        let fail_sends = self.fail_sends;
+        let sent_messages = Arc::clone(&self.sent_messages);
 
-        let mut messages = self.sent_messages.lock().unwrap();
-        messages.push(message);
-        Ok(())
+        async move {
+            if fail_sends {
+                return Err(crate::error::Error::new(
+                    crate::error::ErrorKind::ConnectionLost,
+                ));
+            }
+
+            let mut messages = sent_messages.lock().unwrap();
+            messages.push(message);
+            Ok(())
+        }
     }
 
-    fn broadcast(&self, message: PbftMessage) -> Result<()> {
-        if self.fail_sends {
-            return Err(crate::error::Error::new(
-                crate::error::ErrorKind::ConnectionLost,
-            ));
-        }
+    fn broadcast(
+        &self,
+        message: PbftMessage,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        let fail_sends = self.fail_sends;
+        let sent_messages = Arc::clone(&self.sent_messages);
 
-        let mut messages = self.sent_messages.lock().unwrap();
-        messages.push(message);
-        Ok(())
+        async move {
+            if fail_sends {
+                return Err(crate::error::Error::new(
+                    crate::error::ErrorKind::ConnectionLost,
+                ));
+            }
+
+            let mut messages = sent_messages.lock().unwrap();
+            messages.push(message);
+            Ok(())
+        }
     }
 
-    fn receive(&self) -> Result<PbftMessage> {
-        let mut messages = self.received_messages.lock().unwrap();
-        if let Some(message) = messages.pop() {
-            Ok(message)
-        } else {
-            // Simulate no message available
-            Err(crate::error::Error::new(
-                crate::error::ErrorKind::ChannelEmpty,
-            ))
+    fn receive(&self) -> impl std::future::Future<Output = Result<PbftMessage>> + Send {
+        let received_messages = Arc::clone(&self.received_messages);
+
+        async move {
+            let mut messages = received_messages.lock().unwrap();
+            if let Some(message) = messages.pop() {
+                Ok(message)
+            } else {
+                // Simulate no message available.
+                Err(crate::error::Error::new(
+                    crate::error::ErrorKind::ChannelEmpty,
+                ))
+            }
         }
     }
 }
@@ -119,7 +138,7 @@ fn test_pbft_consensus_creation() {
     let config = PbftConfig::new(4, 1).unwrap();
     let transport = MockTransport::new();
 
-    let consensus = PbftConsensus::new(replica_id, config, transport).unwrap();
+    let _consensus = PbftConsensus::new(replica_id, config, transport).unwrap();
 
     // Should be able to create consensus instance
     assert!(true); // Just verify creation doesn't panic
@@ -131,25 +150,47 @@ fn test_request_submission() {
     let config = PbftConfig::new(4, 1).unwrap();
     let transport = MockTransport::new();
 
-    let consensus = PbftConsensus::new(replica_id, config, transport).unwrap();
+    let _consensus = PbftConsensus::new(replica_id, config, transport).unwrap();
 
-    let request = ConsensusRequest::new(
+    let _request = ConsensusRequest::new(
         "client-1".to_string(),
         Time::from_millis(0),
         b"test operation".to_vec(),
     );
 
     // Create a simple context for testing
-    let cx = Cx::new_for_test();
+    let _cx = Cx::for_testing();
 
     // Just test creation for now, since we don't have async runtime
     assert!(true);
 }
 
 #[test]
-fn test_primary_election() {
-    let config = PbftConfig::new(4, 1).unwrap();
+fn test_mock_transport_message_tracking_helpers() {
+    let transport = MockTransport::new();
+    let replica_id = ReplicaId::new("1".to_string());
+    let request = ConsensusRequest::new(
+        "client-1".to_string(),
+        Time::from_millis(0),
+        b"tracked operation".to_vec(),
+    );
+    let message = PbftMessage::Request(request);
 
+    futures_lite::future::block_on(transport.send_to_replica(&replica_id, message.clone()))
+        .expect("mock send should record message");
+    assert_eq!(transport.get_sent_messages().len(), 1);
+
+    transport.clear_sent_messages();
+    assert!(transport.get_sent_messages().is_empty());
+
+    transport.add_received_message(message);
+    let received = futures_lite::future::block_on(transport.receive())
+        .expect("mock receive should return queued message");
+    assert!(matches!(received, PbftMessage::Request(_)));
+}
+
+#[test]
+fn test_primary_election() {
     // Test primary selection for different views
     assert_eq!(ViewNumber::new(0).primary(4), 0);
     assert_eq!(ViewNumber::new(1).primary(4), 1);
@@ -202,7 +243,6 @@ fn test_message_digest() {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use std::sync::Arc;
 
     /// Test basic 3-node PBFT with no faults.
     #[test]
@@ -212,8 +252,8 @@ mod integration_tests {
         // Create replicas
         for i in 0..4 {
             let replica_id = ReplicaId::new(i.to_string());
-            let transport = Arc::new(MockTransport::new());
-            let node = PbftNode::new(replica_id, config.clone(), transport.clone());
+            let transport = MockTransport::new();
+            let node = PbftNode::new(replica_id, config.clone(), transport);
 
             // Just verify creation succeeded
             assert!(node.is_ok());

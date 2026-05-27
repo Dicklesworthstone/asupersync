@@ -109,7 +109,7 @@ impl AtpReplayCoordinator {
             ));
         }
 
-        cmd.push_str("\n");
+        cmd.push('\n');
         Ok(cmd)
     }
 
@@ -1170,7 +1170,6 @@ fn parse_journal_oracle_results(journal: &str) -> Result<Vec<TransferOracleResul
         } else if let Some(value) = line.strip_prefix("passed:") {
             oracle.passed = Some(parse_bool_journal_field("passed", value, line_number)?);
         } else if line == "violations:" || line == "evidence:" {
-            continue;
         } else if let Some(value) = line.strip_prefix("- type:") {
             oracle.finish_violation()?;
             oracle.current_violation = Some(PendingJournalViolation::new(value.trim()));
