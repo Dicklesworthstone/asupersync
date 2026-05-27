@@ -3194,12 +3194,8 @@ mod tests {
         if n_cols == 0 {
             return false;
         }
-        pivot_nnz
-            .checked_mul(HYBRID_SPARSE_COST_DENOMINATOR)
-            .unwrap_or(usize::MAX)
-            <= n_cols
-                .checked_mul(HYBRID_SPARSE_COST_NUMERATOR)
-                .unwrap_or(usize::MAX)
+        pivot_nnz.saturating_mul(HYBRID_SPARSE_COST_DENOMINATOR)
+            <= n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR)
     }
 
     /// Test-only: collects nonzero column indices from a pivot row.

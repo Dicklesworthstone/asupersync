@@ -4156,7 +4156,11 @@ mod tests {
             "expired-deadline",
             SwarmAdmissionOwner::new("DustyGorge"),
         )
-        .with_deadline(Instant::now() - Duration::from_secs(1));
+        .with_deadline(
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("test instant should support one-second subtraction"),
+        );
         let expired_deadline_decision = governor
             .check_workload_admission(&cx, &expired_deadline)
             .expect("expired deadline should classify as a rejection");
@@ -4567,7 +4571,9 @@ mod tests {
             leases
                 .get_mut(&expiring.lease_id)
                 .expect("lease should exist for forced expiry")
-                .expires_at = Instant::now() - Duration::from_secs(1);
+                .expires_at = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("test instant should support one-second subtraction");
         }
 
         let expired = governor.expire_stale_workload_leases();
@@ -5350,7 +5356,9 @@ mod tests {
             leases
                 .get_mut(&stale.lease_id)
                 .expect("stale lease should exist")
-                .expires_at = Instant::now() - Duration::from_secs(1);
+                .expires_at = Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("test instant should support one-second subtraction");
         }
 
         let schedule = governor.workload_lease_schedule();
@@ -6120,11 +6128,14 @@ mod tests {
                 .get_mut("background-proof")
                 .expect("feedback should exist before forced stale pruning")
                 .reported_at = Instant::now()
-                - governor
-                    .config
-                    .workload_feedback_max_age
-                    .checked_mul(2)
-                    .expect("test feedback max age should double");
+                .checked_sub(
+                    governor
+                        .config
+                        .workload_feedback_max_age
+                        .checked_mul(2)
+                        .expect("test feedback max age should double"),
+                )
+                .expect("test instant should support feedback-age subtraction");
         }
         assert_eq!(governor.prune_stale_workload_pressure_feedback(), 1);
         let metrics = governor.metrics();

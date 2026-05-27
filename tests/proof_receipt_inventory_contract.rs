@@ -385,8 +385,10 @@ fn current_inventory_remote_required_validation_is_not_actionable() {
             && cue["command"].as_str() == Some(command)
             && matches!(
                 cue["kind"].as_str(),
-                Some("missing-cargo-target-dir-validation")
-                    | Some("missing-remote-required-validation")
+                Some(
+                    "missing-cargo-target-dir-validation"
+                        | "missing-remote-required-validation"
+                )
             )
     }));
 }

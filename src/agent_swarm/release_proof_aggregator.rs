@@ -1706,7 +1706,7 @@ mod tests {
     #[test]
     fn test_rch_message_parser_extracts_worker_exit_and_duration() {
         let started_at = SystemTime::now();
-        let message = r#"
+        let message = r"
 ## 2026-05-27T12:43:18.938024Z — HazyRidge → MossyPond
 
 Command:
@@ -1716,7 +1716,7 @@ Command:
 Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 07s
 Remote command finished: exit=0 in 188296ms
 [RCH] remote vmi1167313 (234.3s)
-"#;
+";
 
         let records = ReleaseProofAggregator::extract_rch_records_from_message(message, started_at);
 

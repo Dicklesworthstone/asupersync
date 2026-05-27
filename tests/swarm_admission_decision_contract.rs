@@ -573,7 +573,7 @@ fn scenario_matrix_covers_required_input_classes_and_decision_outputs() {
     for scenario in array(&artifact, "scenarios") {
         let scenario_id = string(scenario, "scenario_id");
         let expected = expected_decision(scenario);
-        covered_decisions.insert(expected.decision.to_string());
+        covered_decisions.insert(expected.decision.clone());
         if string(scenario, "input_status") == "complete" {
             for key in REQUIRED_INPUT_CLASSES {
                 assert!(

@@ -3697,7 +3697,7 @@ mod tests {
 
         let mut builder1 = DecodeProof::builder(config.clone());
         builder1.set_received(ReceivedSummary::from_received(symbols.clone().into_iter()));
-        builder1.set_success(&[recovered_data.clone()]);
+        builder1.set_success(std::slice::from_ref(&recovered_data));
         let proof1 = builder1.build();
 
         let mut builder2 = DecodeProof::builder(config);

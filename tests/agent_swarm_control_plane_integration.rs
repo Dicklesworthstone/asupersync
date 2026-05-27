@@ -51,7 +51,7 @@ fn test_agent_admission_basic() -> TestResult {
             agent_id: "test-agent-1".to_string(),
             resource_requirements: ResourceRequirements {
                 cpu_cores: 2.0,
-                memory_bytes: 1 * 1024 * 1024 * 1024, // 1GB
+                memory_bytes: 1024 * 1024 * 1024,     // 1GB
                 disk_bytes: 5 * 1024 * 1024 * 1024,   // 5GB
                 network_bandwidth: 100_000,           // 100KB/s
                 estimated_duration: Some(Duration::from_secs(3600)),
@@ -76,7 +76,7 @@ fn test_agent_admission_basic() -> TestResult {
             } => {
                 assert!(session_id.starts_with("session-test-agent-1"));
                 assert_eq!(allocated_resources.cpu_cores, 2.0);
-                assert_eq!(allocated_resources.memory_bytes, 1 * 1024 * 1024 * 1024);
+                assert_eq!(allocated_resources.memory_bytes, 1024 * 1024 * 1024);
             }
             AgentAdmissionResult::Rejected { reason, .. } => {
                 panic!("Agent admission unexpectedly rejected: {:?}", reason);

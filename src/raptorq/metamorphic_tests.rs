@@ -1597,7 +1597,7 @@ fn mr_parameter_boundary_symmetry() {
 
                 // Repair ratios should be similar for same overhead (within 50% tolerance due to discretization)
                 let ratio_diff = (repair_ratio_low - repair_ratio_high).abs();
-                let avg_ratio = (repair_ratio_low + repair_ratio_high) / 2.0;
+                let avg_ratio = f64::midpoint(repair_ratio_low, repair_ratio_high);
 
                 prop_assert!(
                     ratio_diff <= 0.5 * avg_ratio.max(0.1),
@@ -2618,7 +2618,7 @@ fn mr_codec_roundtrip_identity() {
                 let mut codec = BytesCodec::new();
                 let mut encode_buf = BytesMut::new();
 
-                if let Ok(()) = codec.encode(Bytes::from(data.clone()), &mut encode_buf) {
+                if matches!(codec.encode(Bytes::from(data.clone()), &mut encode_buf), Ok(())) {
                     match codec.decode(&mut encode_buf) {
                         Ok(Some(decoded)) => {
                             prop_assert_eq!(
@@ -2641,7 +2641,10 @@ fn mr_codec_roundtrip_identity() {
                 let mut codec = LengthDelimitedCodec::new();
                 let mut encode_buf = BytesMut::new();
 
-                if let Ok(()) = codec.encode(BytesMut::from(data.as_slice()), &mut encode_buf) {
+                if matches!(
+                    codec.encode(BytesMut::from(data.as_slice()), &mut encode_buf),
+                    Ok(())
+                ) {
                     match codec.decode(&mut encode_buf) {
                         Ok(Some(decoded)) => {
                             prop_assert_eq!(
@@ -2684,7 +2687,10 @@ fn mr_codec_streaming_consistency() {
             let mut encode_buf = BytesMut::new();
 
             // First encode the data
-            if let Ok(()) = codec.encode(BytesMut::from(data.as_slice()), &mut encode_buf) {
+            if matches!(
+                codec.encode(BytesMut::from(data.as_slice()), &mut encode_buf),
+                Ok(())
+            ) {
                 let encoded_data = encode_buf.freeze();
 
                 // Full decode

@@ -1029,7 +1029,7 @@ mod tests {
         let verifier = HandoffVerifier::new();
         let mut capsule = create_test_capsule();
 
-        capsule.content_hash = "".to_string();
+        capsule.content_hash = String::new();
 
         match verifier.verify_handoff(&capsule) {
             HandoffDecision::UnsafeToContinue { reasons } => {
