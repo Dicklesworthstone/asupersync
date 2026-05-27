@@ -753,6 +753,8 @@ pub mod trace_causality_conformance_tests;
 pub mod web_protocol_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod web_tls_codec_raptorq_metamorphic_tests;
+#[cfg(any(test, feature = "test-internals"))]
+pub mod tls_test_helpers_comprehensive_tests;
 
 // Re-exports for convenient access to core types
 pub use config::{

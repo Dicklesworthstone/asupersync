@@ -333,7 +333,7 @@ mod hardened_examples {
     static TEST_TLS_MATERIAL: std::sync::OnceLock<(crate::tls::Certificate, crate::tls::PrivateKey)> =
         std::sync::OnceLock::new();
 
-    fn generate_test_tls_material() -> &'static (crate::tls::Certificate, crate::tls::PrivateKey) {
+    pub fn generate_test_tls_material() -> &'static (crate::tls::Certificate, crate::tls::PrivateKey) {
         TEST_TLS_MATERIAL.get_or_init(|| {
             // Generate a single key pair for both certificate and private key
             let key_pair = rcgen::KeyPair::generate().expect("key generation");
@@ -359,12 +359,12 @@ mod hardened_examples {
     }
 
     // Helper functions for test setup (would be in test utilities)
-    fn test_certificate() -> crate::tls::Certificate {
+    pub fn test_certificate() -> crate::tls::Certificate {
         // Return certificate from shared TLS material (same key pair as private key)
         generate_test_tls_material().0.clone()
     }
 
-    fn test_private_key() -> crate::tls::PrivateKey {
+    pub fn test_private_key() -> crate::tls::PrivateKey {
         // Return private key from shared TLS material (same key pair as certificate)
         generate_test_tls_material().1.clone()
     }

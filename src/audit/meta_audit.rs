@@ -187,7 +187,7 @@ impl MetaAuditor {
     /// needed for the specific cross-region audit operation.
     pub fn create_constrained_audit_context(
         &self,
-        cx: &Cx,
+        _cx: &Cx,
         target_region: RegionId,
         max_privilege: AuditDomain,
     ) -> Result<MetaAuditor, Error> {
