@@ -24,7 +24,7 @@ use asupersync::net::atp::test_utils::*;
 fn test_my_component() {
     let cx = test_cx();
     let data = test_data::pattern_data(1024);
-    let peer = mocks::test_peer_id(1);
+    let peer = fixtures::test_peer_id(1);
     
     let result = my_component(&cx, &data, peer);
     let value = assertions::assert_atp_ok(result);
@@ -40,7 +40,7 @@ Comprehensive helper functions for ATP testing:
 - **Test Context**: `test_cx()` creates properly configured `Cx` for testing
 - **Test Data**: Pattern data, deterministic random data, small/medium fixtures
 - **Assertions**: Type-safe ATP `Outcome` assertions
-- **Mocks**: Deterministic peer IDs, session IDs, and other ATP types
+- **Fixtures**: Deterministic peer IDs, session IDs, and other ATP types
 
 ### 2. Infrastructure Tests (`tests/atp_infrastructure_test.rs`)
 Basic compilation and functionality validation:
@@ -70,14 +70,14 @@ Quick validation script that checks:
 ### Deterministic Testing
 All test utilities produce deterministic results:
 - `test_data::deterministic_data(size, seed)` always produces the same output for the same inputs
-- Mock functions always return the same objects for the same parameters
+- Fixture constructors always return the same objects for the same parameters
 - Test contexts have consistent budget and timeout settings
 
 ### ATP-Aware Testing
 Testing utilities understand ATP-specific concerns:
 - Proper `Outcome<T, E>` handling with specific assertions
 - `Cx` context management with appropriate budgets
-- ATP protocol type mocking (PeerIds, SessionIds)
+- ATP protocol fixture values (PeerIds, SessionIds)
 - No external QUIC dependencies
 
 ### Fail-Fast Compilation Checks
@@ -143,7 +143,7 @@ The testing infrastructure is designed to be extensible. Consider adding:
 - Lab runtime integration for deterministic concurrency testing
 - Performance benchmarking utilities
 - Property-based test generators for ATP protocol compliance
-- Mock network conditions for path testing
+- Deterministic network-condition fixtures for path testing
 - Fixture corpora for complex scenarios
 
 ## Contributing

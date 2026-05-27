@@ -258,6 +258,18 @@ impl AtpSession {
         self.session.session_id
     }
 
+    /// Get the transfer nonce bound into this session transcript.
+    #[must_use]
+    pub fn transfer_nonce(&self) -> TransferNonce {
+        self.session.nonce
+    }
+
+    /// Get the final negotiated transcript hash.
+    #[must_use]
+    pub fn transcript_hash(&self) -> crate::net::atp::protocol::TranscriptHash {
+        self.session.transcript_hash
+    }
+
     /// Get the remote peer ID.
     #[must_use]
     pub fn remote_peer(&self) -> PeerId {

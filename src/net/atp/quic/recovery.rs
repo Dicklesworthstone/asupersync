@@ -927,7 +927,7 @@ mod tests {
         assert!(tracker.can_send(200));
         assert!(!tracker.can_send(201));
 
-        // Simulate receiving an ACK (validates address)
+        // Receiving an ACK validates the address.
         tracker.on_ack_received();
         assert!(tracker.can_send(5000)); // Address validated, can send freely
     }

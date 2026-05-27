@@ -3,7 +3,7 @@
 use crate::util::DetRng;
 use std::time::Duration;
 
-/// Configuration for the simulated network.
+/// Configuration for the deterministic virtual network.
 #[derive(Clone, Debug)]
 pub struct NetworkConfig {
     /// Random seed for deterministic simulation.

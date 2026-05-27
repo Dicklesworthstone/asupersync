@@ -13,8 +13,8 @@
 //!   Distributed harness: src/lab/network/harness.rs
 
 use asupersync::lab::network::{
-    DistributedHarness, Fault, FaultScript, HarnessFault, HarnessTraceKind, HostId, JitterModel,
-    LatencyModel, NetworkConditions, NetworkConfig, NodeEvent, SimulatedNetwork,
+    DeterministicNetwork, DistributedHarness, Fault, FaultScript, HarnessFault, HarnessTraceKind,
+    HostId, JitterModel, LatencyModel, NetworkConditions, NetworkConfig, NodeEvent,
 };
 use asupersync::remote::{NodeId, RemoteTaskId};
 use std::time::Duration;
@@ -445,7 +445,7 @@ fn network_packet_duplication() {
         ..NetworkConditions::ideal()
     };
     let config = make_config(44, conditions);
-    let mut net = SimulatedNetwork::new(config);
+    let mut net = DeterministicNetwork::new(config);
     let h1 = net.add_host("h1");
     let h2 = net.add_host("h2");
 
@@ -575,7 +575,7 @@ fn jitter_variable_delivery_times() {
         ..NetworkConditions::ideal()
     };
     let config = make_config(46, conditions);
-    let mut net = SimulatedNetwork::new(config);
+    let mut net = DeterministicNetwork::new(config);
     let h1 = net.add_host("h1");
     let h2 = net.add_host("h2");
 
@@ -1240,7 +1240,7 @@ fn metrics_consistency() {
         ..NetworkConditions::local()
     };
     let config = make_config(55, conditions);
-    let mut net = SimulatedNetwork::new(config);
+    let mut net = DeterministicNetwork::new(config);
     let h1 = net.add_host("h1");
     let h2 = net.add_host("h2");
 

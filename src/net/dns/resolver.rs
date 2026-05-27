@@ -3094,7 +3094,7 @@ mod tests {
                     |_addr, _timeout_duration, _time_getter| async {
                         Err(io::Error::new(
                             io::ErrorKind::TimedOut,
-                            "simulated connector timeout",
+                            "connector timeout injected by test",
                         ))
                     },
                 )

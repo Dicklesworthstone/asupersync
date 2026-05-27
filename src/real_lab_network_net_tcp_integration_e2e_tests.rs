@@ -46,7 +46,7 @@ mod tests {
     use crate::lab::network::{
         config::{NetworkConditions, NetworkConfig},
         harness::{FaultScript, NetworkHarness, SimNode},
-        network::{HostId, SimulatedNetwork},
+        network::{DeterministicNetwork, HostId},
     };
     use crate::net::tcp::{TcpListener, TcpStream, TcpStreamBuilder};
     use crate::runtime::region::Region;
@@ -176,7 +176,7 @@ mod tests {
             &self,
             loss_rate: f64,
             reorder_rate: f64,
-        ) -> SimulatedNetwork {
+        ) -> DeterministicNetwork {
             let config = NetworkConfig {
                 default_conditions: NetworkConditions {
                     packet_loss: loss_rate,
@@ -190,7 +190,7 @@ mod tests {
             };
 
             self.increment_network_stat("fault_network_created", 1);
-            SimulatedNetwork::new(config)
+            DeterministicNetwork::new(config)
         }
 
         /// Generate test data pattern for integrity verification
@@ -216,7 +216,7 @@ mod tests {
             self.increment_tcp_stat("transfer_simulation_started", 1);
 
             // In a real integration test, this would establish actual TCP connections
-            // For this e2e test, we simulate the interaction between network faults
+            // This e2e harness exercises the interaction between network faults
             // and TCP behavior
 
             // Simulate connection establishment

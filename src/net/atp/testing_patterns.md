@@ -22,7 +22,7 @@ fn test_atp_component() {
     
     // Arrange
     let input_data = test_data::pattern_data(1024);
-    let peer_id = mocks::test_peer_id(1);
+    let peer_id = fixtures::test_peer_id(1);
     
     // Act
     let result = component_under_test(&cx, input_data, peer_id);
@@ -88,19 +88,19 @@ fn test_cancellation() {
 }
 ```
 
-## Mock Objects
+## Deterministic Fixture Objects
 
-Use provided mocks for consistent test behavior:
+Use provided fixtures for consistent test behavior:
 
 ```rust
 #[test]
-fn test_with_mocks() {
-    let peer_a = mocks::test_peer_id(1);
-    let peer_b = mocks::test_peer_id(2);
-    let session = mocks::test_session_id(100);
+fn test_with_fixtures() {
+    let peer_a = fixtures::test_peer_id(1);
+    let peer_b = fixtures::test_peer_id(2);
+    let session = fixtures::test_session_id(100);
     
-    // Mocks are deterministic - same input always produces same output
-    assert_eq!(peer_a, mocks::test_peer_id(1));
+    // Fixtures are deterministic - same input always produces same output
+    assert_eq!(peer_a, fixtures::test_peer_id(1));
     assert_ne!(peer_a, peer_b);
 }
 ```
@@ -210,7 +210,7 @@ async fn test_end_to_end_scenario() {
 
 ### Unit Tests
 - Test individual functions and components
-- Use mocks for dependencies
+- Use deterministic fixtures for dependencies
 - Focus on single responsibility
 - Fast execution (< 1ms per test)
 

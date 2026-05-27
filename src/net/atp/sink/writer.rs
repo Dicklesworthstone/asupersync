@@ -12,9 +12,12 @@ use crate::types::outcome::Outcome;
 use futures::stream::StreamExt;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
+
+const DIRECTORY_ARCHIVE_DOMAIN: &[u8] = b"asupersync.atp.sink.directory.v1\0";
 
 /// Concrete ATP writer implementation
 pub struct AtpWriter {
@@ -69,6 +72,18 @@ struct ActiveTransfer {
     last_progress_report: Instant,
     cancellation_token: Option<Arc<std::sync::atomic::AtomicBool>>,
     resume_checkpoint: Option<Vec<u8>>,
+}
+
+struct DirectoryArchiveEntry {
+    kind: u8,
+    path_bytes: Vec<u8>,
+    payload: Vec<u8>,
+}
+
+impl DirectoryArchiveEntry {
+    const KIND_DIRECTORY: u8 = 1;
+    const KIND_FILE: u8 = 2;
+    const KIND_SYMLINK: u8 = 3;
 }
 
 impl AtpWriter {
@@ -133,8 +148,10 @@ impl super::AtpWriter for AtpWriter {
             );
         }
 
-        // Update phase to chunking
+        let mut phase_durations = HashMap::new();
+
         self.update_transfer_phase(transfer_id, TransferPhase::Chunking);
+        let chunking_started = Instant::now();
 
         // Determine chunking strategy
         let chunking_profile = options
@@ -154,7 +171,6 @@ impl super::AtpWriter for AtpWriter {
             })
             .unwrap_or(ChunkingProfile::BulkFile);
 
-        // Create chunks with progress reporting
         let chunk_boundaries = match chunking_profile.compute_boundaries(data) {
             Ok(boundaries) => boundaries,
             Err(e) => {
@@ -165,11 +181,14 @@ impl super::AtpWriter for AtpWriter {
                 });
             }
         };
+        phase_durations.insert(TransferPhase::Chunking, chunking_started.elapsed());
 
         self.update_transfer_phase(transfer_id, TransferPhase::Transferring);
+        let transferring_started = Instant::now();
 
         let mut bytes_transferred = 0u64;
         let mut chunks_completed = 0u64;
+        let mut peak_transfer_rate = 0.0_f64;
 
         // Process chunks with backpressure control
         for (chunk_idx, boundary) in chunk_boundaries.iter().enumerate() {
@@ -187,11 +206,16 @@ impl super::AtpWriter for AtpWriter {
             let chunk_data = &data[boundary.byte_offset as usize
                 ..(boundary.byte_offset + boundary.size_bytes) as usize];
 
+            let chunk_started = Instant::now();
             let chunk_result = self
                 .transfer_chunk(transfer_id, cx, chunk_data, chunk_idx, boundary.byte_offset)
                 .await;
             match chunk_result {
                 Ok(_) => {
+                    peak_transfer_rate = peak_transfer_rate.max(Self::bytes_per_second(
+                        chunk_data.len() as u64,
+                        chunk_started.elapsed(),
+                    ));
                     bytes_transferred += chunk_data.len() as u64;
                     chunks_completed += 1;
 
@@ -209,8 +233,10 @@ impl super::AtpWriter for AtpWriter {
                 }
             }
         }
+        phase_durations.insert(TransferPhase::Transferring, transferring_started.elapsed());
 
         self.update_transfer_phase(transfer_id, TransferPhase::Verifying);
+        let verifying_started = Instant::now();
 
         // Generate verification proof
         let verification_result = self
@@ -226,13 +252,25 @@ impl super::AtpWriter for AtpWriter {
                 });
             }
         };
+        phase_durations.insert(TransferPhase::Verifying, verifying_started.elapsed());
 
         self.update_transfer_phase(transfer_id, TransferPhase::Finalizing);
+        let finalizing_started = Instant::now();
 
-        // Create final result
         let object_id = proof.object_id.clone();
         let end_time = Instant::now();
         let duration = end_time.duration_since(start_time);
+        phase_durations.insert(TransferPhase::Finalizing, finalizing_started.elapsed());
+        let resume_token = if options.resume_behavior == ResumeBehavior::EnableResume {
+            Some(ResumeToken {
+                transfer_id,
+                checkpoint_data: Self::build_resume_checkpoint(transfer_id, &proof),
+                expires_at: SystemTime::now() + Duration::from_secs(86400), // 24 hours
+                required_capabilities: vec!["write".to_string()],
+            })
+        } else {
+            None
+        };
 
         let result = WriteResult {
             transfer_id,
@@ -241,16 +279,7 @@ impl super::AtpWriter for AtpWriter {
             chunk_count: chunks_completed,
             completed_at: SystemTime::now(),
             proof,
-            resume_token: if options.resume_behavior == ResumeBehavior::EnableResume {
-                Some(ResumeToken {
-                    transfer_id,
-                    checkpoint_data: Vec::new(), // Would contain actual checkpoint data
-                    expires_at: SystemTime::now() + Duration::from_secs(86400), // 24 hours
-                    required_capabilities: vec!["write".to_string()],
-                })
-            } else {
-                None
-            },
+            resume_token,
             verified_prefix_bytes: if options.allow_early_consumption {
                 data.len() as u64
             } else {
@@ -259,12 +288,13 @@ impl super::AtpWriter for AtpWriter {
             verification_status,
             metrics: TransferMetrics {
                 duration,
-                avg_transfer_rate: data.len() as f64 / duration.as_secs_f64(),
-                peak_transfer_rate: data.len() as f64 / duration.as_secs_f64(), // Simplified
-                phase_durations: HashMap::new(), // Would track actual phase durations
+                avg_transfer_rate: Self::bytes_per_second(data.len() as u64, duration),
+                peak_transfer_rate: peak_transfer_rate
+                    .max(Self::bytes_per_second(data.len() as u64, duration)),
+                phase_durations,
                 round_trips: chunks_completed,
                 retransmissions: 0,
-                compression_ratio: 1.0, // No compression in this simple implementation
+                compression_ratio: 1.0,
                 deduplication_savings: 0,
             },
         };
@@ -282,8 +312,6 @@ impl super::AtpWriter for AtpWriter {
         file_path: &Path,
         options: WriteOptions,
     ) -> Outcome<WriteResult, Self::Error> {
-        // Read file into memory for simplicity
-        // In real implementation, would stream from file
         match std::fs::read(file_path) {
             Ok(data) => self.write_buffer(cx, &data, options).await,
             Err(e) => Outcome::Err(WriteError::Internal {
@@ -298,13 +326,11 @@ impl super::AtpWriter for AtpWriter {
         dir_path: &Path,
         options: WriteOptions,
     ) -> Outcome<WriteResult, Self::Error> {
-        let _ = (cx, options);
-        Outcome::Err(WriteError::Internal {
-            message: format!(
-                "directory transfer for {} is not implemented in this sink writer",
-                dir_path.display()
-            ),
-        })
+        let data = match Self::serialize_directory_tree(dir_path) {
+            Ok(data) => data,
+            Err(error) => return Outcome::Err(error),
+        };
+        self.write_buffer(cx, &data, options).await
     }
 
     async fn write_stream<S>(
@@ -668,6 +694,196 @@ impl AtpWriter {
             chunks,
             SystemTime::now(),
         ))
+    }
+
+    fn serialize_directory_tree(root: &Path) -> Result<Vec<u8>, WriteError> {
+        let root_metadata =
+            std::fs::symlink_metadata(root).map_err(|error| WriteError::Internal {
+                message: format!(
+                    "failed to read directory metadata for {}: {error}",
+                    root.display()
+                ),
+            })?;
+        if !root_metadata.is_dir() {
+            return Err(WriteError::Internal {
+                message: format!("directory source is not a directory: {}", root.display()),
+            });
+        }
+
+        let mut entries = Vec::new();
+        Self::collect_directory_entries(root, root, &mut entries)?;
+        entries.sort_by(|left, right| {
+            left.path_bytes
+                .cmp(&right.path_bytes)
+                .then_with(|| left.kind.cmp(&right.kind))
+        });
+
+        let mut out = Vec::new();
+        out.extend_from_slice(DIRECTORY_ARCHIVE_DOMAIN);
+        out.extend_from_slice(&1_u32.to_be_bytes());
+        out.extend_from_slice(&(entries.len() as u64).to_be_bytes());
+
+        for entry in entries {
+            out.push(entry.kind);
+            Self::write_len_prefixed(&mut out, &entry.path_bytes)?;
+            Self::write_len_prefixed(&mut out, &entry.payload)?;
+
+            let mut hasher = Sha256::new();
+            hasher.update(DIRECTORY_ARCHIVE_DOMAIN);
+            hasher.update([entry.kind]);
+            hasher.update(&(entry.path_bytes.len() as u64).to_be_bytes());
+            hasher.update(&entry.path_bytes);
+            hasher.update(&(entry.payload.len() as u64).to_be_bytes());
+            hasher.update(&entry.payload);
+            let digest: [u8; 32] = hasher.finalize().into();
+            out.extend_from_slice(&digest);
+        }
+
+        Ok(out)
+    }
+
+    fn collect_directory_entries(
+        root: &Path,
+        current: &Path,
+        entries: &mut Vec<DirectoryArchiveEntry>,
+    ) -> Result<(), WriteError> {
+        let mut children = std::fs::read_dir(current)
+            .map_err(|error| WriteError::Internal {
+                message: format!("failed to read directory {}: {error}", current.display()),
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| WriteError::Internal {
+                message: format!(
+                    "failed to enumerate directory {}: {error}",
+                    current.display()
+                ),
+            })?;
+        children.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+
+        for child in children {
+            let path = child.path();
+            let metadata =
+                std::fs::symlink_metadata(&path).map_err(|error| WriteError::Internal {
+                    message: format!(
+                        "failed to read entry metadata for {}: {error}",
+                        path.display()
+                    ),
+                })?;
+            let path_bytes = Self::relative_path_bytes(root, &path)?;
+            let file_type = metadata.file_type();
+
+            if file_type.is_dir() {
+                entries.push(DirectoryArchiveEntry {
+                    kind: DirectoryArchiveEntry::KIND_DIRECTORY,
+                    path_bytes,
+                    payload: Vec::new(),
+                });
+                Self::collect_directory_entries(root, &path, entries)?;
+            } else if file_type.is_file() {
+                let payload = std::fs::read(&path).map_err(|error| WriteError::Internal {
+                    message: format!("failed to read file {}: {error}", path.display()),
+                })?;
+                entries.push(DirectoryArchiveEntry {
+                    kind: DirectoryArchiveEntry::KIND_FILE,
+                    path_bytes,
+                    payload,
+                });
+            } else if file_type.is_symlink() {
+                let target = std::fs::read_link(&path).map_err(|error| WriteError::Internal {
+                    message: format!("failed to read symlink {}: {error}", path.display()),
+                })?;
+                entries.push(DirectoryArchiveEntry {
+                    kind: DirectoryArchiveEntry::KIND_SYMLINK,
+                    path_bytes,
+                    payload: Self::os_str_bytes(target.as_os_str()),
+                });
+            } else {
+                return Err(WriteError::Internal {
+                    message: format!("unsupported directory entry type: {}", path.display()),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn relative_path_bytes(root: &Path, path: &Path) -> Result<Vec<u8>, WriteError> {
+        let relative = path.strip_prefix(root).map_err(|_| WriteError::Internal {
+            message: format!(
+                "directory entry {} escaped root {}",
+                path.display(),
+                root.display()
+            ),
+        })?;
+        let mut out = Vec::new();
+        for component in relative.components() {
+            match component {
+                Component::Normal(name) => {
+                    if !out.is_empty() {
+                        out.push(b'/');
+                    }
+                    out.extend_from_slice(&Self::os_str_bytes(name));
+                }
+                Component::CurDir => {}
+                Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
+                    return Err(WriteError::Internal {
+                        message: format!("non-canonical directory entry path: {}", path.display()),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn write_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), WriteError> {
+        let len = u64::try_from(bytes.len()).map_err(|_| WriteError::Internal {
+            message: "directory archive field length overflowed".to_string(),
+        })?;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn os_str_bytes(value: &OsStr) -> Vec<u8> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            value.as_bytes().to_vec()
+        }
+
+        #[cfg(not(unix))]
+        {
+            value.to_string_lossy().as_bytes().to_vec()
+        }
+    }
+
+    fn bytes_per_second(bytes: u64, duration: Duration) -> f64 {
+        if bytes == 0 {
+            return 0.0;
+        }
+        let secs = duration.as_secs_f64();
+        if secs > 0.0 {
+            bytes as f64 / secs
+        } else {
+            bytes as f64 * 1_000_000_000.0
+        }
+    }
+
+    fn build_resume_checkpoint(transfer_id: TransferId, proof: &TransferProof) -> Vec<u8> {
+        let mut out = Vec::with_capacity(104 + proof.chunks.len() * 56);
+        out.extend_from_slice(b"asupersync.atp.sink.resume.v1\0");
+        out.extend_from_slice(&transfer_id.0);
+        out.extend_from_slice(&proof.total_bytes.to_be_bytes());
+        out.extend_from_slice(&proof.chunk_count.to_be_bytes());
+        out.extend_from_slice(&proof.content_hash);
+        out.extend_from_slice(&proof.manifest_root);
+        for chunk in &proof.chunks {
+            out.extend_from_slice(&chunk.chunk_index.to_be_bytes());
+            out.extend_from_slice(&chunk.byte_offset.to_be_bytes());
+            out.extend_from_slice(&chunk.size_bytes.to_be_bytes());
+            out.extend_from_slice(&chunk.content_hash);
+        }
+        out
     }
 
     fn update_transfer_phase(&self, transfer_id: TransferId, phase: TransferPhase) {

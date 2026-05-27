@@ -144,8 +144,8 @@ pub use meta::{
     MetaResult, MetaRunner, builtin_mutations, invariant_from_violation,
 };
 pub use network::{
-    Fault as NetworkFault, JitterModel, LatencyModel, NetworkConditions, NetworkConfig,
-    NetworkMetrics, NetworkTraceEvent, NetworkTraceKind, Packet, SimulatedNetwork,
+    DeterministicNetwork, Fault as NetworkFault, JitterModel, LatencyModel, NetworkConditions,
+    NetworkConfig, NetworkMetrics, NetworkTraceEvent, NetworkTraceKind, Packet,
 };
 pub use numa::{
     NumaCachePressureInput, NumaCachePressureProjection, NumaPressureClass,

@@ -350,7 +350,7 @@ mod tests {
         let mut encoded = BytesMut::new();
         codec.encode(frame.clone(), &mut encoded).unwrap();
 
-        // Split encoded data into chunks to simulate partial reads
+        // Split encoded data into chunks for partial-read decoding.
         let total_len = encoded.len();
         let chunk_size = 100;
 

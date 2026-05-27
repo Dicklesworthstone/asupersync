@@ -59,19 +59,19 @@
 //! - NET-VERIFY-029: Rapid bind/unbind cycle
 //!
 //! ## Lab Network Simulation
-//! - NET-VERIFY-030: SimulatedNetwork packet loss
-//! - NET-VERIFY-031: SimulatedNetwork WAN latency
-//! - NET-VERIFY-032: SimulatedNetwork multi-host topology
-//! - NET-VERIFY-033: SimulatedNetwork fault injection (partition/heal)
-//! - NET-VERIFY-034: SimulatedNetwork host crash/restart
-//! - NET-VERIFY-035: SimulatedNetwork metrics tracking
-//! - NET-VERIFY-036: SimulatedNetwork bandwidth limiting
+//! - NET-VERIFY-030: DeterministicNetwork packet loss
+//! - NET-VERIFY-031: DeterministicNetwork WAN latency
+//! - NET-VERIFY-032: DeterministicNetwork multi-host topology
+//! - NET-VERIFY-033: DeterministicNetwork fault injection (partition/heal)
+//! - NET-VERIFY-034: DeterministicNetwork host crash/restart
+//! - NET-VERIFY-035: DeterministicNetwork metrics tracking
+//! - NET-VERIFY-036: DeterministicNetwork bandwidth limiting
 
 #[macro_use]
 mod common;
 
 use asupersync::bytes::Bytes;
-use asupersync::lab::{NetworkConditions, NetworkConfig, NetworkFault, SimulatedNetwork};
+use asupersync::lab::{DeterministicNetwork, NetworkConditions, NetworkConfig, NetworkFault};
 use asupersync::net::dns::{CacheConfig, DnsCache};
 use asupersync::net::tcp::TcpListenerBuilder;
 use asupersync::net::{TcpListener, TcpSocket, TcpStream, UdpSocket, lookup_all, lookup_one};
@@ -1132,14 +1132,14 @@ fn net_verify_029_rapid_bind_unbind() {
 // Lab Network Simulation Tests
 // ============================================================================
 
-/// NET-VERIFY-030: SimulatedNetwork packet loss
+/// NET-VERIFY-030: DeterministicNetwork packet loss
 ///
 /// Verifies that configuring packet loss drops some packets.
 #[test]
 fn net_verify_030_sim_packet_loss() {
     init_test("net_verify_030_sim_packet_loss");
 
-    let mut net = SimulatedNetwork::new(NetworkConfig {
+    let mut net = DeterministicNetwork::new(NetworkConfig {
         default_conditions: NetworkConditions::lossy(),
         ..Default::default()
     });
@@ -1182,7 +1182,7 @@ fn net_verify_030_sim_packet_loss() {
     test_complete!("net_verify_030_sim_packet_loss");
 }
 
-/// NET-VERIFY-031: SimulatedNetwork WAN latency
+/// NET-VERIFY-031: DeterministicNetwork WAN latency
 ///
 /// Verifies that WAN conditions produce higher latency than LAN.
 #[test]
@@ -1190,7 +1190,7 @@ fn net_verify_031_sim_wan_latency() {
     init_test("net_verify_031_sim_wan_latency");
 
     // LAN network
-    let mut lan = SimulatedNetwork::new(NetworkConfig {
+    let mut lan = DeterministicNetwork::new(NetworkConfig {
         default_conditions: NetworkConditions::lan(),
         ..Default::default()
     });
@@ -1208,7 +1208,7 @@ fn net_verify_031_sim_wan_latency() {
     tracing::info!(lan_latency_ns = lan_latency, "LAN latency");
 
     // WAN network
-    let mut wan = SimulatedNetwork::new(NetworkConfig {
+    let mut wan = DeterministicNetwork::new(NetworkConfig {
         default_conditions: NetworkConditions::wan(),
         ..Default::default()
     });
@@ -1238,14 +1238,14 @@ fn net_verify_031_sim_wan_latency() {
     test_complete!("net_verify_031_sim_wan_latency");
 }
 
-/// NET-VERIFY-032: SimulatedNetwork multi-host topology
+/// NET-VERIFY-032: DeterministicNetwork multi-host topology
 ///
 /// Verifies that multiple hosts can communicate in a mesh.
 #[test]
 fn net_verify_032_sim_multi_host() {
     init_test("net_verify_032_sim_multi_host");
 
-    let mut net = SimulatedNetwork::new(NetworkConfig {
+    let mut net = DeterministicNetwork::new(NetworkConfig {
         default_conditions: NetworkConditions::ideal(),
         ..Default::default()
     });
@@ -1280,14 +1280,14 @@ fn net_verify_032_sim_multi_host() {
     test_complete!("net_verify_032_sim_multi_host");
 }
 
-/// NET-VERIFY-033: SimulatedNetwork partition and heal
+/// NET-VERIFY-033: DeterministicNetwork partition and heal
 ///
 /// Verifies that network partitions prevent communication and heals restore it.
 #[test]
 fn net_verify_033_sim_partition_heal() {
     init_test("net_verify_033_sim_partition_heal");
 
-    let mut net = SimulatedNetwork::new(NetworkConfig {
+    let mut net = DeterministicNetwork::new(NetworkConfig {
         default_conditions: NetworkConditions::ideal(),
         ..Default::default()
     });
@@ -1350,14 +1350,14 @@ fn net_verify_033_sim_partition_heal() {
     test_complete!("net_verify_033_sim_partition_heal");
 }
 
-/// NET-VERIFY-034: SimulatedNetwork host crash/restart
+/// NET-VERIFY-034: DeterministicNetwork host crash/restart
 ///
 /// Verifies that host crash drops messages and restart allows recovery.
 #[test]
 fn net_verify_034_sim_host_crash_restart() {
     init_test("net_verify_034_sim_host_crash_restart");
 
-    let mut net = SimulatedNetwork::new(NetworkConfig {
+    let mut net = DeterministicNetwork::new(NetworkConfig {
         default_conditions: NetworkConditions::ideal(),
         ..Default::default()
     });
@@ -1399,14 +1399,14 @@ fn net_verify_034_sim_host_crash_restart() {
     test_complete!("net_verify_034_sim_host_crash_restart");
 }
 
-/// NET-VERIFY-035: SimulatedNetwork metrics tracking
+/// NET-VERIFY-035: DeterministicNetwork metrics tracking
 ///
 /// Verifies that network metrics are accurately tracked.
 #[test]
 fn net_verify_035_sim_metrics() {
     init_test("net_verify_035_sim_metrics");
 
-    let mut net = SimulatedNetwork::new(NetworkConfig {
+    let mut net = DeterministicNetwork::new(NetworkConfig {
         default_conditions: NetworkConditions::ideal(),
         capture_trace: true,
         ..Default::default()
@@ -1447,14 +1447,14 @@ fn net_verify_035_sim_metrics() {
     test_complete!("net_verify_035_sim_metrics");
 }
 
-/// NET-VERIFY-036: SimulatedNetwork per-link conditions
+/// NET-VERIFY-036: DeterministicNetwork per-link conditions
 ///
 /// Verifies that per-link network conditions can be configured.
 #[test]
 fn net_verify_036_sim_per_link_conditions() {
     init_test("net_verify_036_sim_per_link_conditions");
 
-    let mut net = SimulatedNetwork::new(NetworkConfig {
+    let mut net = DeterministicNetwork::new(NetworkConfig {
         default_conditions: NetworkConditions::ideal(),
         ..Default::default()
     });

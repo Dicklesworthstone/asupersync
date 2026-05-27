@@ -1,12 +1,12 @@
 //! Deterministic network simulation integration tests.
 
 use asupersync::bytes::Bytes;
-use asupersync::lab::{NetworkConditions, NetworkConfig, SimulatedNetwork};
+use asupersync::lab::{DeterministicNetwork, NetworkConditions, NetworkConfig};
 use std::time::Duration;
 
 #[test]
 fn network_respects_latency_bounds() {
-    let mut net = SimulatedNetwork::new(NetworkConfig {
+    let mut net = DeterministicNetwork::new(NetworkConfig {
         default_conditions: NetworkConditions::lan(),
         ..Default::default()
     });
@@ -27,8 +27,8 @@ fn network_respects_latency_bounds() {
 #[test]
 fn network_is_deterministic_with_same_seed() {
     let config = NetworkConfig::default();
-    let mut net1 = SimulatedNetwork::new(config.clone());
-    let mut net2 = SimulatedNetwork::new(config);
+    let mut net1 = DeterministicNetwork::new(config.clone());
+    let mut net2 = DeterministicNetwork::new(config);
 
     let a1 = net1.add_host("a");
     let b1 = net1.add_host("b");

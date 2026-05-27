@@ -90,8 +90,8 @@ pub mod assertions {
     }
 }
 
-/// Mock types for testing ATP components without external dependencies.
-pub mod mocks {
+/// Deterministic ATP fixtures for testing protocol components without external dependencies.
+pub mod fixtures {
     use crate::net::atp::protocol::{
         AtpFeature, ClientHello, PeerId, SessionContextKind, SessionId, SessionNegotiator,
         SessionPolicy, SessionTraceId, TransferNonce,
@@ -104,9 +104,9 @@ pub mod mocks {
 
     /// Create a deterministic test session ID.
     pub fn test_session_id(suffix: u64) -> SessionId {
-        let initiator = PeerId::from_label(&format!("mock_initiator_{suffix}"));
-        let responder = PeerId::from_label(&format!("mock_responder_{suffix}"));
-        let nonce = TransferNonce::from_seed(&format!("mock_nonce_{suffix}"));
+        let initiator = PeerId::from_label(&format!("fixture_initiator_{suffix}"));
+        let responder = PeerId::from_label(&format!("fixture_responder_{suffix}"));
+        let nonce = TransferNonce::from_seed(&format!("fixture_nonce_{suffix}"));
         let hello = ClientHello::new(
             initiator,
             responder,
@@ -119,7 +119,7 @@ pub mod mocks {
         let mut server = SessionNegotiator::server(responder);
         let (server_hello, _, _) = server
             .accept_client_hello(&hello, &mut policy)
-            .expect("mock ATP session negotiation should succeed");
+            .expect("fixture ATP session negotiation should succeed");
         server_hello.session_id
     }
 }
@@ -188,10 +188,10 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_peer_ids() {
-        let peer1 = mocks::test_peer_id(1);
-        let peer2 = mocks::test_peer_id(2);
-        let peer1_again = mocks::test_peer_id(1);
+    fn test_fixture_peer_ids() {
+        let peer1 = fixtures::test_peer_id(1);
+        let peer2 = fixtures::test_peer_id(2);
+        let peer1_again = fixtures::test_peer_id(1);
 
         assert_eq!(
             peer1, peer1_again,
@@ -204,10 +204,10 @@ mod tests {
     }
 
     #[test]
-    fn test_mock_session_ids() {
-        let session1 = mocks::test_session_id(100);
-        let session2 = mocks::test_session_id(200);
-        let session1_again = mocks::test_session_id(100);
+    fn test_fixture_session_ids() {
+        let session1 = fixtures::test_session_id(100);
+        let session2 = fixtures::test_session_id(200);
+        let session1_again = fixtures::test_session_id(100);
 
         assert_eq!(
             session1, session1_again,

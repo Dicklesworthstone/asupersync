@@ -10,5 +10,6 @@ pub use harness::{
     SimNode,
 };
 pub use network::{
-    Fault, HostId, NetworkMetrics, NetworkTraceEvent, NetworkTraceKind, Packet, SimulatedNetwork,
+    DeterministicNetwork, Fault, HostId, NetworkMetrics, NetworkTraceEvent, NetworkTraceKind,
+    Packet,
 };

@@ -380,7 +380,7 @@ mod tests {
         // Not enabled yet (no peer)
         assert!(transport.validate_size(100).is_err());
 
-        // Simulate peer negotiation
+        // Apply peer negotiation state.
         transport.peer_enabled = true;
         transport.peer_max_size = Some(512);
 

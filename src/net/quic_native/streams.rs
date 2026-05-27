@@ -1815,7 +1815,7 @@ mod tests {
                  stream_send_offset=50,stream_recv_offset=0,send_reset=Some((42, 50))"
             );
 
-            // Simulate MAX_DATA frame increasing connection limit
+            // Apply a MAX_DATA frame increasing the connection limit.
             table
                 .send_connection_credit
                 .increase_limit(300)
@@ -1937,7 +1937,7 @@ mod tests {
                 .expect("stream1")
                 .reset_send(1, 40)
                 .expect("reset stream1");
-            table.send_connection_credit.release(40); // Simulate budget recovery
+            table.send_connection_credit.release(40); // Recovered send budget.
 
             // Open new stream3 and verify it can use the released budget
             let stream3 = table.open_local_bidi().expect("open stream3");

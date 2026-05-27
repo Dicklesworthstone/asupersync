@@ -1,6 +1,6 @@
 //! Deterministic distributed test harness.
 //!
-//! Bridges the [`SimulatedNetwork`] with the remote execution model to
+//! Bridges the [`DeterministicNetwork`] with the remote execution model to
 //! enable deterministic, reproducible testing of distributed structured
 //! concurrency under controlled failure conditions.
 //!
@@ -15,7 +15,7 @@
 //!         └─────────────────┼─────────────────┘
 //!                           │
 //!                  ┌────────┴────────┐
-//!                  │ SimulatedNetwork │
+//!                  │DeterministicNet │
 //!                  │ (deterministic)  │
 //!                  └─────────────────┘
 //! ```
@@ -40,7 +40,7 @@
 use super::network::MAX_DUPLICATE_PACKET_DELAY;
 use crate::bytes::Bytes;
 use crate::cx::Cx;
-use crate::lab::network::{Fault, HostId, NetworkConfig, SimulatedNetwork};
+use crate::lab::network::{DeterministicNetwork, Fault, HostId, NetworkConfig};
 use crate::remote::{
     CancelRequest, IdempotencyKey, IdempotencyRequestFingerprint, IdempotencyStore, LeaseRenewal,
     MessageEnvelope, NodeId, RemoteCap, RemoteError, RemoteMessage, RemoteOutcome, RemoteRuntime,
@@ -167,7 +167,7 @@ impl RemoteRuntime for VirtualNetworkRuntime {
     }
 }
 
-/// A simulated node in the distributed test harness.
+/// A virtual node in the distributed test harness.
 ///
 /// Each node maintains its own state: pending remote tasks, leases,
 /// idempotency store, and causal tracker.
@@ -175,7 +175,7 @@ impl RemoteRuntime for VirtualNetworkRuntime {
 pub struct SimNode {
     /// The node's logical identity.
     pub node_id: NodeId,
-    /// The host ID in the simulated network.
+    /// The host ID in the deterministic virtual network.
     pub host_id: HostId,
     /// Outgoing messages awaiting send (from harness logic).
     outbox: VecDeque<(NodeId, RemoteMessage)>,
@@ -199,7 +199,7 @@ pub struct SimNode {
     event_log: Vec<NodeEvent>,
 }
 
-/// A task running on a simulated node.
+/// A task running on a virtual node.
 #[derive(Debug, Clone)]
 pub struct RunningTask {
     /// The remote task ID.
@@ -208,7 +208,7 @@ pub struct RunningTask {
     pub idempotency_key: IdempotencyKey,
     /// Origin node that spawned this task.
     pub origin: NodeId,
-    /// Simulated work remaining (in time units).
+    /// Virtual work remaining (in time units).
     pub work_remaining: Duration,
     /// Whether a cancellation has been requested.
     pub cancel_requested: bool,
@@ -268,7 +268,7 @@ pub enum NodeEvent {
 }
 
 impl SimNode {
-    /// Creates a new simulated node.
+    /// Creates a new virtual node.
     #[must_use]
     pub fn new(node_id: NodeId, host_id: HostId) -> Self {
         Self {
@@ -399,7 +399,7 @@ impl SimNode {
             task_id: req.remote_task_id,
             idempotency_key: req.idempotency_key,
             origin: req.origin_node.clone(),
-            work_remaining: Duration::from_millis(100), // Default simulated work
+            work_remaining: Duration::from_millis(100), // Default virtual work
             cancel_requested: false,
         };
         self.running_tasks.insert(req.remote_task_id, task);
@@ -492,7 +492,7 @@ impl SimNode {
         });
     }
 
-    /// Advances simulated work on all running tasks by the given duration.
+    /// Advances virtual work on all running tasks by the given duration.
     /// Returns completed or cancelled tasks that need result delivery.
     pub fn tick(&mut self, elapsed: Duration) -> Vec<(NodeId, RemoteMessage)> {
         if self.crashed {
@@ -552,7 +552,7 @@ impl SimNode {
         completed
     }
 
-    /// Simulates a node crash: drops all running tasks.
+    /// Applies a node crash: drops all running tasks.
     pub fn crash(&mut self) {
         self.crashed = true;
         self.running_tasks.clear();
@@ -566,7 +566,7 @@ impl SimNode {
         self.event_log.push(NodeEvent::Crashed);
     }
 
-    /// Simulates a node restart: clears crash flag, starts fresh.
+    /// Applies a node restart: clears crash flag, starts fresh.
     pub fn restart(&mut self) {
         self.crashed = false;
         self.duplicate_waiters.clear();
@@ -692,11 +692,11 @@ impl FaultScript {
 
 /// The distributed test harness.
 ///
-/// Orchestrates the simulated network, nodes, and fault script to run
+/// Orchestrates the deterministic virtual network, nodes, and fault script to run
 /// deterministic distributed tests.
 pub struct DistributedHarness {
-    /// The underlying simulated network.
-    network: SimulatedNetwork,
+    /// The underlying deterministic virtual network.
+    network: DeterministicNetwork,
     /// Nodes indexed by their logical NodeId.
     nodes: BTreeMap<NodeId, SimNode>,
     /// Mapping from NodeId to HostId.
@@ -764,7 +764,7 @@ impl DistributedHarness {
     pub fn new(config: NetworkConfig) -> Self {
         let tick = normalized_tick(config.tick_resolution);
         Self {
-            network: SimulatedNetwork::new(config),
+            network: DeterministicNetwork::new(config),
             nodes: BTreeMap::new(),
             node_to_host: BTreeMap::new(),
             host_to_node: BTreeMap::new(),
@@ -827,7 +827,7 @@ impl DistributedHarness {
         self.send_message(origin, target, &msg);
     }
 
-    /// Sends a remote message between nodes via the simulated network.
+    /// Sends a remote message between nodes via the deterministic virtual network.
     fn send_message(&mut self, from: &NodeId, to: &NodeId, msg: &RemoteMessage) {
         let src = self.node_to_host[from];
         let Some(&dst) = self.node_to_host.get(to) else {
@@ -868,7 +868,7 @@ impl DistributedHarness {
         );
         let envelope = MessageEnvelope::new(from.clone(), sender_time, msg.clone());
 
-        // Serialize message as opaque bytes for the simulated network.
+        // Serialize message as opaque bytes for the deterministic virtual network.
         // In Phase 0, we use a simple encoding: message type tag + task ID.
         let encoded = self.encode_message(&envelope);
         self.network.send(src, dst, Bytes::from(encoded));
@@ -876,7 +876,7 @@ impl DistributedHarness {
 
     /// Runs the simulation for the given duration.
     ///
-    /// This advances the simulated network, delivers messages, processes
+    /// This advances the deterministic virtual network, delivers messages, processes
     /// node logic, and executes fault scripts.
     pub fn run_for(&mut self, duration: Duration) {
         let target = self.sim_time.saturating_add(duration);
@@ -916,7 +916,7 @@ impl DistributedHarness {
         }
     }
 
-    /// Delivers packets from the simulated network to the appropriate nodes.
+    /// Delivers packets from the deterministic virtual network to the appropriate nodes.
     fn deliver_packets(&mut self) {
         // Phase 1: Drain raw payloads without borrowing `self.nodes` and
         // `self.network` in conflicting ways.
@@ -988,7 +988,7 @@ impl DistributedHarness {
     }
 
     // -----------------------------------------------------------------------
-    // Simple message encoding/decoding for the simulated network.
+    // Simple message encoding/decoding for the deterministic virtual network.
     // -----------------------------------------------------------------------
 
     fn encode_message(&mut self, msg: &MessageEnvelope<RemoteMessage>) -> Vec<u8> {
@@ -1079,7 +1079,7 @@ impl DistributedHarness {
                 }
             }
             HarnessFault::ExpireLeases(node_id) => {
-                // Clear all running tasks (simulates lease expiry)
+                // Clear all running tasks (models lease expiry)
                 if let Some(node) = self.nodes.get_mut(node_id) {
                     let task_ids: Vec<RemoteTaskId> = node.running_tasks.keys().copied().collect();
                     for tid in task_ids {
@@ -1155,7 +1155,7 @@ impl fmt::Debug for DistributedHarness {
 }
 
 // ---------------------------------------------------------------------------
-// Simple message encoding/decoding for the simulated network.
+// Simple message encoding/decoding for the deterministic virtual network.
 // In Phase 0, we use a tag byte + task ID. Real transport would use
 // a proper codec.
 // ---------------------------------------------------------------------------
@@ -2262,7 +2262,7 @@ mod tests {
         };
 
         // Try to send a message that claims to originate from victim node_b
-        let fake_req = SpawnRequest {
+        let forged_req = SpawnRequest {
             remote_task_id: RemoteTaskId::next(),
             computation: crate::remote::ComputationName::new("test-computation"),
             input: crate::remote::RemoteInput::new(vec![]),
@@ -2277,7 +2277,7 @@ mod tests {
         let envelope = MessageEnvelope::new(
             node_a.clone(),
             LogicalTime::Vector(VectorClock::new()),
-            RemoteMessage::SpawnRequest(fake_req),
+            RemoteMessage::SpawnRequest(forged_req),
         );
 
         // The send_message should reject this spoofed identity

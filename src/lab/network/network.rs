@@ -1,4 +1,4 @@
-//! Deterministic network simulation.
+//! Deterministic virtual network.
 
 use super::config::{NetworkConditions, NetworkConfig};
 use crate::bytes::Bytes;
@@ -11,7 +11,7 @@ use std::time::Duration;
 pub(super) const MAX_DUPLICATE_PACKET_DELAY: Duration = Duration::from_millis(1);
 const EXTRA_PACKET_DELAY_WINDOW_MICROS: u64 = 1_000;
 
-/// Identifier for a simulated host.
+/// Identifier for a virtual host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HostId(u64);
 
@@ -29,7 +29,7 @@ impl HostId {
     }
 }
 
-/// A simulated packet.
+/// A virtual network packet.
 #[derive(Debug, Clone)]
 pub struct Packet {
     /// Source host.
@@ -46,7 +46,7 @@ pub struct Packet {
     pub corrupted: bool,
 }
 
-/// Fault injection event for the simulated network.
+/// Fault injection event for the deterministic virtual network.
 #[derive(Debug, Clone)]
 pub enum Fault {
     /// Partition hosts into two sets.
@@ -90,7 +90,7 @@ pub struct NetworkMetrics {
     pub packets_corrupted: u64,
 }
 
-/// Simple trace event for network simulation.
+/// Simple trace event for deterministic virtual networking.
 #[derive(Debug, Clone)]
 pub struct NetworkTraceEvent {
     /// Event timestamp.
@@ -119,14 +119,14 @@ pub enum NetworkTraceKind {
 }
 
 #[derive(Debug)]
-struct SimulatedHost {
+struct VirtualHost {
     #[allow(dead_code)] // retained for debug diagnostics
     name: String,
     inbox: Vec<Packet>,
     crashed: bool,
 }
 
-impl SimulatedHost {
+impl VirtualHost {
     fn new(name: String) -> Self {
         Self {
             name,
@@ -180,13 +180,13 @@ impl Eq for ScheduledPacket {}
 
 /// Deterministic network simulator.
 #[derive(Debug)]
-pub struct SimulatedNetwork {
+pub struct DeterministicNetwork {
     config: NetworkConfig,
     rng: DetRng,
     now: Time,
     next_host: u64,
     next_sequence: u64,
-    hosts: HashMap<HostId, SimulatedHost>,
+    hosts: HashMap<HostId, VirtualHost>,
     links: HashMap<LinkKey, NetworkConditions>,
     partitions: HashSet<LinkKey>,
     queue: BinaryHeap<ScheduledPacket>,
@@ -196,8 +196,8 @@ pub struct SimulatedNetwork {
     trace: Vec<NetworkTraceEvent>,
 }
 
-impl SimulatedNetwork {
-    /// Creates a new simulated network with the given configuration.
+impl DeterministicNetwork {
+    /// Creates a new deterministic virtual network with the given configuration.
     #[must_use]
     pub fn new(config: NetworkConfig) -> Self {
         let rng = DetRng::new(config.seed);
@@ -218,7 +218,7 @@ impl SimulatedNetwork {
         }
     }
 
-    /// Returns the current simulated time.
+    /// Returns the current virtual network time.
     #[must_use]
     pub const fn now(&self) -> Time {
         self.now
@@ -240,7 +240,7 @@ impl SimulatedNetwork {
     pub fn add_host(&mut self, name: impl Into<String>) -> HostId {
         let id = HostId::new(self.next_host);
         self.next_host = self.next_host.saturating_add(1);
-        self.hosts.insert(id, SimulatedHost::new(name.into()));
+        self.hosts.insert(id, VirtualHost::new(name.into()));
         id
     }
 
@@ -347,7 +347,7 @@ impl SimulatedNetwork {
         }
     }
 
-    /// Injects a fault into the simulated network.
+    /// Injects a fault into the deterministic virtual network.
     pub fn inject_fault(&mut self, fault: &Fault) {
         match fault {
             Fault::Partition { hosts_a, hosts_b } => {
@@ -632,8 +632,8 @@ mod tests {
             seed: 123,
             ..Default::default()
         };
-        let mut net1 = SimulatedNetwork::new(config.clone());
-        let mut net2 = SimulatedNetwork::new(config);
+        let mut net1 = DeterministicNetwork::new(config.clone());
+        let mut net2 = DeterministicNetwork::new(config);
 
         let a1 = net1.add_host("a");
         let b1 = net1.add_host("b");
@@ -660,7 +660,7 @@ mod tests {
 
     #[test]
     fn multiple_hosts_receive() {
-        let mut net = SimulatedNetwork::new(NetworkConfig::default());
+        let mut net = DeterministicNetwork::new(NetworkConfig::default());
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
         let h3 = net.add_host("h3");
@@ -682,7 +682,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut net = SimulatedNetwork::new(config);
+        let mut net = DeterministicNetwork::new(config);
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -705,7 +705,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut net = SimulatedNetwork::new(config);
+        let mut net = DeterministicNetwork::new(config);
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -730,7 +730,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut net = SimulatedNetwork::new(config);
+        let mut net = DeterministicNetwork::new(config);
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -750,7 +750,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut net = SimulatedNetwork::new(config);
+        let mut net = DeterministicNetwork::new(config);
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -772,7 +772,7 @@ mod tests {
             default_conditions: NetworkConditions::ideal(),
             ..Default::default()
         };
-        let mut net = SimulatedNetwork::new(config);
+        let mut net = DeterministicNetwork::new(config);
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -797,7 +797,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut net = SimulatedNetwork::new(config);
+        let mut net = DeterministicNetwork::new(config);
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -816,7 +816,7 @@ mod tests {
             capture_trace: true,
             ..Default::default()
         };
-        let mut net = SimulatedNetwork::new(config);
+        let mut net = DeterministicNetwork::new(config);
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -830,7 +830,7 @@ mod tests {
 
     #[test]
     fn host_crash_and_restart() {
-        let mut net = SimulatedNetwork::new(NetworkConfig::default());
+        let mut net = DeterministicNetwork::new(NetworkConfig::default());
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -858,7 +858,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut net = SimulatedNetwork::new(config);
+        let mut net = DeterministicNetwork::new(config);
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -879,7 +879,7 @@ mod tests {
             default_conditions: NetworkConditions::ideal(),
             ..Default::default()
         };
-        let mut net = SimulatedNetwork::new(config);
+        let mut net = DeterministicNetwork::new(config);
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
         let payload = Bytes::copy_from_slice(&vec![0u8; 1_000]);
@@ -897,7 +897,7 @@ mod tests {
 
     #[test]
     fn partition_drops_packets() {
-        let mut net = SimulatedNetwork::new(NetworkConfig::default());
+        let mut net = DeterministicNetwork::new(NetworkConfig::default());
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -922,7 +922,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut net = SimulatedNetwork::new(config);
+        let mut net = DeterministicNetwork::new(config);
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -944,7 +944,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut net = SimulatedNetwork::new(config);
+        let mut net = DeterministicNetwork::new(config);
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -966,7 +966,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut net = SimulatedNetwork::new(config);
+        let mut net = DeterministicNetwork::new(config);
         let h1 = net.add_host("h1");
         let h2 = net.add_host("h2");
 
@@ -1109,7 +1109,7 @@ mod tests {
 
     #[test]
     fn topology_snapshot_scrubbed() {
-        let mut net = SimulatedNetwork::new(NetworkConfig::default());
+        let mut net = DeterministicNetwork::new(NetworkConfig::default());
         let h1 = net.add_host("alpha");
         let h2 = net.add_host("beta");
         let h3 = net.add_host("gamma");

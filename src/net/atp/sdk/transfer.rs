@@ -750,7 +750,7 @@ impl AtpSession {
         if envelope.size_bytes != size_bytes {
             return false;
         }
-        if envelope.session_id_hex != hex::encode(self.session.session_id.as_bytes()) {
+        if envelope.session_id_hex != hex::encode(self.session_id().as_bytes()) {
             return false;
         }
 
@@ -778,11 +778,11 @@ impl AtpSession {
         use sha2::Sha256;
 
         let mut ikm = Vec::with_capacity(160);
-        ikm.extend_from_slice(self.session.session_id.as_bytes());
-        ikm.extend_from_slice(self.session.local_peer.as_bytes());
-        ikm.extend_from_slice(self.session.remote_peer.as_bytes());
-        ikm.extend_from_slice(self.session.nonce.as_bytes());
-        ikm.extend_from_slice(self.session.transcript_hash.as_bytes());
+        ikm.extend_from_slice(self.session_id().as_bytes());
+        ikm.extend_from_slice(self.local_peer().as_bytes());
+        ikm.extend_from_slice(self.remote_peer().as_bytes());
+        ikm.extend_from_slice(self.transfer_nonce().as_bytes());
+        ikm.extend_from_slice(self.transcript_hash().as_bytes());
         let key = AuthKey::from_hkdf(
             &ikm,
             Some(b"asupersync-atp-sdk-object-signature-key-v1"),
@@ -792,7 +792,7 @@ impl AtpSession {
         let mut mac =
             Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
         mac.update(OBJECT_SIGNATURE_DOMAIN);
-        mac.update(self.session.session_id.as_bytes());
+        mac.update(self.session_id().as_bytes());
         mac.update(&(computed_hash.len() as u64).to_be_bytes());
         mac.update(computed_hash);
         mac.update(&size_bytes.to_be_bytes());
@@ -1094,7 +1094,7 @@ mod tests {
             let signature = session.compute_detached_object_signature(&hash, object.len() as u64);
             let envelope = serde_json::json!({
                 "algorithm": OBJECT_SIGNATURE_ALGORITHM,
-                "session_id_hex": hex::encode(session.session.session_id.as_bytes()),
+                "session_id_hex": hex::encode(session.session_id().as_bytes()),
                 "hash_hex": hex::encode(hash),
                 "size_bytes": object.len() as u64,
                 "signature_hex": hex::encode(signature),

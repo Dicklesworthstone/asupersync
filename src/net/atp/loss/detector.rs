@@ -1087,7 +1087,7 @@ mod tests {
     fn loss_pattern_analysis() {
         let mut detector = AtpLossDetector::new();
 
-        // Simulate burst losses
+        // Drive a burst-loss packet pattern.
         for _ in 0..5 {
             let rtt = RttEstimator::default();
             for pn in 0..10 {
@@ -1126,7 +1126,7 @@ mod tests {
         let mut tracker = ReorderingTracker::new();
         let initial_threshold = tracker.current_threshold;
 
-        // Simulate reordering detection
+        // Drive reordering-threshold adaptation.
         tracker.adapt_threshold();
 
         assert!(tracker.current_threshold > initial_threshold);

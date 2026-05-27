@@ -1,6 +1,6 @@
 //! Fuzz target for LabNetwork virtual message routing.
 //!
-//! Exercises `SimulatedNetwork` with topology mutations, host crashes, and
+//! Exercises `DeterministicNetwork` with topology mutations, host crashes, and
 //! adversarial link-condition churn. The harness replays the same scenario
 //! twice to assert deterministic routing under a fixed seed and checks that
 //! duplicate deliveries never exceed the simulator's own duplication metric.
@@ -10,8 +10,8 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
 use asupersync::lab::network::{
-    Fault, JitterModel, LatencyModel, NetworkConditions, NetworkConfig, NetworkTraceKind,
-    SimulatedNetwork,
+    DeterministicNetwork, Fault, JitterModel, LatencyModel, NetworkConditions, NetworkConfig,
+    NetworkTraceKind,
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::{BTreeMap, BTreeSet};
@@ -270,7 +270,7 @@ fn run_scenario(input: &FuzzInput) -> ScenarioSummary {
         enable_bandwidth: input.enable_bandwidth,
         default_bandwidth: u64::from(input.default_bandwidth.max(1)),
     };
-    let mut network = SimulatedNetwork::new(config);
+    let mut network = DeterministicNetwork::new(config);
     let host_count = normalize_host_count(input.host_count);
     let hosts = (0..host_count)
         .map(|index| network.add_host(format!("host-{index}")))

@@ -67,7 +67,7 @@ pub use atp::protocol::{
 pub use atp_udp::{
     ATP_UDP_DEFAULT_BATCH_SIZE, ATP_UDP_DEFAULT_MAX_PACKET_SIZE, AtpUdpPacket, AtpUdpPressure,
     AtpUdpReceivedPacket, AtpUdpRecvBatch, AtpUdpSocket, AtpUdpSocketConfig, AtpUdpSocketProfile,
-    FakeAtpUdpSocket, FakeUdpEvent,
+    LabAtpUdpSocket, LabUdpEvent,
 };
 pub use happy_eyeballs::{HappyEyeballsConfig, connect as happy_eyeballs_connect};
 #[cfg(all(feature = "quic", not(target_arch = "wasm32")))]

@@ -579,7 +579,7 @@ mod tests {
         // Should not send again immediately
         assert!(!manager.should_send_beacon(1));
 
-        // Simulate beacon response
+        // Process a beacon response.
         let response_beacon =
             PathBeacon::response(beacon.sequence, beacon.path_id, BeaconMeasurement::empty());
         let response = manager.process_received_beacon(response_beacon);

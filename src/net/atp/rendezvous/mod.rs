@@ -3,6 +3,14 @@
 use crate::cx::Cx;
 use crate::net::atp::stun::{EndpointObservation, ObservedEndpoint};
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
+const RELAY_UNCONDITIONAL_IO_BYTES: u64 = 1_048_576;
+const IPV6_UNCONDITIONAL_IO_BYTES: u64 = 262_144;
+const CANDIDATE_TTL_MIN_MICROS: u64 = 30_000_000;
+const CANDIDATE_TTL_DEFAULT_MICROS: u64 = 60_000_000;
+const CANDIDATE_TTL_MEDIUM_MICROS: u64 = 120_000_000;
+const CANDIDATE_TTL_MAX_MICROS: u64 = 300_000_000;
 
 /// ATP peer identity used by rendezvous candidate exchange.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -87,11 +95,11 @@ pub enum CandidateTransport {
     Ipv6,
 }
 
-/// Real capability context integrated with asupersync Cx capability system.
+/// Capability context integrated with the asupersync `Cx` authority surface.
 ///
-/// This replaces the previous stub CapabilityContext with actual capability-based
-/// access control using the asupersync Cx capability context system. All ATP
-/// operations now flow through proper capability grants instead of simple flags.
+/// ATP rendezvous decisions are derived from explicit I/O authority and the
+/// resource envelopes carried by `Cx`, so candidate admission remains bounded
+/// even when callers construct sessions through generic runtime APIs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityContext {
     /// Capability context label for tracing and audit
@@ -111,7 +119,6 @@ enum RelayCapability {
     /// Relay operations are denied
     Denied,
     /// Conditional relay based on peer/destination
-    #[allow(dead_code)]
     Conditional,
 }
 
@@ -123,15 +130,11 @@ enum Ipv6Capability {
     /// IPv6 operations are denied
     Denied,
     /// Conditional IPv6 based on network policy
-    #[allow(dead_code)]
     Conditional,
 }
 
 impl CapabilityContext {
-    /// Construct a capability context with explicit parameters (for testing/migration).
-    ///
-    /// This creates a capability context with explicitly specified permissions,
-    /// primarily used for testing and gradual migration from the stub implementation.
+    /// Construct a capability context with explicit parameters.
     ///
     /// # Errors
     ///
@@ -167,11 +170,12 @@ impl CapabilityContext {
         })
     }
 
-    /// Construct a capability context from a real Cx capability context.
+    /// Construct a capability context from a `Cx`.
     ///
-    /// This queries the Cx capability system to determine what ATP operations
-    /// are authorized, replacing the previous stub implementation with real
-    /// capability-based access control.
+    /// The derived context admits relay and IPv6 candidates only when the
+    /// caller has I/O authority and a non-exhausted resource envelope. Tight
+    /// envelopes downgrade broad authority to per-destination conditional
+    /// checks rather than granting unbounded network reachability.
     ///
     /// # Errors
     ///
@@ -216,44 +220,81 @@ impl CapabilityContext {
 
     /// Query relay capability from Cx.
     async fn query_relay_capability(cx: &Cx) -> Result<RelayCapability, Error> {
-        // Check if the Cx has I/O capabilities (required for relay operations)
-        // In a real implementation, this would check for specific ATP relay grants
-        if cx.has_io() {
-            // For now, allow relay if I/O capability is present
-            // TODO: Implement specific ATP relay capability checking
+        if !cx.has_io() {
+            return Ok(RelayCapability::Denied);
+        }
+
+        let budget = cx.capability_budget();
+        if matches!(budget.io_bytes, Some(0))
+            || budget.cleanup_budget.is_some_and(|b| b.is_exhausted())
+        {
+            return Ok(RelayCapability::Denied);
+        }
+
+        if budget
+            .io_bytes
+            .is_some_and(|bytes| bytes >= RELAY_UNCONDITIONAL_IO_BYTES)
+        {
             Ok(RelayCapability::Allowed)
         } else {
-            Ok(RelayCapability::Denied)
+            Ok(RelayCapability::Conditional)
         }
     }
 
     /// Query IPv6 capability from Cx.
     async fn query_ipv6_capability(cx: &Cx) -> Result<Ipv6Capability, Error> {
-        // Check if the Cx has I/O capabilities (required for IPv6 operations)
-        // In a real implementation, this would check for specific IPv6 network grants
-        if cx.has_io() {
-            // For now, allow IPv6 if I/O capability is present
-            // TODO: Implement specific IPv6 capability checking
+        if !cx.has_io() {
+            return Ok(Ipv6Capability::Denied);
+        }
+
+        let budget = cx.capability_budget();
+        if matches!(budget.io_bytes, Some(0))
+            || matches!(budget.cpu_units, Some(0))
+            || budget.cleanup_budget.is_some_and(|b| b.is_exhausted())
+        {
+            return Ok(Ipv6Capability::Denied);
+        }
+
+        if budget
+            .io_bytes
+            .is_some_and(|bytes| bytes >= IPV6_UNCONDITIONAL_IO_BYTES)
+        {
             Ok(Ipv6Capability::Allowed)
         } else {
-            Ok(Ipv6Capability::Denied)
+            Ok(Ipv6Capability::Conditional)
         }
     }
 
     /// Query TTL capability constraints from Cx.
     async fn query_ttl_capability(cx: &Cx) -> Result<u64, Error> {
-        // Use the capability budget to determine TTL constraints
         let budget = cx.capability_budget();
+        let mut ttl = match budget.io_bytes {
+            Some(0) => CANDIDATE_TTL_MIN_MICROS,
+            Some(bytes) if bytes >= 8_388_608 => CANDIDATE_TTL_MAX_MICROS,
+            Some(bytes) if bytes >= 1_048_576 => CANDIDATE_TTL_MEDIUM_MICROS,
+            Some(_) | None => CANDIDATE_TTL_DEFAULT_MICROS,
+        };
 
-        // Use memory budget as a proxy for TTL constraints
-        // In a real implementation, this would map to specific ATP TTL grants
-        if budget.memory_bytes.unwrap_or(0) > 1_000_000 {
-            Ok(300_000_000) // 5 minutes for high-memory contexts
-        } else if budget.memory_bytes.unwrap_or(0) > 100_000 {
-            Ok(120_000_000) // 2 minutes for medium contexts
-        } else {
-            Ok(60_000_000) // 1 minute default
+        if budget.memory_bytes.is_some_and(|bytes| bytes < 65_536) {
+            ttl = ttl.min(CANDIDATE_TTL_MIN_MICROS);
         }
+        if budget.artifact_bytes.is_some_and(|bytes| bytes < 4_096) {
+            ttl = ttl.min(CANDIDATE_TTL_MIN_MICROS);
+        }
+        if let Some(cleanup_budget) = budget.cleanup_budget {
+            if cleanup_budget.is_exhausted() {
+                return Err(Error::InvalidCapabilityContext);
+            }
+            if let Some(deadline) = cleanup_budget.deadline {
+                let deadline_micros = deadline.as_nanos() / 1_000;
+                if deadline_micros == 0 {
+                    return Err(Error::InvalidCapabilityContext);
+                }
+                ttl = ttl.min(deadline_micros);
+            }
+        }
+
+        Ok(ttl.clamp(CANDIDATE_TTL_MIN_MICROS, CANDIDATE_TTL_MAX_MICROS))
     }
 
     /// Stable context label for path logs.
@@ -274,7 +315,7 @@ impl CapabilityContext {
         match &self.relay_capability {
             RelayCapability::Allowed => true,
             RelayCapability::Denied => false,
-            RelayCapability::Conditional => true, // Allow with runtime checks
+            RelayCapability::Conditional => true,
         }
     }
 
@@ -284,7 +325,7 @@ impl CapabilityContext {
         match &self.ipv6_capability {
             Ipv6Capability::Allowed => true,
             Ipv6Capability::Denied => false,
-            Ipv6Capability::Conditional => true, // Allow with runtime checks
+            Ipv6Capability::Conditional => true,
         }
     }
 
@@ -296,13 +337,7 @@ impl CapabilityContext {
         match &self.relay_capability {
             RelayCapability::Allowed => true,
             RelayCapability::Denied => false,
-            RelayCapability::Conditional => {
-                // For conditional relay, check if we have I/O cap and validate destination
-                // In a real implementation, this would check against ATP relay policy
-                cx.has_io()
-                    && !destination.trim().is_empty()
-                    && !destination.starts_with("127.0.0.1")
-            }
+            RelayCapability::Conditional => cx.has_io() && relay_destination_allowed(destination),
         }
     }
 
@@ -314,26 +349,126 @@ impl CapabilityContext {
         match &self.ipv6_capability {
             Ipv6Capability::Allowed => true,
             Ipv6Capability::Denied => false,
-            Ipv6Capability::Conditional => {
-                // For conditional IPv6, check if we have I/O cap and endpoint is IPv6
-                // In a real implementation, this would check against network policy
-                cx.has_io() && endpoint.contains(':') // Basic IPv6 detection
-            }
+            Ipv6Capability::Conditional => cx.has_io() && ipv6_direct_endpoint_allowed(endpoint),
         }
     }
 }
 
 impl Default for CapabilityContext {
     fn default() -> Self {
-        // Use testing defaults for backward compatibility
-        // Real code should use from_cx() for proper capability integration
         Self::default_testing().unwrap_or_else(|_| Self {
             label: "fallback-atp-rendezvous".to_owned(),
             relay_capability: RelayCapability::Denied,
             ipv6_capability: Ipv6Capability::Denied,
-            max_candidate_ttl_micros: 30_000_000, // Conservative 30 seconds
+            max_candidate_ttl_micros: CANDIDATE_TTL_MIN_MICROS,
         })
     }
+}
+
+fn relay_destination_allowed(destination: &str) -> bool {
+    let Some(destination) = parse_destination(destination) else {
+        return false;
+    };
+
+    match destination {
+        ParsedDestination::Ip(ip) => routable_relay_destination_ip(ip),
+        ParsedDestination::Host(host) => {
+            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            !host.is_empty()
+                && host != "localhost"
+                && !host.ends_with(".localhost")
+                && !host
+                    .rsplit_once('.')
+                    .is_some_and(|(_, suffix)| suffix.eq_ignore_ascii_case("local"))
+                && host
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
+        }
+    }
+}
+
+fn ipv6_direct_endpoint_allowed(endpoint: &str) -> bool {
+    match parse_destination(endpoint) {
+        Some(ParsedDestination::Ip(IpAddr::V6(addr))) => routable_ipv6_direct_address(addr),
+        Some(ParsedDestination::Host(host)) => host
+            .parse::<Ipv6Addr>()
+            .is_ok_and(routable_ipv6_direct_address),
+        Some(ParsedDestination::Ip(IpAddr::V4(_))) | None => false,
+    }
+}
+
+enum ParsedDestination<'a> {
+    Ip(IpAddr),
+    Host(&'a str),
+}
+
+fn parse_destination(destination: &str) -> Option<ParsedDestination<'_>> {
+    let destination = destination.trim();
+    if destination.is_empty() {
+        return None;
+    }
+    if let Ok(socket_addr) = destination.parse::<SocketAddr>() {
+        return Some(ParsedDestination::Ip(socket_addr.ip()));
+    }
+    if let Some(rest) = destination.strip_prefix('[') {
+        let (host, after_bracket) = rest.split_once(']')?;
+        if after_bracket.is_empty() || valid_port_suffix(after_bracket) {
+            return parse_host_or_ip(host);
+        }
+        return None;
+    }
+    if destination.matches(':').count() == 1 {
+        let (host, port_suffix) = destination.rsplit_once(':')?;
+        if !port_suffix.chars().all(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
+        return parse_host_or_ip(host);
+    }
+    parse_host_or_ip(destination)
+}
+
+fn parse_host_or_ip(value: &str) -> Option<ParsedDestination<'_>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(match value.parse::<IpAddr>() {
+        Ok(ip) => ParsedDestination::Ip(ip),
+        Err(_) => ParsedDestination::Host(value),
+    })
+}
+
+fn valid_port_suffix(suffix: &str) -> bool {
+    suffix
+        .strip_prefix(':')
+        .is_some_and(|port| !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn routable_relay_destination_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(addr) => {
+            let octets = addr.octets();
+            !(addr.is_loopback()
+                || addr.is_unspecified()
+                || addr.is_multicast()
+                || octets[0] == 10
+                || octets[0] == 172 && (16..=31).contains(&octets[1])
+                || octets[0] == 192 && octets[1] == 168
+                || octets[0] == 169 && octets[1] == 254)
+        }
+        IpAddr::V6(addr) => routable_ipv6_direct_address(addr),
+    }
+}
+
+fn routable_ipv6_direct_address(addr: Ipv6Addr) -> bool {
+    let segments = addr.segments();
+    let first_segment = segments[0];
+    !(addr.is_loopback()
+        || addr.is_unspecified()
+        || addr.is_multicast()
+        || first_segment & 0xfe00 == 0xfc00
+        || first_segment & 0xffc0 == 0xfe80
+        || segments[0] == 0x2001 && segments[1] == 0x0db8)
 }
 
 /// Path candidate advertised to peers through rendezvous.
@@ -1466,6 +1601,7 @@ pub enum Error {
 mod tests {
     use super::*;
     use crate::net::atp::stun::{EndpointFamily, ObservationRequest, ObservedEndpoint};
+    use futures_lite::future::block_on;
 
     fn peer(byte: u8) -> PeerId {
         PeerId::new([byte; 32]).expect("peer id")
@@ -1889,6 +2025,43 @@ mod tests {
             .exchange_for_peer(12, transfer_nonce, peer_a)
             .expect("exchange");
         assert_eq!(exchange.remaining_attempts(), 0);
+    }
+
+    #[test]
+    fn conditional_relay_policy_rejects_local_destinations() {
+        let cx = Cx::for_testing_with_io();
+        let context = CapabilityContext {
+            label: "conditional-relay".to_owned(),
+            relay_capability: RelayCapability::Conditional,
+            ipv6_capability: Ipv6Capability::Denied,
+            max_candidate_ttl_micros: CANDIDATE_TTL_DEFAULT_MICROS,
+        };
+
+        assert!(block_on(
+            context.check_relay_to(&cx, "relay.example.net:443")
+        ));
+        assert!(!block_on(context.check_relay_to(&cx, "localhost:443")));
+        assert!(!block_on(context.check_relay_to(&cx, "127.0.0.1:443")));
+        assert!(!block_on(context.check_relay_to(&cx, "10.0.0.7:443")));
+    }
+
+    #[test]
+    fn conditional_ipv6_policy_requires_public_ipv6_endpoint() {
+        let cx = Cx::for_testing_with_io();
+        let context = CapabilityContext {
+            label: "conditional-ipv6".to_owned(),
+            relay_capability: RelayCapability::Denied,
+            ipv6_capability: Ipv6Capability::Conditional,
+            max_candidate_ttl_micros: CANDIDATE_TTL_DEFAULT_MICROS,
+        };
+
+        assert!(block_on(
+            context.check_ipv6_direct_to(&cx, "[2606:4700:4700::1111]:443")
+        ));
+        assert!(!block_on(context.check_ipv6_direct_to(&cx, "[::1]:443")));
+        assert!(!block_on(
+            context.check_ipv6_direct_to(&cx, "198.51.100.10:443")
+        ));
     }
 
     #[test]

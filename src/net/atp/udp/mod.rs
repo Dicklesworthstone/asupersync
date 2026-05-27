@@ -2,7 +2,7 @@
 //!
 //! This module wraps the portable `net::UdpSocket` surface with ATP-specific
 //! packet limits, buffer tuning, pressure accounting, structured profile logs,
-//! and a deterministic fake packet path for lab replay.
+//! and a deterministic lab packet path for replay.
 
 use crate::cx::Cx;
 use crate::net::{
@@ -379,9 +379,9 @@ impl AtpUdpSocket {
     }
 }
 
-/// Deterministic fake UDP event for lab replay.
+/// Deterministic UDP event for lab replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FakeUdpEvent {
+pub enum LabUdpEvent {
     /// Deliver a packet.
     Deliver {
         /// Packet source.
@@ -401,16 +401,16 @@ pub enum FakeUdpEvent {
     Close,
 }
 
-/// Deterministic fake UDP socket for lab replay.
+/// Deterministic UDP socket for lab replay.
 #[derive(Debug, Default)]
-pub struct FakeAtpUdpSocket {
-    events: VecDeque<FakeUdpEvent>,
+pub struct LabAtpUdpSocket {
+    events: VecDeque<LabUdpEvent>,
     closed: bool,
 }
 
-impl FakeAtpUdpSocket {
+impl LabAtpUdpSocket {
     /// Add a replay event.
-    pub fn push_event(&mut self, event: FakeUdpEvent) {
+    pub fn push_event(&mut self, event: LabUdpEvent) {
         self.events.push_back(event);
     }
 
@@ -432,7 +432,7 @@ impl FakeAtpUdpSocket {
         if self.closed {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
-                "fake UDP closed",
+                "lab UDP closed",
             ));
         }
 
@@ -440,7 +440,7 @@ impl FakeAtpUdpSocket {
         while batch.packets.len() < max_packets {
             checkpoint_io(cx)?;
             match self.events.pop_front() {
-                Some(FakeUdpEvent::Deliver {
+                Some(LabUdpEvent::Deliver {
                     src_addr,
                     payload,
                     possibly_truncated,
@@ -454,24 +454,24 @@ impl FakeAtpUdpSocket {
                         possibly_truncated,
                     });
                 }
-                Some(FakeUdpEvent::Drop) => {}
-                Some(FakeUdpEvent::StaleReady) | None => break,
-                Some(FakeUdpEvent::SocketError(error)) => {
+                Some(LabUdpEvent::Drop) => {}
+                Some(LabUdpEvent::StaleReady) | None => break,
+                Some(LabUdpEvent::SocketError(error)) => {
                     if batch.packets.is_empty() {
                         return Err(io::Error::other(error));
                     }
                     batch.report.error = Some(error);
                     break;
                 }
-                Some(FakeUdpEvent::Close) => {
+                Some(LabUdpEvent::Close) => {
                     self.closed = true;
                     if batch.packets.is_empty() {
                         return Err(io::Error::new(
                             io::ErrorKind::NotConnected,
-                            "fake UDP closed",
+                            "lab UDP closed",
                         ));
                     }
-                    batch.report.error = Some("fake UDP closed".to_string());
+                    batch.report.error = Some("lab UDP closed".to_string());
                     break;
                 }
             }
@@ -546,37 +546,37 @@ mod tests {
     }
 
     #[test]
-    fn fake_replay_handles_loss_reorder_truncation_stale_error_and_close() {
+    fn lab_replay_handles_loss_reorder_truncation_stale_error_and_close() {
         run_test_with_cx(|cx| async move {
             let src_a = "127.0.0.1:10001".parse().unwrap();
             let src_b = "127.0.0.1:10002".parse().unwrap();
-            let mut fake = FakeAtpUdpSocket::default();
-            fake.push_event(FakeUdpEvent::Deliver {
+            let mut lab = LabAtpUdpSocket::default();
+            lab.push_event(LabUdpEvent::Deliver {
                 src_addr: src_a,
                 payload: b"first".to_vec(),
                 possibly_truncated: false,
             });
-            fake.push_event(FakeUdpEvent::Drop);
-            fake.push_event(FakeUdpEvent::Deliver {
+            lab.push_event(LabUdpEvent::Drop);
+            lab.push_event(LabUdpEvent::Deliver {
                 src_addr: src_b,
                 payload: b"second".to_vec(),
                 possibly_truncated: true,
             });
-            fake.push_event(FakeUdpEvent::StaleReady);
-            assert!(fake.reorder(0, 2));
+            lab.push_event(LabUdpEvent::StaleReady);
+            assert!(lab.reorder(0, 2));
 
-            let batch = fake.recv_available(&cx, 4).expect("replay fake UDP");
+            let batch = lab.recv_available(&cx, 4).expect("replay lab UDP");
             assert_eq!(batch.packets.len(), 2);
             assert_eq!(batch.packets[0].src_addr, src_b);
             assert!(batch.packets[0].possibly_truncated);
             assert_eq!(batch.packets[1].src_addr, src_a);
 
-            fake.push_event(FakeUdpEvent::SocketError("boom".to_string()));
-            let err = fake.recv_available(&cx, 1).expect_err("socket error");
+            lab.push_event(LabUdpEvent::SocketError("boom".to_string()));
+            let err = lab.recv_available(&cx, 1).expect_err("socket error");
             assert_eq!(err.kind(), io::ErrorKind::Other);
 
-            fake.push_event(FakeUdpEvent::Close);
-            let err = fake.recv_available(&cx, 1).expect_err("close race");
+            lab.push_event(LabUdpEvent::Close);
+            let err = lab.recv_available(&cx, 1).expect_err("close race");
             assert_eq!(err.kind(), io::ErrorKind::NotConnected);
         });
     }

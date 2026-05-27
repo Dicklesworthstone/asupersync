@@ -351,8 +351,8 @@ impl LanPeerAdvertisement {
 /// Provider source for an optional Tailscale/private-route candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TailscaleDetectionSource {
-    /// Deterministic fake provider used by lab/e2e tests.
-    FakeProvider,
+    /// Deterministic lab provider used by lab/e2e tests.
+    LabProvider,
     /// Host interface inventory observed a Tailscale address.
     LocalInterface,
     /// `tailscale status`-style host integration reported a candidate.
@@ -364,7 +364,7 @@ impl TailscaleDetectionSource {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
-            Self::FakeProvider => "fake_provider",
+            Self::LabProvider => "lab_provider",
             Self::LocalInterface => "local_interface",
             Self::StatusCommand => "status_command",
         }
@@ -372,7 +372,7 @@ impl TailscaleDetectionSource {
 
     const fn evidence_code(self) -> &'static str {
         match self {
-            Self::FakeProvider => "tailscale_fake_provider_candidate_validated",
+            Self::LabProvider => "tailscale_lab_provider_candidate_validated",
             Self::LocalInterface => "tailscale_local_interface_candidate_validated",
             Self::StatusCommand => "tailscale_status_command_candidate_validated",
         }
@@ -1184,8 +1184,8 @@ pub enum PathDiscoveryScenario {
     ExplicitDirect,
     /// Platform has a public IPv6 endpoint.
     Ipv6Available,
-    /// Deterministic fake Tailscale provider reported one candidate.
-    TailscaleFakeProvider,
+    /// Deterministic lab Tailscale provider reported one candidate.
+    TailscaleLabProvider,
     /// Platform has no IPv6 support.
     Ipv6Unavailable,
     /// Direct discovery is denied by policy.
@@ -1198,7 +1198,7 @@ impl fmt::Display for PathDiscoveryScenario {
             Self::LanDiscovery => "lan_discovery",
             Self::ExplicitDirect => "explicit_direct",
             Self::Ipv6Available => "ipv6_available",
-            Self::TailscaleFakeProvider => "tailscale_fake_provider",
+            Self::TailscaleLabProvider => "tailscale_lab_provider",
             Self::Ipv6Unavailable => "ipv6_unavailable",
             Self::PolicyDenied => "policy_denied",
         })
@@ -1215,7 +1215,7 @@ pub fn run_discovery_scenario(scenario: PathDiscoveryScenario) -> AtpPathDoctorR
         PathDiscoveryScenario::PolicyDenied => PathDiscoveryPolicy::disabled(),
         PathDiscoveryScenario::ExplicitDirect
         | PathDiscoveryScenario::Ipv6Available
-        | PathDiscoveryScenario::TailscaleFakeProvider
+        | PathDiscoveryScenario::TailscaleLabProvider
         | PathDiscoveryScenario::Ipv6Unavailable => PathDiscoveryPolicy::safe_default(),
     };
 
@@ -1245,10 +1245,10 @@ pub fn run_discovery_scenario(scenario: PathDiscoveryScenario) -> AtpPathDoctorR
         _ => Vec::new(),
     };
     let platform_ipv6_available = matches!(scenario, PathDiscoveryScenario::Ipv6Available);
-    let tailscale_candidates = if matches!(scenario, PathDiscoveryScenario::TailscaleFakeProvider) {
+    let tailscale_candidates = if matches!(scenario, PathDiscoveryScenario::TailscaleLabProvider) {
         vec![TailscaleCandidateObservation::new(
             "100.100.10.20:41641".parse().expect("scenario tailscale"),
-            TailscaleDetectionSource::FakeProvider,
+            TailscaleDetectionSource::LabProvider,
             1_000,
         )]
     } else {
@@ -1425,7 +1425,7 @@ mod tests {
     fn tailscale_policy_distinguishes_disabled_forbidden_allowed_and_preferred() {
         let tailscale = TailscaleCandidateObservation::new(
             socket("100.100.10.20:41641"),
-            TailscaleDetectionSource::FakeProvider,
+            TailscaleDetectionSource::LabProvider,
             1_000,
         );
         let public_ipv6 = socket("[2606:4700:4700::1111]:41641");
@@ -1510,7 +1510,7 @@ mod tests {
                 explicit_direct_endpoint: Some("198.51.100.20:41641".to_string()),
                 tailscale_candidates: vec![TailscaleCandidateObservation::new(
                     socket("100.100.10.20:41641"),
-                    TailscaleDetectionSource::FakeProvider,
+                    TailscaleDetectionSource::LabProvider,
                     1_000,
                 )],
                 now_micros: 2_000,
@@ -1534,7 +1534,7 @@ mod tests {
         assert_eq!(selected.endpoint_scope, "tailscale-ipv4:41641");
         assert_eq!(
             selected.evidence,
-            "tailscale_fake_provider_candidate_validated"
+            "tailscale_lab_provider_candidate_validated"
         );
         assert!(
             doctor.guidance.contains(
@@ -1613,7 +1613,7 @@ mod tests {
             PathDiscoveryScenario::LanDiscovery,
             PathDiscoveryScenario::ExplicitDirect,
             PathDiscoveryScenario::Ipv6Available,
-            PathDiscoveryScenario::TailscaleFakeProvider,
+            PathDiscoveryScenario::TailscaleLabProvider,
             PathDiscoveryScenario::Ipv6Unavailable,
             PathDiscoveryScenario::PolicyDenied,
         ];
@@ -1658,8 +1658,8 @@ mod tests {
     }
 
     #[test]
-    fn tailscale_fake_provider_scenario_is_redaction_safe() {
-        let report = run_discovery_scenario(PathDiscoveryScenario::TailscaleFakeProvider);
+    fn tailscale_lab_provider_scenario_is_redaction_safe() {
+        let report = run_discovery_scenario(PathDiscoveryScenario::TailscaleLabProvider);
 
         assert_eq!(
             report.selected.as_ref().map(|candidate| candidate.source),
@@ -1669,7 +1669,7 @@ mod tests {
         assert_eq!(candidate.endpoint_scope, "tailscale-ipv4:41641");
         assert_eq!(
             candidate.evidence,
-            "tailscale_fake_provider_candidate_validated"
+            "tailscale_lab_provider_candidate_validated"
         );
     }
 }

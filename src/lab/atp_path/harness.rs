@@ -2,8 +2,8 @@
 
 use crate::atp::path::{PathKind, PathTraceId};
 use crate::lab::{
-    AtpLabRegime, AtpLabScenario, AtpLabTransferSpec, AtpTransferLabPlan, NetworkConfig,
-    SimulatedNetwork,
+    AtpLabRegime, AtpLabScenario, AtpLabTransferSpec, AtpTransferLabPlan, DeterministicNetwork,
+    NetworkConfig,
 };
 use crate::net::atp::path::NatProfile;
 use crate::types::Time;
@@ -212,7 +212,7 @@ pub enum AtpPathLabError {
 /// ATP path lab harness for executing path-related scenarios.
 #[derive(Debug)]
 pub struct AtpPathLabHarness {
-    network: SimulatedNetwork,
+    network: DeterministicNetwork,
     /// Deterministic timestamp counter for trace events
     timestamp_counter: u64,
 }
@@ -221,7 +221,7 @@ impl AtpPathLabHarness {
     /// Create a new ATP path lab harness with the given configuration.
     #[must_use]
     pub fn new(config: AtpPathTestConfig) -> Self {
-        let network = SimulatedNetwork::new(config.network.clone());
+        let network = DeterministicNetwork::new(config.network.clone());
         Self {
             network,
             timestamp_counter: 0,
@@ -277,7 +277,7 @@ impl AtpPathLabHarness {
         let mut candidates_evaluated = 0;
         let mut scenario_matched_expected = true;
 
-        // Set up simulated endpoints
+        // Set up deterministic virtual endpoints.
         self.network.add_host("client");
         self.network.add_host("server");
 
@@ -614,7 +614,7 @@ fn target_endpoint_for_path(path_kind: PathKind) -> &'static str {
     if path_kind.uses_connect_udp_proxy() {
         "masque-connect-udp-proxy:443"
     } else {
-        "simulated-endpoint"
+        "virtual-endpoint"
     }
 }
 
@@ -944,11 +944,11 @@ mod tests {
         );
         assert_eq!(
             target_endpoint_for_path(PathKind::LanMulticast),
-            "simulated-endpoint"
+            "virtual-endpoint"
         );
         assert_eq!(
             target_endpoint_for_path(PathKind::AtpRelayUdp),
-            "simulated-endpoint"
+            "virtual-endpoint"
         );
     }
 
