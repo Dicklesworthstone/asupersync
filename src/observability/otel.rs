@@ -173,7 +173,8 @@ impl PrivacyConfig {
     fn should_drop_field(&self, field_name: &str) -> bool {
         // Check explicit drop lists
         if self.drop_attributes.contains(&field_name.to_string())
-            || self.drop_labels.contains(&field_name.to_string()) {
+            || self.drop_labels.contains(&field_name.to_string())
+        {
             return true;
         }
 
@@ -193,7 +194,7 @@ impl PrivacyConfig {
     }
 
     /// Redact PII from field values.
-    fn redact_pii(&self, field_name: &str, value: &str) -> String {
+    fn redact_pii(&self, _field_name: &str, value: &str) -> String {
         let mut redacted_value = value.to_string();
 
         // Apply custom PII patterns
@@ -240,10 +241,17 @@ impl PrivacyConfig {
         }
 
         // SSN pattern detection (XXX-XX-XXXX format)
-        if value.len() == 11 && value.chars().nth(3) == Some('-') && value.chars().nth(6) == Some('-') {
+        if value.len() == 11
+            && value.chars().nth(3) == Some('-')
+            && value.chars().nth(6) == Some('-')
+        {
             let parts: Vec<&str> = value.split('-').collect();
-            if parts.len() == 3 && parts[0].len() == 3 && parts[1].len() == 2 && parts[2].len() == 4 {
-                if parts.iter().all(|part| part.chars().all(|c| c.is_ascii_digit())) {
+            if parts.len() == 3 && parts[0].len() == 3 && parts[1].len() == 2 && parts[2].len() == 4
+            {
+                if parts
+                    .iter()
+                    .all(|part| part.chars().all(|c| c.is_ascii_digit()))
+                {
                     return "[SSN_REDACTED]".to_string();
                 }
             }
@@ -779,7 +787,11 @@ impl OtlpLogRecord {
 
     /// Build an OTLP log record from an Asupersync structured log entry with privacy filtering.
     #[must_use]
-    pub fn from_log_entry_with_privacy(entry: &LogEntry, observed_time_unix_nano: u64, config: &SpanConfig) -> Self {
+    pub fn from_log_entry_with_privacy(
+        entry: &LogEntry,
+        observed_time_unix_nano: u64,
+        config: &SpanConfig,
+    ) -> Self {
         let mut record = Self::new(entry.level(), entry.message(), entry.timestamp().as_nanos())
             .with_observed_time_unix_nano(observed_time_unix_nano);
 
@@ -817,7 +829,12 @@ impl OtlpLogRecord {
     /// **Security**: Attributes listed in `config.drop_attributes` are silently dropped
     /// to prevent sensitive data from reaching OTLP collectors.
     #[must_use]
-    pub fn with_filtered_attribute(mut self, key: impl Into<String>, value: impl Into<String>, config: &SpanConfig) -> Self {
+    pub fn with_filtered_attribute(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+        config: &SpanConfig,
+    ) -> Self {
         let key_str = key.into();
 
         // Privacy filtering: drop sensitive attributes before OTLP export
@@ -1894,7 +1911,10 @@ impl OtlpHttpExporter {
     /// Add Authorization header with Bearer token.
     #[must_use]
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
-        self.auth_headers.push(("Authorization".to_owned(), format!("Bearer {}", token.into())));
+        self.auth_headers.push((
+            "Authorization".to_owned(),
+            format!("Bearer {}", token.into()),
+        ));
         self
     }
 
@@ -7874,7 +7894,13 @@ pub mod otlp_request_builder {
         batch_sequence: u64,
         scope_name: &str,
     ) -> ExportMetricsServiceRequest {
-        metrics_request_from_snapshot_with_privacy(snapshot, service_name, batch_sequence, scope_name, None)
+        metrics_request_from_snapshot_with_privacy(
+            snapshot,
+            service_name,
+            batch_sequence,
+            scope_name,
+            None,
+        )
     }
 
     /// Build a single-scope OTLP metrics export request from a metrics snapshot with privacy filtering.
@@ -9132,7 +9158,7 @@ mod otlp_wire_format_tests {
         snapshot.add_counter(
             "http_requests_total",
             vec![
-                ("method".to_string(), "POST".to_string()),  // Safe
+                ("method".to_string(), "POST".to_string()), // Safe
                 ("endpoint".to_string(), "/api/v1/users".to_string()), // Safe
                 ("user_id".to_string(), "user_12345".to_string()), // Sensitive - PII
                 ("request_id".to_string(), "req_abc123".to_string()), // Sensitive - tracking
@@ -9177,43 +9203,63 @@ mod otlp_wire_format_tests {
         );
 
         // Extract attributes from both requests for comparison
-        let extract_counter_attributes = |request: &otlp_request_builder::ExportMetricsServiceRequest| -> Vec<String> {
-            request.resource_metrics[0].scope_metrics[0].metrics
-                .iter()
-                .find(|m| m.name == "http_requests_total")
-                .and_then(|m| m.data.as_ref())
-                .and_then(|data| match data {
-                    otlp_request_builder::metric::Data::Sum(sum) => Some(&sum.data_points[0].attributes),
-                    _ => None,
-                })
-                .map(|attrs| attrs.iter().map(|kv| kv.key.clone()).collect())
-                .unwrap_or_default()
-        };
+        let extract_counter_attributes =
+            |request: &otlp_request_builder::ExportMetricsServiceRequest| -> Vec<String> {
+                request.resource_metrics[0].scope_metrics[0]
+                    .metrics
+                    .iter()
+                    .find(|m| m.name == "http_requests_total")
+                    .and_then(|m| m.data.as_ref())
+                    .and_then(|data| match data {
+                        otlp_request_builder::metric::Data::Sum(sum) => {
+                            Some(&sum.data_points[0].attributes)
+                        }
+                        _ => None,
+                    })
+                    .map(|attrs| attrs.iter().map(|kv| kv.key.clone()).collect())
+                    .unwrap_or_default()
+            };
 
         let attrs_no_privacy = extract_counter_attributes(&request_no_privacy);
         let attrs_with_privacy = extract_counter_attributes(&request_with_privacy);
 
         // Verify that sensitive labels are present without privacy filtering
-        assert!(attrs_no_privacy.contains(&"user_id".to_string()),
-                "Baseline should contain user_id");
-        assert!(attrs_no_privacy.contains(&"request_id".to_string()),
-                "Baseline should contain request_id");
-        assert!(attrs_no_privacy.contains(&"user_email".to_string()),
-                "Baseline should contain user_email");
+        assert!(
+            attrs_no_privacy.contains(&"user_id".to_string()),
+            "Baseline should contain user_id"
+        );
+        assert!(
+            attrs_no_privacy.contains(&"request_id".to_string()),
+            "Baseline should contain request_id"
+        );
+        assert!(
+            attrs_no_privacy.contains(&"user_email".to_string()),
+            "Baseline should contain user_email"
+        );
 
         // Verify that sensitive labels are removed with privacy filtering
-        assert!(!attrs_with_privacy.contains(&"user_id".to_string()),
-                "Privacy filtering should remove user_id");
-        assert!(!attrs_with_privacy.contains(&"request_id".to_string()),
-                "Privacy filtering should remove request_id");
-        assert!(!attrs_with_privacy.contains(&"user_email".to_string()),
-                "Privacy filtering should remove user_email");
+        assert!(
+            !attrs_with_privacy.contains(&"user_id".to_string()),
+            "Privacy filtering should remove user_id"
+        );
+        assert!(
+            !attrs_with_privacy.contains(&"request_id".to_string()),
+            "Privacy filtering should remove request_id"
+        );
+        assert!(
+            !attrs_with_privacy.contains(&"user_email".to_string()),
+            "Privacy filtering should remove user_email"
+        );
 
         // Verify that safe labels are preserved
-        assert!(attrs_with_privacy.contains(&"method".to_string()),
-                "Safe labels should be preserved");
-        assert!(attrs_with_privacy.contains(&"endpoint".to_string()),
-                "Safe labels should be preserved");
+        assert!(
+            attrs_with_privacy.contains(&"method".to_string()),
+            "Safe labels should be preserved"
+        );
+        assert!(
+            attrs_with_privacy.contains(&"endpoint".to_string()),
+            "Safe labels should be preserved"
+        );
 
         eprintln!("✅ OTLP metrics privacy filtering test passed");
         eprintln!("   • Sensitive labels removed: user_id, request_id, user_email");
@@ -9239,11 +9285,11 @@ mod otlp_wire_format_tests {
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap(),
         )
         .with_field("action", "login")
-        .with_field("user.email", "sensitive@example.com")  // Should be filtered
-        .with_field("api.key", "secret-key-12345")         // Should be filtered
-        .with_field("auth.token", "bearer-token-xyz")      // Should be filtered
-        .with_field("user.id", "12345")                   // Should be kept
-        .with_field("request.path", "/api/login");        // Should be kept
+        .with_field("user.email", "sensitive@example.com") // Should be filtered
+        .with_field("api.key", "secret-key-12345") // Should be filtered
+        .with_field("auth.token", "bearer-token-xyz") // Should be filtered
+        .with_field("user.id", "12345") // Should be kept
+        .with_field("request.path", "/api/login"); // Should be kept
 
         let observed_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -9254,26 +9300,86 @@ mod otlp_wire_format_tests {
         let unfiltered_record = OtlpLogRecord::from_log_entry(&mock_entry, observed_time);
 
         // Verify all attributes are present in unfiltered record
-        assert_eq!(unfiltered_record.attributes.len(), 5, "Unfiltered record should contain all 5 attributes");
-        assert!(unfiltered_record.attributes.iter().any(|(k, _)| k == "user.email"), "user.email should be present without filtering");
-        assert!(unfiltered_record.attributes.iter().any(|(k, _)| k == "api.key"), "api.key should be present without filtering");
-        assert!(unfiltered_record.attributes.iter().any(|(k, _)| k == "auth.token"), "auth.token should be present without filtering");
+        assert_eq!(
+            unfiltered_record.attributes.len(),
+            5,
+            "Unfiltered record should contain all 5 attributes"
+        );
+        assert!(
+            unfiltered_record
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "user.email"),
+            "user.email should be present without filtering"
+        );
+        assert!(
+            unfiltered_record
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "api.key"),
+            "api.key should be present without filtering"
+        );
+        assert!(
+            unfiltered_record
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "auth.token"),
+            "auth.token should be present without filtering"
+        );
 
         // Test WITH privacy filtering (the fix)
-        let filtered_record = OtlpLogRecord::from_log_entry_with_privacy(&mock_entry, observed_time, &privacy_config);
+        let filtered_record =
+            OtlpLogRecord::from_log_entry_with_privacy(&mock_entry, observed_time, &privacy_config);
 
         // Verify sensitive attributes are filtered out
-        assert_eq!(filtered_record.attributes.len(), 2, "Filtered record should contain only 2 safe attributes");
-        assert!(filtered_record.attributes.iter().all(|(k, _)| k != "user.email"), "user.email should be filtered out");
-        assert!(filtered_record.attributes.iter().all(|(k, _)| k != "api.key"), "api.key should be filtered out");
-        assert!(filtered_record.attributes.iter().all(|(k, _)| k != "auth.token"), "auth.token should be filtered out");
+        assert_eq!(
+            filtered_record.attributes.len(),
+            2,
+            "Filtered record should contain only 2 safe attributes"
+        );
+        assert!(
+            filtered_record
+                .attributes
+                .iter()
+                .all(|(k, _)| k != "user.email"),
+            "user.email should be filtered out"
+        );
+        assert!(
+            filtered_record
+                .attributes
+                .iter()
+                .all(|(k, _)| k != "api.key"),
+            "api.key should be filtered out"
+        );
+        assert!(
+            filtered_record
+                .attributes
+                .iter()
+                .all(|(k, _)| k != "auth.token"),
+            "auth.token should be filtered out"
+        );
 
         // Verify safe attributes are preserved
-        assert!(filtered_record.attributes.iter().any(|(k, _)| k == "user.id"), "user.id should be preserved");
-        assert!(filtered_record.attributes.iter().any(|(k, _)| k == "request.path"), "request.path should be preserved");
+        assert!(
+            filtered_record
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "user.id"),
+            "user.id should be preserved"
+        );
+        assert!(
+            filtered_record
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "request.path"),
+            "request.path should be preserved"
+        );
 
         // Verify dropped attributes are counted
-        assert_eq!(filtered_record.dropped_attributes_count, 3, "Should report 3 dropped sensitive attributes");
+        assert_eq!(
+            filtered_record.dropped_attributes_count, 3,
+            "Should report 3 dropped sensitive attributes"
+        );
 
         println!("✓ OTLP privacy filtering security test passed");
         println!("  - Sensitive attributes filtered: ✓");

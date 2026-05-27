@@ -489,35 +489,39 @@ pub struct StaticFilesHandler {
 }
 
 impl Handler for StaticFilesHandler {
-    fn call(&self, _cx: &crate::Cx, req: super::extract::Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        _cx: &crate::Cx,
+        req: super::extract::Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         Box::pin(async move {
-        let head_only = req.method.eq_ignore_ascii_case("HEAD");
-        let if_none_match = req.header("if-none-match").map(str::to_owned);
-        let range_header = req.header("range");
-        let request_path = &req.path;
+            let head_only = req.method.eq_ignore_ascii_case("HEAD");
+            let if_none_match = req.header("if-none-match").map(str::to_owned);
+            let range_header = req.header("range");
+            let request_path = &req.path;
 
-        let mut response = match self.config.resolve_path(request_path) {
-            Some(file_path) => {
-                if let Some(range_str) = range_header {
-                    self.config
-                        .serve_range(&file_path, range_str, if_none_match.as_deref())
-                } else {
-                    let mut resp = self.config.serve_file(&file_path, if_none_match.as_deref());
-                    // Add Accept-Ranges header to advertise range support
-                    resp.set_header("accept-ranges", "bytes");
-                    resp
+            let mut response = match self.config.resolve_path(request_path) {
+                Some(file_path) => {
+                    if let Some(range_str) = range_header {
+                        self.config
+                            .serve_range(&file_path, range_str, if_none_match.as_deref())
+                    } else {
+                        let mut resp = self.config.serve_file(&file_path, if_none_match.as_deref());
+                        // Add Accept-Ranges header to advertise range support
+                        resp.set_header("accept-ranges", "bytes");
+                        resp
+                    }
                 }
-            }
-            None => Response::empty(StatusCode::NOT_FOUND),
-        };
+                None => Response::empty(StatusCode::NOT_FOUND),
+            };
 
-        if head_only {
-            if !response.body.is_empty() && !response.has_header("content-length") {
-                response.set_header("content-length", response.body.len().to_string());
+            if head_only {
+                if !response.body.is_empty() && !response.has_header("content-length") {
+                    response.set_header("content-length", response.body.len().to_string());
+                }
+                response.body = Bytes::new();
             }
-            response.body = Bytes::new();
-        }
-        response
+            response
         })
     }
 }

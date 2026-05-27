@@ -48,7 +48,7 @@ impl Default for PersistentCongestionConfig {
 
 /// A congestion event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CongestionEvent {
+pub struct CongestionEvent {
     /// Event timestamp.
     #[serde(skip, default = "Instant::now")]
     timestamp: Instant,
@@ -75,7 +75,7 @@ enum CongestionEventType {
 
 /// Network conditions snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct NetworkConditions {
+pub struct NetworkConditions {
     /// RTT at event time.
     rtt_micros: Option<u64>,
     /// RTT variance.
@@ -90,7 +90,7 @@ struct NetworkConditions {
 
 /// A congestion epoch (period of sustained congestion).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CongestionEpoch {
+pub struct CongestionEpoch {
     /// Epoch start time.
     #[serde(skip, default = "Instant::now")]
     start_time: Instant,

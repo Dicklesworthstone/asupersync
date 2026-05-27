@@ -239,7 +239,12 @@ impl ConnectionRegistry {
     /// ensures we only remove the stream if it matches the specific registration
     /// we're responsible for.
     /// br-asupersync-tnvxx3: Uses read lock since ConnectionState is internally synchronized.
-    pub fn remove_stream_if_owned(&self, connection_id: &str, stream_id: u32, registered_at: Instant) {
+    pub fn remove_stream_if_owned(
+        &self,
+        connection_id: &str,
+        stream_id: u32,
+        registered_at: Instant,
+    ) {
         let connections = self.connections.read();
         if let Some(connection) = connections.get(connection_id) {
             connection.remove_stream_if_owned(stream_id, registered_at);
@@ -291,8 +296,11 @@ struct StreamRegistrationGuard {
 
 impl Drop for StreamRegistrationGuard {
     fn drop(&mut self) {
-        self.registry
-            .remove_stream_if_owned(&self.connection_id, self.stream_id, self.registered_at);
+        self.registry.remove_stream_if_owned(
+            &self.connection_id,
+            self.stream_id,
+            self.registered_at,
+        );
     }
 }
 
@@ -462,8 +470,8 @@ fn is_valid_header_name_rfc7230(name: &str) -> bool {
             // DIGIT (0-9)
             b'0'..=b'9' => continue,
             // tchar special characters
-            b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' |
-            b'^' | b'_' | b'`' | b'|' | b'~' => continue,
+            b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_'
+            | b'`' | b'|' | b'~' => continue,
             // Invalid character for header name
             _ => return false,
         }
@@ -501,7 +509,7 @@ fn is_valid_header_value_rfc7230(value: &str) -> bool {
 
 /// br-asupersync-60vn7x: Maximum allowed length for individual header names and values
 /// to prevent memory exhaustion attacks via oversized headers.
-const MAX_HEADER_NAME_LEN: usize = 256;   // 256 bytes
+const MAX_HEADER_NAME_LEN: usize = 256; // 256 bytes
 const MAX_HEADER_VALUE_LEN: usize = 8192; // 8 KB
 
 fn validate_inbound_metadata(metadata: &super::streaming::Metadata) -> Result<(), Status> {
@@ -988,7 +996,11 @@ impl ServerBuilder {
     where
         F: Fn(&Cx, &str) -> Result<(), Status> + Send + Sync + 'static,
     {
-        let reflection = self.reflection.take().unwrap_or_default().with_auth(auth_callback);
+        let reflection = self
+            .reflection
+            .take()
+            .unwrap_or_default()
+            .with_auth(auth_callback);
         for service in self.services.values() {
             if service.descriptor().full_name() != ReflectionService::NAME {
                 reflection.register_handler(service.as_ref());
@@ -2202,11 +2214,22 @@ mod tests {
         // Test that a default (locked) reflection service rejects requests
         let locked_reflection = ReflectionService::new(); // Default is Locked mode
         let result = locked_reflection.list_services();
-        crate::assert_with_log!(result.is_err(), "locked reflection should fail", true, result.is_err());
+        crate::assert_with_log!(
+            result.is_err(),
+            "locked reflection should fail",
+            true,
+            result.is_err()
+        );
 
         if let Err(status) = result {
-            let is_permission_denied = status.code() == super::super::status::Code::PermissionDenied;
-            crate::assert_with_log!(is_permission_denied, "should be PermissionDenied", true, is_permission_denied);
+            let is_permission_denied =
+                status.code() == super::super::status::Code::PermissionDenied;
+            crate::assert_with_log!(
+                is_permission_denied,
+                "should be PermissionDenied",
+                true,
+                is_permission_denied
+            );
             let message_contains_with_auth = status.message().contains(".with_auth");
             let message_contains_allow_anonymous = status.message().contains(".allow_anonymous");
             crate::assert_with_log!(
@@ -2226,19 +2249,33 @@ mod tests {
 
         // Test with auth callback that denies access
         let reflection = ReflectionService::new()
-            .with_auth(|_cx, method| {
-                Err(Status::permission_denied(format!("denied: {method}")))
-            });
+            .with_auth(|_cx, method| Err(Status::permission_denied(format!("denied: {method}"))));
 
         // Should be denied by auth callback
         let result = reflection.list_services();
-        crate::assert_with_log!(result.is_err(), "auth callback should deny", true, result.is_err());
+        crate::assert_with_log!(
+            result.is_err(),
+            "auth callback should deny",
+            true,
+            result.is_err()
+        );
 
         if let Err(status) = result {
-            let is_permission_denied = status.code() == super::super::status::Code::PermissionDenied;
-            crate::assert_with_log!(is_permission_denied, "should be PermissionDenied", true, is_permission_denied);
+            let is_permission_denied =
+                status.code() == super::super::status::Code::PermissionDenied;
+            crate::assert_with_log!(
+                is_permission_denied,
+                "should be PermissionDenied",
+                true,
+                is_permission_denied
+            );
             let message_contains_denied = status.message().contains("denied:");
-            crate::assert_with_log!(message_contains_denied, "message should contain 'denied:'", true, message_contains_denied);
+            crate::assert_with_log!(
+                message_contains_denied,
+                "message should contain 'denied:'",
+                true,
+                message_contains_denied
+            );
         }
 
         crate::test_complete!("test_reflection_auth_callback_enforcement");
@@ -2254,11 +2291,21 @@ mod tests {
 
         // Should be allowed in anonymous mode
         let result = reflection.list_services();
-        crate::assert_with_log!(result.is_ok(), "anonymous should allow", true, result.is_ok());
+        crate::assert_with_log!(
+            result.is_ok(),
+            "anonymous should allow",
+            true,
+            result.is_ok()
+        );
 
         if let Ok(services) = result {
             let has_test_service = services.contains(&"test.TestService".to_string());
-            crate::assert_with_log!(has_test_service, "should list test service", true, has_test_service);
+            crate::assert_with_log!(
+                has_test_service,
+                "should list test service",
+                true,
+                has_test_service
+            );
         }
 
         crate::test_complete!("test_reflection_anonymous_allows_access");
@@ -2942,37 +2989,37 @@ mod tests {
         init_test("test_rfc7230_header_name_validation_rejects_invalid_characters");
 
         // Test various invalid characters in header names
-        assert!(!is_valid_header_name_rfc7230(""));                    // Empty name
-        assert!(!is_valid_header_name_rfc7230("invalid space"));      // Space
-        assert!(!is_valid_header_name_rfc7230("invalid\r"));          // CR
-        assert!(!is_valid_header_name_rfc7230("invalid\n"));          // LF
-        assert!(!is_valid_header_name_rfc7230("invalid\t"));          // Tab
-        assert!(!is_valid_header_name_rfc7230("invalid:header"));     // Colon (separator)
-        assert!(!is_valid_header_name_rfc7230("invalid;header"));     // Semicolon
-        assert!(!is_valid_header_name_rfc7230("invalid(header"));     // Parenthesis
-        assert!(!is_valid_header_name_rfc7230("invalid)header"));     // Parenthesis
-        assert!(!is_valid_header_name_rfc7230("invalid<header"));     // Angle bracket
-        assert!(!is_valid_header_name_rfc7230("invalid>header"));     // Angle bracket
-        assert!(!is_valid_header_name_rfc7230("invalid@header"));     // At sign
-        assert!(!is_valid_header_name_rfc7230("invalid,header"));     // Comma
-        assert!(!is_valid_header_name_rfc7230("invalid\\header"));    // Backslash
-        assert!(!is_valid_header_name_rfc7230("invalid\"header"));    // Quote
-        assert!(!is_valid_header_name_rfc7230("invalid/header"));     // Slash
-        assert!(!is_valid_header_name_rfc7230("invalid[header"));     // Bracket
-        assert!(!is_valid_header_name_rfc7230("invalid]header"));     // Bracket
-        assert!(!is_valid_header_name_rfc7230("invalid?header"));     // Question
-        assert!(!is_valid_header_name_rfc7230("invalid=header"));     // Equals
-        assert!(!is_valid_header_name_rfc7230("invalid{header"));     // Brace
-        assert!(!is_valid_header_name_rfc7230("invalid}header"));     // Brace
+        assert!(!is_valid_header_name_rfc7230("")); // Empty name
+        assert!(!is_valid_header_name_rfc7230("invalid space")); // Space
+        assert!(!is_valid_header_name_rfc7230("invalid\r")); // CR
+        assert!(!is_valid_header_name_rfc7230("invalid\n")); // LF
+        assert!(!is_valid_header_name_rfc7230("invalid\t")); // Tab
+        assert!(!is_valid_header_name_rfc7230("invalid:header")); // Colon (separator)
+        assert!(!is_valid_header_name_rfc7230("invalid;header")); // Semicolon
+        assert!(!is_valid_header_name_rfc7230("invalid(header")); // Parenthesis
+        assert!(!is_valid_header_name_rfc7230("invalid)header")); // Parenthesis
+        assert!(!is_valid_header_name_rfc7230("invalid<header")); // Angle bracket
+        assert!(!is_valid_header_name_rfc7230("invalid>header")); // Angle bracket
+        assert!(!is_valid_header_name_rfc7230("invalid@header")); // At sign
+        assert!(!is_valid_header_name_rfc7230("invalid,header")); // Comma
+        assert!(!is_valid_header_name_rfc7230("invalid\\header")); // Backslash
+        assert!(!is_valid_header_name_rfc7230("invalid\"header")); // Quote
+        assert!(!is_valid_header_name_rfc7230("invalid/header")); // Slash
+        assert!(!is_valid_header_name_rfc7230("invalid[header")); // Bracket
+        assert!(!is_valid_header_name_rfc7230("invalid]header")); // Bracket
+        assert!(!is_valid_header_name_rfc7230("invalid?header")); // Question
+        assert!(!is_valid_header_name_rfc7230("invalid=header")); // Equals
+        assert!(!is_valid_header_name_rfc7230("invalid{header")); // Brace
+        assert!(!is_valid_header_name_rfc7230("invalid}header")); // Brace
 
         // Test valid characters
-        assert!(is_valid_header_name_rfc7230("valid-header"));        // Hyphen (allowed)
-        assert!(is_valid_header_name_rfc7230("valid_header"));        // Underscore (allowed)
-        assert!(is_valid_header_name_rfc7230("validheader123"));      // Alphanumeric
-        assert!(is_valid_header_name_rfc7230("x-custom-header"));     // Common pattern
-        assert!(is_valid_header_name_rfc7230("content-type"));        // Standard header
-        assert!(is_valid_header_name_rfc7230("x-trace-id"));         // Trace header
-        assert!(is_valid_header_name_rfc7230("authorization"));       // Auth header
+        assert!(is_valid_header_name_rfc7230("valid-header")); // Hyphen (allowed)
+        assert!(is_valid_header_name_rfc7230("valid_header")); // Underscore (allowed)
+        assert!(is_valid_header_name_rfc7230("validheader123")); // Alphanumeric
+        assert!(is_valid_header_name_rfc7230("x-custom-header")); // Common pattern
+        assert!(is_valid_header_name_rfc7230("content-type")); // Standard header
+        assert!(is_valid_header_name_rfc7230("x-trace-id")); // Trace header
+        assert!(is_valid_header_name_rfc7230("authorization")); // Auth header
 
         crate::test_complete!("test_rfc7230_header_name_validation_rejects_invalid_characters");
     }
@@ -2982,18 +3029,28 @@ mod tests {
         init_test("test_rfc7230_header_value_validation_rejects_crlf_injection");
 
         // Test CRLF injection attacks
-        assert!(!is_valid_header_value_rfc7230("value1\r\ninjected-header: evil"));
-        assert!(!is_valid_header_value_rfc7230("value1\ninjected-header: evil"));
-        assert!(!is_valid_header_value_rfc7230("value1\rinjected-header: evil"));
+        assert!(!is_valid_header_value_rfc7230(
+            "value1\r\ninjected-header: evil"
+        ));
+        assert!(!is_valid_header_value_rfc7230(
+            "value1\ninjected-header: evil"
+        ));
+        assert!(!is_valid_header_value_rfc7230(
+            "value1\rinjected-header: evil"
+        ));
         assert!(!is_valid_header_value_rfc7230("\r\nevil-header: value"));
-        assert!(!is_valid_header_value_rfc7230("normal\r\nContent-Length: 0"));
-        assert!(!is_valid_header_value_rfc7230("test\r\n\r\nHTTP/1.1 200 OK"));
+        assert!(!is_valid_header_value_rfc7230(
+            "normal\r\nContent-Length: 0"
+        ));
+        assert!(!is_valid_header_value_rfc7230(
+            "test\r\n\r\nHTTP/1.1 200 OK"
+        ));
 
         // Test control characters
-        assert!(!is_valid_header_value_rfc7230("value\x00control"));   // NULL
-        assert!(!is_valid_header_value_rfc7230("value\x01control"));   // SOH
-        assert!(!is_valid_header_value_rfc7230("value\x02control"));   // STX
-        assert!(!is_valid_header_value_rfc7230("value\x7Fcontrol"));   // DEL
+        assert!(!is_valid_header_value_rfc7230("value\x00control")); // NULL
+        assert!(!is_valid_header_value_rfc7230("value\x01control")); // SOH
+        assert!(!is_valid_header_value_rfc7230("value\x02control")); // STX
+        assert!(!is_valid_header_value_rfc7230("value\x7Fcontrol")); // DEL
 
         // Test valid values
         assert!(is_valid_header_value_rfc7230("valid header value"));
@@ -3002,7 +3059,7 @@ mod tests {
         assert!(is_valid_header_value_rfc7230("trailers"));
         assert!(is_valid_header_value_rfc7230("5S"));
         assert!(is_valid_header_value_rfc7230("identity,gzip"));
-        assert!(is_valid_header_value_rfc7230(""));  // Empty is valid
+        assert!(is_valid_header_value_rfc7230("")); // Empty is valid
 
         crate::test_complete!("test_rfc7230_header_value_validation_rejects_crlf_injection");
     }
@@ -3041,7 +3098,9 @@ mod tests {
         // CRLF injection in header value
         let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
             "x-trace-id".to_string(),
-            super::super::streaming::MetadataValue::Ascii("normal\r\ninjected-header: evil".to_string()),
+            super::super::streaming::MetadataValue::Ascii(
+                "normal\r\ninjected-header: evil".to_string(),
+            ),
         )]);
         let status = enforce_metadata_size_limit(&metadata, 8 * 1024)
             .expect_err("CRLF injection attack must be rejected");
@@ -3051,7 +3110,9 @@ mod tests {
         // Double CRLF response splitting
         let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
             "authorization".to_string(),
-            super::super::streaming::MetadataValue::Ascii("Bearer token\r\n\r\nHTTP/1.1 200 OK".to_string()),
+            super::super::streaming::MetadataValue::Ascii(
+                "Bearer token\r\n\r\nHTTP/1.1 200 OK".to_string(),
+            ),
         )]);
         let status = enforce_metadata_size_limit(&metadata, 8 * 1024)
             .expect_err("response splitting attack must be rejected");
@@ -3126,7 +3187,9 @@ mod tests {
         // CRLF injection attempt
         let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
             "x-trace-id".to_string(),
-            super::super::streaming::MetadataValue::Ascii("valid\r\ninjected-header: malicious".to_string()),
+            super::super::streaming::MetadataValue::Ascii(
+                "valid\r\ninjected-header: malicious".to_string(),
+            ),
         )]);
         let request = Request::with_metadata(Bytes::new(), metadata);
 
@@ -3137,7 +3200,10 @@ mod tests {
         }));
 
         assert!(result.is_err(), "CRLF injection must be rejected");
-        assert!(!handler_invoked, "handler must NOT be invoked for header injection attempts");
+        assert!(
+            !handler_invoked,
+            "handler must NOT be invoked for header injection attempts"
+        );
 
         let status = result.unwrap_err();
         assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
@@ -3169,7 +3235,12 @@ mod tests {
             for i in 0..100 {
                 let stream_id = i;
                 // Add stream
-                let result = registry_clone.enforce_stream_limits(&connection_id_clone, stream_id, 200, None);
+                let result = registry_clone.enforce_stream_limits(
+                    &connection_id_clone,
+                    stream_id,
+                    200,
+                    None,
+                );
                 if result.is_ok() {
                     // Update stream activity
                     registry_clone.update_stream_activity(&connection_id_clone, stream_id);
@@ -3240,7 +3311,9 @@ mod tests {
             }
         }
 
-        reader_handle.join().expect("reader thread should complete successfully");
+        reader_handle
+            .join()
+            .expect("reader thread should complete successfully");
 
         crate::test_complete!("test_connection_registry_concurrent_read_write");
     }
@@ -4791,7 +4864,9 @@ mod tests {
         let request = Request::with_metadata(Bytes::new(), Metadata::new());
         let result = block_on(server.dispatch_unary(request, |req| async move {
             // Verify auth context exists in handler
-            let auth = req.extensions().get_typed::<crate::grpc::interceptor::AuthContext>();
+            let auth = req
+                .extensions()
+                .get_typed::<crate::grpc::interceptor::AuthContext>();
             assert!(auth.is_some(), "handler should see AuthContext");
             assert_eq!(auth.unwrap().principal, "svc-a");
 
@@ -4825,7 +4900,9 @@ mod tests {
         let request = Request::with_metadata(Bytes::new(), Metadata::new());
         let result = block_on(server.dispatch_unary(request, |req| async move {
             // Handler should see auth context
-            let auth = req.extensions().get_typed::<crate::grpc::interceptor::AuthContext>();
+            let auth = req
+                .extensions()
+                .get_typed::<crate::grpc::interceptor::AuthContext>();
             assert!(auth.is_some(), "handler should see AuthContext");
 
             Ok::<Response<Bytes>, Status>(Response::new(Bytes::new()))

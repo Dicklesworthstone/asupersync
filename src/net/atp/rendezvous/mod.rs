@@ -177,10 +177,7 @@ impl CapabilityContext {
     ///
     /// Returns [`Error::EmptyCapabilityContext`] for blank labels and
     /// [`Error::InvalidCapabilityContext`] when capabilities are insufficient.
-    pub async fn from_cx(
-        cx: &Cx,
-        label: impl Into<String>,
-    ) -> Result<Self, Error> {
+    pub async fn from_cx(cx: &Cx, label: impl Into<String>) -> Result<Self, Error> {
         let label = label.into();
         if label.trim().is_empty() {
             return Err(Error::EmptyCapabilityContext);
@@ -302,7 +299,9 @@ impl CapabilityContext {
             RelayCapability::Conditional => {
                 // For conditional relay, check if we have I/O cap and validate destination
                 // In a real implementation, this would check against ATP relay policy
-                cx.has_io() && !destination.trim().is_empty() && !destination.starts_with("127.0.0.1")
+                cx.has_io()
+                    && !destination.trim().is_empty()
+                    && !destination.starts_with("127.0.0.1")
             }
         }
     }

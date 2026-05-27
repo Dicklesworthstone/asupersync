@@ -321,9 +321,21 @@ impl BoundedLoadConfig {
         const MAX_CAPACITY_PER_WEIGHT: u32 = 1_000; // Reasonable scaling factor
 
         Self {
-            epsilon_milli: if epsilon_milli > MAX_EPSILON_MILLI { MAX_EPSILON_MILLI } else { epsilon_milli },
-            min_capacity: if min_capacity > MAX_MIN_CAPACITY { MAX_MIN_CAPACITY } else { min_capacity },
-            capacity_per_weight: if capacity_per_weight > MAX_CAPACITY_PER_WEIGHT { MAX_CAPACITY_PER_WEIGHT } else { capacity_per_weight },
+            epsilon_milli: if epsilon_milli > MAX_EPSILON_MILLI {
+                MAX_EPSILON_MILLI
+            } else {
+                epsilon_milli
+            },
+            min_capacity: if min_capacity > MAX_MIN_CAPACITY {
+                MAX_MIN_CAPACITY
+            } else {
+                min_capacity
+            },
+            capacity_per_weight: if capacity_per_weight > MAX_CAPACITY_PER_WEIGHT {
+                MAX_CAPACITY_PER_WEIGHT
+            } else {
+                capacity_per_weight
+            },
         }
     }
 
@@ -341,7 +353,10 @@ impl BoundedLoadConfig {
 
         let safe_weight = endpoint.weight.min(MAX_SAFE_WEIGHT).max(1);
         let safe_epsilon = self.epsilon_milli.min(MAX_SAFE_EPSILON_MILLI);
-        let safe_capacity_per_weight = self.capacity_per_weight.min(MAX_SAFE_CAPACITY_PER_WEIGHT).max(1);
+        let safe_capacity_per_weight = self
+            .capacity_per_weight
+            .min(MAX_SAFE_CAPACITY_PER_WEIGHT)
+            .max(1);
 
         // br-asupersync-qfgsh1: Use checked arithmetic to detect overflow attempts
         let base = match safe_weight.checked_mul(safe_capacity_per_weight) {
@@ -577,7 +592,11 @@ impl BoundedLoadDecision {
         // br-asupersync-36grbm: Use bucketed counts to prevent exact enumeration attacks
         fields.insert(
             "fairness_state".to_owned(),
-            self.format_fairness_state_bucketed(rejected_count, overloaded_count, within_capacity_count),
+            self.format_fairness_state_bucketed(
+                rejected_count,
+                overloaded_count,
+                within_capacity_count,
+            ),
         );
         fields.insert("strategy_id".to_owned(), "bounded-load-hash".to_owned());
 
@@ -804,14 +823,20 @@ impl LoadBalancer {
     /// runs where deterministic routing is required.
     #[must_use]
     pub fn new(strategy: LoadBalanceStrategy) -> Self {
-        Self::with_crypto_salt(strategy, crate::util::entropy::CryptoSalt::generate("transport-router"))
+        Self::with_crypto_salt(
+            strategy,
+            crate::util::entropy::CryptoSalt::generate("transport-router"),
+        )
     }
 
     /// Creates a new load balancer with an explicit CryptoSalt.
     /// For production use, prefer [`Self::new`] which generates secure entropy.
     /// (br-asupersync-is96u6)
     #[must_use]
-    pub fn with_crypto_salt(strategy: LoadBalanceStrategy, hash_ring_salt: crate::util::entropy::CryptoSalt) -> Self {
+    pub fn with_crypto_salt(
+        strategy: LoadBalanceStrategy,
+        hash_ring_salt: crate::util::entropy::CryptoSalt,
+    ) -> Self {
         Self {
             strategy,
             rr_counter: AtomicU64::new(0),
@@ -829,14 +854,17 @@ impl LoadBalancer {
     pub fn with_test_salt(strategy: LoadBalanceStrategy, test_seed: u64) -> Self {
         Self::with_crypto_salt(
             strategy,
-            crate::util::entropy::CryptoSalt::for_test(test_seed, "transport-router-test")
+            crate::util::entropy::CryptoSalt::for_test(test_seed, "transport-router-test"),
         )
     }
 
     /// DEPRECATED: Creates a load balancer with legacy 64-bit salt.
     /// Only for compatibility during migration. New code MUST use
     /// [`Self::new`] or [`Self::with_test_salt`]. (br-asupersync-is96u6)
-    #[deprecated(since = "0.1.0", note = "Use with_test_salt() for tests or new() for production")]
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use with_test_salt() for tests or new() for production"
+    )]
     #[must_use]
     pub fn with_seed(strategy: LoadBalanceStrategy, hash_ring_salt: u64) -> Self {
         Self::with_test_salt(strategy, hash_ring_salt)
@@ -1746,7 +1774,12 @@ impl RoutingTable {
     ///
     /// **Security**: Requires admin-level capabilities to prevent endpoint state
     /// manipulation attacks (br-asupersync-4p3xds).
-    pub fn update_endpoint_state(&self, cx: &Cx, id: EndpointId, state: EndpointState) -> Result<bool, Error> {
+    pub fn update_endpoint_state(
+        &self,
+        cx: &Cx,
+        id: EndpointId,
+        state: EndpointState,
+    ) -> Result<bool, Error> {
         // br-asupersync-4p3xds: Add admin capability check to prevent state manipulation DoS
         self.require_admin_capability(cx)?;
 
@@ -4523,11 +4556,17 @@ mod tests {
         let test_cx = Cx::for_testing();
 
         assert_eq!(endpoint.state(), EndpointState::Healthy);
-        assert!(table.update_endpoint_state(&test_cx, EndpointId(9), EndpointState::Draining)
-            .expect("update_endpoint_state should succeed"));
+        assert!(
+            table
+                .update_endpoint_state(&test_cx, EndpointId(9), EndpointState::Draining)
+                .expect("update_endpoint_state should succeed")
+        );
         assert_eq!(endpoint.state(), EndpointState::Draining);
-        assert!(!table.update_endpoint_state(&test_cx, EndpointId(999), EndpointState::Healthy)
-            .expect("update_endpoint_state should succeed"));
+        assert!(
+            !table
+                .update_endpoint_state(&test_cx, EndpointId(999), EndpointState::Healthy)
+                .expect("update_endpoint_state should succeed")
+        );
     }
 
     #[test]
@@ -5071,7 +5110,9 @@ mod tests {
 
         // But not unlimited - simulate high connection count
         let mut high_conn_endpoint = test_endpoint(3).with_weight(u32::MAX);
-        high_conn_endpoint.active_connections.store(100_000, std::sync::atomic::Ordering::Relaxed);
+        high_conn_endpoint
+            .active_connections
+            .store(100_000, std::sync::atomic::Ordering::Relaxed);
 
         // With many active connections, should reject further connections
         assert!(!normal_config.accepts(&high_conn_endpoint));

@@ -25,14 +25,14 @@
 //! - No acceptable encoding is negotiated.
 //! - The negotiated encoding is `identity`.
 
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
 
+use crate::Cx;
 use crate::http::compress::{
     ContentEncoding, DEFAULT_MAX_COMPRESSED_SIZE, make_compressor_with_output_limit,
     negotiate_encoding,
 };
-use crate::Cx;
 
 use super::extract::Request;
 use super::handler::Handler;
@@ -146,132 +146,133 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
     fn call(&self, cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
-        // Extract accept-encoding before passing the request.
-        let accept_encoding = req.header("accept-encoding").map(str::to_owned);
-        let request_sensitivity = RequestCompressionSensitivity::from_request(&req);
+            // Extract accept-encoding before passing the request.
+            let accept_encoding = req.header("accept-encoding").map(str::to_owned);
+            let request_sensitivity = RequestCompressionSensitivity::from_request(&req);
 
-        let mut resp = self.inner.call(&cx, req).await;
+            let mut resp = self.inner.call(&cx, req).await;
 
-        // Skip compression for special status codes.
-        if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
-            return resp;
-        }
-
-        // Skip if the response already has content-encoding.
-        if let Some(existing_encoding) = resp.remove_header("content-encoding") {
-            resp.set_header("content-encoding", existing_encoding);
-            return resp;
-        }
-
-        let identity_acceptable =
-            negotiate_encoding(accept_encoding.as_deref(), &[ContentEncoding::Identity])
-                == Some(ContentEncoding::Identity);
-
-        if !self.policy.compress_sensitive_responses
-            && compression_oracle_sensitive(request_sensitivity, &resp)
-        {
-            if !identity_acceptable {
-                return Response::new(
-                    StatusCode::from_u16(406),
-                    b"No acceptable response encoding".to_vec(),
-                );
+            // Skip compression for special status codes.
+            if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
+                return resp;
             }
-            append_vary_token(&mut resp, "accept-encoding");
-            request_sensitivity.append_vary_tokens(&mut resp);
-            return resp;
-        }
 
-        // Only negotiate encodings we can actually serve in this build.
-        let available_encodings: Vec<_> = self
-            .policy
-            .supported_encodings
-            .iter()
-            .copied()
-            .filter(|encoding| content_encoding_available(*encoding))
-            .collect();
+            // Skip if the response already has content-encoding.
+            if let Some(existing_encoding) = resp.remove_header("content-encoding") {
+                resp.set_header("content-encoding", existing_encoding);
+                return resp;
+            }
 
-        let body_below_minimum = resp.body.len() < self.policy.min_body_size;
-        if body_below_minimum && identity_acceptable {
-            return resp;
-        }
+            let identity_acceptable =
+                negotiate_encoding(accept_encoding.as_deref(), &[ContentEncoding::Identity])
+                    == Some(ContentEncoding::Identity);
 
-        let candidate_encodings = if body_below_minimum {
-            available_encodings
+            if !self.policy.compress_sensitive_responses
+                && compression_oracle_sensitive(request_sensitivity, &resp)
+            {
+                if !identity_acceptable {
+                    return Response::new(
+                        StatusCode::from_u16(406),
+                        b"No acceptable response encoding".to_vec(),
+                    );
+                }
+                append_vary_token(&mut resp, "accept-encoding");
+                request_sensitivity.append_vary_tokens(&mut resp);
+                return resp;
+            }
+
+            // Only negotiate encodings we can actually serve in this build.
+            let available_encodings: Vec<_> = self
+                .policy
+                .supported_encodings
                 .iter()
                 .copied()
-                .filter(|encoding| *encoding != ContentEncoding::Identity)
-                .collect::<Vec<_>>()
-        } else {
-            available_encodings
-        };
+                .filter(|encoding| content_encoding_available(*encoding))
+                .collect();
 
-        // Negotiate encoding.
-        let Some(encoding) = negotiate_encoding(accept_encoding.as_deref(), &candidate_encodings)
-        else {
-            if accept_encoding.is_some() {
-                return Response::new(
-                    StatusCode::from_u16(406),
-                    b"No acceptable response encoding".to_vec(),
-                );
+            let body_below_minimum = resp.body.len() < self.policy.min_body_size;
+            if body_below_minimum && identity_acceptable {
+                return resp;
             }
-            return resp;
-        };
 
-        // Identity means no compression needed.
-        if encoding == ContentEncoding::Identity {
-            append_vary_token(&mut resp, "accept-encoding");
-            return resp;
-        }
+            let candidate_encodings = if body_below_minimum {
+                available_encodings
+                    .iter()
+                    .copied()
+                    .filter(|encoding| *encoding != ContentEncoding::Identity)
+                    .collect::<Vec<_>>()
+            } else {
+                available_encodings
+            };
 
-        // Get a compressor for the negotiated encoding.
-        let Some(mut compressor) =
-            make_compressor_with_output_limit(encoding, Some(self.policy.max_compressed_size))
-        else {
-            if !identity_acceptable {
-                return Response::new(
-                    StatusCode::from_u16(406),
-                    b"No acceptable response encoding".to_vec(),
-                );
+            // Negotiate encoding.
+            let Some(encoding) =
+                negotiate_encoding(accept_encoding.as_deref(), &candidate_encodings)
+            else {
+                if accept_encoding.is_some() {
+                    return Response::new(
+                        StatusCode::from_u16(406),
+                        b"No acceptable response encoding".to_vec(),
+                    );
+                }
+                return resp;
+            };
+
+            // Identity means no compression needed.
+            if encoding == ContentEncoding::Identity {
+                append_vary_token(&mut resp, "accept-encoding");
+                return resp;
             }
-            return resp;
-        };
 
-        // Compress the body.
-        let mut compressed = Vec::new();
-        if compressor.compress(&resp.body, &mut compressed).is_err() {
-            if !identity_acceptable {
-                return Response::new(
-                    StatusCode::from_u16(406),
-                    b"No acceptable response encoding".to_vec(),
-                );
+            // Get a compressor for the negotiated encoding.
+            let Some(mut compressor) =
+                make_compressor_with_output_limit(encoding, Some(self.policy.max_compressed_size))
+            else {
+                if !identity_acceptable {
+                    return Response::new(
+                        StatusCode::from_u16(406),
+                        b"No acceptable response encoding".to_vec(),
+                    );
+                }
+                return resp;
+            };
+
+            // Compress the body.
+            let mut compressed = Vec::new();
+            if compressor.compress(&resp.body, &mut compressed).is_err() {
+                if !identity_acceptable {
+                    return Response::new(
+                        StatusCode::from_u16(406),
+                        b"No acceptable response encoding".to_vec(),
+                    );
+                }
+                append_vary_token(&mut resp, "accept-encoding");
+                return resp;
             }
-            append_vary_token(&mut resp, "accept-encoding");
-            return resp;
-        }
-        if compressor.finish(&mut compressed).is_err() {
-            if !identity_acceptable {
-                return Response::new(
-                    StatusCode::from_u16(406),
-                    b"No acceptable response encoding".to_vec(),
-                );
+            if compressor.finish(&mut compressed).is_err() {
+                if !identity_acceptable {
+                    return Response::new(
+                        StatusCode::from_u16(406),
+                        b"No acceptable response encoding".to_vec(),
+                    );
+                }
+                append_vary_token(&mut resp, "accept-encoding");
+                return resp;
             }
+
+            // Only use compressed version if it's actually smaller.
+            if compressed.len() >= resp.body.len() && identity_acceptable {
+                append_vary_token(&mut resp, "accept-encoding");
+                return resp;
+            }
+
+            // Apply compression.
+            resp.body = compressed.into();
+            resp.remove_header("content-length");
+            resp.set_header("content-encoding", encoding.as_token().to_string());
             append_vary_token(&mut resp, "accept-encoding");
-            return resp;
-        }
 
-        // Only use compressed version if it's actually smaller.
-        if compressed.len() >= resp.body.len() && identity_acceptable {
-            append_vary_token(&mut resp, "accept-encoding");
-            return resp;
-        }
-
-        // Apply compression.
-        resp.body = compressed.into();
-        resp.remove_header("content-length");
-        resp.set_header("content-encoding", encoding.as_token().to_string());
-        append_vary_token(&mut resp, "accept-encoding");
-
-        resp
+            resp
         })
     }
 }

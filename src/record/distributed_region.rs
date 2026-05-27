@@ -21,9 +21,9 @@
 //! ```
 
 use crate::error::{Error, ErrorKind};
-use crate::types::{Budget, RegionId, Time};
-use crate::trace::distributed::vclock::{VectorClock, CausalOrder};
 use crate::remote::NodeId;
+use crate::trace::distributed::vclock::{CausalOrder, VectorClock};
+use crate::types::{Budget, RegionId, Time};
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -431,9 +431,7 @@ impl DistributedRegionRecord {
         let double_timeout_ns = (self.config.replica_timeout * 2)
             .as_nanos()
             .min(u128::from(u64::MAX)) as u64;
-        let timeout_threshold = Time::from_nanos(
-            now.as_nanos().saturating_sub(replica_timeout_ns)
-        );
+        let timeout_threshold = Time::from_nanos(now.as_nanos().saturating_sub(replica_timeout_ns));
 
         for replica in &mut self.replicas {
             if replica.status == ReplicaStatus::Healthy
@@ -442,9 +440,8 @@ impl DistributedRegionRecord {
                 // Mark as suspect first, then unavailable if confirmed
                 replica.status = ReplicaStatus::Suspect;
             } else if replica.status == ReplicaStatus::Suspect
-                && replica.last_heartbeat < Time::from_nanos(
-                    now.as_nanos().saturating_sub(double_timeout_ns)
-                )
+                && replica.last_heartbeat
+                    < Time::from_nanos(now.as_nanos().saturating_sub(double_timeout_ns))
             {
                 // Confirm as unavailable after 2x timeout
                 replica.status = ReplicaStatus::Unavailable;
@@ -470,7 +467,9 @@ impl DistributedRegionRecord {
     #[must_use]
     pub fn is_partitioned(&self) -> bool {
         let healthy = self.healthy_replicas();
-        let suspected = self.replicas.iter()
+        let suspected = self
+            .replicas
+            .iter()
             .filter(|r| r.status == ReplicaStatus::Suspect)
             .count() as u32;
 
@@ -485,9 +484,12 @@ impl DistributedRegionRecord {
     /// split-brain scenarios where multiple minorities might accept writes.
     #[must_use]
     pub fn is_minority_partition(&self) -> bool {
-        let reachable = self.healthy_replicas() + self.replicas.iter()
-            .filter(|r| r.status == ReplicaStatus::Syncing)
-            .count() as u32;
+        let reachable = self.healthy_replicas()
+            + self
+                .replicas
+                .iter()
+                .filter(|r| r.status == ReplicaStatus::Syncing)
+                .count() as u32;
 
         reachable < (self.config.replication_factor / 2) + 1
     }
@@ -497,14 +499,24 @@ impl DistributedRegionRecord {
     ///
     /// This method should be called periodically during Degraded state
     /// to detect when network connectivity is restored.
-    pub fn attempt_partition_recovery(&mut self, now: Time) -> Result<Option<StateTransition>, Error> {
+    pub fn attempt_partition_recovery(
+        &mut self,
+        now: Time,
+    ) -> Result<Option<StateTransition>, Error> {
         if !matches!(self.state, DistributedRegionState::Degraded) {
             return Ok(None);
         }
 
         // Count replicas that might be reachable again
-        let potentially_healthy = self.replicas.iter()
-            .filter(|r| matches!(r.status, ReplicaStatus::Healthy | ReplicaStatus::Syncing | ReplicaStatus::Suspect))
+        let potentially_healthy = self
+            .replicas
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.status,
+                    ReplicaStatus::Healthy | ReplicaStatus::Syncing | ReplicaStatus::Suspect
+                )
+            })
             .count() as u32;
 
         // If we might have quorum, trigger recovery
@@ -519,8 +531,14 @@ impl DistributedRegionRecord {
     ///
     /// This is an enhanced version of update_replica_status that specifically
     /// handles partition recovery scenarios.
-    pub fn receive_heartbeat(&mut self, replica_id: &str, now: Time) -> Result<Option<StateTransition>, Error> {
-        let replica = self.replicas.iter_mut()
+    pub fn receive_heartbeat(
+        &mut self,
+        replica_id: &str,
+        now: Time,
+    ) -> Result<Option<StateTransition>, Error> {
+        let replica = self
+            .replicas
+            .iter_mut()
             .find(|r| r.id == replica_id)
             .ok_or_else(|| {
                 Error::new(ErrorKind::Internal)
@@ -533,8 +551,10 @@ impl DistributedRegionRecord {
         replica.status = ReplicaStatus::Healthy;
 
         // If this heartbeat restores quorum, trigger recovery
-        if matches!(old_status, ReplicaStatus::Suspect | ReplicaStatus::Unavailable)
-            && self.state == DistributedRegionState::Degraded
+        if matches!(
+            old_status,
+            ReplicaStatus::Suspect | ReplicaStatus::Unavailable
+        ) && self.state == DistributedRegionState::Degraded
             && self.has_quorum()
         {
             return Ok(Some(self.trigger_recovery("heartbeat_recovery", now)?));
@@ -554,11 +574,12 @@ impl DistributedRegionRecord {
     /// 3. If concurrent: use sequence number tie-breaking
     ///
     /// Returns the conflict resolution decision.
-    pub fn resolve_conflict(&mut self,
+    pub fn resolve_conflict(
+        &mut self,
         remote_vector_clock: &VectorClock,
         remote_sequence: u64,
         local_sequence: u64,
-        now: Time
+        now: Time,
     ) -> Result<ConflictResolutionResult, Error> {
         // Compare vector clocks to determine causal relationship
         let causal_order = self.vector_clock.causal_order(remote_vector_clock);
@@ -600,7 +621,8 @@ impl DistributedRegionRecord {
                     ConflictResolutionResult::KeepLocal
                 } else {
                     // Same sequence number - use node ID lexicographic order for determinism
-                    let remote_node_id = remote_vector_clock.iter()
+                    let remote_node_id = remote_vector_clock
+                        .iter()
                         .max_by_key(|(_, count)| *count)
                         .map(|(node_id, _)| node_id)
                         .unwrap_or(&self.local_node_id);
@@ -615,7 +637,7 @@ impl DistributedRegionRecord {
         };
 
         // Record the merge decision in transition history
-        let transition = self.record_transition(
+        let _transition = self.record_transition(
             self.state, // State doesn't change during conflict resolution
             TransitionReason::ConflictResolved {
                 resolution: resolution.clone(),
@@ -635,7 +657,10 @@ impl DistributedRegionRecord {
     /// to ensure the region is in a consistent state for conflict resolution.
     pub fn prepare_for_merge(&mut self, now: Time) -> Result<(), Error> {
         // Can only merge from Active or Degraded states
-        if !matches!(self.state, DistributedRegionState::Active | DistributedRegionState::Degraded) {
+        if !matches!(
+            self.state,
+            DistributedRegionState::Active | DistributedRegionState::Degraded
+        ) {
             return Err(Error::new(ErrorKind::InvalidStateTransition)
                 .with_message(format!("cannot merge from state {}", self.state)));
         }
@@ -644,11 +669,7 @@ impl DistributedRegionRecord {
         self.vector_clock.increment(&self.local_node_id);
 
         // Record the prepare transition
-        self.record_transition(
-            self.state,
-            TransitionReason::MergePrepared,
-            now,
-        );
+        self.record_transition(self.state, TransitionReason::MergePrepared, now);
 
         Ok(())
     }
@@ -663,8 +684,10 @@ impl DistributedRegionRecord {
         // 1. In Active or Degraded state
         // 2. Have at least one healthy replica for coordination
         // 3. Not already in a terminal state
-        matches!(self.state, DistributedRegionState::Active | DistributedRegionState::Degraded)
-            && self.healthy_replicas() > 0
+        matches!(
+            self.state,
+            DistributedRegionState::Active | DistributedRegionState::Degraded
+        ) && self.healthy_replicas() > 0
             && !self.state.is_terminal()
     }
 
@@ -1049,8 +1072,12 @@ mod tests {
         );
 
         // Add replicas
-        record.add_replica(ReplicaInfo::new("replica1", "addr1")).unwrap();
-        record.add_replica(ReplicaInfo::new("replica2", "addr2")).unwrap();
+        record
+            .add_replica(ReplicaInfo::new("replica1", "addr1"))
+            .unwrap();
+        record
+            .add_replica(ReplicaInfo::new("replica2", "addr2"))
+            .unwrap();
 
         let now = Time::from_secs(100);
 
@@ -1058,7 +1085,9 @@ mod tests {
         let transitions = record.detect_partition(now).unwrap();
 
         // Should detect suspects
-        let suspect_count = record.replicas.iter()
+        let suspect_count = record
+            .replicas
+            .iter()
             .filter(|r| r.status == ReplicaStatus::Suspect)
             .count();
 
@@ -1077,8 +1106,12 @@ mod tests {
         );
 
         // Activate with quorum
-        record.add_replica(ReplicaInfo::new("replica1", "addr1")).unwrap();
-        record.add_replica(ReplicaInfo::new("replica2", "addr2")).unwrap();
+        record
+            .add_replica(ReplicaInfo::new("replica1", "addr1"))
+            .unwrap();
+        record
+            .add_replica(ReplicaInfo::new("replica2", "addr2"))
+            .unwrap();
 
         let now = Time::from_secs(100);
         record.activate(now).unwrap();

@@ -45,8 +45,8 @@ impl Default for TimingDetectorConfig {
         Self {
             baseline_samples: 10000,
             significance_threshold: 0.01, // p < 0.01 for statistical significance
-            min_suspicious_delta_ns: 100,  // 100ns minimum detectable difference
-            max_baseline_cv: 0.1,          // 10% coefficient of variation max
+            min_suspicious_delta_ns: 100, // 100ns minimum detectable difference
+            max_baseline_cv: 0.1,         // 10% coefficient of variation max
             warmup_iterations: 1000,
         }
     }
@@ -180,7 +180,8 @@ impl TimingStatistics {
         // Welch's t-test for unequal variances
         let mean_diff = (self.mean - other.mean).abs();
         let se_diff = ((self.variance / self.sample_count as f64)
-                      + (other.variance / other.sample_count as f64)).sqrt();
+            + (other.variance / other.sample_count as f64))
+            .sqrt();
 
         if se_diff == 0.0 {
             return 1.0; // No variance means no detectable difference
@@ -191,9 +192,11 @@ impl TimingStatistics {
         // Simplified p-value approximation for demonstration
         // Real implementation would use proper statistical tables
         let df = ((self.variance / self.sample_count as f64)
-                 + (other.variance / other.sample_count as f64)).powi(2)
-                / ((self.variance / self.sample_count as f64).powi(2) / (self.sample_count - 1) as f64
-                 + (other.variance / other.sample_count as f64).powi(2) / (other.sample_count - 1) as f64);
+            + (other.variance / other.sample_count as f64))
+            .powi(2)
+            / ((self.variance / self.sample_count as f64).powi(2) / (self.sample_count - 1) as f64
+                + (other.variance / other.sample_count as f64).powi(2)
+                    / (other.sample_count - 1) as f64);
 
         // Very rough approximation: convert t-statistic to p-value
         // For df > 30, t-distribution approximates normal distribution
@@ -280,14 +283,13 @@ impl TimingSideChannelDetector {
 
         // Validate baseline stability
         let baseline_stats = TimingStatistics::from_samples(
-            &self.baseline_samples.iter().copied().collect::<Vec<_>>()
+            &self.baseline_samples.iter().copied().collect::<Vec<_>>(),
         );
 
         if baseline_stats.coefficient_of_variation > self.config.max_baseline_cv {
             return Err(format!(
                 "Baseline timing too unstable: CV={:.3} > {:.3}",
-                baseline_stats.coefficient_of_variation,
-                self.config.max_baseline_cv
+                baseline_stats.coefficient_of_variation, self.config.max_baseline_cv
             ));
         }
 
@@ -295,7 +297,11 @@ impl TimingSideChannelDetector {
     }
 
     /// Test an operation for timing side-channels compared to baseline.
-    pub fn test_operation<F>(&self, mut test_operation: F, iterations: usize) -> SideChannelDetectionResult
+    pub fn test_operation<F>(
+        &self,
+        mut test_operation: F,
+        iterations: usize,
+    ) -> SideChannelDetectionResult
     where
         F: FnMut() -> (),
     {
@@ -325,7 +331,7 @@ impl TimingSideChannelDetector {
         }
 
         let baseline_stats = TimingStatistics::from_samples(
-            &self.baseline_samples.iter().copied().collect::<Vec<_>>()
+            &self.baseline_samples.iter().copied().collect::<Vec<_>>(),
         );
         let test_stats = TimingStatistics::from_samples(&test_samples);
 
@@ -366,7 +372,13 @@ impl TimingSideChannelDetector {
 
     /// Convenience method to test constant-time implementation.
     /// Compares timing between different inputs that should take equal time.
-    pub fn test_constant_time<F>(&self, mut operation: F, input_a: &[u8], input_b: &[u8], iterations: usize) -> SideChannelDetectionResult
+    pub fn test_constant_time<F>(
+        &self,
+        mut operation: F,
+        input_a: &[u8],
+        input_b: &[u8],
+        iterations: usize,
+    ) -> SideChannelDetectionResult
     where
         F: FnMut(&[u8]) -> (),
     {
@@ -445,7 +457,11 @@ mod tests {
         let elapsed = timer.now_ns().saturating_sub(start);
 
         // Should have elapsed at least 1ms (1_000_000 ns)
-        assert!(elapsed >= 1_000_000, "Timer precision insufficient: {}ns", elapsed);
+        assert!(
+            elapsed >= 1_000_000,
+            "Timer precision insufficient: {}ns",
+            elapsed
+        );
     }
 
     #[test]
@@ -494,7 +510,11 @@ mod tests {
         );
 
         // Should not detect timing differences for simple XOR
-        assert!(!result.detected, "False positive timing detection: {}", result.description);
+        assert!(
+            !result.detected,
+            "False positive timing detection: {}",
+            result.description
+        );
     }
 
     #[test]
@@ -521,6 +541,10 @@ mod tests {
         );
 
         // Should detect timing differences
-        assert!(result.detected, "Failed to detect intentional timing difference: {}", result.description);
+        assert!(
+            result.detected,
+            "Failed to detect intentional timing difference: {}",
+            result.description
+        );
     }
 }

@@ -2668,7 +2668,11 @@ impl RuntimeBuilder {
     /// See [`env_config`](super::env_config) for the full list of supported variables.
     #[allow(clippy::result_large_err)]
     pub fn with_env_overrides(mut self) -> Result<Self, Error> {
-        crate::runtime::env_config::apply_env_overrides(&mut self.config, &crate::runtime::env_config::SystemEnvReader::new()).map_err(|e| {
+        crate::runtime::env_config::apply_env_overrides(
+            &mut self.config,
+            &crate::runtime::env_config::SystemEnvReader::new(),
+        )
+        .map_err(|e| {
             Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
         })?;
         Ok(self)
@@ -2690,10 +2694,13 @@ impl RuntimeBuilder {
     #[cfg(feature = "config-file")]
     #[allow(clippy::result_large_err)]
     pub fn from_toml(path: impl AsRef<std::path::Path>) -> Result<Self, Error> {
-        let toml_config =
-            crate::runtime::env_config::parse_toml_file(path.as_ref(), &crate::runtime::env_config::SystemEnvReader::new()).map_err(|e| {
-                Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
-            })?;
+        let toml_config = crate::runtime::env_config::parse_toml_file(
+            path.as_ref(),
+            &crate::runtime::env_config::SystemEnvReader::new(),
+        )
+        .map_err(|e| {
+            Error::new(crate::error::ErrorKind::ConfigError).with_message(e.to_string())
+        })?;
         let mut config = RuntimeConfig::default();
         crate::runtime::env_config::apply_toml_config(&mut config, &toml_config);
         Ok(Self {
@@ -4012,8 +4019,12 @@ impl RuntimeInner {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
 
             let system_cx = guard.create_system_cx();
-            let (task_id, _handle, cx, _result_tx) =
-                guard.create_task_infrastructure::<()>(&system_cx, self.root_region, Budget::new(), false)?;
+            let (task_id, _handle, cx, _result_tx) = guard.create_task_infrastructure::<()>(
+                &system_cx,
+                self.root_region,
+                Budget::new(),
+                false,
+            )?;
 
             let future = f(cx);
 

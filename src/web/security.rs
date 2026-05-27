@@ -144,41 +144,45 @@ impl<H: Handler> SecurityHeadersMiddleware<H> {
 }
 
 impl<H: Handler> Handler for SecurityHeadersMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &crate::Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             let mut resp = self.inner.call(&cx, req).await;
 
-        // Apply each configured header, only if not already set.
-        if let Some(ref val) = self.policy.content_type_options {
-            resp.ensure_header("x-content-type-options", val.clone());
-        }
+            // Apply each configured header, only if not already set.
+            if let Some(ref val) = self.policy.content_type_options {
+                resp.ensure_header("x-content-type-options", val.clone());
+            }
 
-        if let Some(ref val) = self.policy.frame_options {
-            resp.ensure_header("x-frame-options", val.clone());
-        }
+            if let Some(ref val) = self.policy.frame_options {
+                resp.ensure_header("x-frame-options", val.clone());
+            }
 
-        if let Some(ref val) = self.policy.referrer_policy {
-            resp.ensure_header("referrer-policy", val.clone());
-        }
+            if let Some(ref val) = self.policy.referrer_policy {
+                resp.ensure_header("referrer-policy", val.clone());
+            }
 
-        if let Some(ref val) = self.policy.hsts {
-            resp.ensure_header("strict-transport-security", val.clone());
-        }
+            if let Some(ref val) = self.policy.hsts {
+                resp.ensure_header("strict-transport-security", val.clone());
+            }
 
-        if let Some(ref val) = self.policy.content_security_policy {
-            resp.ensure_header("content-security-policy", val.clone());
-        }
+            if let Some(ref val) = self.policy.content_security_policy {
+                resp.ensure_header("content-security-policy", val.clone());
+            }
 
-        if let Some(ref val) = self.policy.permissions_policy {
-            resp.ensure_header("permissions-policy", val.clone());
-        }
+            if let Some(ref val) = self.policy.permissions_policy {
+                resp.ensure_header("permissions-policy", val.clone());
+            }
 
-        if self.policy.hide_server_header {
-            let _ = resp.remove_header("server");
-        }
+            if self.policy.hide_server_header {
+                let _ = resp.remove_header("server");
+            }
 
-        resp
+            resp
         })
     }
 }

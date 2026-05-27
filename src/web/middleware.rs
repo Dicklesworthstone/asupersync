@@ -57,11 +57,11 @@ use crate::combinator::bulkhead::{Bulkhead, BulkheadPolicy};
 use crate::combinator::circuit_breaker::{CircuitBreaker, CircuitBreakerPolicy};
 use crate::combinator::rate_limit::{RateLimitPolicy, RateLimiter};
 use crate::combinator::retry::RetryPolicy;
+use crate::cx::Cx;
 use crate::http::compress::{
     ContentEncoding, DEFAULT_MAX_COMPRESSED_SIZE, make_compressor_with_output_limit,
     negotiate_encoding,
 };
-use crate::cx::Cx;
 use crate::tracing_compat::{debug, warn};
 use crate::types::Time;
 
@@ -304,51 +304,55 @@ impl<H: Handler> CorsMiddleware<H> {
 }
 
 impl<H: Handler> Handler for CorsMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &crate::Cx,
+        req: Request,
+    ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
-        let Some(origin) = header_value(&req, "origin") else {
-            return self.inner.call(&cx, req).await;
-        };
+            let Some(origin) = header_value(&req, "origin") else {
+                return self.inner.call(&cx, req).await;
+            };
 
-        if Self::is_malformed_origin_value(&origin) {
-            crate::tracing_compat::warn!(
-                origin = %origin,
-                "CorsMiddleware: dropping malformed multi-origin request header"
-            );
-            return self.inner.call(&cx, req).await;
-        }
-
-        let Some(allow_origin) = self.allowed_origin_value(&origin) else {
-            // Origin not allowed: pass through without CORS headers.
-            return self.inner.call(&cx, req).await;
-        };
-
-        if Self::is_preflight(&req) {
-            let mut resp = Response::empty(StatusCode::NO_CONTENT);
-            resp = self.apply_common_headers(resp, &allow_origin);
-            resp.headers.insert(
-                "access-control-allow-methods".to_string(),
-                self.policy.allow_methods.join(", "),
-            );
-            resp.headers.insert(
-                "access-control-allow-headers".to_string(),
-                self.policy.allow_headers.join(", "),
-            );
-            if let Some(max_age) = self.policy.max_age {
-                resp.headers.insert(
-                    "access-control-max-age".to_string(),
-                    max_age.as_secs().to_string(),
+            if Self::is_malformed_origin_value(&origin) {
+                crate::tracing_compat::warn!(
+                    origin = %origin,
+                    "CorsMiddleware: dropping malformed multi-origin request header"
                 );
+                return self.inner.call(&cx, req).await;
             }
-            append_vary_header(&mut resp, "origin");
-            append_vary_header(&mut resp, "access-control-request-method");
-            append_vary_header(&mut resp, "access-control-request-headers");
-            return resp;
-        }
 
-        let resp = self.inner.call(&cx, req).await;
-        self.apply_common_headers(resp, &allow_origin)
+            let Some(allow_origin) = self.allowed_origin_value(&origin) else {
+                // Origin not allowed: pass through without CORS headers.
+                return self.inner.call(&cx, req).await;
+            };
+
+            if Self::is_preflight(&req) {
+                let mut resp = Response::empty(StatusCode::NO_CONTENT);
+                resp = self.apply_common_headers(resp, &allow_origin);
+                resp.headers.insert(
+                    "access-control-allow-methods".to_string(),
+                    self.policy.allow_methods.join(", "),
+                );
+                resp.headers.insert(
+                    "access-control-allow-headers".to_string(),
+                    self.policy.allow_headers.join(", "),
+                );
+                if let Some(max_age) = self.policy.max_age {
+                    resp.headers.insert(
+                        "access-control-max-age".to_string(),
+                        max_age.as_secs().to_string(),
+                    );
+                }
+                append_vary_header(&mut resp, "origin");
+                append_vary_header(&mut resp, "access-control-request-method");
+                append_vary_header(&mut resp, "access-control-request-headers");
+                return resp;
+            }
+
+            let resp = self.inner.call(&cx, req).await;
+            self.apply_common_headers(resp, &allow_origin)
         })
     }
 }
@@ -437,7 +441,11 @@ impl<H: Handler> TimeoutMiddleware<H> {
 }
 
 impl<H: Handler> Handler for TimeoutMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &crate::Cx,
+        req: Request,
+    ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             let start = (self.time_getter)();
@@ -520,39 +528,47 @@ impl<H: Handler> CircuitBreakerMiddleware<H> {
 }
 
 impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &crate::Cx,
+        req: Request,
+    ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
-        let now = (self.time_getter)();
+            let now = (self.time_getter)();
 
-        // Get permit from circuit breaker
-        let permit = match self.breaker.should_allow(now) {
-            Ok(permit) => permit,
-            Err(crate::combinator::circuit_breaker::CircuitBreakerError::Open { remaining }) => {
-                let body =
-                    format!("Service Unavailable: circuit breaker open, retry after {remaining:?}");
-                return Response::new(StatusCode::SERVICE_UNAVAILABLE, body.into_bytes())
-                    .header("retry-after", format!("{}", remaining.as_secs().max(1)));
-            }
-            Err(crate::combinator::circuit_breaker::CircuitBreakerError::HalfOpenFull) => {
-                return Response::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    b"Service Unavailable: circuit breaker half-open, max probes active".to_vec(),
-                );
-            }
-            Err(crate::combinator::circuit_breaker::CircuitBreakerError::Inner(())) => {
-                unreachable!("should_allow cannot produce inner operation errors")
-            }
-        };
+            // Get permit from circuit breaker
+            let permit = match self.breaker.should_allow(now) {
+                Ok(permit) => permit,
+                Err(crate::combinator::circuit_breaker::CircuitBreakerError::Open {
+                    remaining,
+                }) => {
+                    let body = format!(
+                        "Service Unavailable: circuit breaker open, retry after {remaining:?}"
+                    );
+                    return Response::new(StatusCode::SERVICE_UNAVAILABLE, body.into_bytes())
+                        .header("retry-after", format!("{}", remaining.as_secs().max(1)));
+                }
+                Err(crate::combinator::circuit_breaker::CircuitBreakerError::HalfOpenFull) => {
+                    return Response::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        b"Service Unavailable: circuit breaker half-open, max probes active"
+                            .to_vec(),
+                    );
+                }
+                Err(crate::combinator::circuit_breaker::CircuitBreakerError::Inner(())) => {
+                    unreachable!("should_allow cannot produce inner operation errors")
+                }
+            };
 
-        // Call the handler
-        let resp = self.inner.call(&cx, req).await;
-        if resp.status.is_server_error() {
-            self.breaker.record_failure(permit, "server_error", now);
-        } else {
-            self.breaker.record_success(permit, now);
-        }
-        resp
+            // Call the handler
+            let resp = self.inner.call(&cx, req).await;
+            if resp.status.is_server_error() {
+                self.breaker.record_failure(permit, "server_error", now);
+            } else {
+                self.breaker.record_success(permit, now);
+            }
+            resp
         })
     }
 }
@@ -616,7 +632,11 @@ impl<H: Handler> RateLimitMiddleware<H> {
 }
 
 impl<H: Handler> Handler for RateLimitMiddleware<H> {
-    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         let now = (self.time_getter)();
 
@@ -641,10 +661,12 @@ impl<H: Handler> Handler for RateLimitMiddleware<H> {
                     )
                     .header("retry-after", format!("{secs}"))
                 }
-                Err(crate::combinator::rate_limit::RateLimitError::QueueIdExhausted) => Response::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    b"Service Unavailable: rate limiter queue exhausted".to_vec(),
-                ),
+                Err(crate::combinator::rate_limit::RateLimitError::QueueIdExhausted) => {
+                    Response::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        b"Service Unavailable: rate limiter queue exhausted".to_vec(),
+                    )
+                }
                 Err(crate::combinator::rate_limit::RateLimitError::Inner(never)) => match never {},
             }
         })
@@ -689,7 +711,11 @@ impl<H: Handler> BulkheadMiddleware<H> {
 }
 
 impl<H: Handler> Handler for BulkheadMiddleware<H> {
-    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             match self.bulkhead.try_acquire(1) {
@@ -698,12 +724,10 @@ impl<H: Handler> Handler for BulkheadMiddleware<H> {
                     p.release();
                     resp
                 }
-                None => {
-                    Response::new(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        b"Service Unavailable: concurrency limit reached".to_vec(),
-                    )
-                }
+                None => Response::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    b"Service Unavailable: concurrency limit reached".to_vec(),
+                ),
             }
         })
     }
@@ -755,7 +779,11 @@ fn is_idempotent(method: &str) -> bool {
 }
 
 impl<H: Handler> Handler for RetryMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &crate::Cx,
+        req: Request,
+    ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             // Check if retry is appropriate for this method.
@@ -850,103 +878,108 @@ impl<H: Handler> CompressionMiddleware<H> {
 }
 
 impl<H: Handler> Handler for CompressionMiddleware<H> {
-    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             let accept_encoding = header_value(&req, "accept-encoding");
             let mut resp = self.inner.call(&cx, req).await;
 
-        if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
-            return resp;
-        }
+            if resp.status == StatusCode::NO_CONTENT || resp.status == StatusCode::NOT_MODIFIED {
+                return resp;
+            }
 
-        if let Some(existing_encoding) = resp.remove_header("content-encoding") {
-            resp.set_header("content-encoding", existing_encoding);
-            return resp;
-        }
+            if let Some(existing_encoding) = resp.remove_header("content-encoding") {
+                resp.set_header("content-encoding", existing_encoding);
+                return resp;
+            }
 
-        let available_encodings: Vec<_> = self
-            .config
-            .supported
-            .iter()
-            .copied()
-            .filter(|encoding| compression_encoding_available(*encoding))
-            .collect();
-
-        let identity_acceptable =
-            negotiate_encoding(accept_encoding.as_deref(), &[ContentEncoding::Identity])
-                == Some(ContentEncoding::Identity);
-
-        let body_below_minimum = resp.body.len() < self.config.min_body_size;
-        if body_below_minimum && identity_acceptable {
-            return resp;
-        }
-
-        let candidate_encodings = if body_below_minimum {
-            available_encodings
+            let available_encodings: Vec<_> = self
+                .config
+                .supported
                 .iter()
                 .copied()
-                .filter(|encoding| *encoding != ContentEncoding::Identity)
-                .collect::<Vec<_>>()
-        } else {
-            available_encodings
-        };
+                .filter(|encoding| compression_encoding_available(*encoding))
+                .collect();
 
-        let Some(encoding) = negotiate_encoding(accept_encoding.as_deref(), &candidate_encodings)
-        else {
-            if accept_encoding.is_some() {
-                return Response::new(
-                    StatusCode::from_u16(406),
-                    b"No acceptable response encoding".to_vec(),
-                );
+            let identity_acceptable =
+                negotiate_encoding(accept_encoding.as_deref(), &[ContentEncoding::Identity])
+                    == Some(ContentEncoding::Identity);
+
+            let body_below_minimum = resp.body.len() < self.config.min_body_size;
+            if body_below_minimum && identity_acceptable {
+                return resp;
             }
-            return resp;
-        };
 
-        // Identity means no transformation needed.
-        if encoding == ContentEncoding::Identity {
-            append_vary_header(&mut resp, "accept-encoding");
-            return resp;
-        }
+            let candidate_encodings = if body_below_minimum {
+                available_encodings
+                    .iter()
+                    .copied()
+                    .filter(|encoding| *encoding != ContentEncoding::Identity)
+                    .collect::<Vec<_>>()
+            } else {
+                available_encodings
+            };
 
-        let Some(mut compressor) =
-            make_compressor_with_output_limit(encoding, Some(self.config.max_compressed_size))
-        else {
-            if !identity_acceptable {
-                return Response::new(
-                    StatusCode::from_u16(406),
-                    b"No acceptable response encoding".to_vec(),
-                );
+            let Some(encoding) =
+                negotiate_encoding(accept_encoding.as_deref(), &candidate_encodings)
+            else {
+                if accept_encoding.is_some() {
+                    return Response::new(
+                        StatusCode::from_u16(406),
+                        b"No acceptable response encoding".to_vec(),
+                    );
+                }
+                return resp;
+            };
+
+            // Identity means no transformation needed.
+            if encoding == ContentEncoding::Identity {
+                append_vary_header(&mut resp, "accept-encoding");
+                return resp;
             }
-            return resp;
-        };
 
-        let mut compressed = Vec::new();
-        if compressor.compress(&resp.body, &mut compressed).is_err() {
-            if !identity_acceptable {
-                return Response::new(
-                    StatusCode::from_u16(406),
-                    b"No acceptable response encoding".to_vec(),
-                );
-            }
-            append_vary_header(&mut resp, "accept-encoding");
-            return resp;
-        }
-        if compressor.finish(&mut compressed).is_err() {
-            if !identity_acceptable {
-                return Response::new(
-                    StatusCode::from_u16(406),
-                    b"No acceptable response encoding".to_vec(),
-                );
-            }
-            append_vary_header(&mut resp, "accept-encoding");
-            return resp;
-        }
+            let Some(mut compressor) =
+                make_compressor_with_output_limit(encoding, Some(self.config.max_compressed_size))
+            else {
+                if !identity_acceptable {
+                    return Response::new(
+                        StatusCode::from_u16(406),
+                        b"No acceptable response encoding".to_vec(),
+                    );
+                }
+                return resp;
+            };
 
-        if compressed.len() >= resp.body.len() && identity_acceptable {
-            append_vary_header(&mut resp, "accept-encoding");
-            return resp;
-        }
+            let mut compressed = Vec::new();
+            if compressor.compress(&resp.body, &mut compressed).is_err() {
+                if !identity_acceptable {
+                    return Response::new(
+                        StatusCode::from_u16(406),
+                        b"No acceptable response encoding".to_vec(),
+                    );
+                }
+                append_vary_header(&mut resp, "accept-encoding");
+                return resp;
+            }
+            if compressor.finish(&mut compressed).is_err() {
+                if !identity_acceptable {
+                    return Response::new(
+                        StatusCode::from_u16(406),
+                        b"No acceptable response encoding".to_vec(),
+                    );
+                }
+                append_vary_header(&mut resp, "accept-encoding");
+                return resp;
+            }
+
+            if compressed.len() >= resp.body.len() && identity_acceptable {
+                append_vary_header(&mut resp, "accept-encoding");
+                return resp;
+            }
 
             resp.body = compressed.into();
             resp.remove_header("content-length");
@@ -988,7 +1021,11 @@ impl<H: Handler> RequestBodyLimitMiddleware<H> {
 }
 
 impl<H: Handler> Handler for RequestBodyLimitMiddleware<H> {
-    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             // SECURITY: Check Content-Length header BEFORE reading body to prevent DoS
@@ -1146,23 +1183,27 @@ fn sanitize_and_truncate_id(id: &str, max_length: usize) -> String {
 }
 
 impl<H: Handler> Handler for RequestIdMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, mut req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &crate::Cx,
+        mut req: Request,
+    ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
-        let request_id = header_value(&req, &self.header_name).unwrap_or_else(|| {
-            let id = self.counter.fetch_add(1, Ordering::Relaxed);
-            format!("req-{id}")
-        });
-        // Sanitize CRLF and truncate to prevent response header injection
-        // and log amplification attacks (br-asupersync-pol3ps).
-        let request_id = sanitize_and_truncate_id(&request_id, self.max_id_length);
+            let request_id = header_value(&req, &self.header_name).unwrap_or_else(|| {
+                let id = self.counter.fetch_add(1, Ordering::Relaxed);
+                format!("req-{id}")
+            });
+            // Sanitize CRLF and truncate to prevent response header injection
+            // and log amplification attacks (br-asupersync-pol3ps).
+            let request_id = sanitize_and_truncate_id(&request_id, self.max_id_length);
 
-        req.extensions.insert("request_id", request_id.clone());
-        req.extensions.insert("trace_id", request_id.clone());
+            req.extensions.insert("request_id", request_id.clone());
+            req.extensions.insert("trace_id", request_id.clone());
 
-        let mut resp = self.inner.call(&cx, req).await;
-        resp.set_header(&self.header_name, request_id);
-        resp
+            let mut resp = self.inner.call(&cx, req).await;
+            resp.set_header(&self.header_name, request_id);
+            resp
         })
     }
 }
@@ -1250,7 +1291,11 @@ fn resolve_trace_id(req: &Request) -> Option<String> {
 }
 
 impl<H: Handler> Handler for RequestTraceMiddleware<H> {
-    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             let method = req.method.clone();
@@ -1266,40 +1311,40 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
             );
 
             let mut resp = self.inner.call(&cx, req).await;
-        let duration_ms =
-            Duration::from_nanos((self.time_getter)().duration_since(start)).as_millis();
-        let status_code = resp.status.as_u16();
+            let duration_ms =
+                Duration::from_nanos((self.time_getter)().duration_since(start)).as_millis();
+            let status_code = resp.status.as_u16();
 
-        if let Some(header_name) = &self.policy.duration_header {
-            resp.set_header(header_name, duration_ms.to_string());
-        }
-
-        if let (Some(header_name), Some(id)) = (&self.policy.trace_header, trace_id.as_ref()) {
-            // Trace ID is already sanitized and truncated by resolve_trace_id
-            if !resp.has_header(header_name) {
-                resp.set_header(header_name, id.clone());
+            if let Some(header_name) = &self.policy.duration_header {
+                resp.set_header(header_name, duration_ms.to_string());
             }
-        }
 
-        if status_code >= 500 {
-            warn!(
-                method = %method,
-                path = %path,
-                status = status_code,
-                duration_ms = duration_ms,
-                trace_id = ?trace_id,
-                "http request completed with server error"
-            );
-        } else {
-            debug!(
-                method = %method,
-                path = %path,
-                status = status_code,
-                duration_ms = duration_ms,
-                trace_id = ?trace_id,
-                "http request completed"
-            );
-        }
+            if let (Some(header_name), Some(id)) = (&self.policy.trace_header, trace_id.as_ref()) {
+                // Trace ID is already sanitized and truncated by resolve_trace_id
+                if !resp.has_header(header_name) {
+                    resp.set_header(header_name, id.clone());
+                }
+            }
+
+            if status_code >= 500 {
+                warn!(
+                    method = %method,
+                    path = %path,
+                    status = status_code,
+                    duration_ms = duration_ms,
+                    trace_id = ?trace_id,
+                    "http request completed with server error"
+                );
+            } else {
+                debug!(
+                    method = %method,
+                    path = %path,
+                    status = status_code,
+                    duration_ms = duration_ms,
+                    trace_id = ?trace_id,
+                    "http request completed"
+                );
+            }
 
             #[cfg(not(feature = "tracing-integration"))]
             let _ = (&method, &path);
@@ -1477,7 +1522,11 @@ impl<H: Handler> AuthMiddleware<H> {
 }
 
 impl<H: Handler> Handler for AuthMiddleware<H> {
-    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             if !self.policy.allows_at(&req, (self.time_getter)()) {
@@ -1536,7 +1585,11 @@ impl<H: Handler> LoadShedMiddleware<H> {
 }
 
 impl<H: Handler> Handler for LoadShedMiddleware<H> {
-    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             let previous = self.in_flight.fetch_add(1, Ordering::AcqRel);
@@ -1599,7 +1652,11 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 impl<H: Handler> Handler for CatchPanicMiddleware<H> {
-    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             // TODO: Implement proper async panic catching if needed
@@ -1665,7 +1722,11 @@ fn normalization_redirect_response(path: &str) -> Response {
 }
 
 impl<H: Handler> Handler for NormalizePathMiddleware<H> {
-    fn call(&self, cx: &Cx, mut req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &Cx,
+        mut req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             let path = &req.path;
@@ -1761,7 +1822,11 @@ impl<H: Handler> SetResponseHeaderMiddleware<H> {
 }
 
 impl<H: Handler> Handler for SetResponseHeaderMiddleware<H> {
-    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
             let mut resp = self.inner.call(&cx, req).await;

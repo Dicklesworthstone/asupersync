@@ -28,13 +28,13 @@ use nkeys::{KeyPair, KeyPairType};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fmt;
-use subtle::ConstantTimeEq;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 
 const REQUEST_TIMEOUT_MESSAGE: &str = "request timeout";
 
@@ -666,7 +666,7 @@ fn validate_nonce_quality(nonce: &str) -> Result<(), NatsError> {
     let is_valid_char = |c: char| c.is_ascii_alphanumeric() || "+=/-_".contains(c);
     if !nonce.chars().all(is_valid_char) {
         return Err(NatsError::InvalidAuth(
-            "server nonce contains invalid characters (expected base64/base64url)".to_string()
+            "server nonce contains invalid characters (expected base64/base64url)".to_string(),
         ));
     }
 
@@ -682,15 +682,16 @@ fn validate_nonce_quality(nonce: &str) -> Result<(), NatsError> {
     // Check for simple incrementing pattern (like "012345...")
     let chars: Vec<char> = nonce.chars().collect();
     let mut is_sequential = true;
-    for i in 1..chars.len().min(8) { // Check first 8 characters for sequence
-        if chars[i] as u8 != (chars[i-1] as u8).saturating_add(1) {
+    for i in 1..chars.len().min(8) {
+        // Check first 8 characters for sequence
+        if chars[i] as u8 != (chars[i - 1] as u8).saturating_add(1) {
             is_sequential = false;
             break;
         }
     }
     if is_sequential {
         return Err(NatsError::InvalidAuth(
-            "server nonce appears non-random (sequential pattern detected)".to_string()
+            "server nonce appears non-random (sequential pattern detected)".to_string(),
         ));
     }
 
@@ -715,7 +716,11 @@ fn parse_nats_jwt_claims(jwt: &str) -> Result<JwtClaimsSummary, NatsError> {
     let header_b64 = parts.next().unwrap_or_default();
     let payload_b64 = parts.next().unwrap_or_default();
     let signature_b64 = parts.next().unwrap_or_default();
-    if header_b64.is_empty() || payload_b64.is_empty() || signature_b64.is_empty() || parts.next().is_some() {
+    if header_b64.is_empty()
+        || payload_b64.is_empty()
+        || signature_b64.is_empty()
+        || parts.next().is_some()
+    {
         return Err(NatsError::InvalidAuth(
             "JWT auth expects a compact JWT with exactly 3 non-empty segments".to_string(),
         ));
@@ -782,12 +787,14 @@ fn parse_nats_jwt_claims(jwt: &str) -> Result<JwtClaimsSummary, NatsError> {
             // Attempt to verify signature using issuer as the public key
             match KeyPair::from_public_key(issuer_str) {
                 Ok(issuer_keypair) => {
-                    issuer_keypair.verify(signed_data.as_bytes(), &signature).map_err(|err| {
-                        NatsError::InvalidAuth(format!(
-                            "JWT signature verification failed: {}",
-                            err
-                        ))
-                    })?;
+                    issuer_keypair
+                        .verify(signed_data.as_bytes(), &signature)
+                        .map_err(|err| {
+                            NatsError::InvalidAuth(format!(
+                                "JWT signature verification failed: {}",
+                                err
+                            ))
+                        })?;
                 }
                 Err(_) => {
                     // If issuer is not a valid public key, we cannot verify the signature.
@@ -814,7 +821,9 @@ fn parse_nats_jwt_claims(jwt: &str) -> Result<JwtClaimsSummary, NatsError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| {
-                NatsError::InvalidAuth("system clock error: cannot determine current time".to_string())
+                NatsError::InvalidAuth(
+                    "system clock error: cannot determine current time".to_string(),
+                )
             })?
             .as_secs() as i64;
 

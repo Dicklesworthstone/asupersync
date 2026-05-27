@@ -336,7 +336,7 @@ pub struct RepairCoordinator {
 
 /// Statistics for a particular repair mode
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ModeStatistics {
+pub struct ModeStatistics {
     /// Number of times this mode was used
     usage_count: u32,
     /// Average predicted ROI

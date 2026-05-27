@@ -132,7 +132,7 @@ impl StreamChunk {
 }
 
 #[derive(Debug, Clone)]
-enum WriterState {
+pub enum WriterState {
     Ready,
     Writing,
     Flushing,
@@ -141,7 +141,7 @@ enum WriterState {
 }
 
 #[derive(Debug, Clone)]
-enum ReaderState {
+pub enum ReaderState {
     Ready,
     Reading,
     Buffering(Vec<u8>), // Partial data from last read
@@ -381,7 +381,7 @@ impl Drop for AtpReader {
 // Implement AsyncWrite for AtpWriter
 impl AsyncWrite for AtpWriter {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {

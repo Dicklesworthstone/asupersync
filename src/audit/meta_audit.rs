@@ -13,12 +13,12 @@
 //! - Cross-region audit isolation prevents escalation between audit contexts
 //! - Separate capability domains for audit collection vs audit validation
 
-use std::collections::HashSet;
-use std::time::Instant;
-use crate::types::RegionId;
+use super::ambient::{AmbientCategory, AmbientFinding, KNOWN_FINDINGS, Severity};
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind};
-use super::ambient::{AmbientCategory, AmbientFinding, Severity, KNOWN_FINDINGS};
+use crate::types::RegionId;
+use std::collections::HashSet;
+use std::time::Instant;
 
 /// Capability escalation detection for the audit system itself.
 ///
@@ -172,11 +172,10 @@ impl MetaAuditor {
         };
 
         if !allowed {
-            return Err(Error::new(ErrorKind::AdmissionDenied)
-                .with_message(format!(
-                    "Operation {:?} not allowed in domain {:?} - capability escalation attempt",
-                    requested_operation, self.audit_domain
-                )));
+            return Err(Error::new(ErrorKind::AdmissionDenied).with_message(format!(
+                "Operation {:?} not allowed in domain {:?} - capability escalation attempt",
+                requested_operation, self.audit_domain
+            )));
         }
 
         Ok(())
@@ -201,7 +200,7 @@ impl MetaAuditor {
         // Constrain privileges to the minimum necessary
         let constrained_domain = match max_privilege {
             AuditDomain::Meta => AuditDomain::Validation, // Downgrade meta to validation
-            other => other, // Keep collection/validation as-is
+            other => other,                               // Keep collection/validation as-is
         };
 
         // Create new context bound to target region with constrained privileges
@@ -261,7 +260,7 @@ impl MetaAuditor {
     }
 
     fn scan_audit_code_for_ambient_authority(&self) -> Result<Vec<AmbientCategory>, Error> {
-        use super::ambient::{detect_ambient_violations, ViolationType};
+        use super::ambient::{ViolationType, detect_ambient_violations};
 
         // Read the audit module source code to scan for violations
         let audit_files = ["src/audit/ambient.rs", "src/audit/mod.rs"];
@@ -365,10 +364,7 @@ fn compute_findings_hash(findings: &[AmbientFinding]) -> u64 {
 ///
 /// This ensures all meta-auditors are properly region-scoped and cannot
 /// escalate capabilities across region boundaries.
-pub fn create_meta_auditor_for_region(
-    region_id: RegionId,
-    cx: &Cx,
-) -> Result<MetaAuditor, Error> {
+pub fn create_meta_auditor_for_region(region_id: RegionId, cx: &Cx) -> Result<MetaAuditor, Error> {
     // Start with validation domain for most operations
     let auditor = MetaAuditor::new(region_id, AuditDomain::Validation, Instant::now());
 
@@ -410,16 +406,40 @@ mod tests {
         let meta_auditor = MetaAuditor::new(region_id, AuditDomain::Meta, now);
 
         // Collection domain should allow gathering but not validation
-        assert!(collection_auditor.enforce_domain_isolation(AuditOperation::GatherViolations).is_ok());
-        assert!(collection_auditor.enforce_domain_isolation(AuditOperation::ValidateFindings).is_err());
+        assert!(
+            collection_auditor
+                .enforce_domain_isolation(AuditOperation::GatherViolations)
+                .is_ok()
+        );
+        assert!(
+            collection_auditor
+                .enforce_domain_isolation(AuditOperation::ValidateFindings)
+                .is_err()
+        );
 
         // Validation domain should allow validation but not gathering
-        assert!(validation_auditor.enforce_domain_isolation(AuditOperation::ValidateFindings).is_ok());
-        assert!(validation_auditor.enforce_domain_isolation(AuditOperation::GatherViolations).is_err());
+        assert!(
+            validation_auditor
+                .enforce_domain_isolation(AuditOperation::ValidateFindings)
+                .is_ok()
+        );
+        assert!(
+            validation_auditor
+                .enforce_domain_isolation(AuditOperation::GatherViolations)
+                .is_err()
+        );
 
         // Meta domain should allow meta operations
-        assert!(meta_auditor.enforce_domain_isolation(AuditOperation::AuditAuditors).is_ok());
-        assert!(meta_auditor.enforce_domain_isolation(AuditOperation::ValidateCapabilities).is_ok());
+        assert!(
+            meta_auditor
+                .enforce_domain_isolation(AuditOperation::AuditAuditors)
+                .is_ok()
+        );
+        assert!(
+            meta_auditor
+                .enforce_domain_isolation(AuditOperation::ValidateCapabilities)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -445,14 +465,18 @@ mod tests {
         let cx = crate::cx::Cx::for_testing();
 
         // Meta auditor should be able to create constrained context
-        assert!(meta_auditor.create_constrained_audit_context(
-            &cx, target_region, AuditDomain::Collection
-        ).is_ok());
+        assert!(
+            meta_auditor
+                .create_constrained_audit_context(&cx, target_region, AuditDomain::Collection)
+                .is_ok()
+        );
 
         // Collection auditor should not be able to create constrained context
-        assert!(collection_auditor.create_constrained_audit_context(
-            &cx, target_region, AuditDomain::Collection
-        ).is_err());
+        assert!(
+            collection_auditor
+                .create_constrained_audit_context(&cx, target_region, AuditDomain::Collection)
+                .is_err()
+        );
     }
 
     #[test]
@@ -463,7 +487,10 @@ mod tests {
 
         // Collection domain should not be able to audit cross-region
         let collection_auditor = MetaAuditor::new(audit_region, AuditDomain::Collection, now);
-        assert!(!collection_auditor.can_audit_cross_region(&crate::cx::Cx::for_testing(), target_region));
+        assert!(
+            !collection_auditor
+                .can_audit_cross_region(&crate::cx::Cx::for_testing(), target_region)
+        );
 
         // Meta domain should be able to audit cross-region
         let meta_auditor = MetaAuditor::new(audit_region, AuditDomain::Meta, now);
@@ -482,7 +509,11 @@ mod tests {
         // The test validates the detection logic works, actual results depend on current state
         // Each suspicious entry should have a clear reason
         for entry in &suspicious {
-            assert!(entry.contains(" - "), "Suspicious entry should have explanation: {}", entry);
+            assert!(
+                entry.contains(" - "),
+                "Suspicious entry should have explanation: {}",
+                entry
+            );
         }
     }
 }

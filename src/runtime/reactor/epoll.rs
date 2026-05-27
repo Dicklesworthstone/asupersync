@@ -377,7 +377,7 @@ impl Reactor for EpollReactor {
         let post_identity = FdIdentity::from_fd(raw_fd).ok_or_else(|| {
             // If we can't get identity after successful epoll_ctl, the fd was closed
             // Try to clean up the epoll registration
-            let _ = unsafe { self.poller.delete(&borrowed_fd) };
+            let _ = self.poller.delete(&borrowed_fd);
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "fd became invalid during registration (possible TOCTOU race)",
@@ -387,7 +387,7 @@ impl Reactor for EpollReactor {
         if pre_identity != post_identity {
             // FD was reused during registration - this is a TOCTOU race
             // Try to clean up the epoll registration for the new fd
-            let _ = unsafe { self.poller.delete(&borrowed_fd) };
+            let _ = self.poller.delete(&borrowed_fd);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "fd identity changed during registration (TOCTOU race detected)",

@@ -22,7 +22,11 @@ pub trait Handler: Send + Sync + 'static {
     /// Handle the request and produce a response.
     ///
     /// Async handlers receive a `Cx` for structured concurrency and runtime integration.
-    fn call(&self, cx: &Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>;
+    fn call(
+        &self,
+        cx: &Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>;
 }
 
 // ─── Handler Implementations ─────────────────────────────────────────────────
@@ -52,9 +56,7 @@ where
     #[inline]
     fn call(&self, _cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
         let func = &self.func;
-        Box::pin(async move {
-            (func)().into_response()
-        })
+        Box::pin(async move { (func)().into_response() })
     }
 }
 
@@ -255,7 +257,6 @@ where
     let t4 = T4::from_request(req).map_err(IntoResponse::into_response)?;
     Ok((t1, t2, t3, t4))
 }
-
 
 /// Wrapper for async handlers that receive a [`Cx`] and no extractors.
 pub struct AsyncCxFnHandler<F> {
@@ -663,7 +664,9 @@ mod tests {
 
         runtime.block_on_with_cx(request_cx, async move {
             let handler = AsyncCxFnHandler::new(inspect);
-            let resp = handler.call(&request_cx, Request::new("GET", "/ambient")).await;
+            let resp = handler
+                .call(&request_cx, Request::new("GET", "/ambient"))
+                .await;
             assert_eq!(resp.status, StatusCode::OK);
             assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
 
@@ -693,7 +696,9 @@ mod tests {
                 });
 
                 let cx = Cx::for_testing();
-                let resp = Runtime::block_on_current(handler.call(&cx, Request::new("GET", "/thread-local-runtime")));
+                let resp = Runtime::block_on_current(
+                    handler.call(&cx, Request::new("GET", "/thread-local-runtime")),
+                );
                 assert_eq!(resp.status, StatusCode::OK);
             })
         };
@@ -731,7 +736,9 @@ mod tests {
         });
 
         let cx = Cx::for_testing();
-        let resp = Runtime::block_on_current(handler.call(&cx, Request::new("GET", "/ambient-no-runtime")));
+        let resp = Runtime::block_on_current(
+            handler.call(&cx, Request::new("GET", "/ambient-no-runtime")),
+        );
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
 

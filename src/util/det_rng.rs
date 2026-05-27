@@ -62,7 +62,9 @@ impl DetRng {
     #[inline]
     pub const fn new(seed: u64) -> Self {
         let validated_seed = Self::validate_and_correct_seed(seed);
-        Self { state: validated_seed }
+        Self {
+            state: validated_seed,
+        }
     }
 
     /// Creates a new PRNG with explicit seed quality validation.
@@ -73,7 +75,12 @@ impl DetRng {
     pub fn new_with_quality(seed: u64) -> (Self, SeedQuality) {
         let quality = Self::assess_seed_quality(seed);
         let validated_seed = Self::validate_and_correct_seed(seed);
-        (Self { state: validated_seed }, quality)
+        (
+            Self {
+                state: validated_seed,
+            },
+            quality,
+        )
     }
 
     /// Creates a high-entropy PRNG suitable for production use.
@@ -133,12 +140,13 @@ impl DetRng {
     const fn is_degenerate_seed(seed: u64) -> bool {
         // Seeds with all bits in specific patterns can cause short cycles
         // Check for common degenerate patterns
-        matches!(seed,
+        matches!(
+            seed,
             0xFFFF_FFFF_FFFF_FFFF |  // All ones
             0x0000_0000_FFFF_FFFF |  // High zeros, low ones
             0xFFFF_FFFF_0000_0000 |  // High ones, low zeros
             0x5555_5555_5555_5555 |  // Alternating bits
-            0xAAAA_AAAA_AAAA_AAAA    // Alternating bits (inverted)
+            0xAAAA_AAAA_AAAA_AAAA // Alternating bits (inverted)
         )
     }
 
@@ -465,48 +473,75 @@ mod tests {
         // Zero seed
         assert_eq!(
             DetRng::assess_seed_quality(0),
-            SeedQuality::Dangerous { reason: "Zero seed causes xorshift64 to stick at zero" }
+            SeedQuality::Dangerous {
+                reason: "Zero seed causes xorshift64 to stick at zero"
+            }
         );
 
         // Degenerate patterns
         assert_eq!(
             DetRng::assess_seed_quality(0xFFFF_FFFF_FFFF_FFFF),
-            SeedQuality::Dangerous { reason: "Seed creates short cycles in xorshift64" }
+            SeedQuality::Dangerous {
+                reason: "Seed creates short cycles in xorshift64"
+            }
         );
 
         assert_eq!(
             DetRng::assess_seed_quality(0x5555_5555_5555_5555),
-            SeedQuality::Dangerous { reason: "Seed creates short cycles in xorshift64" }
+            SeedQuality::Dangerous {
+                reason: "Seed creates short cycles in xorshift64"
+            }
         );
     }
 
     #[test]
     fn seed_quality_assessment_poor_seeds() {
         // Very low popcount (low entropy)
-        assert_eq!(DetRng::assess_seed_quality(0x0000_0000_0000_0007), SeedQuality::Poor);
+        assert_eq!(
+            DetRng::assess_seed_quality(0x0000_0000_0000_0007),
+            SeedQuality::Poor
+        );
 
         // Very high popcount (inverted low entropy)
-        assert_eq!(DetRng::assess_seed_quality(0xFFFF_FFFF_FFFF_FFF8), SeedQuality::Poor);
+        assert_eq!(
+            DetRng::assess_seed_quality(0xFFFF_FFFF_FFFF_FFF8),
+            SeedQuality::Poor
+        );
 
         // Too many leading zeros
-        assert_eq!(DetRng::assess_seed_quality(0x0000_0000_1234_5678), SeedQuality::Poor);
+        assert_eq!(
+            DetRng::assess_seed_quality(0x0000_0000_1234_5678),
+            SeedQuality::Poor
+        );
 
         // Too many trailing zeros
-        assert_eq!(DetRng::assess_seed_quality(0x1234_5678_0000_0000), SeedQuality::Poor);
+        assert_eq!(
+            DetRng::assess_seed_quality(0x1234_5678_0000_0000),
+            SeedQuality::Poor
+        );
     }
 
     #[test]
     fn seed_quality_assessment_good_seeds() {
         // Typical high-quality seed
-        assert_eq!(DetRng::assess_seed_quality(0x9e37_79b9_7f4a_7c15), SeedQuality::Excellent);
+        assert_eq!(
+            DetRng::assess_seed_quality(0x9e37_79b9_7f4a_7c15),
+            SeedQuality::Excellent
+        );
 
         // Good entropy distribution
-        assert_eq!(DetRng::assess_seed_quality(0x1234_5678_9abc_def0), SeedQuality::Excellent);
+        assert_eq!(
+            DetRng::assess_seed_quality(0x1234_5678_9abc_def0),
+            SeedQuality::Excellent
+        );
 
         // Acceptable seed with some pattern
         let seed_with_pattern = 0x1111_2222_3333_4444;
         let quality = DetRng::assess_seed_quality(seed_with_pattern);
-        assert!(matches!(quality, SeedQuality::Acceptable | SeedQuality::Good));
+        assert!(matches!(
+            quality,
+            SeedQuality::Acceptable | SeedQuality::Good
+        ));
     }
 
     #[test]
@@ -536,7 +571,7 @@ mod tests {
         // Check for basic randomness (no identical consecutive values)
         let mut has_variation = false;
         for i in 1..vals.len() {
-            if vals[i] != vals[i-1] {
+            if vals[i] != vals[i - 1] {
                 has_variation = true;
                 break;
             }
@@ -578,7 +613,10 @@ mod tests {
         let seq1: Vec<_> = (0..100).map(|_| rng1.next_u64()).collect();
         let seq2: Vec<_> = (0..100).map(|_| rng2.next_u64()).collect();
 
-        assert_ne!(seq1, seq2, "Different seeds must produce different sequences");
+        assert_ne!(
+            seq1, seq2,
+            "Different seeds must produce different sequences"
+        );
     }
 
     #[test]
@@ -592,10 +630,16 @@ mod tests {
         let third = rng.next_u64();
 
         // Should not stick at zero
-        assert!(first != 0 || second != 0 || third != 0, "Auto-corrected seed should not stick at zero");
+        assert!(
+            first != 0 || second != 0 || third != 0,
+            "Auto-corrected seed should not stick at zero"
+        );
 
         // Should show progression
-        assert!(first != second || second != third, "Auto-corrected RNG should show state progression");
+        assert!(
+            first != second || second != third,
+            "Auto-corrected RNG should show state progression"
+        );
     }
 
     #[test]
@@ -615,8 +659,14 @@ mod tests {
             let sequence: Vec<_> = (0..100).map(|_| rng.next_u64()).collect();
 
             // Check for basic randomness properties
-            let unique_count = sequence.iter().collect::<std::collections::BTreeSet<_>>().len();
-            assert!(unique_count > 80, "Corrected degenerate seed should produce varied output, got {unique_count}/100 unique values");
+            let unique_count = sequence
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            assert!(
+                unique_count > 80,
+                "Corrected degenerate seed should produce varied output, got {unique_count}/100 unique values"
+            );
         }
     }
 

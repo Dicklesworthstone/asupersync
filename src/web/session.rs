@@ -664,242 +664,250 @@ pub struct SessionMiddleware<S: SessionStore, H: Handler> {
 }
 
 impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
-    fn call(&self, cx: &crate::Cx, mut req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &crate::Cx,
+        mut req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
-        // 1. Extract or generate session ID.
-        //    If the client-supplied ID is syntactically valid but absent from the
-        //    store, regenerate to prevent session-fixation attacks (an attacker
-        //    could plant a chosen ID and later hijack it).
-        let (mut session_id, mut is_new) = match get_cookie(&req, &self.config.cookie_name) {
-            Some(id) if is_valid_session_id(&id) => (id, false),
-            _ => {
-                let Some(id) = generate_session_id() else {
-                    return Response::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Session initialization failed: OS entropy unavailable".to_string(),
-                    );
-                };
-                (id, true)
-            }
-        };
+            // 1. Extract or generate session ID.
+            //    If the client-supplied ID is syntactically valid but absent from the
+            //    store, regenerate to prevent session-fixation attacks (an attacker
+            //    could plant a chosen ID and later hijack it).
+            let (mut session_id, mut is_new) = match get_cookie(&req, &self.config.cookie_name) {
+                Some(id) if is_valid_session_id(&id) => (id, false),
+                _ => {
+                    let Some(id) = generate_session_id() else {
+                        return Response::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Session initialization failed: OS entropy unavailable".to_string(),
+                        );
+                    };
+                    (id, true)
+                }
+            };
 
-        // 2. Load existing session data.
-        //    If the client-supplied ID is not in the store, regenerate to
-        //    prevent session-fixation attacks. Also: if an idle TTL is
-        //    configured and the session's last_accessed is too old,
-        //    server-side delete + new id (br-asupersync-7udumi).
-        let mut session_data = if is_new {
-            SessionData::new()
-        } else if let Some(data) = self.store.load(&session_id) {
-            if self.is_idle_expired(&data) {
-                self.store.delete(&session_id);
+            // 2. Load existing session data.
+            //    If the client-supplied ID is not in the store, regenerate to
+            //    prevent session-fixation attacks. Also: if an idle TTL is
+            //    configured and the session's last_accessed is too old,
+            //    server-side delete + new id (br-asupersync-7udumi).
+            let mut session_data = if is_new {
+                SessionData::new()
+            } else if let Some(data) = self.store.load(&session_id) {
+                if self.is_idle_expired(&data) {
+                    self.store.delete(&session_id);
+                    let Some(new_id) = generate_session_id() else {
+                        return Response::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "Session renewal failed: OS entropy unavailable".to_string(),
+                        );
+                    };
+                    session_id = new_id;
+                    is_new = true;
+                    SessionData::new()
+                } else {
+                    data
+                }
+            } else {
                 let Some(new_id) = generate_session_id() else {
                     return Response::new(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "Session renewal failed: OS entropy unavailable".to_string(),
+                        "Session creation failed: OS entropy unavailable".to_string(),
                     );
                 };
                 session_id = new_id;
                 is_new = true;
                 SessionData::new()
-            } else {
-                data
-            }
-        } else {
-            let Some(new_id) = generate_session_id() else {
-                return Response::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Session creation failed: OS entropy unavailable".to_string(),
-                );
             };
-            session_id = new_id;
-            is_new = true;
-            SessionData::new()
-        };
 
-        // 2b. Touch the session (refresh last-accessed timestamp). Marks
-        //     the session as modified so the touch is persisted to the
-        //     store on this request. (br-asupersync-7udumi)
-        session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
+            // 2b. Touch the session (refresh last-accessed timestamp). Marks
+            //     the session as modified so the touch is persisted to the
+            //     store on this request. (br-asupersync-7udumi)
+            session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
 
-        // 2c. Ensure a CSRF token exists. New sessions get one on first
-        //     touch; existing sessions that pre-date this commit get one
-        //     lazily on first access. (br-asupersync-7udumi)
-        if self.config.csrf_protection && session_data.get(CSRF_TOKEN_KEY).is_none() {
-            let Some(csrf_token) = generate_session_id() else {
-                return Response::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "CSRF token generation failed: OS entropy unavailable".to_string(),
-                );
-            };
-            session_data.insert(CSRF_TOKEN_KEY, csrf_token);
-        }
-
-        // 2d. CSRF validation — state-changing requests must present the
-        //     X-CSRF-Token header matching the session's stored token.
-        //     Constant-time comparison prevents timing oracles.
-        //     (br-asupersync-7udumi)
-        //
-        //     br-asupersync-czbj90 — defense in depth: when allowed_origins
-        //     is non-empty, also validate the request Origin (or Referer
-        //     fallback) against the allow-list. Modern browsers always
-        //     send Origin on state-changing requests, so this check is
-        //     essentially free at runtime. Header-stripping intermediaries
-        //     that drop X-CSRF-Token but preserve Origin still get
-        //     stopped here; a forged Origin would fail this check before
-        //     the X-CSRF-Token check has a chance to compensate. If both
-        //     Origin and Referer are absent on a state-changing request
-        //     and origin checking is configured, reject as 403.
-        if self.config.csrf_protection
-            && is_state_changing_method(&req.method)
-            && !self.config.allowed_origins.is_empty()
-        {
-            match request_origin(&req) {
-                None => {
+            // 2c. Ensure a CSRF token exists. New sessions get one on first
+            //     touch; existing sessions that pre-date this commit get one
+            //     lazily on first access. (br-asupersync-7udumi)
+            if self.config.csrf_protection && session_data.get(CSRF_TOKEN_KEY).is_none() {
+                let Some(csrf_token) = generate_session_id() else {
                     return Response::new(
-                        StatusCode::FORBIDDEN,
-                        crate::bytes::Bytes::from_static(
-                            b"CSRF: missing Origin/Referer header on state-changing request",
-                        ),
-                    )
-                    .header("content-type", "text/plain; charset=utf-8");
-                }
-                Some(origin) => {
-                    if !origin_is_allowed(&origin, &self.config.allowed_origins) {
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "CSRF token generation failed: OS entropy unavailable".to_string(),
+                    );
+                };
+                session_data.insert(CSRF_TOKEN_KEY, csrf_token);
+            }
+
+            // 2d. CSRF validation — state-changing requests must present the
+            //     X-CSRF-Token header matching the session's stored token.
+            //     Constant-time comparison prevents timing oracles.
+            //     (br-asupersync-7udumi)
+            //
+            //     br-asupersync-czbj90 — defense in depth: when allowed_origins
+            //     is non-empty, also validate the request Origin (or Referer
+            //     fallback) against the allow-list. Modern browsers always
+            //     send Origin on state-changing requests, so this check is
+            //     essentially free at runtime. Header-stripping intermediaries
+            //     that drop X-CSRF-Token but preserve Origin still get
+            //     stopped here; a forged Origin would fail this check before
+            //     the X-CSRF-Token check has a chance to compensate. If both
+            //     Origin and Referer are absent on a state-changing request
+            //     and origin checking is configured, reject as 403.
+            if self.config.csrf_protection
+                && is_state_changing_method(&req.method)
+                && !self.config.allowed_origins.is_empty()
+            {
+                match request_origin(&req) {
+                    None => {
                         return Response::new(
                             StatusCode::FORBIDDEN,
                             crate::bytes::Bytes::from_static(
-                                b"CSRF: Origin/Referer not in allow-list",
+                                b"CSRF: missing Origin/Referer header on state-changing request",
                             ),
+                        )
+                        .header("content-type", "text/plain; charset=utf-8");
+                    }
+                    Some(origin) => {
+                        if !origin_is_allowed(&origin, &self.config.allowed_origins) {
+                            return Response::new(
+                                StatusCode::FORBIDDEN,
+                                crate::bytes::Bytes::from_static(
+                                    b"CSRF: Origin/Referer not in allow-list",
+                                ),
+                            )
+                            .header("content-type", "text/plain; charset=utf-8");
+                        }
+                    }
+                }
+            }
+
+            if self.config.csrf_protection && is_state_changing_method(&req.method) {
+                // Brand-new sessions on the first request can't have shipped
+                // a token to the client yet, so we don't reject them — but
+                // they have no authenticated state either, so the CSRF
+                // window is empty anyway. Reject only when the session was
+                // loaded from storage (i.e. the client should know the
+                // token).
+                if !is_new {
+                    let header_token = req
+                        .headers
+                        .iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("x-csrf-token"))
+                        .map_or("", |(_, v)| v.as_str());
+                    let session_token = session_data.get(CSRF_TOKEN_KEY).unwrap_or("");
+                    if !constant_time_eq_str(header_token, session_token)
+                        || session_token.is_empty()
+                    {
+                        return Response::new(
+                            StatusCode::FORBIDDEN,
+                            crate::bytes::Bytes::from_static(b"CSRF token missing or invalid"),
                         )
                         .header("content-type", "text/plain; charset=utf-8");
                     }
                 }
             }
-        }
 
-        if self.config.csrf_protection && is_state_changing_method(&req.method) {
-            // Brand-new sessions on the first request can't have shipped
-            // a token to the client yet, so we don't reject them — but
-            // they have no authenticated state either, so the CSRF
-            // window is empty anyway. Reject only when the session was
-            // loaded from storage (i.e. the client should know the
-            // token).
-            if !is_new {
-                let header_token = req
-                    .headers
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case("x-csrf-token"))
-                    .map_or("", |(_, v)| v.as_str());
-                let session_token = session_data.get(CSRF_TOKEN_KEY).unwrap_or("");
-                if !constant_time_eq_str(header_token, session_token) || session_token.is_empty() {
-                    return Response::new(
-                        StatusCode::FORBIDDEN,
-                        crate::bytes::Bytes::from_static(b"CSRF token missing or invalid"),
-                    )
-                    .header("content-type", "text/plain; charset=utf-8");
-                }
-            }
-        }
+            // 3. Inject session data into request extensions.
+            //    We use a shared Arc<Mutex<SessionData>> so the handler can modify it.
+            let session_handle = Arc::new(Mutex::new(session_data));
+            req.extensions
+                .insert_typed(Session(Arc::clone(&session_handle)));
 
-        // 3. Inject session data into request extensions.
-        //    We use a shared Arc<Mutex<SessionData>> so the handler can modify it.
-        let session_handle = Arc::new(Mutex::new(session_data));
-        req.extensions
-            .insert_typed(Session(Arc::clone(&session_handle)));
-
-        // br-asupersync-qokau8 / br-asupersync-z74jcy — install a
-        // fail-closed regenerate finalizer BEFORE the handler runs.
-        // If the handler unwinds (panic, or future async cancel)
-        // before we reach step 5b, the guard's `Drop` deletes the
-        // OLD store entry whenever `REGENERATE_FLAG_KEY` is set,
-        // preserving the session-fixation defense even on the
-        // cancel path. On the happy path we `disarm()` the guard
-        // once the explicit rotation logic has run.
-        let mut regenerate_guard = RegenerateGuard {
-            armed: true,
-            store: self.store.as_ref(),
-            session_handle: Arc::clone(&session_handle),
-            session_id: session_id.clone(),
-            is_new,
-        };
-
-        // 4. Call inner handler.
-        let mut resp = self.inner.call(&cx, req).await;
-
-        // 5. Extract (possibly modified) session data.
-        session_data = {
-            let guard = session_handle.lock();
-            guard.clone()
-        };
-
-        // 5b. br-asupersync-hifab2 — handle session-ID regeneration. If the
-        //     handler called Session::regenerate(), the data carries a
-        //     REGENERATE_FLAG_KEY marker. Delete the old store entry, mint
-        //     a fresh ID, strip the marker, and proceed with the new ID
-        //     for the save+cookie steps below. The CSRF token was already
-        //     rotated inside Session::regenerate(); we strip the marker
-        //     here so it doesn't persist into the saved data.
-        let regenerate_requested = session_data.get(REGENERATE_FLAG_KEY).is_some();
-        if regenerate_requested {
-            session_data.remove(REGENERATE_FLAG_KEY);
-            if !is_new {
-                self.store.delete(&session_id);
-            }
-            let Some(new_id) = generate_session_id() else {
-                return Response::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Session regeneration failed: OS entropy unavailable".to_string(),
-                );
+            // br-asupersync-qokau8 / br-asupersync-z74jcy — install a
+            // fail-closed regenerate finalizer BEFORE the handler runs.
+            // If the handler unwinds (panic, or future async cancel)
+            // before we reach step 5b, the guard's `Drop` deletes the
+            // OLD store entry whenever `REGENERATE_FLAG_KEY` is set,
+            // preserving the session-fixation defense even on the
+            // cancel path. On the happy path we `disarm()` the guard
+            // once the explicit rotation logic has run.
+            let mut regenerate_guard = RegenerateGuard {
+                armed: true,
+                store: self.store.as_ref(),
+                session_handle: Arc::clone(&session_handle),
+                session_id: session_id.clone(),
+                is_new,
             };
-            session_id = new_id;
-            // Treat as a freshly-issued cookie (must be Set-Cookie'd to
-            // the client); the old client cookie is implicitly replaced
-            // by the new one in the response.
-            is_new = true;
-            // Force the modified flag so the save+cookie branches fire.
-            session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
-        }
-        // br-asupersync-qokau8: explicit rotation path has now taken
-        // responsibility for the regenerate flag. Disarm the
-        // fail-closed finalizer so its Drop is a no-op.
-        regenerate_guard.disarm();
 
-        // 6. Save if modified. Untouched new sessions are NOT saved to prevent DoS.
-        let session_cleared = session_data.is_empty() && session_data.is_modified();
+            // 4. Call inner handler.
+            let mut resp = self.inner.call(&cx, req).await;
 
-        if session_cleared {
-            if !is_new {
-                // Session cleared → delete server-side data and expire the cookie.
-                self.store.delete(&session_id);
+            // 5. Extract (possibly modified) session data.
+            session_data = {
+                let guard = session_handle.lock();
+                guard.clone()
+            };
+
+            // 5b. br-asupersync-hifab2 — handle session-ID regeneration. If the
+            //     handler called Session::regenerate(), the data carries a
+            //     REGENERATE_FLAG_KEY marker. Delete the old store entry, mint
+            //     a fresh ID, strip the marker, and proceed with the new ID
+            //     for the save+cookie steps below. The CSRF token was already
+            //     rotated inside Session::regenerate(); we strip the marker
+            //     here so it doesn't persist into the saved data.
+            let regenerate_requested = session_data.get(REGENERATE_FLAG_KEY).is_some();
+            if regenerate_requested {
+                session_data.remove(REGENERATE_FLAG_KEY);
+                if !is_new {
+                    self.store.delete(&session_id);
+                }
+                let Some(new_id) = generate_session_id() else {
+                    return Response::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Session regeneration failed: OS entropy unavailable".to_string(),
+                    );
+                };
+                session_id = new_id;
+                // Treat as a freshly-issued cookie (must be Set-Cookie'd to
+                // the client); the old client cookie is implicitly replaced
+                // by the new one in the response.
+                is_new = true;
+                // Force the modified flag so the save+cookie branches fire.
+                session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
             }
-        } else if session_data.is_modified() || regenerate_requested {
-            self.store.save(&session_id, &session_data);
-        }
+            // br-asupersync-qokau8: explicit rotation path has now taken
+            // responsibility for the regenerate flag. Disarm the
+            // fail-closed finalizer so its Drop is a no-op.
+            regenerate_guard.disarm();
 
-        // 7. Set cookie on modified sessions, or expire if cleared.
-        //    br-asupersync-ehtkns: append rather than set so any
-        //    Set-Cookie the inner handler emitted (CSRF cookie,
-        //    remember-me, post-login flash) survives the middleware
-        //    layer instead of being overwritten by the session cookie.
-        if session_cleared {
-            if !is_new {
-                // Expire the cookie so the browser deletes it.
-                // Reuse set_cookie_header to ensure all configured attributes
-                // (Secure, SameSite, HttpOnly) are included — omitting them
-                // could leave a stale session cookie in the browser.
-                let mut expire_config = self.config.clone();
-                expire_config.max_age = Some(0);
-                let cookie_val = set_cookie_header(&self.config.cookie_name, "", &expire_config);
+            // 6. Save if modified. Untouched new sessions are NOT saved to prevent DoS.
+            let session_cleared = session_data.is_empty() && session_data.is_modified();
+
+            if session_cleared {
+                if !is_new {
+                    // Session cleared → delete server-side data and expire the cookie.
+                    self.store.delete(&session_id);
+                }
+            } else if session_data.is_modified() || regenerate_requested {
+                self.store.save(&session_id, &session_data);
+            }
+
+            // 7. Set cookie on modified sessions, or expire if cleared.
+            //    br-asupersync-ehtkns: append rather than set so any
+            //    Set-Cookie the inner handler emitted (CSRF cookie,
+            //    remember-me, post-login flash) survives the middleware
+            //    layer instead of being overwritten by the session cookie.
+            if session_cleared {
+                if !is_new {
+                    // Expire the cookie so the browser deletes it.
+                    // Reuse set_cookie_header to ensure all configured attributes
+                    // (Secure, SameSite, HttpOnly) are included — omitting them
+                    // could leave a stale session cookie in the browser.
+                    let mut expire_config = self.config.clone();
+                    expire_config.max_age = Some(0);
+                    let cookie_val =
+                        set_cookie_header(&self.config.cookie_name, "", &expire_config);
+                    resp.append_set_cookie(cookie_val);
+                }
+            } else if session_data.is_modified() || regenerate_requested {
+                let cookie_val =
+                    set_cookie_header(&self.config.cookie_name, &session_id, &self.config);
                 resp.append_set_cookie(cookie_val);
             }
-        } else if session_data.is_modified() || regenerate_requested {
-            let cookie_val = set_cookie_header(&self.config.cookie_name, &session_id, &self.config);
-            resp.append_set_cookie(cookie_val);
-        }
 
-        resp
+            resp
         })
     }
 }

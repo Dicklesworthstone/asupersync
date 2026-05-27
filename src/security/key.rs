@@ -123,7 +123,6 @@ pub struct AuthKey {
     bytes: [u8; AUTH_KEY_SIZE],
 }
 
-
 impl AuthKey {
     /// Creates a new key from a 64-bit seed.
     ///
@@ -147,7 +146,11 @@ impl AuthKey {
             Err(_) => {
                 // SHA-256 should always produce strong output, but if validation
                 // fails, use HKDF to strengthen the seed further
-                Self::from_hkdf(&seed.to_le_bytes(), Some(b"backup-salt"), b"asupersync::AuthKey::strengthened")
+                Self::from_hkdf(
+                    &seed.to_le_bytes(),
+                    Some(b"backup-salt"),
+                    b"asupersync::AuthKey::strengthened",
+                )
             }
         }
     }
@@ -290,7 +293,8 @@ impl AuthKey {
     #[must_use]
     pub fn derive_with_salt(&self, salt: &[u8], context: &[u8]) -> Self {
         // Extract phase: PRK = HMAC-SHA256(salt, input_key_material)
-        let mut extract_mac = HmacSha256::new_from_slice(salt).expect("HMAC accepts any key length");
+        let mut extract_mac =
+            HmacSha256::new_from_slice(salt).expect("HMAC accepts any key length");
         extract_mac.update(&self.bytes);
         let prk = extract_mac.finalize().into_bytes();
 
@@ -341,8 +345,8 @@ impl AuthKey {
         const ZERO_SALT: [u8; AUTH_KEY_SIZE] = [0; AUTH_KEY_SIZE];
 
         // Extract phase: PRK = HKDF-Extract(salt, IKM)
-        let mut extract_mac =
-            HmacSha256::new_from_slice(salt.unwrap_or(&ZERO_SALT)).expect("HMAC accepts any key length");
+        let mut extract_mac = HmacSha256::new_from_slice(salt.unwrap_or(&ZERO_SALT))
+            .expect("HMAC accepts any key length");
         extract_mac.update(ikm);
         let prk = extract_mac.finalize().into_bytes();
 
@@ -878,7 +882,12 @@ mod tests {
         concentrated[5..].fill(1); // Fill rest to ensure diversity
         match AuthKey::from_bytes(concentrated) {
             Err(AuthKeyError::WeakKey {
-                reason: WeakKeyReason::ExcessiveByteConcentration { byte_value, frequency, .. },
+                reason:
+                    WeakKeyReason::ExcessiveByteConcentration {
+                        byte_value,
+                        frequency,
+                        ..
+                    },
             }) => {
                 assert_eq!(byte_value, 42);
                 assert_eq!(frequency, 5);
@@ -897,13 +906,25 @@ mod tests {
         let derived3 = master_key.derive_with_salt(b"salt1", b"different-purpose");
         let derived4 = master_key.derive_with_salt(b"salt2", b"test-purpose");
 
-        assert_eq!(derived1, derived2, "Salted derivation should be deterministic");
-        assert_ne!(derived1, derived3, "Different contexts should yield different keys");
-        assert_ne!(derived1, derived4, "Different salts should yield different keys");
+        assert_eq!(
+            derived1, derived2,
+            "Salted derivation should be deterministic"
+        );
+        assert_ne!(
+            derived1, derived3,
+            "Different contexts should yield different keys"
+        );
+        assert_ne!(
+            derived1, derived4,
+            "Different salts should yield different keys"
+        );
 
         // Verify derived keys pass strengthened validation
         let validation_result = AuthKey::from_bytes(*derived1.as_bytes());
-        assert!(validation_result.is_ok(), "Derived key should pass strengthened validation");
+        assert!(
+            validation_result.is_ok(),
+            "Derived key should pass strengthened validation"
+        );
     }
 
     #[test]
@@ -913,14 +934,20 @@ mod tests {
         // Old validation: MIN_HAMMING_WEIGHT=8, now requires 64
         let mut weak_key = [0u8; 32];
         weak_key[0] = 0xFF; // 8 bits set, would pass old validation
-        assert!(AuthKey::from_bytes(weak_key).is_err(), "Weak key should be rejected");
+        assert!(
+            AuthKey::from_bytes(weak_key).is_err(),
+            "Weak key should be rejected"
+        );
 
         // Old validation: MIN_DISTINCT_BYTES=8, now requires 16
         let mut pattern_key = [0u8; 32];
         for i in 0..8 {
             pattern_key[i * 4] = i as u8; // Only 8 distinct bytes
         }
-        assert!(AuthKey::from_bytes(pattern_key).is_err(), "Pattern key should be rejected");
+        assert!(
+            AuthKey::from_bytes(pattern_key).is_err(),
+            "Pattern key should be rejected"
+        );
     }
 
     #[test]
@@ -930,7 +957,10 @@ mod tests {
 
         // Should pass all new validation checks
         let validation_result = AuthKey::from_bytes(*strong_key.as_bytes());
-        assert!(validation_result.is_ok(), "Strong key should pass validation");
+        assert!(
+            validation_result.is_ok(),
+            "Strong key should pass validation"
+        );
 
         // Verify HKDF outputs also pass (they should by construction)
         let hkdf_key = AuthKey::from_hkdf(b"input-key-material", Some(b"salt"), b"context");
@@ -944,26 +974,34 @@ mod tests {
 
         // Test 1: from_seed still works for normal seeds
         let strong_from_seed = AuthKey::from_seed(0xDEADBEEF);
-        assert!(AuthKey::from_bytes(*strong_from_seed.as_bytes()).is_ok(),
-                "Normal seeds should produce strong keys");
+        assert!(
+            AuthKey::from_bytes(*strong_from_seed.as_bytes()).is_ok(),
+            "Normal seeds should produce strong keys"
+        );
 
         // Test 2: from_rng with deterministic RNG still works
         let mut rng = DetRng::new(12345);
         let strong_from_rng = AuthKey::from_rng(&mut rng);
-        assert!(AuthKey::from_bytes(*strong_from_rng.as_bytes()).is_ok(),
-                "Normal RNG should produce strong keys");
+        assert!(
+            AuthKey::from_bytes(*strong_from_rng.as_bytes()).is_ok(),
+            "Normal RNG should produce strong keys"
+        );
 
         // Test 3: Edge case seeds get strengthened (test doesn't expose internals but ensures no panic)
         let edge_case_key = AuthKey::from_seed(0);
-        assert!(AuthKey::from_bytes(*edge_case_key.as_bytes()).is_ok(),
-                "Edge case seeds should be strengthened to pass validation");
+        assert!(
+            AuthKey::from_bytes(*edge_case_key.as_bytes()).is_ok(),
+            "Edge case seeds should be strengthened to pass validation"
+        );
 
         // Test 4: Multiple keys from same seed should be deterministic but strong
         let key1 = AuthKey::from_seed(42);
         let key2 = AuthKey::from_seed(42);
         assert_eq!(key1, key2, "Same seed should produce same key");
-        assert!(AuthKey::from_bytes(*key1.as_bytes()).is_ok(),
-                "Deterministic keys should still be strong");
+        assert!(
+            AuthKey::from_bytes(*key1.as_bytes()).is_ok(),
+            "Deterministic keys should still be strong"
+        );
     }
 
     #[test]
@@ -972,24 +1010,36 @@ mod tests {
 
         // Test minimum distinct bytes (16 required)
         let mut low_diversity = [0u8; 32];
-        for i in 0..15 { low_diversity[i] = i as u8; } // Only 15 distinct values
-        assert!(AuthKey::from_bytes(low_diversity).is_err(),
-                "Insufficient byte diversity should be rejected");
+        for i in 0..15 {
+            low_diversity[i] = i as u8;
+        } // Only 15 distinct values
+        assert!(
+            AuthKey::from_bytes(low_diversity).is_err(),
+            "Insufficient byte diversity should be rejected"
+        );
 
         // Test Hamming weight bounds (64-192 required)
         let low_hamming = [1u8; 32]; // 32 bits = below 64 minimum
-        assert!(AuthKey::from_bytes(low_hamming).is_err(),
-                "Low Hamming weight should be rejected");
+        assert!(
+            AuthKey::from_bytes(low_hamming).is_err(),
+            "Low Hamming weight should be rejected"
+        );
 
         let high_hamming = [0xFFu8; 32]; // 256 bits = above 192 maximum
-        assert!(AuthKey::from_bytes(high_hamming).is_err(),
-                "High Hamming weight should be rejected");
+        assert!(
+            AuthKey::from_bytes(high_hamming).is_err(),
+            "High Hamming weight should be rejected"
+        );
 
         // Test byte concentration (max 4 occurrences per byte value)
         let mut concentrated = [0u8; 32];
         concentrated[0..5].fill(42); // Byte value 42 appears 5 times
-        for i in 5..32 { concentrated[i] = i as u8; } // Fill with unique values
-        assert!(AuthKey::from_bytes(concentrated).is_err(),
-                "Excessive byte concentration should be rejected");
+        for i in 5..32 {
+            concentrated[i] = i as u8;
+        } // Fill with unique values
+        assert!(
+            AuthKey::from_bytes(concentrated).is_err(),
+            "Excessive byte concentration should be rejected"
+        );
     }
 }

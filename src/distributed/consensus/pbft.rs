@@ -16,19 +16,18 @@
 //!
 //! View changes occur when the primary is suspected of being faulty.
 
-use crate::time::timeout;
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
-use crate::types::{Time, Outcome};
+use crate::time::timeout;
+use crate::types::{Outcome, Time};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 
 use super::types::{
-    ConsensusRequest, ConsensusResponse, ConsensusBatch, ViewNumber,
-    SequenceNumber, ReplicaId, PhaseKind, MessageDigest,
-    MessageCertificate,
+    ConsensusBatch, ConsensusRequest, ConsensusResponse, MessageCertificate, MessageDigest,
+    PhaseKind, ReplicaId, SequenceNumber, ViewNumber,
 };
 
 /// Configuration for PBFT consensus.
@@ -206,9 +205,7 @@ pub trait PbftTransport: Send + Sync {
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
     /// Receive next message (blocking).
-    fn receive(
-        &self,
-    ) -> impl std::future::Future<Output = Result<PbftMessage>> + Send;
+    fn receive(&self) -> impl std::future::Future<Output = Result<PbftMessage>> + Send;
 }
 
 /// State machine for PBFT consensus node.
@@ -252,7 +249,11 @@ impl<T: PbftTransport> PbftNode<T> {
         let state = self.state.lock().unwrap();
         let primary_idx = state.view.primary(self.config.replica_count);
         // For simplicity, assume replica IDs are "0", "1", "2", etc.
-        self.replica_id.as_str().parse::<usize>().unwrap_or(usize::MAX) == primary_idx
+        self.replica_id
+            .as_str()
+            .parse::<usize>()
+            .unwrap_or(usize::MAX)
+            == primary_idx
     }
 
     /// Submit a client request for consensus.
@@ -281,7 +282,8 @@ impl<T: PbftTransport> PbftNode<T> {
 
             // Collect requests for batch
             let mut requests = Vec::new();
-            while requests.len() < self.config.max_batch_size && !state.pending_requests.is_empty() {
+            while requests.len() < self.config.max_batch_size && !state.pending_requests.is_empty()
+            {
                 if let Some(request) = state.pending_requests.pop_front() {
                     requests.push(request);
                 }
@@ -334,31 +336,61 @@ impl<T: PbftTransport> PbftNode<T> {
         };
 
         // Broadcast pre-prepare to all replicas
-        timeout(Time::from_millis(0), self.config.preprepare_timeout, self.transport.broadcast(message))
-            .await
-            .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))?
+        timeout(
+            Time::from_millis(0),
+            self.config.preprepare_timeout,
+            self.transport.broadcast(message),
+        )
+        .await
+        .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))?
     }
 
     /// Process an incoming PBFT message.
     pub async fn process_message(&self, cx: &Cx, message: PbftMessage) -> Result<()> {
         match message {
-            PbftMessage::Request(request) => {
-                self.submit_request(cx, request).await
+            PbftMessage::Request(request) => self.submit_request(cx, request).await,
+            PbftMessage::PrePrepare {
+                view,
+                sequence,
+                digest,
+                batch,
+            } => {
+                self.handle_preprepare(cx, view, sequence, digest, batch)
+                    .await
             }
-            PbftMessage::PrePrepare { view, sequence, digest, batch } => {
-                self.handle_preprepare(cx, view, sequence, digest, batch).await
+            PbftMessage::Prepare {
+                view,
+                sequence,
+                digest,
+                replica_id,
+            } => {
+                self.handle_prepare(cx, view, sequence, digest, replica_id)
+                    .await
             }
-            PbftMessage::Prepare { view, sequence, digest, replica_id } => {
-                self.handle_prepare(cx, view, sequence, digest, replica_id).await
+            PbftMessage::Commit {
+                view,
+                sequence,
+                digest,
+                replica_id,
+            } => {
+                self.handle_commit(cx, view, sequence, digest, replica_id)
+                    .await
             }
-            PbftMessage::Commit { view, sequence, digest, replica_id } => {
-                self.handle_commit(cx, view, sequence, digest, replica_id).await
+            PbftMessage::ViewChange {
+                new_view,
+                replica_id,
+                certificates,
+            } => {
+                self.handle_view_change(cx, new_view, replica_id, certificates)
+                    .await
             }
-            PbftMessage::ViewChange { new_view, replica_id, certificates } => {
-                self.handle_view_change(cx, new_view, replica_id, certificates).await
-            }
-            PbftMessage::NewView { view, view_change_msgs, preprepare_msgs } => {
-                self.handle_new_view(cx, view, view_change_msgs, preprepare_msgs).await
+            PbftMessage::NewView {
+                view,
+                view_change_msgs,
+                preprepare_msgs,
+            } => {
+                self.handle_new_view(cx, view, view_change_msgs, preprepare_msgs)
+                    .await
             }
         }
     }
@@ -409,9 +441,13 @@ impl<T: PbftTransport> PbftNode<T> {
             replica_id: self.replica_id.clone(),
         };
 
-        timeout(Time::from_millis(0), self.config.prepare_timeout, self.transport.broadcast(prepare_msg))
-            .await
-            .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))?
+        timeout(
+            Time::from_millis(0),
+            self.config.prepare_timeout,
+            self.transport.broadcast(prepare_msg),
+        )
+        .await
+        .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))?
     }
 
     /// Handle prepare message from replica.
@@ -454,9 +490,13 @@ impl<T: PbftTransport> PbftNode<T> {
                 replica_id: self.replica_id.clone(),
             };
 
-            timeout(Time::from_millis(0), self.config.commit_timeout, self.transport.broadcast(commit_msg))
-                .await
-                .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))?;
+            timeout(
+                Time::from_millis(0),
+                self.config.commit_timeout,
+                self.transport.broadcast(commit_msg),
+            )
+            .await
+            .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))?;
         }
 
         Ok(())

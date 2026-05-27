@@ -376,42 +376,46 @@ impl<H: Handler> ErrorHandlerMiddleware<H> {
 }
 
 impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
-    fn call(&self, cx: &crate::Cx, req: Request) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+    fn call(
+        &self,
+        cx: &crate::Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
-        let accept = req
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("accept"))
-            .map(|(_, v)| v.clone())
-            .unwrap_or_default();
+            let accept = req
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("accept"))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
 
-        // TODO: Implement proper async panic handling
-        let result: Result<Response, ()> = if self.config.catch_panics {
-            // For now, disable panic catching for async handlers
-            Ok(self.inner.call(&cx, req).await)
-        } else {
-            Ok(self.inner.call(&cx, req).await)
-        };
+            // TODO: Implement proper async panic handling
+            let result: Result<Response, ()> = if self.config.catch_panics {
+                // For now, disable panic catching for async handlers
+                Ok(self.inner.call(&cx, req).await)
+            } else {
+                Ok(self.inner.call(&cx, req).await)
+            };
 
-        match result {
-            Ok(resp) => format_error_response(resp, &accept, self.config.expose_details),
-            Err(_panic) => {
-                let message = if self.config.expose_details {
-                    "Internal Server Error: handler panicked"
-                } else {
-                    "Internal Server Error"
-                };
-                format_error_response(
-                    Response::new(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        message.as_bytes().to_vec(),
-                    ),
-                    &accept,
-                    self.config.expose_details,
-                )
+            match result {
+                Ok(resp) => format_error_response(resp, &accept, self.config.expose_details),
+                Err(_panic) => {
+                    let message = if self.config.expose_details {
+                        "Internal Server Error: handler panicked"
+                    } else {
+                        "Internal Server Error"
+                    };
+                    format_error_response(
+                        Response::new(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            message.as_bytes().to_vec(),
+                        ),
+                        &accept,
+                        self.config.expose_details,
+                    )
+                }
             }
-        }
         })
     }
 }

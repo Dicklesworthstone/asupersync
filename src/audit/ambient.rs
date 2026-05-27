@@ -221,7 +221,7 @@ pub fn validate_audit_system_security() -> Result<(), String> {
                     "Weak exemption justification at {}:{}: '{}'",
                     finding.file, finding.line, reason
                 )),
-                _ => {}, // Valid exemption
+                _ => {} // Valid exemption
             }
         }
     }
@@ -292,7 +292,6 @@ pub const GREP_PATTERNS: &[(&str, AmbientCategory)] = &[
     (r"Clock::now\(\)", AmbientCategory::Time),
     (r"WallTime::now\(\)", AmbientCategory::Time),
     (r"Time::now\(\)", AmbientCategory::Time),
-
     // Thread spawning patterns
     (r"std::thread::spawn", AmbientCategory::Spawn),
     (r"thread::spawn", AmbientCategory::Spawn),
@@ -300,14 +299,15 @@ pub const GREP_PATTERNS: &[(&str, AmbientCategory)] = &[
     (r"std::thread::Builder", AmbientCategory::Spawn),
     (r"core::thread::spawn", AmbientCategory::Spawn),
     (r"Thread::spawn", AmbientCategory::Spawn), // Common alias
-
     // Entropy patterns - including alternative paths
     (r"getrandom::", AmbientCategory::Entropy),
     (r"rand::thread_rng", AmbientCategory::Entropy),
     (r"rand::random\(\)", AmbientCategory::Entropy),
-    (r"std::collections::hash_map::RandomState", AmbientCategory::Entropy),
+    (
+        r"std::collections::hash_map::RandomState",
+        AmbientCategory::Entropy,
+    ),
     (r"Rng::", AmbientCategory::Entropy), // Common trait usage
-
     // IO patterns - network and filesystem
     (r"std::net::TcpListener", AmbientCategory::Io),
     (r"std::net::TcpStream", AmbientCategory::Io),
@@ -321,7 +321,6 @@ pub const GREP_PATTERNS: &[(&str, AmbientCategory)] = &[
     (r"File::create\(", AmbientCategory::Io),
     (r"TcpListener::", AmbientCategory::Io),
     (r"TcpStream::", AmbientCategory::Io),
-
     // Environment variable patterns
     (r"env::var\(", AmbientCategory::Env),
     (r"env::var_os\(", AmbientCategory::Env),
@@ -333,7 +332,6 @@ pub const GREP_PATTERNS: &[(&str, AmbientCategory)] = &[
     (r"std::env::vars\(", AmbientCategory::Env),
     (r"std::env::set_var\(", AmbientCategory::Env),
     (r"std::env::remove_var\(", AmbientCategory::Env),
-
     // Output patterns
     (r"println!\(", AmbientCategory::Output),
     (r"eprintln!\(", AmbientCategory::Output),
@@ -353,22 +351,18 @@ pub const SUSPICIOUS_ALIAS_PATTERNS: &[(&str, AmbientCategory)] = &[
     (r"use.*SystemTime\s+as\s+\w+", AmbientCategory::Time),
     (r"use.*time::Instant\s+as\s+\w+", AmbientCategory::Time),
     (r"use.*time::SystemTime\s+as\s+\w+", AmbientCategory::Time),
-
     // Thread aliases
     (r"use.*thread::spawn\s+as\s+\w+", AmbientCategory::Spawn),
     (r"use.*thread::Builder\s+as\s+\w+", AmbientCategory::Spawn),
     (r"use.*std::thread\s+as\s+\w+", AmbientCategory::Spawn),
-
     // Entropy aliases
     (r"use.*getrandom\s+as\s+\w+", AmbientCategory::Entropy),
     (r"use.*thread_rng\s+as\s+\w+", AmbientCategory::Entropy),
     (r"use.*rand\s+as\s+\w+", AmbientCategory::Entropy),
-
     // IO aliases
     (r"use.*std::fs\s+as\s+\w+", AmbientCategory::Io),
     (r"use.*std::net\s+as\s+\w+", AmbientCategory::Io),
     (r"use.*File\s+as\s+\w+", AmbientCategory::Io),
-
     // Environment aliases
     (r"use.*std::env\s+as\s+\w+", AmbientCategory::Env),
 ];
@@ -436,20 +430,22 @@ fn detect_ambient_violations_impl(source_code: &str) -> Vec<AmbientViolation> {
                 // Check if this looks like an ambient authority alias
                 let is_suspicious = match category {
                     AmbientCategory::Time => {
-                        line.contains("Instant") || line.contains("SystemTime") || line.contains("time::")
+                        line.contains("Instant")
+                            || line.contains("SystemTime")
+                            || line.contains("time::")
                     }
-                    AmbientCategory::Spawn => {
-                        line.contains("thread::") || line.contains("spawn")
-                    }
+                    AmbientCategory::Spawn => line.contains("thread::") || line.contains("spawn"),
                     AmbientCategory::Entropy => {
-                        line.contains("getrandom") || line.contains("thread_rng") || line.contains("rand")
+                        line.contains("getrandom")
+                            || line.contains("thread_rng")
+                            || line.contains("rand")
                     }
                     AmbientCategory::Io => {
-                        line.contains("std::fs") || line.contains("std::net") || line.contains("File")
+                        line.contains("std::fs")
+                            || line.contains("std::net")
+                            || line.contains("File")
                     }
-                    AmbientCategory::Env => {
-                        line.contains("std::env") || line.contains("env::")
-                    }
+                    AmbientCategory::Env => line.contains("std::env") || line.contains("env::"),
                     AmbientCategory::Output => false, // Macro aliases are harder to detect this way
                 };
 
@@ -545,7 +541,7 @@ fn validate_known_findings_integrity() {
                     "KNOWN_FINDINGS tampering detected: insufficient exemption reason at {}:{}: '{}'",
                     finding.file, finding.line, reason
                 ),
-                _ => {}, // Valid exemption
+                _ => {} // Valid exemption
             }
         }
     }
@@ -569,7 +565,10 @@ fn validate_known_findings_integrity() {
 fn validate_audit_system_integrity() {
     // Basic check: ensure the audit system's own code doesn't have obvious ambient authority
     let _audit_source_patterns = [
-        ("std::fs::read_to_string", "Audit system using direct file access"),
+        (
+            "std::fs::read_to_string",
+            "Audit system using direct file access",
+        ),
         ("println!", "Audit system using ambient output"),
         ("eprintln!", "Audit system using ambient error output"),
     ];
@@ -681,8 +680,14 @@ mod tests {
                 println!("Audit system security warnings: {}", warnings);
 
                 // Validate that warnings are properly formatted and informative
-                assert!(!warnings.is_empty(), "Warnings should not be empty if validation failed");
-                assert!(warnings.len() > 10, "Warning messages should be descriptive");
+                assert!(
+                    !warnings.is_empty(),
+                    "Warnings should not be empty if validation failed"
+                );
+                assert!(
+                    warnings.len() > 10,
+                    "Warning messages should be descriptive"
+                );
             }
         }
     }
@@ -706,16 +711,17 @@ mod tests {
         let target_region = crate::types::RegionId::new_for_test(2, 0);
 
         // Same region should always be allowed
-        let same_result = crate::audit::ambient::create_constrained_audit_context(
-            source_region, source_region
-        );
+        let same_result =
+            crate::audit::ambient::create_constrained_audit_context(source_region, source_region);
         assert!(same_result.is_ok(), "Same-region audit should be allowed");
 
         // Cross-region audit should be validated but allowed in test context
-        let cross_result = crate::audit::ambient::create_constrained_audit_context(
-            source_region, target_region
+        let cross_result =
+            crate::audit::ambient::create_constrained_audit_context(source_region, target_region);
+        assert!(
+            cross_result.is_ok(),
+            "Cross-region audit should be validated and logged"
         );
-        assert!(cross_result.is_ok(), "Cross-region audit should be validated and logged");
     }
 
     #[test]
@@ -726,10 +732,16 @@ mod tests {
 
         // These should complete without panicking, indicating capability validation passed
         assert!(warning_count >= 0, "Warning count should be non-negative");
-        assert!(unresolved_count >= 0, "Unresolved count should be non-negative");
+        assert!(
+            unresolved_count >= 0,
+            "Unresolved count should be non-negative"
+        );
 
         // The counts should be reasonable (not obviously tampered)
-        assert!(unresolved_count <= 100, "Unresolved count should be reasonable");
+        assert!(
+            unresolved_count <= 100,
+            "Unresolved count should be reasonable"
+        );
     }
 
     #[test]
@@ -755,11 +767,17 @@ fn test_code() {
         // Should find the direct violations
         assert_eq!(violations.len(), 2);
 
-        let instant_violation = violations.iter().find(|v| v.line_content.contains("Instant::now")).unwrap();
+        let instant_violation = violations
+            .iter()
+            .find(|v| v.line_content.contains("Instant::now"))
+            .unwrap();
         assert_eq!(instant_violation.category, AmbientCategory::Time);
         assert_eq!(instant_violation.violation_type, ViolationType::DirectUsage);
 
-        let println_violation = violations.iter().find(|v| v.line_content.contains("println!")).unwrap();
+        let println_violation = violations
+            .iter()
+            .find(|v| v.line_content.contains("println!"))
+            .unwrap();
         assert_eq!(println_violation.category, AmbientCategory::Output);
         assert_eq!(println_violation.violation_type, ViolationType::DirectUsage);
     }
@@ -785,15 +803,24 @@ fn good_function(cx: &Cx) {
         let violations = detect_ambient_violations(source);
 
         // Should detect the suspicious aliases
-        let alias_violations: Vec<_> = violations.iter()
+        let alias_violations: Vec<_> = violations
+            .iter()
             .filter(|v| v.violation_type == ViolationType::SuspiciousAlias)
             .collect();
 
         assert!(!alias_violations.is_empty(), "Should detect alias bypasses");
 
         // Should detect at least the time and thread aliases
-        assert!(alias_violations.iter().any(|v| v.category == AmbientCategory::Time));
-        assert!(alias_violations.iter().any(|v| v.category == AmbientCategory::Spawn));
+        assert!(
+            alias_violations
+                .iter()
+                .any(|v| v.category == AmbientCategory::Time)
+        );
+        assert!(
+            alias_violations
+                .iter()
+                .any(|v| v.category == AmbientCategory::Spawn)
+        );
     }
 
     #[test]
@@ -815,17 +842,20 @@ fn bad_variants() {
         let violations = detect_ambient_violations(source);
 
         // Should detect all variants
-        let time_violations: Vec<_> = violations.iter()
+        let time_violations: Vec<_> = violations
+            .iter()
             .filter(|v| v.category == AmbientCategory::Time)
             .collect();
         assert_eq!(time_violations.len(), 3, "Should catch all time variants");
 
-        let spawn_violations: Vec<_> = violations.iter()
+        let spawn_violations: Vec<_> = violations
+            .iter()
             .filter(|v| v.category == AmbientCategory::Spawn)
             .collect();
         assert_eq!(spawn_violations.len(), 2, "Should catch all spawn variants");
 
-        let env_violations: Vec<_> = violations.iter()
+        let env_violations: Vec<_> = violations
+            .iter()
             .filter(|v| v.category == AmbientCategory::Env)
             .collect();
         assert_eq!(env_violations.len(), 2, "Should catch all env variants");
@@ -873,12 +903,14 @@ fn test_function() {
 
         // Should classify violation types correctly
         let direct_usage = violations.iter().any(|v| {
-            v.violation_type == ViolationType::DirectUsage && v.line_content.contains("Instant::now")
+            v.violation_type == ViolationType::DirectUsage
+                && v.line_content.contains("Instant::now")
         });
         assert!(direct_usage, "Should detect direct usage");
 
         let alias_usage = violations.iter().any(|v| {
-            v.violation_type == ViolationType::SuspiciousAlias && v.line_content.contains("as Clock")
+            v.violation_type == ViolationType::SuspiciousAlias
+                && v.line_content.contains("as Clock")
         });
         assert!(alias_usage, "Should detect suspicious alias");
     }
@@ -1320,11 +1352,13 @@ fn test_function() {
             audit_failures.is_empty(),
             "Ambient authority audit failures ({}):{}",
             audit_failures.len(),
-            audit_failures.iter().fold(String::new(), |mut acc, failure| {
-                acc.push_str("\n  - ");
-                acc.push_str(failure);
-                acc
-            })
+            audit_failures
+                .iter()
+                .fold(String::new(), |mut acc, failure| {
+                    acc.push_str("\n  - ");
+                    acc.push_str(failure);
+                    acc
+                })
         );
     }
 

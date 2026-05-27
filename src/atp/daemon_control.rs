@@ -133,8 +133,10 @@ impl SecureDaemonController {
     ) -> Result<Self, Error> {
         // Validate daemon executable exists and is executable
         if !daemon_path.exists() {
-            return Err(Error::new(ErrorKind::ConfigError)
-                .with_message(format!("Daemon executable not found: {}", daemon_path.display())));
+            return Err(Error::new(ErrorKind::ConfigError).with_message(format!(
+                "Daemon executable not found: {}",
+                daemon_path.display()
+            )));
         }
 
         if !Self::is_executable(&daemon_path)? {
@@ -144,13 +146,18 @@ impl SecureDaemonController {
 
         // Validate config file exists if specified
         if !config_path.exists() {
-            return Err(Error::new(ErrorKind::ConfigError)
-                .with_message(format!("Daemon config not found: {}", config_path.display())));
+            return Err(Error::new(ErrorKind::ConfigError).with_message(format!(
+                "Daemon config not found: {}",
+                config_path.display()
+            )));
         }
 
-        let pid_file = config_path.parent()
-            .ok_or_else(|| Error::new(ErrorKind::ConfigError)
-                .with_message("Invalid config path: no parent directory"))?
+        let pid_file = config_path
+            .parent()
+            .ok_or_else(|| {
+                Error::new(ErrorKind::ConfigError)
+                    .with_message("Invalid config path: no parent directory")
+            })?
             .join("daemon.pid");
 
         Ok(Self {
@@ -183,13 +190,24 @@ impl SecureDaemonController {
                 if self.is_our_daemon_process(process) {
                     return Ok(DaemonProcessInfo {
                         pid: Some(pid),
-                        command: process.cmd().iter()
+                        command: process
+                            .cmd()
+                            .iter()
                             .map(|s| s.to_string_lossy().into_owned())
                             .collect::<Vec<_>>()
                             .join(" ")
                             .into(),
-                        working_dir: process.cwd().unwrap_or_else(|| std::path::Path::new("/")).to_path_buf(),
-                        user: format!("{:?}", process.user_id().map(|uid| uid.to_string()).unwrap_or_else(|| "0".to_string())),
+                        working_dir: process
+                            .cwd()
+                            .unwrap_or_else(|| std::path::Path::new("/"))
+                            .to_path_buf(),
+                        user: format!(
+                            "{:?}",
+                            process
+                                .user_id()
+                                .map(|uid| uid.to_string())
+                                .unwrap_or_else(|| "0".to_string())
+                        ),
                         cpu_usage: process.cpu_usage(),
                         memory_usage: process.memory(),
                         start_time: Some(Instant::now()), // Approximate start time
@@ -207,7 +225,11 @@ impl SecureDaemonController {
         Ok(DaemonProcessInfo {
             pid: None,
             command: "Not running".to_string(),
-            working_dir: self.config_path.parent().unwrap_or(Path::new("/")).to_path_buf(),
+            working_dir: self
+                .config_path
+                .parent()
+                .unwrap_or(Path::new("/"))
+                .to_path_buf(),
             user: "none".to_string(),
             cpu_usage: 0.0,
             memory_usage: 0,
@@ -392,7 +414,10 @@ impl SecureDaemonController {
     /// Requires Restart capability (or both Stop + Start capabilities).
     pub fn restart(&mut self, cx: &Cx) -> Result<DaemonControlResult, Error> {
         // Check for explicit restart capability or both stop + start
-        if !self.capabilities.contains(&DaemonControlCapability::Restart) {
+        if !self
+            .capabilities
+            .contains(&DaemonControlCapability::Restart)
+        {
             self.require_capability(DaemonControlCapability::Stop)?;
             self.require_capability(DaemonControlCapability::Start)?;
         }
@@ -415,13 +440,11 @@ impl SecureDaemonController {
 
         // Return result with original previous state and final duration
         match start_result {
-            DaemonControlResult::Success { new_state, .. } => {
-                Ok(DaemonControlResult::Success {
-                    previous_state,
-                    new_state,
-                    duration: start_time.elapsed(),
-                })
-            }
+            DaemonControlResult::Success { new_state, .. } => Ok(DaemonControlResult::Success {
+                previous_state,
+                new_state,
+                duration: start_time.elapsed(),
+            }),
             other => Ok(other),
         }
     }
@@ -432,23 +455,25 @@ impl SecureDaemonController {
         if self.capabilities.contains(&cap) {
             Ok(())
         } else {
-            Err(Error::new(ErrorKind::AdmissionDenied)
-                .with_message(format!(
-                    "Operation requires {:?} capability, but only have: {:?}",
-                    cap, self.capabilities
-                )))
+            Err(Error::new(ErrorKind::AdmissionDenied).with_message(format!(
+                "Operation requires {:?} capability, but only have: {:?}",
+                cap, self.capabilities
+            )))
         }
     }
 
-    fn validate_operation_authorized(&self, cx: &Cx, _operation: DaemonControlCapability) -> Result<(), Error> {
+    fn validate_operation_authorized(
+        &self,
+        cx: &Cx,
+        _operation: DaemonControlCapability,
+    ) -> Result<(), Error> {
         // Validate the operation is authorized by the region's capability context
         // This ensures the operation is running in the proper security context
         if cx.budget().remaining_cost().unwrap_or(0) == 0 {
-            return Err(Error::new(ErrorKind::AdmissionDenied)
-                .with_message(format!(
-                    "Daemon control operation for region {:?} not authorized by capability context",
-                    self.region_id
-                )));
+            return Err(Error::new(ErrorKind::AdmissionDenied).with_message(format!(
+                "Daemon control operation for region {:?} not authorized by capability context",
+                self.region_id
+            )));
         }
 
         // Additional validation could check cx.current_region() == self.region_id
@@ -470,19 +495,21 @@ impl SecureDaemonController {
     }
 
     fn read_pid_file(&self) -> Result<u32, Error> {
-        let contents = fs::read_to_string(&self.pid_file)
-            .map_err(|e| Error::new(ErrorKind::InvalidInput)
-                .with_message(format!("Failed to read PID file: {}", e)))?;
+        let contents = fs::read_to_string(&self.pid_file).map_err(|e| {
+            Error::new(ErrorKind::InvalidInput)
+                .with_message(format!("Failed to read PID file: {}", e))
+        })?;
 
-        contents.trim().parse::<u32>()
-            .map_err(|e| Error::new(ErrorKind::InvalidInput)
-                .with_message(format!("Invalid PID in file: {}", e)))
+        contents.trim().parse::<u32>().map_err(|e| {
+            Error::new(ErrorKind::InvalidInput).with_message(format!("Invalid PID in file: {}", e))
+        })
     }
 
     fn write_pid_file(&self, pid: u32) -> Result<(), Error> {
-        fs::write(&self.pid_file, pid.to_string())
-            .map_err(|e| Error::new(ErrorKind::AdmissionDenied)
-                .with_message(format!("Failed to write PID file: {}", e)))
+        fs::write(&self.pid_file, pid.to_string()).map_err(|e| {
+            Error::new(ErrorKind::AdmissionDenied)
+                .with_message(format!("Failed to write PID file: {}", e))
+        })
     }
 
     fn is_our_daemon_process(&self, process: &sysinfo::Process) -> bool {
@@ -494,8 +521,7 @@ impl SecureDaemonController {
 
         // Verify the executable path matches ours
         let exe_path = Path::new(&cmd[0]);
-        exe_path == self.daemon_path ||
-        exe_path.file_name() == self.daemon_path.file_name()
+        exe_path == self.daemon_path || exe_path.file_name() == self.daemon_path.file_name()
     }
 
     fn send_signal_to_process(&self, pid: u32, signal: Signal) -> Result<(), Error> {
@@ -510,8 +536,10 @@ impl SecureDaemonController {
             .arg(format!("-{}", signal_name))
             .arg(pid.to_string())
             .output()
-            .map_err(|e| Error::new(ErrorKind::Internal)
-                .with_message(format!("Failed to send signal: {}", e)))?;
+            .map_err(|e| {
+                Error::new(ErrorKind::Internal)
+                    .with_message(format!("Failed to send signal: {}", e))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -525,9 +553,9 @@ impl SecureDaemonController {
     fn is_executable(path: &Path) -> Result<bool, Error> {
         use std::os::unix::fs::PermissionsExt;
 
-        let metadata = fs::metadata(path)
-            .map_err(|e| Error::new(ErrorKind::InvalidInput)
-                .with_message(format!("Cannot access file: {}", e)))?;
+        let metadata = fs::metadata(path).map_err(|e| {
+            Error::new(ErrorKind::InvalidInput).with_message(format!("Cannot access file: {}", e))
+        })?;
 
         let permissions = metadata.permissions();
         Ok(permissions.mode() & 0o111 != 0) // Check any execute bit
@@ -554,9 +582,10 @@ pub fn create_atp_daemon_controller(
     capabilities: Vec<DaemonControlCapability>,
     config_dir: &Path,
 ) -> Result<SecureDaemonController, Error> {
-    let daemon_path = std::env::current_exe()
-        .map_err(|e| Error::new(ErrorKind::ConfigError)
-            .with_message(format!("Cannot determine daemon executable path: {}", e)))?;
+    let daemon_path = std::env::current_exe().map_err(|e| {
+        Error::new(ErrorKind::ConfigError)
+            .with_message(format!("Cannot determine daemon executable path: {}", e))
+    })?;
 
     let config_path = config_dir.join("config.toml");
 
@@ -579,13 +608,22 @@ mod tests {
             vec![DaemonControlCapability::Status],
             std::env::current_exe().unwrap(),
             config_path,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Status capability should work
-        assert!(controller.require_capability(DaemonControlCapability::Status).is_ok());
+        assert!(
+            controller
+                .require_capability(DaemonControlCapability::Status)
+                .is_ok()
+        );
 
         // Start capability should fail
-        assert!(controller.require_capability(DaemonControlCapability::Start).is_err());
+        assert!(
+            controller
+                .require_capability(DaemonControlCapability::Start)
+                .is_err()
+        );
     }
 
     #[test]
@@ -596,7 +634,10 @@ mod tests {
 
         let controller = SecureDaemonController::new(
             RegionId::new_for_test(1, 0),
-            vec![DaemonControlCapability::Status, DaemonControlCapability::Start],
+            vec![
+                DaemonControlCapability::Status,
+                DaemonControlCapability::Start,
+            ],
             std::env::current_exe().unwrap(),
             config_path,
         );

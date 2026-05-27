@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 
+use crate::Cx;
 use crate::bytes::Bytes;
 use crate::util::DetRng;
 use crate::web::extract::Request;
 use crate::web::response::Response;
-use crate::Cx;
 
 use super::server::VirtualServer;
 

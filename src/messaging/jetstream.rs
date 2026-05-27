@@ -50,7 +50,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use std::collections::HashSet;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicBool};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 /// br-asupersync-w7n2qx: client-side cap on stream and consumer name
 /// length, in bytes. Mirrors the upstream `nats-server` 256-byte cap on
@@ -225,7 +225,8 @@ impl PullRateLimiter {
 
             warn!(
                 "JetStream pull rate limit exceeded - backoff required: {}ms (rapid requests: {})",
-                backoff_ms, rapid_count + 1
+                backoff_ms,
+                rapid_count + 1
             );
 
             return Err(Duration::from_millis(backoff_ms));
@@ -253,7 +254,8 @@ impl PullRateLimiter {
 
     fn calculate_backoff(&self, rapid_count: u64) -> u64 {
         let base_backoff = MIN_PULL_INTERVAL_MS * 2; // Start with 2x minimum interval
-        let exponential_backoff = (base_backoff as f64 * PULL_BACKOFF_MULTIPLIER.powi(rapid_count as i32)) as u64;
+        let exponential_backoff =
+            (base_backoff as f64 * PULL_BACKOFF_MULTIPLIER.powi(rapid_count as i32)) as u64;
         exponential_backoff.min(MAX_PULL_BACKOFF_MS)
     }
 
@@ -272,12 +274,18 @@ impl GlobalPullRateTracker {
     }
 
     /// Check if a global pull request is allowed and update tracking.
-    fn check_global_pull_request(&mut self, now_ns: u64, estimated_batch_memory: u64) -> Result<(), Duration> {
+    fn check_global_pull_request(
+        &mut self,
+        now_ns: u64,
+        estimated_batch_memory: u64,
+    ) -> Result<(), Duration> {
         let now_ms = now_ns / 1_000_000; // Convert to milliseconds
         let one_second_ago = now_ms.saturating_sub(1000);
 
         // Count recent pulls in the last second
-        let recent_count = self.recent_pulls.iter()
+        let recent_count = self
+            .recent_pulls
+            .iter()
             .filter(|&&timestamp| timestamp > one_second_ago)
             .count();
 
@@ -295,7 +303,8 @@ impl GlobalPullRateTracker {
         if new_memory_usage > MEMORY_PRESSURE_THRESHOLD_MB * 1_024 * 1_024 {
             warn!(
                 "JetStream memory pressure detected: {}MB estimated usage (threshold: {}MB)",
-                new_memory_usage / (1_024 * 1_024), MEMORY_PRESSURE_THRESHOLD_MB
+                new_memory_usage / (1_024 * 1_024),
+                MEMORY_PRESSURE_THRESHOLD_MB
             );
             return Err(Duration::from_millis(500)); // Longer delay for memory pressure
         }
@@ -307,7 +316,9 @@ impl GlobalPullRateTracker {
 
         // Cleanup old memory usage estimates (rough approximation)
         if self.buffer_position % 100 == 0 {
-            self.estimated_memory_usage = self.estimated_memory_usage.saturating_sub(estimated_batch_memory * 50);
+            self.estimated_memory_usage = self
+                .estimated_memory_usage
+                .saturating_sub(estimated_batch_memory * 50);
         }
 
         Ok(())
@@ -355,7 +366,10 @@ fn validate_pull_batch_size(batch: usize) -> Result<(), JsError> {
 
 /// Enhanced pull batch size validation with dynamic sizing based on system pressure.
 /// Returns the validated (and potentially clamped) batch size.
-fn validate_and_clamp_pull_batch_size(requested_batch: usize, consumer: &Consumer) -> Result<usize, JsError> {
+fn validate_and_clamp_pull_batch_size(
+    requested_batch: usize,
+    consumer: &Consumer,
+) -> Result<usize, JsError> {
     // First apply basic validation
     validate_pull_batch_size(requested_batch)?;
 
@@ -377,7 +391,8 @@ fn validate_and_clamp_pull_batch_size(requested_batch: usize, consumer: &Consume
 
         if current_memory_mb > MEMORY_PRESSURE_THRESHOLD_MB / 2 {
             // Under moderate memory pressure - reduce batch size
-            let pressure_factor = (current_memory_mb as f64 / MEMORY_PRESSURE_THRESHOLD_MB as f64).min(1.0);
+            let pressure_factor =
+                (current_memory_mb as f64 / MEMORY_PRESSURE_THRESHOLD_MB as f64).min(1.0);
             let reduced_batch = ((requested_batch as f64 * (1.0 - pressure_factor * 0.5)) as usize)
                 .max(MIN_BATCH_SIZE_UNDER_PRESSURE);
 
@@ -1657,7 +1672,10 @@ impl fmt::Debug for Consumer {
             .field("prefix", &self.prefix)
             .field("pending_acks", &self.pending_acks.load(Ordering::Relaxed))
             .field("max_ack_pending", &self.max_ack_pending)
-            .field("rate_limiting_active", &self.pull_rate_limiter.is_rate_limiting_active())
+            .field(
+                "rate_limiting_active",
+                &self.pull_rate_limiter.is_rate_limiting_active(),
+            )
             .finish()
     }
 }
@@ -1821,7 +1839,9 @@ impl Consumer {
         let estimated_batch_memory = effective_batch as u64 * 2048; // Rough estimate: 2KB per message
         {
             let mut global_tracker = GLOBAL_PULL_RATE_TRACKER.lock().unwrap();
-            if let Err(delay) = global_tracker.check_global_pull_request(now_ns, estimated_batch_memory) {
+            if let Err(delay) =
+                global_tracker.check_global_pull_request(now_ns, estimated_batch_memory)
+            {
                 return Err(JsError::InvalidConfig(format!(
                     "JetStream global rate limit or memory pressure - retry after {}ms",
                     delay.as_millis()
@@ -2942,7 +2962,10 @@ impl JsMessage {
         // Create ack token with timestamp, sequence, delivery count, and nonce
         let ack_token = format!(
             "{}.{}.{}.{}.{}",
-            now, self.sequence, self.delivered, nonce,
+            now,
+            self.sequence,
+            self.delivered,
+            nonce,
             self.hash_reply_subject_components()
         );
 
@@ -6365,7 +6388,10 @@ mod tests {
             let mut successful_requests = 0;
             for i in 0..100 {
                 let request_time = now_ns + (i * 1_000_000); // 1ms apart
-                if tracker.check_global_pull_request(request_time, 1024).is_ok() {
+                if tracker
+                    .check_global_pull_request(request_time, 1024)
+                    .is_ok()
+                {
                     successful_requests += 1;
                 }
             }
@@ -6410,7 +6436,9 @@ mod tests {
 
             // Trigger rate limiting by making rapid requests
             let _ = consumer.pull_rate_limiter.check_pull_request(now_ns);
-            let _ = consumer.pull_rate_limiter.check_pull_request(now_ns + 1_000_000); // Rapid request
+            let _ = consumer
+                .pull_rate_limiter
+                .check_pull_request(now_ns + 1_000_000); // Rapid request
 
             // Check that rate limiting is active
             assert!(
@@ -6475,7 +6503,9 @@ mod tests {
                 .as_nanos() as u64;
 
             let _ = consumer.pull_rate_limiter.check_pull_request(now_ns);
-            let rapid_result = consumer.pull_rate_limiter.check_pull_request(now_ns + 1_000_000);
+            let rapid_result = consumer
+                .pull_rate_limiter
+                .check_pull_request(now_ns + 1_000_000);
 
             assert!(
                 rapid_result.is_err(),
