@@ -15,7 +15,9 @@
 #![cfg(all(test, feature = "real-service-e2e"))]
 
 use crate::channel::{broadcast, mpsc, oneshot};
-use crate::combinator::circuit_breaker::{CircuitBreaker, CircuitBreakerPolicy, FailurePredicate};
+use crate::combinator::circuit_breaker::{
+    CircuitBreaker, CircuitBreakerPolicy, FailurePredicate, State,
+};
 use crate::combinator::{join, race, retry, timeout};
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind};
@@ -25,9 +27,9 @@ use crate::sync::{Mutex, Semaphore};
 use crate::time::{Duration, Instant, sleep};
 use crate::types::{Budget, Outcome, RegionId, TaskId, Time};
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::SystemTime;
 use tempfile::TempDir;
 
@@ -88,6 +90,74 @@ impl Drop for IntegrationLogger {
             serde_json::json!({"total_duration_ms": elapsed}),
         );
     }
+}
+
+#[derive(Clone, Debug)]
+struct CircuitBreakerTransition {
+    tier: usize,
+    from: State,
+    to: State,
+    total_success: u64,
+    total_failure: u64,
+    total_rejected: u64,
+    times_opened: u64,
+    times_closed: u64,
+    current_failure_streak: u32,
+}
+
+fn circuit_state_json(state: State) -> serde_json::Value {
+    match state {
+        State::Closed { failures } => serde_json::json!({
+            "name": "closed",
+            "failures": failures,
+        }),
+        State::Open { since_millis } => serde_json::json!({
+            "name": "open",
+            "since_millis": since_millis,
+        }),
+        State::HalfOpen {
+            epoch,
+            probes_active,
+            successes,
+        } => serde_json::json!({
+            "name": "half_open",
+            "epoch": epoch,
+            "probes_active": probes_active,
+            "successes": successes,
+        }),
+    }
+}
+
+fn circuit_transition_json(transition: &CircuitBreakerTransition) -> serde_json::Value {
+    serde_json::json!({
+        "tier": transition.tier,
+        "from": circuit_state_json(transition.from),
+        "to": circuit_state_json(transition.to),
+        "metrics": {
+            "total_success": transition.total_success,
+            "total_failure": transition.total_failure,
+            "total_rejected": transition.total_rejected,
+            "times_opened": transition.times_opened,
+            "times_closed": transition.times_closed,
+            "current_failure_streak": transition.current_failure_streak,
+        }
+    })
+}
+
+fn circuit_state_snapshot_json(tier: usize, breaker: &CircuitBreaker) -> serde_json::Value {
+    let metrics = breaker.metrics();
+    serde_json::json!({
+        "tier": tier,
+        "state": circuit_state_json(metrics.current_state),
+        "metrics": {
+            "total_success": metrics.total_success,
+            "total_failure": metrics.total_failure,
+            "total_rejected": metrics.total_rejected,
+            "times_opened": metrics.times_opened,
+            "times_closed": metrics.times_closed,
+            "current_failure_streak": metrics.current_failure_streak,
+        }
+    })
 }
 
 /// Test harness for integration scenario testing
@@ -456,15 +526,27 @@ impl IntegrationTestHarness {
     async fn test_circuit_breaker_cascade_recovery(&self) {
         self.logger.log_phase("circuit_breaker_setup");
 
+        let scenario_id = "circuit_breaker_cascade_recovery";
+        let artifact_path = self
+            .temp_dir
+            .path()
+            .join("circuit_breaker_cascade_recovery.jsonl")
+            .to_string_lossy()
+            .into_owned();
+
         // Create a multi-tier service architecture with circuit breakers
         let service_tiers = 3;
         let requests_per_tier = 20;
+        let simulated_start_millis = 1_000_000_u64;
 
         self.logger.log_event(
             "cascade_config",
             serde_json::json!({
+                "scenario_id": scenario_id,
+                "artifact_path": artifact_path.as_str(),
                 "service_tiers": service_tiers,
-                "requests_per_tier": requests_per_tier
+                "requests_per_tier": requests_per_tier,
+                "simulated_start_millis": simulated_start_millis
             }),
         );
 
@@ -473,20 +555,38 @@ impl IntegrationTestHarness {
 
         let mut circuit_breakers = Vec::new();
         let failure_counts = Arc::new(Mutex::new(HashMap::new()));
+        let circuit_state_transitions =
+            Arc::new(StdMutex::new(Vec::<CircuitBreakerTransition>::new()));
 
         for tier in 0..service_tiers {
+            let transition_log = Arc::clone(&circuit_state_transitions);
             let policy = CircuitBreakerPolicy {
                 name: format!("service_tier_{}", tier),
                 failure_threshold: 5, // Open after 5 failures
                 success_threshold: 2,
                 open_duration: Duration::from_millis(100),
                 half_open_max_probes: 3,
-                failure_predicate: FailurePredicate::AnyError,
+                failure_predicate: FailurePredicate::AllErrors,
                 sliding_window: None,
-                on_state_change: None,
+                on_state_change: Some(Arc::new(move |from, to, metrics| {
+                    transition_log
+                        .lock()
+                        .expect("circuit breaker transition log lock poisoned")
+                        .push(CircuitBreakerTransition {
+                            tier,
+                            from,
+                            to,
+                            total_success: metrics.total_success,
+                            total_failure: metrics.total_failure,
+                            total_rejected: metrics.total_rejected,
+                            times_opened: metrics.times_opened,
+                            times_closed: metrics.times_closed,
+                            current_failure_streak: metrics.current_failure_streak,
+                        });
+                })),
             };
 
-            let breaker = CircuitBreaker::new(policy);
+            let breaker = Arc::new(CircuitBreaker::new(policy));
             circuit_breakers.push(breaker);
 
             failure_counts
@@ -514,7 +614,6 @@ impl IntegrationTestHarness {
             let successful_requests = Arc::clone(&successful_requests);
             let failed_requests = Arc::clone(&failed_requests);
             let circuit_opened_count = Arc::clone(&circuit_opened_count);
-            let failure_injector = &self.failure_injector;
             let logger = &self.logger;
 
             let request_task = self
@@ -523,7 +622,7 @@ impl IntegrationTestHarness {
                     scope
                         .spawn(async move {
                             let tier = request_id % service_tiers;
-                            let now = Time::now();
+                            let now = Time::from_millis(simulated_start_millis + request_id as u64);
 
                             let result = circuit_breakers_clone[tier].call(now, || {
                                 // Inject failures more frequently in deeper tiers
@@ -534,8 +633,8 @@ impl IntegrationTestHarness {
                                     _ => 50,
                                 };
 
-                                let random_failure = fastrand::usize(0..100) < tier_failure_rate;
-                                if random_failure {
+                                let failure_slot = (request_id * 37 + tier * 17) % 100;
+                                if failure_slot < tier_failure_rate {
                                     return Err(Error::new(
                                         ErrorKind::Service,
                                         format!("Service tier {} failure", tier),
@@ -551,6 +650,7 @@ impl IntegrationTestHarness {
                                     logger.log_event(
                                         "request_success",
                                         serde_json::json!({
+                                            "scenario_id": scenario_id,
                                             "request_id": request_id,
                                             "tier": tier,
                                             "response": response
@@ -561,11 +661,15 @@ impl IntegrationTestHarness {
                                     failed_requests.fetch_add(1, Ordering::Relaxed);
 
                                     let error_description = format!("{:?}", e);
+                                    if let Some(counter) = failure_counts.lock().await.get(&tier) {
+                                        counter.fetch_add(1, Ordering::Relaxed);
+                                    }
                                     if error_description.contains("Open") {
                                         circuit_opened_count.fetch_add(1, Ordering::Relaxed);
                                         logger.log_event(
                                             "circuit_breaker_opened",
                                             serde_json::json!({
+                                                "scenario_id": scenario_id,
                                                 "request_id": request_id,
                                                 "tier": tier,
                                                 "error": error_description
@@ -575,6 +679,7 @@ impl IntegrationTestHarness {
                                         logger.log_event(
                                             "request_failure",
                                             serde_json::json!({
+                                                "scenario_id": scenario_id,
                                                 "request_id": request_id,
                                                 "tier": tier,
                                                 "error": error_description
@@ -616,17 +721,82 @@ impl IntegrationTestHarness {
         let initial_successful = successful_requests.load(Ordering::Relaxed);
         let initial_failed = failed_requests.load(Ordering::Relaxed);
         let initial_circuit_opens = circuit_opened_count.load(Ordering::Relaxed);
+        let initial_transition_count = circuit_state_transitions
+            .lock()
+            .expect("circuit breaker transition log lock poisoned")
+            .len();
+        let initial_states = circuit_breakers
+            .iter()
+            .enumerate()
+            .map(|(tier, breaker)| circuit_state_snapshot_json(tier, breaker))
+            .collect::<Vec<_>>();
+        let mut initial_tier_failures = {
+            let counts = failure_counts.lock().await;
+            counts
+                .iter()
+                .map(|(tier, count)| (*tier, count.load(Ordering::Relaxed)))
+                .collect::<Vec<_>>()
+        };
+        initial_tier_failures.sort_unstable_by_key(|(tier, _)| *tier);
+        let initial_tier_failures = initial_tier_failures
+            .into_iter()
+            .map(|(tier, failures)| {
+                serde_json::json!({
+                    "tier": tier,
+                    "failures": failures
+                })
+            })
+            .collect::<Vec<_>>();
 
         // Phase 4: Recovery - reduce failure rate and test recovery
         self.logger.log_phase("recovery_phase");
 
+        let previous_failure_rate = self.failure_injector.failure_rate.load(Ordering::Relaxed);
         self.failure_injector.set_failure_rate(5); // Reduce to 5% failure rate
+        let recovery_failure_rate = self.failure_injector.failure_rate.load(Ordering::Relaxed);
+        let open_tiers_before_recovery = circuit_breakers
+            .iter()
+            .enumerate()
+            .filter_map(|(tier, breaker)| {
+                matches!(breaker.state(), State::Open { .. }).then_some(tier)
+            })
+            .collect::<HashSet<_>>();
+        let recovery_deadline_millis = circuit_breakers
+            .iter()
+            .filter_map(|breaker| match breaker.state() {
+                State::Open { since_millis } => Some(since_millis.saturating_add(100)),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(simulated_start_millis);
+        let recovery_probe_start_millis = recovery_deadline_millis.saturating_add(1);
+        let mut open_tiers_before_recovery_log = open_tiers_before_recovery
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        open_tiers_before_recovery_log.sort_unstable();
 
-        // TODO: Replace with event-driven circuit breaker state monitoring
-        // For now, use shorter cooperative yield instead of fixed timing
-        for _ in 0..20 {
-            tokio::task::yield_now().await;
-        }
+        self.logger.log_event(
+            "circuit_breaker_recovery_monitor_start",
+            serde_json::json!({
+                "scenario_id": scenario_id,
+                "artifact_path": artifact_path.as_str(),
+                "failure_rate_change": {
+                    "previous_percent": previous_failure_rate,
+                    "current_percent": recovery_failure_rate
+                },
+                "request_counts": {
+                    "successful": initial_successful,
+                    "failed": initial_failed,
+                    "circuit_opens": initial_circuit_opens,
+                    "tier_failures": initial_tier_failures
+                },
+                "open_tiers_before_recovery": open_tiers_before_recovery_log.clone(),
+                "initial_circuit_states": initial_states.clone(),
+                "recovery_deadline_millis": recovery_deadline_millis,
+                "recovery_probe_start_millis": recovery_probe_start_millis
+            }),
+        );
 
         // Send recovery requests
         let recovery_requests = 30;
@@ -636,7 +806,6 @@ impl IntegrationTestHarness {
             let circuit_breakers_clone = circuit_breakers.clone();
             let successful_requests = Arc::clone(&successful_requests);
             let failed_requests = Arc::clone(&failed_requests);
-            let failure_injector = &self.failure_injector;
             let logger = &self.logger;
 
             let recovery_task = self
@@ -645,11 +814,13 @@ impl IntegrationTestHarness {
                     scope
                         .spawn(async move {
                             let tier = request_id % service_tiers;
-                            let now = Time::now();
+                            let now = Time::from_millis(
+                                recovery_probe_start_millis + (request_id - 1000) as u64,
+                            );
 
                             let result = circuit_breakers_clone[tier].call(now, || {
                                 // Much lower failure rate during recovery
-                                if fastrand::usize(0..100) < 5 {
+                                if (request_id - 1000) % 20 == 19 {
                                     return Err(Error::new(
                                         ErrorKind::Service,
                                         format!("Recovery phase failure in tier {}", tier),
@@ -665,6 +836,7 @@ impl IntegrationTestHarness {
                                     logger.log_event(
                                         "recovery_success",
                                         serde_json::json!({
+                                            "scenario_id": scenario_id,
                                             "request_id": request_id,
                                             "tier": tier,
                                             "response": response
@@ -676,6 +848,7 @@ impl IntegrationTestHarness {
                                     logger.log_event(
                                         "recovery_failure",
                                         serde_json::json!({
+                                            "scenario_id": scenario_id,
                                             "request_id": request_id,
                                             "tier": tier,
                                             "error": e.to_string()
@@ -710,18 +883,69 @@ impl IntegrationTestHarness {
         let recovery_failed = final_failed - initial_failed;
         let recovery_success_rate =
             recovery_successful as f64 / (recovery_successful + recovery_failed).max(1) as f64;
+        let final_states = circuit_breakers
+            .iter()
+            .enumerate()
+            .map(|(tier, breaker)| circuit_state_snapshot_json(tier, breaker))
+            .collect::<Vec<_>>();
+        let all_transitions = circuit_state_transitions
+            .lock()
+            .expect("circuit breaker transition log lock poisoned")
+            .clone();
+        let recovery_transitions = all_transitions
+            .iter()
+            .skip(initial_transition_count)
+            .cloned()
+            .collect::<Vec<_>>();
+        let recovered_tiers = recovery_transitions
+            .iter()
+            .filter_map(|transition| {
+                matches!(
+                    transition.to,
+                    State::HalfOpen { .. } | State::Closed { failures: 0 }
+                )
+                .then_some(transition.tier)
+            })
+            .collect::<HashSet<_>>();
+        let mut recovered_tiers_log = recovered_tiers.iter().copied().collect::<Vec<_>>();
+        recovered_tiers_log.sort_unstable();
+        let recovery_state_observed = open_tiers_before_recovery.is_empty()
+            || open_tiers_before_recovery
+                .iter()
+                .all(|tier| recovered_tiers.contains(tier));
 
         self.logger.log_metrics(serde_json::json!({
+            "scenario_id": scenario_id,
+            "artifact_path": artifact_path.as_str(),
             "initial_phase": {
                 "successful": initial_successful,
                 "failed": initial_failed,
-                "circuit_opens": initial_circuit_opens
+                "circuit_opens": initial_circuit_opens,
+                "circuit_states": initial_states.clone()
             },
             "recovery_phase": {
                 "successful": recovery_successful,
                 "failed": recovery_failed,
-                "success_rate": recovery_success_rate
+                "success_rate": recovery_success_rate,
+                "failure_rate_change": {
+                    "previous_percent": previous_failure_rate,
+                    "current_percent": recovery_failure_rate
+                },
+                "recovery_deadline_millis": recovery_deadline_millis,
+                "recovery_probe_start_millis": recovery_probe_start_millis,
+                "open_tiers_before_recovery": open_tiers_before_recovery_log.clone(),
+                "observed_recovery_tiers": recovered_tiers_log.clone(),
+                "state_observed": recovery_state_observed,
+                "circuit_states": final_states
             },
+            "observed_circuit_state_transitions": all_transitions
+                .iter()
+                .map(circuit_transition_json)
+                .collect::<Vec<_>>(),
+            "recovery_circuit_state_transitions": recovery_transitions
+                .iter()
+                .map(circuit_transition_json)
+                .collect::<Vec<_>>(),
             "total_requests": final_successful + final_failed
         }));
 
@@ -742,10 +966,24 @@ impl IntegrationTestHarness {
                 "threshold": 0.8
             }),
         );
+        self.logger.log_assertion(
+            "recovery_state_transitions_observed",
+            recovery_state_observed,
+            serde_json::json!({
+                "open_tiers_before_recovery": open_tiers_before_recovery_log,
+                "observed_recovery_tiers": recovered_tiers_log,
+                "recovery_deadline_millis": recovery_deadline_millis,
+                "artifact_path": artifact_path.as_str()
+            }),
+        );
 
         assert!(
             initial_circuit_opens > 0,
             "Circuit breakers should have activated during cascade"
+        );
+        assert!(
+            recovery_state_observed,
+            "Recovery monitor should observe half-open or closed transitions for opened tiers"
         );
         assert!(
             recovery_success_rate > 0.8,
