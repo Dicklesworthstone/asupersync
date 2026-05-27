@@ -390,8 +390,7 @@ impl TestPieceMap {
     pub fn has_piece(&self, peer_id: &TestPeerId, piece_id: &TestPieceId) -> bool {
         self.peer_pieces
             .get(peer_id)
-            .map(|pieces| pieces.contains(piece_id))
-            .unwrap_or(false)
+            .is_some_and(|pieces| pieces.contains(piece_id))
     }
 }
 
@@ -406,9 +405,7 @@ struct AtpDmlFixture {
 impl AtpDmlFixture {
     async fn new() -> Self {
         let runtime = LabRuntime::new(LabConfig::default());
-        let test_data = b"ATP test data for e2e validation scenarios"
-            .repeat(1000)
-            .to_vec();
+        let test_data = b"ATP test data for e2e validation scenarios".repeat(1000);
 
         Self {
             runtime,
@@ -462,7 +459,7 @@ fn create_test_piece_map(
 fn create_swarm_peers(peer_ids: &[TestPeerId]) -> Vec<TestSwarmPeer> {
     peer_ids
         .iter()
-        .map(|id| create_test_swarm_peer(id))
+        .map(create_test_swarm_peer)
         .collect()
 }
 
@@ -575,13 +572,12 @@ async fn test_multi_source_swarm_transfer_with_verification() {
 
     // Verify rarest-first strategy prioritizes pieces with fewer sources
     // Pieces 0,1,6,7 should have higher priority (only 1 source each)
-    let rare_pieces: Vec<_> = assignments
+    let has_rare_pieces = assignments
         .iter()
-        .filter(|a| [0, 1, 6, 7].contains(&a.piece_id.as_u64()))
-        .collect();
+        .any(|a| [0, 1, 6, 7].contains(&a.piece_id.as_u64()));
 
     assert!(
-        !rare_pieces.is_empty(),
+        has_rare_pieces,
         "Should prioritize rarest pieces (0,1,6,7) with single sources"
     );
 
