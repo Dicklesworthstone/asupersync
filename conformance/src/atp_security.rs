@@ -8,23 +8,22 @@
 //! Uses real ATP implementation types from src/net/atp/ to provide
 //! stronger contract assertions on actual security fixes.
 
-use crate::{ConformanceTest, RequirementLevel, TestCategory, TestMeta, TestResult, RuntimeInterface};
-use serde_json::{json, Value};
+use crate::{
+    ConformanceTest, RequirementLevel, RuntimeInterface, TestCategory, TestMeta, TestResult,
+};
 use std::collections::HashMap;
 
 // Real ATP implementation types - replace previous stub implementations
-use asupersync::net::atp::streams::{
-    FlowControlWindow, StreamState, StreamError, StreamId, AtpStream, StreamPriority,
-    StreamResetCode, StopSendingCode,
-};
+use asupersync::bytes::Bytes;
+use asupersync::cx::Cx;
 use asupersync::net::atp::protocol::packet_assembly::{
     PacketAssembler, PacketConstraints, PacketNumberSpace,
 };
-use asupersync::net::atp::protocol::quic_frames::QuicFrame;
-use asupersync::net::atp::protocol::varint::VarInt;
-use asupersync::cx::Cx;
+use asupersync::net::atp::streams::{
+    AtpStream, FlowControlWindow, StreamError, StreamId, StreamPriority, StreamResetCode,
+    StreamState,
+};
 use asupersync::types::outcome::Outcome;
-use asupersync::bytes::Bytes;
 
 /// Stream sequence tracking for integrity verification
 struct SequenceTracker {
@@ -96,7 +95,6 @@ pub const ATP_SECURITY_CONTRACTS: &[AtpSecurityContract] = &[
         description: "Stream state transitions MUST be validated against protocol FSM",
         test_fn: test_stream_fsm_validation,
     },
-
     // Ambient Capability Gate Contracts (p343ya/d8758c-class)
     AtpSecurityContract {
         id: "ATP-CAPABILITY-001",
@@ -126,7 +124,6 @@ pub const ATP_SECURITY_CONTRACTS: &[AtpSecurityContract] = &[
         description: "Capability delegation SHOULD preserve least-privilege constraints",
         test_fn: test_capability_delegation_constraints,
     },
-
     // Typed Error Semantic Contracts (k9f6li-class)
     AtpSecurityContract {
         id: "ATP-ERROR-001",
@@ -156,7 +153,6 @@ pub const ATP_SECURITY_CONTRACTS: &[AtpSecurityContract] = &[
         description: "Error recovery SHOULD maintain capability constraints",
         test_fn: test_error_recovery_capability_preservation,
     },
-
     // Cross-cutting Security Contracts
     AtpSecurityContract {
         id: "ATP-XCUT-001",
@@ -184,9 +180,9 @@ fn test_stream_sequence_monotonic() -> TestResult {
     let mut seq_tracker = SequenceTracker::new(stream_id);
 
     // Sequence offsets must be monotonic increasing for data transmission
-    let offset1 = seq_tracker.next_offset(100);  // Send 100 bytes
-    let offset2 = seq_tracker.next_offset(200);  // Send 200 bytes
-    let offset3 = seq_tracker.next_offset(150);  // Send 150 bytes
+    let offset1 = seq_tracker.next_offset(100); // Send 100 bytes
+    let offset2 = seq_tracker.next_offset(200); // Send 200 bytes
+    let offset3 = seq_tracker.next_offset(150); // Send 150 bytes
 
     if offset2 <= offset1 || offset3 <= offset2 {
         return TestResult::failed(format!(
@@ -206,7 +202,7 @@ fn test_stream_sequence_monotonic() -> TestResult {
     // Test validation of out-of-order offsets
     if seq_tracker.validate_monotonic(250) {
         return TestResult::failed(
-            "Sequence tracker incorrectly accepted out-of-order offset".to_string()
+            "Sequence tracker incorrectly accepted out-of-order offset".to_string(),
         );
     }
 
@@ -228,28 +224,43 @@ fn test_flow_control_bounds() -> TestResult {
 
     // Consume exactly the available send window
     match flow_window.reserve_send(1024) {
-        Outcome::Ok(()) => {},
-        Outcome::Err(_) => return TestResult::failed("Failed to reserve available window".to_string()),
-        Outcome::Cancelled(_) => return TestResult::failed("Flow control reservation was cancelled".to_string()),
-        Outcome::Panicked(_) => return TestResult::failed("Flow control reservation panicked".to_string()),
+        Outcome::Ok(()) => {}
+        Outcome::Err(_) => {
+            return TestResult::failed("Failed to reserve available window".to_string());
+        }
+        Outcome::Cancelled(_) => {
+            return TestResult::failed("Flow control reservation was cancelled".to_string());
+        }
+        Outcome::Panicked(_) => {
+            return TestResult::failed("Flow control reservation panicked".to_string());
+        }
     }
 
     // Attempting to reserve more should fail, maintaining bounds
     match flow_window.reserve_send(1) {
-        Outcome::Err(StreamError::FlowControlViolation { .. }) => {}, // Expected
-        Outcome::Ok(()) => return TestResult::failed("Flow control allowed window violation".to_string()),
-        other => return TestResult::failed(format!("Unexpected flow control outcome: {:?}", other)),
+        Outcome::Err(StreamError::FlowControlViolation { .. }) => {} // Expected
+        Outcome::Ok(()) => {
+            return TestResult::failed("Flow control allowed window violation".to_string());
+        }
+        other => {
+            return TestResult::failed(format!("Unexpected flow control outcome: {:?}", other));
+        }
     }
 
     // Verify send capacity is now zero
     let capacity = flow_window.send_capacity();
     if capacity != 0 {
-        return TestResult::failed(format!("Flow control send capacity should be 0, got: {}", capacity));
+        return TestResult::failed(format!(
+            "Flow control send capacity should be 0, got: {}",
+            capacity
+        ));
     }
 
     // Verify stream is marked as send blocked
     if !flow_window.is_send_blocked() {
-        return TestResult::failed("Flow control window should be marked as send blocked".to_string());
+        return TestResult::failed(
+            "Flow control window should be marked as send blocked".to_string(),
+        );
     }
 
     TestResult::passed()
@@ -273,7 +284,7 @@ fn test_packet_assembly_size_validation() -> TestResult {
     // Test very large frame that would exceed packet budget
     let large_data = Bytes::from(vec![0u8; MAX_PACKET_SIZE + 100]);
     let oversized_frame = QuicFrame::Stream {
-        stream_id: VarInt::from_u32(0),
+        stream_id: VarInt::new(0).expect("literal stream id is a valid varint"),
         offset: None,
         data: large_data.clone(),
         fin: false,
@@ -283,15 +294,17 @@ fn test_packet_assembly_size_validation() -> TestResult {
     assembler.add_quic_frame(oversized_frame);
 
     match assembler.assemble_packet() {
-        Ok(None) => {}, // Expected - no packet assembled due to size constraints
-        Ok(Some(_)) => return TestResult::failed("Assembler created packet with oversized frame".to_string()),
+        Ok(None) => {} // Expected - no packet assembled due to size constraints
+        Ok(Some(_)) => {
+            return TestResult::failed("Assembler created packet with oversized frame".to_string());
+        }
         Err(e) => return TestResult::failed(format!("Assembler failed with error: {:?}", e)),
     }
 
     // Test normal-sized frames that should assemble successfully
     let normal_data = Bytes::from(vec![1u8; 100]);
     let normal_frame = QuicFrame::Stream {
-        stream_id: VarInt::from_u32(1),
+        stream_id: VarInt::new(1).expect("literal stream id is a valid varint"),
         offset: None,
         data: normal_data,
         fin: false,
@@ -306,8 +319,12 @@ fn test_packet_assembly_size_validation() -> TestResult {
             if packet.frames.is_empty() {
                 return TestResult::failed("Assembled packet has no frames".to_string());
             }
-        },
-        Ok(None) => return TestResult::failed("Failed to assemble packet with normal-sized frame".to_string()),
+        }
+        Ok(None) => {
+            return TestResult::failed(
+                "Failed to assemble packet with normal-sized frame".to_string(),
+            );
+        }
         Err(e) => return TestResult::failed(format!("Failed to assemble normal packet: {:?}", e)),
     }
 
@@ -322,7 +339,10 @@ fn test_stream_fsm_validation() -> TestResult {
 
     // Initial state should be Open for new streams
     if !matches!(stream.state(), StreamState::Open) {
-        return TestResult::failed(format!("New stream should be Open, got: {:?}", stream.state()));
+        return TestResult::failed(format!(
+            "New stream should be Open, got: {:?}",
+            stream.state()
+        ));
     }
 
     // Verify stream can send and receive initially
@@ -337,8 +357,10 @@ fn test_stream_fsm_validation() -> TestResult {
     // Queue data for sending and verify it works
     let test_data = Bytes::from("test data");
     match stream.queue_send(&cx, test_data.clone(), false) {
-        Outcome::Ok(()) => {},
-        Outcome::Err(e) => return TestResult::failed(format!("Failed to queue send data: {:?}", e)),
+        Outcome::Ok(()) => {}
+        Outcome::Err(e) => {
+            return TestResult::failed(format!("Failed to queue send data: {:?}", e));
+        }
         other => return TestResult::failed(format!("Unexpected queue_send outcome: {:?}", other)),
     }
 
@@ -368,8 +390,13 @@ fn test_stream_fsm_validation() -> TestResult {
 
     // Try to queue data on reset stream - should fail
     match reset_stream.queue_send(&cx, Bytes::from("invalid"), false) {
-        Outcome::Err(StreamError::InvalidState { .. }) => {}, // Expected
-        other => return TestResult::failed(format!("Reset stream should reject queue_send, got: {:?}", other)),
+        Outcome::Err(StreamError::InvalidState { .. }) => {} // Expected
+        other => {
+            return TestResult::failed(format!(
+                "Reset stream should reject queue_send, got: {:?}",
+                other
+            ));
+        }
     }
 
     TestResult::passed()
@@ -390,8 +417,13 @@ fn test_stream_capability_requirement() -> TestResult {
     // Test that stream operations accept a Cx (capability context)
     let test_data = Bytes::from("test data");
     match stream.queue_send(&cx, test_data, false) {
-        Outcome::Ok(()) => {}, // Expected - operation requires Cx and succeeds
-        other => return TestResult::failed(format!("Stream operation with Cx should succeed: {:?}", other)),
+        Outcome::Ok(()) => {} // Expected - operation requires Cx and succeeds
+        other => {
+            return TestResult::failed(format!(
+                "Stream operation with Cx should succeed: {:?}",
+                other
+            ));
+        }
     }
 
     // Verify that operations are traced through the capability context
@@ -399,8 +431,13 @@ fn test_stream_capability_requirement() -> TestResult {
 
     // Test receiving data also requires capability context
     match stream.receive_data(&cx, 0, Bytes::from("received"), false) {
-        Outcome::Ok(_) => {}, // Expected - operation requires Cx
-        other => return TestResult::failed(format!("Stream receive with Cx should succeed: {:?}", other)),
+        Outcome::Ok(_) => {} // Expected - operation requires Cx
+        other => {
+            return TestResult::failed(format!(
+                "Stream receive with Cx should succeed: {:?}",
+                other
+            ));
+        }
     }
 
     TestResult::passed()
@@ -451,8 +488,10 @@ fn test_ambient_authority_blocked() -> TestResult {
     match stream.queue_send(&cx, test_data, false) {
         Outcome::Ok(()) => {
             // Success indicates the operation went through capability-mediated path
-        },
-        other => return TestResult::failed(format!("Capability-mediated operation failed: {:?}", other)),
+        }
+        other => {
+            return TestResult::failed(format!("Capability-mediated operation failed: {:?}", other));
+        }
     }
 
     // The design ensures no ambient authority - all effects go through Cx
@@ -464,17 +503,21 @@ fn test_capability_delegation_constraints() -> TestResult {
     let base_cx = Cx::for_testing();
 
     // Test that different ATP operations maintain privilege boundaries
-    let data_stream = AtpStream::new(StreamId::new(0), true, StreamPriority::Data, true);
-    let control_stream = AtpStream::new(StreamId::new(4), true, StreamPriority::Control, true);
-    let repair_stream = AtpStream::new(StreamId::new(8), true, StreamPriority::Repair, true);
+    let mut data_stream = AtpStream::new(StreamId::new(0), true, StreamPriority::Data, true);
+    let mut control_stream = AtpStream::new(StreamId::new(4), true, StreamPriority::Control, true);
+    let mut repair_stream = AtpStream::new(StreamId::new(8), true, StreamPriority::Repair, true);
 
     // Verify priority-based privilege separation
     if data_stream.priority() >= StreamPriority::Control {
-        return TestResult::failed("Data stream should have lower priority than Control".to_string());
+        return TestResult::failed(
+            "Data stream should have lower priority than Control".to_string(),
+        );
     }
 
     if repair_stream.priority() <= StreamPriority::Data {
-        return TestResult::failed("Repair stream should have lower priority than Data".to_string());
+        return TestResult::failed(
+            "Repair stream should have lower priority than Data".to_string(),
+        );
     }
 
     // Test that capability context is consistently required
@@ -483,14 +526,17 @@ fn test_capability_delegation_constraints() -> TestResult {
 
     // All stream types require the same capability context
     let results = [
-        data_stream.clone().queue_send(&base_cx, test_data.clone(), false),
-        control_stream.clone().queue_send(&base_cx, test_data.clone(), false),
-        repair_stream.clone().queue_send(&base_cx, test_data, false),
+        data_stream.queue_send(&base_cx, test_data.clone(), false),
+        control_stream.queue_send(&base_cx, test_data.clone(), false),
+        repair_stream.queue_send(&base_cx, test_data, false),
     ];
 
     for (i, result) in results.iter().enumerate() {
         if !matches!(result, Outcome::Ok(())) {
-            return TestResult::failed(format!("Stream {} failed capability check: {:?}", i, result));
+            return TestResult::failed(format!(
+                "Stream {} failed capability check: {:?}",
+                i, result
+            ));
         }
     }
 
@@ -522,10 +568,14 @@ fn test_error_information_disclosure() -> TestResult {
     // Verify errors don't contain excessive internal information
     // FlowControlViolation should only expose necessary limit/attempt info
     match &flow_violation {
-        StreamError::FlowControlViolation { limit, attempted, .. } => {
+        StreamError::FlowControlViolation {
+            limit, attempted, ..
+        } => {
             // These fields are necessary for debugging and don't expose sensitive state
             if *limit == 0 || *attempted == 0 {
-                return TestResult::failed("Flow control error lacks necessary diagnostic info".to_string());
+                return TestResult::failed(
+                    "Flow control error lacks necessary diagnostic info".to_string(),
+                );
             }
         }
         _ => return TestResult::failed("Expected FlowControlViolation error".to_string()),
@@ -535,7 +585,9 @@ fn test_error_information_disclosure() -> TestResult {
     match &stream_not_found {
         StreamError::StreamNotFound { stream_id: id } => {
             if id.id != stream_id.id {
-                return TestResult::failed("StreamNotFound error has incorrect stream ID".to_string());
+                return TestResult::failed(
+                    "StreamNotFound error has incorrect stream ID".to_string(),
+                );
             }
         }
         _ => return TestResult::failed("Expected StreamNotFound error".to_string()),
@@ -546,7 +598,9 @@ fn test_error_information_disclosure() -> TestResult {
         StreamError::InvalidState { state, .. } => {
             // State string should be descriptive but not leak implementation details
             if state.contains("internal") || state.contains("secret") || state.contains("private") {
-                return TestResult::failed("InvalidState error may leak internal information".to_string());
+                return TestResult::failed(
+                    "InvalidState error may leak internal information".to_string(),
+                );
             }
         }
         _ => return TestResult::failed("Expected InvalidState error".to_string()),
@@ -562,8 +616,14 @@ fn test_error_timing_consistency() -> TestResult {
     // Create different error conditions that should have consistent timing
     let errors = vec![
         StreamError::StreamNotFound { stream_id },
-        StreamError::StreamClosed { stream_id, reset_code: None },
-        StreamError::InvalidState { stream_id, state: "closed".to_string() },
+        StreamError::StreamClosed {
+            stream_id,
+            reset_code: None,
+        },
+        StreamError::InvalidState {
+            stream_id,
+            state: "closed".to_string(),
+        },
     ];
 
     // In real implementation, we would measure timing here
@@ -575,13 +635,13 @@ fn test_error_timing_consistency() -> TestResult {
         match error {
             StreamError::StreamNotFound { .. } => {
                 // Verify consistent error structure
-            },
+            }
             StreamError::StreamClosed { .. } => {
                 // Verify consistent error structure
-            },
+            }
             StreamError::InvalidState { .. } => {
                 // Verify consistent error structure
-            },
+            }
             _ => {
                 return TestResult::failed(format!("Unexpected error type at index {}", i));
             }
@@ -607,9 +667,19 @@ fn test_typed_error_invariant_preservation() -> TestResult {
 
     let errors = vec![
         StreamError::StreamNotFound { stream_id },
-        StreamError::FlowControlViolation { stream_id, limit: 1000, attempted: 2000 },
-        StreamError::InvalidState { stream_id, state: "test".to_string() },
-        StreamError::StreamClosed { stream_id, reset_code: Some(StreamResetCode::ApplicationClose) },
+        StreamError::FlowControlViolation {
+            stream_id,
+            limit: 1000,
+            attempted: 2000,
+        },
+        StreamError::InvalidState {
+            stream_id,
+            state: "test".to_string(),
+        },
+        StreamError::StreamClosed {
+            stream_id,
+            reset_code: Some(StreamResetCode::ApplicationClose),
+        },
     ];
 
     for (i, error) in errors.iter().enumerate() {
@@ -620,7 +690,10 @@ fn test_typed_error_invariant_preservation() -> TestResult {
             StreamError::InvalidState { stream_id, .. } => *stream_id,
             StreamError::StreamClosed { stream_id, .. } => *stream_id,
             _ => {
-                return TestResult::failed(format!("Unexpected error type at index {}: {:?}", i, error));
+                return TestResult::failed(format!(
+                    "Unexpected error type at index {}: {:?}",
+                    i, error
+                ));
             }
         };
 
@@ -660,7 +733,7 @@ fn test_error_recovery_capability_preservation() -> TestResult {
         Outcome::Err(StreamError::InvalidState { .. }) => {
             // Expected - error preserves the requirement for capability context (Cx)
             // Even in error path, the operation still requires Cx parameter
-        },
+        }
         other => {
             return TestResult::failed(format!(
                 "Expected InvalidState error with Cx requirement, got: {:?}",
@@ -677,7 +750,7 @@ fn test_error_recovery_capability_preservation() -> TestResult {
     match recovery_stream.queue_send(&cx, test_data, false) {
         Outcome::Ok(()) => {
             // Recovery path still requires and accepts capability context
-        },
+        }
         other => {
             return TestResult::failed(format!("Recovery operation failed: {:?}", other));
         }
@@ -713,17 +786,14 @@ fn test_resource_exhaustion_bounds() -> TestResult {
                 break;
             }
             other => {
-                return TestResult::failed(format!(
-                    "Unexpected flow control outcome: {:?}",
-                    other
-                ));
+                return TestResult::failed(format!("Unexpected flow control outcome: {:?}", other));
             }
         }
 
         // Safety check to prevent infinite loop
         if allocated_bytes > MAX_ALLOCATION * 2 {
             return TestResult::failed(
-                "Flow control failed to enforce limits - potential DoS".to_string()
+                "Flow control failed to enforce limits - potential DoS".to_string(),
             );
         }
     }
@@ -738,7 +808,9 @@ fn test_resource_exhaustion_bounds() -> TestResult {
 
     // Verify flow control is now blocked
     if !flow_window.is_send_blocked() {
-        return TestResult::failed("Flow control should be blocked after hitting limit".to_string());
+        return TestResult::failed(
+            "Flow control should be blocked after hitting limit".to_string(),
+        );
     }
 
     // Test packet assembly resource bounds
@@ -751,7 +823,7 @@ fn test_resource_exhaustion_bounds() -> TestResult {
 
     for i in 0..100 {
         let frame = QuicFrame::Stream {
-            stream_id: VarInt::from_u32(i),
+            stream_id: VarInt::new(i).expect("bounded test stream id is a valid varint"),
             offset: None,
             data: Bytes::from(vec![0u8; 100]),
             fin: false,
@@ -804,7 +876,10 @@ fn test_side_channel_timing_consistency() -> TestResult {
     }
 
     if !matches!(control_result, Outcome::Ok(())) {
-        return TestResult::failed(format!("Control stream operation failed: {:?}", control_result));
+        return TestResult::failed(format!(
+            "Control stream operation failed: {:?}",
+            control_result
+        ));
     }
 
     // Timing should be similar (within reasonable bounds)
@@ -835,7 +910,10 @@ fn test_side_channel_timing_consistency() -> TestResult {
 
     // Error path should also have consistent timing
     if !matches!(error_result, Outcome::Err(StreamError::InvalidState { .. })) {
-        return TestResult::failed(format!("Expected InvalidState error, got: {:?}", error_result));
+        return TestResult::failed(format!(
+            "Expected InvalidState error, got: {:?}",
+            error_result
+        ));
     }
 
     // Error timing should be reasonable and not leak information
@@ -849,11 +927,33 @@ fn test_side_channel_timing_consistency() -> TestResult {
     TestResult::passed()
 }
 
+fn atp_security_runtime_test<RT: RuntimeInterface>(contract_id: &str) -> fn(&RT) -> TestResult {
+    match contract_id {
+        "ATP-INTEGRITY-001" => |_| test_stream_sequence_monotonic(),
+        "ATP-INTEGRITY-002" => |_| test_flow_control_bounds(),
+        "ATP-INTEGRITY-003" => |_| test_packet_assembly_size_validation(),
+        "ATP-INTEGRITY-004" => |_| test_stream_fsm_validation(),
+        "ATP-CAPABILITY-001" => |_| test_stream_capability_requirement(),
+        "ATP-CAPABILITY-002" => |_| test_privilege_escalation_blocked(),
+        "ATP-CAPABILITY-003" => |_| test_ambient_authority_blocked(),
+        "ATP-CAPABILITY-004" => |_| test_capability_delegation_constraints(),
+        "ATP-ERROR-001" => |_| test_error_information_disclosure(),
+        "ATP-ERROR-002" => |_| test_error_timing_consistency(),
+        "ATP-ERROR-003" => |_| test_typed_error_invariant_preservation(),
+        "ATP-ERROR-004" => |_| test_error_recovery_capability_preservation(),
+        "ATP-XCUT-001" => |_| test_resource_exhaustion_bounds(),
+        "ATP-XCUT-002" => |_| test_side_channel_timing_consistency(),
+        _ => |_| TestResult::failed("unknown ATP security conformance contract".to_string()),
+    }
+}
+
 /// Generate all ATP security conformance tests
 pub fn atp_security_conformance_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
     ATP_SECURITY_CONTRACTS
         .iter()
         .map(|contract| {
+            let test_fn = atp_security_runtime_test::<RT>(contract.id);
+
             ConformanceTest::new(
                 TestMeta {
                     id: format!("atp-security-{}", contract.id),
@@ -880,7 +980,7 @@ pub fn atp_security_conformance_tests<RT: RuntimeInterface>() -> Vec<Conformance
                         }
                     ),
                 },
-                move |_rt| (contract.test_fn)(),
+                test_fn,
             )
         })
         .collect()
@@ -892,7 +992,9 @@ pub fn atp_security_coverage_matrix() -> HashMap<String, (usize, usize, usize)> 
     let mut matrix = HashMap::new();
 
     for contract in ATP_SECURITY_CONTRACTS {
-        let entry = matrix.entry(contract.section.to_string()).or_insert((0, 0, 0));
+        let entry = matrix
+            .entry(contract.section.to_string())
+            .or_insert((0, 0, 0));
         match contract.level {
             RequirementLevel::Must => entry.0 += 1,
             RequirementLevel::Should => entry.1 += 1,
@@ -912,13 +1014,26 @@ mod tests {
         let coverage = atp_security_coverage_matrix();
 
         // Verify we have coverage in all key areas
-        assert!(coverage.contains_key("integrity"), "Missing integrity coverage");
-        assert!(coverage.contains_key("capability"), "Missing capability coverage");
-        assert!(coverage.contains_key("error_semantics"), "Missing error semantics coverage");
+        assert!(
+            coverage.contains_key("integrity"),
+            "Missing integrity coverage"
+        );
+        assert!(
+            coverage.contains_key("capability"),
+            "Missing capability coverage"
+        );
+        assert!(
+            coverage.contains_key("error_semantics"),
+            "Missing error semantics coverage"
+        );
 
         // Verify each area has MUST requirements
         for (section, (must_count, _, _)) in &coverage {
-            assert!(*must_count > 0, "Section {} has no MUST requirements", section);
+            assert!(
+                *must_count > 0,
+                "Section {} has no MUST requirements",
+                section
+            );
         }
 
         // Calculate total coverage score
@@ -926,11 +1041,21 @@ mod tests {
         let total_should: usize = coverage.values().map(|(_, s, _)| s).sum();
         let total_may: usize = coverage.values().map(|(_, _, may)| may).sum();
 
-        assert!(total_must >= 8, "Insufficient MUST requirement coverage: {}", total_must);
-        assert!(total_should >= 2, "Insufficient SHOULD requirement coverage: {}", total_should);
+        assert!(
+            total_must >= 8,
+            "Insufficient MUST requirement coverage: {}",
+            total_must
+        );
+        assert!(
+            total_should >= 2,
+            "Insufficient SHOULD requirement coverage: {}",
+            total_should
+        );
 
-        println!("ATP Security Coverage: {} MUST, {} SHOULD, {} MAY",
-            total_must, total_should, total_may);
+        println!(
+            "ATP Security Coverage: {} MUST, {} SHOULD, {} MAY",
+            total_must, total_should, total_may
+        );
     }
 
     #[test]
