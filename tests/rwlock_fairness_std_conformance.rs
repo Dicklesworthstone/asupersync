@@ -108,12 +108,12 @@ fn test_async_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult 
 
             loop {
                 // Check for timeout to prevent infinite busy-wait
-                if start_time.elapsed() > timeout_duration {
-                    panic!(
-                        "Reader thread {} timed out after {:?} waiting for read lock",
-                        thread_id, timeout_duration
-                    );
-                }
+                assert!(
+                    start_time.elapsed() <= timeout_duration,
+                    "Reader thread {} timed out after {:?} waiting for read lock",
+                    thread_id,
+                    timeout_duration
+                );
 
                 let waker = Waker::noop();
                 let mut context = Context::from_waker(waker);
@@ -164,12 +164,12 @@ fn test_async_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult 
 
             loop {
                 // Check for timeout to prevent infinite busy-wait
-                if start_time.elapsed() > timeout_duration {
-                    panic!(
-                        "Writer thread {} timed out after {:?} waiting for write lock",
-                        thread_id, timeout_duration
-                    );
-                }
+                assert!(
+                    start_time.elapsed() <= timeout_duration,
+                    "Writer thread {} timed out after {:?} waiting for write lock",
+                    thread_id,
+                    timeout_duration
+                );
 
                 let waker = Waker::noop();
                 let mut context = Context::from_waker(waker);

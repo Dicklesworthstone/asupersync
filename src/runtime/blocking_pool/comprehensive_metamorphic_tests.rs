@@ -380,7 +380,7 @@ fn mr_scaling_linearity() {
         // Under saturation, pending tasks should scale approximately linearly
         if pending1 > 0 && pending2 > 0 {
             let ratio = pending2 as f64 / pending1 as f64;
-            prop_assert!(ratio >= 1.5 && ratio <= 2.5,
+            prop_assert!((1.5..=2.5).contains(&ratio),
                 "Scaling linearity violated: base_pending={}, doubled_pending={}, ratio={}",
                 pending1, pending2, ratio);
         }

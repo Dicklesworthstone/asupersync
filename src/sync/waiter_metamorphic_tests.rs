@@ -22,7 +22,6 @@ use std::task::Waker;
 /// | Operation commutativity | 3 | 4 | 2 | 6.0 |
 /// | Remove preserves order | 4 | 4 | 2 | 8.0 |
 /// | Tag preservation | 3 | 2 | 1 | 6.0 |
-
 fn noop_waker() -> Waker {
     Waker::noop().clone()
 }
@@ -145,8 +144,8 @@ mod metamorphic_tests {
                 match op {
                     WaiterOp::PushBack(_) | WaiterOp::PushFront(_) => expected_len += 1,
                     WaiterOp::PopFront => {
-                        if expected_len > 0 { expected_len -= 1; }
-                    },
+                        expected_len = expected_len.saturating_sub(1);
+                    }
                     WaiterOp::Remove(idx) => {
                         if let Some(Some(_)) = ids.get(*idx) {
                             if chain.contains(*ids[*idx].as_ref().unwrap()) {
@@ -154,7 +153,7 @@ mod metamorphic_tests {
                             }
                         }
                     },
-                    _ => {},
+                    WaiterOp::UpdateWaker(_) => {}
                 }
             }
 
@@ -174,7 +173,7 @@ mod metamorphic_tests {
             let ids = execute_ops(&mut chain, &ops.0);
 
             let generated: Vec<WaiterId> = ids.into_iter().flatten().collect();
-            let unique: HashSet<WaiterId> = generated.iter().cloned().collect();
+            let unique: HashSet<WaiterId> = generated.iter().copied().collect();
 
             prop_assert_eq!(generated.len(), unique.len(),
                 "Duplicate IDs generated: {} total, {} unique", generated.len(), unique.len());
@@ -473,7 +472,7 @@ mod metamorphic_tests {
                 "Length inconsistent in composite test");
 
             // 2. ID uniqueness
-            let unique_ids: HashSet<_> = all_ids.iter().cloned().collect();
+            let unique_ids: HashSet<_> = all_ids.iter().copied().collect();
             prop_assert_eq!(all_ids.len(), unique_ids.len(),
                 "Non-unique IDs in composite test");
 

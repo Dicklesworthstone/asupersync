@@ -13,7 +13,7 @@
 //! - Deterministic ordering
 //! - Type safety contracts
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::vec_init_then_push)]
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -186,9 +186,10 @@ impl GenServer for MockGenServer {
         Box::pin(async move {
             self.call_count.fetch_add(1, Ordering::SeqCst);
 
-            if self.should_panic_in_call.load(Ordering::SeqCst) {
-                panic!("Intentional panic in handle_call");
-            }
+            assert!(
+                !self.should_panic_in_call.load(Ordering::SeqCst),
+                "Intentional panic in handle_call"
+            );
 
             match request {
                 MockRequest::Get => {
@@ -231,9 +232,10 @@ impl GenServer for MockGenServer {
         Box::pin(async move {
             self.cast_count.fetch_add(1, Ordering::SeqCst);
 
-            if self.should_panic_in_cast.load(Ordering::SeqCst) {
-                panic!("Intentional panic in handle_cast");
-            }
+            assert!(
+                !self.should_panic_in_cast.load(Ordering::SeqCst),
+                "Intentional panic in handle_cast"
+            );
 
             match msg {
                 MockCast::Reset => {

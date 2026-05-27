@@ -1012,8 +1012,8 @@ mod tests {
 
         // Test minimum distinct bytes (16 required)
         let mut low_diversity = [0u8; 32];
-        for i in 0..15 {
-            low_diversity[i] = i as u8;
+        for (i, byte) in low_diversity.iter_mut().enumerate().take(15) {
+            *byte = i as u8;
         } // Only 15 distinct values
         assert!(
             AuthKey::from_bytes(low_diversity).is_err(),
@@ -1036,8 +1036,8 @@ mod tests {
         // Test byte concentration (max 4 occurrences per byte value)
         let mut concentrated = [0u8; 32];
         concentrated[0..5].fill(42); // Byte value 42 appears 5 times
-        for i in 5..32 {
-            concentrated[i] = i as u8;
+        for (i, byte) in concentrated.iter_mut().enumerate().skip(5) {
+            *byte = i as u8;
         } // Fill with unique values
         assert!(
             AuthKey::from_bytes(concentrated).is_err(),

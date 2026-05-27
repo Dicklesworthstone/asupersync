@@ -352,7 +352,7 @@ fn mr5_region_hierarchy_conservation() {
 
         // Build hierarchy
         let mut current_parents = vec![root_id];
-        for (_level, &child_count) in child_counts.iter().enumerate() {
+        for &child_count in &child_counts {
             let mut next_parents = Vec::new();
 
             for &parent_id in &current_parents {

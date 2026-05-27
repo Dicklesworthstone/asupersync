@@ -101,7 +101,7 @@ fn mr_task_permutation_invariance() {
         }
 
         // Extract all task IDs and create a simple permutation (swap first two tasks if possible)
-        let mut task_ids: Vec<TaskId> = trace.iter().filter_map(|e| extract_task_id(e)).collect();
+        let mut task_ids: Vec<TaskId> = trace.iter().filter_map(extract_task_id).collect();
         task_ids.sort_unstable();
         task_ids.dedup();
 
@@ -467,11 +467,12 @@ fn scale_event_time(event: &TraceEvent, scale_factor: u64) -> TraceEvent {
 
     // Also scale embedded timestamps in event data if present
     match &mut new_event.data {
-        crate::trace::event::TraceData::Timer { deadline, .. } => {
-            if let Some(deadline_time) = deadline {
-                *deadline_time =
-                    Time::from_nanos(deadline_time.as_nanos().saturating_mul(scale_factor));
-            }
+        crate::trace::event::TraceData::Timer {
+            deadline: Some(deadline_time),
+            ..
+        } => {
+            *deadline_time =
+                Time::from_nanos(deadline_time.as_nanos().saturating_mul(scale_factor));
         }
         _ => {} // No embedded time to scale
     }
@@ -497,8 +498,7 @@ fn mr_composite_determinism_permutation_subtrace() {
             let prefix = &trace[..prefix_len];
 
             // Extract and permute tasks (simple swap strategy)
-            let mut task_ids: Vec<TaskId> =
-                trace.iter().filter_map(|e| extract_task_id(e)).collect();
+            let mut task_ids: Vec<TaskId> = trace.iter().filter_map(extract_task_id).collect();
             task_ids.sort_unstable();
             task_ids.dedup();
 

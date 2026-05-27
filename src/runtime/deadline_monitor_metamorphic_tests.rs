@@ -348,7 +348,7 @@ fn duration_history_order_independence() {
     let base_time = Time::from_nanos(0);
 
     // Insert in original order
-    for (_i, &duration) in durations.iter().enumerate() {
+    for &duration in &durations {
         monitor1.record_completion(
             task_id1,
             "test",
@@ -359,7 +359,7 @@ fn duration_history_order_independence() {
     }
 
     // Insert in reverse order
-    for (_i, &duration) in durations.iter().rev().enumerate() {
+    for &duration in durations.iter().rev() {
         monitor2.record_completion(
             task_id2,
             "test",

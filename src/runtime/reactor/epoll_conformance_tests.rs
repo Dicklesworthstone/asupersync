@@ -12,6 +12,8 @@
 //! - **File descriptor lifecycle**: registration, reuse, cleanup
 //! - **Thread safety**: concurrent operations and wake functionality
 
+#![allow(clippy::unnecessary_literal_bound)]
+
 use super::{EpollReactor, Events, Interest, Reactor, Token};
 use std::collections::HashMap;
 use std::io;
@@ -755,7 +757,7 @@ impl ConformanceTest for EdgeTriggeredConformanceTest {
             loop {
                 match sock1.read(&mut drain_buf) {
                     Ok(0) => break,
-                    Ok(_) => continue,
+                    Ok(_) => {}
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                     Err(e) => return Err(e),
                 }

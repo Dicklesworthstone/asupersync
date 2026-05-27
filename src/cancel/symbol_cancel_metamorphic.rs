@@ -63,9 +63,7 @@ impl TestListener {
 
 impl CancelListener for TestListener {
     fn on_cancel(&self, reason: &CancelReason, at: Time) {
-        if self.panic_on_notify {
-            panic!("Test listener panic");
-        }
+        assert!(!self.panic_on_notify, "Test listener panic");
         self.notifications
             .lock()
             .unwrap()

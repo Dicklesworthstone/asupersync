@@ -260,7 +260,7 @@ async fn execute_barrier_work_unit(
         rng: crate::util::det_rng::DetRng,
         global_state: std::sync::Arc<GlobalBarrierState>,
     }
-    impl<'a> std::future::Future for SpuriousWait<'a> {
+    impl std::future::Future for SpuriousWait<'_> {
         type Output =
             Result<crate::sync::barrier::BarrierWaitResult, crate::sync::barrier::BarrierWaitError>;
         fn poll(

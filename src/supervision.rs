@@ -10187,9 +10187,11 @@ mod conformance_integration {
             }
         }
 
-        if !failures.is_empty() {
-            panic!("Supervision conformance failures:\n{}", failures.join("\n"));
-        }
+        assert!(
+            failures.is_empty(),
+            "Supervision conformance failures:\n{}",
+            failures.join("\n")
+        );
 
         assert!(
             passes > 0,

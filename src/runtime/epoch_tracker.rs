@@ -1287,7 +1287,7 @@ mod tests {
                     ModuleId::TaskTable,
                     EpochId::new(to - 1),
                     EpochId::new(to),
-                    Time::from_nanos(1000 + (to as u64) * 100),
+                    Time::from_nanos(1000 + to * 100),
                 );
             }
             tracker.notify_epoch_transition(

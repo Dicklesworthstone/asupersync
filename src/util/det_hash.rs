@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn production_hasher_builder_always_random() {
-        let builder = ProductionBuildHasher::default();
+        let builder = ProductionBuildHasher;
         let h1 = builder.build_hasher();
         let h2 = builder.build_hasher();
         let mut x = h1;

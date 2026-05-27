@@ -313,9 +313,7 @@ fn mr_layer_ordering() {
             for current_event in current_layer {
                 let mut has_dependency = false;
 
-                for prev_layer_idx in 0..current_layer_idx {
-                    let prev_layer = &layers[prev_layer_idx];
-
+                for prev_layer in layers.iter().take(current_layer_idx) {
                     for prev_event in prev_layer {
                         if !independent(prev_event, current_event) {
                             has_dependency = true;
@@ -337,9 +335,7 @@ fn mr_layer_ordering() {
             }
 
             // Events in current layer should be independent of events in later layers
-            for later_layer_idx in (current_layer_idx + 1)..layers.len() {
-                let later_layer = &layers[later_layer_idx];
-
+            for later_layer in layers.iter().skip(current_layer_idx + 1) {
                 for _current_event in current_layer {
                     for _later_event in later_layer {
                         // The later event can depend on the current event,
@@ -649,12 +645,8 @@ fn mr_composite_idempotence_preservation_independence() {
         );
 
         // MR5: Event Preservation
-        let canonical_events: Vec<&TraceEvent> = foata
-            .layers()
-            .iter()
-            .flat_map(|layer| layer.iter())
-            .collect();
-        assert_eq!(canonical_events.len(), trace.len(), "Event count changed");
+        let canonical_event_count = foata.layers().iter().flat_map(|layer| layer.iter()).count();
+        assert_eq!(canonical_event_count, trace.len(), "Event count changed");
 
         // MR1: Layer Independence
         for layer in foata.layers() {

@@ -15,7 +15,7 @@
 //! - Graceful stop vs immediate abort behavior
 //! - Drop abort safety for cleanup guarantee
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::vec_init_then_push)]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -128,9 +128,10 @@ impl Actor for MockActor {
 
     fn on_start(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            if self.should_panic_in_start.load(Ordering::SeqCst) {
-                panic!("Intentional panic in on_start");
-            }
+            assert!(
+                !self.should_panic_in_start.load(Ordering::SeqCst),
+                "Intentional panic in on_start"
+            );
             self.on_start_called.store(true, Ordering::SeqCst);
         })
     }
@@ -141,9 +142,10 @@ impl Actor for MockActor {
         msg: Self::Message,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            if self.should_panic_in_handle.load(Ordering::SeqCst) {
-                panic!("Intentional panic in handle");
-            }
+            assert!(
+                !self.should_panic_in_handle.load(Ordering::SeqCst),
+                "Intentional panic in handle"
+            );
 
             let delay_ms = self.handle_delay_ms.load(Ordering::SeqCst);
             if delay_ms > 0 {
@@ -160,9 +162,10 @@ impl Actor for MockActor {
 
     fn on_stop(&mut self, _cx: &Cx) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
-            if self.should_panic_in_stop.load(Ordering::SeqCst) {
-                panic!("Intentional panic in on_stop");
-            }
+            assert!(
+                !self.should_panic_in_stop.load(Ordering::SeqCst),
+                "Intentional panic in on_stop"
+            );
             self.on_stop_called.store(true, Ordering::SeqCst);
         })
     }

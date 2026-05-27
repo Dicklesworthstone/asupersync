@@ -3364,9 +3364,11 @@ mod conformance_integration {
             }
         }
 
-        if !failures.is_empty() {
-            panic!("Actor conformance failures:\n{}", failures.join("\n"));
-        }
+        assert!(
+            failures.is_empty(),
+            "Actor conformance failures:\n{}",
+            failures.join("\n")
+        );
 
         assert!(
             passes > 0,

@@ -2360,9 +2360,11 @@ mod epoll_conformance_integration {
             .filter(|r| r.level == RequirementLevel::Must && !matches!(r.status, TestStatus::Pass))
             .collect();
 
-        if !must_failures.is_empty() {
-            panic!("Critical conformance failures: {:#?}", must_failures);
-        }
+        assert!(
+            must_failures.is_empty(),
+            "Critical conformance failures: {:#?}",
+            must_failures
+        );
 
         let passed = report
             .results

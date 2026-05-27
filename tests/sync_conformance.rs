@@ -26,7 +26,6 @@ use std::sync::{
 /// 4. **Future State**: PolledAfterCompletion errors for invalid polling
 /// 5. **Lock Ordering**: Integration with asupersync lock hierarchy
 /// 6. **Timeout Support**: Deadline-based acquisition timeouts
-
 #[cfg(test)]
 mod conformance_tests {
     use super::*;

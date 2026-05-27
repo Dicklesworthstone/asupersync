@@ -219,30 +219,15 @@ fn mr6_boundary_behavior() {
         prop_assume!(!test_cases.is_empty() && test_cases.len() <= 10);
 
         for (workers, budget) in test_cases {
-            let _config = RuntimeConfig {
+            let config = RuntimeConfig {
                 worker_threads: workers,
                 poll_budget: budget,
                 ..Default::default()
             };
 
-            // Boundary conditions
-            if workers == 0 {
-                // Zero workers should be invalid
-                prop_assert!(workers > 0 || true, // This would fail validation in real system
-                    "Zero workers should be caught by validation");
-            }
-
-            if budget == 0 {
-                // Zero budget should be invalid
-                prop_assert!(budget > 0 || true, // This would fail validation in real system
-                    "Zero poll budget should be caught by validation");
-            }
-
-            if workers > 1000 {
-                // Very high worker count should be flagged
-                prop_assert!(workers <= 1000 || true, // This would be warned in real system
-                    "Extreme worker count should be warned");
-            }
+            // Boundary values are preserved here; validation policy is exercised separately.
+            prop_assert_eq!(config.worker_threads, workers);
+            prop_assert_eq!(config.poll_budget, budget);
         }
     });
 }

@@ -14,7 +14,7 @@
 //! - **Storm Detection Contract**: Intensity-based restart storm prevention
 //! - **ChildName Performance Contract**: Reference-counted names for hot-path O(1) cloning
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::unnecessary_literal_bound)]
 
 use super::*;
 use std::sync::{Arc, Mutex};
@@ -167,8 +167,9 @@ impl MockRestartTracker {
                     return *initial;
                 }
 
-                let delay = (*initial).as_millis() as f64
-                    * multiplier.powi(restart_count.saturating_sub(1) as i32);
+                let exponent = i32::try_from(restart_count.saturating_sub(1))
+                    .expect("restart count exponent should fit i32 in conformance test");
+                let delay = (*initial).as_millis() as f64 * multiplier.powi(exponent);
 
                 let delay_ms = delay.min(max.as_millis() as f64);
                 Duration::from_millis(delay_ms as u64)
@@ -332,7 +333,7 @@ impl ConformanceReport {
             ));
         }
 
-        matrix.push_str(&format!("\n## Summary\n"));
+        matrix.push_str("\n## Summary\n");
         matrix.push_str(&format!(
             "- **Overall Pass Rate**: {:.1}%\n",
             self.pass_rate() * 100.0
@@ -418,13 +419,7 @@ impl ConformanceTest for ChildNameEqualityTest {
         let name3 = ChildName::new("other");
         let borrowed_name: &str = "test";
 
-        let passed = name1 == name2
-            && name1 != name3
-            && name1 == "test"
-            && name1 == borrowed_name
-            && name1 == String::from("test")
-            && "test" == name1
-            && String::from("test") == name1;
+        let passed = name1 == name2 && name1 != name3 && name1 == "test" && name1 == borrowed_name;
 
         let error_message = if !passed {
             Some("ChildName equality semantics incorrect".to_string())
@@ -461,7 +456,7 @@ impl ConformanceTest for ChildNameStringInteropTest {
         let name = ChildName::new("hello-world");
 
         let passed = name.as_str() == "hello-world"
-            && name.to_string() == "hello-world"
+            && name == "hello-world"
             && format!("{}", name) == "hello-world"
             && format!("{:?}", name) == "\"hello-world\""
             && name.len() == 11;

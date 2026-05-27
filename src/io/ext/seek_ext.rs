@@ -217,18 +217,19 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        let mut fut = seeker.seek(SeekFrom::Current(-4));
-        let err = match Pin::new(&mut fut).poll(&mut cx) {
-            Poll::Ready(Err(err)) => err,
-            other => panic!("expected seek-before-start error, got {other:?}"),
-        };
-        crate::assert_with_log!(
-            err.kind() == io::ErrorKind::InvalidInput,
-            "error kind",
-            io::ErrorKind::InvalidInput,
-            err.kind()
-        );
-        drop(fut);
+        {
+            let mut fut = seeker.seek(SeekFrom::Current(-4));
+            let err = match Pin::new(&mut fut).poll(&mut cx) {
+                Poll::Ready(Err(err)) => err,
+                other => panic!("expected seek-before-start error, got {other:?}"),
+            };
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::InvalidInput,
+                "error kind",
+                io::ErrorKind::InvalidInput,
+                err.kind()
+            );
+        }
         crate::assert_with_log!(seeker.pos == 3, "position unchanged", 3u64, seeker.pos);
         crate::test_complete!("seek_before_start_fails_without_moving_position");
     }

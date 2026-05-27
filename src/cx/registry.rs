@@ -2386,7 +2386,7 @@ mod tests {
         // Add MAX_WATCHERS_PER_REGION watchers for the same region
         for i in 0..MAX_WATCHERS_PER_REGION {
             let watch_ref = reg.watch_name(
-                &format!("name_{i}"),
+                format!("name_{i}"),
                 TaskId::new_for_test(i as u32, 0),
                 region,
             );

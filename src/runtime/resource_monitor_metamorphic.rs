@@ -562,9 +562,7 @@ mod integration_tests {
                 measurement: ResourceMeasurement,
             ) {
                 let mut measurements = self.measurements.borrow_mut();
-                if !measurements.contains_key(&resource_type) {
-                    measurements.insert(resource_type, measurement);
-                }
+                measurements.entry(resource_type).or_insert(measurement);
                 // INTENTIONAL BUG: ignores updates after first one (for metamorphic testing)
             }
 

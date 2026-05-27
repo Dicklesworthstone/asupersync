@@ -9,8 +9,7 @@
 
 use proptest::prelude::*;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::task::{Wake, Waker};
+use std::task::Waker;
 use std::time::Duration;
 
 use super::*;
@@ -151,13 +150,7 @@ fn live_ready_count(wheel: &TimerWheel) -> usize {
 
 /// Create a dummy waker for testing.
 fn dummy_waker() -> Waker {
-    struct NoopWaker;
-
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
-    }
-
-    Arc::new(NoopWaker).into()
+    Waker::noop().clone()
 }
 
 /// Apply a wheel operation and update tracked state.
@@ -337,7 +330,7 @@ fn mr_batch_size_scaling() {
         // Under identical timing, ready counts should scale linearly
         if ready1.len() > 0 {
             let ratio = ready2.len() as f64 / ready1.len() as f64;
-            prop_assert!(ratio >= 1.5 && ratio <= 2.5,
+            prop_assert!((1.5..=2.5).contains(&ratio),
                 "Batch scaling violated: base_ready={}, doubled_ready={}, ratio={}",
                 ready1.len(), ready2.len(), ratio);
         }

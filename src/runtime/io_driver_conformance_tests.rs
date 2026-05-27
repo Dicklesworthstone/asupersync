@@ -14,6 +14,8 @@
 //! - **Statistics Contract**: Accurate operation tracking for diagnostics
 //! - **Error Handling**: Graceful degradation when reactor operations fail
 
+#![allow(clippy::unnecessary_literal_bound)]
+
 use super::IoDriver;
 use crate::runtime::reactor::{Event, Events, Interest, Reactor, Source, Token};
 use std::collections::HashMap;
@@ -161,7 +163,7 @@ impl MockReactor {
 impl Reactor for MockReactor {
     fn register(&self, _source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
         if self.should_fail_register.load(Ordering::Relaxed) {
-            return Err(io::Error::new(ErrorKind::Other, "Mock register failure"));
+            return Err(io::Error::other("Mock register failure"));
         }
 
         self.registrations.lock().unwrap().insert(token, interest);
@@ -170,7 +172,7 @@ impl Reactor for MockReactor {
 
     fn deregister(&self, token: Token) -> io::Result<()> {
         if self.should_fail_deregister.load(Ordering::Relaxed) {
-            return Err(io::Error::new(ErrorKind::Other, "Mock deregister failure"));
+            return Err(io::Error::other("Mock deregister failure"));
         }
 
         let removed = self.registrations.lock().unwrap().remove(&token).is_some();
@@ -183,12 +185,12 @@ impl Reactor for MockReactor {
 
     fn modify(&self, token: Token, interest: Interest) -> io::Result<()> {
         if self.should_fail_modify.load(Ordering::Relaxed) {
-            return Err(io::Error::new(ErrorKind::Other, "Mock modify failure"));
+            return Err(io::Error::other("Mock modify failure"));
         }
 
         let mut registrations = self.registrations.lock().unwrap();
-        if registrations.contains_key(&token) {
-            registrations.insert(token, interest);
+        if let std::collections::hash_map::Entry::Occupied(mut entry) = registrations.entry(token) {
+            entry.insert(interest);
             Ok(())
         } else {
             Err(io::Error::new(ErrorKind::NotFound, "Token not found"))
@@ -197,7 +199,7 @@ impl Reactor for MockReactor {
 
     fn poll(&self, events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
         if self.should_fail_poll.load(Ordering::Relaxed) {
-            return Err(io::Error::new(ErrorKind::Other, "Mock poll failure"));
+            return Err(io::Error::other("Mock poll failure"));
         }
 
         self.poll_calls.fetch_add(1, Ordering::Relaxed);
@@ -215,7 +217,7 @@ impl Reactor for MockReactor {
 
     fn wake(&self) -> io::Result<()> {
         if self.should_fail_wake.load(Ordering::Relaxed) {
-            return Err(io::Error::new(ErrorKind::Other, "Mock wake failure"));
+            return Err(io::Error::other("Mock wake failure"));
         }
 
         self.wake_calls.fetch_add(1, Ordering::Relaxed);
@@ -414,7 +416,7 @@ impl ConformanceReport {
             ));
         }
 
-        matrix.push_str(&format!("\n## Summary\n"));
+        matrix.push_str("\n## Summary\n");
         matrix.push_str(&format!(
             "- **Overall Pass Rate**: {:.1}%\n",
             self.pass_rate() * 100.0

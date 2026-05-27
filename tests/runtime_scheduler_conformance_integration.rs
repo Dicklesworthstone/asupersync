@@ -41,9 +41,11 @@ fn test_remote_conformance_harness() {
 
     // Check for any hard failures (not expected failures)
     let failures: Vec<_> = results.iter().filter(|r| r.is_hard_failure()).collect();
-    if !failures.is_empty() {
-        panic!("Remote conformance tests failed: {:#?}", failures);
-    }
+    assert!(
+        failures.is_empty(),
+        "Remote conformance tests failed: {:#?}",
+        failures
+    );
 }
 
 #[test]
@@ -65,9 +67,11 @@ fn test_kernel_conformance_harness() {
 
     // Check for any hard failures
     let failures: Vec<_> = results.iter().filter(|r| r.is_hard_failure()).collect();
-    if !failures.is_empty() {
-        panic!("Kernel conformance tests failed: {:#?}", failures);
-    }
+    assert!(
+        failures.is_empty(),
+        "Kernel conformance tests failed: {:#?}",
+        failures
+    );
 }
 
 #[test]
@@ -89,9 +93,11 @@ fn test_reactor_conformance_harness() {
 
     // Check for any hard failures
     let failures: Vec<_> = results.iter().filter(|r| r.is_hard_failure()).collect();
-    if !failures.is_empty() {
-        panic!("Reactor conformance tests failed: {:#?}", failures);
-    }
+    assert!(
+        failures.is_empty(),
+        "Reactor conformance tests failed: {:#?}",
+        failures
+    );
 }
 
 #[test]
@@ -113,9 +119,11 @@ fn test_scheduler_conformance_harness() {
 
     // Check for any hard failures
     let failures: Vec<_> = results.iter().filter(|r| r.is_hard_failure()).collect();
-    if !failures.is_empty() {
-        panic!("Scheduler conformance tests failed: {:#?}", failures);
-    }
+    assert!(
+        failures.is_empty(),
+        "Scheduler conformance tests failed: {:#?}",
+        failures
+    );
 }
 
 #[test]

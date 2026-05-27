@@ -12,7 +12,7 @@
 //! - DownReason mapping and predicates
 //! - Monitor removal and lifecycle management
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::vec_init_then_push)]
 
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};

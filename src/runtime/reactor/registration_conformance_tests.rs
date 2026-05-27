@@ -12,7 +12,7 @@
 //! - **Error Handling**: Graceful degradation when reactor disappears
 //! - **Panic Safety**: Registration cleanup survives reactor panics
 
-#![allow(dead_code)]
+#![allow(dead_code, clippy::unnecessary_literal_bound)]
 
 use super::{Interest, ReactorHandle, Registration, Token};
 use std::collections::HashMap;
@@ -136,14 +136,15 @@ impl MockReactor {
 
 impl ReactorHandle for MockReactor {
     fn deregister_by_token(&self, token: Token) -> io::Result<()> {
-        if self.should_panic_on_deregister.load(Ordering::Relaxed) {
-            panic!("Mock reactor deregister panic");
-        }
+        assert!(
+            !self.should_panic_on_deregister.load(Ordering::Relaxed),
+            "Mock reactor deregister panic"
+        );
 
         self.deregister_calls.fetch_add(1, Ordering::Relaxed);
 
         if self.should_fail_deregister.load(Ordering::Relaxed) {
-            return Err(io::Error::new(ErrorKind::Other, "Mock deregister failure"));
+            return Err(io::Error::other("Mock deregister failure"));
         }
 
         let removed = self.registrations.lock().unwrap().remove(&token).is_some();
@@ -158,12 +159,12 @@ impl ReactorHandle for MockReactor {
         self.modify_calls.fetch_add(1, Ordering::Relaxed);
 
         if self.should_fail_modify.load(Ordering::Relaxed) {
-            return Err(io::Error::new(ErrorKind::Other, "Mock modify failure"));
+            return Err(io::Error::other("Mock modify failure"));
         }
 
         let mut registrations = self.registrations.lock().unwrap();
-        if registrations.contains_key(&token) {
-            registrations.insert(token, interest);
+        if let std::collections::hash_map::Entry::Occupied(mut entry) = registrations.entry(token) {
+            entry.insert(interest);
             Ok(())
         } else {
             Err(io::Error::new(ErrorKind::NotFound, "Token not found"))
@@ -291,7 +292,7 @@ impl ConformanceReport {
             ));
         }
 
-        matrix.push_str(&format!("\n## Summary\n"));
+        matrix.push_str("\n## Summary\n");
         matrix.push_str(&format!(
             "- **Overall Pass Rate**: {:.1}%\n",
             self.pass_rate() * 100.0

@@ -876,9 +876,11 @@ mod registration_conformance_integration {
             .filter(|r| r.level == RequirementLevel::Must && !r.passed)
             .collect();
 
-        if !must_failures.is_empty() {
-            panic!("Critical RAII conformance failures: {:#?}", must_failures);
-        }
+        assert!(
+            must_failures.is_empty(),
+            "Critical RAII conformance failures: {:#?}",
+            must_failures
+        );
 
         let must_pass_rate = report.must_pass_rate();
         let overall_pass_rate = report.pass_rate();
