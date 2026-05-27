@@ -53,5 +53,5 @@ pub use quic::*;
 pub mod h3;
 
 // Test utilities for ATP module testing
-#[cfg(test)]
+#[cfg(any(test, feature = "test-internals"))]
 pub mod test_utils;

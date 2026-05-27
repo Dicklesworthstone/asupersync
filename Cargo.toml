@@ -491,6 +491,17 @@ harness = false
 required-features = ["test-internals"]
 
 [[bench]]
+name = "atp_j5_workflows_bench"
+path = "benches/atp_j5_workflows_bench.rs"
+harness = false
+required-features = ["cli"]
+
+[[bench]]
+name = "atp_lab_benchmarks"
+harness = false
+required-features = ["benchmark-adapters"]
+
+[[bench]]
 name = "atp_autotune_decision"
 path = "benches/atp/autotune/decision.rs"
 harness = false

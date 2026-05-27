@@ -26,6 +26,7 @@ pub mod identity;
 pub mod inbox;
 pub mod journal;
 pub mod lab;
+pub mod logging;
 pub mod manifest;
 pub mod object;
 pub mod path;
@@ -115,6 +116,7 @@ pub use inbox::{
     MailboxRetrievalReceipt, MailboxSecurityError, MailboxStorageClass, MailboxStorageRecord,
     MailboxStoreRequest, MailboxTamperEvidence, ObjectDigest, ReceiveGrant,
 };
+pub use logging::{ATP_LOG_EVENT_SCHEMA_VERSION, AtpEvent, AtpLogger, AtpSubsystem, EventContext};
 pub use manifest::{ChunkStrategy, ProofStrength};
 pub use planner::{
     ATP_PLAN_EXECUTION_REPORT_SCHEMA, ATP_TRANSFER_PLAN_SCHEMA, AtpTransferPlan,
