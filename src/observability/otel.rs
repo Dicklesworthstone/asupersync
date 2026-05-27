@@ -9155,7 +9155,7 @@ mod otlp_wire_format_tests {
 
         // Test WITH privacy filtering (the fix)
         let filtered_record =
-            OtlpLogRecord::from_log_entry_with_privacy(&mock_entry, observed_time, &privacy_config);
+            OtlpLogRecord::from_log_entry_with_privacy(&log_entry, observed_time, &privacy_config);
 
         // Verify sensitive attributes are filtered out
         assert_eq!(
