@@ -3,7 +3,7 @@
 //! Provides comprehensive quality metrics collection, analysis, and monitoring
 //! for swarm transfers and peer performance.
 
-use super::*;
+use super::{MailboxTransferId, PeerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};

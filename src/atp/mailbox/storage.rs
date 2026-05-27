@@ -1,6 +1,9 @@
 //! ATP Mailbox Storage - Local storage management for mailbox operations.
 
-use super::*;
+use super::{
+    ChunkNonce, EncryptedChunk, MailboxError, MailboxKey, MailboxResult, MailboxTransferId,
+    MailboxTransferMetadata, PeerId, mailbox_time_now,
+};
 use crate::types::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -234,11 +237,12 @@ impl MailboxStorage {
         requestor: PeerId,
     ) -> MailboxResult<Vec<u8>> {
         let chunks = {
-            let entry = self.entries.get_mut(transfer_id).ok_or_else(|| {
-                MailboxError::TransferNotFound {
-                    transfer_id: *transfer_id,
-                }
-            })?;
+            let entry =
+                self.entries
+                    .get_mut(transfer_id)
+                    .ok_or(MailboxError::TransferNotFound {
+                        transfer_id: *transfer_id,
+                    })?;
 
             entry.state = TransferState::Retrieving {
                 started_at: SystemTime::now(),
@@ -268,12 +272,12 @@ impl MailboxStorage {
 
     /// Delete a transfer from storage.
     pub async fn delete_transfer(&mut self, transfer_id: &MailboxTransferId) -> MailboxResult<()> {
-        let entry =
-            self.entries
-                .remove(transfer_id)
-                .ok_or_else(|| MailboxError::TransferNotFound {
-                    transfer_id: *transfer_id,
-                })?;
+        let entry = self
+            .entries
+            .remove(transfer_id)
+            .ok_or(MailboxError::TransferNotFound {
+                transfer_id: *transfer_id,
+            })?;
 
         // Remove chunk files
         for chunk in &entry.chunks {
@@ -410,15 +414,16 @@ impl MailboxStorage {
 
         let mut nonce = [0u8; 12];
         let mut tag = [0u8; 16];
-        let mut encrypted = false;
-        if self.config.encryption_at_rest {
+        let encrypted = if self.config.encryption_at_rest {
             let encrypted_chunk = EncryptedChunk::encrypt(&payload, &self.config.encryption_key)
                 .map_err(|operation| MailboxError::CryptoError { operation })?;
             payload = encrypted_chunk.data;
             nonce = encrypted_chunk.nonce.bytes;
             tag = encrypted_chunk.tag;
-            encrypted = true;
-        }
+            true
+        } else {
+            false
+        };
 
         let mut flags = 0u8;
         if compressed {
@@ -567,7 +572,7 @@ impl MailboxStorage {
 
         let mut cleaned_count = 0;
         for transfer_id in expired_transfers {
-            if let Ok(()) = self.delete_transfer(&transfer_id).await {
+            if self.delete_transfer(&transfer_id).await.is_ok() {
                 cleaned_count += 1;
             }
         }

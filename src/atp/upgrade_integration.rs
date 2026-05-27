@@ -92,7 +92,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config_dir = temp_dir.path();
 
-        // Create a dummy config file
+        // Create a minimal config file.
         std::fs::write(config_dir.join("config.toml"), "# test config").unwrap();
 
         let result = create_upgrade_daemon_controller(RegionId::new_for_test(1, 0), config_dir);

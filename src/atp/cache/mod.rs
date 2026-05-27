@@ -44,6 +44,14 @@ impl CacheKey {
             None => format!("{}:{}", self.manifest_hash, self.content_hash),
         }
     }
+
+    /// Whether the grant scope declares encrypted-at-rest content.
+    #[must_use]
+    pub fn declares_encrypted_content(&self) -> bool {
+        self.grant_scope
+            .as_deref()
+            .is_some_and(scope_declares_encrypted_content)
+    }
 }
 
 /// Cached content entry with metadata and access tracking.
@@ -78,6 +86,44 @@ pub enum StorageLocation {
     Memory(String),
     /// Stored in external location (relay, CDN, etc.).
     External(String),
+}
+
+fn scope_declares_encrypted_content(scope: &str) -> bool {
+    scope
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "encrypted" | "ciphertext" | "e2e" | "end-to-end" | "sealed"
+            )
+        })
+}
+
+fn content_has_encrypted_envelope(content: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(content) else {
+        return false;
+    };
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+
+    let has_ciphertext = object.contains_key("ciphertext") || object.contains_key("encrypted_data");
+    let has_nonce = object.contains_key("nonce") || object.contains_key("iv");
+    let has_tag = object.contains_key("tag") || object.contains_key("auth_tag");
+    let has_algorithm = object
+        .get("algorithm")
+        .or_else(|| object.get("cipher"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|algorithm| {
+            let algorithm = algorithm.to_ascii_lowercase();
+            algorithm.contains("aes") || algorithm.contains("chacha") || algorithm.contains("gcm")
+        });
+
+    has_ciphertext && has_nonce && has_tag && has_algorithm
+}
+
+fn derive_cache_entry_encryption_status(key: &CacheKey, content: &[u8]) -> bool {
+    key.declares_encrypted_content() || content_has_encrypted_envelope(content)
 }
 
 /// Verification metadata for cached content.
@@ -284,11 +330,9 @@ impl AtpCache {
                     Ok(None)
                 }
             },
-            StorageLocation::External(_) => {
-                // External content would need network fetch
-                Err(CacheError::External(
-                    "External content not yet supported".to_string(),
-                ))
+            StorageLocation::External(location) => {
+                let content = retrieve_external_cache_location(location)?;
+                Ok(Some(content))
             }
         }
     }
@@ -344,11 +388,11 @@ impl AtpCache {
             last_accessed: now,
             access_count: 0,
             ttl: self.config.default_ttl,
-            encrypted: true, // Assume encrypted for now
+            encrypted: derive_cache_entry_encryption_status(&key, content),
             storage_location,
             verification: VerificationMetadata {
                 content_verified: true,
-                manifest_verified: false, // Would need manifest verification
+                manifest_verified: false,
                 proof_location: None,
                 verified_at: Some(now),
             },
@@ -451,6 +495,25 @@ impl AtpCache {
     }
 }
 
+fn retrieve_external_cache_location(location: &str) -> Result<Vec<u8>, CacheError> {
+    if let Some(path) = location.strip_prefix("file://") {
+        return std::fs::read(path).map_err(|error| {
+            CacheError::External(format!(
+                "failed to read external file cache location: {error}"
+            ))
+        });
+    }
+    let path = PathBuf::from(location);
+    if path.is_absolute() {
+        return std::fs::read(path).map_err(|error| {
+            CacheError::External(format!("failed to read external cache path: {error}"))
+        });
+    }
+    Err(CacheError::External(format!(
+        "external cache location requires a configured backend: {location}"
+    )))
+}
+
 /// Cache operation errors.
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
@@ -517,7 +580,7 @@ mod tests {
         let mut cache = AtpCache::new(CacheConfig::default());
         let key = CacheKey::new(
             "manifest123".to_string(),
-            "d2d2d2d2d2d2d2d2".to_string(), // Mock hash
+            "d2d2d2d2d2d2d2d2".to_string(), // Intentionally invalid content hash
             None,
         );
         let content = b"test content";
@@ -528,13 +591,45 @@ mod tests {
     }
 
     #[test]
+    fn cache_entry_encryption_status_is_derived_from_scope_or_envelope() {
+        let encrypted_key = CacheKey::new(
+            "manifest123".to_string(),
+            "content456".to_string(),
+            Some("team:engineering:encrypted".to_string()),
+        );
+        assert!(derive_cache_entry_encryption_status(
+            &encrypted_key,
+            b"plaintext"
+        ));
+
+        let envelope_key = CacheKey::new("manifest123".to_string(), "content456".to_string(), None);
+        let envelope = br#"{
+            "algorithm": "aes-256-gcm",
+            "nonce": "000000000000000000000000",
+            "ciphertext": "deadbeef",
+            "tag": "cafebabe"
+        }"#;
+        assert!(derive_cache_entry_encryption_status(
+            &envelope_key,
+            envelope
+        ));
+
+        let plaintext_key =
+            CacheKey::new("manifest123".to_string(), "content456".to_string(), None);
+        assert!(!derive_cache_entry_encryption_status(
+            &plaintext_key,
+            b"plaintext"
+        ));
+    }
+
+    #[test]
     fn cache_ttl_toctou_fix() {
         let mut cache = AtpCache::new(CacheConfig::default());
 
         // Create a cache key
         let key = CacheKey::new(
             "manifest123".to_string(),
-            "d2d2d2d2d2d2d2d2".to_string(), // Dummy hash for test
+            "d2d2d2d2d2d2d2d2".to_string(), // Intentionally invalid content hash
             None,
         );
 

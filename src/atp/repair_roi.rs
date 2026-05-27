@@ -294,8 +294,11 @@ impl RepairRoiSimulationResult {
             0.0
         };
 
-        // Estimate relay cost (simplified model)
-        let relay_cost_micros = (self.roi_inputs.bandwidth_overhead_bytes / 1_048_576) * 100; // 100µs per MiB
+        let relay_cost_micros = mul_div_u64(
+            self.roi_inputs.bandwidth_overhead_bytes,
+            self.roi_inputs.relay_cost_micros_per_mib,
+            1_048_576,
+        );
         self.relay_cost_efficiency = if relay_cost_micros > 0 {
             self.roi_inputs.expected_time_saved_micros as f64 / relay_cost_micros as f64
         } else {
@@ -418,16 +421,26 @@ impl RepairRoiSimulator {
                                 roi_inputs.resume_value_permille as u64,
                             ));
 
-                        let bandwidth_cost = self.mul_div_u64(
+                        let bandwidth_cost = mul_div_u64(
                             roi_inputs.bandwidth_overhead_bytes,
-                            1000, // Simplified cost model
+                            policy.bandwidth_cost_micros_per_mib,
                             1_048_576,
+                        );
+                        let memory_cost = permille_of(
+                            result.gross_benefit_micros,
+                            u64::from(roi_inputs.memory_pressure_permille),
+                        );
+                        let stream_cost = permille_of(
+                            result.gross_benefit_micros,
+                            u64::from(roi_inputs.stream_contention_permille),
                         );
 
                         result.total_cost_micros = roi_inputs
                             .encode_cpu_micros
                             .saturating_add(roi_inputs.decode_cpu_micros)
-                            .saturating_add(bandwidth_cost);
+                            .saturating_add(bandwidth_cost)
+                            .saturating_add(memory_cost)
+                            .saturating_add(stream_cost);
 
                         let net_roi = i128::from(result.gross_benefit_micros)
                             - i128::from(result.total_cost_micros);
@@ -522,16 +535,19 @@ impl RepairRoiSimulator {
 
     /// Helper function for permille calculations.
     fn permille_of(&self, value: u64, permille: u64) -> u64 {
-        value.saturating_mul(permille) / 1000
+        permille_of(value, permille)
     }
+}
 
-    /// Helper function for multiplication with division.
-    fn mul_div_u64(&self, value: u64, mul: u64, div: u64) -> u64 {
-        if div == 0 {
-            0
-        } else {
-            value.saturating_mul(mul) / div
-        }
+fn permille_of(value: u64, permille: u64) -> u64 {
+    value.saturating_mul(permille) / 1000
+}
+
+fn mul_div_u64(value: u64, mul: u64, div: u64) -> u64 {
+    if div == 0 {
+        0
+    } else {
+        value.saturating_mul(mul) / div
     }
 }
 

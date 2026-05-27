@@ -23,7 +23,8 @@ pub mod reports;
 pub mod suite;
 
 pub use adapters::{
-    BaselineAdapter, CurlAdapter, RsyncAdapter, ScpAdapter, ToolAvailability, ToolVersion,
+    BaselineAdapter, CurlAdapter, RcloneAdapter, RsyncAdapter, ScpAdapter, ToolAvailability,
+    ToolVersion,
 };
 pub use profiles::{AtpProfile, AtpProfileKind};
 pub use reports::{BenchmarkMetrics, BenchmarkReport, BenchmarkResult, ComparisonReport};
@@ -79,10 +80,28 @@ impl BenchmarkEnvironment {
             os_info: whoami::distro(),
             cpu_info: format!("{}x {}", num_cpus::get(), std::env::consts::ARCH),
             memory_info: format!("Available: {} bytes", get_available_memory()),
-            network_info: "Simulated lab network".to_string(),
+            network_info: describe_network_environment(),
             timestamp: chrono::Utc::now(),
             env_vars: collect_relevant_env_vars(),
         })
+    }
+}
+
+fn describe_network_environment() -> String {
+    let interface_count = std::fs::read_dir("/sys/class/net")
+        .ok()
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name() != "lo")
+                .count()
+        })
+        .unwrap_or(0);
+
+    if interface_count == 0 {
+        "network interfaces unavailable".to_string()
+    } else {
+        format!("{} non-loopback interface(s) detected", interface_count)
     }
 }
 
@@ -157,8 +176,7 @@ impl BenchmarkConfig {
 // Helper functions
 
 fn get_available_memory() -> u64 {
-    // Simplified memory detection - in real implementation would use sysinfo or similar
-    8 * 1024 * 1024 * 1024 // 8GB placeholder
+    sysinfo::System::new_all().available_memory()
 }
 
 fn collect_relevant_env_vars() -> BTreeMap<String, String> {

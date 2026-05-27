@@ -6,7 +6,6 @@
 use super::{AdapterNegotiation, AdapterType, FeatureSupport, PerformanceCaveat, SessionStats};
 use crate::atp::object::ObjectId;
 use crate::error::{Error, ErrorKind, Result};
-use crate::time::{Sleep, wall_now};
 use crate::types::TraceId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -132,6 +131,8 @@ pub struct WebTransportSession {
     pub connection_state: ConnectionState,
     /// Active streams
     pub active_streams: HashMap<u64, StreamInfo>,
+    /// Datagram payloads accepted for transmission by the WebTransport session.
+    pub outbound_datagrams: Vec<Vec<u8>>,
     /// Session statistics
     pub session_stats: SessionStats,
     /// Created timestamp
@@ -166,6 +167,8 @@ pub struct StreamInfo {
     pub bytes_sent: u64,
     /// Bytes received on this stream
     pub bytes_received: u64,
+    /// Frames accepted for transmission on this stream.
+    pub outbound_frames: Vec<Vec<u8>>,
     /// Stream priority
     pub priority: u8,
     /// Created timestamp
@@ -276,7 +279,9 @@ impl WebTransportAdapter {
     }
 
     /// Start WebTransport session for object transfer.
-    pub async fn start_session(&mut self, object_id: ObjectId, _url: &str) -> Result<String> {
+    pub async fn start_session(&mut self, object_id: ObjectId, url: &str) -> Result<String> {
+        validate_webtransport_url(url)?;
+
         let session_id = format!(
             "wt-{}-{}",
             object_id,
@@ -286,11 +291,11 @@ impl WebTransportAdapter {
                 .as_millis()
         );
 
-        // Simulate WebTransport session establishment
         let session = WebTransportSession {
             session_id: session_id.clone(),
-            connection_state: ConnectionState::Connecting,
+            connection_state: ConnectionState::Connected,
             active_streams: HashMap::new(),
+            outbound_datagrams: Vec::new(),
             session_stats: SessionStats::new(),
             created_at: SystemTime::now(),
         };
@@ -299,14 +304,6 @@ impl WebTransportAdapter {
         self.stats.total_sessions += 1;
         self.stats.active_sessions += 1;
         self.stats.last_updated = SystemTime::now();
-
-        // Simulate connection establishment delay
-        Sleep::new(wall_now() + Duration::from_millis(100)).await;
-
-        // Update session to connected state
-        if let Some(session) = self.sessions.get_mut(&session_id) {
-            session.connection_state = ConnectionState::Connected;
-        }
 
         Ok(session_id)
     }
@@ -342,6 +339,7 @@ impl WebTransportAdapter {
             state: StreamState::Open,
             bytes_sent: 0,
             bytes_received: 0,
+            outbound_frames: Vec::new(),
             priority,
             created_at: SystemTime::now(),
         };
@@ -374,12 +372,13 @@ impl WebTransportAdapter {
             return Err(Error::new(ErrorKind::StreamEnded));
         }
 
-        // Simulate frame transmission
-        stream.bytes_sent += data.len() as u64;
-        session.session_stats.bytes_sent += data.len() as u64;
+        if data.len() > self.config.stream_config.max_frame_size as usize {
+            return Err(Error::new(ErrorKind::DataTooLarge));
+        }
 
-        // Simulate network delay
-        Sleep::new(wall_now() + Duration::from_millis(5)).await;
+        stream.bytes_sent += data.len() as u64;
+        stream.outbound_frames.push(data.to_vec());
+        session.session_stats.bytes_sent += data.len() as u64;
 
         Ok(())
     }
@@ -395,11 +394,24 @@ impl WebTransportAdapter {
             return Err(Error::new(ErrorKind::ConnectionLost));
         }
 
+        if !self
+            .config
+            .security_policy
+            .feature_permissions
+            .datagrams_enabled
+        {
+            return Err(Error::new(ErrorKind::ConnectionRefused));
+        }
+
         if data.len() > self.config.datagram_config.max_datagram_size {
             return Err(Error::new(ErrorKind::DataTooLarge));
         }
 
-        // Simulate datagram transmission
+        if session.outbound_datagrams.len() >= self.config.datagram_config.queue_size {
+            return Err(Error::new(ErrorKind::ChannelFull));
+        }
+
+        session.outbound_datagrams.push(data.to_vec());
         session.session_stats.bytes_sent += data.len() as u64;
         self.stats.total_datagrams_sent += 1;
         self.stats.last_updated = SystemTime::now();
@@ -492,6 +504,17 @@ impl WebTransportAdapter {
             replay_pointer: Some(format!("webtransport-trace-{}", trace_id.as_u128())),
         }
     }
+}
+
+fn validate_webtransport_url(url: &str) -> Result<()> {
+    let authority = url
+        .strip_prefix("https://")
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
+    let authority = authority.split('/').next().unwrap_or_default();
+    if authority.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidInput));
+    }
+    Ok(())
 }
 
 impl Default for WebTransportConfig {
@@ -650,6 +673,48 @@ mod tests {
             // Second stream should fail due to limit
             let result = adapter.create_stream(&session_id, 128).await;
             assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn test_stream_frame_and_datagram_queues() {
+        block_on(async {
+            let mut adapter = WebTransportAdapter::new(WebTransportConfig::default());
+            let object_id = ObjectId::Content(crate::atp::object::ContentId::new([1; 32]));
+            let session_id = adapter
+                .start_session(object_id, "https://example.com/atp")
+                .await
+                .unwrap();
+            let stream_id = adapter.create_stream(&session_id, 128).await.unwrap();
+
+            adapter
+                .send_frame(&session_id, stream_id, b"stream-frame")
+                .await
+                .unwrap();
+            adapter
+                .send_datagram(&session_id, b"datagram")
+                .await
+                .unwrap();
+
+            let session = adapter.sessions.get(&session_id).unwrap();
+            let stream = session.active_streams.get(&stream_id).unwrap();
+            assert_eq!(stream.outbound_frames, vec![b"stream-frame".to_vec()]);
+            assert_eq!(session.outbound_datagrams, vec![b"datagram".to_vec()]);
+        });
+    }
+
+    #[test]
+    fn test_invalid_webtransport_url_is_rejected() {
+        block_on(async {
+            let mut adapter = WebTransportAdapter::new(WebTransportConfig::default());
+            let object_id = ObjectId::Content(crate::atp::object::ContentId::new([1; 32]));
+
+            let result = adapter.start_session(object_id, "http://example.com").await;
+
+            assert!(matches!(
+                result,
+                Err(err) if err.kind() == ErrorKind::InvalidInput
+            ));
         });
     }
 }

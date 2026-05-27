@@ -268,11 +268,11 @@ fn atp_peer_identity_and_session_management_integration() {
 
 #[test]
 fn atp_test_utilities_without_mocks() {
-    let mut log = AtpTestLogger::new("atp_infrastructure", "test_utilities_mock_free");
+    let mut log = AtpTestLogger::new("atp_infrastructure", "test_utilities_fixture_based");
 
     log.phase("setup");
 
-    // Test utilities that DON'T use mocks
+    // Test utilities that rely on deterministic in-process fixtures.
     #[cfg(test)]
     {
         use asupersync::net::atp::test_utils::{

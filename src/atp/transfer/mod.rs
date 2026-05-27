@@ -1055,15 +1055,8 @@ impl TransferActor {
             }
             actor.journal.push(entry.clone());
         }
-        // Note: After journal replay, open_obligations will be empty since journal entries
-        // only track settled obligations. This is correct for the current synchronous design
-        // where obligations are opened and immediately settled within the same operation.
-        //
-        // FUTURE: To support asynchronous obligations that can remain open across operations,
-        // the journal format would need to be enhanced to track obligation lifecycle events:
-        // - Add obligation_opened field to track when obligations are created
-        // - Keep existing obligation field for when they are settled
-        // - During replay, reconstruct open_obligations from opened-but-not-settled entries
+        // The journal records settled obligations only; transfer operations settle every
+        // obligation before returning, so replay reaches quiescence with no open obligations.
         actor.assert_quiescent()?;
         Ok(actor)
     }

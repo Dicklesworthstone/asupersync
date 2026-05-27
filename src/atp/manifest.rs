@@ -1186,26 +1186,32 @@ impl Manifest {
                     .collect(),
                 content_hash,
                 chunk_boundaries: Self::compute_chunk_boundaries(
-                    &chunk_plan,
+                    chunk_plan.as_ref(),
                     object,
-                    &content_hash,
+                    content_hash.as_ref(),
                 ),
                 raptorq_symbols: Self::compute_raptorq_symbols(
-                    &raptorq_layout,
+                    raptorq_layout.as_ref(),
                     object,
-                    &content_hash,
+                    content_hash.as_ref(),
                 ),
                 compression_metadata: Self::compute_compression_metadata(
-                    &compression_policy,
+                    compression_policy.as_ref(),
                     object,
                 ),
-                encryption_metadata: Self::compute_encryption_metadata(&encryption_policy, object),
+                encryption_metadata: Self::compute_encryption_metadata(
+                    encryption_policy.as_ref(),
+                    object,
+                ),
             };
             manifest_objects.insert(id.clone(), manifest_obj);
         }
 
-        let mut repair_groups =
-            Self::compute_repair_groups(&raptorq_layout, &manifest_objects, MerkleRoot::zero());
+        let mut repair_groups = Self::compute_repair_groups(
+            raptorq_layout.as_ref(),
+            &manifest_objects,
+            MerkleRoot::zero(),
+        );
 
         let merkle_root = MerkleRoot::from_manifest_components(
             &manifest_objects,
@@ -1382,8 +1388,8 @@ impl Manifest {
                 if let Some(order) = &self.transform_order {
                     Self::validate_transform_order_consistency(
                         order,
-                        &self.compression_policy,
-                        &self.encryption_policy,
+                        self.compression_policy.as_ref(),
+                        self.encryption_policy.as_ref(),
                     )?;
                 } else {
                     return Err(ManifestError::TransformPolicyViolation(
@@ -1394,17 +1400,20 @@ impl Manifest {
             }
 
             // Check for ambiguous verification modes
-            Self::validate_verification_boundary(&self.transform_order, &proof_policy)?;
+            Self::validate_verification_boundary(self.transform_order.as_ref(), proof_policy)?;
 
             // Validate lossy transforms disclosure
-            Self::validate_lossy_transforms_disclosure(&self.compression_policy, &proof_policy)?;
+            Self::validate_lossy_transforms_disclosure(
+                self.compression_policy.as_ref(),
+                proof_policy,
+            )?;
 
             // Validate encryption domains
-            Self::validate_encryption_domains(&self.encryption_policy, &proof_policy)?;
+            Self::validate_encryption_domains(self.encryption_policy.as_ref(), proof_policy)?;
 
             // Check plaintext hash requirements
             if proof_policy.require_plaintext_hash {
-                Self::validate_plaintext_hash_availability(&self.transform_order)?;
+                Self::validate_plaintext_hash_availability(self.transform_order.as_ref())?;
             }
         }
 
@@ -1419,19 +1428,13 @@ impl Manifest {
     /// Validate transform order consistency with policies.
     fn validate_transform_order_consistency(
         order: &TransformOrder,
-        compression_policy: &Option<CompressionPolicy>,
-        encryption_policy: &Option<EncryptionPolicy>,
+        compression_policy: Option<&CompressionPolicy>,
+        encryption_policy: Option<&EncryptionPolicy>,
     ) -> Result<(), ManifestError> {
-        let has_compression = compression_policy.is_some()
-            && !matches!(
-                compression_policy.as_ref().unwrap().algorithm,
-                CompressionAlgorithm::None
-            );
-        let has_encryption = encryption_policy.is_some()
-            && !matches!(
-                encryption_policy.as_ref().unwrap().algorithm,
-                EncryptionAlgorithm::None
-            );
+        let has_compression = compression_policy
+            .is_some_and(|policy| !matches!(policy.algorithm, CompressionAlgorithm::None));
+        let has_encryption = encryption_policy
+            .is_some_and(|policy| !matches!(policy.algorithm, EncryptionAlgorithm::None));
 
         // Check compression transform consistency
         if has_compression && !order.transforms.contains(&TransformType::Compression) {
@@ -1482,7 +1485,7 @@ impl Manifest {
 
     /// Validate verification boundary specifications.
     fn validate_verification_boundary(
-        transform_order: &Option<TransformOrder>,
+        transform_order: Option<&TransformOrder>,
         _proof_policy: &TransformProofPolicy,
     ) -> Result<(), ManifestError> {
         if let Some(order) = transform_order {
@@ -1522,7 +1525,7 @@ impl Manifest {
 
     /// Validate lossy transforms are properly disclosed.
     fn validate_lossy_transforms_disclosure(
-        compression_policy: &Option<CompressionPolicy>,
+        compression_policy: Option<&CompressionPolicy>,
         proof_policy: &TransformProofPolicy,
     ) -> Result<(), ManifestError> {
         if let Some(comp) = compression_policy {
@@ -1546,7 +1549,7 @@ impl Manifest {
 
     /// Validate encryption domains and privacy requirements.
     fn validate_encryption_domains(
-        encryption_policy: &Option<EncryptionPolicy>,
+        encryption_policy: Option<&EncryptionPolicy>,
         proof_policy: &TransformProofPolicy,
     ) -> Result<(), ManifestError> {
         if let Some(enc) = encryption_policy {
@@ -1568,7 +1571,7 @@ impl Manifest {
 
     /// Validate plaintext hash availability requirements.
     fn validate_plaintext_hash_availability(
-        transform_order: &Option<TransformOrder>,
+        transform_order: Option<&TransformOrder>,
     ) -> Result<(), ManifestError> {
         if let Some(order) = transform_order {
             if order.hash_point == HashPoint::Ciphertext
@@ -2066,9 +2069,9 @@ impl Manifest {
 
     /// Compute chunk boundaries for an object based on chunk plan.
     fn compute_chunk_boundaries(
-        chunk_plan: &Option<ChunkPlan>,
+        chunk_plan: Option<&ChunkPlan>,
         object: &crate::atp::object::Object,
-        _content_hash: &Option<[u8; 32]>,
+        _content_hash: Option<&[u8; 32]>,
     ) -> Vec<ChunkBoundary> {
         let Some(plan) = chunk_plan else {
             return Vec::new();
@@ -2084,8 +2087,7 @@ impl Manifest {
         let chunk_size = plan
             .cdc_params
             .as_ref()
-            .map(|cdc| cdc.average_chunk_size)
-            .unwrap_or(plan.target_chunk_size);
+            .map_or(plan.target_chunk_size, |cdc| cdc.average_chunk_size);
 
         let mut boundaries = Vec::new();
         let mut offset = 0u64;
@@ -2128,9 +2130,9 @@ impl Manifest {
 
     /// Compute RaptorQ symbols for an object based on repair layout.
     fn compute_raptorq_symbols(
-        raptorq_layout: &Option<RaptorQRepairLayout>,
+        raptorq_layout: Option<&RaptorQRepairLayout>,
         object: &crate::atp::object::Object,
-        content_hash: &Option<[u8; 32]>,
+        content_hash: Option<&[u8; 32]>,
     ) -> Vec<RaptorQSymbol> {
         let Some(layout) = raptorq_layout else {
             return Vec::new();
@@ -2168,7 +2170,7 @@ impl Manifest {
             symbols.push(RaptorQSymbol {
                 index: i,
                 esi: i, // Encoding Symbol ID matches index for systematic symbols
-                size_bytes: symbol_size as u32,
+                size_bytes: symbol_size,
                 content_hash: symbol_hash,
                 is_source: true, // These are systematic source symbols
                 repair_group_id: Some(group_id.clone()),
@@ -2180,7 +2182,7 @@ impl Manifest {
     }
 
     fn compute_repair_groups(
-        raptorq_layout: &Option<RaptorQRepairLayout>,
+        raptorq_layout: Option<&RaptorQRepairLayout>,
         objects: &BTreeMap<ObjectId, ManifestObject>,
         manifest_root: MerkleRoot,
     ) -> BTreeMap<RepairGroupId, RepairGroup> {
@@ -2295,10 +2297,10 @@ impl Manifest {
 
     /// Compute compression metadata for an object based on compression policy.
     fn compute_compression_metadata(
-        compression_policy: &Option<CompressionPolicy>,
+        compression_policy: Option<&CompressionPolicy>,
         object: &crate::atp::object::Object,
     ) -> Option<CompressionMetadata> {
-        let policy = compression_policy.as_ref()?;
+        let policy = compression_policy?;
         let size = object.metadata.size_bytes?;
 
         // Check if compression should be applied
@@ -2381,10 +2383,10 @@ impl Manifest {
 
     /// Compute encryption metadata for an object based on encryption policy.
     fn compute_encryption_metadata(
-        encryption_policy: &Option<EncryptionPolicy>,
+        encryption_policy: Option<&EncryptionPolicy>,
         object: &crate::atp::object::Object,
     ) -> Option<EncryptionMetadata> {
-        let policy = encryption_policy.as_ref()?;
+        let policy = encryption_policy?;
 
         // Check if encryption should be applied
         if !policy.apply_to_kinds.contains(&object.metadata.kind) {

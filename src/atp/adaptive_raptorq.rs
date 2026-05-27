@@ -6,8 +6,8 @@
 
 use crate::atp::object::ObjectId;
 use crate::atp::repair_coordinator::{
-    PathCharacteristics, RepairCoordinator, RepairCoordinatorConfig, RepairDecision,
-    RepairMode, RepairRoi, RepairTelemetry, TransferState,
+    PathCharacteristics, RepairCoordinator, RepairCoordinatorConfig, RepairDecision, RepairMode,
+    RepairRoi, RepairTelemetry, TransferState,
 };
 use crate::error::{Error, ErrorKind, Result};
 use crate::types::TraceId;
@@ -119,9 +119,15 @@ impl AdaptiveRaptorQPolicy {
         // Initialize adaptive thresholds from base configuration
         let mut adaptive_thresholds = HashMap::new();
         for mode in [
-            RepairMode::Off, RepairMode::Tail, RepairMode::Lossy, RepairMode::ResumeRepair,
-            RepairMode::Broadcast, RepairMode::Swarm, RepairMode::RelayExpensive,
-            RepairMode::MobileUnstable, RepairMode::HighBDP,
+            RepairMode::Off,
+            RepairMode::Tail,
+            RepairMode::Lossy,
+            RepairMode::ResumeRepair,
+            RepairMode::Broadcast,
+            RepairMode::Swarm,
+            RepairMode::RelayExpensive,
+            RepairMode::MobileUnstable,
+            RepairMode::HighBDP,
         ] {
             adaptive_thresholds.insert(mode, config.coordinator_config.min_roi_threshold);
         }
@@ -144,19 +150,27 @@ impl AdaptiveRaptorQPolicy {
         trace_id: TraceId,
     ) -> Result<RepairPolicyResult> {
         // Make decision using repair coordinator
-        let decision = self.coordinator.decide_repair_mode(object_id.clone(), path, transfer, trace_id)?;
+        let decision =
+            self.coordinator
+                .decide_repair_mode(object_id.clone(), path, transfer, trace_id)?;
 
         // Check against adaptive threshold if available
-        let mode_threshold = self.adaptive_thresholds.get(&decision.mode)
+        let mode_threshold = self
+            .adaptive_thresholds
+            .get(&decision.mode)
             .copied()
             .unwrap_or(self.config.coordinator_config.min_roi_threshold);
 
-        let should_repair = decision.mode != RepairMode::Off &&
-                           decision.roi.roi_ratio >= mode_threshold;
+        let should_repair =
+            decision.mode != RepairMode::Off && decision.roi.roi_ratio >= mode_threshold;
 
         // Update statistics
         self.policy_stats.total_decisions += 1;
-        *self.policy_stats.decisions_by_mode.entry(decision.mode).or_insert(0) += 1;
+        *self
+            .policy_stats
+            .decisions_by_mode
+            .entry(decision.mode)
+            .or_insert(0) += 1;
 
         let result = RepairPolicyResult {
             should_use_repair: should_repair,
@@ -204,7 +218,9 @@ impl AdaptiveRaptorQPolicy {
 
             debug!(
                 "Updated repair progress for {}: {:.1}% ({} symbols)",
-                object_id, progress * 100.0, symbols_transmitted
+                object_id,
+                progress * 100.0,
+                symbols_transmitted
             );
         }
 
@@ -297,12 +313,16 @@ impl AdaptiveRaptorQPolicy {
         for threshold in self.adaptive_thresholds.values_mut() {
             *threshold = self.config.coordinator_config.min_roi_threshold;
         }
-        info!("Reset adaptive thresholds to default: {:.2}",
-              self.config.coordinator_config.min_roi_threshold);
+        info!(
+            "Reset adaptive thresholds to default: {:.2}",
+            self.config.coordinator_config.min_roi_threshold
+        );
     }
 
     /// Get repair coordinator statistics
-    pub fn get_coordinator_statistics(&self) -> &HashMap<RepairMode, crate::atp::repair_coordinator::ModeStatistics> {
+    pub fn get_coordinator_statistics(
+        &self,
+    ) -> &HashMap<RepairMode, crate::atp::repair_coordinator::ModeStatistics> {
         self.coordinator.get_mode_statistics()
     }
 
@@ -326,19 +346,40 @@ impl AdaptiveRaptorQPolicy {
 
     fn update_policy_statistics(&mut self, telemetry: &RepairTelemetry) {
         // Update average ROI for the mode
-        let current_avg = self.policy_stats.avg_roi_by_mode.get(&telemetry.mode).copied().unwrap_or(0.0);
-        let current_count = self.policy_stats.decisions_by_mode.get(&telemetry.mode).copied().unwrap_or(0);
+        let current_avg = self
+            .policy_stats
+            .avg_roi_by_mode
+            .get(&telemetry.mode)
+            .copied()
+            .unwrap_or(0.0);
+        let current_count = self
+            .policy_stats
+            .decisions_by_mode
+            .get(&telemetry.mode)
+            .copied()
+            .unwrap_or(0);
 
         if current_count > 0 {
-            let new_avg = (current_avg * (current_count - 1) as f64 + telemetry.actual_roi_ratio) / current_count as f64;
-            self.policy_stats.avg_roi_by_mode.insert(telemetry.mode, new_avg);
+            let new_avg = (current_avg * (current_count - 1) as f64 + telemetry.actual_roi_ratio)
+                / current_count as f64;
+            self.policy_stats
+                .avg_roi_by_mode
+                .insert(telemetry.mode, new_avg);
         }
 
         // Update success rate
-        let current_success_rate = self.policy_stats.success_rate_by_mode.get(&telemetry.mode).copied().unwrap_or(1.0);
+        let current_success_rate = self
+            .policy_stats
+            .success_rate_by_mode
+            .get(&telemetry.mode)
+            .copied()
+            .unwrap_or(1.0);
         let success_value = if telemetry.success { 1.0 } else { 0.0 };
-        let new_success_rate = (current_success_rate * (current_count - 1) as f64 + success_value) / current_count as f64;
-        self.policy_stats.success_rate_by_mode.insert(telemetry.mode, new_success_rate);
+        let new_success_rate = (current_success_rate * (current_count - 1) as f64 + success_value)
+            / current_count as f64;
+        self.policy_stats
+            .success_rate_by_mode
+            .insert(telemetry.mode, new_success_rate);
     }
 
     fn maybe_adapt_thresholds(&mut self) {
@@ -346,7 +387,11 @@ impl AdaptiveRaptorQPolicy {
         let min_samples = self.config.min_samples_for_adaptation;
 
         // Only adapt every 60 seconds at most
-        if now.duration_since(self.policy_stats.last_adaptation).unwrap_or(Duration::ZERO) < Duration::from_secs(60) {
+        if now
+            .duration_since(self.policy_stats.last_adaptation)
+            .unwrap_or(Duration::ZERO)
+            < Duration::from_secs(60)
+        {
             return;
         }
 
@@ -355,7 +400,10 @@ impl AdaptiveRaptorQPolicy {
 
         for (mode, stats) in mode_stats {
             if stats.usage_count >= min_samples {
-                let current_threshold = self.adaptive_thresholds.get(mode).copied()
+                let current_threshold = self
+                    .adaptive_thresholds
+                    .get(mode)
+                    .copied()
                     .unwrap_or(self.config.coordinator_config.min_roi_threshold);
 
                 // If actual ROI is consistently higher than predicted, lower threshold
@@ -374,8 +422,8 @@ impl AdaptiveRaptorQPolicy {
                 };
 
                 // Apply learning rate
-                let new_threshold = current_threshold +
-                    (target_threshold - current_threshold) * self.config.learning_rate;
+                let new_threshold = current_threshold
+                    + (target_threshold - current_threshold) * self.config.learning_rate;
 
                 // Clamp to reasonable bounds
                 let new_threshold = new_threshold.clamp(0.5, 5.0);
@@ -386,7 +434,11 @@ impl AdaptiveRaptorQPolicy {
 
                     debug!(
                         "Adapted threshold for {:?}: {:.3} -> {:.3} (ROI ratio: {:.2}, success: {:.1}%)",
-                        mode, current_threshold, new_threshold, roi_ratio, success_factor * 100.0
+                        mode,
+                        current_threshold,
+                        new_threshold,
+                        roi_ratio,
+                        success_factor * 100.0
                     );
                 }
             }
@@ -498,7 +550,7 @@ mod tests {
 
         let object_id = ObjectId::from("test-object");
 
-        // Simulate repair progress
+        // Record an in-flight repair progress sample.
         policy.update_repair_progress(
             object_id.clone(),
             0.5, // 50% progress
@@ -509,17 +561,13 @@ mod tests {
         )?;
 
         // Complete repair
-        policy.complete_repair(
-            object_id,
-            true,
-            Duration::from_millis(150),
-            100000,
-            8,
-        )?;
+        policy.complete_repair(object_id, true, Duration::from_millis(150), 100000, 8)?;
 
         // Should have recorded telemetry
-        assert!(policy.policy_stats.total_decisions > 0 ||
-                !policy.coordinator.get_mode_statistics().is_empty());
+        assert!(
+            policy.policy_stats.total_decisions > 0
+                || !policy.coordinator.get_mode_statistics().is_empty()
+        );
 
         Ok(())
     }
@@ -536,7 +584,7 @@ mod tests {
 
         let original_threshold = policy.adaptive_thresholds[&RepairMode::Tail];
 
-        // Simulate good telemetry that should lower threshold
+        // Feed successful telemetry that should lower threshold.
         let telemetry = RepairTelemetry {
             object_id: ObjectId::from("test"),
             mode: RepairMode::Tail,

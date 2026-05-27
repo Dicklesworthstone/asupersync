@@ -524,7 +524,7 @@ impl RepairCoordinator {
             ));
         }
 
-        // Validate telemetry data authenticity to prevent fake data injection
+        // Validate telemetry data authenticity to prevent forged data injection.
         self.validate_telemetry(&telemetry)?;
         // Update mode statistics
         let stats = self.mode_statistics.entry(telemetry.mode).or_default();
@@ -794,7 +794,7 @@ impl RepairCoordinator {
     }
 
     fn validate_telemetry(&self, telemetry: &RepairTelemetry) -> Result<()> {
-        // Validate that telemetry data is plausible to prevent fake injection attacks
+        // Validate that telemetry data is plausible to prevent forged telemetry attacks.
 
         // Check for impossible values
         if telemetry.actual_roi_ratio < 0.0 || telemetry.actual_roi_ratio > 1000.0 {

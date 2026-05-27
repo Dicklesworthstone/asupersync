@@ -632,15 +632,25 @@ impl ComparisonReport {
         best_atp: &Option<PerformanceSummary>,
         ratios: &[PerformanceRatio],
     ) -> String {
+        let comparison_count = ratios.len();
         match (best_baseline, best_atp) {
             (Some(baseline), Some(atp)) => {
                 let ratio = atp.throughput / baseline.throughput;
                 if ratio >= 1.1 {
-                    format!("ATP outperforms baseline by {:.1}x", ratio)
+                    format!(
+                        "ATP outperforms baseline by {:.1}x across {} comparison(s)",
+                        ratio, comparison_count
+                    )
                 } else if ratio >= 0.9 {
-                    "ATP performance is comparable to baseline".to_string()
+                    format!(
+                        "ATP performance is comparable to baseline across {comparison_count} comparison(s)"
+                    )
                 } else {
-                    format!("ATP underperforms baseline by {:.1}x", 1.0 / ratio)
+                    format!(
+                        "ATP underperforms baseline by {:.1}x across {} comparison(s)",
+                        1.0 / ratio,
+                        comparison_count
+                    )
                 }
             }
             (None, Some(_)) => "ATP succeeded where baseline tools failed".to_string(),

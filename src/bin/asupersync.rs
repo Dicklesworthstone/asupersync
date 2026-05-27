@@ -13845,7 +13845,7 @@ lab:
     #[test]
     fn atp_platform_doctor_human_output_has_stable_sections() {
         let provider =
-            asupersync::atp::platform::DeterministicFakePlatformProvider::fully_supported();
+            asupersync::atp::platform::DeterministicLabPlatformProvider::fully_supported();
         let payload = AtpPlatformDoctorOutput::new(build_platform_doctor_document(&provider));
         let rendered = payload.human_format();
 
@@ -13860,8 +13860,7 @@ lab:
     #[test]
     fn atp_platform_doctor_json_output_has_stable_contract() {
         let provider =
-            asupersync::atp::platform::DeterministicFakePlatformProvider::conservative_degradation(
-            );
+            asupersync::atp::platform::DeterministicLabPlatformProvider::conservative_degradation();
         let payload = AtpPlatformDoctorOutput::new(build_platform_doctor_document(&provider));
         let capture = SharedWrite::default();
         let mut output = Output::with_writer(OutputFormat::Json, capture.clone());

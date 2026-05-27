@@ -484,12 +484,15 @@ mod tests {
 
     #[test]
     fn golden_mailbox_transfer_metadata_serialization() {
+        const CREATED_AT_NANOS: u64 = 1_640_995_200_000_000_000;
+        const WEEK_NANOS: u64 = 604_800_000_000_000;
+
         let metadata = MailboxTransferMetadata {
             transfer_id: fixed_transfer_id(),
             destination_peer: PeerId::new("peer-destination-node"),
-            created_at: Time::from_micros(1640995200000000), // 2022-01-01T00:00:00Z
-            expires_at: Time::from_micros(1640995200000000 + 604800000000), // +1 week
-            total_size: 2048576,                             // 2MB
+            created_at: Time::from_nanos(CREATED_AT_NANOS), // 2022-01-01T00:00:00Z
+            expires_at: Time::from_nanos(CREATED_AT_NANOS + WEEK_NANOS), // +1 week
+            total_size: 2048576,                            // 2MB
             chunk_count: 4,
             encrypted_metadata: vec![0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe],
         };
@@ -498,8 +501,8 @@ mod tests {
         {
           "transfer_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
           "destination_peer": "peer-destination-node",
-          "created_at": 1640995200000000,
-          "expires_at": 1641600000000000,
+          "created_at": 1640995200000000000,
+          "expires_at": 1641600000000000000,
           "total_size": 2048576,
           "chunk_count": 4,
           "encrypted_metadata": [
@@ -519,7 +522,7 @@ mod tests {
     #[test]
     fn golden_mailbox_operation_result_serialization() {
         use crate::atp::mailbox::quota::QuotaUsage;
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::time::UNIX_EPOCH;
 
         let result = MailboxOperationResult {
             success: true,

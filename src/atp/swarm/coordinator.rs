@@ -3,7 +3,11 @@
 //! The SwarmCoordinator manages piece requests, peer quality assessment,
 //! and transfer optimization across multiple peers in the swarm.
 
-use super::*;
+use super::{
+    MailboxTransferId, PeerId, PeerQuality, PeerSelector, PieceAssignment, PieceId, PieceMap,
+    PieceSelectionStrategy, PieceTracker, QualityMetrics, SwarmConfig, SwarmError, SwarmEvent,
+    SwarmPeer, SwarmQualityMetrics, SwarmResult, SwarmTransferStatus, swarm_time_now,
+};
 use crate::cx::Cx;
 use crate::types::Time;
 use sha2::{Digest, Sha256};
@@ -355,11 +359,12 @@ impl SwarmCoordinator {
                     .select_peer_for_piece(&piece_id, &self.peers, &active_loads)?;
 
             let priority = {
-                let transfer = self.active_transfers.get(transfer_id).ok_or_else(|| {
-                    SwarmError::TransferNotFound {
-                        transfer_id: *transfer_id,
-                    }
-                })?;
+                let transfer =
+                    self.active_transfers
+                        .get(transfer_id)
+                        .ok_or(SwarmError::TransferNotFound {
+                            transfer_id: *transfer_id,
+                        })?;
                 self.calculate_piece_priority(&piece_id, transfer)
             };
 
@@ -436,17 +441,17 @@ impl SwarmCoordinator {
             total_size,
             content_hash,
         ) = {
-            let transfer = self.active_transfers.get_mut(transfer_id).ok_or_else(|| {
-                SwarmError::TransferNotFound {
-                    transfer_id: *transfer_id,
-                }
-            })?;
+            let transfer =
+                self.active_transfers
+                    .get_mut(transfer_id)
+                    .ok_or(SwarmError::TransferNotFound {
+                        transfer_id: *transfer_id,
+                    })?;
 
             let request = transfer.active_requests.remove(&piece_id);
             let download_time = request
                 .as_ref()
-                .map(|r| r.requested_at.elapsed())
-                .unwrap_or(Duration::from_secs(0));
+                .map_or(Duration::from_secs(0), |r| r.requested_at.elapsed());
 
             transfer.completed_pieces.insert(piece_id);
             transfer.status.completed_pieces = transfer.completed_pieces.len() as u64;
@@ -536,11 +541,12 @@ impl SwarmCoordinator {
     ) -> SwarmResult<()> {
         let base_timeout = self.config.piece_request_timeout;
         let retry_remaining = {
-            let transfer = self.active_transfers.get_mut(transfer_id).ok_or_else(|| {
-                SwarmError::TransferNotFound {
-                    transfer_id: *transfer_id,
-                }
-            })?;
+            let transfer =
+                self.active_transfers
+                    .get_mut(transfer_id)
+                    .ok_or(SwarmError::TransferNotFound {
+                        transfer_id: *transfer_id,
+                    })?;
 
             let mut retry_remaining = false;
             if let Some(mut request) = transfer.active_requests.remove(&piece_id) {
@@ -658,8 +664,7 @@ impl SwarmCoordinator {
         let retry_boost = transfer
             .active_requests
             .get(piece_id)
-            .map(|request| request.retry_count.saturating_mul(75))
-            .unwrap_or(0);
+            .map_or(0, |request| request.retry_count.saturating_mul(75));
 
         let frontier_boost = if transfer.completed_pieces.is_empty() {
             transfer
@@ -738,7 +743,7 @@ impl SwarmCoordinator {
         let transfer =
             self.active_transfers
                 .get(transfer_id)
-                .ok_or_else(|| SwarmError::TransferNotFound {
+                .ok_or(SwarmError::TransferNotFound {
                     transfer_id: *transfer_id,
                 })?;
 
@@ -971,6 +976,7 @@ impl PiecePicker for EndgameStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::swarm::{PeerCapabilities, PeerReputation};
     use std::collections::BTreeSet;
 
     fn test_peer(id: &str, pieces: impl IntoIterator<Item = PieceId>) -> SwarmPeer {

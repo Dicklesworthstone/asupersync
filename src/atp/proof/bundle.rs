@@ -1500,7 +1500,7 @@ impl RaptorQDecodeMetadata {
         };
 
         let source_blocks = vec![RaptorQSourceBlock {
-            block_index: 0, // Single block for now
+            block_index: u32::from(proof.config.sbn),
             source_symbols: proof.config.k as u32,
             repair_symbols: proof.received.repair_count as u32,
             decode_success,
@@ -2235,8 +2235,7 @@ mod tests {
             .build()
             .expect("bundle should build");
 
-        // Add fake signature extension (the old vulnerable way)
-        let fake_signatures = CryptographicSignatures {
+        let tampered_signatures = CryptographicSignatures {
             signatures: vec![CryptographicSignature {
                 signer_id: "peer1".to_string(),
                 key_fingerprint: "test-key-fp".to_string(),
@@ -2249,7 +2248,7 @@ mod tests {
 
         bundle.extensions.insert(
             "cryptographic_signatures".to_string(),
-            serde_json::to_value(fake_signatures).unwrap(),
+            serde_json::to_value(tampered_signatures).unwrap(),
         );
 
         // Should reject tampering (wrong bundle hash)

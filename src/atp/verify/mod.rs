@@ -340,9 +340,7 @@ impl AtpBundleVerifier {
         let transfer_summary = self.generate_transfer_summary(bundle);
 
         // Determine overall status
-        let status = if !errors.is_empty() {
-            VerificationStatus::Failed
-        } else if checks.iter().any(|c| c.status.is_failure()) {
+        let status = if !errors.is_empty() || checks.iter().any(|c| c.status.is_failure()) {
             VerificationStatus::Failed
         } else if !warnings.is_empty()
             || checks
@@ -549,7 +547,7 @@ impl AtpBundleVerifier {
             == bundle
                 .raptorq_metadata
                 .as_ref()
-                .map_or(false, |m| m.repair_symbols_used > 0);
+                .is_some_and(|m| m.repair_symbols_used > 0);
 
         RepairIntegrityReport {
             raptorq_verified,
@@ -598,12 +596,12 @@ impl AtpBundleVerifier {
                     missing_evidence.push("peer_authentication".to_string());
                 }
             }
-            ProofStrength::Cryptographic => {
-                if !bundle.extensions.contains_key("cryptographic_signatures") {
-                    missing_evidence.push("cryptographic_signatures".to_string());
-                }
+            ProofStrength::Cryptographic
+                if !bundle.extensions.contains_key("cryptographic_signatures") =>
+            {
+                missing_evidence.push("cryptographic_signatures".to_string());
             }
-            _ => {}
+            ProofStrength::Cryptographic | ProofStrength::Basic => {}
         }
 
         checks.push(VerificationCheck {

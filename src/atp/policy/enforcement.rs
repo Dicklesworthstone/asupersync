@@ -1,7 +1,8 @@
 //! Policy enforcement for ATP capability-based access control.
 
-use super::scope::{AtpPath, ObjectId};
+use super::scope::AtpPath;
 use super::{Capability, CapabilityAction, CapabilityDecision, DenialReason, ResourceScope};
+use crate::atp::object::ObjectId;
 use crate::net::atp::protocol::PeerId;
 use std::collections::HashMap;
 use std::net::IpAddr;

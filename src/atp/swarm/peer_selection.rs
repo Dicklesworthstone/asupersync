@@ -3,7 +3,7 @@
 //! Implements peer quality assessment, selection algorithms, and reputation
 //! tracking for optimal swarm performance.
 
-use super::*;
+use super::{PeerId, PieceId, SwarmError, SwarmPeer, SwarmResult, swarm_time_now};
 use crate::types::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -382,7 +382,7 @@ impl PeerSelector {
             + (reputation_score * config.reputation_weight);
 
         PeerScore {
-            composite_score: composite_score.min(1.0).max(0.0),
+            composite_score: composite_score.clamp(0.0, 1.0),
             speed_score,
             reliability_score,
             latency_score,
@@ -452,9 +452,7 @@ impl PeerSelector {
         let latency_factor = (1000.0 / (latency.as_millis() as f64 + 100.0)).min(1.0);
         let success_factor = if success { 1.0 } else { 0.1 };
 
-        (speed_factor * 0.4 + latency_factor * 0.3 + success_factor * 0.3)
-            .min(1.0)
-            .max(0.0)
+        (speed_factor * 0.4 + latency_factor * 0.3 + success_factor * 0.3).clamp(0.0, 1.0)
     }
 
     /// Calculate reputation score from history.
@@ -487,9 +485,7 @@ impl PeerSelector {
         };
 
         // Weighted average of recent quality and long-term success rate
-        (recent_quality * 0.6 + success_rate * 0.4)
-            .min(1.0)
-            .max(0.0)
+        (recent_quality * 0.6 + success_rate * 0.4).clamp(0.0, 1.0)
     }
 
     /// Get quality history for a peer.
@@ -518,6 +514,7 @@ impl PeerSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::swarm::PeerCapabilities;
     use std::collections::BTreeSet;
 
     fn create_test_peer(id: &str, quality_score: f64, download_speed: f64) -> SwarmPeer {

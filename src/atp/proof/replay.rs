@@ -360,13 +360,11 @@ impl ReplayEventFilter {
             }
         }
 
-        // Check custom predicates (simplified implementation)
         for (key, expected) in &self.predicates {
-            if let Some(actual) = event.metadata.get(key) {
-                if actual != expected {
-                    return false;
-                }
-            } else {
+            let Some(actual) = event_predicate_value(event, key) else {
+                return false;
+            };
+            if !predicate_value_matches(&actual, expected) {
                 return false;
             }
         }
@@ -390,6 +388,105 @@ impl Default for ReplayEventFilter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn event_predicate_value(event: &ReplayableEvent, key: &str) -> Option<String> {
+    match key {
+        "sequence" => Some(event.sequence.to_string()),
+        "timestamp_micros" => Some(event.timestamp_micros.to_string()),
+        "kind" => Some(event.kind.as_str().to_string()),
+        "critical" | "is_critical" => Some(event.kind.is_critical().to_string()),
+        _ => key
+            .strip_prefix("metadata.")
+            .and_then(|metadata_key| event.metadata.get(metadata_key))
+            .or_else(|| event.metadata.get(key))
+            .cloned()
+            .or_else(|| payload_predicate_value(&event.payload, key.strip_prefix("payload.")?)),
+    }
+}
+
+fn payload_predicate_value(payload: &ReplayableEventPayload, path: &str) -> Option<String> {
+    let value = serde_json::to_value(payload).ok()?;
+    let mut current = &value;
+    for component in path.split('.') {
+        current = current.get(component)?;
+    }
+    match current {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => Some(current.to_string()),
+    }
+}
+
+fn predicate_value_matches(actual: &str, expected: &str) -> bool {
+    if let Some(prefix) = expected.strip_prefix("prefix:") {
+        actual.starts_with(prefix)
+    } else if let Some(suffix) = expected.strip_prefix("suffix:") {
+        actual.ends_with(suffix)
+    } else if let Some(needle) = expected.strip_prefix("contains:") {
+        actual.contains(needle)
+    } else if let Some(pattern) = expected.strip_prefix("glob:") {
+        replay_glob_match(pattern, actual)
+    } else if let Some(not_expected) = expected.strip_prefix("!=") {
+        actual != not_expected
+    } else if let Some(min) = expected.strip_prefix(">=") {
+        numeric_predicate(actual, min, |actual, expected| actual >= expected)
+    } else if let Some(max) = expected.strip_prefix("<=") {
+        numeric_predicate(actual, max, |actual, expected| actual <= expected)
+    } else if let Some(min) = expected.strip_prefix('>') {
+        numeric_predicate(actual, min, |actual, expected| actual > expected)
+    } else if let Some(max) = expected.strip_prefix('<') {
+        numeric_predicate(actual, max, |actual, expected| actual < expected)
+    } else {
+        actual == expected
+    }
+}
+
+fn numeric_predicate(actual: &str, expected: &str, cmp: impl FnOnce(u64, u64) -> bool) -> bool {
+    let Ok(actual) = actual.parse::<u64>() else {
+        return false;
+    };
+    let Ok(expected) = expected.parse::<u64>() else {
+        return false;
+    };
+    cmp(actual, expected)
+}
+
+fn replay_glob_match(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let text = text.as_bytes();
+    let (mut pattern_index, mut text_index) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut star_text_index = 0usize;
+
+    while text_index < text.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == text[text_index])
+        {
+            pattern_index += 1;
+            text_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            while pattern_index + 1 < pattern.len() && pattern[pattern_index + 1] == b'*' {
+                pattern_index += 1;
+            }
+            star = Some(pattern_index);
+            pattern_index += 1;
+            star_text_index = text_index;
+        } else if let Some(star_index) = star {
+            pattern_index = star_index + 1;
+            star_text_index += 1;
+            text_index = star_text_index;
+        } else {
+            return false;
+        }
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+
+    pattern_index == pattern.len()
 }
 
 /// Errors in replay pointer construction or validation.

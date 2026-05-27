@@ -1,37 +1,26 @@
 //! Resource scope definitions for ATP capabilities.
 
+pub use crate::atp::object::ObjectId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Component, Path};
 
-// Placeholder types - replace with actual implementations when available
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ObjectId(pub [u8; 32]);
-
-impl ObjectId {
-    #[must_use]
-    pub fn test(id: u32) -> Self {
-        let mut bytes = [0u8; 32];
-        bytes[0..4].copy_from_slice(&id.to_le_bytes());
-        Self(bytes)
-    }
-
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-}
-
+/// Normalized ATP resource path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtpPath(pub String);
 
 impl AtpPath {
     pub fn from_str(s: &str) -> Result<Self, &'static str> {
-        if s.is_empty() {
-            Err("path cannot be empty")
-        } else {
-            Ok(Self(s.to_string()))
+        let path = Path::new(s);
+        if s.is_empty() || !path.is_absolute() {
+            return Err("path must be absolute and non-empty");
         }
+        for component in path.components() {
+            if matches!(component, Component::ParentDir | Component::CurDir) {
+                return Err("path must be normalized");
+            }
+        }
+        Ok(Self(s.to_string()))
     }
 
     #[must_use]
@@ -41,12 +30,12 @@ impl AtpPath {
 
     #[must_use]
     pub fn is_inbox_path(&self) -> bool {
-        self.0.starts_with("/inbox") || self.0.contains("inbox")
+        self.0 == "/inbox" || self.0.starts_with("/inbox/")
     }
 
     #[must_use]
     pub fn starts_with_team(&self, team: &str) -> bool {
-        self.0.starts_with(&format!("/team/{team}")) || self.0.contains(team)
+        self.0 == format!("/team/{team}") || self.0.starts_with(&format!("/team/{team}/"))
     }
 }
 
@@ -141,7 +130,7 @@ impl ResourceScope {
             Self::Any => hasher.update(b"any"),
             Self::Object(id) => {
                 hasher.update(b"object");
-                hasher.update(id.as_bytes());
+                hasher.update(id.hash_bytes());
             }
             Self::Path(scope) => {
                 hasher.update(b"path");
@@ -337,40 +326,68 @@ impl ScopeConstraints {
             }
         }
         if let Some((start, end)) = self.allowed_hours {
-            hasher.update([start, end]);
+            let allowed_hours: [u8; 2] = (start, end).into();
+            hasher.update(allowed_hours);
         }
 
         hasher.finalize().into()
     }
 }
 
-/// Simple glob pattern matching for paths and IPs.
 fn glob_match(pattern: &str, text: &str) -> bool {
-    // Simple implementation - for production would use proper glob library
-    if pattern.contains('*') {
-        let parts: Vec<&str> = pattern.split('*').collect();
-        if parts.len() == 2 {
-            text.starts_with(parts[0]) && text.ends_with(parts[1])
+    let pattern = pattern.as_bytes();
+    let text = text.as_bytes();
+    let (mut pattern_index, mut text_index) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut star_text_index = 0usize;
+
+    while text_index < text.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == text[text_index])
+        {
+            pattern_index += 1;
+            text_index += 1;
+        } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            while pattern_index + 1 < pattern.len() && pattern[pattern_index + 1] == b'*' {
+                pattern_index += 1;
+            }
+            star = Some(pattern_index);
+            pattern_index += 1;
+            star_text_index = text_index;
+        } else if let Some(star_index) = star {
+            pattern_index = star_index + 1;
+            star_text_index += 1;
+            text_index = star_text_index;
         } else {
-            // More complex patterns - simplified for now
-            pattern == "*" || pattern == text
+            return false;
         }
-    } else {
-        pattern == text
     }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+
+    pattern_index == pattern.len()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::object::ContentId;
+
+    fn test_object_id(id: u32) -> ObjectId {
+        let mut bytes = [0u8; 32];
+        bytes[0..4].copy_from_slice(&id.to_le_bytes());
+        ObjectId::content(ContentId::new(bytes))
+    }
 
     #[test]
     fn resource_scope_object_coverage() {
-        let object_id = ObjectId::test(1);
+        let object_id = test_object_id(1);
         let scope = ResourceScope::Object(object_id.clone());
 
         assert!(scope.covers_object(&object_id));
-        assert!(!scope.covers_object(&ObjectId::test(2)));
+        assert!(!scope.covers_object(&test_object_id(2)));
     }
 
     #[test]
@@ -416,11 +433,18 @@ mod tests {
 
     #[test]
     fn resource_scope_digest_stability() {
-        let scope1 = ResourceScope::Object(ObjectId::test(1));
-        let scope2 = ResourceScope::Object(ObjectId::test(1));
-        let scope3 = ResourceScope::Object(ObjectId::test(2));
+        let scope1 = ResourceScope::Object(test_object_id(1));
+        let scope2 = ResourceScope::Object(test_object_id(1));
+        let scope3 = ResourceScope::Object(test_object_id(2));
 
         assert_eq!(scope1.digest(), scope2.digest());
         assert_ne!(scope1.digest(), scope3.digest());
+    }
+
+    #[test]
+    fn glob_match_handles_multiple_wildcards_and_question_marks() {
+        assert!(glob_match("/team/*/inbox/**", "/team/alpha/inbox/a/b"));
+        assert!(glob_match("10.0.?.*", "10.0.1.42"));
+        assert!(!glob_match("/team/*/inbox/**", "/team/alpha/outbox/a"));
     }
 }

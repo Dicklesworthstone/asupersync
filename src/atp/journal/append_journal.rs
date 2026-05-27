@@ -5,6 +5,7 @@ use crate::atp::object::{ContentId, ManifestId, ObjectId};
 use crate::cx::Cx;
 use crate::security::{AuthKey, AuthenticationTag};
 use crate::types::outcome::Outcome;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -365,6 +366,21 @@ impl JournalRecord {
                 auth_tag,
             },
         }
+    }
+
+    fn signed_compaction_boundary(
+        generation: u64,
+        compacted_up_to_sequence: u64,
+        timestamp: u64,
+        key: &AuthKey,
+    ) -> Self {
+        Self::CompactionBoundary {
+            generation,
+            compacted_up_to_sequence,
+            timestamp,
+            auth_tag: AuthenticationTag::zero(),
+        }
+        .with_signature(key)
     }
 
     /// Encode the record payload without the auth_tag (for signature computation)
@@ -1071,7 +1087,9 @@ pub struct AppendJournal {
     /// Current journal file path
     current_file: Option<PathBuf>,
     /// In-memory cache of recent entries
-    recent_entries: std::collections::VecDeque<JournalEntry>,
+    recent_entries: VecDeque<JournalEntry>,
+    /// Complete in-memory transfer index keyed by transfer ID.
+    transfer_entries: HashMap<String, Vec<JournalEntry>>,
     /// Cache size limit
     cache_limit: usize,
     /// Authentication key for record signing
@@ -1092,7 +1110,8 @@ impl AppendJournal {
             sequence: 0,
             writer: None,
             current_file: None,
-            recent_entries: std::collections::VecDeque::new(),
+            recent_entries: VecDeque::new(),
+            transfer_entries: HashMap::new(),
             cache_limit: 1000,
             auth_key,
         };
@@ -1149,7 +1168,7 @@ impl AppendJournal {
         let current_sequence = self.sequence;
         self.sequence += 1;
 
-        // Add to recent entries cache
+        self.index_transfer_entry(&entry);
         self.recent_entries.push_back(entry);
         if self.recent_entries.len() > self.cache_limit {
             self.recent_entries.pop_front();
@@ -1191,25 +1210,14 @@ impl AppendJournal {
 
     /// Read all entries from all generations
     pub async fn get_all_entries(&self, _cx: &Cx) -> Outcome<Vec<JournalRecord>, JournalError> {
-        let mut all_entries = Vec::new();
-
-        // Read from all generations
-        for generation_num in 0..=self.generation {
-            let file_path = journal_file_path(&self.config.base_dir, generation_num);
-            if file_path.exists() {
-                let (entries, _corrupted) = match self.read_entries_from_file(&file_path) {
-                    Outcome::Ok(e) => e,
-                    Outcome::Err(err) => return Outcome::err(err),
-                    Outcome::Cancelled(r) => return Outcome::cancelled(r),
-                    Outcome::Panicked(p) => return Outcome::panicked(p),
-                };
-                for entry in entries {
-                    all_entries.push(entry.record);
-                }
+        match self.read_all_entries_from_disk() {
+            Outcome::Ok(entries) => {
+                Outcome::Ok(entries.into_iter().map(|entry| entry.record).collect())
             }
+            Outcome::Err(err) => Outcome::Err(err),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
         }
-
-        Outcome::Ok(all_entries)
     }
 
     /// Read all entries for a specific transfer ID
@@ -1217,33 +1225,13 @@ impl AppendJournal {
         &self,
         transfer_id: &str,
     ) -> Outcome<Vec<JournalEntry>, JournalError> {
-        let mut entries = Vec::new();
-
-        // Check recent entries first
-        for entry in &self.recent_entries {
-            if entry.record.transfer_id() == Some(transfer_id) {
-                entries.push(entry.clone());
-            }
-        }
-
-        // If we need more entries, read from disk
-        // This is a simplified implementation - in practice you'd want to index by transfer_id
-        let disk_entries = match self.read_all_entries_from_disk() {
-            Outcome::Ok(entries) => entries,
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-        };
-        for entry in disk_entries {
-            if entry.record.transfer_id() == Some(transfer_id) {
-                // Only add if not already in recent entries
-                if !entries.iter().any(|e| e.sequence == entry.sequence) {
-                    entries.push(entry);
-                }
-            }
-        }
-
+        let mut entries = self
+            .transfer_entries
+            .get(transfer_id)
+            .cloned()
+            .unwrap_or_default();
         entries.sort_by_key(|e| e.sequence);
+        entries.dedup_by_key(|e| e.sequence);
         Outcome::Ok(entries)
     }
 
@@ -1324,16 +1312,15 @@ impl AppendJournal {
         }
 
         // Create compaction boundary record
-        let boundary_record = JournalRecord::CompactionBoundary {
-            generation: self.generation + 1,
-            compacted_up_to_sequence: self.sequence,
-            timestamp: SystemTime::now() // ubs:ignore - timestamp used for recording, not crypto randomness
+        let boundary_record = JournalRecord::signed_compaction_boundary(
+            self.generation + 1,
+            self.sequence,
+            SystemTime::now() // ubs:ignore - timestamp used for recording, not crypto randomness
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            auth_tag: AuthenticationTag::zero(), // Temporary placeholder
-        }
-        .with_signature(&self.auth_key);
+            &self.auth_key,
+        );
 
         // Write the boundary record
         match self.append(boundary_record) {
@@ -1408,11 +1395,14 @@ impl AppendJournal {
             }
         }
 
-        // Read generations backwards to populate recent_entries and find max_sequence
-        let mut all_recent = std::collections::VecDeque::new();
+        // Read all valid entries once so recovery rebuilds both the recent-entry
+        // window and the transfer-id index used by targeted lookups.
+        let mut all_recent = VecDeque::new();
+        let mut transfer_entries: HashMap<String, Vec<JournalEntry>> = HashMap::new();
         let mut found_sequence = false;
+        let mut recovered_generation = max_generation;
 
-        for generation in (0..=max_generation).rev() {
+        for generation in 0..=max_generation {
             let file_path = journal_file_path(&self.config.base_dir, generation);
 
             if !file_path.exists() {
@@ -1430,27 +1420,35 @@ impl AppendJournal {
                 // If the latest file was corrupted (e.g. partial write from power loss),
                 // we must not append to it. We increment max_generation so the next write
                 // starts a new file cleanly.
-                max_generation += 1;
+                recovered_generation = recovered_generation.saturating_add(1);
             }
 
-            if !found_sequence && !entries.is_empty() {
-                max_sequence = entries.last().map_or(0, |e| e.sequence);
+            for entry in entries {
+                max_sequence = max_sequence.max(entry.sequence);
                 found_sequence = true;
-            }
 
-            for entry in entries.into_iter().rev() {
-                if all_recent.len() < self.cache_limit {
-                    all_recent.push_front(entry);
+                if let Some(transfer_id) = entry.record.transfer_id() {
+                    transfer_entries
+                        .entry(transfer_id.to_string())
+                        .or_default()
+                        .push(entry.clone());
                 }
-            }
 
-            if all_recent.len() >= self.cache_limit && found_sequence {
-                break;
+                all_recent.push_back(entry);
+                if all_recent.len() > self.cache_limit {
+                    all_recent.pop_front();
+                }
             }
         }
 
+        for entries in transfer_entries.values_mut() {
+            entries.sort_by_key(|entry| entry.sequence);
+            entries.dedup_by_key(|entry| entry.sequence);
+        }
+
         self.recent_entries = all_recent;
-        self.generation = max_generation;
+        self.transfer_entries = transfer_entries;
+        self.generation = recovered_generation;
         if found_sequence {
             self.sequence = max_sequence + 1;
         } else {
@@ -1458,6 +1456,19 @@ impl AppendJournal {
         }
 
         Outcome::Ok(())
+    }
+
+    fn index_transfer_entry(&mut self, entry: &JournalEntry) {
+        if let Some(transfer_id) = entry.record.transfer_id() {
+            let entries = self
+                .transfer_entries
+                .entry(transfer_id.to_string())
+                .or_default();
+            match entries.binary_search_by_key(&entry.sequence, |existing| existing.sequence) {
+                Ok(position) => entries[position] = entry.clone(),
+                Err(position) => entries.insert(position, entry.clone()),
+            }
+        }
     }
 
     fn read_entries_from_file(
@@ -1811,5 +1822,101 @@ mod tests {
 
         // Cleanup
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn transfer_index_returns_entries_outside_recent_cache() {
+        let unique = SystemTime::now() // ubs:ignore - timestamp used for test uniqueness, not crypto
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_transfer_index_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let config = JournalConfig {
+            base_dir: temp_dir,
+            ..Default::default()
+        };
+
+        let mut journal = AppendJournal::new(config.clone(), test_auth_key()).unwrap();
+        journal.cache_limit = 1;
+
+        for (transfer_id, timestamp) in [
+            ("transfer_a", 1000),
+            ("transfer_b", 1001),
+            ("transfer_a", 1002),
+        ] {
+            journal
+                .append(JournalRecord::Accept {
+                    transfer_id: transfer_id.to_string(),
+                    peer_id: "peer1".to_string(),
+                    timestamp,
+                    auth_tag: unsigned_tag(),
+                })
+                .unwrap();
+        }
+
+        assert_eq!(journal.recent_entries.len(), 1);
+        let transfer_a_entries = journal.get_transfer_entries("transfer_a").unwrap();
+        assert_eq!(
+            transfer_a_entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+
+        journal.flush().unwrap();
+        let recovered = AppendJournal::new(config, test_auth_key()).unwrap();
+        assert_eq!(recovered.recent_entries.len(), 1);
+        let recovered_transfer_a_entries = recovered.get_transfer_entries("transfer_a").unwrap();
+        assert_eq!(
+            recovered_transfer_a_entries
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+    }
+
+    #[test]
+    fn compaction_boundary_is_signed_and_verifiable() {
+        let unique = SystemTime::now() // ubs:ignore - timestamp used for test uniqueness, not crypto
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_compaction_boundary_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let key = test_auth_key();
+        let config = JournalConfig {
+            base_dir: temp_dir,
+            max_journal_size: u64::MAX,
+            ..Default::default()
+        };
+
+        let mut journal = AppendJournal::new(config, key.clone()).unwrap();
+        journal
+            .append(JournalRecord::Accept {
+                transfer_id: "transfer_a".to_string(),
+                peer_id: "peer1".to_string(),
+                timestamp: 1000,
+                auth_tag: unsigned_tag(),
+            })
+            .unwrap();
+
+        journal.compact().unwrap();
+        let boundary = journal
+            .recent_entries
+            .iter()
+            .find(|entry| matches!(entry.record, JournalRecord::CompactionBoundary { .. }))
+            .expect("compaction writes boundary entry");
+
+        assert!(!boundary.record.auth_tag().is_zero());
+        assert!(boundary.record.verify_signature(&key));
     }
 }

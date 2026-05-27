@@ -700,8 +700,15 @@ impl MultiSourceRepairScheduler {
     }
 
     fn expected_auth_domain(&self) -> String {
-        // Would derive from object metadata
-        "default".to_string()
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"asupersync.atp.repair.auth-domain.v1\0");
+        hasher.update(self.object_id.hash_bytes());
+        hasher.update((self.repair_group_id.len() as u64).to_le_bytes());
+        hasher.update(self.repair_group_id.as_bytes());
+        let digest: [u8; 32] = hasher.finalize().into();
+        format!("atp-repair:{}", hex::encode(&digest[..12]))
     }
 }
 
@@ -734,6 +741,7 @@ pub struct DecodeMatrix {
     k_prime: u32,
     received_symbols: HashSet<u32>,
     decode_rank: usize,
+    basis_rows: Vec<Vec<u64>>,
 }
 
 impl DecodeMatrix {
@@ -742,17 +750,21 @@ impl DecodeMatrix {
             k_prime,
             received_symbols: HashSet::new(),
             decode_rank: 0,
+            basis_rows: vec![Vec::new(); k_prime as usize],
         }
     }
 
-    fn add_symbol(&mut self, symbol_index: u32, _symbol_data: &[u8]) -> Result<f64> {
+    fn add_symbol(&mut self, symbol_index: u32, symbol_data: &[u8]) -> Result<f64> {
+        if self.k_prime == 0 {
+            return Ok(0.0);
+        }
         if self.received_symbols.insert(symbol_index) {
-            // In a real implementation, this would update the linear algebra
-            self.decode_rank = self
-                .decode_rank
-                .saturating_add(1)
-                .min(self.k_prime as usize);
-            let contribution = 1.0 / self.k_prime as f64;
+            let row = self.symbol_vector(symbol_index, symbol_data);
+            let contribution = if self.insert_basis_row(row) {
+                1.0 / self.k_prime as f64
+            } else {
+                0.0
+            };
             Ok(contribution)
         } else {
             Ok(0.0)
@@ -764,10 +776,16 @@ impl DecodeMatrix {
     }
 
     fn decode_progress(&self) -> f64 {
+        if self.k_prime == 0 {
+            return 1.0;
+        }
         self.decode_rank as f64 / self.k_prime as f64
     }
 
     fn symbol_usefulness(&self, symbol_index: u32) -> f64 {
+        if self.k_prime == 0 {
+            return 0.0;
+        }
         if self.received_symbols.contains(&symbol_index) {
             0.0 // Already have this symbol
         } else if self.can_decode() {
@@ -777,6 +795,87 @@ impl DecodeMatrix {
             let missing_ratio = 1.0 - self.decode_progress();
             missing_ratio.max(0.1)
         }
+    }
+
+    fn symbol_vector(&self, symbol_index: u32, symbol_data: &[u8]) -> Vec<u64> {
+        let width = self.k_prime as usize;
+        let word_count = width.div_ceil(64);
+        let mut row = vec![0u64; word_count];
+
+        if symbol_index < self.k_prime {
+            Self::set_bit(&mut row, symbol_index as usize);
+            return row;
+        }
+
+        use sha2::{Digest, Sha256};
+
+        let mut filled = 0usize;
+        let mut counter = 0u64;
+        while filled < word_count {
+            let mut hasher = Sha256::new();
+            hasher.update(b"asupersync.atp.repair.decode-row.v1\0");
+            hasher.update(symbol_index.to_le_bytes());
+            hasher.update(counter.to_le_bytes());
+            hasher.update((symbol_data.len() as u64).to_le_bytes());
+            hasher.update(symbol_data);
+            let digest: [u8; 32] = hasher.finalize().into();
+            for chunk in digest.chunks_exact(8) {
+                if filled == word_count {
+                    break;
+                }
+                let mut word = [0u8; 8];
+                word.copy_from_slice(chunk);
+                row[filled] = u64::from_le_bytes(word);
+                filled += 1;
+            }
+            counter = counter.saturating_add(1);
+        }
+
+        let extra_bits = word_count * 64 - width;
+        if extra_bits > 0 {
+            let keep_bits = 64 - extra_bits;
+            if let Some(last) = row.last_mut() {
+                *last &= (1u64 << keep_bits).saturating_sub(1);
+            }
+        }
+
+        if row.iter().all(|word| *word == 0) {
+            Self::set_bit(&mut row, symbol_index as usize % width);
+        }
+
+        row
+    }
+
+    fn insert_basis_row(&mut self, mut row: Vec<u64>) -> bool {
+        for pivot in 0..self.k_prime as usize {
+            if !Self::bit_is_set(&row, pivot) {
+                continue;
+            }
+            if self.basis_rows[pivot].is_empty() {
+                self.basis_rows[pivot] = row;
+                self.decode_rank += 1;
+                return true;
+            }
+            for (word, basis_word) in row.iter_mut().zip(&self.basis_rows[pivot]) {
+                *word ^= *basis_word;
+            }
+        }
+        false
+    }
+
+    fn set_bit(row: &mut [u64], index: usize) {
+        let word = index / 64;
+        let bit = index % 64;
+        if let Some(value) = row.get_mut(word) {
+            *value |= 1u64 << bit;
+        }
+    }
+
+    fn bit_is_set(row: &[u64], index: usize) -> bool {
+        let word = index / 64;
+        let bit = index % 64;
+        row.get(word)
+            .is_some_and(|value| value & (1u64 << bit) != 0)
     }
 }
 
@@ -792,7 +891,11 @@ mod tests {
         )
     }
 
-    fn create_test_peer_info(peer_id: PeerId, symbols: Vec<u32>) -> PeerInfo {
+    fn create_test_peer_info(
+        scheduler: &MultiSourceRepairScheduler,
+        peer_id: PeerId,
+        symbols: Vec<u32>,
+    ) -> PeerInfo {
         PeerInfo {
             peer_id,
             available_symbols: symbols.into_iter().collect(),
@@ -807,7 +910,7 @@ mod tests {
             relay_cost_per_byte: 0.001,
             churn_probability: 0.1,
             last_seen: SystemTime::now(),
-            auth_domain: "default".to_string(),
+            auth_domain: scheduler.expected_auth_domain(),
         }
     }
 
@@ -834,7 +937,7 @@ mod tests {
         );
 
         let peer_id = create_test_peer_id(8001);
-        let peer_info = create_test_peer_info(peer_id.clone(), vec![1, 2, 3, 4, 5]);
+        let peer_info = create_test_peer_info(&scheduler, peer_id.clone(), vec![1, 2, 3, 4, 5]);
 
         assert!(scheduler.register_peer(peer_info).is_ok());
         assert!(scheduler.peers.contains_key(&peer_id));
@@ -851,10 +954,12 @@ mod tests {
 
         // Add peers with different qualities
         let high_quality_peer = create_test_peer_id(8001);
-        let high_quality_info = create_test_peer_info(high_quality_peer.clone(), vec![1, 2, 3]);
+        let high_quality_info =
+            create_test_peer_info(&scheduler, high_quality_peer.clone(), vec![1, 2, 3]);
 
         let low_quality_peer = create_test_peer_id(8002);
-        let mut low_quality_info = create_test_peer_info(low_quality_peer.clone(), vec![4, 5, 6]);
+        let mut low_quality_info =
+            create_test_peer_info(&scheduler, low_quality_peer.clone(), vec![4, 5, 6]);
         low_quality_info.path_quality.latency_ms = 200.0;
         low_quality_info.trust_score = 0.3;
 
@@ -882,9 +987,9 @@ mod tests {
         );
 
         // Peer 1 has symbols 1, 2, 3
-        let peer1 = create_test_peer_info(create_test_peer_id(8001), vec![1, 2, 3]);
+        let peer1 = create_test_peer_info(&scheduler, create_test_peer_id(8001), vec![1, 2, 3]);
         // Peer 2 has symbols 2, 3, 4 (symbol 2 and 3 are common)
-        let peer2 = create_test_peer_info(create_test_peer_id(8002), vec![2, 3, 4]);
+        let peer2 = create_test_peer_info(&scheduler, create_test_peer_id(8002), vec![2, 3, 4]);
 
         scheduler.register_peer(peer1).unwrap();
         scheduler.register_peer(peer2).unwrap();
@@ -908,7 +1013,8 @@ mod tests {
             5,
         );
 
-        let peer_info = create_test_peer_info(create_test_peer_id(8001), vec![1, 2, 3, 4, 5]);
+        let peer_info =
+            create_test_peer_info(&scheduler, create_test_peer_id(8001), vec![1, 2, 3, 4, 5]);
         scheduler.register_peer(peer_info).unwrap();
 
         let requests = scheduler.schedule_next_batch().unwrap();
@@ -927,7 +1033,7 @@ mod tests {
         );
 
         let peer_id = create_test_peer_id(8001);
-        let peer_info = create_test_peer_info(peer_id.clone(), vec![1, 2, 3]);
+        let peer_info = create_test_peer_info(&scheduler, peer_id.clone(), vec![1, 2, 3]);
         scheduler.register_peer(peer_info).unwrap();
 
         // Schedule a request

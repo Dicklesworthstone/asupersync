@@ -6,12 +6,9 @@
 
 #![allow(dead_code)]
 
-use crate::{
-    Cx,
-    time::{Sleep, wall_now},
-};
+use crate::Cx;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -75,6 +72,9 @@ pub struct MasqueTunnel {
     tunnel_id: String,
     target_addr: SocketAddr,
     proxy_stream_id: u64,
+    connect_request: ConnectUdpRequest,
+    outbound_frames: VecDeque<Vec<u8>>,
+    inbound_datagrams: VecDeque<Vec<u8>>,
     established_at: Instant,
     last_activity: Instant,
     bytes_sent: u64,
@@ -116,6 +116,68 @@ pub struct MasqueStats {
     pub tunnel_timeouts: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectUdpRequest {
+    proxy_authority: String,
+    target_host: String,
+    target_port: u16,
+    authorization: Option<String>,
+}
+
+impl ConnectUdpRequest {
+    fn build(config: &MasqueConfig, target_addr: SocketAddr) -> Result<Self, MasqueError> {
+        let proxy_authority = parse_https_authority(&config.proxy_endpoint)?;
+        let authorization = config
+            .proxy_auth
+            .as_ref()
+            .map(MasqueAuth::authorization_header)
+            .transpose()?;
+
+        Ok(Self {
+            proxy_authority,
+            target_host: target_addr.ip().to_string(),
+            target_port: target_addr.port(),
+            authorization,
+        })
+    }
+
+    fn context_id(&self) -> u64 {
+        let mut hash = crc32fast::Hasher::new();
+        hash.update(self.proxy_authority.as_bytes());
+        hash.update(&[0]);
+        hash.update(self.target_host.as_bytes());
+        hash.update(&[0]);
+        hash.update(&self.target_port.to_le_bytes());
+        u64::from(hash.finalize())
+    }
+}
+
+impl MasqueAuth {
+    fn authorization_header(&self) -> Result<String, MasqueError> {
+        match self {
+            Self::Bearer { token } if !token.is_empty() => Ok(format!("Bearer {token}")),
+            Self::Basic { username, password } if !username.is_empty() && !password.is_empty() => {
+                Ok(format!("Basic {username}:{password}"))
+            }
+            Self::Certificate {
+                cert_path,
+                key_path,
+            } if !cert_path.is_empty() && !key_path.is_empty() => {
+                Ok(format!("Certificate cert={cert_path};key={key_path}"))
+            }
+            Self::Bearer { .. } => Err(MasqueError::AuthenticationFailed {
+                method: "bearer".to_string(),
+            }),
+            Self::Basic { .. } => Err(MasqueError::AuthenticationFailed {
+                method: "basic".to_string(),
+            }),
+            Self::Certificate { .. } => Err(MasqueError::AuthenticationFailed {
+                method: "certificate".to_string(),
+            }),
+        }
+    }
+}
+
 /// Errors that can occur with MASQUE adapter operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MasqueError {
@@ -139,6 +201,9 @@ pub enum MasqueError {
 
     #[error("Tunnel timeout after {duration:?}")]
     TunnelTimeout { duration: Duration },
+
+    #[error("No datagram available for tunnel {tunnel_id}")]
+    NoDatagramAvailable { tunnel_id: String },
 }
 
 impl MasqueAdapter {
@@ -167,25 +232,25 @@ impl MasqueAdapter {
         );
         let start_time = Instant::now();
 
-        // Simulate MASQUE tunnel establishment with HTTP/3 CONNECT-UDP
-        // In real implementation, this would:
-        // 1. Establish HTTP/3 connection to proxy
-        // 2. Send CONNECT-UDP request with target address
-        // 3. Handle proxy authentication if configured
-        // 4. Setup bidirectional stream for UDP datagrams
+        let connect_request = match ConnectUdpRequest::build(&self.config, target_addr) {
+            Ok(request) => request,
+            Err(err) => {
+                self.stats.proxy_connection_failures += 1;
+                return Err(err);
+            }
+        };
 
         cx.trace("masque_tunnel_establish");
 
-        // Simulate network delay for tunnel establishment
-        Sleep::new(wall_now() + Duration::from_millis(100)).await;
+        let proxy_stream_id = connect_request.context_id();
 
         let tunnel = MasqueTunnel {
             tunnel_id: tunnel_id.clone(),
             target_addr,
-            proxy_stream_id: SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos() as u64, // Would be actual HTTP/3 stream ID
+            proxy_stream_id,
+            connect_request,
+            outbound_frames: VecDeque::new(),
+            inbound_datagrams: VecDeque::new(),
             established_at: Instant::now(),
             last_activity: Instant::now(),
             bytes_sent: 0,
@@ -206,7 +271,13 @@ impl MasqueAdapter {
         // Update statistics
         self.stats.active_tunnels = self.tunnels.len();
         self.stats.total_tunnels_created += 1;
-        self.stats.avg_setup_latency = (self.stats.avg_setup_latency + setup_latency) / 2;
+        self.stats.avg_setup_latency = average_duration(
+            self.stats.avg_setup_latency,
+            setup_latency,
+            self.stats.total_tunnels_created,
+        );
+        self.stats.establishment_success_rate = self.stats.total_tunnels_created as f64
+            / (self.stats.total_tunnels_created + self.stats.proxy_connection_failures) as f64;
 
         Ok(tunnel_id)
     }
@@ -232,10 +303,11 @@ impl MasqueAdapter {
                     tunnel_id: tunnel_id.to_string(),
                 })?;
 
-        // Simulate HTTP/3 framing overhead for UDP datagram
-        let overhead_bytes = (payload.len() as f64 * tunnel.overhead_ratio) as u64;
+        let frame = encode_connect_udp_datagram(tunnel.connect_request.context_id(), payload)?;
+        let overhead_bytes = frame.len().saturating_sub(payload.len()) as u64;
 
         tunnel.bytes_sent += payload.len() as u64;
+        tunnel.outbound_frames.push_back(frame);
         tunnel.last_activity = Instant::now();
 
         // Update global stats
@@ -262,9 +334,11 @@ impl MasqueAdapter {
                     tunnel_id: tunnel_id.to_string(),
                 })?;
 
-        // Simulate receiving UDP datagram through HTTP/3 proxy
-        // In real implementation, this would read from the proxy stream
-        let payload = vec![0u8; 1024]; // Placeholder payload
+        let payload = tunnel.inbound_datagrams.pop_front().ok_or_else(|| {
+            MasqueError::NoDatagramAvailable {
+                tunnel_id: tunnel_id.to_string(),
+            }
+        })?;
         let overhead_bytes = (payload.len() as f64 * tunnel.overhead_ratio) as u64;
 
         tunnel.bytes_received += payload.len() as u64;
@@ -277,6 +351,29 @@ impl MasqueAdapter {
         cx.trace("masque_datagram_received");
 
         Ok(payload)
+    }
+
+    /// Queue an inbound proxy datagram for the tunnel receive path.
+    pub fn queue_inbound_datagram(
+        &mut self,
+        tunnel_id: &str,
+        payload: Vec<u8>,
+    ) -> Result<(), MasqueError> {
+        if payload.len() > self.config.max_datagram_size {
+            return Err(MasqueError::DatagramTooLarge {
+                size: payload.len(),
+                max: self.config.max_datagram_size,
+            });
+        }
+
+        let tunnel =
+            self.tunnels
+                .get_mut(tunnel_id)
+                .ok_or_else(|| MasqueError::TunnelNotFound {
+                    tunnel_id: tunnel_id.to_string(),
+                })?;
+        tunnel.inbound_datagrams.push_back(payload);
+        Ok(())
     }
 
     /// Close tunnel and clean up resources.
@@ -306,13 +403,21 @@ impl MasqueAdapter {
 
     /// Perform health check on proxy connection.
     pub async fn health_check(&self, cx: &Cx) -> Result<MasqueHealthStatus, MasqueError> {
-        // Simulate proxy health check
-        Sleep::new(wall_now() + Duration::from_millis(50)).await;
+        let proxy_reachable = parse_https_authority(&self.config.proxy_endpoint).is_ok();
+        let auth_valid = self
+            .config
+            .proxy_auth
+            .as_ref()
+            .is_some_and(|auth| auth.authorization_header().is_ok());
 
         let status = MasqueHealthStatus {
-            proxy_reachable: true,
-            auth_valid: self.config.proxy_auth.is_some(),
-            avg_latency: Duration::from_millis(45),
+            proxy_reachable,
+            auth_valid,
+            avg_latency: if self.stats.avg_setup_latency.is_zero() {
+                Duration::from_millis(1)
+            } else {
+                self.stats.avg_setup_latency
+            },
             active_tunnels: self.stats.active_tunnels,
             overhead_ratio: self.stats.current_overhead_ratio,
         };
@@ -340,6 +445,44 @@ impl MasqueAdapter {
             }
         }
     }
+}
+
+fn parse_https_authority(endpoint: &str) -> Result<String, MasqueError> {
+    let authority = endpoint
+        .strip_prefix("https://")
+        .ok_or_else(|| MasqueError::ProxyConnectionFailed {
+            reason: "MASQUE proxy endpoint must use https://".to_string(),
+        })?
+        .trim_end_matches('/');
+    if authority.is_empty() || authority.contains('/') {
+        return Err(MasqueError::ProxyConnectionFailed {
+            reason: format!("invalid MASQUE proxy authority: {endpoint}"),
+        });
+    }
+    Ok(authority.to_string())
+}
+
+fn encode_connect_udp_datagram(context_id: u64, payload: &[u8]) -> Result<Vec<u8>, MasqueError> {
+    let payload_len = u16::try_from(payload.len()).map_err(|_| MasqueError::DatagramTooLarge {
+        size: payload.len(),
+        max: u16::MAX as usize,
+    })?;
+    let mut frame = Vec::with_capacity(10 + payload.len());
+    frame.extend_from_slice(&context_id.to_be_bytes());
+    frame.extend_from_slice(&payload_len.to_be_bytes());
+    frame.extend_from_slice(payload);
+    Ok(frame)
+}
+
+fn average_duration(current_avg: Duration, new_value: Duration, count: u64) -> Duration {
+    if count <= 1 {
+        return new_value;
+    }
+
+    let avg_nanos = ((current_avg.as_nanos() * u128::from(count - 1)) + new_value.as_nanos())
+        .checked_div(u128::from(count))
+        .unwrap_or_default();
+    Duration::from_nanos(u64::try_from(avg_nanos).unwrap_or(u64::MAX))
 }
 
 /// Health status information for MASQUE proxy.
@@ -493,6 +636,42 @@ mod tests {
             assert!(adapter.stats.total_overhead_bytes > 0);
             assert!(adapter.stats.current_overhead_ratio > 0.0);
             assert!(adapter.stats.current_overhead_ratio < 1.0);
+        });
+    }
+
+    #[test]
+    fn test_receive_reads_queued_proxy_datagram() {
+        block_on(async {
+            let mut adapter = MasqueAdapter::new(MasqueConfig::default());
+            let cx = Cx::for_testing();
+            let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 8080);
+            let tunnel_id = adapter.establish_tunnel(&cx, target_addr).await.unwrap();
+            let inbound = vec![1, 2, 3, 4, 5];
+
+            adapter
+                .queue_inbound_datagram(&tunnel_id, inbound.clone())
+                .unwrap();
+            let received = adapter.receive_datagram(&cx, &tunnel_id).await.unwrap();
+
+            assert_eq!(received, inbound);
+            assert!(adapter.stats.total_payload_bytes >= 5);
+        });
+    }
+
+    #[test]
+    fn test_receive_reports_empty_tunnel_queue() {
+        block_on(async {
+            let mut adapter = MasqueAdapter::new(MasqueConfig::default());
+            let cx = Cx::for_testing();
+            let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 8080);
+            let tunnel_id = adapter.establish_tunnel(&cx, target_addr).await.unwrap();
+
+            let result = adapter.receive_datagram(&cx, &tunnel_id).await;
+
+            assert!(matches!(
+                result,
+                Err(MasqueError::NoDatagramAvailable { .. })
+            ));
         });
     }
 

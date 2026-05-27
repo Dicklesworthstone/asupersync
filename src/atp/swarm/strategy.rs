@@ -3,14 +3,15 @@
 //! Implements various piece selection strategies for optimal download performance,
 //! including rarest-first, sequential, and adaptive strategies.
 
-use super::*;
+use super::{PeerId, PieceId};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Piece selection strategy enumeration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PieceSelectionStrategy {
     /// Prioritize rarest pieces first to maximize swarm efficiency
+    #[default]
     RarestFirst,
 
     /// Download pieces in sequential order
@@ -24,12 +25,6 @@ pub enum PieceSelectionStrategy {
 
     /// Endgame strategy for final pieces
     Endgame,
-}
-
-impl Default for PieceSelectionStrategy {
-    fn default() -> Self {
-        PieceSelectionStrategy::RarestFirst
-    }
 }
 
 /// Comprehensive swarm strategy that encompasses multiple decision-making aspects.
@@ -532,23 +527,19 @@ impl AdaptiveStrategyEngine {
             avg_download_speed: context
                 .current_performance
                 .as_ref()
-                .map(|p| p.avg_download_speed)
-                .unwrap_or(1_000_000.0),
+                .map_or(1_000_000.0, |p| p.avg_download_speed),
             avg_latency: context
                 .current_performance
                 .as_ref()
-                .map(|p| p.avg_latency)
-                .unwrap_or(std::time::Duration::from_millis(100)),
+                .map_or(std::time::Duration::from_millis(100), |p| p.avg_latency),
             success_rate: context
                 .current_performance
                 .as_ref()
-                .map(|p| p.success_rate)
-                .unwrap_or(0.9),
+                .map_or(0.9, |p| p.success_rate),
             efficiency_score: context
                 .current_performance
                 .as_ref()
-                .map(|p| p.efficiency_score)
-                .unwrap_or(0.8),
+                .map_or(0.8, |p| p.efficiency_score),
             timestamp: std::time::Instant::now(),
         }
     }
@@ -574,8 +565,7 @@ impl AdaptiveStrategyEngine {
         }
 
         // Find strategy with highest score
-        let best_strategy = self
-            .strategy_scores
+        self.strategy_scores
             .iter()
             .filter(|(strategy, _)| **strategy != PieceSelectionStrategy::Adaptive)
             .max_by(|(_, score_a), (_, score_b)| {
@@ -583,10 +573,9 @@ impl AdaptiveStrategyEngine {
                     .partial_cmp(score_b)
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
-            .map(|(strategy, _)| *strategy)
-            .unwrap_or(PieceSelectionStrategy::RarestFirst);
-
-        best_strategy
+            .map_or(PieceSelectionStrategy::RarestFirst, |(strategy, _)| {
+                *strategy
+            })
     }
 
     /// Change to a new strategy.
@@ -702,7 +691,7 @@ mod tests {
         let mut context = create_test_context();
         context.transfer_progress = 0.95; // Near completion
 
-        let strategy = engine.select_strategy(&context);
+        let _strategy = engine.select_strategy(&context);
         // Should switch to endgame for transfers > 90% complete
         // Note: actual behavior depends on timing constraints
     }

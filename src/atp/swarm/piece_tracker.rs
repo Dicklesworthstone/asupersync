@@ -3,7 +3,7 @@
 //! Manages the state of which pieces are available from which peers,
 //! tracks download progress, and coordinates piece requests.
 
-use super::*;
+use super::{PeerId, PieceId, SwarmError, SwarmResult, swarm_time_now};
 use crate::atp::mailbox::MailboxTransferId;
 use crate::types::Time;
 use serde::{Deserialize, Serialize};
@@ -55,9 +55,10 @@ pub struct PieceMap {
 }
 
 /// Status of an individual piece.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum PieceStatus {
     /// Piece is needed and not yet requested
+    #[default]
     Needed,
 
     /// Piece has been requested from a peer
@@ -103,12 +104,6 @@ pub enum PieceStatus {
         /// Peer that provided the piece
         peer_id: PeerId,
     },
-}
-
-impl Default for PieceStatus {
-    fn default() -> Self {
-        PieceStatus::Needed
-    }
 }
 
 /// Statistics about piece distribution and redundancy.
@@ -259,7 +254,7 @@ impl PieceTracker {
             for piece_id in pieces {
                 self.global_availability
                     .entry(*piece_id)
-                    .or_insert_with(HashSet::new)
+                    .or_default()
                     .insert(peer_id.clone());
             }
         }
@@ -272,7 +267,7 @@ impl PieceTracker {
         let transfer_map =
             self.transfer_maps
                 .get(transfer_id)
-                .ok_or_else(|| SwarmError::TransferNotFound {
+                .ok_or(SwarmError::TransferNotFound {
                     transfer_id: *transfer_id,
                 })?;
 
@@ -296,7 +291,7 @@ impl PieceTracker {
         let transfer_map =
             self.transfer_maps
                 .get(transfer_id)
-                .ok_or_else(|| SwarmError::TransferNotFound {
+                .ok_or(SwarmError::TransferNotFound {
                     transfer_id: *transfer_id,
                 })?;
 
@@ -326,11 +321,12 @@ impl PieceTracker {
         piece_id: PieceId,
         peer_id: PeerId,
     ) -> SwarmResult<()> {
-        let transfer_map = self.transfer_maps.get_mut(transfer_id).ok_or_else(|| {
-            SwarmError::TransferNotFound {
-                transfer_id: *transfer_id,
-            }
-        })?;
+        let transfer_map =
+            self.transfer_maps
+                .get_mut(transfer_id)
+                .ok_or(SwarmError::TransferNotFound {
+                    transfer_id: *transfer_id,
+                })?;
 
         transfer_map.piece_status.insert(
             piece_id,
@@ -350,11 +346,12 @@ impl PieceTracker {
         piece_id: PieceId,
         peer_id: PeerId,
     ) -> SwarmResult<()> {
-        let transfer_map = self.transfer_maps.get_mut(transfer_id).ok_or_else(|| {
-            SwarmError::TransferNotFound {
-                transfer_id: *transfer_id,
-            }
-        })?;
+        let transfer_map =
+            self.transfer_maps
+                .get_mut(transfer_id)
+                .ok_or(SwarmError::TransferNotFound {
+                    transfer_id: *transfer_id,
+                })?;
 
         transfer_map.piece_status.insert(
             piece_id,
@@ -375,11 +372,12 @@ impl PieceTracker {
         piece_id: PieceId,
         progress: f64,
     ) -> SwarmResult<()> {
-        let transfer_map = self.transfer_maps.get_mut(transfer_id).ok_or_else(|| {
-            SwarmError::TransferNotFound {
-                transfer_id: *transfer_id,
-            }
-        })?;
+        let transfer_map =
+            self.transfer_maps
+                .get_mut(transfer_id)
+                .ok_or(SwarmError::TransferNotFound {
+                    transfer_id: *transfer_id,
+                })?;
 
         if let Some(PieceStatus::Downloading {
             started_at,
@@ -406,17 +404,20 @@ impl PieceTracker {
         transfer_id: &MailboxTransferId,
         piece_id: PieceId,
     ) -> SwarmResult<()> {
-        let transfer_map = self.transfer_maps.get_mut(transfer_id).ok_or_else(|| {
-            SwarmError::TransferNotFound {
-                transfer_id: *transfer_id,
-            }
-        })?;
+        let transfer_map =
+            self.transfer_maps
+                .get_mut(transfer_id)
+                .ok_or(SwarmError::TransferNotFound {
+                    transfer_id: *transfer_id,
+                })?;
 
         // Get peer ID from current status
         let peer_id = match transfer_map.piece_status.get(&piece_id) {
-            Some(PieceStatus::Requested { peer_id, .. })
-            | Some(PieceStatus::Downloading { peer_id, .. })
-            | Some(PieceStatus::Verifying { peer_id, .. }) => peer_id.clone(),
+            Some(
+                PieceStatus::Requested { peer_id, .. }
+                | PieceStatus::Downloading { peer_id, .. }
+                | PieceStatus::Verifying { peer_id, .. },
+            ) => peer_id.clone(),
             _ => {
                 return Err(SwarmError::InvalidPieceState {
                     piece_id,
@@ -443,17 +444,20 @@ impl PieceTracker {
         piece_id: PieceId,
         reason: String,
     ) -> SwarmResult<()> {
-        let transfer_map = self.transfer_maps.get_mut(transfer_id).ok_or_else(|| {
-            SwarmError::TransferNotFound {
-                transfer_id: *transfer_id,
-            }
-        })?;
+        let transfer_map =
+            self.transfer_maps
+                .get_mut(transfer_id)
+                .ok_or(SwarmError::TransferNotFound {
+                    transfer_id: *transfer_id,
+                })?;
 
         // Get peer ID from current status
         let peer_id = match transfer_map.piece_status.get(&piece_id) {
-            Some(PieceStatus::Downloading { peer_id, .. })
-            | Some(PieceStatus::Verifying { peer_id, .. })
-            | Some(PieceStatus::Requested { peer_id, .. }) => peer_id.clone(),
+            Some(
+                PieceStatus::Downloading { peer_id, .. }
+                | PieceStatus::Verifying { peer_id, .. }
+                | PieceStatus::Requested { peer_id, .. },
+            ) => peer_id.clone(),
             _ => PeerId::new("unknown"),
         };
 
@@ -478,7 +482,7 @@ impl PieceTracker {
         let transfer_map =
             self.transfer_maps
                 .get(transfer_id)
-                .ok_or_else(|| SwarmError::TransferNotFound {
+                .ok_or(SwarmError::TransferNotFound {
                     transfer_id: *transfer_id,
                 })?;
 
@@ -486,7 +490,7 @@ impl PieceTracker {
             .piece_status
             .get(piece_id)
             .cloned()
-            .ok_or_else(|| SwarmError::PieceNotFound {
+            .ok_or(SwarmError::PieceNotFound {
                 piece_id: *piece_id,
             })
     }
@@ -499,7 +503,7 @@ impl PieceTracker {
         let transfer_map =
             self.transfer_maps
                 .get(transfer_id)
-                .ok_or_else(|| SwarmError::TransferNotFound {
+                .ok_or(SwarmError::TransferNotFound {
                     transfer_id: *transfer_id,
                 })?;
 
@@ -559,7 +563,7 @@ impl PieceTracker {
         let transfer_map =
             self.transfer_maps
                 .get(transfer_id)
-                .ok_or_else(|| SwarmError::TransferNotFound {
+                .ok_or(SwarmError::TransferNotFound {
                     transfer_id: *transfer_id,
                 })?;
 
@@ -567,7 +571,7 @@ impl PieceTracker {
             .redundancy
             .get(piece_id)
             .copied()
-            .ok_or_else(|| SwarmError::PieceNotFound {
+            .ok_or(SwarmError::PieceNotFound {
                 piece_id: *piece_id,
             })
     }
@@ -581,7 +585,7 @@ impl PieceTracker {
         let transfer_map =
             self.transfer_maps
                 .get(transfer_id)
-                .ok_or_else(|| SwarmError::TransferNotFound {
+                .ok_or(SwarmError::TransferNotFound {
                     transfer_id: *transfer_id,
                 })?;
 

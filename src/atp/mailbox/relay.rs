@@ -1,6 +1,8 @@
 //! ATP Mailbox Relay - Communication with mailbox relay servers.
 
-use super::*;
+use super::{
+    EncryptedChunk, MailboxError, MailboxResult, MailboxTransferId, MailboxTransferMetadata, PeerId,
+};
 use crate::runtime::spawn_blocking;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};

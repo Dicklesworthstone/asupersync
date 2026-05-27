@@ -967,7 +967,7 @@ pub struct GuidedRemediationSessionRequest {
     /// Approved checkpoint identifiers.
     pub approved_checkpoints: Vec<String>,
     /// Whether to inject deterministic apply failure after mutation begins.
-    pub simulate_apply_failure: bool,
+    pub inject_apply_failure: bool,
     /// Previously applied idempotency key (if this is a rerun attempt).
     pub previous_idempotency_key: Option<String>,
 }
@@ -6319,12 +6319,12 @@ fn rejection_log(
     }
 }
 
-/// Simulates screen payload exchange and enforces required-field contracts.
+/// Executes screen payload exchange and enforces required-field contracts.
 ///
 /// # Errors
 ///
 /// Returns [`RejectedPayloadLog`] if the request does not satisfy the contract.
-pub fn simulate_screen_exchange(
+pub fn execute_screen_exchange(
     contract: &ScreenEngineContract,
     request: &ScreenExchangeRequest,
 ) -> Result<ScreenExchangeEnvelope, RejectedPayloadLog> {
@@ -8602,7 +8602,7 @@ pub fn run_guided_remediation_session(
             ),
             "approve all checkpoints and rerun apply".to_string(),
         )
-    } else if request.simulate_apply_failure {
+    } else if request.inject_apply_failure {
         (
             "partial_apply_failed".to_string(),
             "rollback_recommended".to_string(),
@@ -8611,7 +8611,7 @@ pub fn run_guided_remediation_session(
             true,
             true,
             score.confidence_score.saturating_sub(20),
-            "simulated failure after mutation; rollback required".to_string(),
+            "injected failure after mutation; rollback required".to_string(),
             "execute rollback_command, run verify_command, then rerun preview".to_string(),
         )
     } else {
@@ -8853,7 +8853,7 @@ pub fn run_guided_remediation_session_smoke(
                 run_id: "run-guided-remediation-smoke".to_string(),
                 scenario_id: "guided-remediation-apply-success".to_string(),
                 approved_checkpoints: approvals.clone(),
-                simulate_apply_failure: false,
+                inject_apply_failure: false,
                 previous_idempotency_key: None,
             },
         )?,
@@ -8865,7 +8865,7 @@ pub fn run_guided_remediation_session_smoke(
                 run_id: "run-guided-remediation-smoke".to_string(),
                 scenario_id: "guided-remediation-apply-failure".to_string(),
                 approved_checkpoints: approvals,
-                simulate_apply_failure: true,
+                inject_apply_failure: true,
                 previous_idempotency_key: None,
             },
         )?,
@@ -17362,7 +17362,7 @@ fn resolve_profile_for_capability(
     }
 }
 
-/// Simulates visual token application for one screen and terminal capability.
+/// Applies visual tokens for one screen and terminal capability.
 ///
 /// Emits deterministic structured theme events for selection/fallback,
 /// token-resolution failures, and layout degradation.
@@ -17370,13 +17370,13 @@ fn resolve_profile_for_capability(
 /// # Errors
 ///
 /// Returns `Err` when the requested screen or profile cannot be resolved.
-pub fn simulate_visual_token_application(
+pub fn apply_visual_tokens(
     contract: &VisualLanguageContract,
     screen_id: &str,
     correlation_id: &str,
     capability: TerminalCapabilityClass,
 ) -> Result<VisualApplicationTranscript, String> {
-    simulate_visual_token_application_for_viewport(
+    apply_visual_tokens_for_viewport(
         contract,
         screen_id,
         correlation_id,
@@ -17386,7 +17386,7 @@ pub fn simulate_visual_token_application(
     )
 }
 
-/// Simulates visual token application with explicit viewport dimensions.
+/// Applies visual tokens with explicit viewport dimensions.
 ///
 /// Compact terminals below the readability threshold degrade to the
 /// screen-specific degraded layout motif and emit a deterministic
@@ -17397,7 +17397,7 @@ pub fn simulate_visual_token_application(
 /// Returns `Err` when the requested screen/profile cannot be resolved or
 /// when viewport dimensions are zero.
 #[allow(clippy::too_many_lines)]
-pub fn simulate_visual_token_application_for_viewport(
+pub fn apply_visual_tokens_for_viewport(
     contract: &VisualLanguageContract,
     screen_id: &str,
     correlation_id: &str,
@@ -19775,7 +19775,7 @@ impl RuntimeState {
             outcome: ExchangeOutcome::Success,
         };
 
-        let rejection = simulate_screen_exchange(&contract, &request).expect_err("must reject");
+        let rejection = execute_screen_exchange(&contract, &request).expect_err("must reject");
         assert_eq!(rejection.contract_version, contract.contract_version);
         assert_eq!(rejection.correlation_id, request.correlation_id);
         assert_eq!(rejection.rerun_context, request.rerun_context);
@@ -19790,7 +19790,7 @@ impl RuntimeState {
     }
 
     #[test]
-    fn screen_exchange_simulates_success_cancelled_and_failed_paths() {
+    fn screen_exchange_executes_success_cancelled_and_failed_paths() {
         let contract = screen_engine_contract();
         let mut payload = BTreeMap::new();
         payload.insert("action".to_string(), "refresh".to_string());
@@ -19810,8 +19810,7 @@ impl RuntimeState {
                 outcome,
             };
 
-            let envelope =
-                simulate_screen_exchange(&contract, &request).expect("contract exchange");
+            let envelope = execute_screen_exchange(&contract, &request).expect("contract exchange");
             assert_eq!(envelope.contract_version, contract.contract_version);
             assert_eq!(envelope.screen_id, request.screen_id);
             assert_eq!(envelope.outcome_class, expected_class);
@@ -19879,15 +19878,15 @@ impl RuntimeState {
     }
 
     #[test]
-    fn simulate_visual_token_application_falls_back_for_ansi16() {
+    fn apply_visual_tokens_falls_back_for_ansi16() {
         let contract = visual_language_contract();
-        let transcript = simulate_visual_token_application(
+        let transcript = apply_visual_tokens(
             &contract,
             "incident_console",
             "corr-visual-1",
             TerminalCapabilityClass::Ansi16,
         )
-        .expect("simulate");
+        .expect("apply visual tokens");
 
         assert!(transcript.fallback_applied);
         assert_eq!(transcript.selected_profile_id, "showcase_ansi16");
@@ -19910,19 +19909,19 @@ impl RuntimeState {
     }
 
     #[test]
-    fn simulate_visual_token_application_logs_missing_role_event() {
+    fn apply_visual_tokens_logs_missing_role_event() {
         let mut contract = visual_language_contract();
         contract.profiles[0]
             .palette_tokens
             .retain(|token| token.role != "warning");
 
-        let transcript = simulate_visual_token_application(
+        let transcript = apply_visual_tokens(
             &contract,
             "bead_command_center",
             "corr-visual-2",
             TerminalCapabilityClass::Ansi16,
         )
-        .expect("simulate");
+        .expect("apply visual tokens");
 
         assert_eq!(transcript.missing_roles, vec!["warning".to_string()]);
         assert!(
@@ -19935,7 +19934,7 @@ impl RuntimeState {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn simulate_visual_token_application_viewport_matrix_snapshots_are_stable() {
+    fn apply_visual_tokens_viewport_matrix_snapshots_are_stable() {
         let contract = visual_language_contract();
         let scenarios = vec![
             (
@@ -19974,7 +19973,7 @@ impl RuntimeState {
         for (screen_id, width, height, capability) in scenarios {
             let correlation_id =
                 format!("snapshot-{screen_id}-{width}x{height}-{capability:?}").to_lowercase();
-            let transcript = simulate_visual_token_application_for_viewport(
+            let transcript = apply_visual_tokens_for_viewport(
                 &contract,
                 screen_id,
                 &correlation_id,
@@ -19982,7 +19981,7 @@ impl RuntimeState {
                 width,
                 height,
             )
-            .expect("simulate");
+            .expect("apply visual tokens");
 
             let compact_viewport =
                 width < MIN_VISUAL_VIEWPORT_WIDTH || height < MIN_VISUAL_VIEWPORT_HEIGHT;
@@ -20083,9 +20082,9 @@ impl RuntimeState {
     }
 
     #[test]
-    fn simulate_visual_token_application_rejects_zero_viewport_dimensions() {
+    fn apply_visual_tokens_rejects_zero_viewport_dimensions() {
         let contract = visual_language_contract();
-        let width_error = simulate_visual_token_application_for_viewport(
+        let width_error = apply_visual_tokens_for_viewport(
             &contract,
             "bead_command_center",
             "corr-visual-viewport-width-zero",
@@ -20096,7 +20095,7 @@ impl RuntimeState {
         .expect_err("zero width must fail");
         assert_eq!(width_error, "viewport_width must be greater than zero");
 
-        let height_error = simulate_visual_token_application_for_viewport(
+        let height_error = apply_visual_tokens_for_viewport(
             &contract,
             "bead_command_center",
             "corr-visual-viewport-height-zero",
@@ -20573,7 +20572,7 @@ impl RuntimeState {
                 run_id: "run-test-success".to_string(),
                 scenario_id: "test-apply-success".to_string(),
                 approved_checkpoints: approvals,
-                simulate_apply_failure: false,
+                inject_apply_failure: false,
                 previous_idempotency_key: None,
             },
         )
@@ -20619,7 +20618,7 @@ impl RuntimeState {
                 run_id: "run-test-blocked".to_string(),
                 scenario_id: "test-blocked".to_string(),
                 approved_checkpoints: vec![],
-                simulate_apply_failure: false,
+                inject_apply_failure: false,
                 previous_idempotency_key: None,
             },
         )
@@ -20655,7 +20654,7 @@ impl RuntimeState {
                     "checkpoint_diff_review".to_string(),
                     "checkpoint_risk_ack".to_string(),
                 ],
-                simulate_apply_failure: false,
+                inject_apply_failure: false,
                 previous_idempotency_key: None,
             },
         )
@@ -20668,7 +20667,7 @@ impl RuntimeState {
     }
 
     #[test]
-    fn guided_session_simulate_failure_triggers_rollback_recommended() {
+    fn guided_session_injected_failure_triggers_rollback_recommended() {
         let recipe_contract = remediation_recipe_contract();
         let logging_contract = structured_logging_contract();
         let recipe = remediation_recipe_fixtures()
@@ -20691,7 +20690,7 @@ impl RuntimeState {
                 run_id: "run-test-failure".to_string(),
                 scenario_id: "test-apply-failure".to_string(),
                 approved_checkpoints: approvals,
-                simulate_apply_failure: true,
+                inject_apply_failure: true,
                 previous_idempotency_key: None,
             },
         )
@@ -20702,7 +20701,7 @@ impl RuntimeState {
         assert_eq!(
             outcome.trust_score_after,
             outcome.trust_score_before.saturating_sub(20),
-            "trust penalty for simulated failure should be -20"
+            "trust penalty for injected failure should be -20"
         );
     }
 
@@ -20730,7 +20729,7 @@ impl RuntimeState {
                 run_id: "run-test-idempotent".to_string(),
                 scenario_id: "test-idempotent-noop".to_string(),
                 approved_checkpoints: approvals,
-                simulate_apply_failure: false,
+                inject_apply_failure: false,
                 previous_idempotency_key: Some(plan.idempotency_key),
             },
         )
@@ -20762,7 +20761,7 @@ impl RuntimeState {
                 run_id: String::new(),
                 scenario_id: "test-empty-run-id".to_string(),
                 approved_checkpoints: vec![],
-                simulate_apply_failure: false,
+                inject_apply_failure: false,
                 previous_idempotency_key: None,
             },
         )
@@ -20788,7 +20787,7 @@ impl RuntimeState {
                 run_id: "run-test-empty-scenario".to_string(),
                 scenario_id: "   ".to_string(),
                 approved_checkpoints: vec![],
-                simulate_apply_failure: false,
+                inject_apply_failure: false,
                 previous_idempotency_key: None,
             },
         )
@@ -20867,7 +20866,7 @@ impl RuntimeState {
                 run_id: "run-test-risk-flags".to_string(),
                 scenario_id: "test-risk-flag-check".to_string(),
                 approved_checkpoints: approvals,
-                simulate_apply_failure: false,
+                inject_apply_failure: false,
                 previous_idempotency_key: None,
             },
         )
@@ -20912,7 +20911,7 @@ impl RuntimeState {
                 run_id: "run-test-fail-risk".to_string(),
                 scenario_id: "test-fail-risk-flags".to_string(),
                 approved_checkpoints: approvals,
-                simulate_apply_failure: true,
+                inject_apply_failure: true,
                 previous_idempotency_key: None,
             },
         )
@@ -20960,7 +20959,7 @@ impl RuntimeState {
                 run_id: "run-test-cap".to_string(),
                 scenario_id: "test-trust-cap".to_string(),
                 approved_checkpoints: approvals,
-                simulate_apply_failure: false,
+                inject_apply_failure: false,
                 previous_idempotency_key: None,
             },
         )

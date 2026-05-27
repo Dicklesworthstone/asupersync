@@ -6,10 +6,9 @@
 use super::super::{AdapterNegotiation, AdapterType, FeatureSupport, PerformanceCaveat};
 use crate::atp::object::ObjectId;
 use crate::error::{Error, ErrorKind, Result};
-use crate::time::{Sleep, wall_now};
 use crate::types::TraceId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, SystemTime};
 
 /// TCP/TLS fallback adapter configuration.
@@ -151,6 +150,8 @@ pub struct TcpTlsAdapter {
     config: TcpTlsConfig,
     /// Active connections
     connections: HashMap<String, TcpTlsConnection>,
+    /// Structured performance warnings emitted by the adapter.
+    warnings: Vec<PerformanceWarning>,
     /// Adapter statistics
     stats: TcpTlsStats,
 }
@@ -168,6 +169,10 @@ pub struct TcpTlsConnection {
     pub tls_info: TlsConnectionInfo,
     /// Connection statistics
     pub stats: ConnectionStats,
+    /// Frames accepted from callers for transmission over the TCP/TLS stream.
+    pub outbound_frames: VecDeque<Vec<u8>>,
+    /// Frames received from the TCP/TLS stream and awaiting ATP consumers.
+    pub inbound_frames: VecDeque<Vec<u8>>,
     /// Created timestamp
     pub created_at: SystemTime,
     /// Last activity timestamp
@@ -303,6 +308,7 @@ impl TcpTlsAdapter {
         Self {
             config,
             connections: HashMap::new(),
+            warnings: Vec::new(),
             stats: TcpTlsStats::new(),
         }
     }
@@ -332,6 +338,8 @@ impl TcpTlsAdapter {
 
     /// Establish TCP/TLS connection to remote endpoint.
     pub async fn connect(&mut self, object_id: ObjectId, endpoint: &str) -> Result<String> {
+        validate_tcptls_endpoint(endpoint)?;
+
         let connection_id = format!(
             "tcptls-{}-{}",
             object_id,
@@ -343,7 +351,6 @@ impl TcpTlsAdapter {
 
         let start_time = SystemTime::now();
 
-        // Simulate TCP connection establishment
         let mut connection = TcpTlsConnection {
             connection_id: connection_id.clone(),
             state: ConnectionState::TcpConnecting,
@@ -356,21 +363,17 @@ impl TcpTlsAdapter {
                 sni_hostname: self.config.tls_config.sni_hostname.clone(),
             },
             stats: ConnectionStats::new(),
+            outbound_frames: VecDeque::new(),
+            inbound_frames: VecDeque::new(),
             created_at: start_time,
             last_activity: start_time,
         };
 
-        // Simulate TCP connect time
-        let tcp_delay = Duration::from_millis(80);
-        Sleep::new(wall_now() + tcp_delay).await;
-
+        let tcp_delay = estimate_tcp_connect_time(endpoint, &self.config);
         connection.state = ConnectionState::TlsHandshaking;
         connection.stats.connect_time = tcp_delay;
 
-        // Simulate TLS handshake
-        let handshake_delay = Duration::from_millis(120);
-        Sleep::new(wall_now() + handshake_delay).await;
-
+        let handshake_delay = estimate_tls_handshake_time(&self.config);
         connection.state = ConnectionState::Ready;
         connection.stats.handshake_time = handshake_delay;
         connection.tls_info.cipher_suite = "TLS_AES_128_GCM_SHA256".to_string();
@@ -421,26 +424,26 @@ impl TcpTlsAdapter {
 
         let start_time = SystemTime::now();
 
-        // Simulate frame transmission with HOL blocking potential
-        let base_delay = Duration::from_millis(10);
+        let base_delay = estimate_frame_transmission_time(data.len());
         let hol_penalty = if data.len() > 64 * 1024 {
             // Large frames can cause HOL blocking
             connection.stats.hol_blocking_events += 1;
-            Duration::from_millis(50) // Additional delay for large frames
+            Duration::from_millis(50)
         } else {
             Duration::from_millis(0)
         };
-
-        Sleep::new(wall_now() + base_delay + hol_penalty).await;
+        let frame_time = base_delay + hol_penalty;
 
         // Update statistics
         connection.stats.bytes_sent += data.len() as u64;
+        connection.outbound_frames.push_back(data.to_vec());
         connection.last_activity = SystemTime::now();
 
         // Check for HOL blocking warning
-        let frame_time = SystemTime::now()
+        let elapsed = SystemTime::now()
             .duration_since(start_time)
-            .unwrap_or(Duration::from_millis(0));
+            .unwrap_or_default();
+        let frame_time = frame_time.max(elapsed);
         if frame_time
             > self
                 .config
@@ -466,26 +469,36 @@ impl TcpTlsAdapter {
             return Err(Error::new(ErrorKind::ConnectionLost));
         }
 
-        // Simulate frame reception
-        let delay = Duration::from_millis(15);
-        Sleep::new(wall_now() + delay).await;
-
-        // Simulate received frame
-        let frame_data = vec![0xAA, 0xBB, 0xCC, 0xDD]; // Mock ATP frame
+        let frame_data = connection
+            .inbound_frames
+            .pop_front()
+            .ok_or_else(|| Error::new(ErrorKind::ChannelEmpty))?;
         connection.stats.bytes_received += frame_data.len() as u64;
         connection.last_activity = SystemTime::now();
 
         Ok(frame_data)
     }
 
+    /// Queue a frame received by the TCP/TLS transport for ATP consumers.
+    pub fn queue_inbound_frame(&mut self, connection_id: &str, frame: Vec<u8>) -> Result<()> {
+        let connection = self
+            .connections
+            .get_mut(connection_id)
+            .ok_or_else(|| Error::new(ErrorKind::ConnectionLost))?;
+
+        if connection.state != ConnectionState::Ready {
+            return Err(Error::new(ErrorKind::ConnectionLost));
+        }
+
+        connection.inbound_frames.push_back(frame);
+        connection.last_activity = SystemTime::now();
+        Ok(())
+    }
+
     /// Close TCP/TLS connection.
     pub async fn close_connection(&mut self, connection_id: &str) -> Result<()> {
         if let Some(mut connection) = self.connections.remove(connection_id) {
             connection.state = ConnectionState::Closing;
-
-            // Simulate connection close time
-            Sleep::new(wall_now() + Duration::from_millis(50)).await;
-
             connection.state = ConnectionState::Closed;
 
             // Update statistics
@@ -501,6 +514,11 @@ impl TcpTlsAdapter {
     /// Get adapter statistics.
     pub fn stats(&self) -> &TcpTlsStats {
         &self.stats
+    }
+
+    /// Structured warnings captured by this adapter instance.
+    pub fn warnings(&self) -> &[PerformanceWarning] {
+        &self.warnings
     }
 
     /// Get feature parity for TCP/TLS adapter.
@@ -575,9 +593,7 @@ impl TcpTlsAdapter {
             timestamp: SystemTime::now(),
         };
 
-        // In a real implementation, this would emit structured logs
-        eprintln!("Performance warning: {:?}", warning);
-
+        self.warnings.push(warning);
         self.stats.performance_warnings += 1;
     }
 
@@ -607,9 +623,7 @@ impl TcpTlsAdapter {
             timestamp: SystemTime::now(),
         };
 
-        // In a real implementation, this would emit structured logs
-        eprintln!("HOL blocking warning: {:?}", warning);
-
+        self.warnings.push(warning);
         self.stats.hol_blocking_warnings += 1;
     }
 
@@ -629,6 +643,39 @@ impl TcpTlsAdapter {
             )
         }
     }
+}
+
+fn validate_tcptls_endpoint(endpoint: &str) -> Result<()> {
+    let (host, port) = endpoint
+        .rsplit_once(':')
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput))?;
+    if host.is_empty() || port.parse::<u16>().is_err() {
+        return Err(Error::new(ErrorKind::InvalidInput));
+    }
+    Ok(())
+}
+
+fn estimate_tcp_connect_time(endpoint: &str, config: &TcpTlsConfig) -> Duration {
+    let host_len = endpoint.split(':').next().map_or(0, str::len);
+    let buffer_factor = ((config.connection_config.send_buffer_size
+        + config.connection_config.recv_buffer_size)
+        / 64_000)
+        .max(1) as u64;
+    Duration::from_millis(20 + (host_len as u64 % 17) + buffer_factor)
+}
+
+fn estimate_tls_handshake_time(config: &TcpTlsConfig) -> Duration {
+    let version_cost = match config.tls_config.min_tls_version {
+        TlsVersion::Tls13 => 35,
+        TlsVersion::Tls12 => 55,
+    };
+    let alpn_cost = config.tls_config.alpn_protocols.len() as u64;
+    Duration::from_millis(version_cost + alpn_cost)
+}
+
+fn estimate_frame_transmission_time(byte_len: usize) -> Duration {
+    let kilobytes = byte_len.div_ceil(1024) as u64;
+    Duration::from_micros(250 + kilobytes * 30)
 }
 
 impl Default for TcpTlsConfig {
@@ -740,7 +787,12 @@ mod tests {
             adapter.send_frame(&connection_id, data).await.unwrap();
 
             // Receive frame
-            let _received = adapter.receive_frame(&connection_id).await.unwrap();
+            let inbound = b"ATP response over TCP/TLS".to_vec();
+            adapter
+                .queue_inbound_frame(&connection_id, inbound.clone())
+                .unwrap();
+            let received = adapter.receive_frame(&connection_id).await.unwrap();
+            assert_eq!(received, inbound);
 
             // Close connection
             adapter.close_connection(&connection_id).await.unwrap();
@@ -770,7 +822,12 @@ mod tests {
     #[test]
     fn test_hol_blocking_detection() {
         block_on(async {
-            let mut adapter = TcpTlsAdapter::new(TcpTlsConfig::default());
+            let mut config = TcpTlsConfig::default();
+            config
+                .fallback_config
+                .performance_thresholds
+                .hol_blocking_threshold = Duration::from_millis(1);
+            let mut adapter = TcpTlsAdapter::new(config);
             let object_id = ObjectId::Content(crate::atp::object::ContentId::new([1; 32]));
             let connection_id = adapter
                 .connect(object_id, "server.example.com:443")
@@ -787,6 +844,27 @@ mod tests {
             // Check that HOL blocking was detected
             let connection = adapter.connections.get(&connection_id).unwrap();
             assert!(connection.stats.hol_blocking_events > 0);
+            assert!(!adapter.warnings().is_empty());
+            assert!(adapter.stats.hol_blocking_warnings > 0);
+        });
+    }
+
+    #[test]
+    fn test_empty_receive_reports_channel_empty() {
+        block_on(async {
+            let mut adapter = TcpTlsAdapter::new(TcpTlsConfig::default());
+            let object_id = ObjectId::Content(crate::atp::object::ContentId::new([1; 32]));
+            let connection_id = adapter
+                .connect(object_id, "server.example.com:443")
+                .await
+                .unwrap();
+
+            let result = adapter.receive_frame(&connection_id).await;
+
+            assert!(matches!(
+                result,
+                Err(err) if err.kind() == ErrorKind::ChannelEmpty
+            ));
         });
     }
 }

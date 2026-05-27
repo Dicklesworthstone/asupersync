@@ -161,9 +161,10 @@ impl BenchmarkSuite {
     pub fn comprehensive_suite() -> Self {
         let mut suite = Self::new("comprehensive");
 
-        // Add baseline tools
         suite.add_baseline(Box::new(crate::atp::benchmark::ScpAdapter::new()));
-        // TODO: Add RsyncAdapter, RcloneAdapter, CurlAdapter when implemented
+        suite.add_baseline(Box::new(crate::atp::benchmark::RsyncAdapter::new()));
+        suite.add_baseline(Box::new(crate::atp::benchmark::RcloneAdapter::new()));
+        suite.add_baseline(Box::new(crate::atp::benchmark::CurlAdapter::new()));
 
         // Add all ATP profiles
         suite.add_atp_profile(AtpProfile::clean_lan());
@@ -223,21 +224,21 @@ impl BenchmarkSuiteBuilder {
         self
     }
 
-    /// Include rsync baseline in the suite (when implemented).
+    /// Include rsync baseline in the suite.
     #[must_use]
     pub fn with_rsync(mut self) -> Self {
         self.include_rsync = true;
         self
     }
 
-    /// Include rclone baseline in the suite (when implemented).
+    /// Include rclone baseline in the suite.
     #[must_use]
     pub fn with_rclone(mut self) -> Self {
         self.include_rclone = true;
         self
     }
 
-    /// Include curl baseline in the suite (when implemented).
+    /// Include curl baseline in the suite.
     #[must_use]
     pub fn with_curl(mut self) -> Self {
         self.include_curl = true;
@@ -268,20 +269,17 @@ impl BenchmarkSuiteBuilder {
     pub fn build(self) -> BenchmarkSuite {
         let mut suite = BenchmarkSuite::new(self.name);
 
-        // Add baseline tools
         if self.include_scp {
             suite.add_baseline(Box::new(crate::atp::benchmark::ScpAdapter::new()));
         }
-
-        // TODO: Add other baseline adapters when implemented
         if self.include_rsync {
-            eprintln!("Warning: rsync adapter not yet implemented");
+            suite.add_baseline(Box::new(crate::atp::benchmark::RsyncAdapter::new()));
         }
         if self.include_rclone {
-            eprintln!("Warning: rclone adapter not yet implemented");
+            suite.add_baseline(Box::new(crate::atp::benchmark::RcloneAdapter::new()));
         }
         if self.include_curl {
-            eprintln!("Warning: curl adapter not yet implemented");
+            suite.add_baseline(Box::new(crate::atp::benchmark::CurlAdapter::new()));
         }
 
         // Add ATP profiles

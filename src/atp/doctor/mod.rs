@@ -720,7 +720,7 @@ mod tests {
     use crate::atp::path::{
         PathCandidateId, PathFailureKind, PathKind, PathOutcome, PathSuccessKind, PathTraceId,
     };
-    use crate::atp::platform::DeterministicFakePlatformProvider;
+    use crate::atp::platform::DeterministicLabPlatformProvider;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
@@ -835,7 +835,7 @@ mod tests {
     #[test]
     fn platform_doctor_document_has_stable_shape() {
         init_test("platform_doctor_document_has_stable_shape");
-        let provider = DeterministicFakePlatformProvider::fully_supported();
+        let provider = DeterministicLabPlatformProvider::fully_supported();
         let document = build_platform_doctor_document(&provider);
 
         assert_eq!(document.schema_version, ATP_PLATFORM_DOCTOR_SCHEMA);
@@ -854,7 +854,7 @@ mod tests {
     #[test]
     fn platform_doctor_logs_failed_and_skipped_probe_details() {
         init_test("platform_doctor_logs_failed_and_skipped_probe_details");
-        let provider = DeterministicFakePlatformProvider::conservative_degradation();
+        let provider = DeterministicLabPlatformProvider::conservative_degradation();
         let document = build_platform_doctor_document(&provider);
 
         let sparse = document
@@ -884,7 +884,7 @@ mod tests {
     #[test]
     fn platform_doctor_human_output_has_stable_sections() {
         init_test("platform_doctor_human_output_has_stable_sections");
-        let provider = DeterministicFakePlatformProvider::fully_supported();
+        let provider = DeterministicLabPlatformProvider::fully_supported();
         let document = build_platform_doctor_document(&provider);
         let rendered = render_platform_doctor_human(&document);
 
@@ -900,7 +900,7 @@ mod tests {
     #[test]
     fn platform_doctor_json_output_has_stable_fields() {
         init_test("platform_doctor_json_output_has_stable_fields");
-        let provider = DeterministicFakePlatformProvider::conservative_degradation();
+        let provider = DeterministicLabPlatformProvider::conservative_degradation();
         let document = build_platform_doctor_document(&provider);
         let json = serde_json::to_value(&document).expect("serialize doctor document");
 

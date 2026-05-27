@@ -152,7 +152,7 @@ impl TryFrom<SerializableVerificationEvidence> for VerificationEvidence {
     }
 }
 
-/// Serializable wrapper for GraphCommit (simplified).
+/// Serializable proof-bundle projection of a graph commit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SerializableGraphCommit {
     pub id_hash: [u8; 32],

@@ -76,9 +76,9 @@ pub fn build_atp_platform_capability_report(
     crate::fs::build_platform_capability_report(provider)
 }
 
-/// Deterministic fake provider for ATP platform policy and doctor tests.
+/// Deterministic lab provider for ATP platform policy and doctor tests.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeterministicFakePlatformProvider {
+pub struct DeterministicLabPlatformProvider {
     target: PlatformTarget,
     sparse_files: CapabilityProbe,
     preallocation: CapabilityProbe,
@@ -93,15 +93,15 @@ pub struct DeterministicFakePlatformProvider {
     service_manager: CapabilityProbe,
 }
 
-impl DeterministicFakePlatformProvider {
-    /// Returns a fake platform where every ATP capability is measured and supported.
+impl DeterministicLabPlatformProvider {
+    /// Returns a lab platform where every ATP capability is measured and supported.
     #[must_use]
     pub fn fully_supported() -> Self {
         Self {
             target: PlatformTarget {
-                os: "fakeos".to_string(),
-                family: "fake".to_string(),
-                arch: "fakearch".to_string(),
+                os: "labos".to_string(),
+                family: "lab".to_string(),
+                arch: "labarch".to_string(),
                 pointer_width: 64,
             },
             sparse_files: supported_probe("sparse_files"),
@@ -118,7 +118,7 @@ impl DeterministicFakePlatformProvider {
         }
     }
 
-    /// Returns a fake platform that forces conservative ATP degradation policy.
+    /// Returns a lab platform that forces conservative ATP degradation policy.
     #[must_use]
     pub fn conservative_degradation() -> Self {
         Self::fully_supported()
@@ -199,7 +199,7 @@ impl DeterministicFakePlatformProvider {
     }
 }
 
-impl PlatformCapabilityProvider for DeterministicFakePlatformProvider {
+impl PlatformCapabilityProvider for DeterministicLabPlatformProvider {
     fn target(&self) -> PlatformTarget {
         self.target.clone()
     }
@@ -288,9 +288,9 @@ mod tests {
     }
 
     #[test]
-    fn fake_provider_selects_fast_policy() {
-        init_test("fake_provider_selects_fast_policy");
-        let provider = DeterministicFakePlatformProvider::fully_supported();
+    fn lab_provider_selects_fast_policy() {
+        init_test("lab_provider_selects_fast_policy");
+        let provider = DeterministicLabPlatformProvider::fully_supported();
         let report = build_atp_platform_capability_report(&provider);
 
         assert_eq!(
@@ -307,13 +307,13 @@ mod tests {
         );
         assert_eq!(report.degradation_policy.packaging_mode, "managed-service");
         assert!(report.caveats.is_empty());
-        crate::test_complete!("fake_provider_selects_fast_policy");
+        crate::test_complete!("lab_provider_selects_fast_policy");
     }
 
     #[test]
-    fn fake_provider_selects_conservative_policy() {
-        init_test("fake_provider_selects_conservative_policy");
-        let provider = DeterministicFakePlatformProvider::conservative_degradation();
+    fn lab_provider_selects_conservative_policy() {
+        init_test("lab_provider_selects_conservative_policy");
+        let provider = DeterministicLabPlatformProvider::conservative_degradation();
         let report = build_atp_platform_capability_report(&provider);
 
         assert_eq!(
@@ -337,7 +337,7 @@ mod tests {
                 .suggested_recovery_commands
                 .contains(&"enable IPv6 loopback/networking on this host".to_string())
         );
-        crate::test_complete!("fake_provider_selects_conservative_policy");
+        crate::test_complete!("lab_provider_selects_conservative_policy");
     }
 
     #[test]

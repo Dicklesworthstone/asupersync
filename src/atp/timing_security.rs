@@ -23,6 +23,7 @@
 //! secrets through statistical timing analysis.
 
 use std::collections::VecDeque;
+use std::time::Instant;
 
 /// Configuration for timing side-channel detection.
 #[derive(Debug, Clone)]
@@ -55,67 +56,123 @@ impl Default for TimingDetectorConfig {
 /// High-precision timing measurement using hardware performance counters.
 #[derive(Debug, Clone)]
 pub struct PrecisionTimer {
-    /// Whether TSC is available and stable on this platform.
-    tsc_available: bool,
+    source: PrecisionTimingSource,
+    origin: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PrecisionTimingSource {
+    InvariantTsc { ticks_per_second: u64 },
+    MonotonicClock,
 }
 
 impl PrecisionTimer {
     /// Create a new precision timer, detecting available timing sources.
     pub fn new() -> Self {
         Self {
-            tsc_available: Self::detect_tsc_availability(),
+            source: Self::detect_tsc_source().unwrap_or(PrecisionTimingSource::MonotonicClock),
+            origin: Instant::now(),
         }
     }
 
-    /// Detect if TSC (Time Stamp Counter) is available and stable.
-    fn detect_tsc_availability() -> bool {
-        // Check for TSC availability via CPUID (simplified detection)
-        // In production, this would use proper CPUID intrinsics
-        #[cfg(target_arch = "x86_64")]
-        {
-            // Check if rdtsc instruction is available and TSC is invariant
-            // This is a simplified check - real implementation would use
-            // proper CPUID to check for invariant TSC support
-            true
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            false
-        }
+    /// Detect if TSC (Time Stamp Counter) is available, invariant, and has
+    /// a discoverable conversion rate.
+    fn detect_tsc_source() -> Option<PrecisionTimingSource> {
+        detect_invariant_tsc_frequency_hz()
+            .map(|ticks_per_second| PrecisionTimingSource::InvariantTsc { ticks_per_second })
     }
 
     /// Take a high-precision timing measurement.
     /// Returns time in nanoseconds since an arbitrary epoch.
     pub fn now_ns(&self) -> u64 {
-        if self.tsc_available {
-            self.read_tsc_ns()
-        } else {
-            // Fallback to SystemTime for non-x86_64 platforms
-            // Use nanoseconds since UNIX epoch
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64
+        match self.source {
+            PrecisionTimingSource::InvariantTsc { ticks_per_second } => {
+                ticks_to_nanos(read_tsc_ordered(), ticks_per_second)
+            }
+            PrecisionTimingSource::MonotonicClock => {
+                u64::try_from(self.origin.elapsed().as_nanos()).unwrap_or(u64::MAX)
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn detect_invariant_tsc_frequency_hz() -> Option<u64> {
+    let max_basic_leaf = cpuid(0).eax;
+    if max_basic_leaf < 1 {
+        return None;
+    }
+
+    let feature_leaf = cpuid(1);
+    let has_tsc = feature_leaf.edx & (1 << 4) != 0;
+    if !has_tsc {
+        return None;
+    }
+
+    let max_extended_leaf = cpuid(0x8000_0000).eax;
+    let has_invariant_tsc =
+        max_extended_leaf >= 0x8000_0007 && (cpuid(0x8000_0007).edx & (1 << 8) != 0);
+    if !has_invariant_tsc {
+        return None;
+    }
+
+    cpuid_tsc_frequency_hz(max_basic_leaf)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn detect_invariant_tsc_frequency_hz() -> Option<u64> {
+    None
+}
+
+#[cfg(target_arch = "x86_64")]
+fn cpuid_tsc_frequency_hz(max_basic_leaf: u32) -> Option<u64> {
+    if max_basic_leaf >= 0x15 {
+        let leaf = cpuid(0x15);
+        let denominator = leaf.eax;
+        let numerator = leaf.ebx;
+        let crystal_hz = leaf.ecx;
+        if denominator != 0 && numerator != 0 && crystal_hz != 0 {
+            let hz = u128::from(crystal_hz) * u128::from(numerator) / u128::from(denominator);
+            return u64::try_from(hz).ok().filter(|hz| *hz > 0);
         }
     }
 
-    /// Read TSC and convert to nanoseconds.
-    #[cfg(target_arch = "x86_64")]
-    fn read_tsc_ns(&self) -> u64 {
-        // In a real implementation, this would use RDTSC instruction
-        // For now, use high-precision Instant as a proxy
-        use std::time::SystemTime;
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64
+    if max_basic_leaf >= 0x16 {
+        let base_mhz = cpuid(0x16).eax;
+        if base_mhz != 0 {
+            return Some(u64::from(base_mhz) * 1_000_000);
+        }
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
-    fn read_tsc_ns(&self) -> u64 {
-        // Fallback implementation for non-x86_64
-        Instant::now().elapsed().as_nanos() as u64
+    None
+}
+
+#[cfg(target_arch = "x86_64")]
+fn cpuid(leaf: u32) -> core::arch::x86_64::CpuidResult {
+    core::arch::x86_64::__cpuid(leaf)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+fn read_tsc_ordered() -> u64 {
+    // SAFETY: LFENCE serializes the local core before/after the timestamp read;
+    // RDTSC only reads the processor counter and does not dereference memory.
+    unsafe {
+        core::arch::x86_64::_mm_lfence();
+        let ticks = core::arch::x86_64::_rdtsc();
+        core::arch::x86_64::_mm_lfence();
+        ticks
     }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn read_tsc_ordered() -> u64 {
+    0
+}
+
+fn ticks_to_nanos(ticks: u64, ticks_per_second: u64) -> u64 {
+    let nanos = u128::from(ticks).saturating_mul(1_000_000_000) / u128::from(ticks_per_second);
+    u64::try_from(nanos).unwrap_or(u64::MAX)
 }
 
 /// Statistical analysis results for timing measurements.

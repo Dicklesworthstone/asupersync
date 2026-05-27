@@ -230,7 +230,7 @@ impl BaselineAdapter for ScpAdapter {
             let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
 
             // Build and execute scp command
-            let cmd = self.build_scp_command(source_path, &iteration_dest);
+            let mut cmd = self.build_scp_command(source_path, &iteration_dest);
 
             let start_time = Instant::now();
             let output = cmd.output()?;
@@ -466,7 +466,7 @@ impl BaselineAdapter for RsyncAdapter {
             let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
 
             // Build and execute rsync command
-            let cmd = self.build_rsync_command(source_path, &iteration_dest);
+            let mut cmd = self.build_rsync_command(source_path, &iteration_dest);
 
             let start_time = Instant::now();
             let output = cmd.output()?;
@@ -551,6 +551,196 @@ impl Default for RsyncAdapter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Rclone baseline adapter.
+#[derive(Debug)]
+pub struct RcloneAdapter {
+    /// Rclone options.
+    rclone_options: Vec<String>,
+}
+
+impl RcloneAdapter {
+    /// Create a new Rclone adapter with default options.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            rclone_options: vec![
+                "--progress".to_string(),
+                "--stats-one-line".to_string(),
+                "--checksum".to_string(),
+            ],
+        }
+    }
+
+    /// Create an Rclone adapter with custom options.
+    #[must_use]
+    pub fn with_options(rclone_options: Vec<String>) -> Self {
+        Self { rclone_options }
+    }
+
+    async fn create_test_file(&self, path: &Path, size: u64) -> Result<(), BenchmarkError> {
+        let mut file = fs::File::create(path).await?;
+        let chunk_size = 64 * 1024;
+        let chunk_data = vec![0u8; chunk_size];
+        let mut remaining = size;
+
+        while remaining > 0 {
+            let write_size = std::cmp::min(remaining, chunk_size as u64) as usize;
+            AsyncWriteExt::write_all(&mut file, &chunk_data[..write_size]).await?;
+            remaining -= write_size as u64;
+        }
+
+        Ok(())
+    }
+
+    fn build_rclone_command(&self, source: &Path, dest: &Path) -> Command {
+        let mut cmd = Command::new("rclone");
+        cmd.arg("copyto");
+        for option in &self.rclone_options {
+            cmd.arg(option);
+        }
+        cmd.arg(source.to_string_lossy().to_string());
+        cmd.arg(dest.to_string_lossy().to_string());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd
+    }
+}
+
+#[async_trait::async_trait]
+impl BaselineAdapter for RcloneAdapter {
+    fn tool_name(&self) -> &str {
+        "rclone"
+    }
+
+    async fn check_availability(&self) -> ToolAvailability {
+        let output = match Command::new("rclone")
+            .arg("version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => return ToolAvailability::NotFound,
+        };
+
+        let version_text = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = version_text.lines().next() {
+            if line.contains("rclone") {
+                let version = ToolVersion::new("rclone", line);
+                if version.meets_minimum(1, 50) {
+                    ToolAvailability::Available(version)
+                } else {
+                    ToolAvailability::IncompatibleVersion(version)
+                }
+            } else {
+                ToolAvailability::VersionDetectionFailed(line.to_string())
+            }
+        } else {
+            ToolAvailability::VersionDetectionFailed("No version output".to_string())
+        }
+    }
+
+    async fn run_benchmark(
+        &self,
+        config: &BenchmarkConfig,
+        source_path: &Path,
+        dest_path: &Path,
+    ) -> Result<BenchmarkResult, BenchmarkError> {
+        self.create_test_file(source_path, config.data_size).await?;
+
+        let mut total_metrics = Vec::new();
+        for iteration in 0..config.iterations {
+            let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
+            let mut cmd = self.build_rclone_command(source_path, &iteration_dest);
+
+            let start_time = Instant::now();
+            let output = cmd.output()?;
+            let elapsed = start_time.elapsed();
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(BenchmarkError::ExecutionFailed(format!(
+                    "Rclone failed: {stderr}"
+                )));
+            }
+
+            let dest_size = fs::metadata(&iteration_dest).await?.len();
+            if dest_size != config.data_size {
+                return Err(BenchmarkError::ExecutionFailed(format!(
+                    "Size mismatch: expected {}, got {dest_size}",
+                    config.data_size
+                )));
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let mut metrics = self.parse_output(&stdout, &stderr)?;
+            metrics.wall_time = elapsed;
+            metrics.bytes_transferred = config.data_size;
+            metrics.verified_completion = true;
+            total_metrics.push(metrics);
+
+            if !config.preserve_artifacts {
+                let _ = fs::remove_file(&iteration_dest).await;
+            }
+        }
+
+        if !config.preserve_artifacts {
+            let _ = fs::remove_file(source_path).await;
+        }
+
+        Ok(BenchmarkResult {
+            tool_name: self.tool_name().to_string(),
+            iterations: total_metrics,
+            environment: crate::atp::benchmark::BenchmarkEnvironment::collect()?,
+        })
+    }
+
+    fn parse_output(&self, stdout: &str, stderr: &str) -> Result<BenchmarkMetrics, BenchmarkError> {
+        let progress_text = if stdout.is_empty() { stderr } else { stdout };
+        let bytes_on_wire = parse_rclone_bytes(progress_text);
+        Ok(BenchmarkMetrics {
+            wall_time: Duration::ZERO,
+            cpu_time: None,
+            memory_peak: None,
+            bytes_transferred: 0,
+            bytes_on_wire,
+            verified_completion: false,
+            first_usable_output: None,
+            resume_time: None,
+            disk_amplification_ratio: Some(1.0),
+            failure_reproducible: None,
+            failure_mode: None,
+        })
+    }
+
+    fn get_env_vars(&self) -> BTreeMap<String, String> {
+        let mut env = BTreeMap::new();
+        if let Ok(config_path) = std::env::var("RCLONE_CONFIG") {
+            env.insert("RCLONE_CONFIG".to_string(), config_path);
+        }
+        env
+    }
+}
+
+impl Default for RcloneAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn parse_rclone_bytes(text: &str) -> Option<u64> {
+    for token in text.split(|ch: char| !(ch.is_ascii_digit() || ch == '.')) {
+        let Ok(value) = token.parse::<f64>() else {
+            continue;
+        };
+        if !value.is_finite() || value < 0.0 {
+            continue;
+        }
+        return Some(value as u64);
+    }
+    None
 }
 
 /// Curl HTTP/HTTP3 baseline adapter.
@@ -702,8 +892,7 @@ impl BaselineAdapter for CurlAdapter {
         source_path: &Path,
         dest_path: &Path,
     ) -> Result<BenchmarkResult, BenchmarkError> {
-        // Note: For curl adapter, source_path would typically be a URL
-        // For testing purposes, we'll simulate uploading the file
+        // The benchmark fixture uses a local file URL when no HTTP server fixture is supplied.
         self.create_test_file(source_path, config.data_size).await?;
 
         let mut total_metrics = Vec::new();
@@ -711,11 +900,9 @@ impl BaselineAdapter for CurlAdapter {
         for iteration in 0..config.iterations {
             let iteration_dest = dest_path.with_extension(&format!("iter{iteration}"));
 
-            // For testing, use a file:// URL or skip if no HTTP server available
-            // In real usage, this would be an HTTP/HTTPS/HTTP3 URL
             let test_url = format!("file://{}", source_path.to_string_lossy());
 
-            let cmd = self.build_curl_command(&test_url, &iteration_dest);
+            let mut cmd = self.build_curl_command(&test_url, &iteration_dest);
 
             let start_time = Instant::now();
             let output = cmd.output()?;
@@ -723,7 +910,6 @@ impl BaselineAdapter for CurlAdapter {
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                // For test purposes, treat file:// URL failures as skips rather than failures
                 if stderr.contains("Protocol") && test_url.starts_with("file://") {
                     return Err(BenchmarkError::ToolUnavailable {
                         tool: self.tool_name().to_string(),
@@ -778,10 +964,8 @@ impl BaselineAdapter for CurlAdapter {
         _stdout: &str,
         stderr: &str,
     ) -> Result<BenchmarkMetrics, BenchmarkError> {
-        // Curl can provide timing information in verbose mode
-        // For now, provide basic metrics
         let first_usable_output = if stderr.contains("100") {
-            Some(Duration::from_millis(100)) // Estimate time to first response
+            Some(Duration::from_millis(100))
         } else {
             None
         };

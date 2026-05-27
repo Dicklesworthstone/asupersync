@@ -4,6 +4,7 @@
 //! paths, and operations requires explicit grants. Capabilities are signed grants
 //! that specify peer, resource scope, allowed actions, expiry, and constraints.
 
+pub use crate::atp::object::ObjectId;
 use crate::net::atp::protocol::PeerId;
 use crate::types::outcome::Outcome;
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,7 @@ pub use enforcement::{
     AccessRequest, AccessResource, EnforcementContext, PolicyDecision, PolicyEnforcer,
     RequestContext,
 };
-pub use scope::{AtpPath, ObjectId, ResourceScope, ScopeConstraints};
+pub use scope::{AtpPath, ResourceScope, ScopeConstraints};
 
 /// Actions that can be granted for ATP operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

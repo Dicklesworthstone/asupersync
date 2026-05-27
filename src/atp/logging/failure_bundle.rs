@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Stable ATP failure-bundle schema.
 pub const ATP_FAILURE_BUNDLE_SCHEMA_VERSION: &str = "asupersync.atp.failure_bundle.v1";
@@ -487,22 +487,29 @@ fn capture_system_info() -> SystemInfo {
     }
 }
 
-/// Get OS version (simplified)
 fn get_os_version() -> String {
-    // This is a simplified version - in practice, you'd use platform-specific calls
-    "unknown".to_string()
+    sysinfo::System::long_os_version()
+        .or_else(sysinfo::System::os_version)
+        .or_else(sysinfo::System::kernel_version)
+        .unwrap_or_else(|| format!("{}-{}", env::consts::OS, env::consts::ARCH))
 }
 
 /// Get total system memory
 fn get_total_memory() -> u64 {
-    // Simplified - in practice, use system calls
-    0
+    sysinfo::System::new_all().total_memory()
 }
 
 /// Get available disk space
 fn get_available_disk_space() -> u64 {
-    // Simplified - in practice, check actual disk space
-    0
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    disks
+        .list()
+        .iter()
+        .filter(|disk| cwd.starts_with(disk.mount_point()))
+        .max_by_key(|disk| disk.mount_point().components().count())
+        .or_else(|| disks.list().iter().max_by_key(|disk| disk.total_space()))
+        .map_or(0, sysinfo::Disk::available_space)
 }
 
 /// Capture ATP configuration
@@ -514,11 +521,45 @@ fn capture_atp_config() -> Option<serde_json::Value> {
 /// Capture resource limits
 fn capture_resource_limits() -> ResourceLimits {
     ResourceLimits {
-        max_memory: None,
-        max_disk: None,
+        max_memory: proc_limit_bytes("Max address space")
+            .or_else(|| proc_limit_bytes("Max data size")),
+        max_disk: proc_limit_bytes("Max file size"),
         max_bandwidth: None,
-        max_file_descriptors: None,
+        max_file_descriptors: proc_limit_scalar("Max open files"),
     }
+}
+
+fn proc_limit_bytes(label: &str) -> Option<u64> {
+    parse_proc_limit(label).and_then(|(soft, unit)| match unit.as_str() {
+        "bytes" => Some(soft),
+        "kbytes" => soft.checked_mul(1024),
+        "mbytes" => soft.checked_mul(1024 * 1024),
+        "gbytes" => soft.checked_mul(1024 * 1024 * 1024),
+        _ => None,
+    })
+}
+
+fn proc_limit_scalar(label: &str) -> Option<u64> {
+    parse_proc_limit(label).map(|(soft, _unit)| soft)
+}
+
+fn parse_proc_limit(label: &str) -> Option<(u64, String)> {
+    let limits = fs::read_to_string(Path::new("/proc/self/limits")).ok()?;
+    for line in limits.lines().skip(1) {
+        let Some(rest) = line.strip_prefix(label) else {
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        let soft = parts.next()?;
+        if soft == "unlimited" {
+            return None;
+        }
+        let soft = soft.parse().ok()?;
+        let _hard = parts.next();
+        let unit = parts.next().unwrap_or("").to_ascii_lowercase();
+        return Some((soft, unit));
+    }
+    None
 }
 
 /// Generate deterministic seed for replay

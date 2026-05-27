@@ -317,7 +317,7 @@ fn tailscale_provider_is_optional_ranked_and_redacted_in_path_doctor() {
             explicit_direct_endpoint: Some("198.51.100.20:41641".to_string()),
             tailscale_candidates: vec![TailscaleCandidateObservation::new(
                 socket("100.100.10.20:41641"),
-                TailscaleDetectionSource::FakeProvider,
+                TailscaleDetectionSource::LabProvider,
                 1_000,
             )],
             now_micros: 2_000,

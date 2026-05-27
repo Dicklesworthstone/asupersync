@@ -162,10 +162,29 @@ impl PairingCode {
 
     /// Encode pairing code bytes as human-readable string.
     fn encode_pairing_code(bytes: &[u8]) -> String {
-        // Use hex encoding for now (can be replaced with base32 when available)
-        let encoded = hex::encode(bytes);
-        let mut result = String::new();
+        const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+        let mut encoded = String::new();
+        let mut accumulator = 0u16;
+        let mut bits = 0u8;
 
+        for byte in bytes {
+            accumulator = (accumulator << 8) | u16::from(*byte);
+            bits += 8;
+            while bits >= 5 {
+                let shift = bits - 5;
+                let index = ((accumulator >> shift) & 0b1_1111) as usize;
+                encoded.push(char::from(CROCKFORD_BASE32[index]));
+                accumulator &= (1u16 << shift).saturating_sub(1);
+                bits = shift;
+            }
+        }
+
+        if bits > 0 {
+            let index = ((accumulator << (5 - bits)) & 0b1_1111) as usize;
+            encoded.push(char::from(CROCKFORD_BASE32[index]));
+        }
+
+        let mut result = String::new();
         for (i, c) in encoded.chars().enumerate() {
             if i > 0 && i % 4 == 0 {
                 result.push('-');
@@ -173,7 +192,7 @@ impl PairingCode {
             result.push(c);
         }
 
-        result.to_uppercase()
+        result
     }
 
     /// Create a human-readable summary of the pairing code.

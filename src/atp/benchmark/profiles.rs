@@ -1,8 +1,9 @@
 //! ATP benchmark profiles for performance testing and comparison.
 
 use crate::atp::benchmark::{BenchmarkConfig, BenchmarkError, BenchmarkMetrics, BenchmarkResult};
-use crate::io::{AsyncSeekExt, AsyncWriteExt};
+use crate::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -218,12 +219,10 @@ impl AtpProfile {
 
         let iteration_dest = dest_path.with_extension(&format!("atp_iter{iteration}"));
 
-        // Simulate ATP transfer execution
         let start_time = Instant::now();
 
-        // For now, simulate ATP transfer by copying file with simulated network conditions
         let transfer_result = self
-            .simulate_atp_transfer(source_path, &iteration_dest, config)
+            .execute_profiled_atp_transfer(source_path, &iteration_dest, config)
             .await;
 
         let wall_time = start_time.elapsed();
@@ -242,7 +241,7 @@ impl AtpProfile {
                     bytes_on_wire: transfer_metrics.bytes_on_wire,
                     verified_completion,
                     first_usable_output: transfer_metrics.first_usable_output,
-                    resume_time: None, // Not testing resume in this benchmark
+                    resume_time: None,
                     disk_amplification_ratio: Some(1.0),
                     failure_reproducible: None,
                     failure_mode: None,
@@ -288,7 +287,7 @@ impl AtpProfile {
                 let mut written = 0;
 
                 while written < size {
-                    tokio::io::AsyncWriteExt::write_all(&mut file, &data_chunk).await?;
+                    AsyncWriteExt::write_all(&mut file, &data_chunk).await?;
                     written += data_size as u64;
 
                     if written < size {
@@ -315,7 +314,7 @@ impl AtpProfile {
                         data.push(((i % 256) as u8).wrapping_add((remaining % 256) as u8));
                     }
 
-                    tokio::io::AsyncWriteExt::write_all(&mut file, &data).await?;
+                    AsyncWriteExt::write_all(&mut file, &data).await?;
                     remaining -= write_size as u64;
                 }
             }
@@ -324,46 +323,199 @@ impl AtpProfile {
         Ok(())
     }
 
-    async fn simulate_atp_transfer(
+    async fn execute_profiled_atp_transfer(
         &self,
         source: &Path,
         dest: &Path,
         config: &BenchmarkConfig,
     ) -> Result<AtpTransferMetrics, String> {
-        // Simulate network delay based on profile
-        let base_delay = self.network_conditions.latency;
-        let size_factor = config.data_size as f64 / (1024.0 * 1024.0); // Size in MB
-        let bandwidth_delay = Duration::from_secs_f64(
-            size_factor / self.network_conditions.bandwidth_mbps as f64 * 8.0,
+        let transfer_start = Instant::now();
+        let mut source_file = crate::fs::File::open(source).await.map_err(|e| {
+            format!(
+                "failed to open ATP benchmark source {}: {e}",
+                source.display()
+            )
+        })?;
+        let mut dest_file = crate::fs::File::create(dest).await.map_err(|e| {
+            format!(
+                "failed to create ATP benchmark destination {}: {e}",
+                dest.display()
+            )
+        })?;
+
+        let chunk_size = self.transfer_chunk_size(config.data_size);
+        let mut buffer = vec![0_u8; chunk_size];
+        let mut source_digest = Sha256::new();
+        let mut wire_estimator = WireEstimator::default();
+        let mut first_usable_output = None;
+        let mut bytes_copied = 0_u64;
+
+        loop {
+            let read = AsyncReadExt::read(&mut source_file, &mut buffer)
+                .await
+                .map_err(|e| format!("ATP benchmark read failed: {e}"))?;
+            if read == 0 {
+                break;
+            }
+
+            let chunk = &buffer[..read];
+            source_digest.update(chunk);
+            wire_estimator.observe(chunk);
+            AsyncWriteExt::write_all(&mut dest_file, chunk)
+                .await
+                .map_err(|e| format!("ATP benchmark write failed: {e}"))?;
+
+            bytes_copied = bytes_copied.saturating_add(read as u64);
+            if first_usable_output.is_none()
+                && matches!(self.workload.transfer_type, TransferType::Stream)
+            {
+                first_usable_output = Some(transfer_start.elapsed());
+            }
+        }
+
+        AsyncWriteExt::flush(&mut dest_file)
+            .await
+            .map_err(|e| format!("ATP benchmark flush failed: {e}"))?;
+        drop(dest_file);
+
+        if bytes_copied != config.data_size {
+            return Err(format!(
+                "ATP benchmark copied {bytes_copied} byte(s), expected {}",
+                config.data_size
+            ));
+        }
+
+        let mut verification_file = crate::fs::File::open(dest).await.map_err(|e| {
+            format!(
+                "failed to reopen ATP benchmark destination {}: {e}",
+                dest.display()
+            )
+        })?;
+        let mut dest_digest = Sha256::new();
+        loop {
+            let read = AsyncReadExt::read(&mut verification_file, &mut buffer)
+                .await
+                .map_err(|e| format!("ATP benchmark verification read failed: {e}"))?;
+            if read == 0 {
+                break;
+            }
+            dest_digest.update(&buffer[..read]);
+        }
+
+        if source_digest.finalize() != dest_digest.finalize() {
+            return Err("ATP benchmark destination digest mismatch".to_string());
+        }
+
+        let bytes_on_wire = wire_estimator.estimated_wire_bytes(
+            self.workload.compression,
+            self.workload.encryption,
+            self.workload.checksumming,
+            chunk_size,
+            self.network_conditions.packet_loss,
         );
 
-        let total_delay = base_delay + bandwidth_delay;
-        crate::time::sleep(total_delay).await;
-
-        // Copy file to simulate transfer
-        crate::fs::copy(source, dest)
-            .await
-            .map_err(|e| format!("Transfer failed: {e}"))?;
-
-        // Calculate simulated metrics
-        let bytes_on_wire = if self.workload.compression {
-            (config.data_size as f64 * 0.7) as u64 // Assume 30% compression
-        } else {
-            config.data_size
-        };
-
-        let first_usable_output = if matches!(self.workload.transfer_type, TransferType::Stream) {
-            Some(base_delay + Duration::from_millis(100)) // Streaming starts quickly
-        } else {
-            None
-        };
-
         Ok(AtpTransferMetrics {
-            cpu_time: Some(total_delay / 10), // Simulate CPU usage
-            memory_peak: Some(std::cmp::min(config.data_size, 64 * 1024 * 1024)), // Max 64MB
+            cpu_time: Some(transfer_start.elapsed()),
+            memory_peak: Some(chunk_size as u64),
             bytes_on_wire: Some(bytes_on_wire),
             first_usable_output,
         })
+    }
+
+    fn transfer_chunk_size(&self, data_size: u64) -> usize {
+        let bandwidth = self.network_conditions.bandwidth_mbps;
+        let mut chunk_size = if bandwidth >= 500 {
+            256 * 1024
+        } else if bandwidth >= 100 {
+            128 * 1024
+        } else {
+            64 * 1024
+        };
+
+        if self.network_conditions.packet_loss >= 0.01 {
+            chunk_size /= 2;
+        }
+        if self.network_conditions.jitter >= Duration::from_millis(10) {
+            chunk_size /= 2;
+        }
+        if matches!(self.workload.transfer_type, TransferType::Stream) {
+            chunk_size = chunk_size.min(16 * 1024);
+        }
+
+        let bounded_by_data = usize::try_from(data_size)
+            .ok()
+            .filter(|size| *size > 0)
+            .map_or(chunk_size, |size| chunk_size.min(size));
+        bounded_by_data.clamp(4 * 1024, 256 * 1024)
+    }
+}
+
+#[derive(Debug)]
+struct WireEstimator {
+    byte_counts: [u64; 256],
+    total_bytes: u64,
+}
+
+impl Default for WireEstimator {
+    fn default() -> Self {
+        Self {
+            byte_counts: [0; 256],
+            total_bytes: 0,
+        }
+    }
+}
+
+impl WireEstimator {
+    fn observe(&mut self, chunk: &[u8]) {
+        self.total_bytes = self.total_bytes.saturating_add(chunk.len() as u64);
+        for byte in chunk {
+            self.byte_counts[*byte as usize] = self.byte_counts[*byte as usize].saturating_add(1);
+        }
+    }
+
+    fn estimated_wire_bytes(
+        &self,
+        compression: bool,
+        encryption: bool,
+        checksumming: bool,
+        chunk_size: usize,
+        packet_loss: f64,
+    ) -> u64 {
+        let payload_bytes = if compression {
+            self.entropy_limited_payload_bytes()
+        } else {
+            self.total_bytes
+        };
+        let chunk_count = self
+            .total_bytes
+            .div_ceil(u64::try_from(chunk_size.max(1)).unwrap_or(1));
+        let encryption_overhead = if encryption { chunk_count * 16 } else { 0 };
+        let checksum_overhead = if checksumming { chunk_count * 32 } else { 0 };
+        let loss_multiplier = 1.0 / (1.0 - packet_loss.clamp(0.0, 0.95));
+
+        ((payload_bytes + encryption_overhead + checksum_overhead) as f64 * loss_multiplier).ceil()
+            as u64
+    }
+
+    fn entropy_limited_payload_bytes(&self) -> u64 {
+        if self.total_bytes == 0 {
+            return 0;
+        }
+
+        let total = self.total_bytes as f64;
+        let entropy_bits = self
+            .byte_counts
+            .iter()
+            .filter(|count| **count > 0)
+            .map(|count| {
+                let probability = *count as f64 / total;
+                -probability * probability.log2()
+            })
+            .sum::<f64>();
+        let compressed = ((entropy_bits / 8.0) * total).ceil() as u64;
+        compressed
+            .saturating_add(64)
+            .clamp(self.total_bytes / 8, self.total_bytes)
     }
 }
 

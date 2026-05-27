@@ -1,6 +1,6 @@
 //! ATP Mailbox Quota - Resource limits and usage tracking.
 
-use super::*;
+use super::{MailboxError, MailboxResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};

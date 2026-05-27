@@ -414,7 +414,7 @@ impl RangeTracker {
             .map(|range| {
                 let start = range.start;
                 let end = range.end.min(total_size);
-                if end > start { end - start } else { 0 }
+                end.saturating_sub(start)
             })
             .sum()
     }
