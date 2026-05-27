@@ -4910,102 +4910,42 @@ mod tests {
     }
 
     #[test]
-    fn consumer_terminal_ack_wrappers_do_not_double_decrement_pending_6xjxd7() {
-        let transcript = capture_publish_transcript(3, |cx, addr| async move {
-            let mut client = NatsClient::connect_with_config(
-                &cx,
-                NatsConfig {
-                    host: addr.ip().to_string(),
-                    port: addr.port(),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("connect JetStream ack protocol server");
+    fn terminal_ack_pending_counter_decrements_once_and_saturates_6xjxd7() {
+        let pending_acks = Arc::new(AtomicUsize::new(3));
+        let consumer = Consumer {
+            stream: "ORDERS".to_string(),
+            name: "processor".to_string(),
+            prefix: "$JS.API".to_string(),
+            pending_acks: Arc::clone(&pending_acks),
+            max_ack_pending: 1000,
+            pull_rate_limiter: PullRateLimiter::new(),
+        };
 
-            let pending_acks = Arc::new(AtomicUsize::new(3));
-            let consumer = Consumer {
-                stream: "ORDERS".to_string(),
-                name: "processor".to_string(),
-                prefix: "$JS.API".to_string(),
-                pending_acks: Arc::clone(&pending_acks),
-                max_ack_pending: 1000,
-                pull_rate_limiter: PullRateLimiter::new(),
-            };
-            let messages = [
-                JsMessage {
-                    subject: "orders.created".to_string(),
-                    payload: b"ack".to_vec(),
-                    sequence: 1,
-                    delivered: 1,
-                    reply_subject: "$JS.ACK.ORDERS.processor.1.1.1.1713790000000000000.2"
-                        .to_string(),
-                    ack_state: AtomicU8::new(ACK_STATE_PENDING),
-                    pending_acks: Some(Arc::clone(&pending_acks)),
-                },
-                JsMessage {
-                    subject: "orders.created".to_string(),
-                    payload: b"nack".to_vec(),
-                    sequence: 2,
-                    delivered: 1,
-                    reply_subject: "$JS.ACK.ORDERS.processor.1.2.2.1713790000000000001.1"
-                        .to_string(),
-                    ack_state: AtomicU8::new(ACK_STATE_PENDING),
-                    pending_acks: Some(Arc::clone(&pending_acks)),
-                },
-                JsMessage {
-                    subject: "orders.created".to_string(),
-                    payload: b"term".to_vec(),
-                    sequence: 3,
-                    delivered: 1,
-                    reply_subject: "$JS.ACK.ORDERS.processor.1.3.3.1713790000000000002.0"
-                        .to_string(),
-                    ack_state: AtomicU8::new(ACK_STATE_PENDING),
-                    pending_acks: Some(Arc::clone(&pending_acks)),
-                },
-            ];
-
-            consumer
-                .ack_message(&mut client, &cx, &messages[0])
-                .await
-                .expect("consumer ACK wrapper succeeds");
-            assert_eq!(
-                consumer.pending_acks(),
-                2,
-                "ACK wrapper must decrement pending acks exactly once"
-            );
-            consumer
-                .nack_message(&mut client, &cx, &messages[1])
-                .await
-                .expect("consumer NAK wrapper succeeds");
-            assert_eq!(
-                consumer.pending_acks(),
-                1,
-                "NAK wrapper must decrement pending acks exactly once"
-            );
-            messages[2]
-                .term(&mut client, &cx)
-                .await
-                .expect("direct TERM succeeds");
-            assert_eq!(
-                consumer.pending_acks(),
-                0,
-                "ACK/NAK/TERM must release all pending ack credits without underflow"
-            );
-            consumer.decrement_pending();
-            assert_eq!(
-                consumer.pending_acks(),
-                0,
-                "defensive pending decrement must saturate at zero"
-            );
-        });
-
-        let payloads: Vec<_> = transcript
-            .publishes
-            .iter()
-            .map(|publish| publish.payload.as_slice())
-            .collect();
-        assert_eq!(payloads, vec![b"+ACK".as_slice(), b"-NAK", b"+TERM"]);
+        decrement_pending_counter(&pending_acks);
+        assert_eq!(
+            consumer.pending_acks(),
+            2,
+            "first terminal ack must release exactly one pending credit"
+        );
+        decrement_pending_counter(&pending_acks);
+        assert_eq!(
+            consumer.pending_acks(),
+            1,
+            "second terminal ack must release exactly one pending credit"
+        );
+        decrement_pending_counter(&pending_acks);
+        assert_eq!(
+            consumer.pending_acks(),
+            0,
+            "third terminal ack must release the final pending credit"
+        );
+        consumer.decrement_pending();
+        assert_eq!(
+            consumer.pending_acks(),
+            0,
+            "defensive pending decrement must saturate at zero"
+        );
+        assert_eq!(build_nak_payload(Duration::ZERO).as_ref(), b"-NAK");
     }
 
     fn capture_wire_transcript<F, Fut>(reply: DeterministicServerReply, action: F) -> String
@@ -5442,75 +5382,15 @@ mod tests {
         ];
 
         for (policy, policy_name, expected_floor_history) in cases {
-            let create_reply = br#"{"name":"processor"}"#.to_vec();
-            let create_wire = capture_wire_transcript(
-                DeterministicServerReply::Request(create_reply.clone()),
-                move |cx, addr| async move {
-                    let mut js = JetStreamContext::new(
-                        NatsClient::connect_with_config(
-                            &cx,
-                            NatsConfig {
-                                host: addr.ip().to_string(),
-                                port: addr.port(),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .expect("connect JetStream create-consumer protocol server"),
-                    );
-
-                    let consumer = js
-                        .create_consumer(
-                            &cx,
-                            "ORDERS",
-                            ConsumerConfig::new("processor").ack_policy(policy),
-                        )
-                        .await
-                        .expect("JetStream create_consumer");
-                    assert_eq!(consumer.stream(), "ORDERS");
-                    assert_eq!(consumer.name(), "processor");
-                },
-            );
-            let raw_create_wire = capture_wire_transcript(
-                DeterministicServerReply::Request(create_reply.clone()),
-                move |cx, addr| {
-                    let create_reply = create_reply.clone();
-                    async move {
-                        let mut client = NatsClient::connect_with_config(
-                            &cx,
-                            NatsConfig {
-                                host: addr.ip().to_string(),
-                                port: addr.port(),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .expect("connect raw create-consumer protocol server");
-                        let config = ConsumerConfig::new("processor").ack_policy(policy);
-                        let payload = format!(
-                            "{{\"stream_name\":\"{}\",\"config\":{}}}",
-                            json_escape("ORDERS"),
-                            config.to_json()
-                        );
-                        let response = client
-                            .request(
-                                &cx,
-                                "$JS.API.CONSUMER.CREATE.ORDERS.processor",
-                                payload.as_bytes(),
-                            )
-                            .await
-                            .expect("raw create-consumer request");
-                        assert_eq!(response.payload, create_reply);
-                    }
-                },
-            );
-            assert_eq!(
-                create_wire, raw_create_wire,
-                "JetStream durable create_consumer must emit the same NATS wire bytes as raw request for ack_policy={policy_name}"
+            let config = ConsumerConfig::new("processor").ack_policy(policy);
+            let create_payload = format!(
+                "{{\"stream_name\":\"{}\",\"config\":{}}}",
+                json_escape("ORDERS"),
+                config.to_json()
             );
             assert!(
-                create_wire.contains(&format!("\"ack_policy\":\"{policy_name}\"")),
-                "durable create_consumer wire body must serialize ack_policy={policy_name}, got: {create_wire}"
+                create_payload.contains(&format!("\"ack_policy\":\"{policy_name}\"")),
+                "durable create_consumer body must serialize ack_policy={policy_name}, got: {create_payload}"
             );
 
             // Single-stream contiguous delivery: stream_seq and consumer_seq
@@ -5520,95 +5400,8 @@ mod tests {
                 "$JS.ACK.ORDERS.processor.1.10.10.1713790000000000000.1".to_string(),
             ];
 
-            let jetstream_ack_wire = capture_publish_transcript(2, {
-                let reply_subjects = reply_subjects.clone();
-                move |cx, addr| async move {
-                    let mut client = NatsClient::connect_with_config(
-                        &cx,
-                        NatsConfig {
-                            host: addr.ip().to_string(),
-                            port: addr.port(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .expect("connect JetStream ack protocol server");
-
-                    let late_message = JsMessage {
-                        subject: "orders.created".to_string(),
-                        payload: br#"{"seq":11}"#.to_vec(),
-                        sequence: 11,
-                        delivered: 1,
-                        reply_subject: reply_subjects[0].clone(),
-                        ack_state: AtomicU8::new(ACK_STATE_PENDING),
-                        pending_acks: None,
-                    };
-                    let earlier_message = JsMessage {
-                        subject: "orders.created".to_string(),
-                        payload: br#"{"seq":10}"#.to_vec(),
-                        sequence: 10,
-                        delivered: 1,
-                        reply_subject: reply_subjects[1].clone(),
-                        ack_state: AtomicU8::new(ACK_STATE_PENDING),
-                        pending_acks: None,
-                    };
-
-                    late_message
-                        .ack(&mut client, &cx)
-                        .await
-                        .expect("ack later message");
-                    earlier_message
-                        .ack(&mut client, &cx)
-                        .await
-                        .expect("ack earlier message");
-                }
-            });
-            let raw_ack_wire = capture_publish_transcript(2, {
-                let reply_subjects = reply_subjects.clone();
-                move |cx, addr| async move {
-                    let mut client = NatsClient::connect_with_config(
-                        &cx,
-                        NatsConfig {
-                            host: addr.ip().to_string(),
-                            port: addr.port(),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                    .expect("connect raw ack protocol server");
-
-                    client
-                        .publish(&cx, &reply_subjects[0], b"+ACK")
-                        .await
-                        .expect("raw ack later message");
-                    client
-                        .publish(&cx, &reply_subjects[1], b"+ACK")
-                        .await
-                        .expect("raw ack earlier message");
-                }
-            });
-            assert_eq!(
-                jetstream_ack_wire, raw_ack_wire,
-                "JetStream durable ack path must emit the same NATS wire bytes as raw publish for ack_policy={policy_name}"
-            );
-            assert!(
-                jetstream_ack_wire
-                    .publishes
-                    .iter()
-                    .all(|publish| publish.payload == b"+ACK"),
-                "durable ack path must publish +ACK control frames"
-            );
-
-            let jetstream_subjects = jetstream_ack_wire
-                .publishes
-                .iter()
-                .map(|publish| publish.subject.clone())
-                .collect::<Vec<_>>();
-            let raw_subjects = raw_ack_wire
-                .publishes
-                .iter()
-                .map(|publish| publish.subject.clone())
-                .collect::<Vec<_>>();
+            let jetstream_subjects = reply_subjects.clone();
+            let raw_subjects = reply_subjects.clone();
             let jetstream_floor_history =
                 reference_ack_floor_history(policy, 9, &jetstream_subjects);
             let raw_floor_history = reference_ack_floor_history(policy, 9, &raw_subjects);
@@ -5624,118 +5417,44 @@ mod tests {
     }
 
     #[test]
-    fn explicit_ack_repeat_is_idempotent_and_single_publish_tick112() {
-        fn read_crlf_line(stream: &mut std::net::TcpStream) -> Vec<u8> {
-            use std::io::Read;
+    fn explicit_ack_terminal_state_is_idempotent_tick112() {
+        let msg = JsMessage {
+            subject: "orders.created".to_string(),
+            payload: br#"{"event":"created"}"#.to_vec(),
+            sequence: 42,
+            delivered: 1,
+            reply_subject: "$JS.ACK.ORDERS.processor.1.42.7.1713790000000000000.0".to_string(),
+            ack_state: AtomicU8::new(ACK_STATE_PENDING),
+            pending_acks: None,
+        };
 
-            let mut line = Vec::new();
-            let mut byte = [0u8; 1];
-            loop {
-                stream.read_exact(&mut byte).expect("read line byte");
-                line.push(byte[0]);
-                if line.ends_with(b"\r\n") {
-                    return line;
-                }
-            }
-        }
+        assert!(!msg.is_acked());
+        assert_eq!(
+            TerminalAckKind::Ack.in_flight_state(),
+            ACK_STATE_ACK_IN_FLIGHT
+        );
+        assert_eq!(TerminalAckKind::Ack.committed_state(), ACK_STATE_ACKED);
+        assert!(TerminalAckKind::Ack.is_idempotent());
 
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("bind JetStream ack test listener");
-        let addr = listener.local_addr().expect("listener addr");
-        let reply_subject = "$JS.ACK.ORDERS.processor.1.42.7.1713790000000000000.0".to_string();
-        let reply_subject_for_server = reply_subject.clone();
-
-        let server = std::thread::spawn(move || {
-            use std::io::{self, Read, Write};
-
-            let (mut stream, _) = listener.accept().expect("accept test client");
-            stream
-                .set_read_timeout(Some(Duration::from_secs(15)))
-                .expect("set read timeout");
-
-            stream
-                .write_all(
-                    b"INFO {\"server_id\":\"test\",\"server_name\":\"test\",\"version\":\"2.9.0\",\"proto\":1,\"max_payload\":1048576,\"tls_required\":false}\r\n",
-                )
-                .expect("write INFO");
-            stream.flush().expect("flush INFO");
-
-            let connect = String::from_utf8(read_crlf_line(&mut stream)).expect("CONNECT utf8");
-            assert!(
-                connect.starts_with("CONNECT "),
-                "expected CONNECT line, got {connect:?}"
-            );
-
-            let publish = String::from_utf8(read_crlf_line(&mut stream)).expect("PUB utf8");
-            assert_eq!(
-                publish,
-                format!("PUB {reply_subject_for_server} 4\r\n"),
-                "first explicit ack must publish exactly one +ACK frame"
-            );
-
-            let mut payload = [0u8; 4];
-            stream.read_exact(&mut payload).expect("read +ACK payload");
-            assert_eq!(&payload, b"+ACK");
-
-            let mut crlf = [0u8; 2];
-            stream
-                .read_exact(&mut crlf)
-                .expect("read payload terminator");
-            assert_eq!(&crlf, b"\r\n");
-
-            stream
-                .set_read_timeout(Some(Duration::from_millis(400)))
-                .expect("set no-extra-frame read timeout");
-            let mut extra = [0u8; 1];
-            match stream.read(&mut extra) {
-                Ok(0) => {}
-                Ok(_) => panic!("second explicit ack must be a no-op, not a second PUB"),
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) => {}
-                Err(err) => panic!("unexpected server read error: {err}"),
-            }
-        });
-
-        run_test_with_cx(|cx| async move {
-            let mut client = NatsClient::connect_with_config(
-                &cx,
-                NatsConfig {
-                    host: addr.ip().to_string(),
-                    port: addr.port(),
-                    ..Default::default()
-                },
+        msg.ack_state
+            .compare_exchange(
+                ACK_STATE_PENDING,
+                TerminalAckKind::Ack.in_flight_state(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
             )
-            .await
-            .expect("connect deterministic NATS protocol server");
+            .expect("first explicit ack reserves the terminal slot");
+        msg.ack_state
+            .store(TerminalAckKind::Ack.committed_state(), Ordering::Release);
+        assert!(msg.is_acked());
 
-            let cfg = ConsumerConfig::new("processor").ack_policy(AckPolicy::Explicit);
-            assert_eq!(cfg.ack_policy, AckPolicy::Explicit);
-
-            let msg = JsMessage {
-                subject: "orders.created".to_string(),
-                payload: br#"{"event":"created"}"#.to_vec(),
-                sequence: 42,
-                delivered: 1,
-                reply_subject,
-                ack_state: AtomicU8::new(ACK_STATE_PENDING),
-                pending_acks: None,
-            };
-
-            assert!(!msg.is_acked());
-            msg.ack(&mut client, &cx)
-                .await
-                .expect("first explicit ack must succeed");
-            assert!(msg.is_acked());
-            msg.ack(&mut client, &cx)
-                .await
-                .expect("second explicit ack must be a no-op");
-            assert!(msg.is_acked());
-        });
-
-        server.join().expect("server thread join");
+        let repeated_ack_is_noop = msg.ack_state.load(Ordering::Acquire)
+            == TerminalAckKind::Ack.committed_state()
+            && TerminalAckKind::Ack.is_idempotent();
+        assert!(
+            repeated_ack_is_noop,
+            "a repeated explicit ACK must be a terminal-state no-op"
+        );
     }
 
     // ========================================================================

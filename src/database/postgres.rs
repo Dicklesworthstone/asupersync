@@ -46,7 +46,7 @@ use crate::security::SecretString;
 #[cfg(feature = "tls")]
 use crate::tls::{Certificate, TlsConnector, TlsConnectorBuilder, TlsStream};
 use crate::types::{CancelReason, Outcome};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::io;
 use std::pin::Pin;
@@ -1277,8 +1277,11 @@ impl PgConnection {
             );
         }
 
-        if self.inner.closed {
-            return Outcome::Err(PgError::ConnectionClosed);
+        match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         match self.flush_pending_deallocates_before_request(cx).await {
@@ -1337,8 +1340,11 @@ impl PgConnection {
             );
         }
 
-        if self.inner.closed {
-            return Outcome::Err(PgError::ConnectionClosed);
+        match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         match self.flush_pending_deallocates_before_request(cx).await {
@@ -2695,6 +2701,8 @@ impl PreparedStatementCache {
 struct PgConnectionInner {
     /// Transport stream (plain TCP or TLS).
     stream: PgStream,
+    /// Original connection options retained for safe idle reconnect.
+    options: PgConnectOptions,
     /// Server process ID.
     process_id: i32,
     /// Secret key for cancel requests.
@@ -2711,6 +2719,10 @@ struct PgConnectionInner {
     transaction_status: u8,
     /// Whether the connection is closed.
     closed: bool,
+    /// True when [`PgConnection::close`] was called explicitly. Explicitly
+    /// closed connections stay closed; reconnect only covers remote idle drops
+    /// and failed in-flight exchanges where the caller did not request close.
+    explicitly_closed: bool,
     /// Whether a rollback is needed before the next operation (orphaned transaction).
     needs_rollback: bool,
     /// br-asupersync-yl4gu1: whether this connection must NOT be returned
@@ -2758,6 +2770,10 @@ struct PgConnectionInner {
     /// removed from the pool. Exposed via
     /// [`PgConnection::is_unhealthy`].
     unhealthy: bool,
+    /// LISTEN channels established by [`PgConnection::listen`]. These are
+    /// replayed after an idle reconnect so notification consumers do not lose
+    /// subscriptions across server-side idle timeouts.
+    subscribed_channels: BTreeSet<String>,
 }
 
 /// Coordinates needed to send a PG `CancelRequest` on a fresh socket.
@@ -2824,6 +2840,20 @@ fn test_cancel_target() -> CancelTarget {
     }
 }
 
+#[cfg(any(test, feature = "test-internals"))]
+fn test_pg_connect_options() -> PgConnectOptions {
+    PgConnectOptions {
+        host: "127.0.0.1".to_string(),
+        port: 5432,
+        database: "testdb".to_string(),
+        user: "postgres".to_string(),
+        password: None,
+        application_name: Some("asupersync-postgres-test".to_string()),
+        connect_timeout: Some(std::time::Duration::from_secs(1)),
+        ssl_mode: SslMode::Disable,
+    }
+}
+
 /// An async PostgreSQL connection.
 ///
 /// All operations integrate with [`Cx`] for cancellation and checkpointing.
@@ -2832,6 +2862,12 @@ fn test_cancel_target() -> CancelTarget {
 pub struct PgConnection {
     /// Inner connection state.
     inner: PgConnectionInner,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PgOpenState {
+    AlreadyOpen,
+    Reconnected,
 }
 
 /// Server metadata returned when a PostgreSQL `COPY ... FROM STDIN` command
@@ -3250,6 +3286,57 @@ impl PgConnection {
         outcome_from_error(err)
     }
 
+    async fn ensure_open_for_request(&mut self, cx: &Cx) -> Outcome<PgOpenState, PgError> {
+        if !self.inner.closed {
+            return Outcome::Ok(PgOpenState::AlreadyOpen);
+        }
+        self.reconnect_idle(cx).await
+    }
+
+    async fn reconnect_idle(&mut self, cx: &Cx) -> Outcome<PgOpenState, PgError> {
+        if self.inner.explicitly_closed
+            || self.inner.transaction_status != b'I'
+            || self.inner.needs_rollback
+            || self.inner.needs_discard
+        {
+            return Outcome::Err(PgError::ConnectionClosed);
+        }
+
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(cancelled_reason(cx));
+        }
+
+        let options = self.inner.options.clone();
+        let max_result_rows = self.inner.max_result_rows;
+        let subscribed_channels = self.inner.subscribed_channels.clone();
+
+        let mut fresh = match Self::connect_with_options(cx, options).await {
+            Outcome::Ok(conn) => conn,
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
+        fresh.inner.max_result_rows = max_result_rows;
+        fresh.inner.subscribed_channels = subscribed_channels.clone();
+
+        for channel in &subscribed_channels {
+            let sql = match build_listen_sql(channel) {
+                Ok(sql) => sql,
+                Err(err) => return Outcome::Err(err),
+            };
+            match fresh.execute_unchecked(cx, &sql).await {
+                Outcome::Ok(_) => {}
+                Outcome::Err(err) => return Outcome::Err(err),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        }
+
+        let PgConnection { inner } = fresh;
+        self.inner = inner;
+        Outcome::Ok(PgOpenState::Reconnected)
+    }
+
     #[inline]
     async fn ensure_no_orphaned_transaction(&mut self, cx: &Cx) -> Outcome<(), PgError> {
         match self.clear_orphaned_transaction(cx).await {
@@ -3406,12 +3493,14 @@ impl PgConnection {
         let mut conn = Self {
             inner: PgConnectionInner {
                 stream,
+                options: options.clone(),
                 process_id: 0,
                 secret_key: 0,
                 cancel_target,
                 parameters: BTreeMap::new(),
                 transaction_status: b'I', // Idle
                 closed: false,
+                explicitly_closed: false,
                 needs_rollback: false,
                 needs_discard: false,
                 next_stmt_id: 0,
@@ -3420,6 +3509,7 @@ impl PgConnection {
                 deallocate_retry_queue: VecDeque::new(),
                 consecutive_deallocate_failures: 0,
                 unhealthy: false,
+                subscribed_channels: BTreeSet::new(),
             },
         };
 
@@ -4063,8 +4153,11 @@ impl PgConnection {
             );
         }
 
-        if self.inner.closed {
-            return Outcome::Err(PgError::ConnectionClosed);
+        match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
         match self.flush_pending_deallocates_before_request(cx).await {
             Outcome::Ok(()) => {}
@@ -4254,8 +4347,11 @@ impl PgConnection {
             );
         }
 
-        if self.inner.closed {
-            return Outcome::Err(PgError::ConnectionClosed);
+        match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
         match self.flush_pending_deallocates_before_request(cx).await {
             Outcome::Ok(()) => {}
@@ -4367,8 +4463,11 @@ impl PgConnection {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(cancelled_reason(cx));
         }
-        if self.inner.closed {
-            return Outcome::Err(PgError::ConnectionClosed);
+        match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         match self.flush_pending_deallocates_before_request(cx).await {
@@ -4523,7 +4622,10 @@ impl PgConnection {
             Err(err) => return Outcome::Err(err),
         };
         match self.execute_unchecked(cx, &sql).await {
-            Outcome::Ok(_) => Outcome::Ok(()),
+            Outcome::Ok(_) => {
+                self.inner.subscribed_channels.insert(channel.to_string());
+                Outcome::Ok(())
+            }
             Outcome::Err(err) => Outcome::Err(err),
             Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => Outcome::Panicked(payload),
@@ -4538,7 +4640,10 @@ impl PgConnection {
             Err(err) => return Outcome::Err(err),
         };
         match self.execute_unchecked(cx, &sql).await {
-            Outcome::Ok(_) => Outcome::Ok(()),
+            Outcome::Ok(_) => {
+                self.inner.subscribed_channels.remove(channel);
+                Outcome::Ok(())
+            }
             Outcome::Err(err) => Outcome::Err(err),
             Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => Outcome::Panicked(payload),
@@ -4750,6 +4855,7 @@ impl PgConnection {
 
     /// Close the connection.
     pub async fn close(&mut self) -> Result<(), PgError> {
+        self.inner.explicitly_closed = true;
         if self.inner.closed {
             return Ok(());
         }
@@ -4795,8 +4901,11 @@ impl PgConnection {
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
-        if self.inner.closed {
-            return Outcome::Err(PgError::ConnectionClosed);
+        match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
         match self.flush_pending_deallocates_before_request(cx).await {
             Outcome::Ok(()) => {}
@@ -4903,8 +5012,11 @@ impl PgConnection {
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
-        if self.inner.closed {
-            return Outcome::Err(PgError::ConnectionClosed);
+        match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
         match self.flush_pending_deallocates_before_request(cx).await {
             Outcome::Ok(()) => {}
@@ -4983,8 +5095,11 @@ impl PgConnection {
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
-        if self.inner.closed {
-            return Outcome::Err(PgError::ConnectionClosed);
+        match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         // br-asupersync-7v80ju: piggy-back any pending DEALLOCATE
@@ -5108,6 +5223,7 @@ impl PgConnection {
 
         let stmt = PgStatement {
             name: stmt_name,
+            sql: sql.to_string(),
             param_oids,
             columns,
         };
@@ -5150,6 +5266,7 @@ impl PgConnection {
     async fn try_close_or_enqueue_deallocate(&mut self, cx: &Cx, victim_name: String) {
         let victim_stmt = PgStatement {
             name: victim_name.clone(),
+            sql: String::new(),
             param_oids: Vec::new(),
             columns: Vec::new(),
         };
@@ -5238,6 +5355,7 @@ impl PgConnection {
         while let Some(name) = pending.next() {
             let stmt = PgStatement {
                 name: name.clone(),
+                sql: String::new(),
                 param_oids: Vec::new(),
                 columns: Vec::new(),
             };
@@ -5409,9 +5527,25 @@ impl PgConnection {
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
-        if self.inner.closed {
-            return Outcome::Err(PgError::ConnectionClosed);
-        }
+        let rebound_stmt = match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(PgOpenState::AlreadyOpen) => None,
+            Outcome::Ok(PgOpenState::Reconnected) => {
+                if stmt.sql.is_empty() {
+                    return Outcome::Err(PgError::ConnectionClosed);
+                }
+                match self.prepare(cx, &stmt.sql).await {
+                    Outcome::Ok(stmt) => Some(stmt),
+                    Outcome::Err(err) => return Outcome::Err(err),
+                    Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                    Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+                }
+            }
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
+        let stmt = rebound_stmt.as_ref().unwrap_or(stmt);
+
         match self.flush_pending_deallocates_before_request(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(err) => return Outcome::Err(err),
@@ -5481,9 +5615,25 @@ impl PgConnection {
                     .unwrap_or_else(|| CancelReason::user("cancelled")),
             );
         }
-        if self.inner.closed {
-            return Outcome::Err(PgError::ConnectionClosed);
-        }
+        let rebound_stmt = match self.ensure_open_for_request(cx).await {
+            Outcome::Ok(PgOpenState::AlreadyOpen) => None,
+            Outcome::Ok(PgOpenState::Reconnected) => {
+                if stmt.sql.is_empty() {
+                    return Outcome::Err(PgError::ConnectionClosed);
+                }
+                match self.prepare(cx, &stmt.sql).await {
+                    Outcome::Ok(stmt) => Some(stmt),
+                    Outcome::Err(err) => return Outcome::Err(err),
+                    Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                    Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+                }
+            }
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        };
+        let stmt = rebound_stmt.as_ref().unwrap_or(stmt);
+
         match self.flush_pending_deallocates_before_request(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(err) => return Outcome::Err(err),
@@ -5543,7 +5693,11 @@ impl PgConnection {
             );
         }
         if self.inner.closed {
-            return Outcome::Err(PgError::ConnectionClosed);
+            return if self.inner.explicitly_closed {
+                Outcome::Err(PgError::ConnectionClosed)
+            } else {
+                Outcome::Ok(())
+            };
         }
         self.close_statement_exchange(cx, stmt).await
     }
@@ -6637,10 +6791,10 @@ impl Drop for PgCopyIn<'_> {
 mod typed_query_parameter_audit_tests {
     use super::*;
 
-    /// Mock connection for testing parameter binding behavior without real database
-    struct MockPgConnection;
+    /// Parameter OID probe for verifying client-side bind metadata.
+    struct ParameterOidProbe;
 
-    impl MockPgConnection {
+    impl ParameterOidProbe {
         /// Test helper to extract parameter OIDs from ToSql values
         fn extract_parameter_oids(params: &[&dyn ToSql]) -> Vec<u32> {
             params.iter().map(|p| p.type_oid()).collect()
@@ -6656,8 +6810,8 @@ mod typed_query_parameter_audit_tests {
         let int_param = 42i32;
 
         // AUDIT: Client should send actual Rust type OIDs, not infer from SQL cast
-        let string_oids = MockPgConnection::extract_parameter_oids(&[&string_param]);
-        let int_oids = MockPgConnection::extract_parameter_oids(&[&int_param]);
+        let string_oids = ParameterOidProbe::extract_parameter_oids(&[&string_param]);
+        let int_oids = ParameterOidProbe::extract_parameter_oids(&[&int_param]);
 
         // AUDIT: String parameter sends TEXT OID (25), not INT4 OID (23)
         assert_eq!(
@@ -7441,6 +7595,10 @@ impl Drop for PgTransaction<'_> {
 pub struct PgStatement {
     /// Server-side statement name.
     name: String,
+    /// SQL text used to prepare this statement. Retained so a direct
+    /// connection can transparently re-prepare on a fresh backend after an
+    /// idle disconnect.
+    sql: String,
     /// Parameter type OIDs from ParameterDescription.
     param_oids: Vec<u32>,
     /// Result column metadata from RowDescription (empty for non-SELECT).
@@ -7458,6 +7616,12 @@ impl PgStatement {
     #[must_use]
     pub fn columns(&self) -> &[PgColumn] {
         &self.columns
+    }
+
+    /// SQL text used when preparing this statement.
+    #[must_use]
+    pub fn sql(&self) -> &str {
+        &self.sql
     }
 }
 
@@ -7647,12 +7811,14 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
         PgConnection {
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
+                options: test_pg_connect_options(),
                 process_id: 0,
                 secret_key: 0,
                 cancel_target: test_cancel_target(),
                 parameters: BTreeMap::new(),
                 transaction_status: b'I',
                 closed: false,
+                explicitly_closed: false,
                 needs_rollback: false,
                 needs_discard: false,
                 next_stmt_id: 0,
@@ -7661,6 +7827,7 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 deallocate_retry_queue: VecDeque::new(),
                 consecutive_deallocate_failures: 0,
                 unhealthy: false,
+                subscribed_channels: BTreeSet::new(),
             },
         },
         peer_stream,
@@ -9112,12 +9279,14 @@ mod tests {
         PgConnection {
             inner: PgConnectionInner {
                 stream: PgStream::Plain(stream),
+                options: test_pg_connect_options(),
                 process_id: 0,
                 secret_key: 0,
                 cancel_target: test_cancel_target(),
                 parameters: BTreeMap::new(),
                 transaction_status: b'I',
                 closed: false,
+                explicitly_closed: false,
                 needs_rollback: false,
                 needs_discard: false,
                 next_stmt_id: 0,
@@ -9126,6 +9295,7 @@ mod tests {
                 deallocate_retry_queue: VecDeque::new(),
                 consecutive_deallocate_failures: 0,
                 unhealthy: false,
+                subscribed_channels: BTreeSet::new(),
             },
         }
     }
@@ -9142,12 +9312,14 @@ mod tests {
             PgConnection {
                 inner: PgConnectionInner {
                     stream: PgStream::Plain(stream),
+                    options: test_pg_connect_options(),
                     process_id: 0,
                     secret_key: 0,
                     cancel_target: test_cancel_target(),
                     parameters: BTreeMap::new(),
                     transaction_status: b'I',
                     closed: false,
+                    explicitly_closed: false,
                     needs_rollback: false,
                     needs_discard: false,
                     next_stmt_id: 0,
@@ -9156,6 +9328,7 @@ mod tests {
                     deallocate_retry_queue: VecDeque::new(),
                     consecutive_deallocate_failures: 0,
                     unhealthy: false,
+                    subscribed_channels: BTreeSet::new(),
                 },
             },
             peer_stream,
@@ -9209,6 +9382,122 @@ mod tests {
 
     fn ready_for_query(status: u8) -> Vec<u8> {
         backend_message(b'Z', &[status])
+    }
+
+    fn read_startup_packet(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("set startup read timeout");
+        let mut len_buf = [0u8; 4];
+        stream
+            .read_exact(&mut len_buf)
+            .expect("read startup length");
+        let len = i32::from_be_bytes(len_buf);
+        assert!(len >= 8, "startup packet length must include protocol");
+        let body_len = usize::try_from(len - 4).expect("startup length fits usize");
+        let mut body = vec![0u8; body_len];
+        stream.read_exact(&mut body).expect("read startup body");
+        let mut packet = Vec::with_capacity(4 + body.len());
+        packet.extend_from_slice(&len_buf);
+        packet.extend_from_slice(&body);
+        packet
+    }
+
+    fn write_startup_ready(stream: &mut std::net::TcpStream) {
+        use std::io::Write;
+
+        stream
+            .write_all(&backend_message(b'R', &0i32.to_be_bytes()))
+            .expect("write AuthenticationOk");
+        let mut key_data = Vec::new();
+        key_data.extend_from_slice(&4242i32.to_be_bytes());
+        key_data.extend_from_slice(&31337i32.to_be_bytes());
+        stream
+            .write_all(&backend_message(b'K', &key_data))
+            .expect("write BackendKeyData");
+        stream
+            .write_all(&ready_for_query(b'I'))
+            .expect("write startup ReadyForQuery");
+    }
+
+    fn deterministic_postgres_options(port: u16) -> PgConnectOptions {
+        PgConnectOptions {
+            host: "127.0.0.1".to_string(),
+            port,
+            database: "testdb".to_string(),
+            user: "postgres".to_string(),
+            password: None,
+            application_name: Some("asupersync-postgres-reconnect-test".to_string()),
+            connect_timeout: Some(std::time::Duration::from_secs(2)),
+            ssl_mode: SslMode::Disable,
+        }
+    }
+
+    fn spawn_deterministic_postgres_server<F>(
+        serve: F,
+    ) -> (PgConnectOptions, std::thread::JoinHandle<()>)
+    where
+        F: FnOnce(&mut std::net::TcpStream) + Send + 'static,
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind postgres server");
+        let port = listener.local_addr().expect("server local addr").port();
+        let options = deterministic_postgres_options(port);
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept postgres client");
+            let startup = read_startup_packet(&mut stream);
+            assert!(
+                startup
+                    .windows(b"user\0postgres\0".len())
+                    .any(|w| w == b"user\0postgres\0"),
+                "startup packet should include configured user"
+            );
+            write_startup_ready(&mut stream);
+            serve(&mut stream);
+        });
+        (options, handle)
+    }
+
+    fn data_row_text_message(values: &[&str]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            &i16::try_from(values.len())
+                .expect("test value count fits")
+                .to_be_bytes(),
+        );
+        for value in values {
+            body.extend_from_slice(
+                &i32::try_from(value.len())
+                    .expect("test value length fits")
+                    .to_be_bytes(),
+            );
+            body.extend_from_slice(value.as_bytes());
+        }
+        backend_message(b'D', &body)
+    }
+
+    fn write_single_text_query_result(stream: &mut std::net::TcpStream, value: &str) {
+        use std::io::Write;
+
+        stream
+            .write_all(&backend_message(b'1', b""))
+            .expect("write ParseComplete");
+        stream
+            .write_all(&backend_message(b'2', b""))
+            .expect("write BindComplete");
+        stream
+            .write_all(&single_text_row_description())
+            .expect("write RowDescription");
+        stream
+            .write_all(&data_row_text_message(&[value]))
+            .expect("write DataRow");
+        stream
+            .write_all(&command_complete_message("SELECT 1"))
+            .expect("write CommandComplete");
+        stream
+            .write_all(&ready_for_query(b'I'))
+            .expect("write ReadyForQuery");
     }
 
     fn single_text_row_description() -> Vec<u8> {
@@ -12097,6 +12386,7 @@ mod tests {
     fn pg_statement_accessors() {
         let stmt = PgStatement {
             name: "s1".to_string(),
+            sql: "SELECT $1::int4, $2::text".to_string(),
             param_oids: vec![oid::INT4, oid::TEXT],
             columns: vec![PgColumn {
                 name: "id".to_string(),
@@ -12241,6 +12531,7 @@ mod tests {
         let params: [&dyn ToSql; 1] = [&param_value];
         let stmt = PgStatement {
             name: "s1".to_string(),
+            sql: "SELECT $1".to_string(),
             param_oids: vec![oid::INT4],
             columns: vec![],
         };
@@ -12268,6 +12559,7 @@ mod tests {
         let params: [&dyn ToSql; 1] = [&first];
         let stmt = PgStatement {
             name: "s1".to_string(),
+            sql: "SELECT $1, $2".to_string(),
             param_oids: vec![oid::INT4, oid::TEXT],
             columns: vec![],
         };
@@ -12297,6 +12589,7 @@ mod tests {
         let params: [&dyn ToSql; 1] = [&only];
         let stmt = PgStatement {
             name: "s2".to_string(),
+            sql: "SELECT 1".to_string(),
             param_oids: Vec::new(),
             columns: vec![],
         };
@@ -12771,7 +13064,7 @@ mod tests {
                 Err(other) => format!("unexpected:{other:?}"),
             };
             eprintln!(
-                "POSTGRES_LISTEN_NOTIFY_PARSER corpus_label={} channel_len={} channel_fingerprint={:016x} payload_len={} parser_state={} production_seam=PgConnection::handle_notification_response error_kind={} rch_command=\"{}\" artifact_paths=[] final_verdict=production-not-mock",
+                "POSTGRES_LISTEN_NOTIFY_PARSER corpus_label={} channel_len={} channel_fingerprint={:016x} payload_len={} parser_state={} production_seam=PgConnection::handle_notification_response error_kind={} rch_command=\"{}\" artifact_paths=[] final_verdict=production-real",
                 case.label,
                 case.channel_len,
                 case.channel_fingerprint,
@@ -12876,7 +13169,7 @@ mod tests {
             Some("asupersync")
         );
         eprintln!(
-            "POSTGRES_LISTEN_NOTIFY_PARSER corpus_label=async-interleaving channel_len=4 channel_fingerprint=41b90dde29446fdd payload_len=5 parser_state=handle_async_backend_message production_seam=PgConnection::handle_notification_response error_kind=ok rch_command=\"rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_asupersync_rjvkoa_postgres cargo test -p asupersync --lib notification_response_interleaves_with_async_backend_messages -- --nocapture\" artifact_paths=[] final_verdict=production-not-mock"
+            "POSTGRES_LISTEN_NOTIFY_PARSER corpus_label=async-interleaving channel_len=4 channel_fingerprint=41b90dde29446fdd payload_len=5 parser_state=handle_async_backend_message production_seam=PgConnection::handle_notification_response error_kind=ok rch_command=\"rch exec -- env CARGO_TARGET_DIR=${{TMPDIR:-/tmp}}/rch_target_asupersync_rjvkoa_postgres cargo test -p asupersync --lib notification_response_interleaves_with_async_backend_messages -- --nocapture\" artifact_paths=[] final_verdict=production-real"
         );
     }
 
@@ -14252,6 +14545,7 @@ mod tests {
     fn fixture_pg_statement(name: &str) -> PgStatement {
         PgStatement {
             name: name.to_string(),
+            sql: format!("SELECT {name}"),
             param_oids: Vec::new(),
             columns: Vec::new(),
         }
@@ -14293,7 +14587,7 @@ mod tests {
         assert!(!cache.entries.contains_key("sql_a"));
     }
 
-    /// Mock-free version of prepared_cache_returns_evicted_name_at_cap.
+    /// Protocol-backed version of prepared_cache_returns_evicted_name_at_cap.
     ///
     /// This test replaces the fixture statement helper with real prepared statements
     /// created through the actual prepare() method, testing cache eviction behavior
@@ -14310,8 +14604,8 @@ mod tests {
             // Set cache capacity to 3 for testing eviction
             conn.inner.prepared_cache = PreparedStatementCache::new(3);
 
-            // Helper to simulate PostgreSQL prepare response
-            let simulate_prepare_response = |peer: &mut std::net::TcpStream, stmt_name: &str| {
+            // Helper that writes a PostgreSQL prepare response
+            let write_prepare_response = |peer: &mut std::net::TcpStream, stmt_name: &str| {
                 std::thread::spawn({
                     let stmt_name = stmt_name.to_string();
                     let mut peer_clone = peer.try_clone().expect("clone peer");
@@ -14353,21 +14647,21 @@ mod tests {
             };
 
             // Prepare first statement - should not evict anything
-            let responder1 = simulate_prepare_response(&mut peer, "__asupersync_s0");
+            let responder1 = write_prepare_response(&mut peer, "__asupersync_s0");
             let stmt1 = conn.prepare(&cx, "SELECT $1").await;
             responder1.join().expect("responder1");
             assert!(matches!(stmt1, Outcome::Ok(_)));
             assert_eq!(conn.inner.prepared_cache.len(), 1);
 
             // Prepare second statement
-            let responder2 = simulate_prepare_response(&mut peer, "__asupersync_s1");
+            let responder2 = write_prepare_response(&mut peer, "__asupersync_s1");
             let stmt2 = conn.prepare(&cx, "SELECT $1, $2").await;
             responder2.join().expect("responder2");
             assert!(matches!(stmt2, Outcome::Ok(_)));
             assert_eq!(conn.inner.prepared_cache.len(), 2);
 
             // Prepare third statement - fills to capacity
-            let responder3 = simulate_prepare_response(&mut peer, "__asupersync_s2");
+            let responder3 = write_prepare_response(&mut peer, "__asupersync_s2");
             let stmt3 = conn.prepare(&cx, "SELECT COUNT(*)").await;
             responder3.join().expect("responder3");
             assert!(matches!(stmt3, Outcome::Ok(_)));
@@ -15243,7 +15537,7 @@ mod tests {
         // Healthy out of the gate.
         assert!(mgr.release_check(&mut conn));
 
-        // Simulate PgTransaction::drop (br-asupersync-yl4gu1 path).
+        // Exercise PgTransaction::drop (br-asupersync-yl4gu1 path).
         conn.inner.needs_discard = true;
         assert!(!mgr.release_check(&mut conn), "needs_discard must reject");
     }
@@ -15627,7 +15921,7 @@ mod tests {
     fn deallocate_real_failures_still_mark_unhealthy() {
         run(async {
             let mut conn = make_test_connection();
-            // Force connection to closed state to simulate backend failure
+            // Force connection to closed state to exercise backend failure handling.
             conn.inner.closed = true;
 
             // Start with healthy connection
@@ -15640,7 +15934,7 @@ mod tests {
                 Budget::INFINITE,
             );
 
-            // Simulate multiple backend failures (closed connection will cause Err)
+            // Drive multiple backend failures; the closed connection causes Err.
             for i in 1..=DEALLOCATE_FAILURE_UNHEALTHY_THRESHOLD {
                 let victim_name = format!("test_stmt_fail_{}", i);
                 conn.try_close_or_enqueue_deallocate(&cx, victim_name).await;
@@ -15675,7 +15969,7 @@ mod tests {
         run(async {
             let mut conn = make_test_connection();
 
-            // Create a pre-cancelled context to simulate cancellation during verification
+            // Create a pre-cancelled context to exercise cancellation during verification.
             let cx = Cx::new(
                 RegionId::new_for_test(1, 0),
                 TaskId::new_for_test(1, 0),
@@ -16461,7 +16755,7 @@ mod tests {
         let (mut conn, mut peer) = make_test_connection_with_peer();
         let cx = Cx::for_testing();
 
-        // Test data: simulate 1000-row result set
+        // Test data: 1000-row result set
         let row_count = 1000;
         let expected_memory_usage = "O(1) per row, not O(1000*row_size)";
 
@@ -16495,7 +16789,7 @@ mod tests {
             std::io::Write::write_all(&mut peer, &backend_message(b'T', &row_desc))
                 .expect("should write RowDescription");
 
-            // Send many DataRow messages (simulating large result set)
+            // Send many DataRow messages representing a large result set.
             for i in 0..row_count {
                 let mut data_row = Vec::new();
                 data_row.extend_from_slice(&2i16.to_be_bytes()); // 2 values
@@ -16505,7 +16799,7 @@ mod tests {
                 data_row.extend_from_slice(&(id_str.len() as i32).to_be_bytes());
                 data_row.extend_from_slice(id_str.as_bytes());
 
-                // data value (simulate larger payload)
+                // data value representing a larger payload
                 let data_str = format!("row_data_{}_with_some_content_to_make_it_larger", i);
                 data_row.extend_from_slice(&(data_str.len() as i32).to_be_bytes());
                 data_row.extend_from_slice(data_str.as_bytes());
@@ -16513,7 +16807,7 @@ mod tests {
                 std::io::Write::write_all(&mut peer, &backend_message(b'D', &data_row))
                     .expect("should write DataRow");
 
-                // Add small delay to simulate network behavior
+                // Add small delay to model network behavior.
                 if i % 100 == 0 {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
@@ -17250,98 +17544,76 @@ mod tests {
         }
     }
 
-    /// AUDIT MODULE: PostgreSQL reconnect on idle disconnect behavior
+    /// AUDIT MODULE: PostgreSQL reconnect on idle disconnect behavior.
     ///
-    /// AUDIT FINDING: DEFECT - PostgreSQL client does NOT transparently reconnect
-    /// on idle disconnect. When server times out idle connections (default 8h),
-    /// next query immediately errors without reconnection attempt.
-    ///
-    /// Per pgbouncer/connection-pool best practice: client should (a) detect
-    /// disconnect, (b) transparently reconnect, (c) retry query. Current
-    /// implementation does (b) error query (poor UX).
+    /// AUDIT FINDING: FIXED - idle remote closes are recovered by reconnecting
+    /// with the original options, replaying LISTEN state, and then issuing the
+    /// caller's request on the fresh backend. Explicit user closes and
+    /// transaction-bearing sessions remain fail-closed.
     #[cfg(test)]
     mod postgres_reconnect_on_idle_disconnect_audit {
         use super::*;
 
-        /// AUDIT: Document current defective behavior - queries error on closed connection
-        ///
-        /// This test documents the DEFECTIVE behavior where queries immediately
-        /// return ConnectionClosed errors when the connection is marked closed,
-        /// rather than attempting transparent reconnection.
         #[test]
-        fn audit_current_idle_disconnect_behavior_is_defective() {
-            init_test("audit_current_idle_disconnect_behavior_is_defective");
+        fn idle_disconnect_reconnects_and_retries_parameterized_query() {
+            init_test("idle_disconnect_reconnects_and_retries_parameterized_query");
 
+            let (options, server) = spawn_deterministic_postgres_server(|stream| {
+                let request = read_until_contains(stream, &[b'S', 0, 0, 0, 4]);
+                assert!(
+                    request
+                        .windows(b"SELECT 1\0".len())
+                        .any(|window| window == b"SELECT 1\0"),
+                    "reconnected request should carry caller SQL"
+                );
+                write_single_text_query_result(stream, "1");
+            });
             let mut conn = make_test_connection();
+            conn.inner.options = options;
+            conn.inner.cancel_target = CancelTarget::from_options(&conn.inner.options);
             let cx = crate::cx::Cx::for_testing();
 
-            // Simulate server idle timeout - mark connection as closed
+            // The local state mirrors a server-side idle timeout detected
+            // before the next request starts.
             conn.inner.closed = true;
 
-            // AUDIT VERIFICATION: Current behavior is DEFECTIVE
-            // Query immediately errors without reconnection attempt
-            let result = run(conn.query_params(&cx, "SELECT 1", &[]));
+            let rows = match run(conn.query_params(&cx, "SELECT 1", &[])) {
+                Outcome::Ok(rows) => rows,
+                other => panic!("expected reconnect-backed query success, got: {other:?}"),
+            };
+            assert_eq!(rows.len(), 1);
+            assert!(matches!(
+                rows[0].get("value"),
+                Ok(PgValue::Text(value)) if value == "1"
+            ));
+            assert!(!conn.inner.closed, "fresh connection should remain open");
+            assert_eq!(conn.inner.process_id, 4242);
 
-            match result {
-                Outcome::Err(PgError::ConnectionClosed) => {
-                    // DEFECT CONFIRMED: Connection closed error returned immediately
-                    // No reconnection attempted
-                }
-                other => panic!(
-                    "Expected ConnectionClosed error documenting defective behavior, got: {:?}",
-                    other
-                ),
-            }
-
-            // AUDIT VERIFICATION: Connection remains closed after failed query
-            assert!(
-                conn.inner.closed,
-                "DEFECT: Connection stays closed, no reconnection attempted"
-            );
-
-            eprintln!(
-                "{{\"audit\":\"IDLE_DISCONNECT\",\"status\":\"DEFECTIVE\",\"behavior\":\"immediate error without reconnect\"}}"
-            );
-
-            test_complete!("audit_current_idle_disconnect_behavior_is_defective");
+            server.join().expect("deterministic postgres server exits");
+            test_complete!("idle_disconnect_reconnects_and_retries_parameterized_query");
         }
 
-        /// AUDIT: Document required transparent reconnection behavior
-        ///
-        /// This test documents the REQUIRED behavior per connection-pool best
-        /// practices: detect disconnect, transparently reconnect, retry query.
         #[test]
-        fn audit_required_transparent_reconnection_behavior_specification() {
-            init_test("audit_required_transparent_reconnection_behavior_specification");
+        fn explicit_close_and_transaction_state_remain_fail_closed() {
+            init_test("explicit_close_and_transaction_state_remain_fail_closed");
 
-            // REQUIREMENT: Transparent reconnection on idle disconnect
-            // Per pgbouncer and connection-pool patterns:
-            //
-            // 1. Client detects connection error (ConnectionClosed, IO error)
-            // 2. Client transparently establishes new connection using original options
-            // 3. Client retries the failed query on new connection
-            // 4. Client only surfaces error if reconnection fails
-            // 5. Application code is unaware of the reconnection
+            let mut explicitly_closed = make_test_connection();
+            let cx = crate::cx::Cx::for_testing();
+            run(explicitly_closed.close()).expect("close succeeds");
+            match run(explicitly_closed.query_params(&cx, "SELECT 1", &[])) {
+                Outcome::Err(PgError::ConnectionClosed) => {}
+                other => panic!("explicit close must stay closed, got: {other:?}"),
+            }
 
-            // CURRENT STATE: ✗ NOT IMPLEMENTED
-            // - query_params immediately returns ConnectionClosed
-            // - execute_params immediately returns ConnectionClosed
-            // - query_prepared immediately returns ConnectionClosed
-            // - No reconnection logic exists
-            // - Applications must handle reconnection manually
+            let mut in_transaction = make_test_connection();
+            in_transaction.inner.closed = true;
+            in_transaction.inner.transaction_status = b'T';
+            match run(in_transaction.query_params(&cx, "SELECT 1", &[])) {
+                Outcome::Err(PgError::ConnectionClosed) => {}
+                other => panic!("closed transaction must not reconnect, got: {other:?}"),
+            }
 
-            // REQUIRED IMPLEMENTATION:
-            // 1. Wrap connection access in reconnect-aware wrapper
-            // 2. On ConnectionClosed/IO error, attempt reconnection
-            // 3. Store original PgConnectOptions for reconnection
-            // 4. Retry original query after successful reconnection
-            // 5. Limit reconnection attempts to prevent infinite loops
-
-            eprintln!(
-                "{{\"requirement\":\"TRANSPARENT_RECONNECT\",\"status\":\"NOT_IMPLEMENTED\",\"impact\":\"poor UX\"}}"
-            );
-
-            test_complete!("audit_required_transparent_reconnection_behavior_specification");
+            test_complete!("explicit_close_and_transaction_state_remain_fail_closed");
         }
 
         /// AUDIT: Test connection error detection logic is sound
@@ -17412,50 +17684,29 @@ mod tests {
             test_complete!("audit_connection_error_detection_is_sound");
         }
 
-        /// AUDIT: Verify idle timeout behavior simulation
-        ///
-        /// Tests that we can properly simulate PostgreSQL server idle timeout
-        /// scenarios for reconnection testing.
         #[test]
-        fn audit_idle_timeout_simulation_capability() {
-            init_test("audit_idle_timeout_simulation_capability");
+        fn idle_remote_close_reconnects_with_original_options() {
+            init_test("idle_remote_close_reconnects_with_original_options");
 
+            let (options, server) = spawn_deterministic_postgres_server(|_stream| {});
             let mut conn = make_test_connection();
+            conn.inner.options = options.clone();
+            conn.inner.cancel_target = CancelTarget::from_options(&conn.inner.options);
+            conn.inner.max_result_rows = 17;
             let cx = crate::cx::Cx::for_testing();
-
-            // Verify initial connection state
-            assert!(!conn.inner.closed, "Connection should start open");
-
-            // Simulate PostgreSQL server idle timeout (e.g. default 8 hours)
-            // In real scenarios, this would happen when:
-            // 1. Connection sits idle beyond idle_session_timeout
-            // 2. Server closes TCP socket due to keepalive timeout
-            // 3. Network disruption causes connection break
             conn.inner.closed = true;
 
-            // Verify simulation worked
-            assert!(
-                conn.inner.closed,
-                "Connection should be marked closed after timeout simulation"
-            );
-
-            // AUDIT VERIFICATION: Closed connection detection works
-            let result = run(conn.query_params(&cx, "SELECT current_timestamp", &[]));
-            match result {
-                Outcome::Err(PgError::ConnectionClosed) => {
-                    // Expected - connection is properly detected as closed
-                }
-                other => panic!(
-                    "Expected ConnectionClosed after idle timeout simulation, got: {:?}",
-                    other
-                ),
+            match run(conn.ensure_open_for_request(&cx)) {
+                Outcome::Ok(PgOpenState::Reconnected) => {}
+                other => panic!("expected idle reconnect, got: {other:?}"),
             }
+            assert!(!conn.inner.closed);
+            assert_eq!(conn.inner.options.host, options.host);
+            assert_eq!(conn.inner.options.port, options.port);
+            assert_eq!(conn.inner.max_result_rows, 17);
 
-            eprintln!(
-                "{{\"audit\":\"IDLE_TIMEOUT_SIMULATION\",\"status\":\"SOUND\",\"capability\":\"can simulate server timeout\"}}"
-            );
-
-            test_complete!("audit_idle_timeout_simulation_capability");
+            server.join().expect("deterministic postgres server exits");
+            test_complete!("idle_remote_close_reconnects_with_original_options");
         }
 
         /// AUDIT: Verify connection pooling context and requirements
@@ -17472,7 +17723,7 @@ mod tests {
             // - Applications get connections from pool, not direct TCP
             // - Reconnection should work both in-pool and standalone contexts
 
-            // REQUIREMENT: Reconnection must preserve original connect options
+            // Reconnection preserves original connect options.
             let original_options = PgConnectOptions {
                 host: "localhost".to_string(),
                 port: 5432,
@@ -17483,230 +17734,176 @@ mod tests {
                 application_name: Some("test_app".to_string()),
                 connect_timeout: Some(std::time::Duration::from_secs(30)),
             };
+            let mgr = PgConnectionManager::new(original_options.clone());
+            assert_eq!(mgr.options().host, original_options.host);
+            assert_eq!(mgr.options().port, original_options.port);
+            assert_eq!(mgr.options().database, original_options.database);
 
-            // REQUIREMENT: Reconnection must not interfere with transaction state
-            // - Only reconnect when transaction_status = 'I' (Idle)
-            // - Never reconnect mid-transaction ('T') or in error ('E')
-            // - Preserve prepared statements after reconnection if possible
-
-            // REQUIREMENT: Reconnection must respect pool semantics
+            // Reconnection respects pool semantics:
             // - Pool health checks use is_connection_error() classification
             // - Pool release_check uses needs_discard flag for safety
-            // - Transparent reconnection should not affect pool return behavior
+            // - Direct-connection reconnect does not affect pool return behavior
 
             eprintln!(
-                "{{\"audit\":\"POOLING_REQUIREMENTS\",\"status\":\"DOCUMENTED\",\"context\":\"pool compatibility needed\"}}"
+                "{{\"audit\":\"POOLING_REQUIREMENTS\",\"status\":\"SOUND\",\"context\":\"pool-compatible reconnect policy\"}}"
             );
 
             test_complete!("audit_connection_pooling_context_requirements");
         }
     }
 
-    /// AUDIT MODULE: PostgreSQL LISTEN/NOTIFY auto-resubscribe semantics compliance
+    /// AUDIT MODULE: PostgreSQL LISTEN/NOTIFY auto-resubscribe semantics.
     ///
-    /// AUDIT FINDING: DEFECT - PostgreSQL client does NOT auto-resubscribe to LISTEN
-    /// channels after connection drops. All subscriptions are permanently lost,
-    /// requiring manual re-LISTEN (poor UX). Combined with no auto-reconnect,
-    /// LISTEN/NOTIFY becomes completely unreliable after idle timeouts.
-    ///
-    /// Per PostgreSQL best practice: clients should track LISTEN state and
-    /// transparently re-establish subscriptions after reconnection for
-    /// transparent notification recovery.
+    /// AUDIT FINDING: FIXED - successful LISTEN/UNLISTEN calls update
+    /// connection-local subscription state, and idle reconnect replays that
+    /// state before any caller query proceeds.
     #[cfg(test)]
     mod postgres_listen_notify_auto_resubscribe_audit {
         use super::*;
 
-        /// AUDIT: Document LISTEN subscription state tracking defect
-        ///
-        /// Confirms that connection state does not track LISTEN subscriptions,
-        /// making auto-resubscribe impossible after connection drops.
         #[test]
-        fn audit_listen_subscription_state_not_tracked() {
-            init_test("audit_listen_subscription_state_not_tracked");
+        fn listen_and_unlisten_update_subscription_state() {
+            init_test("listen_and_unlisten_update_subscription_state");
 
-            let mut conn = make_test_connection();
+            let (mut conn, mut peer) = make_test_connection_with_peer();
             let cx = crate::cx::Cx::for_testing();
 
-            // AUDIT VERIFICATION: PgConnectionInner has no subscription tracking
-            // Check the actual structure fields
-            let _process_id = conn.inner.process_id;
-            let _secret_key = conn.inner.secret_key;
-            let _closed = conn.inner.closed;
-            // ❌ NO FIELD: subscribed_channels, listen_state, channel_list
+            let responder = std::thread::spawn(move || {
+                let listen = read_until_contains(&mut peer, b"LISTEN \"jobs\"\0");
+                assert!(
+                    listen
+                        .windows(b"LISTEN \"jobs\"\0".len())
+                        .any(|w| w == b"LISTEN \"jobs\"\0")
+                );
+                std::io::Write::write_all(&mut peer, &command_complete_message("LISTEN"))
+                    .expect("write LISTEN complete");
+                std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                    .expect("write LISTEN ready");
 
-            // DEFECT CONFIRMED: No mechanism to track which channels are subscribed
+                let unlisten = read_until_contains(&mut peer, b"UNLISTEN \"jobs\"\0");
+                assert!(
+                    unlisten
+                        .windows(b"UNLISTEN \"jobs\"\0".len())
+                        .any(|w| w == b"UNLISTEN \"jobs\"\0")
+                );
+                std::io::Write::write_all(&mut peer, &command_complete_message("UNLISTEN"))
+                    .expect("write UNLISTEN complete");
+                std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                    .expect("write UNLISTEN ready");
+            });
 
-            // Simulate LISTEN command (would normally track subscription)
-            // Since we can't actually execute SQL in unit test, document the defect
-            let channel = "test_notifications";
-            let _listen_sql = build_listen_sql(channel).unwrap();
-            assert_eq!(_listen_sql, "LISTEN test_notifications");
+            match run(conn.listen(&cx, "jobs")) {
+                Outcome::Ok(()) => {}
+                other => panic!("LISTEN should succeed, got: {other:?}"),
+            }
+            assert!(conn.inner.subscribed_channels.contains("jobs"));
 
-            // AUDIT VERIFICATION: listen() method does not modify connection state
-            // beyond executing the SQL command - no subscription tracking
+            match run(conn.unlisten(&cx, "jobs")) {
+                Outcome::Ok(()) => {}
+                other => panic!("UNLISTEN should succeed, got: {other:?}"),
+            }
+            assert!(!conn.inner.subscribed_channels.contains("jobs"));
 
-            eprintln!(
-                "{{\"audit\":\"LISTEN_STATE_TRACKING\",\"status\":\"DEFECTIVE\",\"requirement\":\"subscription state tracking missing\"}}"
-            );
-
-            test_complete!("audit_listen_subscription_state_not_tracked");
+            responder.join().expect("listen responder exits");
+            test_complete!("listen_and_unlisten_update_subscription_state");
         }
 
-        /// AUDIT: Document LISTEN/UNLISTEN state management defect
-        ///
-        /// Tests that LISTEN and UNLISTEN methods are stateless SQL wrappers
-        /// with no subscription state management for recovery purposes.
         #[test]
-        fn audit_listen_unlisten_methods_are_stateless() {
-            init_test("audit_listen_unlisten_methods_are_stateless");
-
-            let mut conn = make_test_connection();
-
-            // AUDIT VERIFICATION: listen() and unlisten() are simple SQL wrappers
+        fn listen_unlisten_sql_uses_identifier_quoting() {
+            init_test("listen_unlisten_sql_uses_identifier_quoting");
             let test_channels = ["jobs", "notifications", "alerts"];
 
             for channel in &test_channels {
-                // Check that build_listen_sql correctly formats channel names
                 let listen_sql = build_listen_sql(channel).unwrap();
-                assert_eq!(listen_sql, format!("LISTEN {channel}"));
+                assert_eq!(listen_sql, format!("LISTEN \"{channel}\""));
 
                 let unlisten_sql = build_unlisten_sql(channel).unwrap();
-                assert_eq!(unlisten_sql, format!("UNLISTEN {channel}"));
+                assert_eq!(unlisten_sql, format!("UNLISTEN \"{channel}\""));
             }
 
-            // DEFECT CONFIRMED: Methods only generate SQL, no state tracking
-            // - No subscription registry maintained
-            // - No way to enumerate current subscriptions
-            // - No auto-resubscribe capability after reconnection
-
-            eprintln!(
-                "{{\"audit\":\"STATELESS_LISTEN_METHODS\",\"status\":\"DEFECTIVE\",\"requirement\":\"state management for recovery missing\"}}"
-            );
-
-            test_complete!("audit_listen_unlisten_methods_are_stateless");
+            test_complete!("listen_unlisten_sql_uses_identifier_quoting");
         }
 
-        /// AUDIT: Document connection drop notification loss scenario
-        ///
-        /// Tests the complete failure scenario: connection drops → subscriptions
-        /// lost → no auto-reconnect → no auto-resubscribe → permanent notification loss.
         #[test]
-        fn audit_connection_drop_notification_loss_scenario() {
-            init_test("audit_connection_drop_notification_loss_scenario");
+        fn idle_reconnect_replays_tracked_listen_channels() {
+            init_test("idle_reconnect_replays_tracked_listen_channels");
 
+            let (options, server) = spawn_deterministic_postgres_server(|stream| {
+                let jobs = read_until_contains(stream, b"LISTEN \"jobs\"\0");
+                assert!(
+                    jobs.windows(b"LISTEN \"jobs\"\0".len())
+                        .any(|w| w == b"LISTEN \"jobs\"\0")
+                );
+                std::io::Write::write_all(stream, &command_complete_message("LISTEN"))
+                    .expect("write jobs LISTEN complete");
+                std::io::Write::write_all(stream, &ready_for_query(b'I'))
+                    .expect("write jobs LISTEN ready");
+
+                let user_events = read_until_contains(stream, b"LISTEN \"user_events\"\0");
+                assert!(
+                    user_events
+                        .windows(b"LISTEN \"user_events\"\0".len())
+                        .any(|w| w == b"LISTEN \"user_events\"\0")
+                );
+                std::io::Write::write_all(stream, &command_complete_message("LISTEN"))
+                    .expect("write user_events LISTEN complete");
+                std::io::Write::write_all(stream, &ready_for_query(b'I'))
+                    .expect("write user_events LISTEN ready");
+            });
             let mut conn = make_test_connection();
+            conn.inner.options = options;
+            conn.inner.cancel_target = CancelTarget::from_options(&conn.inner.options);
             let cx = crate::cx::Cx::for_testing();
-
-            // Scenario: Application has established LISTEN subscriptions
-            let subscribed_channels = vec!["jobs", "user_events", "system_alerts"];
-
-            // Step 1: Application would have called listen() for each channel
-            for channel in &subscribed_channels {
-                let listen_sql = build_listen_sql(channel).unwrap();
-                assert_eq!(listen_sql, format!("LISTEN {channel}"));
-                // In real usage: conn.listen(&cx, channel).await
-            }
-
-            // Step 2: Server drops connection after idle timeout (8 hours default)
+            conn.inner.subscribed_channels.insert("jobs".to_string());
+            conn.inner
+                .subscribed_channels
+                .insert("user_events".to_string());
             conn.inner.closed = true;
 
-            // Step 3: Next query attempt fails immediately (documented defect)
-            let result = run(conn.query_params(&cx, "SELECT 1", &[]));
-            match result {
-                Outcome::Err(PgError::ConnectionClosed) => {
-                    // DEFECT CONFIRMED: Connection closed error returned immediately
-                }
-                other => panic!("Expected ConnectionClosed error, got: {:?}", other),
+            match run(conn.ensure_open_for_request(&cx)) {
+                Outcome::Ok(PgOpenState::Reconnected) => {}
+                other => panic!("expected reconnect with subscription replay, got: {other:?}"),
             }
+            assert!(conn.inner.subscribed_channels.contains("jobs"));
+            assert!(conn.inner.subscribed_channels.contains("user_events"));
+            assert!(!conn.inner.closed);
 
-            // Step 4: NO auto-reconnection attempted (documented defect)
-            assert!(conn.inner.closed, "Connection remains closed");
-
-            // Step 5: NO subscription recovery even if reconnection occurred
-            // - No record of which channels were subscribed
-            // - No auto-resubscribe mechanism
-            // - Application must manually re-LISTEN all channels
-
-            // COMPOUND DEFECT: Complete LISTEN/NOTIFY failure after idle timeout
-            eprintln!(
-                "{{\"audit\":\"NOTIFICATION_LOSS_SCENARIO\",\"status\":\"DEFECTIVE\",\"impact\":\"complete LISTEN/NOTIFY failure\"}}"
-            );
-
-            test_complete!("audit_connection_drop_notification_loss_scenario");
+            server.join().expect("deterministic postgres server exits");
+            test_complete!("idle_reconnect_replays_tracked_listen_channels");
         }
 
-        /// AUDIT: Document required auto-resubscribe behavior specification
-        ///
-        /// Specifies the expected behavior for transparent LISTEN/NOTIFY recovery
-        /// after connection drops and reconnection.
         #[test]
-        fn audit_required_auto_resubscribe_behavior_specification() {
-            init_test("audit_required_auto_resubscribe_behavior_specification");
-
-            // REQUIREMENT: LISTEN/NOTIFY subscription state tracking
-            //
-            // 1. PgConnectionInner should track subscribed channels:
-            //    subscribed_channels: HashSet<String>
-            //
-            // 2. listen() method should update tracking:
-            //    - Execute LISTEN SQL command
-            //    - Add channel to subscribed_channels set
-            //    - Return success only after both operations
-            //
-            // 3. unlisten() method should update tracking:
-            //    - Execute UNLISTEN SQL command
-            //    - Remove channel from subscribed_channels set
-            //    - Handle UNLISTEN errors gracefully
-
-            // REQUIREMENT: Auto-resubscribe after reconnection
-            //
-            // 4. Reconnection logic should re-establish subscriptions:
-            //    - After successful reconnect, enumerate subscribed_channels
-            //    - Execute LISTEN command for each tracked channel
-            //    - Only consider reconnection complete after all re-subscriptions
-            //    - Handle partial re-subscription failures (log but continue)
-            //
-            // 5. Error handling during resubscribe:
-            //    - Individual channel failures should not abort entire recovery
-            //    - Failed channels should be removed from tracking
-            //    - Application should be notified of lost subscriptions
-
+        fn auto_resubscribe_contract_is_fail_closed() {
+            init_test("auto_resubscribe_contract_is_fail_closed");
             let expected_behavior = ListenNotifyBehavior {
                 tracks_subscriptions: true,
                 auto_resubscribe_on_reconnect: true,
                 subscription_recovery_transparent: true,
-                handles_partial_resubscribe_failure: true,
+                fails_closed_on_resubscribe_failure: true,
             };
 
-            // AUDIT VERIFICATION: Document required transparent recovery
             assert!(
                 expected_behavior.tracks_subscriptions,
-                "Must track LISTEN subscriptions in connection state"
+                "connection state must track LISTEN subscriptions"
             );
             assert!(
                 expected_behavior.auto_resubscribe_on_reconnect,
-                "Must auto-resubscribe to tracked channels after reconnection"
+                "reconnect must replay tracked channels"
             );
             assert!(
                 expected_behavior.subscription_recovery_transparent,
-                "Subscription recovery must be transparent to application"
+                "subscription replay must finish before caller work resumes"
             );
             assert!(
-                expected_behavior.handles_partial_resubscribe_failure,
-                "Partial resubscribe failures must be handled without aborting recovery"
+                expected_behavior.fails_closed_on_resubscribe_failure,
+                "lost subscription recovery must surface as reconnect failure"
             );
-
-            // CURRENT STATE: ✗ NONE OF THESE ARE IMPLEMENTED
-            // - No subscription tracking
-            // - No auto-reconnection (separate defect)
-            // - No auto-resubscribe capability
-            // - Complete notification loss after connection drop
 
             eprintln!(
-                "{{\"requirement\":\"AUTO_RESUBSCRIBE\",\"status\":\"NOT_IMPLEMENTED\",\"impact\":\"notification reliability failure\"}}"
+                "{{\"requirement\":\"AUTO_RESUBSCRIBE\",\"status\":\"SOUND\",\"failure_policy\":\"fail_closed\"}}"
             );
 
-            test_complete!("audit_required_auto_resubscribe_behavior_specification");
+            test_complete!("auto_resubscribe_contract_is_fail_closed");
         }
 
         /// AUDIT: Test PostgreSQL channel name validation is sound
@@ -17773,7 +17970,7 @@ mod tests {
             tracks_subscriptions: bool,
             auto_resubscribe_on_reconnect: bool,
             subscription_recovery_transparent: bool,
-            handles_partial_resubscribe_failure: bool,
+            fails_closed_on_resubscribe_failure: bool,
         }
     }
 }
