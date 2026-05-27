@@ -8,7 +8,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 
 use franken_decision::{
-    DecisionContract, EvalContext, FallbackPolicy, LossMatrix, Posterior, evaluate,
+    DecisionContract, EvalContext, FallbackPolicy, LossMatrix, Posterior, ValidationError, evaluate,
 };
 use franken_kernel::{DecisionId, TraceId};
 
@@ -25,6 +25,10 @@ const FALLBACK_REASON_POLICY_BUDGET_EXHAUSTED: &str = "policy_budget_exhausted";
 const FALLBACK_REASON_UNKNOWN_LOW_CONFIDENCE: &str = "unknown_state_with_low_confidence";
 const FALLBACK_REASON_REGRESSION_LOW_CONFIDENCE: &str = "regression_state_with_low_confidence";
 const FALLBACK_REASON_UNCLASSIFIED: &str = "conservative_fallback_reason_unclassified";
+const MALFORMED_POSTERIOR_CONFIDENCE: u16 = 0;
+const MALFORMED_POSTERIOR_UNCERTAINTY: u16 = 1000;
+const MALFORMED_POSTERIOR_EXPECTED_LOSS_TERMS: [u32; action::COUNT] =
+    [u32::MAX, u32::MAX, u32::MAX, 0];
 
 /// Canonical fallback reasons the live G7 runtime can emit when fallback is active.
 ///
@@ -216,7 +220,16 @@ impl RaptorQDecisionContract {
     #[must_use]
     pub fn telemetry(&self, snapshot: &GovernanceSnapshot) -> GovernanceTelemetry {
         let posterior_permille = Self::state_posterior_permille(snapshot);
-        let posterior = posterior_from_permille(posterior_permille);
+        let posterior = match posterior_from_permille(posterior_permille) {
+            Ok(posterior) => posterior,
+            Err(error) => {
+                return Self::malformed_posterior_fallback_telemetry(
+                    snapshot,
+                    posterior_permille,
+                    &error,
+                );
+            }
+        };
         let expected_loss_terms = expected_loss_terms(&self.losses, &posterior);
 
         let concentration_score = concentration_score(posterior_permille);
@@ -289,6 +302,41 @@ impl RaptorQDecisionContract {
             } else {
                 "none"
             },
+            replay_ref: G7_DECISION_REPLAY_REF,
+            top_evidence_contributors: top_evidence_contributors(snapshot),
+        }
+    }
+
+    fn malformed_posterior_fallback_telemetry(
+        snapshot: &GovernanceSnapshot,
+        posterior_permille: [u16; state::COUNT],
+        _error: &ValidationError,
+    ) -> GovernanceTelemetry {
+        crate::tracing_compat::warn!(
+            target: "asupersync::raptorq::decision_contract",
+            healthy_permille = posterior_permille[state::HEALTHY],
+            degraded_permille = posterior_permille[state::DEGRADED],
+            regression_permille = posterior_permille[state::REGRESSION],
+            unknown_permille = posterior_permille[state::UNKNOWN],
+            error = %_error,
+            "raptorq G7 posterior conversion failed; emitting deterministic fallback telemetry"
+        );
+
+        let ctx = eval_context(
+            snapshot,
+            MALFORMED_POSTERIOR_CONFIDENCE,
+            MALFORMED_POSTERIOR_UNCERTAINTY,
+        );
+        GovernanceTelemetry {
+            decision_id: ctx.decision_id,
+            trace_id: ctx.trace_id,
+            state_posterior_permille: posterior_permille,
+            expected_loss_terms: MALFORMED_POSTERIOR_EXPECTED_LOSS_TERMS,
+            chosen_action: action_label(action::FALLBACK),
+            confidence_score: MALFORMED_POSTERIOR_CONFIDENCE,
+            uncertainty_score: MALFORMED_POSTERIOR_UNCERTAINTY,
+            deterministic_fallback_triggered: true,
+            deterministic_fallback_reason: FALLBACK_REASON_UNCLASSIFIED,
             replay_ref: G7_DECISION_REPLAY_REF,
             top_evidence_contributors: top_evidence_contributors(snapshot),
         }
@@ -490,16 +538,15 @@ fn normalize_contributor_permille(scores: [u32; 3]) -> [u16; 3] {
 }
 
 #[inline]
-fn posterior_from_permille(posterior_permille: [u16; state::COUNT]) -> Posterior {
-    // TODO: Handle Posterior::new failure gracefully instead of panicking
-    // Current assumption: normalized permille values should always be valid
+fn posterior_from_permille(
+    posterior_permille: [u16; state::COUNT],
+) -> Result<Posterior, ValidationError> {
     Posterior::new(
         posterior_permille
             .into_iter()
             .map(|value| f64::from(value) / f64::from(PERMILLE_SCALE))
             .collect(),
     )
-    .expect("normalized posterior permille should convert to Posterior")
 }
 
 #[inline]
@@ -934,7 +981,8 @@ mod tests {
         };
 
         let posterior_permille = RaptorQDecisionContract::state_posterior_permille(&snapshot);
-        let posterior = posterior_from_permille(posterior_permille);
+        let posterior = posterior_from_permille(posterior_permille)
+            .expect("state_posterior_permille must produce a valid posterior");
         let preliminary_confidence = (((u32::from(concentration_score(posterior_permille)) * 7)
             + (u32::from(action_margin_score(expected_loss_terms(
                 contract.loss_matrix(),
@@ -1393,6 +1441,59 @@ mod tests {
     fn normalize_permille_does_not_assign_remainder_to_zero_score_bucket() {
         let result = normalize_permille([1, 1, 1, 0]);
         assert_eq!(result, [334, 333, 333, 0]);
+    }
+
+    #[test]
+    fn posterior_from_permille_rejects_malformed_distribution() {
+        let err = posterior_from_permille([1000, 1000, 1000, 1000])
+            .expect_err("non-normalized permille input must not construct a posterior");
+
+        assert!(
+            matches!(err, ValidationError::PosteriorNotNormalized { sum } if (sum - 4.0).abs() < f64::EPSILON),
+            "expected PosteriorNotNormalized, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn malformed_posterior_telemetry_fails_closed_with_full_uncertainty() {
+        let snapshot = GovernanceSnapshot {
+            n_rows: 48,
+            n_cols: 32,
+            density_permille: 400,
+            rank_deficit_permille: 250,
+            inactivation_pressure_permille: 300,
+            overhead_ratio_permille: 150,
+            budget_exhausted: false,
+            baseline_loss: 500,
+            high_support_loss: 520,
+            block_schur_loss: 540,
+        };
+        let posterior_permille = [1000, 1000, 1000, 1000];
+        let error = posterior_from_permille(posterior_permille)
+            .expect_err("malformed posterior fixture must reject before telemetry fallback");
+        let telemetry = RaptorQDecisionContract::malformed_posterior_fallback_telemetry(
+            &snapshot,
+            posterior_permille,
+            &error,
+        );
+
+        assert_eq!(telemetry.state_posterior_permille, posterior_permille);
+        assert_eq!(
+            telemetry.expected_loss_terms,
+            MALFORMED_POSTERIOR_EXPECTED_LOSS_TERMS
+        );
+        assert_eq!(telemetry.chosen_action, "fallback");
+        assert!(telemetry.deterministic_fallback_triggered);
+        assert_eq!(
+            telemetry.deterministic_fallback_reason,
+            FALLBACK_REASON_UNCLASSIFIED
+        );
+        assert_eq!(telemetry.confidence_score, 0);
+        assert_eq!(telemetry.uncertainty_score, 1000);
+        assert!(
+            is_runtime_fallback_reason(telemetry.deterministic_fallback_reason),
+            "malformed posterior fallback must use a canonical runtime reason"
+        );
     }
 
     #[test]
