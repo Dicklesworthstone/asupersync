@@ -664,15 +664,29 @@ mod tests {
 // IDs, server-side session fixation defense, clear/expiry behavior, and CSRF
 // protection for existing sessions.
 
+use asupersync::Cx;
 use asupersync::web::extract::Request;
-use asupersync::web::handler::Handler;
 use asupersync::web::session::{
     MemoryStore, SameSite, Session, SessionData, SessionLayer, SessionStore,
 };
 use asupersync::web::{Response, StatusCode};
+use std::future::Future;
+use std::pin::Pin;
 
 const BEAD_ID: &str = "asupersync-nax796";
 const SUITE_ID: &str = "web_session_cookies";
+
+trait TestHandlerSyncExt: asupersync::web::handler::Handler {
+    fn call(&self, req: Request) -> Response {
+        futures_lite::future::block_on(asupersync::web::handler::Handler::call(
+            self,
+            &Cx::for_testing(),
+            req,
+        ))
+    }
+}
+
+impl<T> TestHandlerSyncExt for T where T: asupersync::web::handler::Handler + ?Sized {}
 
 #[derive(Debug)]
 struct SessionCookieCaseResult {
@@ -797,51 +811,57 @@ fn assert_hex_session_id(id: &str) {
 
 struct WriteSessionHandler;
 
-impl Handler for WriteSessionHandler {
-    fn call(&self, req: Request) -> Response {
-        let Some(session) = req.extensions.get_typed::<Session>() else {
-            return Response::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                b"missing session".to_vec(),
-            );
-        };
-        let next = session
-            .get("count")
-            .and_then(|count| count.parse::<u32>().ok())
-            .unwrap_or(0)
-            + 1;
-        session.insert("count", next.to_string());
-        Response::new(StatusCode::OK, format!("count={next}").into_bytes())
+impl asupersync::web::handler::Handler for WriteSessionHandler {
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
+            let Some(session) = req.extensions.get_typed::<Session>() else {
+                return Response::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    b"missing session".to_vec(),
+                );
+            };
+            let next = session
+                .get("count")
+                .and_then(|count| count.parse::<u32>().ok())
+                .unwrap_or(0)
+                + 1;
+            session.insert("count", next.to_string());
+            Response::new(StatusCode::OK, format!("count={next}").into_bytes())
+        })
     }
 }
 
 struct ClearSessionHandler;
 
-impl Handler for ClearSessionHandler {
-    fn call(&self, req: Request) -> Response {
-        if let Some(session) = req.extensions.get_typed::<Session>() {
-            session.clear();
-        }
-        Response::new(StatusCode::OK, b"cleared".to_vec())
+impl asupersync::web::handler::Handler for ClearSessionHandler {
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
+            if let Some(session) = req.extensions.get_typed::<Session>() {
+                session.clear();
+            }
+            Response::new(StatusCode::OK, b"cleared".to_vec())
+        })
     }
 }
 
 struct CsrfEchoOrMutateHandler;
 
-impl Handler for CsrfEchoOrMutateHandler {
-    fn call(&self, req: Request) -> Response {
-        let Some(session) = req.extensions.get_typed::<Session>() else {
-            return Response::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                b"missing session".to_vec(),
-            );
-        };
-        if req.method.eq_ignore_ascii_case("GET") {
-            let token = session.csrf_token().unwrap_or_default();
-            return Response::new(StatusCode::OK, token.into_bytes());
-        }
-        session.insert("mutated", "yes");
-        Response::new(StatusCode::OK, b"mutated".to_vec())
+impl asupersync::web::handler::Handler for CsrfEchoOrMutateHandler {
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
+            let Some(session) = req.extensions.get_typed::<Session>() else {
+                return Response::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    b"missing session".to_vec(),
+                );
+            };
+            if req.method.eq_ignore_ascii_case("GET") {
+                let token = session.csrf_token().unwrap_or_default();
+                return Response::new(StatusCode::OK, token.into_bytes());
+            }
+            session.insert("mutated", "yes");
+            Response::new(StatusCode::OK, b"mutated".to_vec())
+        })
     }
 }
 

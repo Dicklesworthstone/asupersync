@@ -7,8 +7,8 @@
 //! - E2E scenarios generate bundles for various failure types
 
 use asupersync::lab::crashpack::agent_proof::{
-    AgentTaskProofBundleBuilder, BlockerRecord, CommandRecord, CommitRecord, FileReservationRecord,
-    RchRecord, ReplayInstructions, ReplaySafetyLevel, ValidationFrontierRecord,
+    AgentTaskProofBundleBuilder, BlockerRecord, CommitRecord, FileReservationRecord, RchRecord,
+    ReplayInstructions, ReplaySafetyLevel, ValidationFrontierRecord,
 };
 use asupersync::lab::oracle::evidence::{
     BayesFactor, EvidenceEntry, EvidenceLine, EvidenceStrength, LogLikelihoodContributions,

@@ -23,10 +23,13 @@ mod common;
 use common::init_test_logging;
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use asupersync::Cx;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::combinator::bulkhead::BulkheadPolicy;
@@ -40,18 +43,30 @@ use asupersync::grpc::{
     parse_grpc_timeout, rate_limiter, timeout_interceptor, trace_interceptor,
 };
 use asupersync::web::extract::{Form, Json as JsonExtract, Path, Query, RawBody, Request, State};
-use asupersync::web::handler::{FnHandler, FnHandler1, Handler};
+use asupersync::web::handler::{FnHandler, FnHandler1};
 use asupersync::web::middleware::{
     AuthMiddleware, AuthPolicy, BulkheadMiddleware, CatchPanicMiddleware, CircuitBreakerMiddleware,
     LoadShedMiddleware, LoadShedPolicy, RetryMiddleware, TimeoutMiddleware,
 };
-use asupersync::web::response::StatusCode;
+use asupersync::web::response::{Response, StatusCode};
 use asupersync::web::router::{Router, get};
 
 fn init_test(name: &str) {
     init_test_logging();
     test_phase!(name);
 }
+
+trait TestHandlerSyncExt: asupersync::web::handler::Handler {
+    fn call(&self, req: Request) -> Response {
+        futures_lite::future::block_on(asupersync::web::handler::Handler::call(
+            self,
+            &Cx::for_testing(),
+            req,
+        ))
+    }
+}
+
+impl<T> TestHandlerSyncExt for T where T: asupersync::web::handler::Handler + ?Sized {}
 
 // ============================================================================
 // Section 1: Web Router Contract Tests (T5.2)
@@ -488,17 +503,21 @@ fn t54_unit_04_retry_with_idempotent_methods() {
     struct CountHandler {
         count: Arc<AtomicU32>,
     }
-    impl Handler for CountHandler {
-        fn call(&self, _req: Request) -> asupersync::web::response::Response {
-            let n = self.count.fetch_add(1, Ordering::SeqCst);
-            if n < 2 {
-                asupersync::web::response::Response::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    b"fail".to_vec(),
-                )
-            } else {
-                asupersync::web::response::Response::new(StatusCode::OK, b"ok".to_vec())
-            }
+    impl asupersync::web::handler::Handler for CountHandler {
+        fn call(
+            &self,
+            _cx: &Cx,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            let count = self.count.clone();
+            Box::pin(async move {
+                let n = count.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Response::new(StatusCode::INTERNAL_SERVER_ERROR, b"fail".to_vec())
+                } else {
+                    Response::new(StatusCode::OK, b"ok".to_vec())
+                }
+            })
         }
     }
 
@@ -538,13 +557,17 @@ fn t54_unit_05_retry_skips_non_idempotent() {
     struct FailHandler {
         count: Arc<AtomicU32>,
     }
-    impl Handler for FailHandler {
-        fn call(&self, _req: Request) -> asupersync::web::response::Response {
-            self.count.fetch_add(1, Ordering::SeqCst);
-            asupersync::web::response::Response::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                b"fail".to_vec(),
-            )
+    impl asupersync::web::handler::Handler for FailHandler {
+        fn call(
+            &self,
+            _cx: &Cx,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            let count = self.count.clone();
+            Box::pin(async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                Response::new(StatusCode::INTERNAL_SERVER_ERROR, b"fail".to_vec())
+            })
         }
     }
 
@@ -625,9 +648,15 @@ fn t54_unit_08_catch_panic_recovery() {
 
     test_section!("panicking_handler_returns_500");
     struct PanicHandler;
-    impl Handler for PanicHandler {
-        fn call(&self, _req: Request) -> asupersync::web::response::Response {
-            panic!("deliberate panic in handler");
+    impl asupersync::web::handler::Handler for PanicHandler {
+        fn call(
+            &self,
+            _cx: &Cx,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            Box::pin(async move {
+                panic!("deliberate panic in handler");
+            })
         }
     }
 

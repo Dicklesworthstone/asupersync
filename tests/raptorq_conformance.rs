@@ -1342,6 +1342,8 @@ mod pipeline_e2e {
         match reason {
             FailureReason::InsufficientSymbols { .. } => RejectReason::InsufficientRank,
             FailureReason::SymbolSizeMismatch { .. } => RejectReason::SymbolSizeMismatch,
+            FailureReason::ComputeBudgetExhausted { .. } => RejectReason::MemoryLimitReached,
+            FailureReason::EsiRateLimitExceeded { .. } => RejectReason::InvalidMetadata,
             FailureReason::SingularMatrix { .. }
             | FailureReason::SymbolEquationArityMismatch { .. }
             | FailureReason::ColumnIndexOutOfRange { .. }
@@ -1488,7 +1490,9 @@ mod pipeline_e2e {
                     | DecodeError::ColumnIndexOutOfRange { .. }
                     | DecodeError::SourceEsiOutOfRange { .. }
                     | DecodeError::InvalidSourceSymbolEquation { .. }
-                    | DecodeError::CorruptDecodedOutput { .. } => {
+                    | DecodeError::CorruptDecodedOutput { .. }
+                    | DecodeError::ComputeBudgetExhausted { .. }
+                    | DecodeError::EsiRateLimitExceeded { .. } => {
                         panic!("unexpected decode error {err:?}");
                     }
                 }
@@ -1796,6 +1800,8 @@ mod differential_harness {
             DecodeError::SourceEsiOutOfRange { .. } => "source_esi_out_of_range",
             DecodeError::InvalidSourceSymbolEquation { .. } => "invalid_source_symbol_equation",
             DecodeError::CorruptDecodedOutput { .. } => "corrupt_decoded_output",
+            DecodeError::ComputeBudgetExhausted { .. } => "compute_budget_exhausted",
+            DecodeError::EsiRateLimitExceeded { .. } => "esi_rate_limit_exceeded",
         }
     }
 

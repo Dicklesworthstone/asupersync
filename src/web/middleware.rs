@@ -2139,6 +2139,45 @@ mod tests {
         Request::new("GET", "/test")
     }
 
+    fn call_sync<H: Handler + ?Sized>(handler: &H, req: Request) -> Response {
+        futures_lite::future::block_on(Handler::call(handler, &crate::Cx::for_testing(), req))
+    }
+
+    macro_rules! impl_test_sync_call {
+        ($ty:ident) => {
+            impl<H: Handler> $ty<H> {
+                fn call(&self, req: Request) -> Response {
+                    call_sync(self, req)
+                }
+            }
+        };
+    }
+
+    impl_test_sync_call!(CorsMiddleware);
+    impl_test_sync_call!(TimeoutMiddleware);
+    impl_test_sync_call!(CircuitBreakerMiddleware);
+    impl_test_sync_call!(RateLimitMiddleware);
+    impl_test_sync_call!(BulkheadMiddleware);
+    impl_test_sync_call!(RetryMiddleware);
+    impl_test_sync_call!(CompressionMiddleware);
+    impl_test_sync_call!(RequestBodyLimitMiddleware);
+    impl_test_sync_call!(RequestIdMiddleware);
+    impl_test_sync_call!(RequestTraceMiddleware);
+    impl_test_sync_call!(AuthMiddleware);
+    impl_test_sync_call!(LoadShedMiddleware);
+    impl_test_sync_call!(CatchPanicMiddleware);
+    impl_test_sync_call!(NormalizePathMiddleware);
+    impl_test_sync_call!(SetResponseHeaderMiddleware);
+
+    impl<F> FnHandler<F>
+    where
+        Self: Handler,
+    {
+        fn call(&self, req: Request) -> Response {
+            call_sync(self, req)
+        }
+    }
+
     struct CountingHandler {
         calls: Arc<std::sync::atomic::AtomicU32>,
         delay: Duration,
@@ -2146,47 +2185,73 @@ mod tests {
     }
 
     impl Handler for CountingHandler {
-        fn call(&self, _req: Request) -> Response {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if !self.delay.is_zero() {
-                std::thread::sleep(self.delay);
-            }
-            Response::new(self.status, b"counted".to_vec())
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if !self.delay.is_zero() {
+                    std::thread::sleep(self.delay);
+                }
+                Response::new(self.status, b"counted".to_vec())
+            })
         }
     }
 
     struct InspectHandler;
 
     impl Handler for InspectHandler {
-        fn call(&self, req: Request) -> Response {
-            req.extensions.get("trace_id").map_or_else(
-                || Response::new(StatusCode::BAD_REQUEST, b"missing trace_id".to_vec()),
-                |value| Response::new(StatusCode::OK, value.as_bytes().to_vec()),
-            )
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            Box::pin(async move {
+                req.extensions.get("trace_id").map_or_else(
+                    || Response::new(StatusCode::BAD_REQUEST, b"missing trace_id".to_vec()),
+                    |value| Response::new(StatusCode::OK, value.as_bytes().to_vec()),
+                )
+            })
         }
     }
 
     struct FailingIfCalled;
 
     impl Handler for FailingIfCalled {
-        fn call(&self, _req: Request) -> Response {
-            Response::new(StatusCode::INTERNAL_SERVER_ERROR, b"inner-called".to_vec())
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            Box::pin(async {
+                Response::new(StatusCode::INTERNAL_SERVER_ERROR, b"inner-called".to_vec())
+            })
         }
     }
 
     struct InspectPathHandler;
 
     impl Handler for InspectPathHandler {
-        fn call(&self, req: Request) -> Response {
-            Response::new(StatusCode::OK, req.path.into_bytes())
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            Box::pin(async move { Response::new(StatusCode::OK, req.path.into_bytes()) })
         }
     }
 
     struct PanicHandler;
 
     impl Handler for PanicHandler {
-        fn call(&self, _req: Request) -> Response {
-            panic!("boom");
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            Box::pin(async { panic!("boom") })
         }
     }
 
@@ -2196,9 +2261,15 @@ mod tests {
     }
 
     impl Handler for AdvanceTimeHandler {
-        fn call(&self, _req: Request) -> Response {
-            set_timeout_test_time(self.next_time_ms);
-            Response::new(self.status, b"advanced".to_vec())
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            Box::pin(async move {
+                set_timeout_test_time(self.next_time_ms);
+                Response::new(self.status, b"advanced".to_vec())
+            })
         }
     }
 
@@ -2208,9 +2279,15 @@ mod tests {
     }
 
     impl Handler for AdvanceRequestTraceTimeHandler {
-        fn call(&self, _req: Request) -> Response {
-            set_request_trace_test_time(self.next_time_ms);
-            Response::new(StatusCode::OK, self.body.to_vec())
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            Box::pin(async move {
+                set_request_trace_test_time(self.next_time_ms);
+                Response::new(StatusCode::OK, self.body.to_vec())
+            })
         }
     }
 
@@ -4012,11 +4089,17 @@ mod tests {
     fn request_id_stores_in_extensions() {
         struct RequestIdEchoHandler;
         impl Handler for RequestIdEchoHandler {
-            fn call(&self, req: Request) -> Response {
-                req.extensions.get("request_id").map_or_else(
-                    || Response::new(StatusCode::BAD_REQUEST, b"no id".to_vec()),
-                    |val| Response::new(StatusCode::OK, val.as_bytes().to_vec()),
-                )
+            fn call(
+                &self,
+                _cx: &crate::Cx,
+                req: Request,
+            ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+                Box::pin(async move {
+                    req.extensions.get("request_id").map_or_else(
+                        || Response::new(StatusCode::BAD_REQUEST, b"no id".to_vec()),
+                        |val| Response::new(StatusCode::OK, val.as_bytes().to_vec()),
+                    )
+                })
             }
         }
 
@@ -4303,8 +4386,12 @@ mod tests {
     fn normalize_path_trim_preserves_root() {
         struct PathEchoHandler;
         impl Handler for PathEchoHandler {
-            fn call(&self, req: Request) -> Response {
-                Response::new(StatusCode::OK, req.path.into_bytes())
+            fn call(
+                &self,
+                _cx: &crate::Cx,
+                req: Request,
+            ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+                Box::pin(async move { Response::new(StatusCode::OK, req.path.into_bytes()) })
             }
         }
 
@@ -4318,8 +4405,12 @@ mod tests {
     fn normalize_path_always_adds_slash() {
         struct PathEchoHandler;
         impl Handler for PathEchoHandler {
-            fn call(&self, req: Request) -> Response {
-                Response::new(StatusCode::OK, req.path.into_bytes())
+            fn call(
+                &self,
+                _cx: &crate::Cx,
+                req: Request,
+            ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+                Box::pin(async move { Response::new(StatusCode::OK, req.path.into_bytes()) })
             }
         }
 
@@ -4332,8 +4423,12 @@ mod tests {
     fn normalize_path_always_skips_dotfiles() {
         struct PathEchoHandler;
         impl Handler for PathEchoHandler {
-            fn call(&self, req: Request) -> Response {
-                Response::new(StatusCode::OK, req.path.into_bytes())
+            fn call(
+                &self,
+                _cx: &crate::Cx,
+                req: Request,
+            ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+                Box::pin(async move { Response::new(StatusCode::OK, req.path.into_bytes()) })
             }
         }
 

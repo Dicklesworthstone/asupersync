@@ -375,6 +375,16 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    trait SyncHandlerExt {
+        fn call_sync(&self, req: super::super::extract::Request) -> Response;
+    }
+
+    impl<H: Handler> SyncHandlerExt for H {
+        fn call_sync(&self, req: super::super::extract::Request) -> Response {
+            futures_lite::future::block_on(Handler::call(self, &crate::Cx::for_testing(), req))
+        }
+    }
+
     // ================================================================
     // HealthStatus
     // ================================================================
@@ -644,7 +654,7 @@ mod tests {
         let handler = hc.liveness_handler();
 
         let req = super::super::extract::Request::new("GET", "/healthz");
-        let resp = handler.call(req);
+        let resp = handler.call_sync(req);
         assert_eq!(resp.status, StatusCode::OK);
         let body = std::str::from_utf8(&resp.body).unwrap();
         assert!(body.contains("healthy"));
@@ -658,7 +668,7 @@ mod tests {
         let handler = hc.liveness_handler();
 
         let req = super::super::extract::Request::new("GET", "/healthz");
-        let resp = handler.call(req);
+        let resp = handler.call_sync(req);
         assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
         let body = std::str::from_utf8(&resp.body).unwrap();
         assert_eq!(body, r#"{"status":"unhealthy"}"#);
@@ -674,7 +684,7 @@ mod tests {
         let handler = hc.readiness_handler();
 
         let req = super::super::extract::Request::new("GET", "/readyz");
-        let resp = handler.call(req);
+        let resp = handler.call_sync(req);
         assert_eq!(resp.status, StatusCode::OK);
         let body = std::str::from_utf8(&resp.body).unwrap();
         assert_eq!(body, r#"{"status":"degraded"}"#);
@@ -689,7 +699,7 @@ mod tests {
         let handler = hc.readiness_handler();
 
         let req = super::super::extract::Request::new("GET", "/readyz");
-        let resp = handler.call(req);
+        let resp = handler.call_sync(req);
         assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
         let body = std::str::from_utf8(&resp.body).unwrap();
         assert!(body.contains("not_ready"));
@@ -701,7 +711,7 @@ mod tests {
         let handler = hc.startup_handler();
 
         let req = super::super::extract::Request::new("GET", "/startupz");
-        let resp = handler.call(req);
+        let resp = handler.call_sync(req);
         assert_eq!(resp.status, StatusCode::OK);
         let body = std::str::from_utf8(&resp.body).unwrap();
         assert!(body.contains("started"));
@@ -714,7 +724,7 @@ mod tests {
         let handler = hc.startup_handler();
 
         let req = super::super::extract::Request::new("GET", "/startupz");
-        let resp = handler.call(req);
+        let resp = handler.call_sync(req);
         assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
         let body = std::str::from_utf8(&resp.body).unwrap();
         assert!(body.contains("starting"));

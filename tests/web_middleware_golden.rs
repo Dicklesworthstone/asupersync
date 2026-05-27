@@ -1,5 +1,6 @@
 //! Golden snapshot for the web middleware request/response chain.
 
+use asupersync::Cx;
 use asupersync::combinator::rate_limit::{RateLimitPolicy, WaitStrategy};
 use asupersync::types::Time;
 use asupersync::web::extract::Request;
@@ -32,18 +33,32 @@ struct EchoPayload<'a> {
 }
 
 impl Handler for EchoChainHandler {
-    fn call(&self, req: Request) -> Response {
-        let payload = EchoPayload {
-            method: &req.method,
-            path: &req.path,
-            authorization: req.header("authorization"),
-            request_id: req.extensions.get("request_id"),
-            trace_id: req.extensions.get("trace_id"),
-        };
-        let body = serde_json::to_vec_pretty(&payload).expect("echo payload should serialize");
-        Response::new(StatusCode::OK, body).header("x-handler", "echo")
+    fn call(
+        &self,
+        _cx: &Cx,
+        req: Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
+            let payload = EchoPayload {
+                method: &req.method,
+                path: &req.path,
+                authorization: req.header("authorization"),
+                request_id: req.extensions.get("request_id"),
+                trace_id: req.extensions.get("trace_id"),
+            };
+            let body = serde_json::to_vec_pretty(&payload).expect("echo payload should serialize");
+            Response::new(StatusCode::OK, body).header("x-handler", "echo")
+        })
     }
 }
+
+trait TestHandlerSyncExt: Handler {
+    fn call_sync(&self, req: Request) -> Response {
+        futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
+    }
+}
+
+impl<T> TestHandlerSyncExt for T where T: Handler + ?Sized {}
 
 #[derive(Debug, Serialize)]
 struct MiddlewareGolden {
@@ -126,20 +141,20 @@ fn request_response_chain() {
     let happy_pipeline = build_pipeline(41);
     let happy_request =
         Request::new("GET", "/golden/happy").with_header("authorization", "Bearer token-123");
-    let happy_response = happy_pipeline.call(happy_request.clone());
+    let happy_response = happy_pipeline.call_sync(happy_request.clone());
 
     let auth_fail_pipeline = build_pipeline(70);
     let auth_fail_request =
         Request::new("GET", "/golden/auth-fail").with_header("x-request-id", "client-auth-7");
-    let auth_fail_response = auth_fail_pipeline.call(auth_fail_request.clone());
+    let auth_fail_response = auth_fail_pipeline.call_sync(auth_fail_request.clone());
 
     let rate_limit_pipeline = build_pipeline(90);
     let rate_limit_warmup =
         Request::new("GET", "/golden/rate-limit").with_header("authorization", "Bearer token-123");
-    let rate_limit_warmup_response = rate_limit_pipeline.call(rate_limit_warmup.clone());
+    let rate_limit_warmup_response = rate_limit_pipeline.call_sync(rate_limit_warmup.clone());
     let rate_limit_request =
         Request::new("GET", "/golden/rate-limit").with_header("authorization", "Bearer token-123");
-    let rate_limit_response = rate_limit_pipeline.call(rate_limit_request.clone());
+    let rate_limit_response = rate_limit_pipeline.call_sync(rate_limit_request.clone());
 
     let golden = MiddlewareGolden {
         scenarios: vec![

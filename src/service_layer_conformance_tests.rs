@@ -913,6 +913,7 @@ mod conformance_tests {
                 .map(|i| MockResponse::TransientError(format!("fail{}", i)))
                 .collect();
 
+            let max_delay_ms = config.max_delay_ms;
             let handler = MockRetryHandler::new(responses, config);
             let result = handler.execute_with_retries();
 
@@ -925,7 +926,7 @@ mod conformance_tests {
             for attempt in 1..max_attempts {
                 let next_delay = std::cmp::min(
                     (expected_delay as f64 * multiplier) as u64,
-                    config.max_delay_ms
+                    max_delay_ms
                 );
                 prop_assert!(
                     next_delay >= expected_delay,

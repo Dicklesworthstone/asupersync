@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_comparisons)]
+
 //! Ambient-authority scanner contract.
 //!
 //! This integration wrapper runs the scanner tests from `src/audit/ambient.rs`
@@ -7,6 +9,10 @@
 
 #[path = "../src/audit/ambient.rs"]
 mod ambient;
+
+mod types {
+    pub use asupersync::types::*;
+}
 
 #[test]
 fn ambient_authority_catalog_has_no_unresolved_entries() {

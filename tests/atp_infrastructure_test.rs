@@ -5,9 +5,11 @@
 //! NO MOCKS for critical paths (peer IDs, sessions, protocol flows).
 
 use asupersync::cx::Cx;
-use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::net::atp;
-use asupersync::types::{Budget, Outcome};
+use asupersync::net::atp::protocol::{
+    AtpFeature, ClientHello, PeerId, SessionContextKind, SessionId, SessionNegotiator,
+    SessionPolicy, SessionTraceId, TransferNonce,
+};
+use asupersync::types::{CancelReason, Outcome};
 use serde_json::json;
 use std::time::{Duration, SystemTime};
 
@@ -117,26 +119,42 @@ impl AtpTestLogger {
 struct AtpPeerFactory;
 
 impl AtpPeerFactory {
-    fn create_peer_with_label(label: &str) -> asupersync::net::atp::protocol::PeerId {
-        asupersync::net::atp::protocol::PeerId::from_label(label)
+    fn create_peer_with_label(label: &str) -> PeerId {
+        PeerId::from_label(label)
     }
 
-    fn create_peer_with_entropy(entropy: u64) -> asupersync::net::atp::protocol::PeerId {
+    fn create_peer_with_entropy(entropy: u64) -> PeerId {
         // Create a deterministic but realistic peer ID using entropy
         let label = format!("peer_{:016x}", entropy);
         Self::create_peer_with_label(&label)
     }
 
-    fn create_session_with_timestamp() -> asupersync::net::atp::protocol::SessionId {
+    fn create_session_with_timestamp() -> SessionId {
         let timestamp_nanos = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
             .as_nanos() as u64;
-        asupersync::net::atp::protocol::SessionId::new(timestamp_nanos)
+        Self::create_session_with_id(timestamp_nanos)
     }
 
-    fn create_session_with_id(id: u64) -> asupersync::net::atp::protocol::SessionId {
-        asupersync::net::atp::protocol::SessionId::new(id)
+    fn create_session_with_id(id: u64) -> SessionId {
+        let initiator = PeerId::from_label(&format!("integration-initiator-{id:016x}"));
+        let responder = PeerId::from_label(&format!("integration-responder-{id:016x}"));
+        let nonce = TransferNonce::from_seed(&format!("integration-nonce-{id:016x}"));
+        let hello = ClientHello::new(
+            initiator,
+            responder,
+            nonce,
+            SessionContextKind::Direct,
+            SessionTraceId::new(id),
+        )
+        .with_features(&[AtpFeature::EncryptionPolicy]);
+        let mut policy = SessionPolicy::new(responder, id);
+        let mut server = SessionNegotiator::server(responder);
+        let (server_hello, _, _) = server
+            .accept_client_hello(&hello, &mut policy)
+            .expect("deterministic ATP session negotiation should succeed");
+        server_hello.session_id
     }
 }
 
@@ -146,11 +164,7 @@ fn atp_peer_identity_and_session_management_integration() {
 
     log.phase("setup");
 
-    // Create deterministic lab runtime for consistent testing
-    let mut runtime = LabRuntime::new(LabConfig::new(0x1234_atp1).max_steps(10_000));
-    let root = runtime.state.create_root_region(Budget::INFINITE);
-
-    runtime.run(&root, |cx| async {
+    {
         log.phase("peer_creation");
 
         // Create real peer IDs using different methods (NO MOCKS)
@@ -172,10 +186,10 @@ fn atp_peer_identity_and_session_management_integration() {
         let session_id2 = AtpPeerFactory::create_session_with_id(12345);
         let session_id3 = AtpPeerFactory::create_session_with_id(67890);
 
-        log.snapshot("session_timestamp", &session_timestamp.value());
-        log.snapshot("session_id1", &session_id1.value());
-        log.snapshot("session_id2", &session_id2.value());
-        log.snapshot("session_id3", &session_id3.value());
+        log.snapshot("session_timestamp", &session_timestamp.redacted());
+        log.snapshot("session_id1", &session_id1.redacted());
+        log.snapshot("session_id2", &session_id2.redacted());
+        log.snapshot("session_id3", &session_id3.redacted());
 
         log.phase("identity_verification");
 
@@ -188,16 +202,8 @@ fn atp_peer_identity_and_session_management_integration() {
         assert!(!log.assert_outcome("peer_different_entropy", &peer_entropy1, &peer_entropy3));
 
         // Verify session ID behavior
-        assert!(log.assert_outcome(
-            "session_deterministic_same_id",
-            &session_id1.value(),
-            &session_id2.value()
-        ));
-        assert!(!log.assert_outcome(
-            "session_different_id",
-            &session_id1.value(),
-            &session_id3.value()
-        ));
+        assert!(log.assert_outcome("session_deterministic_same_id", &session_id1, &session_id2));
+        assert!(!log.assert_outcome("session_different_id", &session_id1, &session_id3));
 
         // Verify peer IDs are non-empty and unique
         assert!(!peer_label.to_string().is_empty());
@@ -209,7 +215,8 @@ fn atp_peer_identity_and_session_management_integration() {
         // Test real Outcome handling in ATP context
         let success_outcome: Outcome<String, String> = Outcome::Ok("atp_success".to_string());
         let error_outcome: Outcome<String, String> = Outcome::Err("atp_error".to_string());
-        let cancelled_outcome: Outcome<String, String> = Outcome::Cancelled;
+        let cancelled_outcome: Outcome<String, String> =
+            Outcome::cancelled(CancelReason::user("atp-test-cancelled"));
 
         log.snapshot("success_outcome", &success_outcome);
         log.snapshot("error_outcome", &error_outcome);
@@ -231,7 +238,7 @@ fn atp_peer_identity_and_session_management_integration() {
         }
 
         match cancelled_outcome {
-            Outcome::Cancelled => {
+            Outcome::Cancelled(_) => {
                 assert!(log.assert_outcome("cancelled_outcome_match", &true, &true));
             }
             _ => panic!("Expected Cancelled outcome"),
@@ -240,21 +247,20 @@ fn atp_peer_identity_and_session_management_integration() {
         log.phase("context_integration");
 
         // Verify ATP components work with real asupersync context
+        let cx = Cx::for_testing();
         let current_budget = cx.budget();
-        log.snapshot("context_budget", &current_budget.remaining_ms());
+        log.snapshot("context_budget_poll_quota", &current_budget.poll_quota);
 
         // Create ATP components in real context
         let peer_in_context = AtpPeerFactory::create_peer_with_label("context_peer");
         let session_in_context = AtpPeerFactory::create_session_with_timestamp();
 
         log.snapshot("peer_in_context", &peer_in_context.to_string());
-        log.snapshot("session_in_context", &session_in_context.value());
+        log.snapshot("session_in_context", &session_in_context.redacted());
 
         assert!(!peer_in_context.to_string().is_empty());
-        assert!(session_in_context.value() > 0);
-
-        Ok::<(), anyhow::Error>(())
-    });
+        assert!(session_in_context.as_bytes().iter().any(|byte| *byte != 0));
+    }
 
     log.phase("teardown");
     log.test_end("pass");
@@ -269,16 +275,18 @@ fn atp_test_utilities_without_mocks() {
     // Test utilities that DON'T use mocks
     #[cfg(test)]
     {
-        use asupersync::net::atp::test_utils::{TEST_BUDGET, assertions, test_cx, test_data};
+        use asupersync::net::atp::test_utils::{
+            TEST_BUDGET_DEADLINE_MS, assertions, test_cx, test_data,
+        };
 
         log.phase("context_utilities");
 
         // Test context creation (real context, not mocked)
         let cx = test_cx();
-        let budget_remaining = cx.budget().remaining_ms();
-        log.snapshot("test_context_budget", &budget_remaining);
+        let budget_deadline_ms = cx.budget().deadline.map(asupersync::types::Time::as_millis);
+        log.snapshot("test_context_budget_deadline_ms", &budget_deadline_ms);
 
-        assert!(budget_remaining <= TEST_BUDGET.as_millis());
+        assert_eq!(budget_deadline_ms, Some(TEST_BUDGET_DEADLINE_MS));
 
         log.phase("test_data_utilities");
 
@@ -304,7 +312,8 @@ fn atp_test_utilities_without_mocks() {
 
         // Test assertion utilities with real outcomes
         let ok_outcome: Outcome<i32, String> = Outcome::Ok(123);
-        let cancelled_outcome: Outcome<i32, String> = Outcome::Cancelled;
+        let cancelled_outcome: Outcome<i32, String> =
+            Outcome::cancelled(CancelReason::user("atp-test-cancelled"));
 
         let extracted_value = assertions::assert_atp_ok(ok_outcome);
         assertions::assert_atp_cancelled(cancelled_outcome);

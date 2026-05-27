@@ -3,8 +3,7 @@
 //! Tests idempotency key behavior during connection interruptions.
 
 use asupersync::net::atp::protocol::outcome::{
-    AtpError, AtpOutcome, IdempotencyKey, OutcomeClass, RetryPolicy, TransferTranscript,
-    TransportError,
+    AtpOutcome, IdempotencyKey, OutcomeClass, RetryPolicy, TransferTranscript, TransportError,
 };
 
 #[test]

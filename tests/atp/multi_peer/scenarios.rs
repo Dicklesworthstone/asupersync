@@ -491,6 +491,10 @@ mod tests {
     #[test]
     fn test_scenario_filtering() {
         let all_scenarios = AllScenarios::all();
+        assert!(
+            !all_scenarios.is_empty(),
+            "Should have scenarios before filtering"
+        );
 
         // Test by type filtering
         let mailbox_scenarios = AllScenarios::by_type(&ScenarioType::Mailbox);
@@ -592,6 +596,11 @@ mod tests {
         let ids = AllScenarios::list_ids();
 
         assert!(!ids.is_empty(), "Should have scenario IDs");
+        assert_eq!(
+            scenarios.len(),
+            ids.len(),
+            "ID list should include every scenario"
+        );
 
         // Test lookup by ID
         for id in &ids {

@@ -7,7 +7,6 @@ use asupersync::atp::safety::{
     build_receive_plan, consent_token,
 };
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 

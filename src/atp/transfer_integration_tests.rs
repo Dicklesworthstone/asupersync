@@ -281,7 +281,7 @@ mod tests {
         log.phase("setup");
 
         // Create deterministic lab runtime for ATP transfer testing
-        let mut runtime = LabRuntime::new(LabConfig::new(0xatp_transfer_1).max_steps(20_000));
+        let mut runtime = LabRuntime::new(LabConfig::new(0xa7f7_0001).max_steps(20_000));
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
         runtime.run(&root, |cx| async {
@@ -393,7 +393,7 @@ mod tests {
 
         log.phase("setup");
 
-        let mut runtime = LabRuntime::new(LabConfig::new(0xatp_multi_peer).max_steps(30_000));
+        let mut runtime = LabRuntime::new(LabConfig::new(0xa7f7_0002).max_steps(30_000));
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
         runtime.run(&root, |cx| async {
@@ -491,7 +491,7 @@ mod tests {
 
         log.phase("setup");
 
-        let mut runtime = LabRuntime::new(LabConfig::new(0xatp_cancel_test).max_steps(15_000));
+        let mut runtime = LabRuntime::new(LabConfig::new(0xa7f7_0003).max_steps(15_000));
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
         runtime.run(&root, |cx| async {

@@ -7,7 +7,7 @@
 //! tagged by requirement level for coverage accounting.
 
 use asupersync::cx::Cx;
-use asupersync::net::atp::protocol::{AtpFrame, FrameType};
+use asupersync::net::atp::protocol::{AtpFrame, FrameType, ProtocolVersion};
 use asupersync::net::atp::sdk::{AtpSdk, SdkMode, SessionConfig, TransferPolicy};
 use asupersync::net::atp::test_utils::*;
 use asupersync::types::Outcome;
@@ -26,7 +26,7 @@ pub enum RequirementLevel {
 }
 
 /// Conformance test category for organization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TestCategory {
     /// Protocol frame handling
     FrameHandling,
@@ -239,7 +239,7 @@ fn test_frame_empty_payload_support(_cx: &Cx) -> ConformanceResult {
 fn test_frame_validation(_cx: &Cx) -> ConformanceResult {
     // Test frame with valid payload
     let payload = vec![1, 2, 3, 4];
-    match AtpFrame::new(FrameType::Data, payload.clone()) {
+    match AtpFrame::new(ProtocolVersion::CURRENT, FrameType::Data, payload.clone()) {
         Ok(frame) => {
             if frame.payload() != payload {
                 ConformanceResult::Fail {
@@ -342,7 +342,7 @@ fn test_transfer_size_limits(_cx: &Cx) -> ConformanceResult {
         ConformanceResult::Fail {
             reason: "Maximum transfer size must be greater than zero".to_string(),
         }
-    } else if policy.max_chunk_size_bytes > policy.max_transfer_size_bytes {
+    } else if u64::from(policy.max_chunk_size_bytes) > policy.max_transfer_size_bytes {
         ConformanceResult::Fail {
             reason: "Chunk size cannot exceed transfer size".to_string(),
         }

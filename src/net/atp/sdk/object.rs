@@ -596,14 +596,14 @@ mod tests {
 
     #[test]
     fn memory_object_store() {
-        crate::test_utils::init_test("memory_object_store");
+        crate::test_utils::init_test_logging();
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime
             .state
             .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
             region,
             crate::types::Budget::INFINITE,
         );
@@ -645,7 +645,6 @@ mod tests {
             })
             .unwrap();
 
-        runtime.run_until_stalled();
         result.join().unwrap();
 
         crate::test_complete!("memory_object_store");
@@ -686,7 +685,7 @@ mod tests {
 
     #[test]
     fn filesystem_object_store() {
-        crate::test_utils::init_test("filesystem_object_store");
+        crate::test_utils::init_test_logging();
 
         use tempfile::tempdir;
 
@@ -695,7 +694,7 @@ mod tests {
             .state
             .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
             region,
             crate::types::Budget::INFINITE,
         );
@@ -737,7 +736,6 @@ mod tests {
             })
             .unwrap();
 
-        runtime.run_until_stalled();
         result.join().unwrap();
 
         crate::test_complete!("filesystem_object_store");

@@ -1268,7 +1268,7 @@ mod tests {
             }
         }
 
-        for (section, (must_count, should_count)) in by_section {
+        for (section, (must_count, should_count)) in &by_section {
             println!(
                 "| {} | {}/{} | {}/{} | All | ✅ PASS |",
                 section, must_count, must_count, should_count, should_count

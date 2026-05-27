@@ -463,8 +463,9 @@ mod tests {
     use std::thread;
 
     use crate::bytes::Bytes;
-    use crate::runtime::Runtime;
+    use crate::runtime::RuntimeBuilder;
     use crate::time::TimerDriverHandle;
+    use crate::types::Budget;
     use crate::web::extract::{Json, Path, Query};
     use crate::web::response::StatusCode;
 
@@ -477,7 +478,7 @@ mod tests {
         let handler = FnHandler::new(index);
         let cx = Cx::for_testing();
         let req = Request::new("GET", "/");
-        let resp = Runtime::block_on_current(handler.call(&cx, req));
+        let resp = futures_lite::future::block_on(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::OK);
     }
 
@@ -492,7 +493,7 @@ mod tests {
         let mut params = std::collections::HashMap::new();
         params.insert("id".to_string(), "42".to_string());
         let req = Request::new("GET", "/users/42").with_path_params(params);
-        let resp = Runtime::block_on_current(handler.call(&cx, req));
+        let resp = futures_lite::future::block_on(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::OK);
     }
 
@@ -505,7 +506,7 @@ mod tests {
         let handler = FnHandler1::<_, Path<String>>::new(get_user);
         let cx = Cx::for_testing();
         let req = Request::new("GET", "/"); // no path params
-        let resp = Runtime::block_on_current(handler.call(&cx, req));
+        let resp = futures_lite::future::block_on(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     }
 
@@ -539,7 +540,7 @@ mod tests {
             .with_header("x-request-id", "req-123");
 
         let cx = Cx::for_testing();
-        let resp = Runtime::block_on_current(handler.call(&cx, req));
+        let resp = futures_lite::future::block_on(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),
@@ -582,7 +583,7 @@ mod tests {
             .with_body(Bytes::from_static(br#"{"event":"created"}"#));
 
         let cx = Cx::for_testing();
-        let resp = Runtime::block_on_current(handler.call(&cx, req));
+        let resp = futures_lite::future::block_on(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),
@@ -599,7 +600,7 @@ mod tests {
 
         let handler = AsyncCxFnHandler::new(index);
         let cx = Cx::for_testing();
-        let resp = Runtime::block_on_current(handler.call(&cx, Request::new("GET", "/")));
+        let resp = futures_lite::future::block_on(handler.call(&cx, Request::new("GET", "/")));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),
@@ -626,7 +627,8 @@ mod tests {
 
         let handler = AsyncCxFnHandler::new(inspect);
         let cx = Cx::for_testing();
-        let resp = Runtime::block_on_current(handler.call(&cx, Request::new("GET", "/inspect")));
+        let resp =
+            futures_lite::future::block_on(handler.call(&cx, Request::new("GET", "/inspect")));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
     }
@@ -661,11 +663,12 @@ mod tests {
         let expected_task = request_cx.task_id();
         let expected_region = request_cx.region_id();
         let expected_deadline = request_cx.budget().deadline;
+        let handler_cx = request_cx.clone();
 
         runtime.block_on_with_cx(request_cx, async move {
             let handler = AsyncCxFnHandler::new(inspect);
             let resp = handler
-                .call(&request_cx, Request::new("GET", "/ambient"))
+                .call(&handler_cx, Request::new("GET", "/ambient"))
                 .await;
             assert_eq!(resp.status, StatusCode::OK);
             assert_eq!(std::str::from_utf8(&resp.body).expect("utf8"), "ok");
@@ -696,7 +699,7 @@ mod tests {
                 });
 
                 let cx = Cx::for_testing();
-                let resp = Runtime::block_on_current(
+                let resp = futures_lite::future::block_on(
                     handler.call(&cx, Request::new("GET", "/thread-local-runtime")),
                 );
                 assert_eq!(resp.status, StatusCode::OK);
@@ -736,7 +739,7 @@ mod tests {
         });
 
         let cx = Cx::for_testing();
-        let resp = Runtime::block_on_current(
+        let resp = futures_lite::future::block_on(
             handler.call(&cx, Request::new("GET", "/ambient-no-runtime")),
         );
         assert_eq!(resp.status, StatusCode::OK);
@@ -759,7 +762,7 @@ mod tests {
         params.insert("id".to_string(), "7".to_string());
         let req = Request::new("GET", "/users/7").with_path_params(params);
         let cx = Cx::for_testing();
-        let resp = Runtime::block_on_current(handler.call(&cx, req));
+        let resp = futures_lite::future::block_on(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),
@@ -790,7 +793,7 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(Bytes::from_static(br#"{"name":"alice"}"#));
         let cx = Cx::for_testing();
-        let resp = Runtime::block_on_current(handler.call(&cx, req));
+        let resp = futures_lite::future::block_on(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::CREATED);
     }
 
@@ -816,7 +819,7 @@ mod tests {
             .with_query("tenant=blue")
             .with_body(Bytes::from_static(br#"{"name":"alice"}"#));
         let cx = Cx::for_testing();
-        let resp = Runtime::block_on_current(handler.call(&cx, req));
+        let resp = futures_lite::future::block_on(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),
@@ -860,7 +863,7 @@ mod tests {
             .with_body(Bytes::from_static(br#"{"event":"created"}"#));
 
         let cx = Cx::for_testing();
-        let resp = Runtime::block_on_current(handler.call(&cx, req));
+        let resp = futures_lite::future::block_on(handler.call(&cx, req));
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
             std::str::from_utf8(&resp.body).expect("utf8"),

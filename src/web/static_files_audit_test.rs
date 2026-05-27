@@ -8,6 +8,20 @@
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
+trait SyncHandlerExt {
+    fn call_sync(&self, req: crate::web::extract::Request) -> crate::web::response::Response;
+}
+
+impl SyncHandlerExt for crate::web::static_files::StaticFilesHandler {
+    fn call_sync(&self, req: crate::web::extract::Request) -> crate::web::response::Response {
+        futures_lite::future::block_on(crate::web::handler::Handler::call(
+            self,
+            &crate::Cx::for_testing(),
+            req,
+        ))
+    }
+}
+
 /// AUDIT: Verify ETag generation produces strong ETags (content-based, no W/ prefix)
 /// per RFC 9110 §8.8.3. Strong ETags must be content-derived, not metadata-derived.
 #[test]
@@ -111,7 +125,6 @@ fn audit_etag_matching_handles_weak_client_etags() {
 /// AUDIT: Verify that file serving includes proper ETag headers
 #[test]
 fn audit_file_serving_includes_etag_headers() {
-    use crate::web::handler::Handler;
     use std::fs;
     use tempfile::TempDir;
 
@@ -123,7 +136,7 @@ fn audit_file_serving_includes_etag_headers() {
     let static_files = crate::web::static_files::StaticFiles::new(dir.path());
     let response = static_files
         .handler()
-        .call(crate::web::extract::Request::new("GET", "/test.txt"));
+        .call_sync(crate::web::extract::Request::new("GET", "/test.txt"));
 
     // AUDIT: Response must include ETag header
     assert!(
@@ -154,7 +167,6 @@ fn audit_file_serving_includes_etag_headers() {
 /// AUDIT: Verify conditional requests (If-None-Match) work correctly with strong ETags
 #[test]
 fn audit_conditional_requests_with_strong_etags() {
-    use crate::web::handler::Handler;
     use std::fs;
     use tempfile::TempDir;
 
@@ -167,12 +179,12 @@ fn audit_conditional_requests_with_strong_etags() {
     let handler = static_files.handler();
 
     // First request to get ETag
-    let response1 = handler.call(crate::web::extract::Request::new("GET", "/test.txt"));
+    let response1 = handler.call_sync(crate::web::extract::Request::new("GET", "/test.txt"));
     assert_eq!(response1.status, crate::web::response::StatusCode::OK);
     let etag = response1.headers.get("etag").unwrap().clone();
 
     // AUDIT: Conditional request with matching ETag should return 304
-    let response2 = handler.call(
+    let response2 = handler.call_sync(
         crate::web::extract::Request::new("GET", "/test.txt").with_header("If-None-Match", etag),
     );
     assert_eq!(
@@ -191,7 +203,7 @@ fn audit_conditional_requests_with_strong_etags() {
 
     // AUDIT: Conditional request with non-matching ETag should return full content
     let different_etag = r#""different-etag-value""#;
-    let response3 = handler.call(
+    let response3 = handler.call_sync(
         crate::web::extract::Request::new("GET", "/test.txt")
             .with_header("If-None-Match", different_etag),
     );

@@ -9,6 +9,8 @@
 //! This module provides the foundation for validating QUIC protocol
 //! correctness and robustness at the packet and frame level.
 
+#![allow(unused_imports)]
+
 pub mod conformance;
 pub mod e2e_endpoints;
 pub mod fuzz_harness;

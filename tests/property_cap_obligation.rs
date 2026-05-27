@@ -479,19 +479,19 @@ fn obligation_token_commit_returns_correct_proof() {
     init_test_logging();
     test_phase!("obligation_token_commit_returns_correct_proof");
 
-    let token = ObligationToken::<SendPermit>::reserve("prop-commit");
+    let token = ObligationToken::<SendPermit>::reserve_test("prop-commit");
     let proof = token.commit();
     assert_eq!(proof.kind(), ObligationKind::SendPermit);
 
-    let token = ObligationToken::<AckKind>::reserve("prop-commit-ack");
+    let token = ObligationToken::<AckKind>::reserve_test("prop-commit-ack");
     let proof = token.commit();
     assert_eq!(proof.kind(), ObligationKind::Ack);
 
-    let token = ObligationToken::<LeaseKind>::reserve("prop-commit-lease");
+    let token = ObligationToken::<LeaseKind>::reserve_test("prop-commit-lease");
     let proof = token.commit();
     assert_eq!(proof.kind(), ObligationKind::Lease);
 
-    let token = ObligationToken::<IoOpKind>::reserve("prop-commit-io");
+    let token = ObligationToken::<IoOpKind>::reserve_test("prop-commit-io");
     let proof = token.commit();
     assert_eq!(proof.kind(), ObligationKind::IoOp);
 
@@ -503,11 +503,11 @@ fn obligation_token_abort_returns_correct_proof() {
     init_test_logging();
     test_phase!("obligation_token_abort_returns_correct_proof");
 
-    let token = ObligationToken::<SendPermit>::reserve("prop-abort");
+    let token = ObligationToken::<SendPermit>::reserve_test("prop-abort");
     let proof = token.abort();
     assert_eq!(proof.kind(), ObligationKind::SendPermit);
 
-    let token = ObligationToken::<AckKind>::reserve("prop-abort-ack");
+    let token = ObligationToken::<AckKind>::reserve_test("prop-abort-ack");
     let proof = token.abort();
     assert_eq!(proof.kind(), ObligationKind::Ack);
 
@@ -519,7 +519,7 @@ fn obligation_token_into_raw_disarms() {
     init_test_logging();
     test_phase!("obligation_token_into_raw_disarms");
 
-    let token = ObligationToken::<LeaseKind>::reserve("raw-escape");
+    let token = ObligationToken::<LeaseKind>::reserve_test("raw-escape");
     let raw = token.into_raw();
     assert_eq!(raw.kind, ObligationKind::Lease);
     drop(raw); // Should not panic.
@@ -530,7 +530,7 @@ fn obligation_token_into_raw_disarms() {
 #[test]
 #[should_panic(expected = "OBLIGATION TOKEN LEAKED")]
 fn obligation_token_drop_bomb_fires() {
-    let _token = ObligationToken::<SendPermit>::reserve("leaked");
+    let _token = ObligationToken::<SendPermit>::reserve_test("leaked");
     // Dropped without commit/abort — panics.
 }
 

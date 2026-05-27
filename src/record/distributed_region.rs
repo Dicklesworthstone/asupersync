@@ -1230,6 +1230,7 @@ mod tests {
             config,
             None,
             Budget::default(),
+            NodeId::new("test-node"),
         );
         assert_eq!(region.state, DistributedRegionState::Initializing);
 
@@ -1348,6 +1349,7 @@ mod tests {
             config,
             None,
             Budget::default(),
+            NodeId::new("test-node"),
         );
 
         // Only one replica.
@@ -1417,6 +1419,7 @@ mod tests {
             config,
             None,
             Budget::default(),
+            NodeId::new("test-node"),
         );
 
         assert_eq!(region.current_quorum(), 0);
@@ -1457,6 +1460,7 @@ mod tests {
             config,
             None,
             Budget::default(),
+            NodeId::new("test-node"),
         );
 
         region.add_replica(ReplicaInfo::new("r1", "addr1")).unwrap();
@@ -1493,6 +1497,7 @@ mod tests {
             config,
             None,
             Budget::default(),
+            NodeId::new("test-node"),
         );
         region.add_replica(ReplicaInfo::new("r1", "addr1")).unwrap();
         region.activate(Time::from_secs(0)).unwrap();
@@ -1599,6 +1604,7 @@ mod tests {
             config,
             None,
             Budget::default(),
+            NodeId::new("test-node"),
         );
         region.add_replica(ReplicaInfo::new("r1", "addr1")).unwrap();
         region.add_replica(ReplicaInfo::new("r2", "addr2")).unwrap();
@@ -1699,6 +1705,7 @@ mod tests {
             config,
             None,
             Budget::default(),
+            NodeId::new("test-node"),
         );
     }
 
@@ -1716,6 +1723,7 @@ mod tests {
             config,
             None,
             Budget::default(),
+            NodeId::new("test-node"),
         );
     }
 
@@ -1733,6 +1741,7 @@ mod tests {
             config,
             None,
             Budget::default(),
+            NodeId::new("test-node"),
         );
     }
 
@@ -1747,6 +1756,7 @@ mod tests {
             config,
             None,
             Budget::default(),
+            NodeId::new("test-node"),
         );
         region.add_replica(ReplicaInfo::new("r1", "addr1")).unwrap();
         region.add_replica(ReplicaInfo::new("r2", "addr2")).unwrap();

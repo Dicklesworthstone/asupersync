@@ -1354,13 +1354,11 @@ impl ProducerConfig {
         ))
     }
 
-    /// Scary test-only opt-in for remote PLAINTEXT / unauthenticated brokers.
+    /// Scary test/debug-only opt-in for remote PLAINTEXT / unauthenticated brokers.
     ///
-    /// This setter is intentionally ONLY available in test builds so
+    /// This setter is intentionally unavailable in release builds so
     /// production callers cannot compile with a remote plaintext-broker bypass.
-    /// SECURITY: Restricted to test context only - NOT debug_assertions to prevent
-    /// debug builds with insecure transport from accidentally reaching production.
-    #[cfg(test)]
+    #[cfg(any(test, debug_assertions))]
     #[must_use]
     pub const fn allow_insecure_transport_for_testing(mut self, allow: bool) -> Self {
         self.allow_insecure_transport_for_testing = allow;

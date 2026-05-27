@@ -694,6 +694,7 @@ mod tests {
     /// before `drop` ran. This is the standard manual-zeroize verification
     /// pattern (see `zeroize` crate's own tests).
     #[test]
+    #[allow(unsafe_code)]
     fn drop_zeroises_key_bytes() {
         use std::mem::ManuallyDrop;
 

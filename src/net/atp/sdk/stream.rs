@@ -553,14 +553,14 @@ mod tests {
 
     #[test]
     fn atp_writer_creation() {
-        crate::test_utils::init_test("atp_writer_creation");
+        crate::test_utils::init_test_logging();
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime
             .state
             .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
             region,
             crate::types::Budget::INFINITE,
         );
@@ -588,14 +588,14 @@ mod tests {
 
     #[test]
     fn atp_reader_creation() {
-        crate::test_utils::init_test("atp_reader_creation");
+        crate::test_utils::init_test_logging();
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime
             .state
             .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
             region,
             crate::types::Budget::INFINITE,
         );
@@ -623,14 +623,14 @@ mod tests {
 
     #[test]
     fn writer_chunk_operations() {
-        crate::test_utils::init_test("writer_chunk_operations");
+        crate::test_utils::init_test_logging();
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime
             .state
             .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
             region,
             crate::types::Budget::INFINITE,
         );
@@ -658,14 +658,14 @@ mod tests {
 
     #[test]
     fn reader_chunk_operations() {
-        crate::test_utils::init_test("reader_chunk_operations");
+        crate::test_utils::init_test_logging();
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime
             .state
             .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
             region,
             crate::types::Budget::INFINITE,
         );
@@ -693,14 +693,14 @@ mod tests {
 
     #[test]
     fn async_write_interface() {
-        crate::test_utils::init_test("async_write_interface");
+        crate::test_utils::init_test_logging();
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime
             .state
             .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
             region,
             crate::types::Budget::INFINITE,
         );
@@ -728,14 +728,14 @@ mod tests {
 
     #[test]
     fn async_read_interface() {
-        crate::test_utils::init_test("async_read_interface");
+        crate::test_utils::init_test_logging();
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime
             .state
             .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
             region,
             crate::types::Budget::INFINITE,
         );

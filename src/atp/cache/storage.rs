@@ -679,7 +679,7 @@ mod tests {
         let mut isolation = CacheStorageTestIsolation::new();
 
         // Create deterministic lab runtime for structured testing
-        let mut runtime = LabRuntime::new(LabConfig::new(0xcache_storage_1).max_steps(15_000));
+        let mut runtime = LabRuntime::new(LabConfig::new(0xcac4_e501).max_steps(15_000));
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
         runtime.run(&root, |cx| async {
@@ -863,7 +863,7 @@ mod tests {
     fn hybrid_storage_backend_selection_and_workflow() {
         let mut isolation = CacheStorageTestIsolation::new();
 
-        let mut runtime = LabRuntime::new(LabConfig::new(0xcache_hybrid_2).max_steps(10_000));
+        let mut runtime = LabRuntime::new(LabConfig::new(0xcac4_e502).max_steps(10_000));
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
         runtime.run(&root, |cx| async {
@@ -984,7 +984,7 @@ mod tests {
     fn storage_stress_and_metrics_validation() {
         let mut isolation = CacheStorageTestIsolation::new();
 
-        let mut runtime = LabRuntime::new(LabConfig::new(0xcache_stress_3).max_steps(25_000));
+        let mut runtime = LabRuntime::new(LabConfig::new(0xcac4_e503).max_steps(25_000));
         let root = runtime.state.create_root_region(Budget::INFINITE);
 
         runtime.run(&root, |cx| async {

@@ -14,6 +14,8 @@ use asupersync::distributed::snapshot::{
     BudgetSnapshot, RegionSnapshot, SnapshotError, TaskSnapshot, TaskState,
 };
 use asupersync::record::region::RegionState;
+use asupersync::security::AuthenticationTag;
+use asupersync::trace::distributed::vclock::VectorClock;
 use asupersync::types::{RegionId, TaskId, Time};
 use insta::{Settings, assert_debug_snapshot};
 
@@ -31,7 +33,7 @@ pub struct SnapshotFormatCapture {
     /// Deserialized snapshot (should match original)
     pub deserialized: Result<RegionSnapshot, SnapshotError>,
     /// Content hash for deduplication
-    pub content_hash: u64,
+    pub content_hash: String,
     /// Generation metadata
     pub metadata: SnapshotCaptureMetadata,
 }
@@ -60,7 +62,7 @@ fn generate_snapshot_capture(
         .iter()
         .map(|b| format!("{:02x}", b))
         .collect::<String>();
-    let content_hash = snapshot.content_hash();
+    let content_hash = snapshot.content_hash().to_hex();
 
     let deserialized = RegionSnapshot::from_bytes(&serialized);
 
@@ -116,6 +118,7 @@ fn snapshot_simple_open_region() {
         state: RegionState::Open,
         timestamp: Time::from_secs(1000),
         sequence: 5,
+        vector_clock: VectorClock::new(),
         origin_id: 1,
         epoch: 1,
         tasks: vec![TaskSnapshot {
@@ -133,6 +136,7 @@ fn snapshot_simple_open_region() {
         cancel_reason: None,
         parent: None,
         metadata: vec![1, 2, 3, 4],
+        auth_tag: AuthenticationTag::zero(),
     };
 
     let capture = generate_snapshot_capture(
@@ -156,6 +160,7 @@ fn snapshot_complex_closing_region() {
         state: RegionState::Closing,
         timestamp: Time::from_millis(1_500_000), // 25 minutes
         sequence: 42,
+        vector_clock: VectorClock::new(),
         origin_id: 1,
         epoch: 1,
         tasks: vec![
@@ -188,6 +193,7 @@ fn snapshot_complex_closing_region() {
         cancel_reason: Some("timeout_exceeded".to_string()),
         parent: Some(RegionId::new_for_test(0, 1)),
         metadata: vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF],
+        auth_tag: AuthenticationTag::zero(),
     };
 
     let capture = generate_snapshot_capture(
@@ -211,6 +217,7 @@ fn snapshot_finalized_region() {
         state: RegionState::Closed,
         timestamp: Time::from_nanos(9_876_543_210_123), // Large timestamp
         sequence: 999,
+        vector_clock: VectorClock::new(),
         origin_id: 1,
         epoch: 1,
         tasks: vec![],    // No tasks in finalized region
@@ -224,6 +231,7 @@ fn snapshot_finalized_region() {
         cancel_reason: Some("region_completed".to_string()),
         parent: Some(RegionId::new_for_test(199, 14)),
         metadata: vec![], // Empty metadata
+        auth_tag: AuthenticationTag::zero(),
     };
 
     let capture = generate_snapshot_capture(
@@ -247,6 +255,7 @@ fn snapshot_draining_region() {
         state: RegionState::Draining,
         timestamp: Time::from_secs(7200), // 2 hours
         sequence: 128,
+        vector_clock: VectorClock::new(),
         origin_id: 1,
         epoch: 1,
         tasks: vec![TaskSnapshot {
@@ -268,6 +277,7 @@ fn snapshot_draining_region() {
         cancel_reason: Some("user_cancel_request".to_string()),
         parent: Some(RegionId::new_for_test(299, 7)),
         metadata: b"drain_metadata".to_vec(),
+        auth_tag: AuthenticationTag::zero(),
     };
 
     let capture = generate_snapshot_capture(
@@ -291,6 +301,7 @@ fn snapshot_all_task_states() {
         state: RegionState::Open,
         timestamp: Time::from_millis(12345),
         sequence: 77,
+        vector_clock: VectorClock::new(),
         origin_id: 1,
         epoch: 1,
         tasks: vec![
@@ -330,6 +341,7 @@ fn snapshot_all_task_states() {
         cancel_reason: None,
         parent: None,
         metadata: b"all_states_test".to_vec(),
+        auth_tag: AuthenticationTag::zero(),
     };
 
     let capture = generate_snapshot_capture(
@@ -378,6 +390,7 @@ fn snapshot_maximum_complexity() {
         state: RegionState::Finalizing,
         timestamp: Time::from_nanos(18_446_744_073_709_551_615), // Near u64::MAX
         sequence: u64::MAX,
+        vector_clock: VectorClock::new(),
         origin_id: 1,
         epoch: 1,
         tasks,
@@ -391,6 +404,7 @@ fn snapshot_maximum_complexity() {
         cancel_reason: Some("maximum_complexity_test_scenario_with_very_long_reason_string_to_test_string_serialization".to_string()),
         parent: Some(RegionId::new_for_test(499, 98)),
         metadata: (0..100u8).collect(), // 100 bytes of metadata
+        auth_tag: AuthenticationTag::zero(),
     };
 
     let capture = generate_snapshot_capture(

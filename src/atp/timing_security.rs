@@ -448,6 +448,7 @@ impl Default for TimingSideChannelDetector {
 mod tests {
     use super::*;
     use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn test_precision_timer() {

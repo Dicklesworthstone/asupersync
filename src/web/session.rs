@@ -1107,6 +1107,20 @@ mod tests {
     use super::super::response::StatusCode;
     use super::*;
 
+    fn call_sync<H: Handler + ?Sized>(handler: &H, req: Request) -> Response {
+        futures_lite::future::block_on(Handler::call(handler, &crate::Cx::for_testing(), req))
+    }
+
+    impl<S, H> SessionMiddleware<S, H>
+    where
+        S: SessionStore,
+        H: Handler,
+    {
+        fn call(&self, req: Request) -> Response {
+            call_sync(self, req)
+        }
+    }
+
     // ================================================================
     // SessionData
     // ================================================================
@@ -1336,20 +1350,26 @@ mod tests {
     struct TestHandler;
 
     impl Handler for TestHandler {
-        fn call(&self, req: Request) -> Response {
-            // Try to get session from extensions.
-            req.extensions.get_typed::<Session>().map_or_else(
-                || Response::new(StatusCode::OK, b"no session".to_vec()),
-                |session| {
-                    let count = session
-                        .get("count")
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(0);
-                    session.insert("count", (count + 1).to_string());
-                    let body = format!("count={}", count + 1);
-                    Response::new(StatusCode::OK, body.into_bytes())
-                },
-            )
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            req: Request,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+            Box::pin(async move {
+                // Try to get session from extensions.
+                req.extensions.get_typed::<Session>().map_or_else(
+                    || Response::new(StatusCode::OK, b"no session".to_vec()),
+                    |session| {
+                        let count = session
+                            .get("count")
+                            .and_then(|s| s.parse::<u32>().ok())
+                            .unwrap_or(0);
+                        session.insert("count", (count + 1).to_string());
+                        let body = format!("count={}", count + 1);
+                        Response::new(StatusCode::OK, body.into_bytes())
+                    },
+                )
+            })
         }
     }
 
@@ -1457,14 +1477,21 @@ mod tests {
     fn middleware_regenerate_rotates_id_and_preserves_data() {
         struct LoginHandler;
         impl Handler for LoginHandler {
-            fn call(&self, req: Request) -> Response {
-                if let Some(session) = req.extensions.get_typed::<Session>() {
-                    // Simulate a successful login: stash an authenticated
-                    // user_id and rotate the session ID.
-                    session.insert("user_id", "alice");
-                    session.regenerate();
-                }
-                Response::new(StatusCode::OK, b"logged in".to_vec())
+            fn call(
+                &self,
+                _cx: &crate::Cx,
+                req: Request,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>
+            {
+                Box::pin(async move {
+                    if let Some(session) = req.extensions.get_typed::<Session>() {
+                        // Simulate a successful login: stash an authenticated
+                        // user_id and rotate the session ID.
+                        session.insert("user_id", "alice");
+                        session.regenerate();
+                    }
+                    Response::new(StatusCode::OK, b"logged in".to_vec())
+                })
             }
         }
 
@@ -1541,12 +1568,19 @@ mod tests {
         // not re-set it with the same ID.
         struct ClearHandler;
         impl Handler for ClearHandler {
-            fn call(&self, req: Request) -> Response {
-                if let Some(session) = req.extensions.get_typed::<Session>() {
-                    session.insert("data", "value"); // ensure non-empty first
-                    session.clear();
-                }
-                Response::new(StatusCode::OK, b"cleared".to_vec())
+            fn call(
+                &self,
+                _cx: &crate::Cx,
+                req: Request,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>
+            {
+                Box::pin(async move {
+                    if let Some(session) = req.extensions.get_typed::<Session>() {
+                        session.insert("data", "value"); // ensure non-empty first
+                        session.clear();
+                    }
+                    Response::new(StatusCode::OK, b"cleared".to_vec())
+                })
             }
         }
 
@@ -1786,17 +1820,23 @@ mod tests {
     /// call and the middleware's post-handler rotation logic.
     struct PanicAfterRegenerateHandler;
     impl Handler for PanicAfterRegenerateHandler {
-        fn call(&self, req: Request) -> Response {
-            let session = req
-                .extensions
-                .get_typed::<Session>()
-                .expect("middleware injects Session");
-            // Simulate the auth boundary: handler authenticates the
-            // user and then rotates the session ID per the hifab2
-            // protocol …
-            session.regenerate();
-            // … then unwinds before returning a Response.
-            panic!("simulated handler panic after regenerate");
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            req: Request,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+            Box::pin(async move {
+                let session = req
+                    .extensions
+                    .get_typed::<Session>()
+                    .expect("middleware injects Session");
+                // Simulate the auth boundary: handler authenticates the
+                // user and then rotates the session ID per the hifab2
+                // protocol …
+                session.regenerate();
+                // … then unwinds before returning a Response.
+                panic!("simulated handler panic after regenerate");
+            })
         }
     }
 
@@ -1853,8 +1893,12 @@ mod tests {
     /// with a pending regenerate flag are eligible for invalidation.
     struct PanicNoRegenerateHandler;
     impl Handler for PanicNoRegenerateHandler {
-        fn call(&self, _req: Request) -> Response {
-            panic!("simulated handler panic without regenerate");
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            _req: Request,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+            Box::pin(async { panic!("simulated handler panic without regenerate") })
         }
     }
 
@@ -1963,13 +2007,19 @@ mod tests {
     /// did not double-delete).
     struct RegenerateAndReturnHandler;
     impl Handler for RegenerateAndReturnHandler {
-        fn call(&self, req: Request) -> Response {
-            let session = req
-                .extensions
-                .get_typed::<Session>()
-                .expect("middleware injects Session");
-            session.regenerate();
-            Response::new(StatusCode::OK, b"ok".to_vec())
+        fn call(
+            &self,
+            _cx: &crate::Cx,
+            req: Request,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
+            Box::pin(async move {
+                let session = req
+                    .extensions
+                    .get_typed::<Session>()
+                    .expect("middleware injects Session");
+                session.regenerate();
+                Response::new(StatusCode::OK, b"ok".to_vec())
+            })
         }
     }
 
@@ -2019,11 +2069,18 @@ mod tests {
     fn middleware_preserves_inner_handler_set_cookie() {
         struct CsrfEmittingHandler;
         impl Handler for CsrfEmittingHandler {
-            fn call(&self, _req: Request) -> Response {
-                let mut resp = Response::new(StatusCode::OK, b"ok".to_vec());
-                // Inner handler emits its own cookie via the canonical API.
-                resp.append_set_cookie("csrf_token=abc123; HttpOnly; Path=/");
-                resp
+            fn call(
+                &self,
+                _cx: &crate::Cx,
+                _req: Request,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>>
+            {
+                Box::pin(async {
+                    let mut resp = Response::new(StatusCode::OK, b"ok".to_vec());
+                    // Inner handler emits its own cookie via the canonical API.
+                    resp.append_set_cookie("csrf_token=abc123; HttpOnly; Path=/");
+                    resp
+                })
             }
         }
 

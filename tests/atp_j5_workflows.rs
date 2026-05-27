@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 //! ATP-J5 workflow integration tests.
 //!
 //! Tests the complete ATP logistics workflows for CI artifacts, datasets,
@@ -51,7 +53,7 @@ fn test_ci_artifact_pull_workflow() {
         let mut coordinator = AtpWorkflowCoordinator::new(OutputFormat::Json).unwrap();
 
         let ci_args = AtpCiArgs {
-            action: AtpCiAction::Pull(crate::cli::AtpCiPullArgs {
+            action: AtpCiAction::Pull(asupersync::cli::AtpCiPullArgs {
                 build_id: Some("build-12345".to_string()),
                 tags: vec!["linux".to_string()],
                 destination: PathBuf::from("/tmp/artifacts"),
@@ -109,7 +111,7 @@ fn test_dataset_get_workflow() {
         let mut coordinator = AtpWorkflowCoordinator::new(OutputFormat::Json).unwrap();
 
         let dataset_args = AtpDatasetArgs {
-            action: AtpDatasetAction::Get(crate::cli::AtpDatasetGetArgs {
+            action: AtpDatasetAction::Get(asupersync::cli::AtpDatasetGetArgs {
                 dataset_id: "ml-dataset-v1.0".to_string(),
                 version: Some("1.0".to_string()),
                 destination: Some(PathBuf::from("/tmp/datasets")),
@@ -165,7 +167,7 @@ fn test_fuzz_corpus_minimize_workflow() {
         let mut coordinator = AtpWorkflowCoordinator::new(OutputFormat::Json).unwrap();
 
         let fuzz_args = AtpFuzzArgs {
-            action: AtpFuzzAction::Minimize(crate::cli::AtpFuzzMinimizeArgs {
+            action: AtpFuzzAction::Minimize(asupersync::cli::AtpFuzzMinimizeArgs {
                 corpus_path,
                 target: "parser-fuzzer".to_string(),
                 coverage_threshold: 0.95,
@@ -232,7 +234,7 @@ fn test_release_install_workflow() {
         let mut coordinator = AtpWorkflowCoordinator::new(OutputFormat::Json).unwrap();
 
         let release_args = AtpReleaseArgs {
-            action: AtpReleaseAction::Install(crate::cli::AtpReleaseInstallArgs {
+            action: AtpReleaseAction::Install(asupersync::cli::AtpReleaseInstallArgs {
                 release_id: "app-v1.0.0".to_string(),
                 version: Some("1.0.0".to_string()),
                 destination: Some(PathBuf::from("/opt/app")),
@@ -283,7 +285,7 @@ fn test_proof_bundle_retrieve_workflow() {
         let mut coordinator = AtpWorkflowCoordinator::new(OutputFormat::Json).unwrap();
 
         let archive_args = AtpArchiveArgs {
-            action: AtpArchiveAction::Retrieve(crate::cli::AtpArchiveRetrieveArgs {
+            action: AtpArchiveAction::Retrieve(asupersync::cli::AtpArchiveRetrieveArgs {
                 archive_id: "proof-12345".to_string(),
                 destination: Some(PathBuf::from("/tmp/proofs")),
                 temporary: false,

@@ -130,7 +130,7 @@ fn rst_stream_protocol_error_maps_to_status_internal() {
 fn connection_state_add_remove_stream_is_symmetric() {
     // Pin (b) at the public API surface: adding then removing
     // a stream-id produces an empty active_streams map.
-    let mut state = ConnectionState::new();
+    let state = ConnectionState::new();
     state.add_stream(7, 32).expect("add OK");
     assert_eq!(state.active_stream_count(), 1);
 
@@ -151,7 +151,7 @@ fn connection_state_remove_unknown_stream_is_idempotent_noop() {
     // the transport adapter calls remove_stream twice (e.g. on
     // both the dispatch path AND a Drop-guard fallback) —
     // double-remove is safe.
-    let mut state = ConnectionState::new();
+    let state = ConnectionState::new();
     state.add_stream(42, 32).expect("add");
     state.remove_stream(42);
     state.remove_stream(42); // second remove — must not panic
@@ -171,7 +171,7 @@ fn connection_state_cleanup_idle_removes_orphans_within_timeout() {
     //
     // We use a 0-ns threshold so the cleanup removes every
     // active stream — verifying the sweep contract works.
-    let mut state = ConnectionState::new();
+    let state = ConnectionState::new();
     for stream_id in 0..5u32 {
         state.add_stream(stream_id, 32).expect("add");
     }
@@ -192,12 +192,12 @@ fn connection_state_max_concurrent_enforced_after_orphan_cleanup() {
     // Pin (d) interaction: after cleanup_idle_streams runs,
     // the freed slot count should allow new streams up to
     // max_concurrent. This pins the recovery property.
-    let mut state = ConnectionState::new();
+    let state = ConnectionState::new();
     for stream_id in 0..32u32 {
         state.add_stream(stream_id, 32).expect("under cap");
     }
     // At cap — next add must reject.
-    let result: Result<(), _> = state.add_stream(99, 32);
+    let result = state.add_stream(99, 32);
     assert!(result.is_err(), "at-cap add must reject");
 
     // Sweep — now under cap.

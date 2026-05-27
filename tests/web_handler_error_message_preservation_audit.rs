@@ -328,6 +328,7 @@ fn fn_handler_call_dispatches_via_into_response() {
 
 #[cfg(feature = "test-internals")]
 mod behavioral {
+    use asupersync::Cx;
     use asupersync::web::extract::Request;
     use asupersync::web::handler::{FnHandler, Handler};
     use asupersync::web::response::{IntoResponse, Response, StatusCode};
@@ -361,6 +362,16 @@ mod behavioral {
         Request::new("GET", "/audit/error")
     }
 
+    trait SyncHandlerExt {
+        fn call_sync(&self, req: Request) -> Response;
+    }
+
+    impl<H: Handler> SyncHandlerExt for H {
+        fn call_sync(&self, req: Request) -> Response {
+            futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
+        }
+    }
+
     #[test]
     fn handler_returning_err_with_custom_display_preserves_message() {
         // Pin AUDIT-CRITICAL: a handler that returns
@@ -373,7 +384,7 @@ mod behavioral {
                 detail: "user-controlled detail must survive".to_string(),
             })
         });
-        let resp = handler.call(make_request());
+        let resp = handler.call_sync(make_request());
 
         // Status reflects the user's choice (BAD_REQUEST), NOT
         // a framework-imposed 500.
@@ -417,7 +428,7 @@ mod behavioral {
         // (e.g. always producing 500) would catastrophically
         // break every handler.
         let handler = FnHandler::new(|| -> Result<&'static str, DomainError> { Ok("hello") });
-        let resp = handler.call(make_request());
+        let resp = handler.call_sync(make_request());
 
         assert_eq!(resp.status, StatusCode::OK);
         let body = std::str::from_utf8(&resp.body).expect("utf8");
@@ -438,7 +449,7 @@ mod behavioral {
                 "request body exceeded 10 MiB cap".to_string(),
             )
         });
-        let resp = handler.call(make_request());
+        let resp = handler.call_sync(make_request());
 
         assert_eq!(resp.status, StatusCode::PAYLOAD_TOO_LARGE);
         let body = std::str::from_utf8(&resp.body).expect("utf8");
@@ -463,7 +474,7 @@ mod behavioral {
                 }))
             },
         );
-        let resp = handler.call(make_request());
+        let resp = handler.call_sync(make_request());
 
         assert_eq!(resp.status, StatusCode::BAD_REQUEST);
         let body = std::str::from_utf8(&resp.body).expect("utf8");

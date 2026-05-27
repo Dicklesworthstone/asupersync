@@ -334,10 +334,13 @@ fn catch_panic_uses_assert_unwind_safe_for_handler_call() {
 
 #[cfg(feature = "test-internals")]
 mod behavioral {
+    use asupersync::Cx;
     use asupersync::web::extract::Request;
     use asupersync::web::handler::Handler;
     use asupersync::web::middleware::CatchPanicMiddleware;
     use asupersync::web::response::{Response, StatusCode};
+    use std::future::Future;
+    use std::pin::Pin;
 
     /// Handler that always panics with the given static message.
     struct PanickingHandler {
@@ -345,7 +348,11 @@ mod behavioral {
     }
 
     impl Handler for PanickingHandler {
-        fn call(&self, _req: Request) -> Response {
+        fn call(
+            &self,
+            _cx: &Cx,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
             panic!("{}", self.message);
         }
     }
@@ -354,8 +361,22 @@ mod behavioral {
     struct OkHandler;
 
     impl Handler for OkHandler {
-        fn call(&self, _req: Request) -> Response {
-            Response::new(StatusCode::OK, b"ok".to_vec())
+        fn call(
+            &self,
+            _cx: &Cx,
+            _req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            Box::pin(async move { Response::new(StatusCode::OK, b"ok".to_vec()) })
+        }
+    }
+
+    trait SyncHandlerExt {
+        fn call_sync(&self, req: Request) -> Response;
+    }
+
+    impl<H: Handler> SyncHandlerExt for H {
+        fn call_sync(&self, req: Request) -> Response {
+            futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
         }
     }
 
@@ -375,7 +396,7 @@ mod behavioral {
         };
         let middleware = CatchPanicMiddleware::new(handler);
         let req = make_request("GET", "/audit/panic");
-        let resp = middleware.call(req);
+        let resp = middleware.call_sync(req);
 
         assert_eq!(
             resp.status,
@@ -403,14 +424,18 @@ mod behavioral {
         // AND `panic!("{x}", x = ...)` (String payload) paths.
         struct FormattedPanic;
         impl Handler for FormattedPanic {
-            fn call(&self, _req: Request) -> Response {
+            fn call(
+                &self,
+                _cx: &Cx,
+                _req: Request,
+            ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
                 let secret = "PASSWORD=hunter2";
                 panic!("formatted panic with secret: {secret}");
             }
         }
         let middleware = CatchPanicMiddleware::new(FormattedPanic);
         let req = make_request("POST", "/audit/formatted");
-        let resp = middleware.call(req);
+        let resp = middleware.call_sync(req);
 
         assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
         // CRITICAL: the secret must NOT appear in the body even
@@ -432,7 +457,7 @@ mod behavioral {
         // the Ok arm) would break every request.
         let middleware = CatchPanicMiddleware::new(OkHandler);
         let req = make_request("GET", "/audit/ok");
-        let resp = middleware.call(req);
+        let resp = middleware.call_sync(req);
 
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(&*resp.body, b"ok");
@@ -448,10 +473,10 @@ mod behavioral {
         let panicking = CatchPanicMiddleware::new(PanickingHandler {
             message: "first request panic",
         });
-        let _ = panicking.call(make_request("GET", "/p"));
+        let _ = panicking.call_sync(make_request("GET", "/p"));
 
         let ok = CatchPanicMiddleware::new(OkHandler);
-        let resp = ok.call(make_request("GET", "/ok"));
+        let resp = ok.call_sync(make_request("GET", "/ok"));
         assert_eq!(resp.status, StatusCode::OK);
     }
 }

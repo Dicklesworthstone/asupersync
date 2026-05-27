@@ -1,5 +1,7 @@
 //! Contract tests for the ASW operator swarm-status surface.
 
+#![cfg(feature = "cli")]
+
 use asupersync::cli::doctor::{
     agent_swarm_status_contract, parse_git_short_status, run_agent_swarm_status_smoke,
     validate_agent_swarm_status_contract,

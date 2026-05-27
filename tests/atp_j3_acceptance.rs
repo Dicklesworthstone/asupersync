@@ -201,7 +201,7 @@ mod tests {
             access_count: 1,
             ttl: Duration::from_secs(24 * 60 * 60),
             encrypted: true,
-            storage_location: StorageLocation::Memory,
+            storage_location: StorageLocation::Memory("proof-preserved".to_string()),
             verification: VerificationMetadata {
                 content_verified: true,
                 manifest_verified: true,
@@ -219,7 +219,7 @@ mod tests {
             access_count: 1,
             ttl: Duration::from_secs(24 * 60 * 60),
             encrypted: true,
-            storage_location: StorageLocation::Memory,
+            storage_location: StorageLocation::Memory("no-proof-evictable".to_string()),
             verification: VerificationMetadata {
                 content_verified: true,
                 manifest_verified: true,

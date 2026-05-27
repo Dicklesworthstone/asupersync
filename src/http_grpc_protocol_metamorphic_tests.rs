@@ -1455,7 +1455,7 @@ mod tests {
                 let reassembled = MockGrpcMessage::reassemble_fragments(&fragments);
 
                 // Frame integrity: reassembled frame should be identical to original
-                prop_assert_eq!(reassembled, frame,
+                prop_assert_eq!(&reassembled, &frame,
                     "Frame corrupted during fragmentation/reassembly");
 
                 // Message content preservation
@@ -1473,7 +1473,7 @@ mod tests {
                 if !different_boundaries.is_empty() {
                     let alt_fragments = MockGrpcMessage::fragment_at_boundaries(&frame, &different_boundaries);
                     let alt_reassembled = MockGrpcMessage::reassemble_fragments(&alt_fragments);
-                    prop_assert_eq!(alt_reassembled, frame,
+                    prop_assert_eq!(&alt_reassembled, &frame,
                         "Different fragmentation boundaries produced different results");
                 }
             }

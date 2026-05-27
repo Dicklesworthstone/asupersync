@@ -10,6 +10,7 @@
 //! The server MUST reject this by NOT setting any Access-Control-Allow-Origin header,
 //! causing the browser to block the request. This prevents credential reflection attacks.
 
+use asupersync::Cx;
 use asupersync::web::extract::Request;
 use asupersync::web::middleware::{CorsMiddleware, CorsPolicy};
 use asupersync::web::{FnHandler, Handler, StatusCode};
@@ -17,6 +18,14 @@ use asupersync::web::{FnHandler, Handler, StatusCode};
 fn ok_handler() -> asupersync::web::Response {
     asupersync::web::Response::new(StatusCode::OK, "test response")
 }
+
+trait TestHandlerSyncExt: Handler {
+    fn call_sync(&self, req: Request) -> asupersync::web::Response {
+        futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
+    }
+}
+
+impl<T> TestHandlerSyncExt for T where T: Handler + ?Sized {}
 
 #[test]
 fn cors_preflight_wildcard_credentials_security_audit() {
@@ -48,7 +57,7 @@ fn cors_preflight_wildcard_credentials_security_audit() {
                 "authorization,content-type",
             );
 
-        let response = middleware.call(preflight_request);
+        let response = middleware.call_sync(preflight_request);
 
         println!("Preflight response status: {:?}", response.status);
         println!("Response headers: {:?}", response.headers);
@@ -106,7 +115,7 @@ fn cors_preflight_exact_origins_with_credentials_allowed() {
             "authorization,content-type",
         );
 
-    let response = middleware.call(preflight_request);
+    let response = middleware.call_sync(preflight_request);
 
     assert_eq!(response.status, StatusCode::NO_CONTENT);
 
@@ -151,7 +160,7 @@ fn cors_preflight_untrusted_origin_with_exact_policy_blocked() {
         .with_header("Access-Control-Request-Method", "POST")
         .with_header("Access-Control-Request-Headers", "authorization");
 
-    let response = middleware.call(preflight_request);
+    let response = middleware.call_sync(preflight_request);
 
     // Should pass through to inner handler (not preflight response)
     assert_eq!(response.status, StatusCode::OK);

@@ -346,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn different_seeds_different_sequences() {
+    fn replay_different_seeds_different_sequences() {
         let mut rng1 = DetRng::new(42);
         let mut rng2 = DetRng::new(43);
 

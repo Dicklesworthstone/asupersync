@@ -21,6 +21,7 @@ use asupersync::remote::{
     IdempotencyStore, NodeId, RemoteCap, RemoteError, RemoteInput, RemoteOutcome, RemoteTaskId,
     RemoteTaskState, Saga, SagaState,
 };
+use asupersync::security::AuthenticationTag;
 use asupersync::trace::causality::{CausalOrderVerifier, CausalityViolationKind};
 use asupersync::trace::certificate::{CertificateVerifier, TraceCertificate};
 use asupersync::trace::compat::{
@@ -77,6 +78,7 @@ fn make_snapshot(region_id: RegionId) -> RegionSnapshot {
         state: RegionState::Open,
         timestamp: Time::from_nanos(1_000_000),
         sequence: 42,
+        vector_clock: VectorClock::new(),
         origin_id: 1,
         epoch: 1,
         tasks: vec![
@@ -101,6 +103,7 @@ fn make_snapshot(region_id: RegionId) -> RegionSnapshot {
         cancel_reason: Some("timeout".to_string()),
         parent: Some(rid(0)),
         metadata: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        auth_tag: AuthenticationTag::zero(),
     }
 }
 

@@ -17,6 +17,10 @@ use crate::runtime::config::RuntimeConfig;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+fn apply_env_overrides(config: &mut RuntimeConfig) -> Result<(), BuildError> {
+    super::apply_env_overrides(config, &SystemEnvReader::new())
+}
+
 /// Test environment variable setting for controlled testing.
 #[derive(Debug, Clone)]
 struct TestEnvVar {

@@ -567,7 +567,7 @@ fn test_quic_e2e_with_packet_lab() -> Result<(), Box<dyn std::error::Error>> {
     // This test would integrate with the packet lab for realistic network conditions
     println!("E2E test with packet lab simulation");
 
-    let config = E2EConfig {
+    let _config = E2EConfig {
         server_addr: "127.0.0.1:18444".parse()?,
         test_duration: Duration::from_secs(3),
         test_data_size: 5120, // 5KB

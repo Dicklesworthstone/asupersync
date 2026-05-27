@@ -613,6 +613,7 @@ pub mod test_utils {
         graph
     }
 
+    #[allow(dead_code)]
     pub fn create_test_manifest() -> Manifest {
         Manifest::from_graph(&ObjectGraph::new(), MetadataPolicy::portable())
             .expect("empty object graph should produce a manifest")

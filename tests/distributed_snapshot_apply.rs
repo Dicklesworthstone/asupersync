@@ -45,6 +45,7 @@ fn test_apply_snapshot_updates_local_state() {
         cancel_reason: Some("remote cancel".to_string()),
         parent: None,
         metadata: vec![],
+        ..RegionSnapshot::empty(region_id)
     };
 
     // 3. Apply snapshot

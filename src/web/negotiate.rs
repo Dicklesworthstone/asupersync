@@ -434,6 +434,12 @@ mod tests {
     use crate::web::handler::FnHandler;
     use crate::web::response::StatusCode;
 
+    impl<H: Handler> ErrorHandlerMiddleware<H> {
+        fn call(&self, req: Request) -> Response {
+            futures_lite::future::block_on(Handler::call(self, &crate::Cx::for_testing(), req))
+        }
+    }
+
     fn make_request() -> Request {
         Request::new("GET", "/test")
     }

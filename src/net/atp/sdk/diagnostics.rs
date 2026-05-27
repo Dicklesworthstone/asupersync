@@ -612,14 +612,14 @@ mod tests {
 
     #[test]
     fn path_diagnosis_basic() {
-        crate::test_utils::init_test("path_diagnosis_basic");
+        crate::test_utils::init_test_logging();
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime
             .state
             .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
             region,
             crate::types::Budget::INFINITE,
         );
@@ -713,14 +713,14 @@ mod tests {
 
     #[test]
     fn path_monitoring() {
-        crate::test_utils::init_test("path_monitoring");
+        crate::test_utils::init_test_logging();
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
         let region = runtime
             .state
             .create_root_region(crate::types::Budget::INFINITE);
         let cx = crate::cx::Cx::for_testing();
-        let scope = crate::cx::Scope::<crate::combinator::FailFast>::new(
+        let scope = crate::cx::Scope::<crate::types::policy::FailFast>::new(
             region,
             crate::types::Budget::INFINITE,
         );
@@ -738,7 +738,7 @@ mod tests {
                 assert!(monitor.last_diagnosis().is_none());
 
                 // In a real test, we would wait for monitoring to produce results
-                crate::time::sleep(Duration::from_millis(50)).await;
+                crate::time::sleep(crate::types::Time::ZERO, Duration::from_millis(50)).await;
             })
             .unwrap();
 

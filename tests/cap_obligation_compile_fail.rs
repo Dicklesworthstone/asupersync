@@ -22,6 +22,7 @@ use asupersync::obligation::graded::{
     ObligationToken, Resolution, SendPermit, SendPermitToken,
 };
 use asupersync::record::ObligationKind;
+use asupersync::types::RegionId;
 
 fn assert_subset<Sub: asupersync::cx::cap::SubsetOf<Super>, Super>() {}
 
@@ -29,6 +30,10 @@ fn assert_subset<Sub: asupersync::cx::cap::SubsetOf<Super>, Super>() {}
 type WebCaps = CapSet<false, true, false, true, false>; // Time + IO.
 type GrpcCaps = CapSet<true, true, false, true, false>; // Spawn + Time + IO.
 type BackgroundCaps = CapSet<true, true, false, false, false>; // Spawn + Time.
+
+fn test_region() -> RegionId {
+    RegionId::new_for_test(1, 0)
+}
 
 // ==================== Drop Bomb Enforcement ====================
 
@@ -63,25 +68,25 @@ fn graded_obligation_io_panics_on_drop() {
 #[test]
 #[should_panic(expected = "OBLIGATION TOKEN LEAKED")]
 fn obligation_token_send_panics_on_drop() {
-    let _token: SendPermitToken = ObligationToken::reserve("leaked");
+    let _token: SendPermitToken = ObligationToken::reserve("leaked", test_region());
 }
 
 #[test]
 #[should_panic(expected = "OBLIGATION TOKEN LEAKED")]
 fn obligation_token_ack_panics_on_drop() {
-    let _token: AckToken = ObligationToken::reserve("leaked");
+    let _token: AckToken = ObligationToken::reserve("leaked", test_region());
 }
 
 #[test]
 #[should_panic(expected = "OBLIGATION TOKEN LEAKED")]
 fn obligation_token_lease_panics_on_drop() {
-    let _token: LeaseToken = ObligationToken::reserve("leaked");
+    let _token: LeaseToken = ObligationToken::reserve("leaked", test_region());
 }
 
 #[test]
 #[should_panic(expected = "OBLIGATION TOKEN LEAKED")]
 fn obligation_token_io_panics_on_drop() {
-    let _token: IoOpToken = ObligationToken::reserve("leaked");
+    let _token: IoOpToken = ObligationToken::reserve("leaked", test_region());
 }
 
 #[test]
@@ -139,19 +144,19 @@ fn obligation_token_commit_no_panic() {
     init_test_logging();
     test_phase!("obligation_token_commit_no_panic");
 
-    let token: SendPermitToken = ObligationToken::reserve("send");
+    let token: SendPermitToken = ObligationToken::reserve("send", test_region());
     let proof = token.commit();
     assert_eq!(proof.kind(), ObligationKind::SendPermit);
 
-    let token: AckToken = ObligationToken::reserve("ack");
+    let token: AckToken = ObligationToken::reserve("ack", test_region());
     let proof = token.commit();
     assert_eq!(proof.kind(), ObligationKind::Ack);
 
-    let token: LeaseToken = ObligationToken::reserve("lease");
+    let token: LeaseToken = ObligationToken::reserve("lease", test_region());
     let proof = token.commit();
     assert_eq!(proof.kind(), ObligationKind::Lease);
 
-    let token: IoOpToken = ObligationToken::reserve("io");
+    let token: IoOpToken = ObligationToken::reserve("io", test_region());
     let proof = token.commit();
     assert_eq!(proof.kind(), ObligationKind::IoOp);
 
@@ -163,11 +168,11 @@ fn obligation_token_abort_no_panic() {
     init_test_logging();
     test_phase!("obligation_token_abort_no_panic");
 
-    let token: SendPermitToken = ObligationToken::reserve("send");
+    let token: SendPermitToken = ObligationToken::reserve("send", test_region());
     let proof = token.abort();
     assert_eq!(proof.kind(), ObligationKind::SendPermit);
 
-    let token: IoOpToken = ObligationToken::reserve("io");
+    let token: IoOpToken = ObligationToken::reserve("io", test_region());
     let proof = token.abort();
     assert_eq!(proof.kind(), ObligationKind::IoOp);
 
@@ -179,7 +184,7 @@ fn obligation_token_into_raw_disarms() {
     init_test_logging();
     test_phase!("obligation_token_into_raw_disarms");
 
-    let token: LeaseToken = ObligationToken::reserve("lease");
+    let token: LeaseToken = ObligationToken::reserve("lease", test_region());
     let raw = token.into_raw();
     assert_eq!(raw.kind, ObligationKind::Lease);
     drop(raw); // No panic.
@@ -194,7 +199,7 @@ fn committed_proof_bridges_to_resolved() {
     init_test_logging();
     test_phase!("committed_proof_bridges_to_resolved");
 
-    let token: SendPermitToken = ObligationToken::reserve("bridge");
+    let token: SendPermitToken = ObligationToken::reserve("bridge", test_region());
     let committed = token.commit();
     let resolved = committed.into_resolved_proof();
     assert_eq!(resolved.kind(), ObligationKind::SendPermit);
@@ -208,7 +213,7 @@ fn aborted_proof_bridges_to_resolved() {
     init_test_logging();
     test_phase!("aborted_proof_bridges_to_resolved");
 
-    let token: AckToken = ObligationToken::reserve("bridge");
+    let token: AckToken = ObligationToken::reserve("bridge", test_region());
     let aborted = token.abort();
     let resolved = aborted.into_resolved_proof();
     assert_eq!(resolved.kind(), ObligationKind::Ack);

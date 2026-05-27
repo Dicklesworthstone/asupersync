@@ -3878,7 +3878,7 @@ mod tests {
         let mut discharges = Vec::new();
 
         // Create MAX_DISCHARGE_DEPTH + 5 discharges to exceed limit
-        for i in 0..(Macaroon::MAX_DISCHARGE_DEPTH + 5) {
+        for i in 0..(MacaroonToken::MAX_DISCHARGE_DEPTH + 5) {
             let discharge_key = AuthKey::from_seed(i as u64 + 1000);
             let discharge =
                 MacaroonToken::mint(&discharge_key, &format!("discharge_{i}"), "test_location");
@@ -3899,17 +3899,13 @@ mod tests {
         token = token.0.add_caveat_raw(tp_caveat);
 
         let ctx = VerificationContext::new();
-        let discharge_refs: Vec<&Macaroon> = discharges.iter().map(|t| &t.0).collect();
-
         // Verification should fail with depth exceeded error before stack overflow
-        let result = token
-            .0
-            .verify_with_discharges(&root_key, &ctx, &discharge_refs);
+        let result = token.0.verify_with_discharges(&root_key, &ctx, &discharges);
 
         match result {
             Err(VerificationError::DischargeChainTooDeep { depth }) => {
                 assert!(
-                    depth <= Macaroon::MAX_DISCHARGE_DEPTH,
+                    depth <= MacaroonToken::MAX_DISCHARGE_DEPTH,
                     "Depth protection should trigger before reaching deep recursion"
                 );
             }

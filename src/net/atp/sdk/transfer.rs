@@ -753,7 +753,7 @@ mod tests {
             let peer = PeerId::from_label("test_peer");
             let session_options = granted_direct_options(&config, peer, "active-transfer");
             let sdk = AtpSdk::new_in_process(config);
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
 
             let session = sdk.open_session(&cx, session_options).await.unwrap();
 
@@ -792,7 +792,7 @@ mod tests {
             let peer = PeerId::from_label("test_peer");
             let session_options = granted_direct_options(&config, peer, "transfer-cancel");
             let sdk = AtpSdk::new_in_process(config);
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
 
             let session = sdk.open_session(&cx, session_options).await.unwrap();
 
@@ -824,7 +824,7 @@ mod tests {
         futures_lite::future::block_on(async {
             let config = SessionConfig::default();
             let sdk = AtpSdk::new_in_process(config.clone());
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
             let peer = PeerId::from_label("receive_peer");
             let session = sdk
                 .open_session(
@@ -849,7 +849,7 @@ mod tests {
         futures_lite::future::block_on(async {
             let config = SessionConfig::default();
             let sdk = AtpSdk::new_in_process(config.clone());
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
             let peer = PeerId::from_label("resume_peer");
             let session = sdk
                 .open_session(
@@ -875,7 +875,7 @@ mod tests {
         futures_lite::future::block_on(async {
             let config = SessionConfig::default();
             let sdk = AtpSdk::new_in_process(config.clone());
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
             let peer = PeerId::from_label("cancel_peer");
             let session = sdk
                 .open_session(
@@ -919,7 +919,7 @@ mod tests {
         futures_lite::future::block_on(async {
             let config = SessionConfig::default();
             let sdk = AtpSdk::new_in_process(config.clone());
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
             let peer = PeerId::from_label("size_peer");
             let session = sdk
                 .open_session(&cx, granted_direct_options(&config, peer, "directory-size"))
@@ -942,7 +942,7 @@ mod tests {
         futures_lite::future::block_on(async {
             let config = SessionConfig::default();
             let sdk = AtpSdk::new_in_process(config.clone());
-            let cx = Cx::root();
+            let cx = Cx::for_testing();
             let peer = PeerId::from_label("size_error_peer");
             let session = sdk
                 .open_session(

@@ -155,8 +155,8 @@ impl<'a> RequestRegion<'a> {
     #[inline]
     pub async fn run_async<F, Fut>(self, handler: F) -> RegionOutcome
     where
-        F: FnOnce(&RequestContext<'_>) -> Fut + Send,
-        Fut: std::future::Future<Output = Response> + Send,
+        F: FnOnce(&RequestContext<'_>) -> Fut,
+        Fut: std::future::Future<Output = Response>,
     {
         let _cx_guard = Cx::set_current(Some(self.cx.clone()));
         let ctx = RequestContext {
@@ -1409,6 +1409,7 @@ mod tests {
     mod async_tests {
         use super::*;
         use crate::test_utils::run_test_with_cx;
+        use std::pin::Pin;
 
         /// Test basic async handler execution
         #[test]
@@ -1418,10 +1419,14 @@ mod tests {
                 let region = RequestRegion::new(&cx, req);
 
                 let outcome = region
-                    .run_async(|ctx| async move {
-                        assert_eq!(ctx.method(), "GET");
-                        assert_eq!(ctx.path(), "/async-hello");
-                        Response::new(StatusCode::OK, b"async ok".to_vec())
+                    .run_async(|ctx| {
+                        let method = ctx.method().to_owned();
+                        let path = ctx.path().to_owned();
+                        async move {
+                            assert_eq!(method, "GET");
+                            assert_eq!(path, "/async-hello");
+                            Response::new(StatusCode::OK, b"async ok".to_vec())
+                        }
                     })
                     .await;
 
@@ -1492,12 +1497,14 @@ mod tests {
                 let region = RequestRegion::new(&cx, req);
 
                 let outcome = region
-                    .run_async(|ctx| async move {
+                    .run_async(|ctx| {
                         // Verify context provides access to Cx and cancellation
                         let can_cancel = ctx.cx().checkpoint().is_ok();
-                        assert!(can_cancel, "Context should provide access to cancellation");
+                        async move {
+                            assert!(can_cancel, "Context should provide access to cancellation");
 
-                        Response::new(StatusCode::OK, b"context ok".to_vec())
+                            Response::new(StatusCode::OK, b"context ok".to_vec())
+                        }
                     })
                     .await;
 

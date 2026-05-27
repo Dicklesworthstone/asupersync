@@ -6,11 +6,24 @@
 
 #![cfg(test)]
 
-use crate::web::handler::Handler;
 use crate::web::response::StatusCode;
 use crate::web::static_files::StaticFiles;
 use std::fs;
 use tempfile::TempDir;
+
+trait SyncHandlerExt {
+    fn call_sync(&self, req: crate::web::extract::Request) -> crate::web::response::Response;
+}
+
+impl SyncHandlerExt for crate::web::static_files::StaticFilesHandler {
+    fn call_sync(&self, req: crate::web::extract::Request) -> crate::web::response::Response {
+        futures_lite::future::block_on(crate::web::handler::Handler::call(
+            self,
+            &crate::Cx::for_testing(),
+            req,
+        ))
+    }
+}
 
 fn body_contains_bytes(body: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && body.windows(needle.len()).any(|window| window == needle)
@@ -58,7 +71,7 @@ fn audit_basic_path_traversal_rejected() {
 
     for path in traversal_paths {
         let request = crate::web::extract::Request::new("GET", path);
-        let response = handler.call(request);
+        let response = handler.call_sync(request);
 
         assert_eq!(
             response.status,
@@ -93,7 +106,7 @@ fn audit_url_encoded_path_traversal_rejected() {
 
     for path in encoded_traversal_paths {
         let request = crate::web::extract::Request::new("GET", path);
-        let response = handler.call(request);
+        let response = handler.call_sync(request);
 
         assert_eq!(
             response.status,
@@ -122,7 +135,7 @@ fn audit_double_encoded_path_traversal_rejected() {
 
     for path in double_encoded_paths {
         let request = crate::web::extract::Request::new("GET", path);
-        let response = handler.call(request);
+        let response = handler.call_sync(request);
 
         assert_eq!(
             response.status,
@@ -151,7 +164,7 @@ fn audit_unicode_dot_path_traversal_rejected() {
 
     for path in unicode_dot_paths {
         let request = crate::web::extract::Request::new("GET", path);
-        let response = handler.call(request);
+        let response = handler.call_sync(request);
 
         assert_eq!(
             response.status,
@@ -178,7 +191,7 @@ fn audit_null_byte_injection_rejected() {
 
     for path in null_byte_paths {
         let request = crate::web::extract::Request::new("GET", path);
-        let response = handler.call(request);
+        let response = handler.call_sync(request);
 
         assert_eq!(
             response.status,
@@ -208,7 +221,7 @@ fn audit_legitimate_files_still_accessible() {
 
     for path in legitimate_paths {
         let request = crate::web::extract::Request::new("GET", path);
-        let response = handler.call(request);
+        let response = handler.call_sync(request);
 
         // File exists → 200, File doesn't exist → 404, but NOT security rejection
         assert!(
@@ -241,7 +254,7 @@ fn audit_path_traversal_rejected_across_http_methods() {
 
     for method in methods {
         let request = crate::web::extract::Request::new(method, traversal_path);
-        let response = handler.call(request);
+        let response = handler.call_sync(request);
 
         // Static file handler should reject traversal regardless of method
         // (It may return 405 Method Not Allowed for non-GET/HEAD, but not serve the file)
@@ -279,7 +292,7 @@ fn audit_symlink_traversal_blocked() {
 
     // AUDIT: Symlink that points outside document root must be rejected
     let request = crate::web::extract::Request::new("GET", "/evil_link");
-    let response = handler.call(request);
+    let response = handler.call_sync(request);
 
     assert_eq!(
         response.status,
@@ -324,7 +337,7 @@ fn audit_comprehensive_traversal_attack_simulation() {
 
     for (attack_path, attack_name) in attack_sequence {
         let request = crate::web::extract::Request::new("GET", attack_path);
-        let response = handler.call(request);
+        let response = handler.call_sync(request);
 
         assert_eq!(
             response.status,

@@ -356,7 +356,7 @@ impl ConnectionRouter {
     }
 
     /// Allocate a new connection ID.
-    fn allocate_connection_id(&mut self) -> ConnectionId {
+    pub(crate) fn allocate_connection_id(&mut self) -> ConnectionId {
         let id = self.next_connection_id;
         self.next_connection_id += 1;
 

@@ -377,6 +377,12 @@ mod tests {
     use crate::web::handler::FnHandler;
     use crate::web::response::StatusCode;
 
+    impl<H: Handler> CompressionMiddleware<H> {
+        fn call(&self, req: Request) -> Response {
+            futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
+        }
+    }
+
     fn make_request_with_encoding(encoding: &str) -> Request {
         Request::new("GET", "/test").with_header("accept-encoding", encoding)
     }

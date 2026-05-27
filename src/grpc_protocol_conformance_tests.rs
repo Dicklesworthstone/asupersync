@@ -36,6 +36,8 @@
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 
 #[cfg(test)]

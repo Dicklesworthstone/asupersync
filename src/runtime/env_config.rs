@@ -444,6 +444,10 @@ mod tests {
     use super::*;
     use crate::runtime::config::RuntimeConfig;
 
+    fn apply_env_overrides(config: &mut RuntimeConfig) -> Result<(), BuildError> {
+        super::apply_env_overrides(config, &SystemEnvReader::new())
+    }
+
     fn with_clean_env<F, R>(f: F) -> R
     where
         F: FnOnce() -> R,

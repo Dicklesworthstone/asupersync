@@ -14,9 +14,9 @@ mod tests {
         QuicTimerScheduler, QuicUdpEndpointConfig,
     };
     use crate::test_utils::run_test_with_cx;
-    use crate::time::Instant;
     use std::net::SocketAddr;
     use std::time::Duration;
+    use std::time::Instant;
 
     #[test]
     fn test_managed_endpoint_basic_lifecycle() {

@@ -293,6 +293,26 @@ fn scrub_failure_reason_for_snapshot(reason: &FailureReason) -> serde_json::Valu
             "expected": expected,
             "actual": actual
         }),
+        FailureReason::ComputeBudgetExhausted {
+            used,
+            requested,
+            max,
+        } => json!({
+            "type": "ComputeBudgetExhausted",
+            "used": used,
+            "requested": requested,
+            "max": max
+        }),
+        FailureReason::EsiRateLimitExceeded {
+            esi,
+            column_count,
+            max_columns,
+        } => json!({
+            "type": "EsiRateLimitExceeded",
+            "esi": esi,
+            "column_count": column_count,
+            "max_columns": max_columns
+        }),
     }
 }
 

@@ -28,7 +28,7 @@ pub enum SecurityRequirementLevel {
 }
 
 /// Security test category for organization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SecurityTestCategory {
     /// No ambient authority enforcement
     NoAmbientAuthority,

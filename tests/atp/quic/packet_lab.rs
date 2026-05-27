@@ -3,10 +3,10 @@
 //! Provides deterministic packet scenarios for testing loss, reorder,
 //! duplication, truncation, delayed ACK, ACK loss, PTO storms, and migration.
 
-use asupersync::bytes::{Buf, BufMut, Bytes, BytesMut};
+use asupersync::bytes::Bytes;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// Deterministic packet lab for QUIC testing
 pub struct QuicPacketLab {

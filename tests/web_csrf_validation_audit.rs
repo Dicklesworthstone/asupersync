@@ -49,7 +49,6 @@
 use asupersync::Cx;
 use asupersync::web::extract::Request;
 use asupersync::web::handler::FnHandler;
-use asupersync::web::handler::Handler;
 use asupersync::web::response::{Response, StatusCode};
 use asupersync::web::session::{MemoryStore, Session, SessionLayer};
 use std::future::Future;
@@ -61,7 +60,7 @@ fn ok_handler() -> StatusCode {
 
 struct SessionStatusHandler<F>(F);
 
-impl<F> Handler for SessionStatusHandler<F>
+impl<F> asupersync::web::handler::Handler for SessionStatusHandler<F>
 where
     F: Fn(&Session) -> StatusCode + Send + Sync + 'static,
 {
@@ -76,13 +75,17 @@ where
     }
 }
 
-trait TestHandlerSyncExt: Handler {
+trait TestHandlerSyncExt: asupersync::web::handler::Handler {
     fn call(&self, req: Request) -> Response {
-        futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
+        futures_lite::future::block_on(asupersync::web::handler::Handler::call(
+            self,
+            &Cx::for_testing(),
+            req,
+        ))
     }
 }
 
-impl<T> TestHandlerSyncExt for T where T: Handler + ?Sized {}
+impl<T> TestHandlerSyncExt for T where T: asupersync::web::handler::Handler + ?Sized {}
 
 // ── (1) Token rotation on session-id change ──────────────────────
 

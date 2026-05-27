@@ -1447,8 +1447,8 @@ mod tests {
 
             prop_assert_eq!(parsed.fields.len(), original.fields.len());
             for (i, (orig, parsed)) in original.fields.iter().zip(parsed.fields.iter()).enumerate() {
-                prop_assert_eq!(parsed.name, orig.name, "Field {} name mismatch", i);
-                prop_assert_eq!(parsed.body, orig.body, "Field {} body mismatch", i);
+                prop_assert_eq!(&parsed.name, &orig.name, "Field {} name mismatch", i);
+                prop_assert_eq!(&parsed.body, &orig.body, "Field {} body mismatch", i);
             }
         }
 
@@ -1503,9 +1503,9 @@ mod tests {
 
             prop_assert_eq!(parsed.events.len(), event_count);
             for (i, event) in parsed.events.iter().enumerate() {
-                prop_assert_eq!(event.id, Some(format!("event_{}", i)));
-                prop_assert_eq!(event.event_type, Some("test".to_string()));
-                prop_assert_eq!(event.data[0], format!("data line {}", i));
+                prop_assert_eq!(event.id.as_ref(), Some(&format!("event_{}", i)));
+                prop_assert_eq!(event.event_type.as_ref(), Some(&"test".to_string()));
+                prop_assert_eq!(&event.data[0], &format!("data line {}", i));
             }
         }
 

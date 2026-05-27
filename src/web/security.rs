@@ -201,6 +201,12 @@ mod tests {
     use crate::web::handler::FnHandler;
     use crate::web::response::StatusCode;
 
+    impl<H: Handler> SecurityHeadersMiddleware<H> {
+        fn call(&self, req: Request) -> Response {
+            futures_lite::future::block_on(Handler::call(self, &crate::Cx::for_testing(), req))
+        }
+    }
+
     fn ok_handler() -> &'static str {
         "ok"
     }

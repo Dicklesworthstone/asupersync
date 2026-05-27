@@ -349,6 +349,7 @@ fn session_error_to_protocol(error: &SessionError) -> ProtocolError {
 mod tests {
     use super::*;
     use crate::cx::Cx;
+    use crate::net::atp::protocol::{CapabilityGrantId, CapabilityScope};
 
     fn grant_for_direct_peer(issuer: PeerId, subject: PeerId, label: &str) -> CapabilityGrant {
         CapabilityGrant::new(
@@ -420,7 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn transfer_nonce_uses_full_context_entropy() {
-        let cx = Cx::root();
+        let cx = Cx::for_testing();
         let nonce = generate_transfer_nonce(&cx);
 
         let mut weak_expansion = [0u8; 32];
@@ -440,7 +441,7 @@ mod tests {
         let local_peer = config.local_peer;
         let sdk = AtpSdk::new_in_process(config);
 
-        let cx = Cx::root();
+        let cx = Cx::for_testing();
         let peer = PeerId::from_label("remote_peer");
         let options = granted_direct_options(local_peer, peer, "sdk-session-grant");
 
@@ -461,7 +462,7 @@ mod tests {
         let config = SessionConfig::default();
         let sdk = AtpSdk::new_in_process(config);
 
-        let cx = Cx::root();
+        let cx = Cx::for_testing();
         let peer = PeerId::from_label("remote_peer");
         let result = sdk.open_session(&cx, SessionOptions::direct(peer)).await;
 
@@ -480,7 +481,7 @@ mod tests {
             Some("token".to_string()),
         );
 
-        let cx = Cx::root();
+        let cx = Cx::for_testing();
         let peer = PeerId::from_label("remote_peer");
         let options = SessionOptions::direct(peer);
 

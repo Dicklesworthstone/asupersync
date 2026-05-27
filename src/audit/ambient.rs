@@ -667,7 +667,7 @@ mod tests {
         // This test validates that the audit system security validation
         // can detect potential tampering with KNOWN_FINDINGS
 
-        let result = crate::audit::ambient::validate_audit_system_security();
+        let result = super::validate_audit_system_security();
 
         // The validation should either pass or report specific security warnings
         match result {
@@ -696,13 +696,13 @@ mod tests {
     fn capability_validation_prevents_unauthorized_operations() {
         // Test that capability validation functions work correctly
         // This should not panic since we're in a test context
-        crate::audit::ambient::validate_audit_operation_authorized("test_operation");
+        super::validate_audit_operation_authorized("test_operation");
 
         // Test that known findings validation works
-        crate::audit::ambient::validate_known_findings_integrity();
+        super::validate_known_findings_integrity();
 
         // Test that audit system integrity validation works
-        crate::audit::ambient::validate_audit_system_integrity();
+        super::validate_audit_system_integrity();
     }
 
     #[test]
@@ -711,13 +711,11 @@ mod tests {
         let target_region = crate::types::RegionId::new_for_test(2, 0);
 
         // Same region should always be allowed
-        let same_result =
-            crate::audit::ambient::create_constrained_audit_context(source_region, source_region);
+        let same_result = super::create_constrained_audit_context(source_region, source_region);
         assert!(same_result.is_ok(), "Same-region audit should be allowed");
 
         // Cross-region audit should be validated but allowed in test context
-        let cross_result =
-            crate::audit::ambient::create_constrained_audit_context(source_region, target_region);
+        let cross_result = super::create_constrained_audit_context(source_region, target_region);
         assert!(
             cross_result.is_ok(),
             "Cross-region audit should be validated and logged"
@@ -727,8 +725,8 @@ mod tests {
     #[test]
     fn count_functions_include_capability_validation() {
         // Test that count functions include proper capability validation
-        let warning_count = crate::audit::ambient::count_by_severity(Severity::Medium);
-        let unresolved_count = crate::audit::ambient::unresolved_count();
+        let warning_count = super::count_by_severity(Severity::Medium);
+        let unresolved_count = super::unresolved_count();
 
         // These should complete without panicking, indicating capability validation passed
         assert!(warning_count >= 0, "Warning count should be non-negative");

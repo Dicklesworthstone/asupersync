@@ -2188,7 +2188,7 @@ mod tests {
             );
 
             prop_assert_eq!(
-                supervisor.supervision_tree_state, MockSupervisionTreeState::Quiescing,
+                &supervisor.supervision_tree_state, &MockSupervisionTreeState::Quiescing,
                 "Supervision tree should be in quiescing state after initiation"
             );
 
@@ -2215,12 +2215,12 @@ mod tests {
                 supervisor.initiate_quiescence(current_time + 100);
 
                 prop_assert_eq!(
-                    supervisor.quiescence_state, MockQuiescenceState::QuiescenceAchieved,
+                    &supervisor.quiescence_state, &MockQuiescenceState::QuiescenceAchieved,
                     "Supervision tree should achieve quiescence when no children are active"
                 );
 
                 prop_assert_eq!(
-                    supervisor.supervision_tree_state, MockSupervisionTreeState::Quiescent,
+                    &supervisor.supervision_tree_state, &MockSupervisionTreeState::Quiescent,
                     "Supervision tree state should be quiescent"
                 );
             }
@@ -2241,7 +2241,10 @@ mod tests {
                         let new_child_id = child_id + 2000;
                         let result = supervisor.start_child(new_child_id, current_time);
 
-                        if matches!(supervisor.supervision_tree_state, MockSupervisionTreeState::Quiescent) {
+                        if matches!(
+                            &supervisor.supervision_tree_state,
+                            MockSupervisionTreeState::Quiescent
+                        ) {
                             // Starting new children in quiescent state might be restricted
                             // or might restart the supervision tree
                         }
@@ -2258,7 +2261,10 @@ mod tests {
             }
 
             // Verify final state consistency
-            if matches!(supervisor.supervision_tree_state, MockSupervisionTreeState::Quiescent) {
+            if matches!(
+                &supervisor.supervision_tree_state,
+                MockSupervisionTreeState::Quiescent
+            ) {
                 // Quiescent tree should maintain its properties
                 let active_children_count = supervisor.children.values()
                     .filter(|c| matches!(c.state, MockChildState::Running | MockChildState::Starting))

@@ -560,6 +560,20 @@ fn comprehensive_compression_performance_conformance() {
                 let compression_time = start_time.elapsed();
 
                 let metrics = CompressionMetrics::new(compression_time, &compressed);
+                assert_eq!(
+                    metrics.compressed_size,
+                    compressed.events.len(),
+                    "Metric compressed size mismatch for {size_label} trace at {level:?}"
+                );
+                assert_eq!(
+                    metrics.events_removed,
+                    compressed.events_removed(),
+                    "Metric removed-event count mismatch for {size_label} trace at {level:?}"
+                );
+                assert_eq!(
+                    metrics.level, level,
+                    "Metric level mismatch for {size_label} trace at {level:?}"
+                );
                 level_metrics.push(metrics);
 
                 // Validate correctness properties

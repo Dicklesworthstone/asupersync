@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 //! ATP-M2: Integration tests for ATP dogfooding workflows.
 //!
 //! These tests demonstrate actual ATP usage for real Asupersync artifacts

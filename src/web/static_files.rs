@@ -750,6 +750,20 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    trait SyncHandlerExt {
+        fn call_sync(&self, req: super::super::extract::Request) -> Response;
+    }
+
+    impl<H: super::super::handler::Handler> SyncHandlerExt for H {
+        fn call_sync(&self, req: super::super::extract::Request) -> Response {
+            futures_lite::future::block_on(super::super::handler::Handler::call(
+                self,
+                &crate::Cx::for_testing(),
+                req,
+            ))
+        }
+    }
+
     fn setup_dir() -> TempDir {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("hello.txt"), "Hello, world!").unwrap();
@@ -1298,28 +1312,25 @@ mod tests {
 
     #[test]
     fn handler_serves_file() {
-        use super::super::handler::Handler;
-
         let dir = setup_dir();
         let sf = StaticFiles::new(dir.path());
         let handler = sf.handler();
 
         let req = super::super::extract::Request::new("GET", "/hello.txt");
-        let resp = handler.call(req);
+        let resp = handler.call_sync(req);
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "Hello, world!");
     }
 
     #[test]
     fn handler_head_omits_body_but_preserves_conditional_headers() {
-        use super::super::handler::Handler;
-
         let dir = setup_dir();
         let sf = StaticFiles::new(dir.path());
         let handler = sf.handler();
 
-        let get_resp = handler.call(super::super::extract::Request::new("GET", "/hello.txt"));
-        let head_resp = handler.call(super::super::extract::Request::new("HEAD", "/hello.txt"));
+        let get_resp = handler.call_sync(super::super::extract::Request::new("GET", "/hello.txt"));
+        let head_resp =
+            handler.call_sync(super::super::extract::Request::new("HEAD", "/hello.txt"));
 
         assert_eq!(head_resp.status, StatusCode::OK);
         assert!(head_resp.body.is_empty());
@@ -1344,51 +1355,45 @@ mod tests {
 
     #[test]
     fn handler_returns_404() {
-        use super::super::handler::Handler;
-
         let dir = setup_dir();
         let sf = StaticFiles::new(dir.path());
         let handler = sf.handler();
 
         let req = super::super::extract::Request::new("GET", "/missing.txt");
-        let resp = handler.call(req);
+        let resp = handler.call_sync(req);
         assert_eq!(resp.status, StatusCode::NOT_FOUND);
     }
 
     #[test]
     fn handler_304_with_etag() {
-        use super::super::handler::Handler;
-
         let dir = setup_dir();
         let sf = StaticFiles::new(dir.path());
         let handler = sf.handler();
 
         // First request.
         let req1 = super::super::extract::Request::new("GET", "/hello.txt");
-        let resp1 = handler.call(req1);
+        let resp1 = handler.call_sync(req1);
         let etag = resp1.headers.get("etag").unwrap().clone();
 
         // Second request with If-None-Match.
         let req2 = super::super::extract::Request::new("GET", "/hello.txt")
             .with_header("If-None-Match", etag);
-        let resp2 = handler.call(req2);
+        let resp2 = handler.call_sync(req2);
         assert_eq!(resp2.status, StatusCode::NOT_MODIFIED);
     }
 
     #[test]
     fn handler_head_304_with_etag_stays_empty() {
-        use super::super::handler::Handler;
-
         let dir = setup_dir();
         let sf = StaticFiles::new(dir.path());
         let handler = sf.handler();
 
-        let get_resp = handler.call(super::super::extract::Request::new("GET", "/hello.txt"));
+        let get_resp = handler.call_sync(super::super::extract::Request::new("GET", "/hello.txt"));
         let etag = get_resp.headers.get("etag").unwrap().clone();
 
         let head_req = super::super::extract::Request::new("HEAD", "/hello.txt")
             .with_header("If-None-Match", etag);
-        let head_resp = handler.call(head_req);
+        let head_resp = handler.call_sync(head_req);
 
         assert_eq!(head_resp.status, StatusCode::NOT_MODIFIED);
         assert!(head_resp.body.is_empty());

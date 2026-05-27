@@ -1,3 +1,5 @@
+#![cfg(feature = "benchmark-adapters")]
+
 //! ATP Benchmark Adapter Integration Tests
 //!
 //! Tests the benchmark adapter framework with scp baseline and ATP profile comparison.

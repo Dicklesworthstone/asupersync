@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 //! ATP Mailbox & Swarm E2E Test Matrix
 //!
 //! Comprehensive e2e scenarios for ATP Data Movement Layer:
@@ -7,12 +9,12 @@
 //! - Malicious peer detection and rejection
 //! - Capability-scoped seeding and trust boundaries
 
-use crate::cx::Cx;
-use crate::lab::LabRuntime;
-use crate::types::{Outcome, Time};
+use asupersync::Cx;
+use asupersync::LabConfig;
+use asupersync::LabRuntime;
+use asupersync::types::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
-use std::time::Duration;
 
 // Test-specific types that mirror the ATP interfaces for e2e testing
 
@@ -222,9 +224,9 @@ impl TestSwarmCoordinator {
                     peer_id: (*peer_id).clone(),
                     piece_id,
                     priority,
-                    estimated_completion: Time::now(),
+                    estimated_completion: Time::ZERO,
                     retry_count: 0,
-                    assigned_at: Time::now(),
+                    assigned_at: Time::ZERO,
                 });
             }
         }
@@ -403,7 +405,7 @@ struct AtpDmlFixture {
 
 impl AtpDmlFixture {
     async fn new() -> Self {
-        let runtime = LabRuntime::new();
+        let runtime = LabRuntime::new(LabConfig::default());
         let test_data = b"ATP test data for e2e validation scenarios"
             .repeat(1000)
             .to_vec();
@@ -437,7 +439,7 @@ impl AtpDmlFixture {
     }
 
     fn get_cx(&self) -> Cx {
-        Cx::new()
+        Cx::for_testing()
     }
 }
 
@@ -889,14 +891,14 @@ async fn test_end_to_end_integration_matrix() {
     println!("\n=== ATP Data Movement Layer E2E Test Matrix ===");
 
     // Run all scenarios in sequence to verify end-to-end workflows
-    test_encrypted_offline_mailbox_upload_download().await;
-    test_multi_source_swarm_transfer_with_verification().await;
-    test_malicious_peer_detection_and_rejection().await;
-    test_cache_quota_enforcement_and_eviction().await;
-    test_peer_churn_and_recovery().await;
-    test_relay_cache_handoff_workflow().await;
-    test_capability_scoped_seeding_with_revocation().await;
-    test_structured_logging_and_observability().await;
+    test_encrypted_offline_mailbox_upload_download();
+    test_multi_source_swarm_transfer_with_verification();
+    test_malicious_peer_detection_and_rejection();
+    test_cache_quota_enforcement_and_eviction();
+    test_peer_churn_and_recovery();
+    test_relay_cache_handoff_workflow();
+    test_capability_scoped_seeding_with_revocation();
+    test_structured_logging_and_observability();
 
     println!("\n✓ ALL ATP Data Movement Layer E2E scenarios: PASS");
     println!("✓ Encryption: Relay never accesses plaintext");

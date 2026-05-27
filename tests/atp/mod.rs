@@ -4,6 +4,8 @@
 //! verifier, and crash-resume functionality. This module implements the
 //! receiver trust boundary where ATP proves itself or fails.
 
+#![allow(unused_imports)]
+
 pub mod crash_injection;
 pub mod e2e_proof_suite;
 pub mod forensics;

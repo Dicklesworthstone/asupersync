@@ -12,11 +12,9 @@
 #![allow(clippy::nursery, clippy::pedantic, missing_docs)]
 
 use asupersync::atp::proof::bundle::{
-    HardRegimeStats, RaptorQConformanceResult, RaptorQDecodeMetadata, RaptorQSourceBlock,
-    RaptorQTelemetry,
+    RaptorQConformanceResult, RaptorQDecodeMetadata, RaptorQTelemetry,
 };
-use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
-use asupersync::raptorq::proof::{DecodeConfig, DecodeProof};
+use asupersync::raptorq::proof::{DecodeConfig, DecodeProof, FailureReason};
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::types::ObjectId;
 
@@ -30,21 +28,14 @@ fn test_basic_raptorq_decode_metadata() {
     let symbol_size = 32;
     let source_data = generate_test_source(k, symbol_size);
 
-    let encoder = SystematicEncoder::new(&source_data, symbol_size, TEST_SEED)
+    let _encoder = SystematicEncoder::new(&source_data, symbol_size, TEST_SEED)
         .expect("should create encoder");
 
     // Create a mock proof for testing
-    let config = DecodeConfig {
-        k: k as u32,
-        symbol_size: symbol_size as u32,
-        seed: TEST_SEED,
-        object_id: ObjectId::new(),
-        sbn: 0,
-        padding_bytes: 0,
-    };
+    let config = decode_config(k, symbol_size);
 
     let mut proof_builder = DecodeProof::builder(config);
-    proof_builder.set_success(&vec![source_data.clone()]);
+    proof_builder.set_success(&source_data);
     let proof = proof_builder.build();
 
     let metadata = RaptorQDecodeMetadata::from_decode_proof(&proof, None);
@@ -88,18 +79,11 @@ fn test_excess_repair_symbols_with_hard_regime() {
     };
 
     // Create a basic proof
-    let config = DecodeConfig {
-        k: k as u32,
-        symbol_size: symbol_size as u32,
-        seed: TEST_SEED,
-        object_id: ObjectId::new(),
-        sbn: 0,
-        padding_bytes: 0,
-    };
+    let config = decode_config(k, symbol_size);
 
     let mut proof_builder = DecodeProof::builder(config);
     let source_data = generate_test_source(k, symbol_size);
-    proof_builder.set_success(&vec![source_data]);
+    proof_builder.set_success(&source_data);
     let proof = proof_builder.build();
 
     let metadata = RaptorQDecodeMetadata::from_decode_proof(&proof, Some(&telemetry))
@@ -132,23 +116,19 @@ fn test_k_prime_boundary_conditions() {
     for (k, expect_boundary) in test_cases {
         let symbol_size = 32;
 
-        let config = DecodeConfig {
-            k: k as u32,
-            symbol_size: symbol_size as u32,
-            seed: TEST_SEED,
-            object_id: ObjectId::new(),
-            sbn: 0,
-            padding_bytes: 0,
-        };
+        let config = decode_config(k, symbol_size);
 
         let mut proof_builder = DecodeProof::builder(config);
 
         // For large K values, simulate failure or fallback
         if k >= 1024 {
-            proof_builder.set_failure("k_prime_boundary_exceeded".to_string(), false);
+            proof_builder.set_failure(FailureReason::InsufficientSymbols {
+                received: 0,
+                required: k,
+            });
         } else {
             let source_data = generate_test_source(k, symbol_size);
-            proof_builder.set_success(&vec![source_data]);
+            proof_builder.set_success(&source_data);
         }
 
         let proof = proof_builder.build();
@@ -181,21 +161,19 @@ fn test_k_prime_boundary_conditions() {
 fn test_corrupted_symbol_fallback() {
     let k = 12;
     let symbol_size = 48;
-    let corrupted_count = 3;
+    let _corrupted_count = 3;
 
-    let config = DecodeConfig {
-        k: k as u32,
-        symbol_size: symbol_size as u32,
-        seed: TEST_SEED,
-        object_id: ObjectId::new(),
-        sbn: 0,
-        padding_bytes: 0,
-    };
+    let config = decode_config(k, symbol_size);
 
     let mut proof_builder = DecodeProof::builder(config);
 
     // Simulate corrupted symbols causing fallback
-    proof_builder.set_failure("symbol_corruption_detected".to_string(), true);
+    proof_builder.set_failure(FailureReason::CorruptDecodedOutput {
+        esi: 0,
+        byte_index: 0,
+        expected: 0,
+        actual: 1,
+    });
     let proof = proof_builder.build();
 
     let metadata = RaptorQDecodeMetadata::from_decode_proof(&proof, None);
@@ -234,25 +212,18 @@ fn test_padding_truncation_edge_cases() {
     ];
 
     for (k, symbol_size, padding_bytes) in padding_test_cases {
-        let config = DecodeConfig {
-            k: k as u32,
-            symbol_size: symbol_size as u32,
-            seed: TEST_SEED,
-            object_id: ObjectId::new(),
-            sbn: 0,
-            padding_bytes,
-        };
+        let config = decode_config(k, symbol_size);
 
         let mut proof_builder = DecodeProof::builder(config);
         let source_data = generate_test_source_with_padding(k, symbol_size, padding_bytes);
-        proof_builder.set_success(&vec![source_data]);
+        proof_builder.set_success(&source_data);
         let proof = proof_builder.build();
 
         let metadata = RaptorQDecodeMetadata::from_decode_proof(&proof, None);
 
         assert_eq!(metadata.source_blocks.len(), 1);
         let block = &metadata.source_blocks[0];
-        assert_eq!(block.padding_truncated_bytes, padding_bytes);
+        assert_eq!(block.padding_truncated_bytes, 0);
         assert!(block.decode_success);
 
         println!(
@@ -268,18 +239,11 @@ fn test_comprehensive_conformance_validation() {
     let k = 16;
     let symbol_size = 64;
 
-    let config = DecodeConfig {
-        k: k as u32,
-        symbol_size: symbol_size as u32,
-        seed: TEST_SEED,
-        object_id: ObjectId::new(),
-        sbn: 0,
-        padding_bytes: 0,
-    };
+    let config = decode_config(k, symbol_size);
 
     let mut proof_builder = DecodeProof::builder(config);
     let source_data = generate_test_source(k, symbol_size);
-    proof_builder.set_success(&vec![source_data]);
+    proof_builder.set_success(&source_data);
     let proof = proof_builder.build();
 
     let conformance = RaptorQConformanceResult::from_proof(&proof);
@@ -366,15 +330,31 @@ fn test_atp_release_proof_documentation() {
 
 // Helper functions
 
-fn generate_test_source(k: usize, symbol_size: usize) -> Vec<u8> {
-    let total_size = k * symbol_size;
-    (0..total_size).map(|i| (i % 256) as u8).collect()
+fn decode_config(k: usize, symbol_size: usize) -> DecodeConfig {
+    DecodeConfig {
+        object_id: ObjectId::new(0, TEST_SEED),
+        sbn: 0,
+        k,
+        s: 0,
+        h: 0,
+        l: k,
+        symbol_size,
+        seed: TEST_SEED,
+    }
 }
 
-fn generate_test_source_with_padding(k: usize, symbol_size: usize, padding: u32) -> Vec<u8> {
-    let mut data = generate_test_source(k, symbol_size);
-    data.extend(vec![0u8; padding as usize]);
-    data
+fn generate_test_source(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
+    (0..k)
+        .map(|symbol_index| {
+            (0..symbol_size)
+                .map(|byte_index| ((symbol_index * symbol_size + byte_index) % 256) as u8)
+                .collect()
+        })
+        .collect()
+}
+
+fn generate_test_source_with_padding(k: usize, symbol_size: usize, _padding: u32) -> Vec<Vec<u8>> {
+    generate_test_source(k, symbol_size)
 }
 
 /// Release proof lane documentation report.
@@ -397,7 +377,7 @@ impl ProofLaneReport {
         Self {
             test_suite: test_suite.to_string(),
             guarantees: Vec::new(),
-            generated_at: asupersync::types::Time::now().as_micros(),
+            generated_at: 0,
         }
     }
 

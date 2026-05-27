@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use asupersync::Cx;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::server::Interceptor;
@@ -53,7 +54,7 @@ use asupersync::web::middleware::{
     LoadShedPolicy, NormalizePathMiddleware, RequestBodyLimitMiddleware, RequestIdMiddleware,
     SetResponseHeaderMiddleware, TimeoutMiddleware, TrailingSlash,
 };
-use asupersync::web::response::{Json, StatusCode};
+use asupersync::web::response::{Json, Response, StatusCode};
 use asupersync::web::router::{Router, get, post};
 use asupersync::web::security::{SecurityHeadersMiddleware, SecurityPolicy};
 use asupersync::web::session::MemoryStore;
@@ -62,6 +63,14 @@ fn init_test(name: &str) {
     init_test_logging();
     test_phase!(name);
 }
+
+trait HandlerSyncExt: Handler {
+    fn call_sync(&self, req: Request) -> Response {
+        futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
+    }
+}
+
+impl<T: Handler> HandlerSyncExt for T {}
 
 // ============================================================================
 // Shared helpers — simulating a realistic app domain
@@ -371,7 +380,7 @@ fn t59_ref_09_cors_middleware() {
 
     test_section!("cors_adds_headers");
     let req = Request::new("GET", "/").with_header("origin", "https://example.com");
-    let resp = cors.call(req);
+    let resp = cors.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert!(
         resp.headers.contains_key("access-control-allow-origin"),
@@ -382,7 +391,7 @@ fn t59_ref_09_cors_middleware() {
     let req = Request::new("OPTIONS", "/")
         .with_header("origin", "https://example.com")
         .with_header("access-control-request-method", "POST");
-    let resp = cors.call(req);
+    let resp = cors.call_sync(req);
     // Preflight response should include CORS headers
     assert!(resp.headers.contains_key("access-control-allow-methods"));
 
@@ -398,12 +407,12 @@ fn t59_ref_10_auth_middleware_rejects_unauthenticated() {
 
     test_section!("no_auth_header_rejected");
     let req = Request::new("GET", "/protected");
-    let resp = auth.call(req);
+    let resp = auth.call_sync(req);
     assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 
     test_section!("with_bearer_accepted");
     let req = Request::new("GET", "/protected").with_header("authorization", "Bearer valid-token");
-    let resp = auth.call(req);
+    let resp = auth.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
 
     test_complete!("t59_ref_10_auth_middleware_rejects_unauthenticated");
@@ -418,7 +427,7 @@ fn t59_ref_11_timeout_middleware() {
 
     test_section!("fast_request_succeeds");
     let req = Request::new("GET", "/");
-    let resp = with_timeout.call(req);
+    let resp = with_timeout.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "fast");
 
@@ -441,7 +450,7 @@ fn t59_ref_12_compression_middleware() {
 
     test_section!("compression_active");
     let req = Request::new("GET", "/").with_header("accept-encoding", "gzip");
-    let resp = with_compression.call(req);
+    let resp = with_compression.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     // Body may or may not be compressed depending on feature flags,
     // but the middleware should run without error.
@@ -469,7 +478,7 @@ fn t59_ref_13_security_headers_middleware() {
 
     test_section!("security_headers_present");
     let req = Request::new("GET", "/");
-    let resp = with_security.call(req);
+    let resp = with_security.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert!(
         resp.headers.contains_key("x-content-type-options")
@@ -490,7 +499,7 @@ fn t59_ref_14_request_id_middleware() {
 
     test_section!("response_has_request_id");
     let req = Request::new("GET", "/");
-    let resp = with_id.call(req);
+    let resp = with_id.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert!(
         resp.headers.contains_key("x-request-id"),
@@ -501,7 +510,7 @@ fn t59_ref_14_request_id_middleware() {
 
     test_section!("each_request_gets_unique_id");
     let req2 = Request::new("GET", "/");
-    let resp2 = with_id.call(req2);
+    let resp2 = with_id.call_sync(req2);
     let id2 = resp2.headers.get("x-request-id").unwrap();
     assert_ne!(id, id2, "request IDs are unique");
 
@@ -518,7 +527,7 @@ fn t59_ref_15_middleware_chain_composition() {
     let with_id = RequestIdMiddleware::new(with_timeout, "x-request-id");
 
     let req = Request::new("GET", "/").with_header("authorization", "Bearer tok");
-    let resp = with_id.call(req);
+    let resp = with_id.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert!(resp.headers.contains_key("x-request-id"));
 
@@ -911,7 +920,7 @@ fn t59_ref_31_catch_panic_middleware() {
 
     test_section!("panic_converted_to_500");
     let req = Request::new("GET", "/");
-    let resp = safe.call(req);
+    let resp = safe.call_sync(req);
     assert_eq!(
         resp.status,
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -935,7 +944,7 @@ fn t59_ref_32_load_shed_rejects_excess() {
 
     test_section!("shed_when_at_capacity");
     let req = Request::new("GET", "/");
-    let resp = load_shed.call(req);
+    let resp = load_shed.call_sync(req);
     assert_eq!(
         resp.status,
         StatusCode::SERVICE_UNAVAILABLE,
@@ -954,13 +963,13 @@ fn t59_ref_33_request_body_limit() {
 
     test_section!("small_body_passes");
     let req = Request::new("POST", "/").with_body("short");
-    let resp = limited.call(req);
+    let resp = limited.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
 
     test_section!("large_body_rejected");
     let big = vec![b'x'; 100];
     let req = Request::new("POST", "/").with_body(big);
-    let resp = limited.call(req);
+    let resp = limited.call_sync(req);
     assert_eq!(resp.status, StatusCode::PAYLOAD_TOO_LARGE);
 
     test_complete!("t59_ref_33_request_body_limit");
@@ -978,7 +987,7 @@ fn t59_ref_34_normalize_trailing_slash() {
     test_section!("trailing_slash_stripped");
     // The middleware normalizes the path before forwarding to the inner handler.
     let req = Request::new("GET", "/api/users");
-    let resp = normalized.call(req);
+    let resp = normalized.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "users");
 
@@ -999,7 +1008,7 @@ fn t59_ref_35_custom_response_header() {
 
     test_section!("header_set_on_response");
     let req = Request::new("GET", "/");
-    let resp = with_header.call(req);
+    let resp = with_header.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(
         resp.headers.get("x-powered-by").map(String::as_str),
@@ -1022,7 +1031,7 @@ fn t59_ref_36_correlation_id_propagated() {
     let with_id = RequestIdMiddleware::new(handler, "x-request-id");
 
     let req = Request::new("GET", "/");
-    let resp = with_id.call(req);
+    let resp = with_id.call_sync(req);
     let rid = resp
         .headers
         .get("x-request-id")
@@ -1032,7 +1041,7 @@ fn t59_ref_36_correlation_id_propagated() {
 
     test_section!("provided_correlation_id_preserved");
     let req = Request::new("GET", "/").with_header("x-request-id", "custom-123");
-    let resp = with_id.call(req);
+    let resp = with_id.call_sync(req);
     // Middleware may or may not preserve the incoming header depending on policy.
     // The key invariant is that a request-id is present on the response.
     assert!(resp.headers.contains_key("x-request-id"));
@@ -1049,7 +1058,7 @@ fn t59_ref_37_redaction_no_sensitive_data_in_responses() {
     let with_auth = AuthMiddleware::new(handler, AuthPolicy::AnyBearer);
 
     let req = Request::new("GET", "/").with_header("authorization", "Bearer super-secret-token");
-    let resp = with_auth.call(req);
+    let resp = with_auth.call_sync(req);
     // Response body and headers should not contain the token
     let body = std::str::from_utf8(&resp.body).unwrap_or("");
     assert!(

@@ -2,6 +2,8 @@
 //!
 //! Main integration test file for ATP e2e proof suite.
 
+#![allow(dead_code, unused_imports)]
+
 mod atp;
 
 use asupersync::lab::crashpack::{

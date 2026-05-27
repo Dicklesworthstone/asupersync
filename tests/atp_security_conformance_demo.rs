@@ -6,17 +6,16 @@
 
 #![allow(missing_docs)]
 
-use asupersync_conformance::{
-    RequirementLevel, TestCategory,
+use conformance::{
+    TestCategory,
     atp_security::{atp_security_conformance_tests, atp_security_coverage_matrix},
     runner::{RunConfig, TestRunner},
 };
-use std::collections::HashMap;
 
 /// Demo runtime that implements the basic RuntimeInterface for testing
 struct DemoRuntime;
 
-use asupersync_conformance::*;
+use conformance::*;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -51,7 +50,7 @@ impl RuntimeInterface for DemoRuntime {
 
     fn block_on<F: Future>(&self, future: F) -> F::Output {
         // Simplified block_on for demo
-        futures::executor::block_on(future)
+        futures_lite::future::block_on(future)
     }
 
     fn sleep(&self, _duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
@@ -134,30 +133,26 @@ impl RuntimeInterface for DemoRuntime {
 }
 
 // Dummy types for the minimal runtime implementation
-#[derive(Clone)]
 struct DummyMpscSender<T> {
-    _phantom: std::marker::PhantomData<T>,
+    _phantom: std::marker::PhantomData<fn() -> T>,
 }
 struct DummyMpscReceiver<T> {
-    _phantom: std::marker::PhantomData<T>,
+    _phantom: std::marker::PhantomData<fn() -> T>,
 }
 struct DummyOneshotSender<T> {
-    _phantom: std::marker::PhantomData<T>,
+    _phantom: std::marker::PhantomData<fn() -> T>,
 }
-#[derive(Clone)]
 struct DummyBroadcastSender<T> {
-    _phantom: std::marker::PhantomData<T>,
+    _phantom: std::marker::PhantomData<fn() -> T>,
 }
 struct DummyBroadcastReceiver<T> {
-    _phantom: std::marker::PhantomData<T>,
+    _phantom: std::marker::PhantomData<fn() -> T>,
 }
-#[derive(Clone)]
 struct DummyWatchSender<T> {
-    _phantom: std::marker::PhantomData<T>,
+    _phantom: std::marker::PhantomData<fn() -> T>,
 }
-#[derive(Clone)]
 struct DummyWatchReceiver<T> {
-    _phantom: std::marker::PhantomData<T>,
+    _phantom: std::marker::PhantomData<fn() -> T>,
 }
 struct DummyFile;
 struct DummyTcpListener;
@@ -214,6 +209,24 @@ impl<T> DummyWatchReceiver<T> {
     }
 }
 
+impl<T> Clone for DummyMpscSender<T> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl<T> Clone for DummyBroadcastSender<T> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
+impl<T> Clone for DummyWatchReceiver<T> {
+    fn clone(&self) -> Self {
+        Self::new()
+    }
+}
+
 // Implement the channel traits with no-op behavior for demo
 impl<T: Send> MpscSender<T> for DummyMpscSender<T> {
     fn send(&self, _value: T) -> Pin<Box<dyn Future<Output = Result<(), T>> + Send + '_>> {
@@ -233,7 +246,7 @@ impl<T: Send> OneshotSender<T> for DummyOneshotSender<T> {
     }
 }
 
-impl<T: Send + Clone> BroadcastSender<T> for DummyBroadcastSender<T> {
+impl<T: Send + Clone + 'static> BroadcastSender<T> for DummyBroadcastSender<T> {
     fn send(&self, _value: T) -> Result<usize, T> {
         Ok(0)
     }
@@ -254,16 +267,13 @@ impl<T: Send + Sync> WatchSender<T> for DummyWatchSender<T> {
     }
 }
 
-impl<T: Send + Sync + Clone> WatchReceiver<T> for DummyWatchReceiver<T>
-where
-    T: Default,
-{
+impl<T: Send + Sync + Clone> WatchReceiver<T> for DummyWatchReceiver<T> {
     fn changed(&mut self) -> Pin<Box<dyn Future<Output = Result<(), WatchRecvError>> + Send + '_>> {
         Box::pin(async { Err(WatchRecvError) })
     }
 
     fn borrow_and_clone(&self) -> T {
-        T::default()
+        panic!("demo watch receiver has no current value")
     }
 }
 

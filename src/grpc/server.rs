@@ -5819,6 +5819,7 @@ mod tests {
     /// the handler and respond with DEADLINE_EXCEEDED status if deadline is exceeded.
     mod grpc_deadline_enforcement_audit {
         use super::*;
+        use crate::grpc::Code;
         use crate::grpc::MetadataValue;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};

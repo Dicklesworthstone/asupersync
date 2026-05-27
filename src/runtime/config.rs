@@ -9447,6 +9447,7 @@ mod tests {
             enable_adaptive_cancel_streak: false,
             adaptive_cancel_streak_epoch_steps: 0,
             runtime_state_shape: RuntimeStateShape::Unified,
+            security: SecurityConfig::default(),
         }
     }
 
@@ -9747,6 +9748,7 @@ mod tests {
             enable_adaptive_cancel_streak: true,
             adaptive_cancel_streak_epoch_steps: 64,
             runtime_state_shape: RuntimeStateShape::Unified,
+            security: SecurityConfig::default(),
         };
 
         config.normalize();

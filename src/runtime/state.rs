@@ -13856,7 +13856,7 @@ mod tests {
     fn authorization_denial_error_format() {
         init_test("authorization_denial_error_format");
 
-        let region = crate::types::RegionId::from_arena(42);
+        let region = crate::types::RegionId::from_arena(ArenaIndex::new(42, 0));
         let error = SpawnError::AuthorizationDenied {
             region,
             cx_id: "task_123".to_string(),

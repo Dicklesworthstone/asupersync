@@ -27,10 +27,13 @@ mod common;
 use common::init_test_logging;
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use asupersync::Cx;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::server::Interceptor;
@@ -55,7 +58,7 @@ use asupersync::web::middleware::{
     RequestBodyLimitMiddleware, RequestIdMiddleware, SetResponseHeaderMiddleware,
     TimeoutMiddleware, TrailingSlash,
 };
-use asupersync::web::response::{Json, StatusCode};
+use asupersync::web::response::{Json, Response, StatusCode};
 use asupersync::web::router::{Router, get, post};
 use asupersync::web::security::{SecurityHeadersMiddleware, SecurityPolicy};
 use asupersync::web::session::{MemoryStore, SameSite, Session, SessionLayer};
@@ -64,6 +67,14 @@ fn init_test(name: &str) {
     init_test_logging();
     test_phase!(name);
 }
+
+trait TestHandlerSyncExt: Handler {
+    fn call_sync(&self, req: Request) -> Response {
+        futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
+    }
+}
+
+impl<T> TestHandlerSyncExt for T where T: Handler + ?Sized {}
 
 // ============================================================================
 // Section 1: Web Router Composition (T52-ROUTE)
@@ -399,7 +410,7 @@ fn t54_mw_01_cors_preflight() {
     let req = Request::new("OPTIONS", "/api")
         .with_header("origin", "http://example.com")
         .with_header("access-control-request-method", "POST");
-    let resp = cors.call(req);
+    let resp = cors.call_sync(req);
     assert_eq!(resp.status, StatusCode::NO_CONTENT);
     assert!(resp.headers.contains_key("access-control-allow-origin"));
     assert!(resp.headers.contains_key("access-control-allow-methods"));
@@ -428,7 +439,7 @@ fn t54_mw_02_cors_preserves_vary_header() {
     let cors = CorsMiddleware::new(FnHandler::new(inner_handler), policy);
 
     let req = Request::new("GET", "/api").with_header("origin", "http://example.com");
-    let resp = cors.call(req);
+    let resp = cors.call_sync(req);
 
     // Both "origin" and "accept-encoding" must appear in Vary.
     let vary = resp.headers.get("vary").expect("Vary header missing");
@@ -452,7 +463,7 @@ fn t54_mw_03_compression_content_negotiation() {
     let compress = CompressionMiddleware::new(inner, CompressionConfig::default());
 
     let req = Request::new("GET", "/big").with_header("accept-encoding", "gzip, deflate");
-    let resp = compress.call(req);
+    let resp = compress.call_sync(req);
 
     // Response should be compressed or have vary header.
     let vary = resp.headers.get("vary").unwrap_or(&String::new()).clone();
@@ -473,17 +484,17 @@ fn t54_mw_04_auth_bearer_token() {
 
     // Valid token.
     let req = Request::new("GET", "/").with_header("authorization", "Bearer secret-token");
-    let resp = auth.call(req);
+    let resp = auth.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
 
     // Invalid token.
     let req2 = Request::new("GET", "/").with_header("authorization", "Bearer wrong-token");
-    let resp2 = auth.call(req2);
+    let resp2 = auth.call_sync(req2);
     assert_eq!(resp2.status, StatusCode::UNAUTHORIZED);
 
     // Missing header.
     let req3 = Request::new("GET", "/");
-    let resp3 = auth.call(req3);
+    let resp3 = auth.call_sync(req3);
     assert_eq!(resp3.status, StatusCode::UNAUTHORIZED);
 
     test_complete!("t54_mw_04_auth_bearer_token");
@@ -497,7 +508,7 @@ fn t54_mw_05_timeout_enforcement() {
     let timeout_mw = TimeoutMiddleware::new(fast, Duration::from_secs(5));
 
     let req = Request::new("GET", "/");
-    let resp = timeout_mw.call(req);
+    let resp = timeout_mw.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "fast");
 
@@ -516,7 +527,7 @@ fn t54_mw_06_catch_panic_recovery() {
     let safe = CatchPanicMiddleware::new(inner);
 
     let req = Request::new("GET", "/");
-    let resp = safe.call(req);
+    let resp = safe.call_sync(req);
     assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
 
     test_complete!("t54_mw_06_catch_panic_recovery");
@@ -531,12 +542,12 @@ fn t54_mw_07_request_body_limit() {
 
     // Small body -- passes.
     let req = Request::new("POST", "/").with_body(Bytes::from(vec![0u8; 50]));
-    let resp = limiter.call(req);
+    let resp = limiter.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
 
     // Large body -- rejected.
     let req2 = Request::new("POST", "/").with_body(Bytes::from(vec![0u8; 200]));
-    let resp2 = limiter.call(req2);
+    let resp2 = limiter.call_sync(req2);
     assert_eq!(resp2.status, StatusCode::PAYLOAD_TOO_LARGE);
 
     test_complete!("t54_mw_07_request_body_limit");
@@ -550,7 +561,7 @@ fn t54_mw_08_request_id_generation() {
     let id_mw = RequestIdMiddleware::new(inner, "x-request-id");
 
     let req = Request::new("GET", "/");
-    let resp = id_mw.call(req);
+    let resp = id_mw.call_sync(req);
     assert!(
         resp.headers.contains_key("x-request-id"),
         "must add x-request-id header"
@@ -558,7 +569,7 @@ fn t54_mw_08_request_id_generation() {
 
     // Second request gets a different ID.
     let req2 = Request::new("GET", "/");
-    let resp2 = id_mw.call(req2);
+    let resp2 = id_mw.call_sync(req2);
     let id1 = resp.headers.get("x-request-id").unwrap();
     let id2 = resp2.headers.get("x-request-id").unwrap();
     assert_ne!(id1, id2, "request IDs must be unique");
@@ -574,7 +585,7 @@ fn t54_mw_09_normalize_path_trailing_slash() {
     let norm = NormalizePathMiddleware::new(inner, TrailingSlash::Trim);
 
     let req = Request::new("GET", "/api/users/");
-    let resp = norm.call(req);
+    let resp = norm.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
 
     test_complete!("t54_mw_09_normalize_path_trailing_slash");
@@ -588,7 +599,7 @@ fn t54_mw_10_set_response_header() {
     let set_hdr = SetResponseHeaderMiddleware::always(inner, "x-custom", "value123");
 
     let req = Request::new("GET", "/");
-    let resp = set_hdr.call(req);
+    let resp = set_hdr.call_sync(req);
     assert_eq!(
         resp.headers.get("x-custom").map(String::as_str),
         Some("value123")
@@ -607,7 +618,7 @@ fn t54_mw_11_middleware_stack_composition() {
     let safe = CatchPanicMiddleware::new(with_id);
 
     let req = Request::new("GET", "/");
-    let resp = safe.call(req);
+    let resp = safe.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert!(resp.headers.contains_key("x-request-id"));
     assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "stacked");
@@ -624,7 +635,7 @@ fn t54_mw_12_security_headers() {
     let sec = SecurityHeadersMiddleware::new(inner, policy);
 
     let req = Request::new("GET", "/");
-    let resp = sec.call(req);
+    let resp = sec.call_sync(req);
     assert!(
         resp.headers.contains_key("x-content-type-options"),
         "must set nosniff"
@@ -1246,22 +1257,28 @@ fn t61_life_01_session_middleware_full_lifecycle() {
     struct SessionCountHandler;
 
     impl Handler for SessionCountHandler {
-        fn call(&self, req: Request) -> asupersync::web::response::Response {
-            let session = req.extensions.get_typed::<Session>().unwrap();
-            let count = session
-                .get("count")
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            session.insert("count", (count + 1).to_string());
-            let body = format!("count={}", count + 1);
-            asupersync::web::response::Response::new(StatusCode::OK, body)
+        fn call(
+            &self,
+            _cx: &Cx,
+            req: Request,
+        ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+            Box::pin(async move {
+                let session = req.extensions.get_typed::<Session>().unwrap();
+                let count = session
+                    .get("count")
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                session.insert("count", (count + 1).to_string());
+                let body = format!("count={}", count + 1);
+                Response::new(StatusCode::OK, body)
+            })
         }
     }
 
     let mw = layer.wrap(SessionCountHandler);
 
     // First request: creates session.
-    let resp1 = mw.call(Request::new("GET", "/"));
+    let resp1 = mw.call_sync(Request::new("GET", "/"));
     assert_eq!(std::str::from_utf8(&resp1.body).unwrap(), "count=1");
     let cookie1 = resp1.set_cookies.first().unwrap().clone();
     assert!(cookie1.contains("sid="));
@@ -1277,7 +1294,7 @@ fn t61_life_01_session_middleware_full_lifecycle() {
 
     // Second request with session cookie.
     let req2 = Request::new("GET", "/").with_header("cookie", format!("sid={sid}"));
-    let resp2 = mw.call(req2);
+    let resp2 = mw.call_sync(req2);
     assert_eq!(std::str::from_utf8(&resp2.body).unwrap(), "count=2");
 
     test_complete!("t61_life_01_session_middleware_full_lifecycle");
@@ -1292,19 +1309,19 @@ fn t61_life_02_health_check_endpoint() {
     let readiness = health.readiness_handler();
 
     // Both liveness and readiness should return 200 initially.
-    let resp_live = liveness.call(Request::new("GET", "/healthz"));
+    let resp_live = liveness.call_sync(Request::new("GET", "/healthz"));
     assert_eq!(resp_live.status, StatusCode::OK);
 
-    let resp_ready = readiness.call(Request::new("GET", "/readyz"));
+    let resp_ready = readiness.call_sync(Request::new("GET", "/readyz"));
     assert_eq!(resp_ready.status, StatusCode::OK);
 
     // Set not ready.
     health.set_ready(false);
-    let resp_ready2 = readiness.call(Request::new("GET", "/readyz"));
+    let resp_ready2 = readiness.call_sync(Request::new("GET", "/readyz"));
     assert_eq!(resp_ready2.status, StatusCode::SERVICE_UNAVAILABLE);
 
     // Liveness should still return 200.
-    let resp_live2 = liveness.call(Request::new("GET", "/healthz"));
+    let resp_live2 = liveness.call_sync(Request::new("GET", "/healthz"));
     assert_eq!(resp_live2.status, StatusCode::OK);
 
     test_complete!("t61_life_02_health_check_endpoint");

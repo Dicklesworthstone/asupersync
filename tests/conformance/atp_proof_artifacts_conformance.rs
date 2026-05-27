@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
-use crate::raptorq::proof::{DecodeConfig, DecodeProof, PROOF_SCHEMA_VERSION, ProofHash};
-use crate::raptorq::systematic::SystematicParams;
-use crate::types::ObjectId;
+use asupersync::raptorq::proof::{DecodeConfig, DecodeProof, PROOF_SCHEMA_VERSION};
+use asupersync::raptorq::systematic::SystematicParams;
+use asupersync::types::ObjectId;
 
 /// Requirement compliance levels for ATP proof artifacts
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,13 +56,16 @@ impl ProofConformanceContext {
     fn new() -> Self {
         let config = DecodeConfig {
             k: 10,
+            s: 0,
+            h: 0,
+            l: 10,
             symbol_size: 64,
             seed: 12345,
             object_id: ObjectId::from_u128(0x1234567890abcdef),
             sbn: 0,
         };
 
-        let systematic_params = SystematicParams::new(10, 64).unwrap();
+        let systematic_params = SystematicParams::for_source_block(10, 64);
         let test_data = (0..640).map(|i| (i % 256) as u8).collect();
 
         Self {
@@ -289,7 +292,7 @@ fn proof_timing_independence(_ctx: &mut ProofConformanceContext) -> ConformanceR
 
 fn proof_truncation_deterministic(_ctx: &mut ProofConformanceContext) -> ConformanceResult {
     // Test that truncation is bounded and consistent
-    use crate::raptorq::proof::{MAX_PIVOT_EVENTS, MAX_RECEIVED_SYMBOLS};
+    use asupersync::raptorq::proof::{MAX_PIVOT_EVENTS, MAX_RECEIVED_SYMBOLS};
 
     // Verify constants are defined and reasonable
     if MAX_PIVOT_EVENTS > 0 && MAX_RECEIVED_SYMBOLS > 0 {
@@ -309,9 +312,10 @@ fn proof_verification_independent(_ctx: &mut ProofConformanceContext) -> Conform
     // (configuration, received symbols summary, outcome)
     if proof.config.k > 0
         && proof.received.total > 0
-        && !matches!(
+        && matches!(
             proof.outcome,
-            crate::raptorq::proof::ProofOutcome::InternalError { .. }
+            asupersync::raptorq::proof::ProofOutcome::Success { .. }
+                | asupersync::raptorq::proof::ProofOutcome::Failure { .. }
         )
     {
         ConformanceResult::Pass
@@ -398,13 +402,16 @@ fn proof_serialization_portable(_ctx: &mut ProofConformanceContext) -> Conforman
 // ============================================================================
 
 fn create_sample_proof() -> DecodeProof {
-    use crate::raptorq::proof::{
+    use asupersync::raptorq::proof::{
         DecodeConfig, EliminationTrace, InactivationStrategy, PeelingTrace, ProofOutcome,
         ReceivedSummary,
     };
 
     let config = DecodeConfig {
         k: 10,
+        s: 0,
+        h: 0,
+        l: 10,
         symbol_size: 64,
         seed: 12345,
         object_id: ObjectId::from_u128(0x1234567890abcdef),
@@ -430,7 +437,7 @@ fn create_sample_proof() -> DecodeProof {
         pivots: 2,
         row_ops: 5,
         inactivated: 2,
-        strategy: InactivationStrategy::FirstEligible,
+        strategy: InactivationStrategy::AllAtOnce,
         inactive_cols: vec![8, 9],
         inactive_cols_truncated: false,
         pivot_events: vec![],

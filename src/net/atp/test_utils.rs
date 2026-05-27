@@ -4,20 +4,22 @@
 //! in a deterministic and cancellation-correct manner.
 
 use crate::cx::Cx;
-use crate::types::Budget;
+use crate::types::{Budget, Time};
 use std::time::Duration;
 
 /// Test-specific budget for ATP operations.
-pub const TEST_BUDGET: Budget = Budget::from_millis(5000);
+pub const TEST_BUDGET_DEADLINE_MS: u64 = 5_000;
+
+/// Test-specific budget for ATP operations.
+pub const TEST_BUDGET: Budget =
+    Budget::new().with_deadline(Time::from_millis(TEST_BUDGET_DEADLINE_MS));
 
 /// Default test timeout for ATP operations.
 pub const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Creates a test context with appropriate budget and cancellation setup.
 pub fn test_cx() -> Cx {
-    let cx = Cx::root();
-    cx.set_budget(TEST_BUDGET);
-    cx
+    Cx::for_testing_with_budget(TEST_BUDGET)
 }
 
 /// Test data patterns for ATP testing.
@@ -57,8 +59,8 @@ pub mod assertions {
         match outcome {
             Outcome::Ok(value) => value,
             Outcome::Err(err) => panic!("Expected Ok, got Err: {:?}", err),
-            Outcome::Cancelled => panic!("Expected Ok, got Cancelled"),
-            Outcome::Panicked => panic!("Expected Ok, got Panicked"),
+            Outcome::Cancelled(_) => panic!("Expected Ok, got Cancelled"),
+            Outcome::Panicked(_) => panic!("Expected Ok, got Panicked"),
         }
     }
 
@@ -69,7 +71,7 @@ pub mod assertions {
         E: std::fmt::Debug,
     {
         match outcome {
-            Outcome::Cancelled => {}
+            Outcome::Cancelled(_) => {}
             other => panic!("Expected Cancelled, got: {:?}", other),
         }
     }
@@ -82,15 +84,18 @@ pub mod assertions {
         match outcome {
             Outcome::Err(err) => err,
             Outcome::Ok(value) => panic!("Expected Err, got Ok: {:?}", value),
-            Outcome::Cancelled => panic!("Expected Err, got Cancelled"),
-            Outcome::Panicked => panic!("Expected Err, got Panicked"),
+            Outcome::Cancelled(_) => panic!("Expected Err, got Cancelled"),
+            Outcome::Panicked(_) => panic!("Expected Err, got Panicked"),
         }
     }
 }
 
 /// Mock types for testing ATP components without external dependencies.
 pub mod mocks {
-    use crate::net::atp::protocol::{PeerId, SessionId};
+    use crate::net::atp::protocol::{
+        AtpFeature, ClientHello, PeerId, SessionContextKind, SessionId, SessionNegotiator,
+        SessionPolicy, SessionTraceId, TransferNonce,
+    };
 
     /// Create a deterministic test peer ID.
     pub fn test_peer_id(suffix: u64) -> PeerId {
@@ -99,7 +104,23 @@ pub mod mocks {
 
     /// Create a deterministic test session ID.
     pub fn test_session_id(suffix: u64) -> SessionId {
-        SessionId::new(suffix)
+        let initiator = PeerId::from_label(&format!("mock_initiator_{suffix}"));
+        let responder = PeerId::from_label(&format!("mock_responder_{suffix}"));
+        let nonce = TransferNonce::from_seed(&format!("mock_nonce_{suffix}"));
+        let hello = ClientHello::new(
+            initiator,
+            responder,
+            nonce,
+            SessionContextKind::Direct,
+            SessionTraceId::new(suffix),
+        )
+        .with_features(&[AtpFeature::EncryptionPolicy]);
+        let mut policy = SessionPolicy::new(responder, suffix);
+        let mut server = SessionNegotiator::server(responder);
+        let (server_hello, _, _) = server
+            .accept_client_hello(&hello, &mut policy)
+            .expect("mock ATP session negotiation should succeed");
+        server_hello.session_id
     }
 }
 
@@ -108,12 +129,15 @@ mod tests {
     use super::assertions::*;
     use super::test_data::*;
     use super::*;
-    use crate::types::Outcome;
+    use crate::types::{CancelReason, Outcome};
 
     #[test]
     fn test_cx_creation() {
         let cx = test_cx();
-        assert!(cx.budget().remaining_ms() <= TEST_BUDGET.as_millis());
+        assert_eq!(
+            cx.budget().deadline.map(Time::as_millis),
+            Some(TEST_BUDGET_DEADLINE_MS)
+        );
     }
 
     #[test]
@@ -146,13 +170,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "Expected Ok, got Cancelled")]
     fn test_assert_atp_ok_with_cancelled() {
-        let outcome: Outcome<i32, String> = Outcome::Cancelled;
+        let outcome: Outcome<i32, String> = Outcome::cancelled(CancelReason::user("test"));
         assert_atp_ok(outcome);
     }
 
     #[test]
     fn test_assert_atp_cancelled() {
-        let outcome: Outcome<i32, String> = Outcome::Cancelled;
+        let outcome: Outcome<i32, String> = Outcome::cancelled(CancelReason::user("test"));
         assert_atp_cancelled(outcome);
     }
 

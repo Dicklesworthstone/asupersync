@@ -3265,6 +3265,7 @@ mod tests {
                 state: Arc::clone(&state),
                 next_sid: AtomicU64::new(1),
                 connected: false,
+                tls_required_on_connect: false,
             };
 
             client
@@ -3306,6 +3307,7 @@ mod tests {
                 state,
                 next_sid: AtomicU64::new(8),
                 connected: false,
+                tls_required_on_connect: false,
             };
 
             client
@@ -3355,6 +3357,7 @@ mod tests {
                 state: Arc::clone(&state),
                 next_sid: AtomicU64::new(13),
                 connected: false,
+                tls_required_on_connect: false,
             };
 
             client
@@ -3416,6 +3419,7 @@ mod tests {
                 state: Arc::clone(&state),
                 next_sid: AtomicU64::new(43),
                 connected: true,
+                tls_required_on_connect: false,
             };
 
             let err = client
@@ -4391,6 +4395,7 @@ mod tests {
                 state,
                 next_sid: AtomicU64::new(1),
                 connected: true,
+                tls_required_on_connect: false,
             };
 
             let err = client
@@ -4454,6 +4459,7 @@ mod tests {
                 state: Arc::clone(&state),
                 next_sid: AtomicU64::new(1),
                 connected: false,
+                tls_required_on_connect: false,
             };
 
             let err = client
@@ -4498,6 +4504,7 @@ mod tests {
                 state: Arc::new(SharedState::new()),
                 next_sid: AtomicU64::new(1),
                 connected: false,
+                tls_required_on_connect: false,
             };
 
             let err = client
@@ -4542,6 +4549,7 @@ mod tests {
                 state: Arc::new(SharedState::new()),
                 next_sid: AtomicU64::new(1),
                 connected: true,
+                tls_required_on_connect: false,
             };
 
             client.read_buf.extend(b"PING\r\n").expect("buffer ping");
@@ -4620,6 +4628,7 @@ mod tests {
                 state: Arc::clone(&state),
                 next_sid: AtomicU64::new(1),
                 connected: true,
+                tls_required_on_connect: false,
             };
 
             client.read_buf.extend(b"PING\r\n").expect("buffer ping");
@@ -4763,6 +4772,7 @@ mod tests {
                 state: Arc::new(SharedState::new()),
                 next_sid: AtomicU64::new(1),
                 connected: true,
+                tls_required_on_connect: false,
             };
 
             let headers = b"NATS/1.0\r\nFoo: bar\r\n\r\n";
@@ -4847,6 +4857,7 @@ mod tests {
                 state: Arc::new(SharedState::new()),
                 next_sid: AtomicU64::new(1),
                 connected: true,
+                tls_required_on_connect: false,
             };
 
             let headers = b"NATS/1.0 408 Request Timeout\r\n\r\n";
@@ -5147,6 +5158,7 @@ mod tests {
                 state: Arc::new(SharedState::new()),
                 next_sid: AtomicU64::new(1),
                 connected: true,
+                tls_required_on_connect: false,
             };
 
             client
