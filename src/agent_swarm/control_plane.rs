@@ -425,7 +425,7 @@ impl AgentSwarmControlPlane {
     /// Admit a new agent to the swarm with resource allocation.
     pub async fn admit_agent(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         request: AgentAdmissionRequest,
     ) -> Result<AgentAdmissionResult> {
         // SECURITY: Validate agent authentication/authorization before admission
@@ -502,7 +502,7 @@ impl AgentSwarmControlPlane {
     /// Validate agent authorization and authentication.
     async fn validate_agent_authorization(
         &self,
-        cx: &Cx,
+        _cx: &Cx,
         request: &AgentAdmissionRequest,
     ) -> Result<bool> {
         // If no authentication provided, reject
