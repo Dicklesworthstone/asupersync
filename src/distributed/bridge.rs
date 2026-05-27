@@ -583,7 +583,8 @@ impl RegionBridge {
                     ..Default::default()
                 };
                 let local_node_id = NodeId::new("local-node");
-                let distributed = DistributedRegionRecord::new(id, dist_config, parent, budget, local_node_id);
+                let distributed =
+                    DistributedRegionRecord::new(id, dist_config, parent, budget, local_node_id);
                 Self {
                     local: RegionRecord::new(id, parent, budget),
                     distributed: Some(distributed),

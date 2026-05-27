@@ -2541,12 +2541,19 @@ impl MySqlConnection {
     /// Query static SQL (safe wrapper for system queries).
     /// Only allows whitelisted static SQL patterns. For dynamic queries,
     /// use prepared statements.
-    pub async fn query_static_sql(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
+    pub async fn query_static_sql(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
         self.query_unchecked_internal(cx, sql).await
     }
 
     /// Begin a transaction - safe wrapper.
-    pub async fn begin_transaction(&mut self, cx: &Cx) -> Outcome<MySqlTransaction<'_>, MySqlError> {
+    pub async fn begin_transaction(
+        &mut self,
+        cx: &Cx,
+    ) -> Outcome<MySqlTransaction<'_>, MySqlError> {
         self.begin(cx).await
     }
 
@@ -2559,7 +2566,11 @@ impl MySqlConnection {
     /// TESTING ONLY: Execute SQL bypassing injection validation.
     /// This is UNSAFE and should only be used for testing protocol security features.
     #[cfg(test)]
-    pub async fn query_unchecked_test_only(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
+    pub async fn query_unchecked_test_only(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
         // Skip validation for tests that specifically need to test dangerous SQL
         self.query_unchecked_inner_impl(cx, sql).await
     }
@@ -3445,7 +3456,11 @@ impl MySqlConnection {
         result
     }
 
-    async fn execute_unchecked_inner_impl(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+    async fn execute_unchecked_inner_impl(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<u64, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -3534,7 +3549,10 @@ impl MySqlConnection {
 
     /// Begin a transaction.
     pub async fn begin(&mut self, cx: &Cx) -> Outcome<MySqlTransaction<'_>, MySqlError> {
-        match self.execute_unchecked_internal(cx, "START TRANSACTION").await {
+        match self
+            .execute_unchecked_internal(cx, "START TRANSACTION")
+            .await
+        {
             Outcome::Ok(_) => Outcome::Ok(MySqlTransaction {
                 conn: self,
                 finished: false,
@@ -5115,7 +5133,11 @@ impl MySqlTransaction<'_> {
 
     /// Query static SQL within transaction (safe wrapper).
     /// Only allows whitelisted static SQL patterns.
-    pub async fn query_static_sql(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
+    pub async fn query_static_sql(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
         self.query_unchecked_internal(cx, sql).await
     }
 }
@@ -6038,7 +6060,10 @@ mod tests {
 
         // debug_details() should provide full error information for server-side logging
         let debug_output = server_err.debug_details();
-        assert_eq!(debug_output, "MySQL error [1054] (42S22): Unknown column 'secret_password' in 'field list'");
+        assert_eq!(
+            debug_output,
+            "MySQL error [1054] (42S22): Unknown column 'secret_password' in 'field list'"
+        );
         assert!(debug_output.contains("secret_password"));
         assert!(debug_output.contains("field list"));
         assert!(debug_output.contains("42S22"));

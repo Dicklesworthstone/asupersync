@@ -478,18 +478,25 @@ mod tests {
 
         // Test 1: Different key should not verify the same tag
         let different_key = AuthKey::from_seed(0xCAFEBABE);
-        assert!(!valid_tag.verify(&different_key, &symbol),
-                "Tag should not verify with different key");
+        assert!(
+            !valid_tag.verify(&different_key, &symbol),
+            "Tag should not verify with different key"
+        );
 
         // Test 2: Modified symbol should not verify with same tag
-        let modified_symbol = Symbol::new(id, vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42], SymbolKind::Source);
-        assert!(!valid_tag.verify(&key, &modified_symbol),
-                "Tag should not verify with modified symbol");
+        let modified_symbol =
+            Symbol::new(id, vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42], SymbolKind::Source);
+        assert!(
+            !valid_tag.verify(&key, &modified_symbol),
+            "Tag should not verify with modified symbol"
+        );
 
         // Test 3: Different symbol kind should not verify
         let repair_symbol = Symbol::new(id, vec![0xDE, 0xAD, 0xBE, 0xEF], SymbolKind::Repair);
-        assert!(!valid_tag.verify(&key, &repair_symbol),
-                "Tag should not verify with different symbol kind");
+        assert!(
+            !valid_tag.verify(&key, &repair_symbol),
+            "Tag should not verify with different symbol kind"
+        );
 
         // Test 4: All-bits-flipped tag should not verify
         let mut flipped_bytes = *valid_tag.as_bytes();
@@ -497,12 +504,16 @@ mod tests {
             *byte = !*byte;
         }
         let flipped_tag = AuthenticationTag::from_bytes(flipped_bytes);
-        assert!(!flipped_tag.verify(&key, &symbol),
-                "Completely flipped tag should not verify");
+        assert!(
+            !flipped_tag.verify(&key, &symbol),
+            "Completely flipped tag should not verify"
+        );
 
         // Test 5: Zero tag should never verify (even if computed tag is zero by chance)
         let zero_tag = AuthenticationTag::zero();
-        assert!(!zero_tag.verify(&key, &symbol),
-                "Zero tag must never verify");
+        assert!(
+            !zero_tag.verify(&key, &symbol),
+            "Zero tag must never verify"
+        );
     }
 }

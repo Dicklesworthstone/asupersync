@@ -147,7 +147,11 @@ impl std::fmt::Display for LedgerError {
             Self::StatsUnderflow { counter } => {
                 write!(f, "obligation ledger {counter} stats underflow")
             }
-            Self::AcquireAfterFinalize { region, kind, holder } => write!(
+            Self::AcquireAfterFinalize {
+                region,
+                kind,
+                holder,
+            } => write!(
                 f,
                 "cannot acquire obligation against finalized region {region:?} \
                  (kind={kind:?}, holder={holder:?})"
@@ -340,15 +344,18 @@ impl ObligationLedger {
     }
 
     fn resolve_one_pending(&mut self, _operation: &'static str) -> Result<(), LedgerError> {
-        self.stats.pending = self.stats.pending.checked_sub(1).ok_or_else(|| {
-            LedgerError::StatsUnderflow {
-                counter: "pending",
-            }
-        })?;
+        self.stats.pending = self
+            .stats
+            .pending
+            .checked_sub(1)
+            .ok_or_else(|| LedgerError::StatsUnderflow { counter: "pending" })?;
         Ok(())
     }
 
-    fn record_for_token_mut(&mut self, token: &ObligationToken) -> Result<&mut ObligationRecord, LedgerError> {
+    fn record_for_token_mut(
+        &mut self,
+        token: &ObligationToken,
+    ) -> Result<&mut ObligationRecord, LedgerError> {
         let record = self.pending_record_for_id_mut(token.id, "token resolve")?;
         if record.kind != token.kind {
             return Err(LedgerError::TokenMismatch {
@@ -371,7 +378,11 @@ impl ObligationLedger {
         Ok(record)
     }
 
-    fn finish_resolution(&mut self, operation: &'static str, resolution: ObligationResolution) -> Result<(), LedgerError> {
+    fn finish_resolution(
+        &mut self,
+        operation: &'static str,
+        resolution: ObligationResolution,
+    ) -> Result<(), LedgerError> {
         match resolution {
             ObligationResolution::Commit => {
                 self.stats.total_committed += 1;
@@ -556,11 +567,12 @@ impl ObligationLedger {
         }
 
         // Check for index overflow
-        let next_index = self.next_index.checked_add(1).ok_or_else(|| {
-            LedgerError::IndexOverflow {
-                generation: self.generation,
-            }
-        })?;
+        let next_index =
+            self.next_index
+                .checked_add(1)
+                .ok_or_else(|| LedgerError::IndexOverflow {
+                    generation: self.generation,
+                })?;
 
         let idx = ArenaIndex::new(self.next_index, self.generation);
         self.next_index = next_index;
@@ -700,9 +712,7 @@ impl ObligationLedger {
             return 0;
         }
         self.resolve_token(&token, "commit", ObligationResolution::Commit, now)
-            .unwrap_or_else(|err| {
-                panic!("commit: {err}")
-            })
+            .unwrap_or_else(|err| panic!("commit: {err}"))
     }
 
     /// Aborts an obligation, consuming the token.
@@ -729,9 +739,7 @@ impl ObligationLedger {
             return 0;
         }
         self.resolve_token(&token, "abort", ObligationResolution::Abort(reason), now)
-            .unwrap_or_else(|err| {
-                panic!("abort: {err}")
-            })
+            .unwrap_or_else(|err| panic!("abort: {err}"))
     }
 
     /// Aborts an obligation by ID.
@@ -770,9 +778,7 @@ impl ObligationLedger {
             }
         }
         self.resolve_id(id, "abort_by_id", ObligationResolution::Abort(reason), now)
-            .unwrap_or_else(|err| {
-                panic!("abort_by_id: {err}")
-            })
+            .unwrap_or_else(|err| panic!("abort_by_id: {err}"))
     }
 
     /// Race-tolerant variant of [`Self::abort_by_id`] for drain loops
@@ -843,9 +849,7 @@ impl ObligationLedger {
     /// Panics if the obligation was already resolved or does not exist.
     pub fn mark_leaked(&mut self, id: ObligationId, now: Time) -> u64 {
         self.resolve_id(id, "mark_leaked", ObligationResolution::Leak, now)
-            .unwrap_or_else(|err| {
-                panic!("mark_leaked: {err}")
-            })
+            .unwrap_or_else(|err| panic!("mark_leaked: {err}"))
     }
 
     /// Returns the current ledger statistics.

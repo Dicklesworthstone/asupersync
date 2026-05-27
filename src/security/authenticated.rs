@@ -47,7 +47,9 @@ impl AuthenticatedSymbol {
     pub(crate) fn new_verified(symbol: Symbol, tag: AuthenticationTag) -> Self {
         // asupersync-8kumb7: Log warning for zero tag usage to discourage this pattern
         if tag.is_zero() {
-            eprintln!("WARNING: AuthenticatedSymbol::new_verified called with zero tag - consider using new_unauthenticated() instead");
+            eprintln!(
+                "WARNING: AuthenticatedSymbol::new_verified called with zero tag - consider using new_unauthenticated() instead"
+            );
         }
 
         let verified = !tag.is_zero();
@@ -181,8 +183,14 @@ mod tests {
         let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
         let auth = AuthenticatedSymbol::new_unauthenticated(symbol.clone());
 
-        assert!(!auth.is_verified(), "unauthenticated symbol must not be verified");
-        assert!(auth.tag().is_zero(), "unauthenticated symbol must use zero tag");
+        assert!(
+            !auth.is_verified(),
+            "unauthenticated symbol must not be verified"
+        );
+        assert!(
+            auth.tag().is_zero(),
+            "unauthenticated symbol must use zero tag"
+        );
         assert_eq!(auth.symbol(), &symbol, "symbol data must be preserved");
     }
 

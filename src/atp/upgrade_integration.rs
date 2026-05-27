@@ -4,7 +4,9 @@
 //! and the CLI upgrade commands. It can be integrated with src/cli/upgrade.rs
 //! once MCP reservations allow.
 
-use crate::atp::daemon_control::{SecureDaemonController, DaemonControlCapability, create_atp_daemon_controller};
+use crate::atp::daemon_control::{
+    DaemonControlCapability, SecureDaemonController, create_atp_daemon_controller,
+};
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind};
 use crate::types::RegionId;
@@ -32,19 +34,17 @@ impl UpgradeDaemonController {
     /// Stops daemon if running (integrates with stop_daemon_if_running).
     pub async fn stop_daemon_if_running(&mut self, cx: &Cx) -> Result<bool, Error> {
         match self.controller.status(cx) {
-            Ok(status) if status.pid.is_some() => {
-                match self.controller.stop(cx)? {
-                    crate::atp::daemon_control::DaemonControlResult::Success { .. } => Ok(true),
-                    crate::atp::daemon_control::DaemonControlResult::Failed { error, .. } => {
-                        Err(Error::new(ErrorKind::OperationFailed)
-                            .with_message(format!("Failed to stop daemon: {}", error)))
-                    }
-                    crate::atp::daemon_control::DaemonControlResult::PermissionDenied { .. } => {
-                        Err(Error::new(ErrorKind::AdmissionDenied)
-                            .with_message("Permission denied to stop daemon"))
-                    }
+            Ok(status) if status.pid.is_some() => match self.controller.stop(cx)? {
+                crate::atp::daemon_control::DaemonControlResult::Success { .. } => Ok(true),
+                crate::atp::daemon_control::DaemonControlResult::Failed { error, .. } => {
+                    Err(Error::new(ErrorKind::OperationFailed)
+                        .with_message(format!("Failed to stop daemon: {}", error)))
                 }
-            }
+                crate::atp::daemon_control::DaemonControlResult::PermissionDenied { .. } => {
+                    Err(Error::new(ErrorKind::AdmissionDenied)
+                        .with_message("Permission denied to stop daemon"))
+                }
+            },
             Ok(_) => Ok(false), // Not running
             Err(e) => Err(e),
         }
@@ -95,10 +95,7 @@ mod tests {
         // Create a dummy config file
         std::fs::write(config_dir.join("config.toml"), "# test config").unwrap();
 
-        let result = create_upgrade_daemon_controller(
-            RegionId::new_for_test(1, 0),
-            config_dir,
-        );
+        let result = create_upgrade_daemon_controller(RegionId::new_for_test(1, 0), config_dir);
 
         assert!(result.is_ok());
     }

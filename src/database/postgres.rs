@@ -3816,9 +3816,9 @@ impl PgConnection {
         }
 
         // Ensure at least one SCRAM mechanism is available
-        let has_scram = mechanisms.iter().any(|m|
-            m == "SCRAM-SHA-256" || m == "SCRAM-SHA-256-PLUS"
-        );
+        let has_scram = mechanisms
+            .iter()
+            .any(|m| m == "SCRAM-SHA-256" || m == "SCRAM-SHA-256-PLUS");
 
         if !has_scram {
             return Err(PgError::UnsupportedAuth(
@@ -9009,8 +9009,7 @@ mod tests {
     #[test]
     fn test_validate_sasl_mechanisms_accepts_scram_sha256() {
         let mechanisms = vec!["SCRAM-SHA-256".to_string()];
-        PgConnection::validate_sasl_mechanisms(&mechanisms)
-            .expect("Should accept SCRAM-SHA-256");
+        PgConnection::validate_sasl_mechanisms(&mechanisms).expect("Should accept SCRAM-SHA-256");
     }
 
     #[test]
@@ -9022,7 +9021,10 @@ mod tests {
 
     #[test]
     fn test_validate_sasl_mechanisms_accepts_both_scram_variants() {
-        let mechanisms = vec!["SCRAM-SHA-256".to_string(), "SCRAM-SHA-256-PLUS".to_string()];
+        let mechanisms = vec![
+            "SCRAM-SHA-256".to_string(),
+            "SCRAM-SHA-256-PLUS".to_string(),
+        ];
         PgConnection::validate_sasl_mechanisms(&mechanisms)
             .expect("Should accept both SCRAM variants");
     }
@@ -9093,7 +9095,9 @@ mod tests {
                 assert!(msg.contains("unacceptable SASL mechanism"));
                 assert!(msg.contains("SCRAM-SHA-256"));
             }
-            other => panic!("Expected UnsupportedAuth error for non-SCRAM mechanisms, got {other:?}"),
+            other => {
+                panic!("Expected UnsupportedAuth error for non-SCRAM mechanisms, got {other:?}")
+            }
         }
     }
 

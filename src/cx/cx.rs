@@ -3666,7 +3666,7 @@ mod tests {
             for _ in 0..crate::types::task_context::MAX_CONTEXT_STACK_DEPTH {
                 s.push(CurrentCxFrame {
                     cx: cx.clone().retype::<cap::All>(),
-                    mask: cap::CapMask::all()
+                    mask: cap::CapMask::all(),
                 });
             }
         });
@@ -3688,7 +3688,7 @@ mod tests {
             for _ in 0..crate::types::task_context::MAX_CONTEXT_STACK_DEPTH {
                 s.push(CurrentCxFrame {
                     cx: cx.clone().retype::<cap::All>(),
-                    mask: cap::CapMask::all()
+                    mask: cap::CapMask::all(),
                 });
             }
         });

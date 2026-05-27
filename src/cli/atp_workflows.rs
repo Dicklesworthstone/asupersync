@@ -173,14 +173,16 @@ impl AtpWorkflowCoordinator {
             })?;
 
             // Read artifact file using validated path
-            let content = tokio::fs::read(validated_path.as_path()).await.map_err(|e| {
-                CliError::new(
-                    "file_read_error",
-                    &format!("Failed to read artifact: {}", path.display()),
-                )
-                .detail(&format!("IO error: {}", e))
-                .exit_code(ExitCode::RUNTIME_ERROR)
-            })?;
+            let content = tokio::fs::read(validated_path.as_path())
+                .await
+                .map_err(|e| {
+                    CliError::new(
+                        "file_read_error",
+                        &format!("Failed to read artifact: {}", path.display()),
+                    )
+                    .detail(&format!("IO error: {}", e))
+                    .exit_code(ExitCode::RUNTIME_ERROR)
+                })?;
 
             // Create cache key for the artifact
             let content_hash = self.compute_content_hash(&content);

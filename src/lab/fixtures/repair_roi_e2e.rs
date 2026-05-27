@@ -311,27 +311,39 @@ impl RepairRoiE2eHarness {
 
         for policy_result in policy_results {
             let total_scenarios = policy_result.scenario_results.len();
-            let successful_scenarios = policy_result.scenario_results.iter()
+            let successful_scenarios = policy_result
+                .scenario_results
+                .iter()
                 .filter(|r| r.success)
                 .count();
 
-            let total_duration: Duration = policy_result.scenario_results.iter()
+            let total_duration: Duration = policy_result
+                .scenario_results
+                .iter()
                 .map(|r| Duration::from_micros(r.duration_micros))
                 .sum();
 
-            let avg_bandwidth_efficiency = policy_result.scenario_results.iter()
+            let avg_bandwidth_efficiency = policy_result
+                .scenario_results
+                .iter()
                 .flat_map(|r| &r.transfer_results)
                 .map(|t| t.bandwidth_efficiency)
-                .sum::<f64>() / policy_result.scenario_results.iter()
-                .flat_map(|r| &r.transfer_results)
-                .count().max(1) as f64;
+                .sum::<f64>()
+                / policy_result
+                    .scenario_results
+                    .iter()
+                    .flat_map(|r| &r.transfer_results)
+                    .count()
+                    .max(1) as f64;
 
             policy_metrics.push(PolicyMetrics {
                 policy_name: policy_result.policy_name.clone(),
                 success_rate: successful_scenarios as f64 / total_scenarios as f64,
                 avg_duration: total_duration / total_scenarios as u32,
                 avg_bandwidth_efficiency,
-                total_errors: policy_result.scenario_results.iter()
+                total_errors: policy_result
+                    .scenario_results
+                    .iter()
                     .map(|r| r.errors.len())
                     .sum(),
             });
@@ -365,9 +377,9 @@ impl RepairRoiE2eHarness {
                 1.0
             };
 
-            let score = (metric.success_rate * success_weight) +
-                       (metric.avg_bandwidth_efficiency * efficiency_weight) +
-                       (speed_score * speed_weight);
+            let score = (metric.success_rate * success_weight)
+                + (metric.avg_bandwidth_efficiency * efficiency_weight)
+                + (speed_score * speed_weight);
 
             if score > best_score {
                 best_score = score;
@@ -383,9 +395,11 @@ impl RepairRoiE2eHarness {
         let mut recommendations = Vec::new();
 
         // Find highest success rate
-        if let Some(most_reliable) = metrics.iter().max_by(|a, b|
-            a.success_rate.partial_cmp(&b.success_rate).unwrap_or(std::cmp::Ordering::Equal)
-        ) {
+        if let Some(most_reliable) = metrics.iter().max_by(|a, b| {
+            a.success_rate
+                .partial_cmp(&b.success_rate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
             recommendations.push(format!(
                 "{} policy showed highest success rate ({:.1}%)",
                 most_reliable.policy_name,
@@ -394,13 +408,14 @@ impl RepairRoiE2eHarness {
         }
 
         // Find highest efficiency
-        if let Some(most_efficient) = metrics.iter().max_by(|a, b|
-            a.avg_bandwidth_efficiency.partial_cmp(&b.avg_bandwidth_efficiency).unwrap_or(std::cmp::Ordering::Equal)
-        ) {
+        if let Some(most_efficient) = metrics.iter().max_by(|a, b| {
+            a.avg_bandwidth_efficiency
+                .partial_cmp(&b.avg_bandwidth_efficiency)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
             recommendations.push(format!(
                 "{} policy achieved best bandwidth efficiency ({:.3})",
-                most_efficient.policy_name,
-                most_efficient.avg_bandwidth_efficiency
+                most_efficient.policy_name, most_efficient.avg_bandwidth_efficiency
             ));
         }
 
@@ -414,7 +429,8 @@ impl RepairRoiE2eHarness {
         }
 
         if recommendations.is_empty() {
-            recommendations.push("No clear performance differences detected between policies".to_string());
+            recommendations
+                .push("No clear performance differences detected between policies".to_string());
         }
 
         recommendations
@@ -975,8 +991,7 @@ mod tests {
         // Should create 3 different policies (Conservative, Aggressive, Balanced)
         assert_eq!(policies.len(), 3);
 
-        let harness = RepairRoiE2eHarness::new(lab_runtime)
-            .with_policies(policies.clone());
+        let harness = RepairRoiE2eHarness::new(lab_runtime).with_policies(policies.clone());
 
         // Verify policies were set correctly
         assert_eq!(harness.policies.len(), 3);
@@ -997,8 +1012,7 @@ mod tests {
         // Test the policy comparison result structure
         let lab_runtime = LabRuntime::new();
         let policies = RepairRoiE2eHarness::create_comparison_policies();
-        let mut harness = RepairRoiE2eHarness::new(lab_runtime)
-            .with_policies(policies);
+        let mut harness = RepairRoiE2eHarness::new(lab_runtime).with_policies(policies);
 
         // This would normally execute scenarios, but for testing we just verify structure
         let scenarios = &harness.scenarios.clone();
@@ -1006,7 +1020,11 @@ mod tests {
 
         // Verify we have test scenarios
         assert!(!scenario_names.is_empty());
-        assert!(scenario_names.iter().any(|name| name.contains("clean-path")));
+        assert!(
+            scenario_names
+                .iter()
+                .any(|name| name.contains("clean-path"))
+        );
         assert!(scenario_names.iter().any(|name| name.contains("lossy")));
 
         // Verify comparison policies have been configured

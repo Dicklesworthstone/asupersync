@@ -4,8 +4,8 @@ use super::class::DeliveryClass;
 use super::subject::{Subject, SubjectPattern};
 use crate::types::{RegionId, Time};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
@@ -559,7 +559,12 @@ impl WalStorageBackend {
             // Validate payload size and integrity before deserialization
             Self::validate_payload(payload, None).map_err(|mut error| {
                 // Update path and line information for context
-                if let StreamError::WalFormat { path: ref mut error_path, line: ref mut error_line, .. } = error {
+                if let StreamError::WalFormat {
+                    path: ref mut error_path,
+                    line: ref mut error_line,
+                    ..
+                } = error
+                {
                     *error_path = path.display().to_string();
                     *error_line = line_number;
                 }

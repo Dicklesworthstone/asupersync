@@ -526,7 +526,10 @@ impl<'a> Future for AcquireFuture<'a, '_> {
                 // br-asupersync-13jmt3: static description (see paired
                 // comment in try_acquire); count is exposed via
                 // SemaphorePermit.count.
-                obligation: Some(ObligationToken::reserve("semaphore-permit", self.cx.region_id())),
+                obligation: Some(ObligationToken::reserve(
+                    "semaphore-permit",
+                    self.cx.region_id(),
+                )),
                 semaphore: self.semaphore,
                 count: self.count,
                 release_lock_order_on_drop: true,
@@ -904,7 +907,9 @@ impl Future for OwnedAcquireFuture {
                 // comment in try_acquire); count is exposed via
                 // OwnedSemaphorePermit.count.
                 obligation: Some({
-                    let region = this.cx.as_ref()
+                    let region = this
+                        .cx
+                        .as_ref()
                         .map(|cx| cx.region_id())
                         .unwrap_or_else(|| {
                             panic!(

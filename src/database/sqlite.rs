@@ -158,7 +158,7 @@ fn classify_sql_surface_violation(sql: &str) -> Option<SqlSurfaceViolation> {
     // SECURITY FIX: Use sqlparser-rs to eliminate parser divergence vulnerabilities
     // This ensures we use the same SQL parsing logic as execution (asupersync-dn5hn8)
 
-    use sqlparser::ast::{Statement, SetExpr};
+    use sqlparser::ast::{SetExpr, Statement};
     use sqlparser::dialect::SQLiteDialect;
     use sqlparser::parser::Parser;
 
@@ -175,7 +175,9 @@ fn classify_sql_surface_violation(sql: &str) -> Option<SqlSurfaceViolation> {
 }
 
 /// Check parsed SQL AST statements for violations
-fn check_parsed_statements(statements: &[sqlparser::ast::Statement]) -> Option<SqlSurfaceViolation> {
+fn check_parsed_statements(
+    statements: &[sqlparser::ast::Statement],
+) -> Option<SqlSurfaceViolation> {
     use sqlparser::ast::Statement;
 
     for statement in statements {
@@ -245,8 +247,11 @@ fn check_sql_keywords_fallback(sql: &str) -> Option<SqlSurfaceViolation> {
 
         // Check for transaction control (excluding CREATE TRIGGER)
         if !stmt.contains(" TRIGGER ") {
-            if stmt.starts_with("BEGIN") || stmt.starts_with("COMMIT")
-                || stmt.starts_with("ROLLBACK") || stmt.starts_with("SAVEPOINT ") {
+            if stmt.starts_with("BEGIN")
+                || stmt.starts_with("COMMIT")
+                || stmt.starts_with("ROLLBACK")
+                || stmt.starts_with("SAVEPOINT ")
+            {
                 return Some(SqlSurfaceViolation::TransactionControl);
             }
         }
@@ -1697,14 +1702,17 @@ impl SqliteConnection {
     pub fn close(&self) -> Result<(), SqliteError> {
         let mut guard = self.inner.lock();
         if let Some(conn) = guard.conn.as_ref() {
-            let _ = rollback_orphaned_transaction_mutex_guarded(conn, self.transaction_state.as_ref());
+            let _ =
+                rollback_orphaned_transaction_mutex_guarded(conn, self.transaction_state.as_ref());
 
             // SECURITY FIX: Fail-closed WAL checkpoint to prevent data loss
             // WAL checkpoint failures now propagate as errors instead of being ignored
             match self.execute_wal_checkpoint_with_retry(conn) {
                 Ok(()) => {
                     #[cfg(feature = "tracing-integration")]
-                    crate::tracing_compat::debug!("WAL checkpoint completed successfully during close");
+                    crate::tracing_compat::debug!(
+                        "WAL checkpoint completed successfully during close"
+                    );
                 }
                 Err(e) => {
                     #[cfg(feature = "tracing-integration")]
@@ -1737,10 +1745,7 @@ impl SqliteConnection {
         }
 
         // Execute WAL checkpoint with verification asynchronously
-        match self
-            .execute_wal_checkpoint_async_with_retry(cx)
-            .await
-        {
+        match self.execute_wal_checkpoint_async_with_retry(cx).await {
             Outcome::Ok(()) => {
                 #[cfg(feature = "tracing-integration")]
                 crate::tracing_compat::debug!("Async WAL checkpoint completed successfully");
@@ -1771,7 +1776,10 @@ impl SqliteConnection {
     }
 
     /// Execute WAL checkpoint with retry logic and verification
-    fn execute_wal_checkpoint_with_retry(&self, conn: &rusqlite::Connection) -> Result<(), SqliteError> {
+    fn execute_wal_checkpoint_with_retry(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> Result<(), SqliteError> {
         const MAX_RETRY_ATTEMPTS: u32 = 3;
         const RETRY_DELAY_MS: u64 = 50;
 
@@ -1804,7 +1812,9 @@ impl SqliteConnection {
                     }
 
                     // Brief delay before retry
-                    std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS * attempt as u64));
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        RETRY_DELAY_MS * attempt as u64,
+                    ));
                 }
             }
         }
@@ -1813,7 +1823,10 @@ impl SqliteConnection {
     }
 
     /// Execute a single WAL checkpoint with verification
-    fn execute_single_wal_checkpoint(&self, conn: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+    fn execute_single_wal_checkpoint(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> Result<(), rusqlite::Error> {
         // Use PRAGMA wal_checkpoint(RESTART) for stronger durability guarantees
         // This ensures WAL is checkpointed AND reset
         conn.execute_batch("PRAGMA wal_checkpoint(RESTART)")?;
@@ -1821,23 +1834,25 @@ impl SqliteConnection {
         // Verify checkpoint completed by checking WAL size
         // After successful checkpoint, WAL should be minimal
         let mut stmt = conn.prepare_cached("PRAGMA wal_checkpoint")?;
-        let result: (i32, i32, i32) = stmt.query_row([], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let result: (i32, i32, i32) =
+            stmt.query_row([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
 
         let (busy, log_pages, checkpointed_pages) = result;
 
         if busy != 0 {
             return Err(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
-                Some("WAL checkpoint blocked by concurrent readers".to_string())
+                Some("WAL checkpoint blocked by concurrent readers".to_string()),
             ));
         }
 
         if log_pages > 0 && checkpointed_pages == 0 {
             return Err(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
-                Some(format!("WAL checkpoint failed - {} pages remain in WAL", log_pages))
+                Some(format!(
+                    "WAL checkpoint failed - {} pages remain in WAL",
+                    log_pages
+                )),
             ));
         }
 
@@ -1849,10 +1864,7 @@ impl SqliteConnection {
         const MAX_RETRY_ATTEMPTS: u32 = 3;
 
         for attempt in 1..=MAX_RETRY_ATTEMPTS {
-            match self
-                .execute_wal_checkpoint_async_single(cx)
-                .await
-            {
+            match self.execute_wal_checkpoint_async_single(cx).await {
                 Outcome::Ok(()) => {
                     #[cfg(feature = "tracing-integration")]
                     if attempt > 1 {
@@ -1880,7 +1892,12 @@ impl SqliteConnection {
                     }
 
                     // Brief delay before retry (async-friendly)
-                    if let Outcome::Cancelled(r) = crate::time::sleep(cx, std::time::Duration::from_millis(50 * attempt as u64)).await {
+                    if let Outcome::Cancelled(r) = crate::time::sleep(
+                        cx,
+                        std::time::Duration::from_millis(50 * attempt as u64),
+                    )
+                    .await
+                    {
                         return Outcome::Cancelled(r);
                     }
                 }
@@ -1895,7 +1912,10 @@ impl SqliteConnection {
     /// Execute a single async WAL checkpoint with verification
     async fn execute_wal_checkpoint_async_single(&self, cx: &Cx) -> Outcome<(), SqliteError> {
         // Use RESTART for stronger durability guarantees
-        match self.execute_batch_unchecked(cx, "PRAGMA wal_checkpoint(RESTART)").await {
+        match self
+            .execute_batch_unchecked(cx, "PRAGMA wal_checkpoint(RESTART)")
+            .await
+        {
             Outcome::Ok(()) => {
                 // Verify checkpoint by checking WAL status
                 match self.query_unchecked(cx, "PRAGMA wal_checkpoint", &[]).await {
@@ -1907,7 +1927,7 @@ impl SqliteConnection {
 
                             if busy != 0 {
                                 return Outcome::Err(SqliteError::WalCheckpointFailed(
-                                    "WAL checkpoint blocked by concurrent readers".to_string()
+                                    "WAL checkpoint blocked by concurrent readers".to_string(),
                                 ));
                             }
 
@@ -1935,7 +1955,8 @@ impl SqliteConnection {
     fn close_without_checkpoint(&self) -> Result<(), SqliteError> {
         let mut guard = self.inner.lock();
         if let Some(conn) = guard.conn.as_ref() {
-            let _ = rollback_orphaned_transaction_mutex_guarded(conn, self.transaction_state.as_ref());
+            let _ =
+                rollback_orphaned_transaction_mutex_guarded(conn, self.transaction_state.as_ref());
             conn.flush_prepared_statement_cache();
         }
         *self.transaction_state.lock() = TransactionState::Autocommit;
@@ -2117,22 +2138,40 @@ mod tests {
     #[test]
     fn test_sqlparser_blocks_pragma() {
         // Test basic PRAGMA blocking
-        assert_eq!(classify_sql_surface_violation("PRAGMA journal_mode"), Some(SqlSurfaceViolation::Pragma));
-        assert_eq!(classify_sql_surface_violation("pragma foreign_keys"), Some(SqlSurfaceViolation::Pragma));
+        assert_eq!(
+            classify_sql_surface_violation("PRAGMA journal_mode"),
+            Some(SqlSurfaceViolation::Pragma)
+        );
+        assert_eq!(
+            classify_sql_surface_violation("pragma foreign_keys"),
+            Some(SqlSurfaceViolation::Pragma)
+        );
 
         // Test comment bypass attempts (should still block with fallback)
-        assert_eq!(classify_sql_surface_violation("/* comment */ PRAGMA journal_mode"), Some(SqlSurfaceViolation::Pragma));
+        assert_eq!(
+            classify_sql_surface_violation("/* comment */ PRAGMA journal_mode"),
+            Some(SqlSurfaceViolation::Pragma)
+        );
 
         // Test that normal SQL is allowed
         assert_eq!(classify_sql_surface_violation("SELECT * FROM users"), None);
-        assert_eq!(classify_sql_surface_violation("INSERT INTO test VALUES (1, 'test')"), None);
+        assert_eq!(
+            classify_sql_surface_violation("INSERT INTO test VALUES (1, 'test')"),
+            None
+        );
     }
 
     #[test]
     fn test_sqlparser_blocks_attach_detach() {
         // Note: sqlparser may not fully support ATTACH/DETACH, so these test the fallback
-        assert_eq!(classify_sql_surface_violation("ATTACH 'db.sqlite' AS test"), Some(SqlSurfaceViolation::AttachDetach));
-        assert_eq!(classify_sql_surface_violation("DETACH DATABASE test"), Some(SqlSurfaceViolation::AttachDetach));
+        assert_eq!(
+            classify_sql_surface_violation("ATTACH 'db.sqlite' AS test"),
+            Some(SqlSurfaceViolation::AttachDetach)
+        );
+        assert_eq!(
+            classify_sql_surface_violation("DETACH DATABASE test"),
+            Some(SqlSurfaceViolation::AttachDetach)
+        );
 
         // Test that normal SQL is allowed
         assert_eq!(classify_sql_surface_violation("SELECT * FROM users"), None);
@@ -2141,12 +2180,26 @@ mod tests {
     #[test]
     fn test_sqlparser_blocks_transaction_control() {
         // Test transaction control blocking
-        assert_eq!(classify_sql_surface_violation("BEGIN IMMEDIATE"), Some(SqlSurfaceViolation::TransactionControl));
-        assert_eq!(classify_sql_surface_violation("COMMIT"), Some(SqlSurfaceViolation::TransactionControl));
-        assert_eq!(classify_sql_surface_violation("ROLLBACK"), Some(SqlSurfaceViolation::TransactionControl));
+        assert_eq!(
+            classify_sql_surface_violation("BEGIN IMMEDIATE"),
+            Some(SqlSurfaceViolation::TransactionControl)
+        );
+        assert_eq!(
+            classify_sql_surface_violation("COMMIT"),
+            Some(SqlSurfaceViolation::TransactionControl)
+        );
+        assert_eq!(
+            classify_sql_surface_violation("ROLLBACK"),
+            Some(SqlSurfaceViolation::TransactionControl)
+        );
 
         // Test that CREATE TRIGGER with BEGIN is allowed (special case)
-        assert_eq!(classify_sql_surface_violation("CREATE TRIGGER test AFTER INSERT ON table BEGIN INSERT INTO log VALUES (1); END"), None);
+        assert_eq!(
+            classify_sql_surface_violation(
+                "CREATE TRIGGER test AFTER INSERT ON table BEGIN INSERT INTO log VALUES (1); END"
+            ),
+            None
+        );
 
         // Test that normal SQL is allowed
         assert_eq!(classify_sql_surface_violation("SELECT * FROM users"), None);
@@ -2156,7 +2209,10 @@ mod tests {
     fn test_sqlparser_comment_bypass_protection() {
         // Test that comment removal in fallback works correctly
         let sql = "/* comment */ PRAGMA journal_mode -- line comment";
-        assert_eq!(classify_sql_surface_violation(sql), Some(SqlSurfaceViolation::Pragma));
+        assert_eq!(
+            classify_sql_surface_violation(sql),
+            Some(SqlSurfaceViolation::Pragma)
+        );
 
         // Test nested comments in fallback
         let sql = "/* outer /* inner */ comment */ SELECT 1";
@@ -2166,8 +2222,8 @@ mod tests {
     /// TOCTOU Security Tests - Verify the TOCTOU vulnerability fix (asupersync-607uqy)
     #[test]
     fn test_toctou_fix_path_resolution() {
-        use tempfile::tempdir;
         use std::fs;
+        use tempfile::tempdir;
 
         let temp_dir = tempdir().expect("Failed to create temp directory");
         let temp_path = temp_dir.path();
@@ -2201,9 +2257,9 @@ mod tests {
 
     #[test]
     fn test_toctou_fix_prevents_symlink_attack() {
-        use tempfile::tempdir;
         use std::fs;
         use std::os::unix::fs::symlink;
+        use tempfile::tempdir;
 
         let temp_dir = tempdir().expect("Failed to create temp directory");
         let temp_path = temp_dir.path();
@@ -2212,7 +2268,8 @@ mod tests {
         let symlink_path = temp_path.join("malicious.sqlite");
         if symlink("/etc/passwd", &symlink_path).is_ok() {
             // Test that our fixed validation catches symlinks to restricted paths
-            let resolved = resolve_sqlite_open_path(&symlink_path).expect("Failed to resolve symlink");
+            let resolved =
+                resolve_sqlite_open_path(&symlink_path).expect("Failed to resolve symlink");
 
             // The resolved path should point to /etc/passwd and be rejected
             assert!(validate_resolved_sqlite_path(&resolved).is_err());
@@ -2254,7 +2311,10 @@ mod tests {
 
         // Verify the new error variant exists
         let checkpoint_error = SqliteError::WalCheckpointFailed("test error".to_string());
-        assert!(matches!(checkpoint_error, SqliteError::WalCheckpointFailed(_)));
+        assert!(matches!(
+            checkpoint_error,
+            SqliteError::WalCheckpointFailed(_)
+        ));
 
         // Verify error message formatting
         let error_msg = format!("{}", checkpoint_error);
@@ -2268,19 +2328,19 @@ mod tests {
 
         // Test busy error
         let busy_error = SqliteError::WalCheckpointFailed(
-            "WAL checkpoint blocked by concurrent readers".to_string()
+            "WAL checkpoint blocked by concurrent readers".to_string(),
         );
         assert!(format!("{}", busy_error).contains("blocked by concurrent readers"));
 
         // Test incomplete checkpoint error
         let incomplete_error = SqliteError::WalCheckpointFailed(
-            "WAL checkpoint failed - 42 pages remain in WAL".to_string()
+            "WAL checkpoint failed - 42 pages remain in WAL".to_string(),
         );
         assert!(format!("{}", incomplete_error).contains("pages remain in WAL"));
 
         // Test retry exhaustion error
         let retry_error = SqliteError::WalCheckpointFailed(
-            "WAL checkpoint failed after 3 attempts: I/O error".to_string()
+            "WAL checkpoint failed after 3 attempts: I/O error".to_string(),
         );
         assert!(format!("{}", retry_error).contains("failed after 3 attempts"));
     }
@@ -2291,7 +2351,10 @@ mod tests {
 
         // 1. Fail-closed: Checkpoint failures should propagate as errors
         let checkpoint_failure = SqliteError::WalCheckpointFailed("simulated failure".to_string());
-        assert!(matches!(checkpoint_failure, SqliteError::WalCheckpointFailed(_)));
+        assert!(matches!(
+            checkpoint_failure,
+            SqliteError::WalCheckpointFailed(_)
+        ));
 
         // 2. Retry mechanism: The implementation includes retry logic (tested via constants)
         const MAX_RETRY_ATTEMPTS: u32 = 3;
@@ -2366,7 +2429,10 @@ mod tests {
         let result2 = handle2.join().unwrap();
 
         // Exactly one thread should succeed (mutex prevents concurrent modification)
-        assert_ne!(result1, result2, "Mutex should prevent concurrent state modification");
+        assert_ne!(
+            result1, result2,
+            "Mutex should prevent concurrent state modification"
+        );
 
         // Verify final state is RollingBack
         assert_eq!(*transaction_state.lock(), TransactionState::RollingBack);
@@ -2433,7 +2499,10 @@ mod tests {
 
         // State is properly synchronized
         assert_eq!(*transaction_state.lock(), TransactionState::NeedsRollback);
-        assert_ne!(TransactionState::RollingBack, TransactionState::NeedsRollback); // Distinct states
+        assert_ne!(
+            TransactionState::RollingBack,
+            TransactionState::NeedsRollback
+        ); // Distinct states
     }
 
     #[test]

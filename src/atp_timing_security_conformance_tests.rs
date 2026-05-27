@@ -10,11 +10,11 @@
 #[cfg(test)]
 mod tests {
     use crate::atp::timing_security::{
-        TimingSideChannelDetector, TimingDetectorConfig, SideChannelDetectionResult,
+        SideChannelDetectionResult, TimingDetectorConfig, TimingSideChannelDetector,
     };
     use std::collections::HashMap;
-    use std::time::Duration;
     use std::thread;
+    use std::time::Duration;
 
     /// Mock ATP cryptographic operation for testing.
     struct MockCryptoOperation {
@@ -107,7 +107,8 @@ mod tests {
         }
 
         // Enhanced system should provide sub-microsecond precision
-        let avg_measurement: f64 = measurements.iter().map(|&x| x as f64).sum::<f64>() / measurements.len() as f64;
+        let avg_measurement: f64 =
+            measurements.iter().map(|&x| x as f64).sum::<f64>() / measurements.len() as f64;
 
         // Should be able to measure operations faster than 10 microseconds
         assert!(
@@ -191,7 +192,8 @@ mod tests {
             let work_factor = (std::time::SystemTime::now()
                 .duration_since(std::time::SystemTime::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos() % 100) as u64;
+                .as_nanos()
+                % 100) as u64;
             let _work: u64 = (0..work_factor).sum();
         };
 
@@ -233,10 +235,16 @@ mod tests {
         let mut vulnerabilities_found = 0;
         for (operation, result) in &results {
             if result.detected {
-                println!("⚠️  Timing vulnerability detected in {}: {}", operation, result.description);
+                println!(
+                    "⚠️  Timing vulnerability detected in {}: {}",
+                    operation, result.description
+                );
                 vulnerabilities_found += 1;
             } else {
-                println!("✅ {} appears constant-time: {}", operation, result.description);
+                println!(
+                    "✅ {} appears constant-time: {}",
+                    operation, result.description
+                );
             }
         }
 
@@ -251,7 +259,7 @@ mod tests {
     fn test_hmac_timing(detector: &TimingSideChannelDetector) -> SideChannelDetectionResult {
         // Mock HMAC computation with different inputs
         let key = [0x5Au8; 32];
-        let message_a = vec![0u8; 64];     // All zeros
+        let message_a = vec![0u8; 64]; // All zeros
         let message_b = vec![0xFFu8; 64]; // All ones
 
         detector.test_constant_time(
@@ -268,7 +276,9 @@ mod tests {
         )
     }
 
-    fn test_key_derivation_timing(detector: &TimingSideChannelDetector) -> SideChannelDetectionResult {
+    fn test_key_derivation_timing(
+        detector: &TimingSideChannelDetector,
+    ) -> SideChannelDetectionResult {
         // Mock key derivation with different salt values
         let salt_a = vec![0x00u8; 16];
         let salt_b = vec![0xFFu8; 16];
@@ -349,11 +359,17 @@ mod tests {
 
         // Attack vector 1: Early termination in string comparison
         let result_1 = test_early_termination_attack(&detector);
-        assert!(result_1.detected, "Failed to detect early termination attack");
+        assert!(
+            result_1.detected,
+            "Failed to detect early termination attack"
+        );
 
         // Attack vector 2: Conditional branching based on secret data
         let result_2 = test_conditional_branching_attack(&detector);
-        assert!(result_2.detected, "Failed to detect conditional branching attack");
+        assert!(
+            result_2.detected,
+            "Failed to detect conditional branching attack"
+        );
 
         // Attack vector 3: Cache timing through lookup tables
         let result_3 = test_cache_timing_attack(&detector);
@@ -361,7 +377,9 @@ mod tests {
         println!("Cache timing test result: {}", result_3.description);
     }
 
-    fn test_early_termination_attack(detector: &TimingSideChannelDetector) -> SideChannelDetectionResult {
+    fn test_early_termination_attack(
+        detector: &TimingSideChannelDetector,
+    ) -> SideChannelDetectionResult {
         let secret_prefix = b"SECRET_";
         let guess_correct = b"SECRET_PASSWORD";
         let guess_wrong = b"WRONG_PASSWORD";
@@ -384,7 +402,9 @@ mod tests {
         )
     }
 
-    fn test_conditional_branching_attack(detector: &TimingSideChannelDetector) -> SideChannelDetectionResult {
+    fn test_conditional_branching_attack(
+        detector: &TimingSideChannelDetector,
+    ) -> SideChannelDetectionResult {
         let high_entropy_data = b"ABCDEFGHIJKLMNOP";
         let low_entropy_data = b"AAAAAAAAAAAAAAAA";
 
@@ -410,7 +430,9 @@ mod tests {
         )
     }
 
-    fn test_cache_timing_attack(detector: &TimingSideChannelDetector) -> SideChannelDetectionResult {
+    fn test_cache_timing_attack(
+        detector: &TimingSideChannelDetector,
+    ) -> SideChannelDetectionResult {
         // Simplified cache timing test (difficult to reproduce reliably in unit tests)
         let cache_friendly_data = vec![0u8; 64];
         let cache_unfriendly_data: Vec<u8> = (0..64).map(|i| (i * 37) as u8).collect();

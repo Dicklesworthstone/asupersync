@@ -179,6 +179,7 @@ pub struct ManifestEntry {
 }
 
 /// Object store for managing ATP objects.
+#[allow(async_fn_in_trait)]
 pub trait ObjectStore {
     /// Store an object and return its hash.
     async fn store_object(

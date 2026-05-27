@@ -275,7 +275,7 @@ fn test_packet_assembly_size_validation() -> TestResult {
         .with_packet_number_space(PacketNumberSpace::ApplicationData)
         .without_anti_amplification();
 
-    let mut assembler = PacketAssembler::new(constraints);
+    let mut assembler = PacketAssembler::new(constraints.clone());
 
     // Create test frames to add to the packet
     use asupersync::net::atp::protocol::quic_frames::QuicFrame;
@@ -490,7 +490,10 @@ fn test_ambient_authority_blocked() -> TestResult {
             // Success indicates the operation went through capability-mediated path
         }
         other => {
-            return TestResult::failed(format!("Capability-mediated operation failed: {:?}", other));
+            return TestResult::failed(format!(
+                "Capability-mediated operation failed: {:?}",
+                other
+            ));
         }
     }
 

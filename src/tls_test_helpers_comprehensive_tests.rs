@@ -6,8 +6,10 @@
 
 #[cfg(test)]
 mod tls_helpers_tests {
-    use crate::real_e2e_hardening_consolidation::hardened_examples::{test_certificate, test_private_key, generate_test_tls_material};
-    use crate::tls::{TlsAcceptor, TlsAcceptorBuilder, Certificate, PrivateKey};
+    use crate::real_e2e_hardening_consolidation::hardened_examples::{
+        generate_test_tls_material, test_certificate, test_private_key,
+    };
+    use crate::tls::{Certificate, PrivateKey, TlsAcceptor, TlsAcceptorBuilder};
     use std::time::Instant;
 
     /// Unit test: Verify test_certificate() returns valid certificate data
@@ -16,7 +18,10 @@ mod tls_helpers_tests {
         let cert = test_certificate();
 
         // Certificate should have non-empty DER data
-        assert!(cert.as_der().len() > 0, "Certificate DER data should not be empty");
+        assert!(
+            cert.as_der().len() > 0,
+            "Certificate DER data should not be empty"
+        );
 
         // Certificate should have reasonable size (not too small/large)
         let der_len = cert.as_der().len();
@@ -24,7 +29,11 @@ mod tls_helpers_tests {
         assert!(der_len < 10000, "Certificate too large: {} bytes", der_len);
 
         // DER data should start with valid ASN.1 SEQUENCE tag (0x30)
-        assert_eq!(cert.as_der()[0], 0x30, "Certificate should start with ASN.1 SEQUENCE tag");
+        assert_eq!(
+            cert.as_der()[0],
+            0x30,
+            "Certificate should start with ASN.1 SEQUENCE tag"
+        );
     }
 
     /// Unit test: Verify test_private_key() returns valid private key data
@@ -33,7 +42,10 @@ mod tls_helpers_tests {
         let key = test_private_key();
 
         // Private key should have non-empty DER data
-        assert!(key.as_der().len() > 0, "Private key DER data should not be empty");
+        assert!(
+            key.as_der().len() > 0,
+            "Private key DER data should not be empty"
+        );
 
         // Private key should have reasonable size
         let der_len = key.as_der().len();
@@ -41,7 +53,11 @@ mod tls_helpers_tests {
         assert!(der_len < 5000, "Private key too large: {} bytes", der_len);
 
         // DER data should start with valid ASN.1 SEQUENCE tag (0x30)
-        assert_eq!(key.as_der()[0], 0x30, "Private key should start with ASN.1 SEQUENCE tag");
+        assert_eq!(
+            key.as_der()[0],
+            0x30,
+            "Private key should start with ASN.1 SEQUENCE tag"
+        );
     }
 
     /// Deterministic generation test: Same inputs should produce same outputs
@@ -52,22 +68,46 @@ mod tls_helpers_tests {
         let cert2 = test_certificate();
         let cert3 = test_certificate();
 
-        assert_eq!(cert1.as_der(), cert2.as_der(), "Certificates should be identical (cached)");
-        assert_eq!(cert1.as_der(), cert3.as_der(), "Certificates should be identical (cached)");
+        assert_eq!(
+            cert1.as_der(),
+            cert2.as_der(),
+            "Certificates should be identical (cached)"
+        );
+        assert_eq!(
+            cert1.as_der(),
+            cert3.as_der(),
+            "Certificates should be identical (cached)"
+        );
 
         let key1 = test_private_key();
         let key2 = test_private_key();
         let key3 = test_private_key();
 
-        assert_eq!(key1.as_der(), key2.as_der(), "Private keys should be identical (cached)");
-        assert_eq!(key1.as_der(), key3.as_der(), "Private keys should be identical (cached)");
+        assert_eq!(
+            key1.as_der(),
+            key2.as_der(),
+            "Private keys should be identical (cached)"
+        );
+        assert_eq!(
+            key1.as_der(),
+            key3.as_der(),
+            "Private keys should be identical (cached)"
+        );
 
         // Verify underlying shared material is identical
         let material1 = generate_test_tls_material();
         let material2 = generate_test_tls_material();
 
-        assert_eq!(material1.0.as_der(), material2.0.as_der(), "Shared certificate material should be identical");
-        assert_eq!(material1.1.as_der(), material2.1.as_der(), "Shared private key material should be identical");
+        assert_eq!(
+            material1.0.as_der(),
+            material2.0.as_der(),
+            "Shared certificate material should be identical"
+        );
+        assert_eq!(
+            material1.1.as_der(),
+            material2.1.as_der(),
+            "Shared private key material should be identical"
+        );
     }
 
     /// Integration test: Certificate and private key should be compatible pair
@@ -77,10 +117,13 @@ mod tls_helpers_tests {
         let key = test_private_key();
 
         // Verify we can create a TlsAcceptor with the cert/key pair
-        let acceptor_result = TlsAcceptorBuilder::new(cert.clone(), key.clone())
-            .build();
+        let acceptor_result = TlsAcceptorBuilder::new(cert.clone(), key.clone()).build();
 
-        assert!(acceptor_result.is_ok(), "Should be able to create TlsAcceptor with cert/key pair: {:?}", acceptor_result.err());
+        assert!(
+            acceptor_result.is_ok(),
+            "Should be able to create TlsAcceptor with cert/key pair: {:?}",
+            acceptor_result.err()
+        );
 
         // Verify the certificate contains expected test attributes
         // Note: We can't directly parse the certificate without adding dependencies,
@@ -116,7 +159,10 @@ mod tls_helpers_tests {
         // More importantly, verify it works with TLS stack
         let key = test_private_key();
         let acceptor_result = TlsAcceptorBuilder::new(cert, key).build();
-        assert!(acceptor_result.is_ok(), "Test certificate should be valid for TLS acceptor");
+        assert!(
+            acceptor_result.is_ok(),
+            "Test certificate should be valid for TLS acceptor"
+        );
     }
 
     /// Memory safety test: Generation should not leak memory
@@ -127,7 +173,7 @@ mod tls_helpers_tests {
 
         for _ in 0..100 {
             let _cert = test_certificate(); // Should use cached version after first call
-            let _key = test_private_key();  // Should use cached version after first call
+            let _key = test_private_key(); // Should use cached version after first call
         }
 
         // If we get here without panicking or OOM, basic memory safety is OK
@@ -143,8 +189,16 @@ mod tls_helpers_tests {
         let generation_time = start.elapsed();
 
         // TLS key generation should complete within reasonable time for test usage
-        assert!(generation_time.as_secs() < 5, "TLS material generation took too long: {:?}", generation_time);
-        assert!(generation_time.as_millis() < 2000, "TLS material generation took too long: {:?}", generation_time);
+        assert!(
+            generation_time.as_secs() < 5,
+            "TLS material generation took too long: {:?}",
+            generation_time
+        );
+        assert!(
+            generation_time.as_millis() < 2000,
+            "TLS material generation took too long: {:?}",
+            generation_time
+        );
 
         // Subsequent calls should be very fast (cached)
         let start = Instant::now();
@@ -152,7 +206,11 @@ mod tls_helpers_tests {
         let _key = test_private_key();
         let cached_time = start.elapsed();
 
-        assert!(cached_time.as_micros() < 1000, "Cached TLS material access too slow: {:?}", cached_time);
+        assert!(
+            cached_time.as_micros() < 1000,
+            "Cached TLS material access too slow: {:?}",
+            cached_time
+        );
     }
 
     /// Error handling test: Invalid certificate scenarios
@@ -205,9 +263,18 @@ mod tls_helpers_tests {
         let acceptor2_result = TlsAcceptorBuilder::new(cert.clone(), key.clone()).build();
         let acceptor3_result = TlsAcceptorBuilder::new(cert, key).build();
 
-        assert!(acceptor1_result.is_ok(), "First acceptor creation should succeed");
-        assert!(acceptor2_result.is_ok(), "Second acceptor creation should succeed");
-        assert!(acceptor3_result.is_ok(), "Third acceptor creation should succeed");
+        assert!(
+            acceptor1_result.is_ok(),
+            "First acceptor creation should succeed"
+        );
+        assert!(
+            acceptor2_result.is_ok(),
+            "Second acceptor creation should succeed"
+        );
+        assert!(
+            acceptor3_result.is_ok(),
+            "Third acceptor creation should succeed"
+        );
 
         // Verify all acceptors are independent instances
         let acceptor1 = acceptor1_result.unwrap();
@@ -247,28 +314,40 @@ mod tls_helpers_tests {
 #[cfg(test)]
 mod edge_case_tests {
     use super::*;
-    use crate::real_e2e_hardening_consolidation::hardened_examples::{test_certificate, test_private_key};
-    use std::thread;
+    use crate::real_e2e_hardening_consolidation::hardened_examples::{
+        test_certificate, test_private_key,
+    };
     use std::sync::Arc;
+    use std::thread;
 
     /// Concurrent access test: Multiple threads should get same cached material
     #[test]
     fn test_concurrent_access() {
-        let handles: Vec<_> = (0..10).map(|_| {
-            thread::spawn(|| {
-                let cert = test_certificate();
-                let key = test_private_key();
-                (cert.as_der().to_vec(), key.as_der().to_vec())
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                thread::spawn(|| {
+                    let cert = test_certificate();
+                    let key = test_private_key();
+                    (cert.as_der().to_vec(), key.as_der().to_vec())
+                })
             })
-        }).collect();
+            .collect();
 
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         // All threads should get identical results (due to OnceLock)
         let first = &results[0];
         for (i, result) in results.iter().enumerate() {
-            assert_eq!(result.0, first.0, "Certificate should be identical across threads (thread {})", i);
-            assert_eq!(result.1, first.1, "Private key should be identical across threads (thread {})", i);
+            assert_eq!(
+                result.0, first.0,
+                "Certificate should be identical across threads (thread {})",
+                i
+            );
+            assert_eq!(
+                result.1, first.1,
+                "Private key should be identical across threads (thread {})",
+                i
+            );
         }
     }
 
@@ -298,8 +377,14 @@ mod edge_case_tests {
         let cert = test_certificate();
         let key = test_private_key();
 
-        assert!(cert.as_der().len() > 0, "Certificate should still work under memory pressure");
-        assert!(key.as_der().len() > 0, "Private key should still work under memory pressure");
+        assert!(
+            cert.as_der().len() > 0,
+            "Certificate should still work under memory pressure"
+        );
+        assert!(
+            key.as_der().len() > 0,
+            "Private key should still work under memory pressure"
+        );
     }
 }
 
@@ -321,8 +406,14 @@ mod performance_tests {
         println!("TLS material generation took: {:?}", elapsed);
 
         // Set reasonable performance expectations
-        assert!(elapsed.as_secs() < 10, "Generation should complete within 10 seconds");
-        assert!(elapsed.as_millis() < 5000, "Generation should complete within 5 seconds");
+        assert!(
+            elapsed.as_secs() < 10,
+            "Generation should complete within 10 seconds"
+        );
+        assert!(
+            elapsed.as_millis() < 5000,
+            "Generation should complete within 5 seconds"
+        );
     }
 
     /// Benchmark: Cached access time
@@ -342,6 +433,9 @@ mod performance_tests {
         println!("1000 cached accesses took: {:?}", elapsed);
 
         // Cached access should be very fast
-        assert!(elapsed.as_millis() < 100, "Cached access should be under 100ms for 1000 calls");
+        assert!(
+            elapsed.as_millis() < 100,
+            "Cached access should be under 100ms for 1000 calls"
+        );
     }
 }

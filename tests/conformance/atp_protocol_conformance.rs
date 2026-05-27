@@ -96,7 +96,6 @@ const ATP_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "ATP implementations SHOULD validate frame consistency",
         test_fn: test_frame_validation,
     },
-
     // Session Management Requirements
     ConformanceCase {
         id: "ATP-SESSION-001",
@@ -122,7 +121,6 @@ const ATP_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Sessions SHOULD support compression configuration",
         test_fn: test_compression_configuration,
     },
-
     // Transfer Policy Requirements
     ConformanceCase {
         id: "ATP-TRANSFER-001",
@@ -148,7 +146,6 @@ const ATP_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Transfers SHOULD support automatic retry",
         test_fn: test_automatic_retry_support,
     },
-
     // Data Integrity Requirements
     ConformanceCase {
         id: "ATP-INTEGRITY-001",
@@ -166,7 +163,6 @@ const ATP_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Corrupted data MUST be rejected",
         test_fn: test_corruption_detection,
     },
-
     // Security Model Requirements
     ConformanceCase {
         id: "ATP-SECURITY-001",
@@ -209,8 +205,11 @@ fn test_frame_type_required(_cx: &Cx) -> ConformanceResult {
         let frame = frame.unwrap();
         if frame.frame_type() != frame_type {
             return ConformanceResult::Fail {
-                reason: format!("Frame type mismatch: expected {:?}, got {:?}",
-                               frame_type, frame.frame_type()),
+                reason: format!(
+                    "Frame type mismatch: expected {:?}, got {:?}",
+                    frame_type,
+                    frame.frame_type()
+                ),
             };
         }
     }
@@ -449,31 +448,44 @@ fn atp_protocol_full_conformance() {
             }
             ConformanceResult::Fail { reason } => {
                 fail += 1;
-                eprintln!("FAIL {}: {}\n  reason: {}", case.id, case.description, reason);
+                eprintln!(
+                    "FAIL {}: {}\n  reason: {}",
+                    case.id, case.description, reason
+                );
                 "FAIL"
             }
             ConformanceResult::Skipped { reason } => {
                 skipped += 1;
-                eprintln!("SKIP {}: {}\n  reason: {}", case.id, case.description, reason);
+                eprintln!(
+                    "SKIP {}: {}\n  reason: {}",
+                    case.id, case.description, reason
+                );
                 "SKIP"
             }
             ConformanceResult::ExpectedFailure { reason } => {
                 xfail += 1;
-                eprintln!("XFAIL {}: {}\n  reason: {}", case.id, case.description, reason);
+                eprintln!(
+                    "XFAIL {}: {}\n  reason: {}",
+                    case.id, case.description, reason
+                );
                 "XFAIL"
             }
         };
 
         // Structured JSON output for CI parsing
-        eprintln!("{{\"id\":\"{}\",\"verdict\":\"{}\",\"level\":\"{:?}\",\"category\":\"{:?}\"}}",
-                 case.id, verdict, case.level, case.category);
+        eprintln!(
+            "{{\"id\":\"{}\",\"verdict\":\"{}\",\"level\":\"{:?}\",\"category\":\"{:?}\"}}",
+            case.id, verdict, case.level, case.category
+        );
     }
 
     let total = pass + fail + skipped + xfail;
-    let must_tests = ATP_CONFORMANCE_CASES.iter()
+    let must_tests = ATP_CONFORMANCE_CASES
+        .iter()
         .filter(|c| c.level == RequirementLevel::Must)
         .count();
-    let must_pass = ATP_CONFORMANCE_CASES.iter()
+    let must_pass = ATP_CONFORMANCE_CASES
+        .iter()
         .filter(|c| c.level == RequirementLevel::Must)
         .filter(|c| matches!((c.test_fn)(&cx), ConformanceResult::Pass))
         .count();
@@ -483,17 +495,32 @@ fn atp_protocol_full_conformance() {
         0.0
     };
 
-    eprintln!("\nATP Protocol Conformance: {}/{} pass, {} fail, {} skip, {} xfail",
-             pass, total, fail, skipped, xfail);
-    eprintln!("MUST requirements: {}/{} pass ({:.1}%)", must_pass, must_tests, compliance_score);
-    eprintln!("Compliance: {}", if compliance_score >= 95.0 { "COMPLIANT" } else { "NON-COMPLIANT" });
+    eprintln!(
+        "\nATP Protocol Conformance: {}/{} pass, {} fail, {} skip, {} xfail",
+        pass, total, fail, skipped, xfail
+    );
+    eprintln!(
+        "MUST requirements: {}/{} pass ({:.1}%)",
+        must_pass, must_tests, compliance_score
+    );
+    eprintln!(
+        "Compliance: {}",
+        if compliance_score >= 95.0 {
+            "COMPLIANT"
+        } else {
+            "NON-COMPLIANT"
+        }
+    );
 
     // Fail only if non-expected failures occur
     assert_eq!(fail, 0, "{} conformance tests failed unexpectedly", fail);
 
     // Warn if compliance score is low
     if compliance_score < 95.0 {
-        eprintln!("Warning: MUST requirement compliance is {:.1}% (< 95% threshold)", compliance_score);
+        eprintln!(
+            "Warning: MUST requirement compliance is {:.1}% (< 95% threshold)",
+            compliance_score
+        );
     }
 }
 
@@ -516,8 +543,10 @@ fn atp_protocol_coverage_matrix() {
             ConformanceResult::ExpectedFailure { .. } => "⚠️ XFAIL",
         };
 
-        println!("| {} | {} | {:?} | {:?} | {} | {} |",
-                case.id, case.section, case.level, case.category, status, case.description);
+        println!(
+            "| {} | {} | {:?} | {:?} | {} | {} |",
+            case.id, case.section, case.level, case.category, status, case.description
+        );
     }
 }
 
@@ -528,20 +557,29 @@ mod tests {
     #[test]
     fn test_conformance_infrastructure() {
         // Test that we have defined test cases
-        assert!(!ATP_CONFORMANCE_CASES.is_empty(), "Should have ATP conformance test cases");
+        assert!(
+            !ATP_CONFORMANCE_CASES.is_empty(),
+            "Should have ATP conformance test cases"
+        );
 
         // Test that all requirement levels are covered
-        let has_must = ATP_CONFORMANCE_CASES.iter().any(|c| c.level == RequirementLevel::Must);
-        let has_should = ATP_CONFORMANCE_CASES.iter().any(|c| c.level == RequirementLevel::Should);
+        let has_must = ATP_CONFORMANCE_CASES
+            .iter()
+            .any(|c| c.level == RequirementLevel::Must);
+        let has_should = ATP_CONFORMANCE_CASES
+            .iter()
+            .any(|c| c.level == RequirementLevel::Should);
 
         assert!(has_must, "Should have MUST requirements tested");
         assert!(has_should, "Should have SHOULD requirements tested");
 
         // Test that all categories are covered
-        let categories: std::collections::HashSet<_> = ATP_CONFORMANCE_CASES.iter()
-            .map(|c| c.category)
-            .collect();
+        let categories: std::collections::HashSet<_> =
+            ATP_CONFORMANCE_CASES.iter().map(|c| c.category).collect();
 
-        assert!(categories.len() > 1, "Should cover multiple test categories");
+        assert!(
+            categories.len() > 1,
+            "Should cover multiple test categories"
+        );
     }
 }

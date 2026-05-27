@@ -332,7 +332,9 @@ impl CryptoSalt {
         // Fill remaining bytes with deterministic but well-mixed data
         let mut state = seed;
         for chunk in salt_bytes[8..].chunks_exact_mut(8) {
-            state = state.wrapping_mul(0x9e37_79b9_7f4a_7c15).wrapping_add(0x243f_6a88_85a3_08d3);
+            state = state
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .wrapping_add(0x243f_6a88_85a3_08d3);
             chunk.copy_from_slice(&state.to_le_bytes());
         }
 
@@ -355,8 +357,7 @@ impl CryptoSalt {
     #[must_use]
     pub fn as_u64(&self) -> u64 {
         u64::from_le_bytes([
-            self.0[0], self.0[1], self.0[2], self.0[3],
-            self.0[4], self.0[5], self.0[6], self.0[7],
+            self.0[0], self.0[1], self.0[2], self.0[3], self.0[4], self.0[5], self.0[6], self.0[7],
         ])
     }
 
@@ -372,8 +373,8 @@ impl CryptoSalt {
     /// Each domain gets a cryptographically independent 64-bit value.
     #[must_use]
     pub fn derive_u64(&self, domain_suffix: &str) -> u64 {
-        use std::hash::{Hash, Hasher};
         use crate::util::det_hash::DetHasher;
+        use std::hash::{Hash, Hasher};
 
         let mut hasher = DetHasher::for_production();
         self.0.hash(&mut hasher);

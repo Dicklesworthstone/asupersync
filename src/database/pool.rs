@@ -30,7 +30,7 @@
 use crate::combinator::{RetryPolicy, calculate_delay};
 
 use parking_lot::Mutex;
-use std::collections::{VecDeque, HashMap};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -167,8 +167,8 @@ impl Default for DbPoolConfig {
             // br-asupersync-gb3rck: Security defaults for authentication state validation
             validate_authentication_state: true, // Enable authentication state validation by default
             // br-asupersync-mlojr9: Retry storm amplification DoS protection defaults
-            max_retry_attempts_per_client: 5,    // Max 5 retry attempts per client
-            min_retry_delay_per_client_ms: 100,  // Min 100ms between retries per client
+            max_retry_attempts_per_client: 5, // Max 5 retry attempts per client
+            min_retry_delay_per_client_ms: 100, // Min 100ms between retries per client
         }
     }
 }
@@ -429,7 +429,11 @@ pub enum DbPoolError<E: std::error::Error> {
     AuthenticationMismatch { expected: String, found: String },
     /// Client retry limit exceeded.
     /// br-asupersync-mlojr9: Prevents retry storm amplification DoS attacks.
-    RetryLimitExceeded { client_id: String, attempts: u32, max_attempts: u32 },
+    RetryLimitExceeded {
+        client_id: String,
+        attempts: u32,
+        max_attempts: u32,
+    },
 }
 
 impl<E: std::error::Error> fmt::Display for DbPoolError<E> {
@@ -441,8 +445,18 @@ impl<E: std::error::Error> fmt::Display for DbPoolError<E> {
             Self::Connect(e) => write!(f, "connection failed: {e}"),
             Self::ValidationFailed => write!(f, "connection validation failed"),
             Self::ClientQuotaExceeded(client) => write!(f, "client quota exceeded for '{client}'"),
-            Self::AuthenticationMismatch { expected, found } => write!(f, "authentication state mismatch: expected '{expected}', found '{found}'"),
-            Self::RetryLimitExceeded { client_id, attempts, max_attempts } => write!(f, "retry limit exceeded for client '{client_id}': {attempts}/{max_attempts} attempts"),
+            Self::AuthenticationMismatch { expected, found } => write!(
+                f,
+                "authentication state mismatch: expected '{expected}', found '{found}'"
+            ),
+            Self::RetryLimitExceeded {
+                client_id,
+                attempts,
+                max_attempts,
+            } => write!(
+                f,
+                "retry limit exceeded for client '{client_id}': {attempts}/{max_attempts} attempts"
+            ),
         }
     }
 }
@@ -470,7 +484,10 @@ impl<M: ConnectionManager> Drop for ValidationGuard<'_, M> {
                 let mut inner = self.pool.inner.lock();
                 inner.total = inner.total.saturating_sub(1);
                 drop(inner);
-                self.pool.stats.total_discards.fetch_add(1, Ordering::Relaxed);
+                self.pool
+                    .stats
+                    .total_discards
+                    .fetch_add(1, Ordering::Relaxed);
             } else {
                 eprintln!("SECURITY: ValidationGuard disconnect failure - pool state preserved");
             }
@@ -534,7 +551,10 @@ impl<M: ConnectionManager> DbPool<M> {
             total_discards: self.stats.total_discards.load(Ordering::Relaxed),
             total_timeouts: self.stats.total_timeouts.load(Ordering::Relaxed),
             total_validation_failures: self.stats.total_validation_failures.load(Ordering::Relaxed),
-            total_retry_limits_exceeded: self.stats.total_retry_limits_exceeded.load(Ordering::Relaxed),
+            total_retry_limits_exceeded: self
+                .stats
+                .total_retry_limits_exceeded
+                .load(Ordering::Relaxed),
             total_disconnect_failures: self.stats.total_disconnect_failures.load(Ordering::Relaxed),
         }
     }
@@ -582,12 +602,16 @@ impl<M: ConnectionManager> DbPool<M> {
                     } else {
                         // br-asupersync-gb3rck: For get() without client_id, only reuse clean connections
                         // If authentication validation is enabled and connection has auth state, discard it
-                        if self.config.validate_authentication_state && idle.authenticated_for.is_some() {
+                        if self.config.validate_authentication_state
+                            && idle.authenticated_for.is_some()
+                        {
                             inner.total = inner.total.saturating_sub(1);
                             self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                            popped = Some((idle.conn, false, idle.created_at, idle.authenticated_for));
+                            popped =
+                                Some((idle.conn, false, idle.created_at, idle.authenticated_for));
                         } else {
-                            popped = Some((idle.conn, true, idle.created_at, idle.authenticated_for));
+                            popped =
+                                Some((idle.conn, true, idle.created_at, idle.authenticated_for));
                         }
                     }
                 }
@@ -605,7 +629,8 @@ impl<M: ConnectionManager> DbPool<M> {
                 popped
             };
 
-            if let Some((conn, needs_validation, created_at, _authenticated_for)) = conn_to_validate {
+            if let Some((conn, needs_validation, created_at, _authenticated_for)) = conn_to_validate
+            {
                 if !needs_validation {
                     // br-asupersync-sxhome: Use safe disconnect for expired connections
                     self.safe_disconnect(conn);
@@ -684,7 +709,10 @@ impl<M: ConnectionManager> DbPool<M> {
     ///
     /// br-asupersync-qydi3j: DoS protection against connection exhaustion.
     /// Enforces per-client connection quotas when `enforce_client_quotas` is enabled.
-    pub fn get_for_client(&self, client_id: &str) -> Result<PooledConnection<'_, M>, DbPoolError<M::Error>> {
+    pub fn get_for_client(
+        &self,
+        client_id: &str,
+    ) -> Result<PooledConnection<'_, M>, DbPoolError<M::Error>> {
         // If client quotas are disabled, delegate to regular get()
         if !self.config.enforce_client_quotas {
             return self.get().map(|mut conn| {
@@ -705,7 +733,11 @@ impl<M: ConnectionManager> DbPool<M> {
 
                 // br-asupersync-qydi3j: Enforce per-client connection quota
                 if let Some(max_per_client) = self.config.max_connections_per_client {
-                    let current_count = inner.client_connections.get(&client_id_owned).copied().unwrap_or(0);
+                    let current_count = inner
+                        .client_connections
+                        .get(&client_id_owned)
+                        .copied()
+                        .unwrap_or(0);
                     if current_count >= max_per_client {
                         return Err(DbPoolError::ClientQuotaExceeded(client_id_owned));
                     }
@@ -715,7 +747,9 @@ impl<M: ConnectionManager> DbPool<M> {
                 let mut popped = None;
                 if let Some(idle) = inner.idle.pop_front() {
                     let now = crate::time::wall_now();
-                    if idle.is_expired(&self.config, now) || idle.is_idle_too_long(&self.config, now) {
+                    if idle.is_expired(&self.config, now)
+                        || idle.is_idle_too_long(&self.config, now)
+                    {
                         inner.total = inner.total.saturating_sub(1);
                         self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
                         popped = Some((idle.conn, false, idle.created_at, idle.authenticated_for));
@@ -724,18 +758,33 @@ impl<M: ConnectionManager> DbPool<M> {
                         match &idle.authenticated_for {
                             None => {
                                 // Clean connection - safe to reuse for any client
-                                popped = Some((idle.conn, true, idle.created_at, idle.authenticated_for));
+                                popped = Some((
+                                    idle.conn,
+                                    true,
+                                    idle.created_at,
+                                    idle.authenticated_for,
+                                ));
                             }
                             Some(auth_client) if auth_client == &client_id_owned => {
                                 // Connection authenticated for same client - safe to reuse
-                                popped = Some((idle.conn, true, idle.created_at, idle.authenticated_for));
+                                popped = Some((
+                                    idle.conn,
+                                    true,
+                                    idle.created_at,
+                                    idle.authenticated_for,
+                                ));
                             }
                             Some(other_client) => {
                                 // SECURITY: Connection authenticated for different client - must not reuse
                                 // This prevents privilege escalation and cross-user data access
                                 inner.total = inner.total.saturating_sub(1);
                                 self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                                popped = Some((idle.conn, false, idle.created_at, Some(other_client.clone())));
+                                popped = Some((
+                                    idle.conn,
+                                    false,
+                                    idle.created_at,
+                                    Some(other_client.clone()),
+                                ));
                             }
                         }
                     } else {
@@ -753,13 +802,17 @@ impl<M: ConnectionManager> DbPool<M> {
                 }
 
                 // br-asupersync-qydi3j: Increment client connection count
-                *inner.client_connections.entry(client_id_owned.clone()).or_insert(0) += 1;
+                *inner
+                    .client_connections
+                    .entry(client_id_owned.clone())
+                    .or_insert(0) += 1;
 
                 drop(inner);
                 popped
             };
 
-            if let Some((conn, needs_validation, created_at, authenticated_for)) = conn_to_validate {
+            if let Some((conn, needs_validation, created_at, authenticated_for)) = conn_to_validate
+            {
                 if !needs_validation {
                     // Decrement client count since we're discarding this connection
                     let mut inner = self.inner.lock();
@@ -775,7 +828,10 @@ impl<M: ConnectionManager> DbPool<M> {
                     if let Some(auth_client) = authenticated_for {
                         if auth_client != client_id_owned {
                             // This is a security-relevant event - connection was authenticated for different client
-                            eprintln!("SECURITY: Discarding connection authenticated for '{}' requested by '{}'", auth_client, client_id_owned);
+                            eprintln!(
+                                "SECURITY: Discarding connection authenticated for '{}' requested by '{}'",
+                                auth_client, client_id_owned
+                            );
                         }
                     }
 
@@ -804,7 +860,9 @@ impl<M: ConnectionManager> DbPool<M> {
                         }
                         drop(inner);
 
-                        self.stats.total_validation_failures.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .total_validation_failures
+                            .fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
 
@@ -814,11 +872,15 @@ impl<M: ConnectionManager> DbPool<M> {
                     if self.config.validate_authentication_state {
                         let current_auth_state = self.manager.authentication_state(&valid_conn);
                         match (&current_auth_state, &authenticated_for) {
-                            (Some(current_client), Some(expected_client)) if current_client != expected_client => {
+                            (Some(current_client), Some(expected_client))
+                                if current_client != expected_client =>
+                            {
                                 // Authentication state mismatch - connection shows different auth than expected
                                 // Decrement client count and return error
                                 let mut inner = self.inner.lock();
-                                if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                                if let Some(count) =
+                                    inner.client_connections.get_mut(&client_id_owned)
+                                {
                                     *count = count.saturating_sub(1);
                                     if *count == 0 {
                                         inner.client_connections.remove(&client_id_owned);
@@ -826,7 +888,9 @@ impl<M: ConnectionManager> DbPool<M> {
                                 }
                                 drop(inner);
 
-                                self.stats.total_validation_failures.fetch_add(1, Ordering::Relaxed);
+                                self.stats
+                                    .total_validation_failures
+                                    .fetch_add(1, Ordering::Relaxed);
                                 self.manager.disconnect(valid_conn);
                                 return Err(DbPoolError::AuthenticationMismatch {
                                     expected: expected_client.clone(),
@@ -838,7 +902,9 @@ impl<M: ConnectionManager> DbPool<M> {
                                 if !self.manager.clear_authentication_state(&mut valid_conn) {
                                     // Failed to clear auth state - discard connection
                                     let mut inner = self.inner.lock();
-                                    if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                                    if let Some(count) =
+                                        inner.client_connections.get_mut(&client_id_owned)
+                                    {
                                         *count = count.saturating_sub(1);
                                         if *count == 0 {
                                             inner.client_connections.remove(&client_id_owned);
@@ -846,7 +912,9 @@ impl<M: ConnectionManager> DbPool<M> {
                                     }
                                     drop(inner);
 
-                                    self.stats.total_validation_failures.fetch_add(1, Ordering::Relaxed);
+                                    self.stats
+                                        .total_validation_failures
+                                        .fetch_add(1, Ordering::Relaxed);
                                     self.manager.disconnect(valid_conn);
                                     continue;
                                 }
@@ -857,7 +925,9 @@ impl<M: ConnectionManager> DbPool<M> {
                         }
                     }
 
-                    self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .total_acquisitions
+                        .fetch_add(1, Ordering::Relaxed);
                     return Ok(PooledConnection {
                         conn: Some(valid_conn),
                         pool: self,
@@ -866,7 +936,9 @@ impl<M: ConnectionManager> DbPool<M> {
                     });
                 }
 
-                self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .total_acquisitions
+                    .fetch_add(1, Ordering::Relaxed);
                 return Ok(PooledConnection {
                     conn: Some(conn),
                     pool: self,
@@ -885,7 +957,9 @@ impl<M: ConnectionManager> DbPool<M> {
                 Ok(conn) => {
                     creation_guard.disarmed = true;
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .total_acquisitions
+                        .fetch_add(1, Ordering::Relaxed);
                     return Ok(PooledConnection {
                         conn: Some(conn),
                         pool: self,
@@ -1007,7 +1081,9 @@ impl<M: ConnectionManager> DbPool<M> {
 
             // Check if client has exceeded maximum retry attempts
             if attempts >= self.config.max_retry_attempts_per_client {
-                self.stats.total_retry_limits_exceeded.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .total_retry_limits_exceeded
+                    .fetch_add(1, Ordering::Relaxed);
                 return Err(DbPoolError::RetryLimitExceeded {
                     client_id: client_id_owned,
                     attempts,
@@ -1018,15 +1094,21 @@ impl<M: ConnectionManager> DbPool<M> {
             // Check if minimum delay has elapsed since last retry
             let min_delay_ms = self.config.min_retry_delay_per_client_ms;
             let time_since_last_retry = now.duration_since(last_retry);
-            let should_delay = if min_delay_ms > 0 && time_since_last_retry < min_delay_ms * 1_000_000 {
-                Some(Duration::from_millis(min_delay_ms) - Duration::from_nanos(time_since_last_retry))
-            } else {
-                None
-            };
+            let should_delay =
+                if min_delay_ms > 0 && time_since_last_retry < min_delay_ms * 1_000_000 {
+                    Some(
+                        Duration::from_millis(min_delay_ms)
+                            - Duration::from_nanos(time_since_last_retry),
+                    )
+                } else {
+                    None
+                };
 
             // Increment attempt counter and update last retry time
             let new_attempts = attempts + 1;
-            inner.client_retry_state.insert(client_id_owned.clone(), (new_attempts, now));
+            inner
+                .client_retry_state
+                .insert(client_id_owned.clone(), (new_attempts, now));
 
             (new_attempts, should_delay)
         };
@@ -1052,7 +1134,9 @@ impl<M: ConnectionManager> DbPool<M> {
                 Err(DbPoolError::Closed) => return Err(DbPoolError::Closed),
                 Err(DbPoolError::RetryLimitExceeded { .. }) => {
                     // Don't retry if we've hit retry limits
-                    self.stats.total_retry_limits_exceeded.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .total_retry_limits_exceeded
+                        .fetch_add(1, Ordering::Relaxed);
                     return Err(DbPoolError::RetryLimitExceeded {
                         client_id: client_id_owned,
                         attempts: current_attempts,
@@ -1061,7 +1145,12 @@ impl<M: ConnectionManager> DbPool<M> {
                 }
                 Err(e) => {
                     // Only retry on Connect, Full, and ClientQuotaExceeded errors
-                    if !matches!(e, DbPoolError::Connect(_) | DbPoolError::Full | DbPoolError::ClientQuotaExceeded(_)) {
+                    if !matches!(
+                        e,
+                        DbPoolError::Connect(_)
+                            | DbPoolError::Full
+                            | DbPoolError::ClientQuotaExceeded(_)
+                    ) {
                         // Reset retry state on non-retryable error
                         let mut inner = self.inner.lock();
                         inner.client_retry_state.remove(&client_id_owned);
@@ -1089,7 +1178,8 @@ impl<M: ConnectionManager> DbPool<M> {
                     let backoff_delay = calculate_delay(policy, attempt, None);
 
                     // Also enforce minimum per-client delay
-                    let client_delay = Duration::from_millis(self.config.min_retry_delay_per_client_ms);
+                    let client_delay =
+                        Duration::from_millis(self.config.min_retry_delay_per_client_ms);
                     let total_delay = backoff_delay.max(client_delay);
 
                     if !self.sleep_retry_backoff(total_delay.min(remaining)) {
@@ -1122,7 +1212,12 @@ impl<M: ConnectionManager> DbPool<M> {
     }
 
     /// Return a connection to the pool, preserving its original creation time.
-    fn return_connection(&self, mut conn: M::Connection, created_at: Time, client_id: Option<String>) {
+    fn return_connection(
+        &self,
+        mut conn: M::Connection,
+        created_at: Time,
+        client_id: Option<String>,
+    ) {
         // br-asupersync-gb3rck: Determine authentication state for this connection
         let authenticated_for = if self.config.validate_authentication_state {
             // If authentication validation is enabled, check current auth state
@@ -1158,7 +1253,9 @@ impl<M: ConnectionManager> DbPool<M> {
                 // so we need to increment it back to maintain consistency
                 let mut inner = self.inner.lock();
                 inner.total += 1;
-                eprintln!("SECURITY: Disconnect failure in return_connection - pool count restored");
+                eprintln!(
+                    "SECURITY: Disconnect failure in return_connection - pool count restored"
+                );
             } else {
                 self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
             }
@@ -1268,10 +1365,12 @@ impl<M: ConnectionManager> DbPool<M> {
         let now = crate::time::wall_now();
         let stale_threshold = Duration::from_secs(600); // 10 minutes
 
-        inner.client_retry_state.retain(|_client_id, (_, last_retry)| {
-            let age = Duration::from_nanos(now.duration_since(*last_retry));
-            age < stale_threshold
-        });
+        inner
+            .client_retry_state
+            .retain(|_client_id, (_, last_retry)| {
+                let age = Duration::from_nanos(now.duration_since(*last_retry));
+                age < stale_threshold
+            });
     }
 
     /// Safely disconnect a connection with proper error handling and resource cleanup.
@@ -1292,7 +1391,9 @@ impl<M: ConnectionManager> DbPool<M> {
             }
             Err(_panic_info) => {
                 // Disconnect panicked - this is a resource leak
-                self.stats.total_disconnect_failures.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .total_disconnect_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 eprintln!(
                     "SECURITY WARNING: Connection disconnect failed (panic) - potential resource leak detected"
                 );
@@ -1416,7 +1517,8 @@ impl<M: ConnectionManager> PooledConnection<'_, M> {
     /// Explicitly return the connection to the pool.
     pub fn return_to_pool(mut self) {
         if let Some(conn) = self.conn.take() {
-            self.pool.return_connection(conn, self.created_at, self.client_id.clone());
+            self.pool
+                .return_connection(conn, self.created_at, self.client_id.clone());
         }
     }
 
@@ -1469,17 +1571,24 @@ impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
             // the connection through `discard_connection` so it's closed
             // rather than handed back to a fresh caller.
             if self.pool.manager.release_check(&mut conn) {
-                self.pool.return_connection(conn, self.created_at, self.client_id.clone());
+                self.pool
+                    .return_connection(conn, self.created_at, self.client_id.clone());
             } else {
                 // br-asupersync-sxhome: Use safe discard to handle disconnect failures
                 // If disconnect fails, client count was already decremented above,
                 // so we need to restore it
-                if !self.pool.safe_discard_connection(conn, self.client_id.clone()) {
+                if !self
+                    .pool
+                    .safe_discard_connection(conn, self.client_id.clone())
+                {
                     // Disconnect failed - restore client connection count that was decremented above
                     if let Some(ref client_id) = self.client_id {
                         if self.pool.config.enforce_client_quotas {
                             let mut inner = self.pool.inner.lock();
-                            let count = inner.client_connections.entry(client_id.clone()).or_insert(0);
+                            let count = inner
+                                .client_connections
+                                .entry(client_id.clone())
+                                .or_insert(0);
                             *count += 1;
                             eprintln!(
                                 "SECURITY: Disconnect failure in Drop - client count restored for '{}'",
@@ -1661,7 +1770,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             total_discards: self.stats.total_discards.load(Ordering::Relaxed),
             total_timeouts: self.stats.total_timeouts.load(Ordering::Relaxed),
             total_validation_failures: self.stats.total_validation_failures.load(Ordering::Relaxed),
-            total_retry_limits_exceeded: self.stats.total_retry_limits_exceeded.load(Ordering::Relaxed),
+            total_retry_limits_exceeded: self
+                .stats
+                .total_retry_limits_exceeded
+                .load(Ordering::Relaxed),
             total_disconnect_failures: self.stats.total_disconnect_failures.load(Ordering::Relaxed),
         }
     }
@@ -1729,7 +1841,9 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         inner.total = inner.total.saturating_sub(1);
                     }
                     self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
-                    eprintln!("SECURITY: Async pool discarding connection with authentication state for anonymous get()");
+                    eprintln!(
+                        "SECURITY: Async pool discarding connection with authentication state for anonymous get()"
+                    );
                     self.manager.disconnect(idle.conn);
                     continue;
                 }
@@ -1843,7 +1957,11 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
                 // br-asupersync-80525g: Enforce per-client connection quota for async pool
                 if let Some(max_per_client) = self.config.max_connections_per_client {
-                    let current_count = inner.client_connections.get(&client_id_owned).copied().unwrap_or(0);
+                    let current_count = inner
+                        .client_connections
+                        .get(&client_id_owned)
+                        .copied()
+                        .unwrap_or(0);
                     if current_count >= max_per_client {
                         return Err(DbPoolError::ClientQuotaExceeded(client_id_owned));
                     }
@@ -1857,7 +1975,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         match &idle.authenticated_for {
                             Some(auth_client) if auth_client != &client_id_owned => {
                                 // SECURITY: Connection authenticated for different client - must not reuse
-                                eprintln!("SECURITY: Async pool discarding connection authenticated for '{}' requested by '{}'", auth_client, client_id_owned);
+                                eprintln!(
+                                    "SECURITY: Async pool discarding connection authenticated for '{}' requested by '{}'",
+                                    auth_client, client_id_owned
+                                );
                                 candidate = None; // Force discard and creation of new connection
                             }
                             _ => {
@@ -1875,7 +1996,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 }
 
                 // br-asupersync-80525g: Increment client connection count for async pool
-                *inner.client_connections.entry(client_id_owned.clone()).or_insert(0) += 1;
+                *inner
+                    .client_connections
+                    .entry(client_id_owned.clone())
+                    .or_insert(0) += 1;
 
                 candidate
             };
@@ -1929,14 +2053,17 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         // Decrement client count since validation failed
                         {
                             let mut inner = self.inner.lock();
-                            if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                            if let Some(count) = inner.client_connections.get_mut(&client_id_owned)
+                            {
                                 *count = count.saturating_sub(1);
                                 if *count == 0 {
                                     inner.client_connections.remove(&client_id_owned);
                                 }
                             }
                         }
-                        self.stats.total_validation_failures.fetch_add(1, Ordering::Relaxed);
+                        self.stats
+                            .total_validation_failures
+                            .fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
 
@@ -1946,17 +2073,23 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     if self.config.validate_authentication_state {
                         let current_auth_state = self.manager.authentication_state(&valid_conn);
                         match (&current_auth_state, &idle.authenticated_for) {
-                            (Some(current_client), Some(expected_client)) if current_client != expected_client => {
+                            (Some(current_client), Some(expected_client))
+                                if current_client != expected_client =>
+                            {
                                 // Authentication state mismatch - connection shows different auth than expected
                                 let mut inner = self.inner.lock();
-                                if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                                if let Some(count) =
+                                    inner.client_connections.get_mut(&client_id_owned)
+                                {
                                     *count = count.saturating_sub(1);
                                     if *count == 0 {
                                         inner.client_connections.remove(&client_id_owned);
                                     }
                                 }
                                 drop(inner);
-                                self.stats.total_validation_failures.fetch_add(1, Ordering::Relaxed);
+                                self.stats
+                                    .total_validation_failures
+                                    .fetch_add(1, Ordering::Relaxed);
                                 self.manager.disconnect(valid_conn);
                                 return Err(DbPoolError::AuthenticationMismatch {
                                     expected: expected_client.clone(),
@@ -1968,14 +2101,18 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                                 if !self.manager.clear_authentication_state(&mut valid_conn) {
                                     // Failed to clear auth state - discard connection
                                     let mut inner = self.inner.lock();
-                                    if let Some(count) = inner.client_connections.get_mut(&client_id_owned) {
+                                    if let Some(count) =
+                                        inner.client_connections.get_mut(&client_id_owned)
+                                    {
                                         *count = count.saturating_sub(1);
                                         if *count == 0 {
                                             inner.client_connections.remove(&client_id_owned);
                                         }
                                     }
                                     drop(inner);
-                                    self.stats.total_validation_failures.fetch_add(1, Ordering::Relaxed);
+                                    self.stats
+                                        .total_validation_failures
+                                        .fetch_add(1, Ordering::Relaxed);
                                     self.manager.disconnect(valid_conn);
                                     continue;
                                 }
@@ -1986,7 +2123,9 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                         }
                     }
 
-                    self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .total_acquisitions
+                        .fetch_add(1, Ordering::Relaxed);
                     return Ok(AsyncPooledConnection {
                         conn: Some(valid_conn),
                         pool: self,
@@ -1995,7 +2134,9 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     });
                 }
 
-                self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .total_acquisitions
+                    .fetch_add(1, Ordering::Relaxed);
                 return Ok(AsyncPooledConnection {
                     conn: Some(idle.conn),
                     pool: self,
@@ -2028,7 +2169,9 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     }
                     creation_guard.disarmed = true;
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    self.stats.total_acquisitions.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .total_acquisitions
+                        .fetch_add(1, Ordering::Relaxed);
                     return Ok(AsyncPooledConnection {
                         conn: Some(conn),
                         pool: self,
@@ -2260,7 +2403,9 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             }
             Err(_panic_info) => {
                 // Disconnect panicked - this is a resource leak
-                self.stats.total_disconnect_failures.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .total_disconnect_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 eprintln!(
                     "SECURITY WARNING: Async pool connection disconnect failed (panic) - potential resource leak detected"
                 );
@@ -2319,14 +2464,16 @@ impl<M: AsyncConnectionManager> AsyncPooledConnection<'_, M> {
     /// Explicitly return the connection to the pool.
     pub fn return_to_pool(mut self) {
         if let Some(conn) = self.conn.take() {
-            self.pool.return_connection(conn, self.created_at, self.client_id.clone());
+            self.pool
+                .return_connection(conn, self.created_at, self.client_id.clone());
         }
     }
 
     /// Discard this connection instead of returning it.
     pub fn discard(mut self) {
         if let Some(conn) = self.conn.take() {
-            self.pool.discard_connection_with_client(conn, self.client_id.clone());
+            self.pool
+                .discard_connection_with_client(conn, self.client_id.clone());
         }
     }
 }
@@ -2368,7 +2515,8 @@ impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
             // poison the next caller (open transaction, half-drained
             // result set, protocol desync).
             if self.pool.manager.release_check(&mut conn) {
-                self.pool.return_connection(conn, self.created_at, self.client_id.clone());
+                self.pool
+                    .return_connection(conn, self.created_at, self.client_id.clone());
             } else {
                 // br-asupersync-80525g: Use safe disconnect for unhealthy connections
                 if !self.pool.safe_disconnect(conn) {
@@ -2377,7 +2525,10 @@ impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
                     if let Some(ref client_id) = self.client_id {
                         if self.pool.config.enforce_client_quotas {
                             let mut inner = self.pool.inner.lock();
-                            let count = inner.client_connections.entry(client_id.clone()).or_insert(0);
+                            let count = inner
+                                .client_connections
+                                .entry(client_id.clone())
+                                .or_insert(0);
                             *count += 1;
                             eprintln!(
                                 "SECURITY: Async pool disconnect failure in Drop - client count restored for '{}'",

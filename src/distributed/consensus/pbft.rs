@@ -496,7 +496,7 @@ impl<T: PbftTransport> PbftNode<T> {
                 self.transport.broadcast(commit_msg),
             )
             .await
-            .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))?;
+            .map_err(|_| Error::new(ErrorKind::DeadlineExceeded))??;
         }
 
         Ok(())

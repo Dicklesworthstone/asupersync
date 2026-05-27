@@ -111,9 +111,7 @@ pub struct TraceEventSummary {
 /// Only logical sequence (seq), event kind, and data matter for determinism.
 impl PartialEq for TraceEventSummary {
     fn eq(&self, other: &Self) -> bool {
-        self.seq == other.seq
-            && self.kind == other.kind
-            && self.data_summary == other.data_summary
+        self.seq == other.seq && self.kind == other.kind && self.data_summary == other.data_summary
     }
 }
 

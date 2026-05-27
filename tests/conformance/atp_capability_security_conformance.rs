@@ -10,7 +10,7 @@
 //! - Explicit capability requirements
 
 use asupersync::cx::Cx;
-use asupersync::net::atp::sdk::{AtpSdk, SdkMode, SessionConfig, TransferPolicy, TransferId};
+use asupersync::net::atp::sdk::{AtpSdk, SdkMode, SessionConfig, TransferId, TransferPolicy};
 use asupersync::net::atp::test_utils::*;
 use asupersync::types::{Budget, Outcome};
 use serde::{Deserialize, Serialize};
@@ -98,7 +98,6 @@ const ATP_SECURITY_CASES: &[SecurityConformanceCase] = &[
         description: "ATP operations SHOULD validate Cx capabilities before use",
         test_fn: test_cx_capability_validation,
     },
-
     // Scoped Access Control Requirements
     SecurityConformanceCase {
         id: "ATP-CAP-004",
@@ -124,7 +123,6 @@ const ATP_SECURITY_CASES: &[SecurityConformanceCase] = &[
         description: "Relay operations MUST be scoped to trust boundaries",
         test_fn: test_relay_operation_scoping,
     },
-
     // Trust Boundary Requirements
     SecurityConformanceCase {
         id: "ATP-CAP-007",
@@ -142,7 +140,6 @@ const ATP_SECURITY_CASES: &[SecurityConformanceCase] = &[
         description: "Cross-boundary operations MUST validate trust chains",
         test_fn: test_trust_chain_validation,
     },
-
     // Capability Requirement Validation
     SecurityConformanceCase {
         id: "ATP-CAP-009",
@@ -160,7 +157,6 @@ const ATP_SECURITY_CASES: &[SecurityConformanceCase] = &[
         description: "Session creation MUST validate authentication capabilities",
         test_fn: test_session_capability_validation,
     },
-
     // Authorization Enforcement
     SecurityConformanceCase {
         id: "ATP-CAP-011",
@@ -178,7 +174,6 @@ const ATP_SECURITY_CASES: &[SecurityConformanceCase] = &[
         description: "Authorization failures SHOULD be audited",
         test_fn: test_authorization_audit,
     },
-
     // Resource Isolation
     SecurityConformanceCase {
         id: "ATP-CAP-013",
@@ -356,31 +351,44 @@ fn atp_capability_security_full_conformance() {
             }
             SecurityConformanceResult::Fail { reason } => {
                 fail += 1;
-                eprintln!("FAIL {}: {}\n  reason: {}", case.id, case.description, reason);
+                eprintln!(
+                    "FAIL {}: {}\n  reason: {}",
+                    case.id, case.description, reason
+                );
                 "FAIL"
             }
             SecurityConformanceResult::Skipped { reason } => {
                 skipped += 1;
-                eprintln!("SKIP {}: {}\n  reason: {}", case.id, case.description, reason);
+                eprintln!(
+                    "SKIP {}: {}\n  reason: {}",
+                    case.id, case.description, reason
+                );
                 "SKIP"
             }
             SecurityConformanceResult::ExpectedFailure { reason } => {
                 xfail += 1;
-                eprintln!("XFAIL {}: {}\n  reason: {}", case.id, case.description, reason);
+                eprintln!(
+                    "XFAIL {}: {}\n  reason: {}",
+                    case.id, case.description, reason
+                );
                 "XFAIL"
             }
         };
 
         // Structured JSON output for CI parsing
-        eprintln!("{{\"id\":\"{}\",\"verdict\":\"{}\",\"level\":\"{:?}\",\"category\":\"{:?}\"}}",
-                 case.id, verdict, case.level, case.category);
+        eprintln!(
+            "{{\"id\":\"{}\",\"verdict\":\"{}\",\"level\":\"{:?}\",\"category\":\"{:?}\"}}",
+            case.id, verdict, case.level, case.category
+        );
     }
 
     let total = pass + fail + skipped + xfail;
-    let must_tests = ATP_SECURITY_CASES.iter()
+    let must_tests = ATP_SECURITY_CASES
+        .iter()
         .filter(|c| c.level == SecurityRequirementLevel::Must)
         .count();
-    let must_pass = ATP_SECURITY_CASES.iter()
+    let must_pass = ATP_SECURITY_CASES
+        .iter()
         .filter(|c| c.level == SecurityRequirementLevel::Must)
         .filter(|c| matches!((c.test_fn)(&cx), SecurityConformanceResult::Pass))
         .count();
@@ -390,19 +398,36 @@ fn atp_capability_security_full_conformance() {
         0.0
     };
 
-    eprintln!("\nATP Capability Security Conformance: {}/{} pass, {} fail, {} skip, {} xfail",
-             pass, total, fail, skipped, xfail);
-    eprintln!("MUST requirements: {}/{} pass ({:.1}%)", must_pass, must_tests, security_compliance);
-    eprintln!("Security Compliance: {}",
-             if security_compliance >= 95.0 { "SECURE" } else { "INSECURE" });
+    eprintln!(
+        "\nATP Capability Security Conformance: {}/{} pass, {} fail, {} skip, {} xfail",
+        pass, total, fail, skipped, xfail
+    );
+    eprintln!(
+        "MUST requirements: {}/{} pass ({:.1}%)",
+        must_pass, must_tests, security_compliance
+    );
+    eprintln!(
+        "Security Compliance: {}",
+        if security_compliance >= 95.0 {
+            "SECURE"
+        } else {
+            "INSECURE"
+        }
+    );
 
     // Fail only if non-expected failures occur
-    assert_eq!(fail, 0, "{} security conformance tests failed unexpectedly", fail);
+    assert_eq!(
+        fail, 0,
+        "{} security conformance tests failed unexpectedly",
+        fail
+    );
 
     // Warn if security compliance is low
     if security_compliance < 95.0 {
-        eprintln!("Warning: MUST requirement security compliance is {:.1}% (< 95% threshold)",
-                 security_compliance);
+        eprintln!(
+            "Warning: MUST requirement security compliance is {:.1}% (< 95% threshold)",
+            security_compliance
+        );
         eprintln!("This indicates critical security vulnerabilities in ATP capability model");
     }
 }
@@ -426,21 +451,29 @@ fn atp_capability_security_coverage_matrix() {
             SecurityConformanceResult::ExpectedFailure { .. } => "⚠️ XFAIL",
         };
 
-        println!("| {} | {} | {:?} | {:?} | {} | {} |",
-                case.id, case.section, case.level, case.category, status, case.description);
+        println!(
+            "| {} | {} | {:?} | {:?} | {} | {} |",
+            case.id, case.section, case.level, case.category, status, case.description
+        );
     }
 
     println!();
     println!("## Security Risk Assessment");
 
-    let critical_failures = ATP_SECURITY_CASES.iter()
+    let critical_failures = ATP_SECURITY_CASES
+        .iter()
         .filter(|c| c.level == SecurityRequirementLevel::Must)
         .filter(|c| !matches!((c.test_fn)(&cx), SecurityConformanceResult::Pass))
         .count();
 
     if critical_failures > 0 {
-        println!("🚨 **CRITICAL**: {} MUST-level security requirements not implemented", critical_failures);
-        println!("This indicates serious security vulnerabilities that must be addressed immediately.");
+        println!(
+            "🚨 **CRITICAL**: {} MUST-level security requirements not implemented",
+            critical_failures
+        );
+        println!(
+            "This indicates serious security vulnerabilities that must be addressed immediately."
+        );
     } else {
         println!("✅ **GOOD**: All MUST-level security requirements are implemented");
     }
@@ -480,30 +513,43 @@ mod tests {
     #[test]
     fn test_security_conformance_infrastructure() {
         // Test that we have security test cases defined
-        assert!(!ATP_SECURITY_CASES.is_empty(), "Should have security conformance test cases");
+        assert!(
+            !ATP_SECURITY_CASES.is_empty(),
+            "Should have security conformance test cases"
+        );
 
         // Test that all security requirement levels are covered
-        let has_must = ATP_SECURITY_CASES.iter()
+        let has_must = ATP_SECURITY_CASES
+            .iter()
             .any(|c| c.level == SecurityRequirementLevel::Must);
-        let has_should = ATP_SECURITY_CASES.iter()
+        let has_should = ATP_SECURITY_CASES
+            .iter()
             .any(|c| c.level == SecurityRequirementLevel::Should);
 
         assert!(has_must, "Should have MUST-level security requirements");
         assert!(has_should, "Should have SHOULD-level security requirements");
 
         // Test that all security categories are covered
-        let categories: std::collections::HashSet<_> = ATP_SECURITY_CASES.iter()
-            .map(|c| c.category)
-            .collect();
+        let categories: std::collections::HashSet<_> =
+            ATP_SECURITY_CASES.iter().map(|c| c.category).collect();
 
-        assert!(categories.len() >= 5, "Should cover multiple security categories");
+        assert!(
+            categories.len() >= 5,
+            "Should cover multiple security categories"
+        );
 
         // Verify critical security categories are present
-        assert!(categories.contains(&SecurityTestCategory::NoAmbientAuthority),
-               "Should test no ambient authority");
-        assert!(categories.contains(&SecurityTestCategory::CapabilityRequirements),
-               "Should test capability requirements");
-        assert!(categories.contains(&SecurityTestCategory::TrustBoundaries),
-               "Should test trust boundaries");
+        assert!(
+            categories.contains(&SecurityTestCategory::NoAmbientAuthority),
+            "Should test no ambient authority"
+        );
+        assert!(
+            categories.contains(&SecurityTestCategory::CapabilityRequirements),
+            "Should test capability requirements"
+        );
+        assert!(
+            categories.contains(&SecurityTestCategory::TrustBoundaries),
+            "Should test trust boundaries"
+        );
     }
 }

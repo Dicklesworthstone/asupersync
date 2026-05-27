@@ -8,11 +8,11 @@
 //! to ensure cryptographic integrity, deterministic generation, and audit trail
 //! completeness required by the ATP security model.
 
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
-use crate::raptorq::proof::{DecodeProof, DecodeConfig, ProofHash, PROOF_SCHEMA_VERSION};
+use crate::raptorq::proof::{DecodeConfig, DecodeProof, PROOF_SCHEMA_VERSION, ProofHash};
 use crate::raptorq::systematic::SystematicParams;
 use crate::types::ObjectId;
 
@@ -49,7 +49,7 @@ pub enum ConformanceResult {
     Pass,
     Fail { reason: String },
     Skipped { reason: String },
-    ExpectedFailure { reason: String },  // XFAIL for known divergences
+    ExpectedFailure { reason: String }, // XFAIL for known divergences
 }
 
 impl ProofConformanceContext {
@@ -113,7 +113,6 @@ const ATP_PROOF_CONFORMANCE_CASES: &[ProofConformanceCase] = &[
         description: "Proof forgery MUST be computationally infeasible (256-bit hash)",
         test_fn: proof_hash_prevents_forgery,
     },
-
     // ========================================================================
     // Deterministic Generation Requirements (MUST)
     // ========================================================================
@@ -138,7 +137,6 @@ const ATP_PROOF_CONFORMANCE_CASES: &[ProofConformanceCase] = &[
         description: "Proof truncation MUST be bounded and deterministic",
         test_fn: proof_truncation_deterministic,
     },
-
     // ========================================================================
     // Independent Verification Requirements (MUST)
     // ========================================================================
@@ -163,7 +161,6 @@ const ATP_PROOF_CONFORMANCE_CASES: &[ProofConformanceCase] = &[
         description: "Proof schema version MUST enable forward compatibility",
         test_fn: proof_schema_versioning,
     },
-
     // ========================================================================
     // Audit Trail Completeness (SHOULD)
     // ========================================================================
@@ -181,7 +178,6 @@ const ATP_PROOF_CONFORMANCE_CASES: &[ProofConformanceCase] = &[
         description: "Proof SHOULD include outcome explanation for failures",
         test_fn: proof_explains_failures,
     },
-
     // ========================================================================
     // Cross-Platform Portability (SHOULD)
     // ========================================================================
@@ -208,7 +204,7 @@ fn proof_has_cryptographic_hash(_ctx: &mut ProofConformanceContext) -> Conforman
         ConformanceResult::Pass
     } else {
         ConformanceResult::Fail {
-            reason: format!("Expected 32-byte hash, got {}", hash.as_bytes().len())
+            reason: format!("Expected 32-byte hash, got {}", hash.as_bytes().len()),
         }
     }
 }
@@ -226,7 +222,7 @@ fn proof_hash_covers_all_content(_ctx: &mut ProofConformanceContext) -> Conforma
         ConformanceResult::Pass
     } else {
         ConformanceResult::Fail {
-            reason: "Hash did not change when proof content was modified".to_string()
+            reason: "Hash did not change when proof content was modified".to_string(),
         }
     }
 }
@@ -245,7 +241,7 @@ fn proof_hash_detects_tampering(_ctx: &mut ProofConformanceContext) -> Conforman
         ConformanceResult::Pass
     } else {
         ConformanceResult::Fail {
-            reason: "Hash collision detected - tampering not detected".to_string()
+            reason: "Hash collision detected - tampering not detected".to_string(),
         }
     }
 }
@@ -257,11 +253,12 @@ fn proof_hash_prevents_forgery(_ctx: &mut ProofConformanceContext) -> Conformanc
 
     // Verify hash is full 256 bits (not truncated)
     let hash_hex = hash.to_hex();
-    if hash_hex.len() == 64 { // 32 bytes = 64 hex chars
+    if hash_hex.len() == 64 {
+        // 32 bytes = 64 hex chars
         ConformanceResult::Pass
     } else {
         ConformanceResult::Fail {
-            reason: format!("Hash not full 256 bits: {} chars", hash_hex.len())
+            reason: format!("Hash not full 256 bits: {} chars", hash_hex.len()),
         }
     }
 }
@@ -275,7 +272,7 @@ fn proof_generation_is_deterministic(_ctx: &mut ProofConformanceContext) -> Conf
         ConformanceResult::Pass
     } else {
         ConformanceResult::Fail {
-            reason: "Identical inputs produced different proofs".to_string()
+            reason: "Identical inputs produced different proofs".to_string(),
         }
     }
 }
@@ -299,7 +296,7 @@ fn proof_truncation_deterministic(_ctx: &mut ProofConformanceContext) -> Conform
         ConformanceResult::Pass
     } else {
         ConformanceResult::Fail {
-            reason: "Truncation bounds not properly defined".to_string()
+            reason: "Truncation bounds not properly defined".to_string(),
         }
     }
 }
@@ -310,13 +307,17 @@ fn proof_verification_independent(_ctx: &mut ProofConformanceContext) -> Conform
 
     // Verify proof contains all necessary information for verification
     // (configuration, received symbols summary, outcome)
-    if proof.config.k > 0 &&
-       proof.received.total > 0 &&
-       !matches!(proof.outcome, crate::raptorq::proof::ProofOutcome::InternalError { .. }) {
+    if proof.config.k > 0
+        && proof.received.total > 0
+        && !matches!(
+            proof.outcome,
+            crate::raptorq::proof::ProofOutcome::InternalError { .. }
+        )
+    {
         ConformanceResult::Pass
     } else {
         ConformanceResult::Fail {
-            reason: "Proof missing essential verification data".to_string()
+            reason: "Proof missing essential verification data".to_string(),
         }
     }
 }
@@ -326,13 +327,14 @@ fn proof_metadata_complete(_ctx: &mut ProofConformanceContext) -> ConformanceRes
     let proof = create_sample_proof();
 
     // Check essential fields are present
-    if proof.version == PROOF_SCHEMA_VERSION &&
-       proof.config.object_id != ObjectId::from_u128(0) &&
-       proof.config.symbol_size > 0 {
+    if proof.version == PROOF_SCHEMA_VERSION
+        && proof.config.object_id != ObjectId::from_u128(0)
+        && proof.config.symbol_size > 0
+    {
         ConformanceResult::Pass
     } else {
         ConformanceResult::Fail {
-            reason: "Proof metadata incomplete for verification".to_string()
+            reason: "Proof metadata incomplete for verification".to_string(),
         }
     }
 }
@@ -345,7 +347,7 @@ fn proof_schema_versioning(_ctx: &mut ProofConformanceContext) -> ConformanceRes
         ConformanceResult::Pass
     } else {
         ConformanceResult::Fail {
-            reason: "Schema version not set for forward compatibility".to_string()
+            reason: "Schema version not set for forward compatibility".to_string(),
         }
     }
 }
@@ -359,7 +361,7 @@ fn proof_captures_decision_points(_ctx: &mut ProofConformanceContext) -> Conform
         ConformanceResult::Pass
     } else {
         ConformanceResult::Fail {
-            reason: "Proof missing decision point traces".to_string()
+            reason: "Proof missing decision point traces".to_string(),
         }
     }
 }
@@ -368,7 +370,7 @@ fn proof_explains_failures(_ctx: &mut ProofConformanceContext) -> ConformanceRes
     // Test that failures include explanatory information
     // Note: This would need actual failure cases to test fully
     ConformanceResult::ExpectedFailure {
-        reason: "Failure explanation testing requires decode failure injection".to_string()
+        reason: "Failure explanation testing requires decode failure injection".to_string(),
     }
 }
 
@@ -381,13 +383,13 @@ fn proof_serialization_portable(_ctx: &mut ProofConformanceContext) -> Conforman
         match serde_json::to_string(&proof) {
             Ok(_) => ConformanceResult::Pass,
             Err(e) => ConformanceResult::Fail {
-                reason: format!("Serialization failed: {}", e)
-            }
+                reason: format!("Serialization failed: {}", e),
+            },
         }
     }
     #[cfg(not(feature = "test-internals"))]
     ConformanceResult::Skipped {
-        reason: "Serialization testing requires test-internals feature".to_string()
+        reason: "Serialization testing requires test-internals feature".to_string(),
     }
 }
 
@@ -396,7 +398,10 @@ fn proof_serialization_portable(_ctx: &mut ProofConformanceContext) -> Conforman
 // ============================================================================
 
 fn create_sample_proof() -> DecodeProof {
-    use crate::raptorq::proof::{DecodeConfig, ReceivedSummary, PeelingTrace, EliminationTrace, ProofOutcome, InactivationStrategy};
+    use crate::raptorq::proof::{
+        DecodeConfig, EliminationTrace, InactivationStrategy, PeelingTrace, ProofOutcome,
+        ReceivedSummary,
+    };
 
     let config = DecodeConfig {
         k: 10,
@@ -497,18 +502,22 @@ mod tests {
         }
 
         let total = pass + fail + xfail + skip;
-        let must_cases: Vec<_> = results.iter()
+        let must_cases: Vec<_> = results
+            .iter()
             .filter(|(case, _)| case.level == RequirementLevel::Must)
             .collect();
-        let must_pass = must_cases.iter()
+        let must_pass = must_cases
+            .iter()
             .filter(|(_, result)| matches!(result, ConformanceResult::Pass))
             .count();
         let must_total = must_cases.len();
 
         eprintln!("\nATP Proof Artifacts Conformance Summary:");
         eprintln!("  Total: {pass}/{total} pass, {fail} fail, {xfail} xfail, {skip} skip");
-        eprintln!("  MUST:  {must_pass}/{must_total} pass ({:.1}%)",
-                 100.0 * must_pass as f64 / must_total as f64);
+        eprintln!(
+            "  MUST:  {must_pass}/{must_total} pass ({:.1}%)",
+            100.0 * must_pass as f64 / must_total as f64
+        );
 
         // Fail test if any unexpected failures
         assert_eq!(fail, 0, "{fail} conformance tests failed unexpectedly");
@@ -516,9 +525,15 @@ mod tests {
         // Report compliance status
         let must_compliance = 100.0 * must_pass as f64 / must_total as f64;
         if must_compliance >= 95.0 {
-            eprintln!("✅ ATP Proof Artifacts: COMPLIANT ({:.1}% MUST compliance)", must_compliance);
+            eprintln!(
+                "✅ ATP Proof Artifacts: COMPLIANT ({:.1}% MUST compliance)",
+                must_compliance
+            );
         } else {
-            eprintln!("⚠️ ATP Proof Artifacts: NON-COMPLIANT ({:.1}% MUST compliance < 95%)", must_compliance);
+            eprintln!(
+                "⚠️ ATP Proof Artifacts: NON-COMPLIANT ({:.1}% MUST compliance < 95%)",
+                must_compliance
+            );
         }
     }
 
@@ -539,11 +554,15 @@ mod tests {
                 ConformanceResult::ExpectedFailure { .. } => "⚠️ XFAIL",
                 ConformanceResult::Skipped { .. } => "⏭️ SKIP",
             };
-            eprintln!("| {} | {} | {:?} | {} | {} |",
-                     case.id, case.section, case.level, case.description, status);
+            eprintln!(
+                "| {} | {} | {:?} | {} | {} |",
+                case.id, case.section, case.level, case.description, status
+            );
         }
 
         eprintln!();
-        eprintln!("Legend: ✅ PASS = Implemented, ❌ FAIL = Broken, ⚠️ XFAIL = Known gap, ⏭️ SKIP = Feature disabled");
+        eprintln!(
+            "Legend: ✅ PASS = Implemented, ❌ FAIL = Broken, ⚠️ XFAIL = Known gap, ⏭️ SKIP = Feature disabled"
+        );
     }
 }

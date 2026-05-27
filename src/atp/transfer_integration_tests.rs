@@ -233,7 +233,10 @@ mod tests {
             }
         }
 
-        fn create_transfer_actor(actor_id: u32, entropy: u64) -> Result<TransferActor, Box<dyn std::error::Error>> {
+        fn create_transfer_actor(
+            actor_id: u32,
+            entropy: u64,
+        ) -> Result<TransferActor, Box<dyn std::error::Error>> {
             TransferActor::new(
                 TransferActorId::new(actor_id),
                 Self::create_test_transfer_id(entropy),

@@ -330,10 +330,13 @@ mod hardened_examples {
     }
 
     // Shared test TLS material - generated once and cached for consistency
-    static TEST_TLS_MATERIAL: std::sync::OnceLock<(crate::tls::Certificate, crate::tls::PrivateKey)> =
-        std::sync::OnceLock::new();
+    static TEST_TLS_MATERIAL: std::sync::OnceLock<(
+        crate::tls::Certificate,
+        crate::tls::PrivateKey,
+    )> = std::sync::OnceLock::new();
 
-    pub fn generate_test_tls_material() -> &'static (crate::tls::Certificate, crate::tls::PrivateKey) {
+    pub fn generate_test_tls_material() -> &'static (crate::tls::Certificate, crate::tls::PrivateKey)
+    {
         TEST_TLS_MATERIAL.get_or_init(|| {
             // Generate a single key pair for both certificate and private key
             let key_pair = rcgen::KeyPair::generate().expect("key generation");
@@ -342,15 +345,22 @@ mod hardened_examples {
             let mut params = rcgen::CertificateParams::new(vec!["localhost".into()])
                 .expect("valid localhost SAN");
             params.is_ca = rcgen::IsCa::ExplicitNoCa;
-            params.distinguished_name
+            params
+                .distinguished_name
                 .push(rcgen::DnType::CommonName, "asupersync-test-server");
-            params.key_usages.push(rcgen::KeyUsagePurpose::DigitalSignature);
-            params.extended_key_usages.push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
+            params
+                .key_usages
+                .push(rcgen::KeyUsagePurpose::DigitalSignature);
+            params
+                .extended_key_usages
+                .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
             params.not_before = rcgen::date_time_ymd(2025, 1, 1);
             params.not_after = rcgen::date_time_ymd(2035, 1, 1);
 
             // Generate certificate using the key pair
-            let cert = params.self_signed(&key_pair).expect("certificate generation");
+            let cert = params
+                .self_signed(&key_pair)
+                .expect("certificate generation");
             let certificate = crate::tls::Certificate::from_der(cert.der().as_ref().to_vec());
             let private_key = crate::tls::PrivateKey::from_pkcs8_der(key_pair.serialize_der());
 
@@ -376,14 +386,21 @@ mod hardened_examples {
         let key = test_private_key();
 
         // Basic validation: certificate and key should be created successfully
-        assert!(cert.as_der().len() > 0, "Certificate should have non-empty DER data");
+        assert!(
+            cert.as_der().len() > 0,
+            "Certificate should have non-empty DER data"
+        );
 
         // Verify we can call the functions multiple times and get the same result
         // (due to OnceLock caching)
         let cert2 = test_certificate();
         let key2 = test_private_key();
 
-        assert_eq!(cert.as_der(), cert2.as_der(), "Certificate should be deterministic");
+        assert_eq!(
+            cert.as_der(),
+            cert2.as_der(),
+            "Certificate should be deterministic"
+        );
         // Note: PrivateKey doesn't expose comparison, but both should be from same cached source
     }
 }

@@ -184,8 +184,14 @@ fn verify_placeholder_is_intentional_test_fixture() {
     let needs_implementation = false;
 
     assert_eq!(test_fixture_purpose, "Policy enforcement validation");
-    assert!(!is_production_code, "The todo!() is test data, not production code");
-    assert!(!needs_implementation, "Test fixtures should remain as-is for policy testing");
+    assert!(
+        !is_production_code,
+        "The todo!() is test data, not production code"
+    );
+    assert!(
+        !needs_implementation,
+        "Test fixtures should remain as-is for policy testing"
+    );
 }
 
 #[test]

@@ -245,6 +245,8 @@ pub mod signal;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod actor_genserver_monitor_evidence_link_process_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod atp_timing_security_conformance_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod bytes_io_time_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod cancel_cx_runtime_channel_metamorphic_tests;
@@ -272,8 +274,6 @@ pub mod distributed_obligation_metamorphic_tests;
 pub mod distributed_primitives_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod distributed_security_codec_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod atp_timing_security_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod distributed_service_messaging_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
@@ -748,13 +748,13 @@ pub mod test_utils;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod timer_wheel_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
+pub mod tls_test_helpers_comprehensive_tests;
+#[cfg(any(test, feature = "test-internals"))]
 pub mod trace_causality_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod web_protocol_conformance_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod web_tls_codec_raptorq_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
-pub mod tls_test_helpers_comprehensive_tests;
 
 // Re-exports for convenient access to core types
 pub use config::{

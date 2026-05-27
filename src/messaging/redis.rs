@@ -1690,10 +1690,9 @@ impl RedisConfig {
                 })?;
 
                 // Parse hex digits to byte value
-                let byte = u8::from_str_radix(&format!("{}{}", hex1, hex2), 16)
-                    .map_err(|_| {
-                        RedisError::InvalidUrl("invalid percent encoding in credential".to_string())
-                    })?;
+                let byte = u8::from_str_radix(&format!("{}{}", hex1, hex2), 16).map_err(|_| {
+                    RedisError::InvalidUrl("invalid percent encoding in credential".to_string())
+                })?;
 
                 // Convert byte to char (assuming UTF-8, which is standard for URLs)
                 if byte.is_ascii() {
@@ -7719,9 +7718,18 @@ mod tests {
         let err = RedisConfig::from_url("http://user:secret123@localhost:6379")
             .expect_err("invalid scheme should fail");
         let err_msg = err.to_string();
-        assert!(err_msg.contains("***"), "Password should be redacted in error message");
-        assert!(!err_msg.contains("secret123"), "Password should not appear in error message");
-        assert!(!err_msg.contains("user:secret123"), "Full userinfo should not appear in error message");
+        assert!(
+            err_msg.contains("***"),
+            "Password should be redacted in error message"
+        );
+        assert!(
+            !err_msg.contains("secret123"),
+            "Password should not appear in error message"
+        );
+        assert!(
+            !err_msg.contains("user:secret123"),
+            "Full userinfo should not appear in error message"
+        );
 
         // Test redact_url_for_errors function directly
         assert_eq!(
@@ -7754,10 +7762,7 @@ mod tests {
         // to prevent authentication bypass (asupersync-ts45lv)
 
         // Test basic percent-encoding decoding
-        assert_eq!(
-            RedisConfig::url_decode_credential("user").unwrap(),
-            "user"
-        );
+        assert_eq!(RedisConfig::url_decode_credential("user").unwrap(), "user");
         assert_eq!(
             RedisConfig::url_decode_credential("user%3Aescaped").unwrap(),
             "user:escaped"
@@ -7835,7 +7840,9 @@ mod tests {
         // Verify TLS URLs are rejected when TLS feature is not enabled
         let err = RedisConfig::from_url("rediss://localhost:6380")
             .expect_err("rediss:// should fail when TLS feature disabled");
-        assert!(matches!(err, RedisError::InvalidUrl(ref msg) if msg.contains("TLS support not enabled")));
+        assert!(
+            matches!(err, RedisError::InvalidUrl(ref msg) if msg.contains("TLS support not enabled"))
+        );
     }
 
     // Pure data-type tests (wave 13 – CyanBarn)

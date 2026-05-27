@@ -60,8 +60,8 @@ use crate::record::{ObligationKind, ObligationState};
 use crate::types::RegionId;
 use std::fmt;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ============================================================================
 // Panic-Safe Leak Tracker
@@ -94,7 +94,9 @@ impl PanicLeakTracker {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             eprintln!(
                 "PANIC LEAK #{}: {} obligation '{}' dropped during panic unwinding",
-                count + 1, kind, description
+                count + 1,
+                kind,
+                description
             );
         }));
     }
@@ -1071,7 +1073,8 @@ impl GradedScope {
         kind: ObligationKind,
         description: impl Into<String>,
     ) -> Result<ObligationToken<K>, TypedObligationKindError> {
-        let token = ObligationToken::try_reserve_kind(kind, description, RegionId::new_ephemeral())?;
+        let token =
+            ObligationToken::try_reserve_kind(kind, description, RegionId::new_ephemeral())?;
         self.on_reserve();
         Ok(token)
     }

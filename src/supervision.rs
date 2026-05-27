@@ -3263,8 +3263,10 @@ impl Supervisor {
                                 task_id,
                                 region_id,
                                 reason: StopReason::RestartBudgetExhausted {
-                                    total_restarts: u32::try_from(history.recent_restart_count(now))
-                                        .unwrap_or(u32::MAX),
+                                    total_restarts: u32::try_from(
+                                        history.recent_restart_count(now),
+                                    )
+                                    .unwrap_or(u32::MAX),
                                     window: config.window,
                                 },
                             },

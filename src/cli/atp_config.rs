@@ -84,18 +84,26 @@ impl AtpInstallConfig {
     }
 
     /// Read a persisted ATP installation config from TOML with path validation.
-    pub fn read_from_file_secure(path: &Path, base_dir: Option<&Path>) -> Result<Self, ConfigError> {
+    pub fn read_from_file_secure(
+        path: &Path,
+        base_dir: Option<&Path>,
+    ) -> Result<Self, ConfigError> {
         let validated_path = if let Some(base) = base_dir {
             // If a base directory is provided, validate the path is within bounds
-            let secure_path = SecurePath::new(base)
-                .map_err(|e| ConfigError::PathSecurity(format!("Failed to create secure path validator: {}", e)))?;
-            let validated = secure_path.validate_path(path)
-                .map_err(|e| ConfigError::PathSecurity(format!("Path traversal validation failed: {}", e)))?;
+            let secure_path = SecurePath::new(base).map_err(|e| {
+                ConfigError::PathSecurity(format!("Failed to create secure path validator: {}", e))
+            })?;
+            let validated = secure_path.validate_path(path).map_err(|e| {
+                ConfigError::PathSecurity(format!("Path traversal validation failed: {}", e))
+            })?;
             validated.to_path_buf()
         } else {
             // If no base directory provided, use the path directly (for backward compatibility)
             // but log a warning about potential security risk
-            tracing::warn!("Reading config file without path validation: {}", path.display());
+            tracing::warn!(
+                "Reading config file without path validation: {}",
+                path.display()
+            );
             path.to_path_buf()
         };
 
@@ -110,18 +118,27 @@ impl AtpInstallConfig {
     }
 
     /// Write a persisted ATP installation config to TOML with path validation.
-    pub fn write_to_file_secure(&self, path: &Path, base_dir: Option<&Path>) -> Result<(), ConfigError> {
+    pub fn write_to_file_secure(
+        &self,
+        path: &Path,
+        base_dir: Option<&Path>,
+    ) -> Result<(), ConfigError> {
         let validated_path = if let Some(base) = base_dir {
             // If a base directory is provided, validate the path is within bounds
-            let secure_path = SecurePath::new(base)
-                .map_err(|e| ConfigError::PathSecurity(format!("Failed to create secure path validator: {}", e)))?;
-            let validated = secure_path.validate_path(path)
-                .map_err(|e| ConfigError::PathSecurity(format!("Path traversal validation failed: {}", e)))?;
+            let secure_path = SecurePath::new(base).map_err(|e| {
+                ConfigError::PathSecurity(format!("Failed to create secure path validator: {}", e))
+            })?;
+            let validated = secure_path.validate_path(path).map_err(|e| {
+                ConfigError::PathSecurity(format!("Path traversal validation failed: {}", e))
+            })?;
             validated.to_path_buf()
         } else {
             // If no base directory provided, use the path directly (for backward compatibility)
             // but log a warning about potential security risk
-            tracing::warn!("Writing config file without path validation: {}", path.display());
+            tracing::warn!(
+                "Writing config file without path validation: {}",
+                path.display()
+            );
             path.to_path_buf()
         };
 
@@ -181,7 +198,8 @@ impl ConfigPaths {
         #[cfg(unix)]
         {
             let home = Self::sanitize_env_path("HOME", "/tmp");
-            let config_dir = Self::sanitize_env_path("XDG_CONFIG_HOME", &format!("{}/.config", home));
+            let config_dir =
+                Self::sanitize_env_path("XDG_CONFIG_HOME", &format!("{}/.config", home));
 
             Self {
                 daemon_policy: PathBuf::from("/etc/asupersync/atp.toml"),
@@ -226,7 +244,10 @@ impl ConfigPaths {
 
         // Security checks to prevent path injection
         if raw_path.contains("..") {
-            eprintln!("Security warning: {} contains suspicious path traversal, using default", env_var);
+            eprintln!(
+                "Security warning: {} contains suspicious path traversal, using default",
+                env_var
+            );
             return default.to_string();
         }
 
@@ -237,22 +258,35 @@ impl ConfigPaths {
         }
 
         // Prevent null bytes and other control characters
-        if raw_path.contains('\0') || raw_path.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
-            eprintln!("Security warning: {} contains invalid characters, using default", env_var);
+        if raw_path.contains('\0')
+            || raw_path
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+        {
+            eprintln!(
+                "Security warning: {} contains invalid characters, using default",
+                env_var
+            );
             return default.to_string();
         }
 
         // On Unix, ensure the path is absolute if not default
         #[cfg(unix)]
         if !raw_path.starts_with('/') && raw_path != default {
-            eprintln!("Security warning: {} is not absolute, using default", env_var);
+            eprintln!(
+                "Security warning: {} is not absolute, using default",
+                env_var
+            );
             return default.to_string();
         }
 
         // On Windows, basic drive letter validation
         #[cfg(windows)]
         if !raw_path.chars().nth(1).map_or(false, |c| c == ':') && raw_path != default {
-            eprintln!("Security warning: {} is not a valid Windows path, using default", env_var);
+            eprintln!(
+                "Security warning: {} is not a valid Windows path, using default",
+                env_var
+            );
             return default.to_string();
         }
 

@@ -195,7 +195,7 @@ impl ReadBiasedDrainingRegionSnapshot {
                     writes,
                     0,
                     Ordering::AcqRel,
-                    Ordering::Acquire
+                    Ordering::Acquire,
                 ) {
                     Ok(_) => {
                         // Counter reset successful, now atomically check validity and read cache
@@ -209,7 +209,7 @@ impl ReadBiasedDrainingRegionSnapshot {
                             return cached_value;
                         }
                         // Cache was invalidated between reset and read, fall through to rebuild
-                    },
+                    }
                     Err(_) => {
                         // Counter was modified by another thread, retry
                         continue;
@@ -1856,11 +1856,9 @@ impl RuntimeState {
 
         // Check if caller has authorization to spawn in this region
         if let Some(root_key) = self.get_spawn_authorization_key() {
-            if let Err(_verification_error) = caller_cx.verify_capability(
-                &root_key,
-                &spawn_capability,
-                &verification_context,
-            ) {
+            if let Err(_verification_error) =
+                caller_cx.verify_capability(&root_key, &spawn_capability, &verification_context)
+            {
                 return Err(SpawnError::AuthorizationDenied {
                     region,
                     cx_id: format!("{:?}", caller_cx.task_id()),
@@ -2109,7 +2107,7 @@ impl RuntimeState {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        use crate::runtime::{task_handle::JoinError, StoredTask};
+        use crate::runtime::{StoredTask, task_handle::JoinError};
 
         let (task_id, handle, cx, result_tx) =
             self.create_task_infrastructure(caller_cx, region, budget, false)?;
@@ -2393,7 +2391,8 @@ impl RuntimeState {
         // This prevents reentrancy during finalizer execution that could violate
         // the quiescence invariant.
         if self.handling_leaks == 0 && !self.deferred_region_advancements.is_empty() {
-            let deferred_regions: Vec<RegionId> = self.deferred_region_advancements.drain().collect();
+            let deferred_regions: Vec<RegionId> =
+                self.deferred_region_advancements.drain().collect();
             for region_id in deferred_regions {
                 self.advance_region_state(region_id);
             }
@@ -3449,10 +3448,11 @@ impl RuntimeState {
                 // EDGE CASE VALIDATION: Validate barrier was properly set
                 // This catches cases where the barrier tracking might be corrupted
                 debug_assert!(
-                    self.regions.get(owner.arena_index()).is_some_and(|r|
-                        r.state() == crate::record::region::RegionState::Finalizing ||
-                        r.state() == crate::record::region::RegionState::Closed
-                    ),
+                    self.regions
+                        .get(owner.arena_index())
+                        .is_some_and(|r| r.state()
+                            == crate::record::region::RegionState::Finalizing
+                            || r.state() == crate::record::region::RegionState::Closed),
                     "br-asupersync-mg70eb: async finalizer barrier cleared for region in invalid state \
                      (region={:?}, task_id={:?}, finalizer_id={})",
                     owner,
@@ -3858,14 +3858,10 @@ impl RuntimeState {
             let has_more_finalizers = !region.finalizers_empty();
             let has_more_ids = self.pending_finalizer_ids.contains_key(&region_id);
             debug_assert_eq!(
-                has_more_finalizers,
-                has_more_ids,
+                has_more_finalizers, has_more_ids,
                 "br-asupersync-mg70eb: finalizer stack and ID tracking inconsistency after pop \
                  (region={:?}, has_finalizers={}, has_ids={}, popped_id={})",
-                region_id,
-                has_more_finalizers,
-                has_more_ids,
-                id
+                region_id, has_more_finalizers, has_more_ids, id
             );
         }
 
@@ -3976,7 +3972,7 @@ impl RuntimeState {
                     if let Some(region) = self.regions.get(region_id.arena_index()) {
                         debug_assert!(
                             region.state() == crate::record::region::RegionState::Finalizing
-                            || region.state() == crate::record::region::RegionState::Closed,
+                                || region.state() == crate::record::region::RegionState::Closed,
                             "br-asupersync-vks0tm: finalizer execution left region in invalid state \
                              (region={:?}, state_after_finalizer={:?}, finalizer_id={})",
                             region_id,
@@ -4039,7 +4035,7 @@ impl RuntimeState {
             // Additional validation: ensure we have proper tracking for pending finalizers
             debug_assert!(
                 self.pending_finalizer_ids.contains_key(&region_id)
-                || region.finalizer_count() == 0,
+                    || region.finalizer_count() == 0,
                 "br-asupersync-vks0tm: finalizer tracking inconsistency detected - \
                  region has finalizers but no tracked IDs (region={:?}, finalizer_count={})",
                 region_id,
@@ -4180,9 +4176,7 @@ impl RuntimeState {
                             }
                         };
                         if let Some((old_state, new_state)) = transition {
-                            self.note_read_biased_region_snapshot_transition(
-                                old_state, new_state,
-                            );
+                            self.note_read_biased_region_snapshot_transition(old_state, new_state);
                             true
                         } else {
                             false
@@ -4196,45 +4190,43 @@ impl RuntimeState {
                     if region.child_count() > 0
                         && region.state() == crate::record::region::RegionState::Closing
                     {
-                                // Validate protocol transition to Draining
-                                let context = RegionContext {
-                                    region_id,
-                                    parent_region: region.parent,
-                                    created_at: region.created_at,
-                                    validation_level: CancelValidationLevel::Basic,
-                                };
-                                let validation_result = self.validate_region_protocol_transition(
-                                    region_id,
-                                    RegionEvent::Cancel {
-                                        reason: "draining children".to_string(),
-                                    },
-                                    &context,
-                                );
-                                if matches!(
-                                    validation_result,
-                                    TransitionResult::Invalid { .. }
-                                        | TransitionResult::InvariantViolation { .. }
-                                ) {
-                                    log_cancel_protocol_violation(
-                                        "region drain transition",
-                                        &validation_result,
-                                    );
-                                    // Protocol violation detected - invalidate region snapshot cache
-                                    self.read_biased_draining_region_snapshot.invalidate();
-                                    // Continue with transition but log violation
-                                }
+                        // Validate protocol transition to Draining
+                        let context = RegionContext {
+                            region_id,
+                            parent_region: region.parent,
+                            created_at: region.created_at,
+                            validation_level: CancelValidationLevel::Basic,
+                        };
+                        let validation_result = self.validate_region_protocol_transition(
+                            region_id,
+                            RegionEvent::Cancel {
+                                reason: "draining children".to_string(),
+                            },
+                            &context,
+                        );
+                        if matches!(
+                            validation_result,
+                            TransitionResult::Invalid { .. }
+                                | TransitionResult::InvariantViolation { .. }
+                        ) {
+                            log_cancel_protocol_violation(
+                                "region drain transition",
+                                &validation_result,
+                            );
+                            // Protocol violation detected - invalidate region snapshot cache
+                            self.read_biased_draining_region_snapshot.invalidate();
+                            // Continue with transition but log violation
+                        }
 
-                                let old_state = region.state();
-                                region.begin_drain();
-                                let new_state = region.state();
-                                self.note_read_biased_region_snapshot_transition(
-                                    old_state, new_state,
-                                );
+                        let old_state = region.state();
+                        region.begin_drain();
+                        let new_state = region.state();
+                        self.note_read_biased_region_snapshot_transition(old_state, new_state);
 
-                                self.notify_runtime_epoch_advance(
-                                    super::epoch_tracker::ModuleId::RegionTable,
-                                );
-                            }
+                        self.notify_runtime_epoch_advance(
+                            super::epoch_tracker::ModuleId::RegionTable,
+                        );
+                    }
 
                     if transition_to_finalizing {
                         self.notify_runtime_epoch_advance(
@@ -13840,11 +13832,7 @@ mod tests {
         let test_cx = crate::cx::Cx::for_testing();
 
         // Legacy method should still work without authorization checks
-        let result = state.create_task(
-            region,
-            Budget::INFINITE,
-            async { 42 }
-        );
+        let result = state.create_task(region, Budget::INFINITE, async { 42 });
         crate::assert_with_log!(
             result.is_ok(),
             "legacy create_task should succeed without authorization",
@@ -13853,12 +13841,7 @@ mod tests {
         );
 
         // Secure method should succeed when authorization is disabled (default behavior)
-        let result = state.create_task_with_auth(
-            &test_cx,
-            region,
-            Budget::INFINITE,
-            async { 42 }
-        );
+        let result = state.create_task_with_auth(&test_cx, region, Budget::INFINITE, async { 42 });
         crate::assert_with_log!(
             result.is_ok(),
             "create_task_with_auth should succeed when authorization is disabled",
@@ -13876,7 +13859,7 @@ mod tests {
         let region = crate::types::RegionId::from_arena(42);
         let error = SpawnError::AuthorizationDenied {
             region,
-            cx_id: "task_123".to_string()
+            cx_id: "task_123".to_string(),
         };
 
         let error_msg = format!("{}", error);

@@ -811,8 +811,10 @@ impl PriorityInversionOracle {
                                         101..=200 => InversionSeverity::Severe,
                                         _ => InversionSeverity::Critical,
                                     },
-                                    throughput_impact: 0.1 * f64::from(task_a.priority - task_b.priority),
-                                    fairness_impact: 0.2 * f64::from(task_a.priority - task_b.priority),
+                                    throughput_impact: 0.1
+                                        * f64::from(task_a.priority - task_b.priority),
+                                    fairness_impact: 0.2
+                                        * f64::from(task_a.priority - task_b.priority),
                                 };
 
                                 let violation = PriorityInversion {

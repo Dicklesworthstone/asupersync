@@ -1247,13 +1247,19 @@ impl UdpSocket {
             if max_packets > UDP_MAX_BATCH_SIZE {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("max_packets ({}) exceeds UDP_MAX_BATCH_SIZE ({})", max_packets, UDP_MAX_BATCH_SIZE)
+                    format!(
+                        "max_packets ({}) exceeds UDP_MAX_BATCH_SIZE ({})",
+                        max_packets, UDP_MAX_BATCH_SIZE
+                    ),
                 ));
             }
             if packet_size > UDP_MAX_PACKET_SIZE {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("packet_size ({}) exceeds UDP_MAX_PACKET_SIZE ({})", packet_size, UDP_MAX_PACKET_SIZE)
+                    format!(
+                        "packet_size ({}) exceeds UDP_MAX_PACKET_SIZE ({})",
+                        packet_size, UDP_MAX_PACKET_SIZE
+                    ),
                 ));
             }
 

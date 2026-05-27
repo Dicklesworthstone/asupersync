@@ -520,7 +520,10 @@ mod tests {
 
         // But deserialization should fail due to baggage size limit
         let parsed = SymbolTraceContext::from_bytes(&bytes);
-        assert!(parsed.is_none(), "Should reject oversized baggage during deserialization");
+        assert!(
+            parsed.is_none(),
+            "Should reject oversized baggage during deserialization"
+        );
     }
 
     #[test]

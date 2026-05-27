@@ -352,7 +352,7 @@ impl ArtifactCache {
             access_count: 0,
             expires_at_nanos: current_time_nanos + (self.config.default_ttl_secs * 1_000_000_000),
             numa_node_hint: None, // Could be enhanced with NUMA detection
-            priority: 128, // Default priority
+            priority: 128,        // Default priority
         };
 
         // Store data and metadata
@@ -377,7 +377,11 @@ impl ArtifactCache {
         let mut evicted_bytes = 0u64;
 
         // Collect eviction candidates based on policy - clone to avoid borrow checker issues
-        let mut candidates: Vec<_> = self.metadata.iter().map(|(id, meta)| (id.clone(), meta.clone())).collect();
+        let mut candidates: Vec<_> = self
+            .metadata
+            .iter()
+            .map(|(id, meta)| (id.clone(), meta.clone()))
+            .collect();
 
         match self.config.eviction_policy {
             EvictionPolicy::LruWithTtl => {
@@ -409,7 +413,10 @@ impl ArtifactCache {
             evicted_count += 1;
         }
 
-        self.statistics.total_evictions = self.statistics.total_evictions.saturating_add(u64::from(evicted_count));
+        self.statistics.total_evictions = self
+            .statistics
+            .total_evictions
+            .saturating_add(u64::from(evicted_count));
         evicted_count
     }
 
@@ -470,14 +477,19 @@ impl ArtifactCache {
         self.invalidate_expired();
 
         // Check if we have enough space now
-        let available_bytes = self.config.max_cache_size_bytes.saturating_sub(self.current_size_bytes);
+        let available_bytes = self
+            .config
+            .max_cache_size_bytes
+            .saturating_sub(self.current_size_bytes);
         if available_bytes >= needed_bytes {
             return true;
         }
 
         // Need to evict some items
         let bytes_to_free = needed_bytes.saturating_sub(available_bytes);
-        let eviction_threshold = (self.config.max_cache_size_bytes * u64::from(self.config.eviction_threshold_ratio)) / 10_000;
+        let eviction_threshold = (self.config.max_cache_size_bytes
+            * u64::from(self.config.eviction_threshold_ratio))
+            / 10_000;
 
         // If we're above eviction threshold, be more aggressive
         let target_eviction = if self.current_size_bytes > eviction_threshold {
@@ -489,7 +501,10 @@ impl ArtifactCache {
         self.evict(target_eviction);
 
         // Check if we now have enough space
-        let final_available = self.config.max_cache_size_bytes.saturating_sub(self.current_size_bytes);
+        let final_available = self
+            .config
+            .max_cache_size_bytes
+            .saturating_sub(self.current_size_bytes);
         final_available >= needed_bytes
     }
 
@@ -587,7 +602,7 @@ mod tests {
     #[test]
     fn artifact_cache_eviction() {
         let config = ArtifactCacheConfig {
-            max_cache_size_bytes: 100, // Small cache for testing
+            max_cache_size_bytes: 100,      // Small cache for testing
             eviction_threshold_ratio: 5000, // 50%
             ..ArtifactCacheConfig::default()
         };

@@ -14,10 +14,10 @@
 pub mod pbft;
 pub mod types;
 
-pub use pbft::{PbftConsensus, PbftConfig, PbftNode, PbftState};
+pub use pbft::{PbftConfig, PbftConsensus, PbftNode, PbftState};
 pub use types::{
-    ConsensusRequest, ConsensusResponse, ConsensusBatch, ViewNumber,
-    SequenceNumber, ReplicaId, PhaseKind, MessageDigest, ConsensusError,
+    ConsensusBatch, ConsensusError, ConsensusRequest, ConsensusResponse, MessageDigest, PhaseKind,
+    ReplicaId, SequenceNumber, ViewNumber,
 };
 
 #[cfg(test)]

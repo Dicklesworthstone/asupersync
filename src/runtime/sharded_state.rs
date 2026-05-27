@@ -1559,12 +1559,13 @@ mod tests {
     fn lock_ordering_validation_with_lock_metrics_feature() {
         // This test verifies that lock ordering validation is enabled in production
         // builds when the lock-metrics feature is enabled.
-        use crate::trace::TraceBufferHandle;
         use crate::observability::metrics::NoOpMetrics;
+        use crate::trace::TraceBufferHandle;
         use std::sync::Arc;
 
         let trace = TraceBufferHandle::noop();
-        let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> = Arc::new(NoOpMetrics);
+        let metrics: Arc<dyn crate::observability::metrics::MetricsProvider> =
+            Arc::new(NoOpMetrics);
         let state = ShardedState::new(trace, metrics, test_config());
 
         // Valid order: Regions -> Tasks -> Obligations

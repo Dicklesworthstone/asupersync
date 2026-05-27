@@ -259,7 +259,8 @@ impl TlsAcceptor {
             return Err(TlsError::Configuration(
                 "SECURITY: Client did not send SNI extension but require_sni() is set. \
                  SNI-less connections are rejected to prevent exposure of default \
-                 certificate tenant in multi-tenant deployments (asupersync-3iqbx3)".into(),
+                 certificate tenant in multi-tenant deployments (asupersync-3iqbx3)"
+                    .into(),
             ));
         }
 
@@ -478,17 +479,17 @@ impl TlsAcceptorBuilder {
     #[cfg(feature = "tls")]
     fn validate_certificate_chain(chain: &CertificateChain) -> Result<(), TlsError> {
         if chain.is_empty() {
-            return Err(TlsError::Configuration(
-                "certificate chain is empty".into(),
-            ));
+            return Err(TlsError::Configuration("certificate chain is empty".into()));
         }
 
         // Get current time for expiration checking
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| TlsError::Configuration(
-                "failed to get current time for certificate validation".into()
-            ))?;
+            .map_err(|_| {
+                TlsError::Configuration(
+                    "failed to get current time for certificate validation".into(),
+                )
+            })?;
 
         // Validate each certificate in the chain
         for (i, cert) in chain.iter().enumerate() {
@@ -523,9 +524,10 @@ impl TlsAcceptorBuilder {
                     }
 
                     // Additional validation: check certificate is well-formed
-                    if cert.subject().iter_common_name().next().is_none() &&
-                       cert.subject().iter_organizational_unit().next().is_none() &&
-                       cert.subject().iter_organization().next().is_none() {
+                    if cert.subject().iter_common_name().next().is_none()
+                        && cert.subject().iter_organizational_unit().next().is_none()
+                        && cert.subject().iter_organization().next().is_none()
+                    {
                         return Err(TlsError::Configuration(format!(
                             "certificate {} in chain has empty subject. \
                              Certificate may be malformed (asupersync-jxzrs4)",
@@ -541,7 +543,7 @@ impl TlsAcceptorBuilder {
                         not_after = %validity.not_after,
                         "Certificate validation passed"
                     );
-                },
+                }
                 Err(e) => {
                     return Err(TlsError::Configuration(format!(
                         "failed to parse certificate {} in chain: {}. \
@@ -733,7 +735,10 @@ impl TlsAcceptorBuilder {
     /// );
     /// ```
     #[must_use]
-    pub fn with_early_data_replay_protection(mut self, protection: EarlyDataReplayProtection) -> Self {
+    pub fn with_early_data_replay_protection(
+        mut self,
+        protection: EarlyDataReplayProtection,
+    ) -> Self {
         self.early_data_replay_protection = protection;
         self
     }
@@ -799,7 +804,10 @@ impl TlsAcceptorBuilder {
         self.early_data_max_bytes = max_bytes;
         // Set to testing mode to allow legacy builds to succeed
         // but log security warnings
-        if matches!(self.early_data_replay_protection, EarlyDataReplayProtection::None) {
+        if matches!(
+            self.early_data_replay_protection,
+            EarlyDataReplayProtection::None
+        ) {
             self.early_data_replay_protection = EarlyDataReplayProtection::UnprotectedForTesting;
         }
         self
@@ -999,9 +1007,9 @@ impl TlsAcceptorBuilder {
                          duplicate operations. Use only for testing (asupersync-ycuuwy)"
                     );
                 }
-                EarlyDataReplayProtection::SafeMethodsOnly |
-                EarlyDataReplayProtection::IdempotencyKeys |
-                EarlyDataReplayProtection::NonceValidation => {
+                EarlyDataReplayProtection::SafeMethodsOnly
+                | EarlyDataReplayProtection::IdempotencyKeys
+                | EarlyDataReplayProtection::NonceValidation => {
                     #[cfg(feature = "tracing-integration")]
                     tracing::info!(
                         max_early_data_bytes = self.early_data_max_bytes,
@@ -2332,7 +2340,9 @@ SrXuVI5uunTgPWuOtJOP+KM=
                         "error message should contain security context, got: {msg}"
                     );
                 }
-                other => panic!("expected Configuration error with security context, got {other:?}"),
+                other => {
+                    panic!("expected Configuration error with security context, got {other:?}")
+                }
             }
         });
     }
@@ -2347,7 +2357,11 @@ SrXuVI5uunTgPWuOtJOP+KM=
         let result = TlsAcceptorBuilder::validate_certificate_chain(&chain);
 
         // Should pass since the test certificate is not expired
-        assert!(result.is_ok(), "valid certificate should pass validation: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "valid certificate should pass validation: {:?}",
+            result
+        );
     }
 
     #[cfg(feature = "tls")]
@@ -2356,7 +2370,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
         let empty_chain = CertificateChain::new();
         let result = TlsAcceptorBuilder::validate_certificate_chain(&empty_chain);
 
-        assert!(result.is_err(), "empty certificate chain should be rejected");
+        assert!(
+            result.is_err(),
+            "empty certificate chain should be rejected"
+        );
         match result {
             Err(TlsError::Configuration(msg)) => {
                 assert!(msg.contains("certificate chain is empty"));
@@ -2374,7 +2391,11 @@ SrXuVI5uunTgPWuOtJOP+KM=
 
         // Should succeed with valid certificate
         let result = TlsAcceptorBuilder::new(chain, key).build();
-        assert!(result.is_ok(), "build should succeed with valid certificate: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "build should succeed with valid certificate: {:?}",
+            result
+        );
     }
 
     #[cfg(feature = "tls")]
@@ -2385,7 +2406,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
         let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
 
         let result = TlsAcceptorBuilder::new(empty_chain, key).build();
-        assert!(result.is_err(), "build should fail with empty certificate chain");
+        assert!(
+            result.is_err(),
+            "build should fail with empty certificate chain"
+        );
 
         match result {
             Err(TlsError::Configuration(msg)) => {
@@ -2394,7 +2418,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
                     "error should mention empty chain validation: {msg}"
                 );
             }
-            other => panic!("expected Configuration error for empty chain, got {:?}", other),
+            other => panic!(
+                "expected Configuration error for empty chain, got {:?}",
+                other
+            ),
         }
     }
 
@@ -2409,10 +2436,7 @@ SrXuVI5uunTgPWuOtJOP+KM=
             Err(TlsError::Configuration(msg)) => {
                 // While this specific error doesn't include asupersync-jxzrs4,
                 // it's part of the security validation system
-                assert!(
-                    !msg.is_empty(),
-                    "error message should provide context"
-                );
+                assert!(!msg.is_empty(), "error message should provide context");
             }
             other => panic!("expected Configuration error, got {:?}", other),
         }
@@ -2427,7 +2451,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
 
         // Build should fail with strict validation (default)
         let strict_result = TlsAcceptorBuilder::new(empty_chain.clone(), key.clone()).build();
-        assert!(strict_result.is_err(), "strict validation should reject empty chain");
+        assert!(
+            strict_result.is_err(),
+            "strict validation should reject empty chain"
+        );
 
         // Build should still fail with disabled validation due to rustls validation
         // (our strict validation is an additional layer on top of rustls)
@@ -2437,7 +2464,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
         // Note: This will still fail because rustls also validates, but at least
         // we can verify our flag is being respected by checking the error doesn't
         // contain our validation message
-        assert!(relaxed_result.is_err(), "empty chain should still fail rustls validation");
+        assert!(
+            relaxed_result.is_err(),
+            "empty chain should still fail rustls validation"
+        );
     }
 
     // ── br-asupersync-ycuuwy: 0-RTT replay protection tests ──────────
@@ -2478,7 +2508,11 @@ SrXuVI5uunTgPWuOtJOP+KM=
             .enable_early_data_with_protection(16384)
             .build();
 
-        assert!(result.is_ok(), "0-RTT with safe methods protection should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "0-RTT with safe methods protection should succeed: {:?}",
+            result
+        );
 
         let acceptor = result.unwrap();
         assert_eq!(acceptor.config.max_early_data_size, 16384);
@@ -2499,7 +2533,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
             .enable_early_data_with_protection(8192)
             .build();
 
-        assert!(result.is_ok(), "0-RTT with idempotency protection should succeed");
+        assert!(
+            result.is_ok(),
+            "0-RTT with idempotency protection should succeed"
+        );
 
         let acceptor = result.unwrap();
         assert_eq!(acceptor.config.max_early_data_size, 8192);
@@ -2542,7 +2579,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
             .enable_early_data_with_protection(16384)
             .build();
 
-        assert!(result.is_ok(), "unprotected testing mode should succeed but log warnings");
+        assert!(
+            result.is_ok(),
+            "unprotected testing mode should succeed but log warnings"
+        );
 
         let acceptor = result.unwrap();
         assert_eq!(acceptor.config.max_early_data_size, 16384);
@@ -2564,7 +2604,10 @@ SrXuVI5uunTgPWuOtJOP+KM=
             .enable_early_data(16384)
             .build();
 
-        assert!(result.is_ok(), "deprecated enable_early_data should succeed in testing mode");
+        assert!(
+            result.is_ok(),
+            "deprecated enable_early_data should succeed in testing mode"
+        );
 
         let acceptor = result.unwrap();
         assert!(matches!(
@@ -2599,33 +2642,95 @@ SrXuVI5uunTgPWuOtJOP+KM=
     fn test_early_data_request_validation_helper() {
         // Test SafeMethodsOnly protection
         let safe_methods = EarlyDataReplayProtection::SafeMethodsOnly;
-        assert!(safe_methods.validate_request_for_early_data("GET", false, false).is_ok());
-        assert!(safe_methods.validate_request_for_early_data("HEAD", false, false).is_ok());
-        assert!(safe_methods.validate_request_for_early_data("OPTIONS", false, false).is_ok());
-        assert!(safe_methods.validate_request_for_early_data("POST", false, false).is_err());
-        assert!(safe_methods.validate_request_for_early_data("PUT", false, false).is_err());
-        assert!(safe_methods.validate_request_for_early_data("DELETE", false, false).is_err());
+        assert!(
+            safe_methods
+                .validate_request_for_early_data("GET", false, false)
+                .is_ok()
+        );
+        assert!(
+            safe_methods
+                .validate_request_for_early_data("HEAD", false, false)
+                .is_ok()
+        );
+        assert!(
+            safe_methods
+                .validate_request_for_early_data("OPTIONS", false, false)
+                .is_ok()
+        );
+        assert!(
+            safe_methods
+                .validate_request_for_early_data("POST", false, false)
+                .is_err()
+        );
+        assert!(
+            safe_methods
+                .validate_request_for_early_data("PUT", false, false)
+                .is_err()
+        );
+        assert!(
+            safe_methods
+                .validate_request_for_early_data("DELETE", false, false)
+                .is_err()
+        );
 
         // Test IdempotencyKeys protection
         let idempotency = EarlyDataReplayProtection::IdempotencyKeys;
-        assert!(idempotency.validate_request_for_early_data("POST", true, false).is_ok());
-        assert!(idempotency.validate_request_for_early_data("PUT", true, false).is_ok());
-        assert!(idempotency.validate_request_for_early_data("GET", false, false).is_err());
+        assert!(
+            idempotency
+                .validate_request_for_early_data("POST", true, false)
+                .is_ok()
+        );
+        assert!(
+            idempotency
+                .validate_request_for_early_data("PUT", true, false)
+                .is_ok()
+        );
+        assert!(
+            idempotency
+                .validate_request_for_early_data("GET", false, false)
+                .is_err()
+        );
 
         // Test NonceValidation protection
         let nonce = EarlyDataReplayProtection::NonceValidation;
-        assert!(nonce.validate_request_for_early_data("POST", false, true).is_ok());
-        assert!(nonce.validate_request_for_early_data("GET", false, true).is_ok());
-        assert!(nonce.validate_request_for_early_data("PUT", false, false).is_err());
+        assert!(
+            nonce
+                .validate_request_for_early_data("POST", false, true)
+                .is_ok()
+        );
+        assert!(
+            nonce
+                .validate_request_for_early_data("GET", false, true)
+                .is_ok()
+        );
+        assert!(
+            nonce
+                .validate_request_for_early_data("PUT", false, false)
+                .is_err()
+        );
 
         // Test UnprotectedForTesting allows everything
         let unprotected = EarlyDataReplayProtection::UnprotectedForTesting;
-        assert!(unprotected.validate_request_for_early_data("POST", false, false).is_ok());
-        assert!(unprotected.validate_request_for_early_data("DELETE", false, false).is_ok());
+        assert!(
+            unprotected
+                .validate_request_for_early_data("POST", false, false)
+                .is_ok()
+        );
+        assert!(
+            unprotected
+                .validate_request_for_early_data("DELETE", false, false)
+                .is_ok()
+        );
 
         // Test None rejects everything
         let none = EarlyDataReplayProtection::None;
-        assert!(none.validate_request_for_early_data("GET", false, false).is_err());
-        assert!(none.validate_request_for_early_data("POST", true, true).is_err());
+        assert!(
+            none.validate_request_for_early_data("GET", false, false)
+                .is_err()
+        );
+        assert!(
+            none.validate_request_for_early_data("POST", true, true)
+                .is_err()
+        );
     }
 }

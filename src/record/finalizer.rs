@@ -263,8 +263,7 @@ impl FinalizerStack {
         } else {
             // EDGE CASE VALIDATION: Verify empty pop behavior
             debug_assert_eq!(
-                len_before,
-                0,
+                len_before, 0,
                 "br-asupersync-mg70eb: finalizer stack returned None but was not empty \
                  (len_before={})",
                 len_before

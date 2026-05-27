@@ -1408,7 +1408,9 @@ mod tests {
 
     // Security regression test for DoS vulnerability br-asupersync-e51d48
     #[test]
-    #[should_panic(expected = "wakeup storm count end (200000) must be <= 10000 to prevent DoS attacks")]
+    #[should_panic(
+        expected = "wakeup storm count end (200000) must be <= 10000 to prevent DoS attacks"
+    )]
     fn wakeup_storm_count_rejects_dos_attack() {
         let _ = ChaosConfig::new(42).with_wakeup_storm_count(0..200_000);
     }
@@ -1426,7 +1428,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "wakeup storm count end (10001) must be <= 10000 to prevent DoS attacks")]
+    #[should_panic(
+        expected = "wakeup storm count end (10001) must be <= 10000 to prevent DoS attacks"
+    )]
     fn wakeup_storm_count_rejects_above_limit() {
         let _ = ChaosConfig::new(42).with_wakeup_storm_count(1..10_001);
     }

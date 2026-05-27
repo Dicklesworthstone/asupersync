@@ -63,7 +63,9 @@ impl DetHasher {
     #[inline]
     #[must_use]
     pub fn for_lab() -> Self {
-        Self { state: Self::LAB_SEED }
+        Self {
+            state: Self::LAB_SEED,
+        }
     }
 
     /// Creates a hasher with a random seed for production security.
@@ -85,7 +87,9 @@ impl DetHasher {
         std::ptr::addr_of!(random_state).hash(&mut hasher);
         std::thread::current().id().hash(&mut hasher);
 
-        Self { state: hasher.finish() }
+        Self {
+            state: hasher.finish(),
+        }
     }
 
     #[inline]
@@ -231,7 +235,9 @@ impl DetBuildHasher {
     #[inline]
     #[must_use]
     pub fn for_lab() -> Self {
-        Self { production_mode: false }
+        Self {
+            production_mode: false,
+        }
     }
 
     /// Creates a builder that produces production hashers (random seed).
@@ -240,7 +246,9 @@ impl DetBuildHasher {
     #[inline]
     #[must_use]
     pub fn for_production() -> Self {
-        Self { production_mode: true }
+        Self {
+            production_mode: true,
+        }
     }
 }
 
@@ -616,7 +624,11 @@ mod tests {
         let mut l = lab_hasher;
         d.write(b"compatibility test");
         l.write(b"compatibility test");
-        assert_eq!(d.finish(), l.finish(), "Default should be identical to lab mode");
+        assert_eq!(
+            d.finish(),
+            l.finish(),
+            "Default should be identical to lab mode"
+        );
 
         let default_builder = DetBuildHasher::default();
         let lab_builder = DetBuildHasher::for_lab();
@@ -624,6 +636,10 @@ mod tests {
         let mut l_h = lab_builder.build_hasher();
         d_h.write(b"compatibility");
         l_h.write(b"compatibility");
-        assert_eq!(d_h.finish(), l_h.finish(), "Default builder should match lab builder");
+        assert_eq!(
+            d_h.finish(),
+            l_h.finish(),
+            "Default builder should match lab builder"
+        );
     }
 }

@@ -28,7 +28,6 @@
 use crate::cx::Cx;
 use crate::sync::Notify;
 use parking_lot::Mutex;
-use zeroize::ZeroizeOnDrop;
 #[cfg(feature = "kafka")]
 use rdkafka::producer::Producer;
 #[cfg(not(feature = "kafka"))]
@@ -39,6 +38,7 @@ use std::io;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
+use zeroize::ZeroizeOnDrop;
 
 #[cfg(feature = "kafka")]
 use rdkafka::{
@@ -4031,18 +4031,24 @@ mod tests {
             .allow_insecure_transport_for_testing(true);
 
         // This should work because we're in a test context
-        assert!(config.validate().is_ok(),
-                "allow_insecure_transport_for_testing should work in test context");
+        assert!(
+            config.validate().is_ok(),
+            "allow_insecure_transport_for_testing should work in test context"
+        );
 
         // Test Case 2: Verify default behavior remains secure
         let secure_config = ProducerConfig::new(vec!["broker.example.com:9092".to_string()]);
-        assert!(secure_config.validate().is_err(),
-                "Remote plaintext should be blocked by default");
+        assert!(
+            secure_config.validate().is_err(),
+            "Remote plaintext should be blocked by default"
+        );
 
         // Test Case 3: Verify loopback still works without the bypass
         let loopback_config = ProducerConfig::new(vec!["localhost:9092".to_string()]);
-        assert!(loopback_config.validate().is_ok(),
-                "Loopback should work without insecure bypass");
+        assert!(
+            loopback_config.validate().is_ok(),
+            "Loopback should work without insecure bypass"
+        );
 
         // SECURITY AUDIT VERIFICATION:
         // - allow_insecure_transport_for_testing is restricted to #[cfg(test)] only
@@ -4064,44 +4070,65 @@ mod tests {
         let sasl_config = KafkaSaslConfig::scram_sha_256("test-user", "secret-password");
 
         // Should be able to validate
-        assert!(sasl_config.validate().is_ok(),
-                "SASL config with password should validate successfully");
+        assert!(
+            sasl_config.validate().is_ok(),
+            "SASL config with password should validate successfully"
+        );
 
         // Test Case 2: Verify password is accessible for rdkafka
         let password_ref = sasl_config.password.as_str();
-        assert_eq!(password_ref, "secret-password",
-                   "Password should be accessible via as_str()");
+        assert_eq!(
+            password_ref, "secret-password",
+            "Password should be accessible via as_str()"
+        );
 
         // Test Case 3: Verify Debug output is redacted
         let debug_output = format!("{:?}", sasl_config);
-        assert!(debug_output.contains("<redacted>"),
-                "Debug output should redact password");
-        assert!(!debug_output.contains("secret-password"),
-                "Debug output must not contain plaintext password");
+        assert!(
+            debug_output.contains("<redacted>"),
+            "Debug output should redact password"
+        );
+        assert!(
+            !debug_output.contains("secret-password"),
+            "Debug output must not contain plaintext password"
+        );
 
         // Test Case 4: Verify SecureSaslPassword Debug is redacted
         let secure_password = SecureSaslPassword::new("another-secret");
         let secure_debug = format!("{:?}", secure_password);
-        assert!(secure_debug.contains("<redacted>"),
-                "SecureSaslPassword debug should redact password");
-        assert!(!secure_debug.contains("another-secret"),
-                "SecureSaslPassword debug must not contain plaintext");
+        assert!(
+            secure_debug.contains("<redacted>"),
+            "SecureSaslPassword debug should redact password"
+        );
+        assert!(
+            !secure_debug.contains("another-secret"),
+            "SecureSaslPassword debug must not contain plaintext"
+        );
 
         // Test Case 5: Verify different SASL mechanisms work
         let sha512_config = KafkaSaslConfig::scram_sha_512("test-user", "secret-512");
-        assert!(sha512_config.validate().is_ok(),
-                "SCRAM-SHA-512 config should validate successfully");
-        assert_eq!(sha512_config.password.as_str(), "secret-512",
-                   "SCRAM-SHA-512 password should be accessible");
+        assert!(
+            sha512_config.validate().is_ok(),
+            "SCRAM-SHA-512 config should validate successfully"
+        );
+        assert_eq!(
+            sha512_config.password.as_str(),
+            "secret-512",
+            "SCRAM-SHA-512 password should be accessible"
+        );
 
         // Test Case 6: Verify empty password validation fails
         let empty_password_config = KafkaSaslConfig::scram_sha_256("test-user", "");
-        assert!(empty_password_config.validate().is_err(),
-                "Empty password should fail validation");
+        assert!(
+            empty_password_config.validate().is_err(),
+            "Empty password should fail validation"
+        );
 
         let whitespace_password_config = KafkaSaslConfig::scram_sha_256("test-user", "   ");
-        assert!(whitespace_password_config.validate().is_err(),
-                "Whitespace-only password should fail validation");
+        assert!(
+            whitespace_password_config.validate().is_err(),
+            "Whitespace-only password should fail validation"
+        );
 
         // SECURITY AUDIT VERIFICATION:
         // - SASL passwords are stored using SecureSaslPassword with ZeroizeOnDrop

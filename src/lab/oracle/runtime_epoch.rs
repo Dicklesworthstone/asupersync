@@ -412,16 +412,15 @@ impl ModuleEpochState {
     }
 
     fn transition_duration_so_far(&self, now: Time) -> Option<u64> {
-        self.transition_start_time
-            .map(|start| {
-                // Use microsecond granularity for better determinism under chaos injection.
-                // Nanosecond precision can introduce flakiness in timing-sensitive oracles.
-                let now_micros = now.as_nanos() / 1000;
-                let start_micros = start.as_nanos() / 1000;
-                let duration_micros = now_micros.saturating_sub(start_micros);
-                // Convert back to nanoseconds for API compatibility
-                duration_micros * 1000
-            })
+        self.transition_start_time.map(|start| {
+            // Use microsecond granularity for better determinism under chaos injection.
+            // Nanosecond precision can introduce flakiness in timing-sensitive oracles.
+            let now_micros = now.as_nanos() / 1000;
+            let start_micros = start.as_nanos() / 1000;
+            let duration_micros = now_micros.saturating_sub(start_micros);
+            // Convert back to nanoseconds for API compatibility
+            duration_micros * 1000
+        })
     }
 }
 

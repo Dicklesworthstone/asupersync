@@ -1480,20 +1480,20 @@ mod tests {
             merge_id: OperationId(100),
             operations: vec![
                 // Mix of monotonic and non-monotonic operations for comprehensive testing
-                create_test_increment_operation(),  // Monotonic: counter increment
-                create_test_max_operation(),        // Monotonic: lattice join
-                create_test_set_operation(),        // Non-monotonic: destructive update
-                create_test_monotonic_union(),      // Monotonic: set union
-                create_test_lattice_advancement(),  // Monotonic: max operation
+                create_test_increment_operation(), // Monotonic: counter increment
+                create_test_max_operation(),       // Monotonic: lattice join
+                create_test_set_operation(),       // Non-monotonic: destructive update
+                create_test_monotonic_union(),     // Monotonic: set union
+                create_test_lattice_advancement(), // Monotonic: max operation
             ],
             merge_strategy: MergeStrategy::JoinSemilattice,
-            concurrency_level: 4,  // 4 concurrent operations for stress testing
+            concurrency_level: 4, // 4 concurrent operations for stress testing
             calm_properties: CalmProperties {
                 // Overall merge should be convergent despite mixed monotonicity
-                is_associative: true,   // Join-semilattice property
-                is_logical: true,       // CALM logical consistency
-                is_monotonic: false,    // Mixed operations include non-monotonic
-                is_convergent: true,    // Should converge despite coordination needed
+                is_associative: true, // Join-semilattice property
+                is_logical: true,     // CALM logical consistency
+                is_monotonic: false,  // Mixed operations include non-monotonic
+                is_convergent: true,  // Should converge despite coordination needed
             },
         }
     }
@@ -1512,16 +1512,21 @@ mod tests {
 
         // Verify merge strategy
         match merge_op.merge_strategy {
-            MergeStrategy::JoinSemilattice => {}, // Expected
+            MergeStrategy::JoinSemilattice => {} // Expected
             _ => panic!("Expected JoinSemilattice merge strategy"),
         }
 
         // Verify operations are diverse (test comprehensive coverage)
-        let operation_types: Vec<_> = merge_op.operations.iter()
+        let operation_types: Vec<_> = merge_op
+            .operations
+            .iter()
             .map(|op| &op.operation_type)
             .collect();
 
         // Should have different operation types for comprehensive testing
-        assert!(operation_types.len() >= 4, "Should have diverse operation types");
+        assert!(
+            operation_types.len() >= 4,
+            "Should have diverse operation types"
+        );
     }
 }

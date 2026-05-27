@@ -5,7 +5,7 @@
 //! cryptographic integrity protection.
 
 use crate::record::region::RegionState;
-use crate::security::{AuthenticationTag, AuthKey};
+use crate::security::{AuthKey, AuthenticationTag};
 use crate::trace::distributed::vclock::VectorClock;
 use crate::types::{RegionId, TaskId, Time};
 use crate::util::ArenaIndex;
@@ -17,7 +17,6 @@ const SNAP_MAGIC: &[u8; 4] = b"SNAP";
 
 /// Current binary format version.
 const SNAP_VERSION: u8 = 2;
-
 
 /// Domain separator for snapshot authentication tags.
 const SNAPSHOT_AUTH_DOMAIN: &[u8] = b"asupersync::distributed::RegionSnapshot::v2";
@@ -238,8 +237,8 @@ impl RegionSnapshot {
         let content = self.to_bytes_unsigned();
 
         // Compute HMAC-SHA256 over content
-        let mut mac = HmacSha256::new_from_slice(key.as_bytes())
-            .expect("HMAC accepts any key length");
+        let mut mac =
+            HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
         mac.update(SNAPSHOT_AUTH_DOMAIN);
         mac.update(&content);
         let auth_tag: [u8; 32] = mac.finalize().into_bytes().into();
@@ -378,8 +377,8 @@ impl RegionSnapshot {
         }
 
         // Verify signature
-        let mut mac = HmacSha256::new_from_slice(key.as_bytes())
-            .expect("HMAC accepts any key length");
+        let mut mac =
+            HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
         mac.update(SNAPSHOT_AUTH_DOMAIN);
         mac.update(content);
 
@@ -570,7 +569,7 @@ impl RegionSnapshot {
         let sequence = 8_usize;
         let vector_clock = 4_usize.saturating_add(
             // Estimate: 4 bytes length + (node_count * (8 bytes NodeId + 8 bytes counter))
-            self.vector_clock.node_count().saturating_mul(16)
+            self.vector_clock.node_count().saturating_mul(16),
         );
         let provenance = 16_usize;
         let tasks = 4_usize.saturating_add(self.tasks.len().saturating_mul(10)); // count + per-task (8+1+1)
@@ -911,22 +910,28 @@ impl std::fmt::Display for SnapshotError {
             Self::AuthenticationFailed => write!(f, "snapshot authentication failed"),
             Self::UnauthenticatedSnapshot => {
                 write!(f, "snapshot contains unauthenticated zero tag")
-            },
+            }
             Self::InvalidRegionId { index, generation } => {
-                write!(f, "invalid RegionId arena index={index}, generation={generation}")
-            },
+                write!(
+                    f,
+                    "invalid RegionId arena index={index}, generation={generation}"
+                )
+            }
             Self::InvalidTaskId { index, generation } => {
-                write!(f, "invalid TaskId arena index={index}, generation={generation}")
-            },
+                write!(
+                    f,
+                    "invalid TaskId arena index={index}, generation={generation}"
+                )
+            }
             Self::InvalidVectorClock => {
                 write!(f, "vector clock data is corrupted or invalid")
-            },
+            }
             Self::VectorClockTooLarge { len, max } => {
                 write!(
                     f,
                     "vector clock size ({len} B) exceeds the per-deserialise maximum ({max} B)"
                 )
-            },
+            }
         }
     }
 }
@@ -1008,10 +1013,12 @@ fn write_vector_clock(buf: &mut Vec<u8>, clock: &VectorClock) {
     // Serialize using bincode for deterministic binary representation
     let clock_bytes = bincode::serde::encode_to_vec(clock, bincode::config::legacy())
         .expect("VectorClock should always serialize successfully");
-    write_u32(buf, u32::try_from(clock_bytes.len()).expect("vector clock exceeds u32::MAX"));
+    write_u32(
+        buf,
+        u32::try_from(clock_bytes.len()).expect("vector clock exceeds u32::MAX"),
+    );
     buf.extend_from_slice(&clock_bytes);
 }
-
 
 // ---------------------------------------------------------------------------
 // Deserialization cursor
@@ -2456,7 +2463,10 @@ mod tests {
 
         // Test authenticated serialization
         let bytes = snapshot.to_bytes_with_key(&key);
-        assert!(bytes.len() > snapshot.to_bytes_unsigned().len(), "authenticated bytes should be larger");
+        assert!(
+            bytes.len() > snapshot.to_bytes_unsigned().len(),
+            "authenticated bytes should be larger"
+        );
 
         // Test successful verification
         let restored = RegionSnapshot::from_bytes_with_key(&bytes, &key)
@@ -2464,7 +2474,10 @@ mod tests {
 
         assert_eq!(snapshot.region_id, restored.region_id);
         assert_eq!(snapshot.sequence, restored.sequence);
-        assert!(!restored.auth_tag.is_zero(), "restored snapshot should have non-zero auth tag");
+        assert!(
+            !restored.auth_tag.is_zero(),
+            "restored snapshot should have non-zero auth tag"
+        );
     }
 
     #[test]
@@ -2481,7 +2494,7 @@ mod tests {
         let result = RegionSnapshot::from_bytes_with_key(&bytes, &key2);
         assert!(result.is_err(), "wrong key should fail verification");
         match result.unwrap_err() {
-            SnapshotError::AuthenticationFailed => {}, // Expected
+            SnapshotError::AuthenticationFailed => {} // Expected
             other => panic!("Expected AuthenticationFailed, got {:?}", other),
         }
     }
@@ -2500,7 +2513,7 @@ mod tests {
         let result = RegionSnapshot::from_bytes_with_key(&bytes, &key);
         assert!(result.is_err(), "zero tag should fail verification");
         match result.unwrap_err() {
-            SnapshotError::UnauthenticatedSnapshot => {}, // Expected
+            SnapshotError::UnauthenticatedSnapshot => {} // Expected
             other => panic!("Expected UnauthenticatedSnapshot, got {:?}", other),
         }
     }
@@ -2521,7 +2534,7 @@ mod tests {
         let result = RegionSnapshot::from_bytes_with_key(&bytes, &key);
         assert!(result.is_err(), "tampered content should fail verification");
         match result.unwrap_err() {
-            SnapshotError::AuthenticationFailed => {}, // Expected
+            SnapshotError::AuthenticationFailed => {} // Expected
             other => panic!("Expected AuthenticationFailed, got {:?}", other),
         }
     }

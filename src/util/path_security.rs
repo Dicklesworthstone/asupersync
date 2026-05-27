@@ -28,8 +28,8 @@
 //! assert!(result.is_err());
 //! ```
 
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 /// Errors that can occur during path security validation.
@@ -106,11 +106,13 @@ impl SecurePath {
         let base_path = base_dir.as_ref();
 
         // Canonicalize the base directory to ensure it's absolute and resolved
-        let allowed_base = base_path.canonicalize()
-            .map_err(|e| PathSecurityError::BaseDirectoryInaccessible {
-                base: base_path.display().to_string(),
-                source: e,
-            })?;
+        let allowed_base =
+            base_path
+                .canonicalize()
+                .map_err(|e| PathSecurityError::BaseDirectoryInaccessible {
+                    base: base_path.display().to_string(),
+                    source: e,
+                })?;
 
         Ok(Self { allowed_base })
     }
@@ -124,7 +126,10 @@ impl SecurePath {
     /// 4. Verifies the canonical path stays within the allowed base
     ///
     /// Returns a `ValidatedPath` if the path is safe, or an error if validation fails.
-    pub fn validate_path<P: AsRef<Path>>(&self, user_path: P) -> Result<ValidatedPath, PathSecurityError> {
+    pub fn validate_path<P: AsRef<Path>>(
+        &self,
+        user_path: P,
+    ) -> Result<ValidatedPath, PathSecurityError> {
         let user_path_ref = user_path.as_ref();
         let user_path_str = user_path_ref.to_string_lossy().to_string();
 
@@ -144,7 +149,10 @@ impl SecurePath {
         // Pre-check for obvious traversal attempts before canonicalization
         if user_path_str.contains("..") {
             // This is a preliminary check; canonicalization will be the final arbiter
-            tracing::warn!("Potential path traversal attempt detected: {}", user_path_str);
+            tracing::warn!(
+                "Potential path traversal attempt detected: {}",
+                user_path_str
+            );
         }
 
         // Join with the allowed base directory
@@ -212,14 +220,21 @@ impl SecurePath {
 /// Secure wrapper functions for common file operations.
 impl SecurePath {
     /// Securely read a file to a string with path validation.
-    pub fn read_to_string<P: AsRef<Path>>(&self, user_path: P) -> Result<String, Box<dyn std::error::Error>> {
+    pub fn read_to_string<P: AsRef<Path>>(
+        &self,
+        user_path: P,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let validated = self.validate_path(user_path)?;
         let content = fs::read_to_string(validated.as_path())?;
         Ok(content)
     }
 
     /// Securely write a string to a file with path validation.
-    pub fn write_string<P: AsRef<Path>, C: AsRef<str>>(&self, user_path: P, content: C) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn write_string<P: AsRef<Path>, C: AsRef<str>>(
+        &self,
+        user_path: P,
+        content: C,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let validated = self.validate_path(user_path)?;
 
         // Ensure parent directory exists
@@ -232,14 +247,21 @@ impl SecurePath {
     }
 
     /// Securely read file bytes with path validation.
-    pub fn read_bytes<P: AsRef<Path>>(&self, user_path: P) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    pub fn read_bytes<P: AsRef<Path>>(
+        &self,
+        user_path: P,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let validated = self.validate_path(user_path)?;
         let bytes = fs::read(validated.as_path())?;
         Ok(bytes)
     }
 
     /// Securely write bytes to a file with path validation.
-    pub fn write_bytes<P: AsRef<Path>, B: AsRef<[u8]>>(&self, user_path: P, bytes: B) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn write_bytes<P: AsRef<Path>, B: AsRef<[u8]>>(
+        &self,
+        user_path: P,
+        bytes: B,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let validated = self.validate_path(user_path)?;
 
         // Ensure parent directory exists
@@ -252,7 +274,11 @@ impl SecurePath {
     }
 
     /// Securely copy a file with source and destination path validation.
-    pub fn copy_file<P1: AsRef<Path>, P2: AsRef<Path>>(&self, src: P1, dst: P2) -> Result<u64, Box<dyn std::error::Error>> {
+    pub fn copy_file<P1: AsRef<Path>, P2: AsRef<Path>>(
+        &self,
+        src: P1,
+        dst: P2,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
         let validated_src = self.validate_path(src)?;
         let validated_dst = self.validate_path(dst)?;
 
@@ -276,7 +302,10 @@ mod tests {
     fn test_secure_path_creation() {
         let temp_dir = TempDir::new().unwrap();
         let secure_path = SecurePath::new(temp_dir.path()).unwrap();
-        assert_eq!(secure_path.base_directory(), temp_dir.path().canonicalize().unwrap());
+        assert_eq!(
+            secure_path.base_directory(),
+            temp_dir.path().canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -295,7 +324,11 @@ mod tests {
         let secure_path = SecurePath::new(temp_dir.path()).unwrap();
 
         let validated = secure_path.validate_path("configs/app.toml").unwrap();
-        let expected = temp_dir.path().canonicalize().unwrap().join("configs/app.toml");
+        let expected = temp_dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("configs/app.toml");
         assert_eq!(validated.as_path(), expected);
         assert_eq!(validated.original_path(), "configs/app.toml");
     }
@@ -367,7 +400,9 @@ mod tests {
         secure_path.write_string("source.txt", content).unwrap();
 
         // Copy file
-        let bytes_copied = secure_path.copy_file("source.txt", "destination.txt").unwrap();
+        let bytes_copied = secure_path
+            .copy_file("source.txt", "destination.txt")
+            .unwrap();
         assert!(bytes_copied > 0);
 
         // Verify copy
@@ -381,7 +416,9 @@ mod tests {
         let secure_path = SecurePath::new(temp_dir.path()).unwrap();
 
         // Writing to nested path should create directories
-        secure_path.write_string("nested/dirs/file.txt", "content").unwrap();
+        secure_path
+            .write_string("nested/dirs/file.txt", "content")
+            .unwrap();
 
         // Verify the file was created
         let content = secure_path.read_to_string("nested/dirs/file.txt").unwrap();

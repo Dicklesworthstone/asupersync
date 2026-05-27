@@ -257,9 +257,7 @@ impl ReflectionService {
                  .with_auth(...) for production or .allow_anonymous() for \
                  dev/test before serving reflection RPCs"
             ))),
-            ReflectionAuthMode::Required(auth) => {
-                auth(&cx, method)
-            }
+            ReflectionAuthMode::Required(auth) => auth(&cx, method),
             ReflectionAuthMode::Anonymous => Ok(()),
         }
     }
@@ -751,12 +749,13 @@ mod tests {
 
         // Test without REMOTE capability using a restricted context
         let restricted_cx = crate::cx::Cx::for_testing_no_caps();
-        let result = crate::cx::Cx::run_with_current(restricted_cx, || {
-            reflection.list_services()
-        });
+        let result = crate::cx::Cx::run_with_current(restricted_cx, || reflection.list_services());
 
         // Should be denied due to missing REMOTE capability
-        assert!(result.is_err(), "list_services should fail without REMOTE capability");
+        assert!(
+            result.is_err(),
+            "list_services should fail without REMOTE capability"
+        );
         if let Err(status) = result {
             assert_eq!(status.code(), super::super::status::Code::PermissionDenied);
             assert!(
@@ -780,12 +779,13 @@ mod tests {
 
         // Test with REMOTE capability using full testing context
         let full_cx = crate::cx::Cx::for_testing();
-        let result = crate::cx::Cx::run_with_current(full_cx, || {
-            reflection.list_services()
-        });
+        let result = crate::cx::Cx::run_with_current(full_cx, || reflection.list_services());
 
         // Should succeed with REMOTE capability
-        assert!(result.is_ok(), "list_services should succeed with REMOTE capability");
+        assert!(
+            result.is_ok(),
+            "list_services should succeed with REMOTE capability"
+        );
 
         crate::test_complete!("tlp8m9_reflection_allows_with_remote_capability");
     }
@@ -801,16 +801,21 @@ mod tests {
         let restricted_cx = crate::cx::Cx::for_testing_no_caps();
 
         // Test that capability check applies to both list_services and describe_service
-        let list_result = crate::cx::Cx::run_with_current(restricted_cx.clone(), || {
-            reflection.list_services()
-        });
+        let list_result =
+            crate::cx::Cx::run_with_current(restricted_cx.clone(), || reflection.list_services());
         let describe_result = crate::cx::Cx::run_with_current(restricted_cx, || {
             reflection.describe_service("test.TestService")
         });
 
         // Both should be denied
-        assert!(list_result.is_err(), "list_services should fail without REMOTE");
-        assert!(describe_result.is_err(), "describe_service should fail without REMOTE");
+        assert!(
+            list_result.is_err(),
+            "list_services should fail without REMOTE"
+        );
+        assert!(
+            describe_result.is_err(),
+            "describe_service should fail without REMOTE"
+        );
 
         crate::test_complete!("tlp8m9_capability_check_applies_to_all_methods");
     }
@@ -823,15 +828,15 @@ mod tests {
         let reflection = ReflectionService::new()
             .register_for_test()
             .with_auth(|_cx, method| {
-                Err(super::super::status::Status::permission_denied(format!("denied: {method}")))
+                Err(super::super::status::Status::permission_denied(format!(
+                    "denied: {method}"
+                )))
             });
 
         let restricted_cx = crate::cx::Cx::for_testing_no_caps();
 
         // Even though auth callback would deny, capability check should happen first
-        let result = crate::cx::Cx::run_with_current(restricted_cx, || {
-            reflection.list_services()
-        });
+        let result = crate::cx::Cx::run_with_current(restricted_cx, || reflection.list_services());
 
         assert!(result.is_err());
         if let Err(status) = result {

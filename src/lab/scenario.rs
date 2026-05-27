@@ -1173,15 +1173,14 @@ impl Scenario {
             if include.path.chars().any(|c| c.is_control() || c == '\0') {
                 errors.push(ValidationError {
                     field: field.clone(),
-                    message: "include path must not contain control characters or null bytes".into(),
+                    message: "include path must not contain control characters or null bytes"
+                        .into(),
                 });
                 continue;
             }
 
             // Security: Restrict to reasonable filename characters
-            let allowed_chars = |c: char| {
-                c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '/')
-            };
+            let allowed_chars = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '/');
             if !include.path.chars().all(allowed_chars) {
                 errors.push(ValidationError {
                     field: field.clone(),
@@ -1898,7 +1897,11 @@ mod tests {
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
-        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("empty")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "include[0].path" && e.message.contains("empty"))
+        );
 
         // Test absolute path rejection (Unix style)
         let json = r#"{
@@ -1907,7 +1910,11 @@ mod tests {
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
-        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("absolute")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "include[0].path" && e.message.contains("absolute"))
+        );
 
         // Test absolute path rejection (Windows style)
         let json = r#"{
@@ -1916,7 +1923,11 @@ mod tests {
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
-        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("absolute")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "include[0].path" && e.message.contains("absolute"))
+        );
 
         // Test path traversal rejection
         let json = r#"{
@@ -1925,7 +1936,11 @@ mod tests {
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
-        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("path traversal")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "include[0].path" && e.message.contains("path traversal"))
+        );
 
         // Test subtler path traversal
         let json = r#"{
@@ -1934,7 +1949,11 @@ mod tests {
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
-        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("path traversal")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "include[0].path" && e.message.contains("path traversal"))
+        );
 
         // Test control character rejection (null byte)
         let json = r#"{
@@ -1943,7 +1962,11 @@ mod tests {
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
-        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("control characters")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "include[0].path" && e.message.contains("control characters"))
+        );
 
         // Test invalid character rejection
         let json = r#"{
@@ -1952,14 +1975,25 @@ mod tests {
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
-        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("invalid characters")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "include[0].path" && e.message.contains("invalid characters"))
+        );
 
         // Test path length limit
         let long_path = "a".repeat(256) + ".yaml";
-        let json = format!(r#"{{"id": "test", "include": [{{"path": "{}"}}]}}"#, long_path);
+        let json = format!(
+            r#"{{"id": "test", "include": [{{"path": "{}"}}]}}"#,
+            long_path
+        );
         let s: Scenario = serde_json::from_str(&json).unwrap();
         let errors = s.validate();
-        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("too long")));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.field == "include[0].path" && e.message.contains("too long"))
+        );
 
         // Test extension requirement (missing extension)
         let json = r#"{
@@ -1968,7 +2002,10 @@ mod tests {
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
-        assert!(errors.iter().any(|e| e.field == "include[0].path" && e.message.contains("must end with .yaml or .yml")));
+        assert!(
+            errors.iter().any(|e| e.field == "include[0].path"
+                && e.message.contains("must end with .yaml or .yml"))
+        );
 
         // Test valid path passes all checks
         let json = r#"{
@@ -1977,7 +2014,11 @@ mod tests {
         }"#;
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
-        assert!(errors.iter().all(|e| !e.field.starts_with("include[0].path")));
+        assert!(
+            errors
+                .iter()
+                .all(|e| !e.field.starts_with("include[0].path"))
+        );
     }
 
     #[test]

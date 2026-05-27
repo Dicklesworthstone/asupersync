@@ -84,9 +84,7 @@ impl SymbolAssigner {
         // asupersync-j18rga: Filter replicas to only include authorized ones
         let authorized_replicas: Vec<&ReplicaInfo> = replicas
             .iter()
-            .filter(|replica| {
-                security_context.is_replica_authorized(&replica.id, region_id)
-            })
+            .filter(|replica| security_context.is_replica_authorized(&replica.id, region_id))
             .collect();
 
         if authorized_replicas.is_empty() {
@@ -97,13 +95,19 @@ impl SymbolAssigner {
         match self.strategy {
             AssignmentStrategy::Full => Self::assign_full(symbols, &authorized_replicas, k),
             AssignmentStrategy::Striped => Self::assign_striped(symbols, &authorized_replicas, k),
-            AssignmentStrategy::MinimumK => Self::assign_minimum_k(symbols, &authorized_replicas, k),
+            AssignmentStrategy::MinimumK => {
+                Self::assign_minimum_k(symbols, &authorized_replicas, k)
+            }
             AssignmentStrategy::Weighted => Self::assign_weighted(symbols, &authorized_replicas, k),
         }
     }
 
     /// Full replication: every replica gets all symbols.
-    fn assign_full(symbols: &[Symbol], replicas: &[&ReplicaInfo], k: u16) -> Vec<ReplicaAssignment> {
+    fn assign_full(
+        symbols: &[Symbol],
+        replicas: &[&ReplicaInfo],
+        k: u16,
+    ) -> Vec<ReplicaAssignment> {
         let k_usize = k as usize;
         let all_indices: Vec<usize> = (0..symbols.len()).collect();
         replicas
@@ -747,12 +751,12 @@ mod tests {
 
         // Mix of authorized and unauthorized replica IDs
         let mut replicas = vec![
-            ReplicaInfo::new("replica-auth-1", "addr1"),     // authorized
-            ReplicaInfo::new("node-auth-2", "addr2"),        // authorized
-            ReplicaInfo::new("r3", "addr3"),                 // authorized
-            ReplicaInfo::new("invalid-test", "addr4"),       // unauthorized (contains "test")
-            ReplicaInfo::new("fake-replica", "addr5"),       // unauthorized (contains "fake")
-            ReplicaInfo::new("", "addr6"),                   // unauthorized (empty ID)
+            ReplicaInfo::new("replica-auth-1", "addr1"), // authorized
+            ReplicaInfo::new("node-auth-2", "addr2"),    // authorized
+            ReplicaInfo::new("r3", "addr3"),             // authorized
+            ReplicaInfo::new("invalid-test", "addr4"),   // unauthorized (contains "test")
+            ReplicaInfo::new("fake-replica", "addr5"),   // unauthorized (contains "fake")
+            ReplicaInfo::new("", "addr6"),               // unauthorized (empty ID)
         ];
 
         let assignments = assigner.assign(&symbols, &replicas, &security_context, None, 3);
@@ -779,9 +783,9 @@ mod tests {
 
         // All unauthorized replicas
         let replicas = vec![
-            ReplicaInfo::new("test-replica", "addr1"),       // contains "test"
-            ReplicaInfo::new("mock-node", "addr2"),          // contains "mock"
-            ReplicaInfo::new("", "addr3"),                   // empty ID
+            ReplicaInfo::new("test-replica", "addr1"), // contains "test"
+            ReplicaInfo::new("mock-node", "addr2"),    // contains "mock"
+            ReplicaInfo::new("", "addr3"),             // empty ID
         ];
 
         let assignments = assigner.assign(&symbols, &replicas, &security_context, None, 3);
@@ -815,7 +819,11 @@ mod tests {
         all.dedup();
 
         assert_eq!(all.len(), 12, "all symbols should be assigned exactly once");
-        assert_eq!(assignments.len(), 3, "all authorized replicas should get assignments");
+        assert_eq!(
+            assignments.len(),
+            3,
+            "all authorized replicas should get assignments"
+        );
     }
 
     #[test]

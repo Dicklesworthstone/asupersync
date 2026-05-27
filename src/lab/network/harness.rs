@@ -2289,7 +2289,10 @@ mod tests {
             assert!(msg.contains(&format!("{:?}", node_b)));
             assert!(msg.contains(&format!("{:?}", node_a)));
         } else {
-            panic!("Expected TransportError with identity spoofing message, got: {:?}", result);
+            panic!(
+                "Expected TransportError with identity spoofing message, got: {:?}",
+                result
+            );
         }
 
         // Verify no message was actually sent

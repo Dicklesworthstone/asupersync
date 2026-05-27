@@ -89,7 +89,10 @@ pub trait EnvReader {
 
     /// Read a file, returning an error if it fails.
     /// This is needed for TOML config file reading.
-    fn read_file(&self, path: &std::path::Path) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
+    fn read_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
 }
 
 /// Production implementation that reads from the actual process environment.
@@ -122,9 +125,14 @@ impl EnvReader for SystemEnvReader {
         self.env_cap.read_env(name)
     }
 
-    fn read_file(&self, path: &std::path::Path) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    fn read_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // Use the file capability instead of direct std::fs access
-        self.file_cap.read_to_string(path).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+        self.file_cap
+            .read_to_string(path)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
     }
 }
 
@@ -155,13 +163,15 @@ impl EnvReader for TestEnvReader {
         self.env_vars.get(name).cloned()
     }
 
-    fn read_file(&self, path: &std::path::Path) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        self.files.get(path)
-            .cloned()
-            .ok_or_else(|| {
-                let msg = format!("Test file not found: {}", path.display());
-                Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, msg)) as Box<dyn std::error::Error + Send + Sync>
-            })
+    fn read_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.files.get(path).cloned().ok_or_else(|| {
+            let msg = format!("Test file not found: {}", path.display());
+            Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, msg))
+                as Box<dyn std::error::Error + Send + Sync>
+        })
     }
 }
 
@@ -198,7 +208,10 @@ pub const ENV_ADAPTIVE_CANCEL_EPOCH_STEPS: &str = "ASUPERSYNC_ADAPTIVE_CANCEL_EP
 ///
 /// Only variables that are set in the environment are applied.
 /// Returns an error if a variable is set but contains an unparseable value.
-pub fn apply_env_overrides(config: &mut RuntimeConfig, env_reader: &dyn EnvReader) -> Result<(), BuildError> {
+pub fn apply_env_overrides(
+    config: &mut RuntimeConfig,
+    env_reader: &dyn EnvReader,
+) -> Result<(), BuildError> {
     if let Some(val) = env_reader.read_env(ENV_WORKER_THREADS) {
         config.worker_threads = parse_usize(ENV_WORKER_THREADS, &val)?;
     }
@@ -244,7 +257,6 @@ pub fn apply_env_overrides(config: &mut RuntimeConfig, env_reader: &dyn EnvReade
     }
     Ok(())
 }
-
 
 fn parse_usize(var_name: &str, val: &str) -> Result<usize, BuildError> {
     val.trim().parse::<usize>().map_err(|e| {
@@ -409,7 +421,10 @@ pub fn parse_toml_str(toml_str: &str) -> Result<RuntimeTomlConfig, BuildError> {
 
 /// Read and parse a TOML file into a [`RuntimeTomlConfig`].
 #[cfg(feature = "config-file")]
-pub fn parse_toml_file(path: &std::path::Path, env_reader: &dyn EnvReader) -> Result<RuntimeTomlConfig, BuildError> {
+pub fn parse_toml_file(
+    path: &std::path::Path,
+    env_reader: &dyn EnvReader,
+) -> Result<RuntimeTomlConfig, BuildError> {
     let content = env_reader.read_file(path).map_err(|e| {
         BuildError::custom(format!(
             "failed to read config file {}: {e}",
@@ -867,7 +882,10 @@ max_threads = 128
 
     #[test]
     fn toml_file_not_found() {
-        let result = parse_toml_file(std::path::Path::new("/nonexistent/config.toml"), &SystemEnvReader::new());
+        let result = parse_toml_file(
+            std::path::Path::new("/nonexistent/config.toml"),
+            &SystemEnvReader::new(),
+        );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("failed to read"));

@@ -35,6 +35,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::time::Duration;
 
+pub mod atp_security;
 pub mod bench;
 pub mod h1_expect_continue_conformance;
 pub mod h1_request_building_conformance;
@@ -65,8 +66,10 @@ pub mod rfc6330_tests;
 pub mod runner;
 pub mod tests;
 pub mod traceability;
-pub mod atp_security;
 
+pub use atp_security::{
+    AtpSecurityContract, atp_security_conformance_tests, atp_security_coverage_matrix,
+};
 pub use bench::{
     BenchAllocSnapshot, BenchAllocStats, BenchCategory, BenchComparisonResult,
     BenchComparisonSummary, BenchConfig, BenchOutput, BenchRunResult, BenchRunSummary, BenchRunner,
@@ -170,9 +173,6 @@ pub use traceability::{
     CiReport, CoverageStats, ScanWarning, SpecRequirement, TraceabilityEntry, TraceabilityMatrix,
     TraceabilityMatrixBuilder, TraceabilityScan, TraceabilityScanError, requirements_from_entries,
     scan_conformance_attributes,
-};
-pub use atp_security::{
-    AtpSecurityContract, atp_security_conformance_tests, atp_security_coverage_matrix,
 };
 
 // ============================================================================

@@ -180,7 +180,8 @@ impl<T> TrackedSender<T> {
         cx: &'a Cx,
     ) -> Result<TrackedPermit<'a, T>, mpsc::SendError<()>> {
         let permit = self.inner.reserve(cx).await?;
-        let obligation = ObligationToken::<SendPermit>::reserve("TrackedPermit(mpsc)", cx.region_id());
+        let obligation =
+            ObligationToken::<SendPermit>::reserve("TrackedPermit(mpsc)", cx.region_id());
         Ok(TrackedPermit { permit, obligation })
     }
 
@@ -368,7 +369,8 @@ impl<T> TrackedOneshotSender<T> {
     /// (br-asupersync-4taf1b).
     pub fn reserve(self, cx: &Cx) -> Result<TrackedOneshotPermit<T>, oneshot::SendError<()>> {
         let permit = self.inner.reserve(cx)?;
-        let obligation = ObligationToken::<SendPermit>::reserve("TrackedOneshotPermit", cx.region_id());
+        let obligation =
+            ObligationToken::<SendPermit>::reserve("TrackedOneshotPermit", cx.region_id());
         Ok(TrackedOneshotPermit { permit, obligation })
     }
 

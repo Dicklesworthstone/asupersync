@@ -38,8 +38,8 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::cx::{Cx, cap};
 use crate::cx::scope::CatchUnwind;
+use crate::cx::{Cx, cap};
 use crate::error::Error;
 use crate::web::extract::Request;
 use crate::web::response::{Response, StatusCode};
@@ -585,7 +585,7 @@ mod tests {
     use crate::cx::Cx;
     use crate::obligation::graded::{GradedObligation, Resolution};
     use crate::record::ObligationKind;
-    use crate::test_utils::{test_lab_with_seed, DEFAULT_TEST_SEED};
+    use crate::test_utils::{DEFAULT_TEST_SEED, test_lab_with_seed};
     use crate::time::VirtualClock;
     use crate::types::Time;
     use crate::web::extract::Request;
@@ -1417,11 +1417,13 @@ mod tests {
                 let req = test_request("GET", "/async-hello");
                 let region = RequestRegion::new(&cx, req);
 
-                let outcome = region.run_async(|ctx| async move {
-                    assert_eq!(ctx.method(), "GET");
-                    assert_eq!(ctx.path(), "/async-hello");
-                    Response::new(StatusCode::OK, b"async ok".to_vec())
-                }).await;
+                let outcome = region
+                    .run_async(|ctx| async move {
+                        assert_eq!(ctx.method(), "GET");
+                        assert_eq!(ctx.path(), "/async-hello");
+                        Response::new(StatusCode::OK, b"async ok".to_vec())
+                    })
+                    .await;
 
                 assert!(outcome.is_ok());
                 let resp = outcome.into_response();
@@ -1440,9 +1442,11 @@ mod tests {
                 // Set cancellation before running
                 cx.set_cancel_requested(true);
 
-                let outcome = region.run_async(|_ctx| async move {
-                    Response::new(StatusCode::OK, b"should not execute".to_vec())
-                }).await;
+                let outcome = region
+                    .run_async(|_ctx| async move {
+                        Response::new(StatusCode::OK, b"should not execute".to_vec())
+                    })
+                    .await;
 
                 assert!(outcome.is_cancelled());
             });
@@ -1454,7 +1458,11 @@ mod tests {
             struct AsyncTestHandler;
 
             impl crate::web::handler::Handler for AsyncTestHandler {
-                fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+                fn call(
+                    &self,
+                    _cx: &Cx,
+                    req: Request,
+                ) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
                     let path = req.path.clone();
                     Box::pin(async move {
                         Response::new(StatusCode::OK, format!("async: {}", path).into_bytes())
@@ -1483,13 +1491,15 @@ mod tests {
                 let req = test_request("GET", "/context");
                 let region = RequestRegion::new(&cx, req);
 
-                let outcome = region.run_async(|ctx| async move {
-                    // Verify context provides access to Cx and cancellation
-                    let can_cancel = ctx.cx().checkpoint().is_ok();
-                    assert!(can_cancel, "Context should provide access to cancellation");
+                let outcome = region
+                    .run_async(|ctx| async move {
+                        // Verify context provides access to Cx and cancellation
+                        let can_cancel = ctx.cx().checkpoint().is_ok();
+                        assert!(can_cancel, "Context should provide access to cancellation");
 
-                    Response::new(StatusCode::OK, b"context ok".to_vec())
-                }).await;
+                        Response::new(StatusCode::OK, b"context ok".to_vec())
+                    })
+                    .await;
 
                 assert!(outcome.is_ok());
             });

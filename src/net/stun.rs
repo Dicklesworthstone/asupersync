@@ -215,7 +215,10 @@ mod tests {
             priority: 100,
             address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 10), 54400)),
             candidate_type: IceCandidateType::ServerReflexive,
-            related_address: Some(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 5000))),
+            related_address: Some(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::new(192, 168, 1, 100),
+                5000,
+            ))),
         };
         assert_json_snapshot!("ice_candidate_server_reflexive", reflexive_candidate);
     }
@@ -231,7 +234,10 @@ mod tests {
             priority: 50,
             address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 20), 49152)),
             candidate_type: IceCandidateType::Relay,
-            related_address: Some(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(203, 0, 113, 10), 54400))),
+            related_address: Some(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::new(203, 0, 113, 10),
+                54400,
+            ))),
         };
         assert_json_snapshot!("ice_candidate_relay", relay_candidate);
     }

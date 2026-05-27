@@ -1,16 +1,14 @@
 //! Tests for Byzantine consensus protocols.
 
+use crate::cx::Cx;
+use crate::error::Result;
+use crate::types::Time;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use crate::cx::Cx;
-use crate::types::Time;
-use crate::error::Result;
 
-use super::pbft::{PbftConfig, PbftConsensus, PbftTransport, PbftMessage, PbftNode};
-use super::types::{
-    ConsensusRequest, ReplicaId, ViewNumber, SequenceNumber,
-};
+use super::pbft::{PbftConfig, PbftConsensus, PbftMessage, PbftNode, PbftTransport};
+use super::types::{ConsensusRequest, ReplicaId, SequenceNumber, ViewNumber};
 
 /// Mock transport for testing PBFT.
 #[derive(Debug)]
@@ -51,7 +49,9 @@ impl MockTransport {
 impl PbftTransport for MockTransport {
     fn send_to_replica(&self, _replica_id: &ReplicaId, message: PbftMessage) -> Result<()> {
         if self.fail_sends {
-            return Err(crate::error::Error::new(crate::error::ErrorKind::ConnectionLost));
+            return Err(crate::error::Error::new(
+                crate::error::ErrorKind::ConnectionLost,
+            ));
         }
 
         let mut messages = self.sent_messages.lock().unwrap();
@@ -61,7 +61,9 @@ impl PbftTransport for MockTransport {
 
     fn broadcast(&self, message: PbftMessage) -> Result<()> {
         if self.fail_sends {
-            return Err(crate::error::Error::new(crate::error::ErrorKind::ConnectionLost));
+            return Err(crate::error::Error::new(
+                crate::error::ErrorKind::ConnectionLost,
+            ));
         }
 
         let mut messages = self.sent_messages.lock().unwrap();
@@ -75,7 +77,9 @@ impl PbftTransport for MockTransport {
             Ok(message)
         } else {
             // Simulate no message available
-            Err(crate::error::Error::new(crate::error::ErrorKind::ChannelEmpty))
+            Err(crate::error::Error::new(
+                crate::error::ErrorKind::ChannelEmpty,
+            ))
         }
     }
 }

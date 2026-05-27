@@ -134,10 +134,14 @@ impl DialecticaContract {
             Self::CancellationNonCascading => "cancellation does not auto-resolve obligations",
             Self::KindUniformStateMachine => "all obligation kinds share identical state machine",
             // Temporal Logic Contracts
-            Self::AlwaysEventuallyResolved => "every reserved obligation eventually resolves within time bound",
+            Self::AlwaysEventuallyResolved => {
+                "every reserved obligation eventually resolves within time bound"
+            }
             Self::NeverThenAfterClose => "no new reservations after region close",
             Self::AlwaysImpliesTrackable => "reserved obligations remain trackable until resolved",
-            Self::EventuallyAlwaysQuiescent => "quiescent state is eventually reached and maintained",
+            Self::EventuallyAlwaysQuiescent => {
+                "quiescent state is eventually reached and maintained"
+            }
         }
     }
 }
@@ -771,7 +775,10 @@ impl ContractChecker {
 
     /// Check quiescence state for EventuallyAlwaysQuiescent contract.
     fn check_quiescence(&mut self, current_time: Time) {
-        let is_quiescent = self.obligations.values().all(|snap| snap.state.is_terminal());
+        let is_quiescent = self
+            .obligations
+            .values()
+            .all(|snap| snap.state.is_terminal());
 
         if is_quiescent {
             if self.quiescence_start.is_none() {
@@ -807,9 +814,7 @@ impl ContractChecker {
             self.violations.push(ContractViolation {
                 contract: DialecticaContract::AlwaysImpliesTrackable,
                 time,
-                description: format!(
-                    "obligation {obligation:?} became untrackable"
-                ),
+                description: format!("obligation {obligation:?} became untrackable"),
                 obligation: Some(obligation),
                 region: None,
             });
@@ -2695,14 +2700,21 @@ mod tests {
 
         // Test NeverThenAfterClose: reservation after region close should be violation
         let events_never_then = vec![
-            close(0, r(0)), // Close region 0
+            close(0, r(0)),                                            // Close region 0
             reserve(10, o(0), ObligationKind::SendPermit, t(0), r(0)), // Should violate
         ];
         let mut checker = ContractChecker::new();
         let result = checker.check(&events_never_then);
-        assert!(!result.is_clean(), "Should detect NeverThenAfterClose violation");
+        assert!(
+            !result.is_clean(),
+            "Should detect NeverThenAfterClose violation"
+        );
         let violations = result.violations_for(DialecticaContract::NeverThenAfterClose);
-        assert_eq!(violations.len(), 1, "Should have exactly one NeverThenAfterClose violation");
+        assert_eq!(
+            violations.len(),
+            1,
+            "Should have exactly one NeverThenAfterClose violation"
+        );
 
         // Test AlwaysEventuallyResolved: obligation not resolved within time bound
         let time_bound = Time::from_millis(100);
@@ -2712,9 +2724,17 @@ mod tests {
         ];
         let mut checker_time = ContractChecker::new_with_time_bound(time_bound);
         let result_time = checker_time.check(&events_slow_resolve);
-        assert!(!result_time.is_clean(), "Should detect AlwaysEventuallyResolved violation");
-        let time_violations = result_time.violations_for(DialecticaContract::AlwaysEventuallyResolved);
-        assert_eq!(time_violations.len(), 1, "Should have exactly one AlwaysEventuallyResolved violation");
+        assert!(
+            !result_time.is_clean(),
+            "Should detect AlwaysEventuallyResolved violation"
+        );
+        let time_violations =
+            result_time.violations_for(DialecticaContract::AlwaysEventuallyResolved);
+        assert_eq!(
+            time_violations.len(),
+            1,
+            "Should have exactly one AlwaysEventuallyResolved violation"
+        );
 
         // Test EventuallyAlwaysQuiescent: system reaches and maintains quiescence
         let events_quiescent = vec![
@@ -2725,7 +2745,11 @@ mod tests {
         ];
         let mut checker_quies = ContractChecker::new();
         let result_quies = checker_quies.check(&events_quiescent);
-        assert!(result_quies.contract_status.is_satisfied(DialecticaContract::EventuallyAlwaysQuiescent));
+        assert!(
+            result_quies
+                .contract_status
+                .is_satisfied(DialecticaContract::EventuallyAlwaysQuiescent)
+        );
 
         // Test EventuallyAlwaysQuiescent violation: lose quiescence
         let events_lose_quies = vec![
@@ -2735,8 +2759,13 @@ mod tests {
         ];
         let mut checker_lose = ContractChecker::new();
         let result_lose = checker_lose.check(&events_lose_quies);
-        let quies_violations = result_lose.violations_for(DialecticaContract::EventuallyAlwaysQuiescent);
-        assert_eq!(quies_violations.len(), 1, "Should have exactly one EventuallyAlwaysQuiescent violation");
+        let quies_violations =
+            result_lose.violations_for(DialecticaContract::EventuallyAlwaysQuiescent);
+        assert_eq!(
+            quies_violations.len(),
+            1,
+            "Should have exactly one EventuallyAlwaysQuiescent violation"
+        );
 
         // Test AlwaysImpliesTrackable: this is implicitly satisfied if obligations are tracked
         let events_trackable = vec![
@@ -2745,6 +2774,10 @@ mod tests {
         ];
         let mut checker_track = ContractChecker::new();
         let result_track = checker_track.check(&events_trackable);
-        assert!(result_track.contract_status.is_satisfied(DialecticaContract::AlwaysImpliesTrackable));
+        assert!(
+            result_track
+                .contract_status
+                .is_satisfied(DialecticaContract::AlwaysImpliesTrackable)
+        );
     }
 }

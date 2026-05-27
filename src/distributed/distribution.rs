@@ -182,7 +182,8 @@ impl SymbolDistributor {
         let start = cx
             .timer_driver()
             .map_or_else(crate::time::wall_now, |d| d.now());
-        let assignments = Self::compute_assignments_with_auth(encoded, replicas, auth_context, None);
+        let assignments =
+            Self::compute_assignments_with_auth(encoded, replicas, auth_context, None);
         let mut outcomes = Vec::with_capacity(assignments.len());
         let mut symbols_sent_total = 0_u64;
         for assignment in assignments {
@@ -261,7 +262,13 @@ impl SymbolDistributor {
         region_id: Option<&str>,
     ) -> Vec<super::assignment::ReplicaAssignment> {
         let assigner = SymbolAssigner::new(AssignmentStrategy::Full);
-        assigner.assign(&encoded.symbols, replicas, security_context, region_id, encoded.source_count)
+        assigner.assign(
+            &encoded.symbols,
+            replicas,
+            security_context,
+            region_id,
+            encoded.source_count,
+        )
     }
 
     /// Evaluates pre-computed outcomes with quorum semantics.

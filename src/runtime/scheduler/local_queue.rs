@@ -155,9 +155,7 @@ impl LocalQueue {
         // Fix race condition: clone the queue to avoid holding RefCell borrow
         // across the schedule_local_push call, preventing borrow conflicts with
         // concurrent CurrentQueueGuard::drop() operations.
-        let queue = CURRENT_QUEUE.with(|slot| {
-            slot.borrow().clone()
-        });
+        let queue = CURRENT_QUEUE.with(|slot| slot.borrow().clone());
 
         match queue {
             Some(queue) => queue.schedule_local_push(task),

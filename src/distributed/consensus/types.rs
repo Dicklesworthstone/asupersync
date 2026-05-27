@@ -1,6 +1,6 @@
 //! Core types for Byzantine consensus protocols.
 
-use crate::types::{Time, Outcome};
+use crate::types::{Outcome, Time};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -79,7 +79,7 @@ pub struct MessageDigest(pub [u8; 32]);
 impl MessageDigest {
     /// Compute digest of serializable data.
     pub fn of<T: Serialize>(data: &T) -> crate::error::Result<Self> {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
 
         let serialized = serde_json::to_vec(data)
             .map_err(|_| crate::error::Error::new(crate::error::ErrorKind::InvalidInput))?;
@@ -204,19 +204,38 @@ pub enum ConsensusError {
     /// Not enough replicas for fault tolerance.
     InsufficientReplicas { required: usize, available: usize },
     /// Invalid view number.
-    InvalidView { expected: ViewNumber, received: ViewNumber },
+    InvalidView {
+        expected: ViewNumber,
+        received: ViewNumber,
+    },
     /// Invalid sequence number.
-    InvalidSequence { expected: SequenceNumber, received: SequenceNumber },
+    InvalidSequence {
+        expected: SequenceNumber,
+        received: SequenceNumber,
+    },
     /// Message authentication failed.
-    AuthenticationFailure { replica_id: ReplicaId, reason: String },
+    AuthenticationFailure {
+        replica_id: ReplicaId,
+        reason: String,
+    },
     /// Timeout waiting for consensus.
     Timeout { phase: PhaseKind, duration_ms: u64 },
     /// Byzantine behavior detected.
-    ByzantineDetected { replica_id: ReplicaId, evidence: String },
+    ByzantineDetected {
+        replica_id: ReplicaId,
+        evidence: String,
+    },
     /// View change in progress.
-    ViewChangeInProgress { current_view: ViewNumber, target_view: ViewNumber },
+    ViewChangeInProgress {
+        current_view: ViewNumber,
+        target_view: ViewNumber,
+    },
     /// Replica is not primary for current view.
-    NotPrimary { replica_id: ReplicaId, view: ViewNumber, primary: usize },
+    NotPrimary {
+        replica_id: ReplicaId,
+        view: ViewNumber,
+        primary: usize,
+    },
     /// Generic consensus failure.
     ConsensusFailed { reason: String },
 }
@@ -224,14 +243,25 @@ pub enum ConsensusError {
 impl fmt::Display for ConsensusError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConsensusError::InsufficientReplicas { required, available } => {
-                write!(f, "insufficient replicas: need {}, have {}", required, available)
+            ConsensusError::InsufficientReplicas {
+                required,
+                available,
+            } => {
+                write!(
+                    f,
+                    "insufficient replicas: need {}, have {}",
+                    required, available
+                )
             }
             ConsensusError::InvalidView { expected, received } => {
                 write!(f, "invalid view: expected {}, got {}", expected, received)
             }
             ConsensusError::InvalidSequence { expected, received } => {
-                write!(f, "invalid sequence: expected {}, got {}", expected, received)
+                write!(
+                    f,
+                    "invalid sequence: expected {}, got {}",
+                    expected, received
+                )
             }
             ConsensusError::AuthenticationFailure { replica_id, reason } => {
                 write!(f, "authentication failed for {}: {}", replica_id, reason)
@@ -239,14 +269,32 @@ impl fmt::Display for ConsensusError {
             ConsensusError::Timeout { phase, duration_ms } => {
                 write!(f, "{} phase timeout after {}ms", phase, duration_ms)
             }
-            ConsensusError::ByzantineDetected { replica_id, evidence } => {
+            ConsensusError::ByzantineDetected {
+                replica_id,
+                evidence,
+            } => {
                 write!(f, "Byzantine behavior from {}: {}", replica_id, evidence)
             }
-            ConsensusError::ViewChangeInProgress { current_view, target_view } => {
-                write!(f, "view change in progress: {} -> {}", current_view, target_view)
+            ConsensusError::ViewChangeInProgress {
+                current_view,
+                target_view,
+            } => {
+                write!(
+                    f,
+                    "view change in progress: {} -> {}",
+                    current_view, target_view
+                )
             }
-            ConsensusError::NotPrimary { replica_id, view, primary } => {
-                write!(f, "{} not primary for {}, primary is replica {}", replica_id, view, primary)
+            ConsensusError::NotPrimary {
+                replica_id,
+                view,
+                primary,
+            } => {
+                write!(
+                    f,
+                    "{} not primary for {}, primary is replica {}",
+                    replica_id, view, primary
+                )
             }
             ConsensusError::ConsensusFailed { reason } => {
                 write!(f, "consensus failed: {}", reason)
