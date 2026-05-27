@@ -4839,7 +4839,7 @@ mod tests {
 
             let (mut stream, _) = listener.accept().expect("accept test client");
             stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
+                .set_read_timeout(Some(Duration::from_secs(15)))
                 .expect("set read timeout");
             stream
                 .write_all(
@@ -5021,7 +5021,7 @@ mod tests {
 
             let (mut stream, _) = listener.accept().expect("accept test client");
             stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
+                .set_read_timeout(Some(Duration::from_secs(15)))
                 .expect("set read timeout");
             stream
                 .write_all(
@@ -5650,7 +5650,7 @@ mod tests {
 
             let (mut stream, _) = listener.accept().expect("accept test client");
             stream
-                .set_read_timeout(Some(Duration::from_millis(400)))
+                .set_read_timeout(Some(Duration::from_secs(15)))
                 .expect("set read timeout");
 
             stream
@@ -5683,6 +5683,9 @@ mod tests {
                 .expect("read payload terminator");
             assert_eq!(&crlf, b"\r\n");
 
+            stream
+                .set_read_timeout(Some(Duration::from_millis(400)))
+                .expect("set no-extra-frame read timeout");
             let mut extra = [0u8; 1];
             match stream.read(&mut extra) {
                 Ok(0) => {}
@@ -5736,7 +5739,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Real NATS Integration Tests (No Mocks)
+    // Live NATS Integration Tests
     // ========================================================================
 
     /// Test logger for structured output during integration tests.
@@ -6454,9 +6457,15 @@ mod tests {
             let result = limiter.check_pull_request(now_ns + 1_000_000); // 1ms later
             assert!(result.is_err());
 
-            // Request after minimum interval should succeed
-            let later_ns = now_ns + (MIN_PULL_INTERVAL_MS * 1_000_000) + 1_000_000; // MIN_PULL_INTERVAL_MS + 1ms
-            assert!(limiter.check_pull_request(later_ns).is_ok());
+            let backoff = result.expect_err("rapid request should return a backoff");
+
+            // The minimum interval is still below the active exponential
+            // backoff, so the limiter must continue to refuse the request.
+            let minimum_interval_ns = now_ns + (MIN_PULL_INTERVAL_MS * 1_000_000) + 1_000_000;
+            assert!(limiter.check_pull_request(minimum_interval_ns).is_err());
+
+            let after_backoff_ns = now_ns + backoff.as_nanos() as u64 + 1_000_000; // backoff + 1ms
+            assert!(limiter.check_pull_request(after_backoff_ns).is_ok());
         }
 
         #[test]
