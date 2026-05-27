@@ -83,7 +83,7 @@ impl DetRng {
     #[must_use]
     pub fn from_entropy() -> Self {
         use std::collections::hash_map::RandomState;
-        use std::hash::{Hash, Hasher};
+        use std::hash::{BuildHasher, Hash, Hasher};
 
         // Generate high-quality seed from OS entropy
         let random_state = RandomState::new();
