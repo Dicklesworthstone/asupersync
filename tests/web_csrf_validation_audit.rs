@@ -46,11 +46,14 @@
 //!
 //! Regression tests below pin (1)+(2)+(3).
 
+use asupersync::Cx;
 use asupersync::web::extract::Request;
 use asupersync::web::handler::FnHandler;
 use asupersync::web::handler::Handler;
 use asupersync::web::response::{Response, StatusCode};
 use asupersync::web::session::{MemoryStore, Session, SessionLayer};
+use std::future::Future;
+use std::pin::Pin;
 
 fn ok_handler() -> StatusCode {
     StatusCode::OK
@@ -62,14 +65,24 @@ impl<F> Handler for SessionStatusHandler<F>
 where
     F: Fn(&Session) -> StatusCode + Send + Sync + 'static,
 {
-    fn call(&self, req: Request) -> Response {
-        let session = req
-            .extensions
-            .get_typed::<Session>()
-            .expect("session middleware injects Session");
-        Response::new((self.0)(session), Vec::<u8>::new())
+    fn call(&self, _cx: &Cx, req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async move {
+            let session = req
+                .extensions
+                .get_typed::<Session>()
+                .expect("session middleware injects Session");
+            Response::new((self.0)(session), Vec::<u8>::new())
+        })
     }
 }
+
+trait TestHandlerSyncExt: Handler {
+    fn call(&self, req: Request) -> Response {
+        futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
+    }
+}
+
+impl<T> TestHandlerSyncExt for T where T: Handler + ?Sized {}
 
 // ── (1) Token rotation on session-id change ──────────────────────
 

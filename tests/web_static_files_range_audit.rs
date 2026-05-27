@@ -1,13 +1,22 @@
 //! Regression tests for static file Range request handling.
 
+use asupersync::Cx;
 use asupersync::web::extract::Request;
 use asupersync::web::handler::Handler;
-use asupersync::web::response::StatusCode;
+use asupersync::web::response::{Response, StatusCode};
 use asupersync::web::static_files::StaticFiles;
 use std::fs;
 use tempfile::TempDir;
 
 const TEST_CONTENT: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+trait TestHandlerSyncExt: Handler {
+    fn call(&self, req: Request) -> Response {
+        futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
+    }
+}
+
+impl<T> TestHandlerSyncExt for T where T: Handler + ?Sized {}
 
 fn setup_test_dir() -> TempDir {
     let dir = tempfile::tempdir().expect("create temp dir");

@@ -178,6 +178,9 @@ fn test_stream_sequence_monotonic() -> TestResult {
     // Test that stream packet sequence numbers are strictly monotonic using real ATP types
     let stream_id = StreamId::new(0);
     let mut seq_tracker = SequenceTracker::new(stream_id);
+    if seq_tracker.stream_id != stream_id {
+        return TestResult::failed("sequence tracker bound to the wrong stream".to_string());
+    }
 
     // Sequence offsets must be monotonic increasing for data transmission
     let offset1 = seq_tracker.next_offset(100); // Send 100 bytes
