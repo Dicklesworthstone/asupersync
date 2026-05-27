@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::cx::Cx;
 use crate::types::Time;
 use crate::web::extract::Request;
 use crate::web::response::Response;
@@ -39,11 +40,11 @@ impl VirtualServer {
 
     /// Handle a request and return a response.
     ///
-    /// This dispatches the request through the router synchronously.
+    /// This dispatches the request through the router asynchronously.
     /// The request count is incremented.
-    pub fn handle(&self, req: Request) -> Response {
+    pub async fn handle(&self, cx: &Cx, req: Request) -> Response {
         self.request_count.fetch_add(1, Ordering::Relaxed);
-        self.router.handle(req)
+        self.router.handle(cx, req).await
     }
 
     /// Handle a request, recording virtual timestamps.

@@ -533,14 +533,25 @@ impl<H: Handler> Handler for CircuitBreakerMiddleware<H> {
         Box::pin(async move {
         let now = (self.time_getter)();
 
-        // TODO: Implement proper async circuit breaker integration
-        // For now, call the handler directly and apply circuit breaker logic after
+        // Get permit from circuit breaker
+        let permit = match self.breaker.should_allow(now) {
+            Ok(permit) => permit,
+            Err(err) => {
+                // Circuit breaker is open, return error response
+                return crate::web::response::Response::builder()
+                    .status(503)
+                    .body("Service temporarily unavailable")
+                    .unwrap_or_else(|_| crate::web::response::Response::default());
+            }
+        };
+
+        // Call the handler
         let resp = self.inner.call(cx, req).await;
         let result = if resp.status.is_server_error() {
-            self.breaker.record_error(now);
+            self.breaker.record_error(permit, "server_error", now);
             Err(HandlerServerError(resp))
         } else {
-            self.breaker.record_success(now);
+            self.breaker.record_success(permit, now);
             Ok(resp)
         };
 

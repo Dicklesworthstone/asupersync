@@ -7664,7 +7664,7 @@ mod otel_log_body_golden_test;
 /// OTLP request builders used by conformance, fuzz, and regression helpers.
 pub mod otlp_request_builder {
     use super::span_semantics::TestSpan;
-    use super::{MetricLabels, MetricsSnapshot, SpanConfig};
+    use super::{MetricLabels, MetricsSnapshot, PrivacyConfig, SpanConfig};
     use opentelemetry::trace::{SpanKind as ApiSpanKind, Status as ApiStatus};
     use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
     use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
