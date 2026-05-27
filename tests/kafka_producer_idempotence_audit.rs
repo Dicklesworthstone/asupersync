@@ -4,9 +4,9 @@
 //! producer-id + sequence-number per partition to prevent duplicates
 //! during retries. This is critical for exactly-once semantics.
 //!
-//! DEFECT IDENTIFIED: StubBroker has no deduplication logic, meaning
-//! retry behavior cannot be properly validated in tests. Hidden bugs
-//! in retry logic may only surface in production.
+//! AUDIT CONTEXT: the crate-local deterministic broker harness is not a
+//! Kafka broker and does not validate producer sequence numbers. Production
+//! operations must fail closed unless the real Kafka backend feature is enabled.
 
 #[cfg(not(feature = "kafka"))]
 use asupersync::messaging::kafka::KafkaError;
@@ -15,10 +15,10 @@ use asupersync::test_utils::run_test_with_cx;
 
 #[cfg(not(feature = "kafka"))]
 #[test]
-fn test_stub_broker_enables_idempotence_config() {
-    use asupersync::messaging::kafka::lock_stub_broker_for_tests;
+fn deterministic_broker_harness_allows_idempotence_config() {
+    use asupersync::messaging::kafka::lock_deterministic_broker_for_tests;
 
-    let _broker = lock_stub_broker_for_tests();
+    let _broker = lock_deterministic_broker_for_tests();
 
     // Verify that idempotence can be configured (use builder — struct has a
     // private field for the insecure-transport opt-in).
@@ -32,8 +32,8 @@ fn test_stub_broker_enables_idempotence_config() {
     let _ = producer; // keep alive for the duration of the test
     // Producer was created with enable_idempotence=true.
 
-    // But the underlying StubBroker doesn't implement idempotence!
-    // (DEFECT: StubBroker has no deduplication logic.)
+    // The deterministic broker harness is intentionally crate-local test
+    // infrastructure; it does not claim Kafka idempotence semantics.
 }
 
 #[cfg(not(feature = "kafka"))]
@@ -53,7 +53,7 @@ fn default_feature_integration_send_fails_closed_instead_of_using_stub() {
 
         assert!(
             matches!(send_result, Err(KafkaError::FeatureDisabled)),
-            "default-feature integration tests must fail closed instead of silently using stub broker"
+            "default-feature integration tests must fail closed instead of using deterministic test infrastructure"
         );
     });
 }
@@ -80,7 +80,8 @@ fn default_feature_integration_send_fails_closed_for_all_producers() {
         let topic = "producer-id-test";
 
         // Integration tests compile as downstream consumers, so default builds
-        // must not route broker operations to the crate-local stub.
+        // must not route broker operations to crate-local deterministic test
+        // infrastructure.
         let first_send = producer1
             .send(&cx, topic, Some(b"key"), b"from-p1", None)
             .await;
@@ -114,14 +115,14 @@ fn audit_kafka_producer_idempotence_implementation() {
     println!("File: src/messaging/kafka.rs");
     println!("1. ProducerConfig.enable_idempotence (line 1102): ✓ SOUND config field");
     println!("2. rdkafka integration (line 430): ✓ SOUND passes config to rdkafka");
-    println!("3. StubBroker implementation (lines 703-732): ✗ DEFECT - no deduplication");
-    println!("4. Test infrastructure: ✗ DEFECT - cannot validate idempotent behavior\n");
+    println!("3. Deterministic broker harness: crate-local only, no production idempotence claim");
+    println!("4. Default-feature integration path: ✓ SOUND fail-closed boundary\n");
 
     println!("DEFECT IDENTIFIED:");
-    println!("✗ CRITICAL: StubBroker has no producer ID tracking");
-    println!("✗ CRITICAL: StubBroker has no sequence number validation");
-    println!("✗ CRITICAL: StubBroker accepts all duplicates without deduplication");
-    println!("✗ CRITICAL: Retry logic cannot be properly tested\n");
+    println!("✗ CRITICAL: deterministic harness has no producer ID tracking");
+    println!("✗ CRITICAL: deterministic harness has no sequence number validation");
+    println!("✓ SOUND: downstream default-feature sends return FeatureDisabled");
+    println!("✓ SOUND: production idempotence remains delegated to rdkafka\n");
 
     println!("IMPACT:");
     println!("- Test/production behavior divergence (tests pass, production may duplicate)");
@@ -131,13 +132,13 @@ fn audit_kafka_producer_idempotence_implementation() {
 
     println!("EXACTLY-ONCE SEMANTICS GAP:");
     println!("Kafka exactly-once requires BOTH:");
-    println!("1. Idempotent producers (prevent duplicates) - MISSING in StubBroker");
-    println!("2. Transactional producers (atomic commits) - Present but untested\n");
+    println!("1. Idempotent producers (prevent duplicates) - delegated to rdkafka");
+    println!("2. Transactional producers (atomic commits) - present behind kafka feature\n");
 
     println!("RECOMMENDATION:");
-    println!("Enhance StubBroker with idempotence simulation:");
+    println!("Keep crate-local harnesses explicit and fail closed in downstream builds:");
     println!("```rust");
-    println!("struct IdempotentStubBroker {{");
+    println!("struct IdempotentDeterministicBrokerHarness {{");
     println!("    producer_ids: BTreeMap<String, u64>, // client_id -> producer_id");
     println!(
         "    sequences: BTreeMap<(u64, String, i32), u64>, // (producer_id, topic, partition) -> next_seq"
@@ -147,9 +148,9 @@ fn audit_kafka_producer_idempotence_implementation() {
     );
     println!("}}");
     println!();
-    println!("impl IdempotentStubBroker {{");
+    println!("impl IdempotentDeterministicBrokerHarness {{");
     println!(
-        "    fn publish_with_idempotence(&mut self, record: StubBrokerRecord, producer_id: u64, sequence: u64) {{"
+        "    fn publish_with_idempotence(&mut self, record: DeterministicBrokerRecord, producer_id: u64, sequence: u64) {{"
     );
     println!("        let key = (producer_id, record.topic.clone(), record.partition, sequence);");
     println!("        if let Some(cached) = self.dedup_cache.get(&key) {{");

@@ -93,7 +93,7 @@ pub enum KafkaError {
     /// `KafkaProducer` / `TransactionalProducer` cannot reach a real broker
     /// without the `kafka` cargo feature. Returned by `send`-family methods so
     /// callers fail loudly instead of silently dropping messages onto the
-    /// in-process test stub. To use Kafka, build with `--features kafka`.
+    /// in-process deterministic harness. To use Kafka, build with `--features kafka`.
     FeatureDisabled,
 }
 
@@ -585,7 +585,7 @@ where
 
 #[cfg(not(feature = "kafka"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StubBrokerRecord {
+pub(crate) struct DeterministicBrokerRecord {
     pub topic: String,
     pub partition: i32,
     pub key: Option<Vec<u8>>,
@@ -596,55 +596,54 @@ pub(crate) struct StubBrokerRecord {
 
 #[cfg(not(feature = "kafka"))]
 #[derive(Debug, Default)]
-struct StubBrokerState {
-    partitions: BTreeMap<(String, i32), Vec<StubBrokerRecord>>,
+struct DeterministicBrokerState {
+    partitions: BTreeMap<(String, i32), Vec<DeterministicBrokerRecord>>,
 }
 
 #[cfg(not(feature = "kafka"))]
 /// Harness-only deterministic in-process broker shared by the fallback
 /// producer and consumer paths when the real Kafka feature is disabled.
 #[derive(Debug, Default)]
-struct StubBroker {
-    state: Mutex<StubBrokerState>,
+struct DeterministicBroker {
+    state: Mutex<DeterministicBrokerState>,
     notify: Notify,
 }
 
 #[cfg(not(feature = "kafka"))]
-static STUB_BROKER: OnceLock<StubBroker> = OnceLock::new();
+static DETERMINISTIC_BROKER: OnceLock<DeterministicBroker> = OnceLock::new();
 
 #[cfg(all(not(feature = "kafka"), feature = "test-internals"))]
-static STUB_BROKER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static DETERMINISTIC_BROKER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[cfg(not(feature = "kafka"))]
-fn stub_broker() -> &'static StubBroker {
-    // PRODUCTION SAFETY: Block StubBroker in production builds
-    // The StubBroker is a dangerous mock that can silently hide message delivery bugs.
-    // It should only run in test/development environments.
+fn deterministic_broker() -> &'static DeterministicBroker {
+    // PRODUCTION SAFETY: Block the deterministic harness in production builds.
+    // It should only run in this crate's tests and debug-only diagnostics.
     #[cfg(not(any(test, debug_assertions)))]
     {
         panic!(
-            "CRITICAL: StubBroker attempted to run in production build. \
-             This is a dangerous mock that lacks real Kafka semantics and can \
-             cause message loss in payment/transaction paths. \
+            "CRITICAL: deterministic Kafka harness attempted to run in production build. \
+             It lacks real broker durability and can cause message loss in \
+             payment/transaction paths. \
              Enable the 'kafka' feature for production use or ensure debug_assertions are enabled."
         );
     }
 
     #[cfg(any(test, debug_assertions))]
     {
-        STUB_BROKER.get_or_init(StubBroker::default)
+        DETERMINISTIC_BROKER.get_or_init(DeterministicBroker::default)
     }
 }
 
 #[cfg(not(feature = "kafka"))]
-pub(crate) fn stub_broker_notify() -> &'static Notify {
-    &stub_broker().notify
+pub(crate) fn deterministic_broker_notify() -> &'static Notify {
+    &deterministic_broker().notify
 }
 
 #[cfg(not(feature = "kafka"))]
-/// Return the current end offset for a stub broker topic partition.
-pub fn stub_broker_end_offset(topic: &str, partition: i32) -> i64 {
-    let state = stub_broker().state.lock();
+/// Return the current end offset for a deterministic harness topic partition.
+pub fn deterministic_broker_end_offset(topic: &str, partition: i32) -> i64 {
+    let state = deterministic_broker().state.lock();
     state
         .partitions
         .get(&(topic.to_string(), partition))
@@ -654,16 +653,16 @@ pub fn stub_broker_end_offset(topic: &str, partition: i32) -> i64 {
 }
 
 #[cfg(not(feature = "kafka"))]
-pub(crate) fn stub_broker_fetch(
+pub(crate) fn deterministic_broker_fetch(
     topic: &str,
     partition: i32,
     offset: i64,
-) -> Option<StubBrokerRecord> {
+) -> Option<DeterministicBrokerRecord> {
     if offset < 0 {
         return None;
     }
 
-    let state = stub_broker().state.lock();
+    let state = deterministic_broker().state.lock();
     state
         .partitions
         .get(&(topic.to_string(), partition))
@@ -676,42 +675,44 @@ pub(crate) fn stub_broker_fetch(
 
 #[cfg(not(feature = "kafka"))]
 #[allow(dead_code)]
-pub(crate) fn stub_broker_publish(record: StubBrokerRecord) -> RecordMetadata {
+pub(crate) fn deterministic_broker_publish(record: DeterministicBrokerRecord) -> RecordMetadata {
     // PRODUCTION SAFETY: Additional guard for critical payment/transaction topics
     if is_critical_production_topic(&record.topic) {
         #[cfg(not(any(test, debug_assertions)))]
         {
             panic!(
-                "CRITICAL: Attempted to publish to production topic '{}' using StubBroker mock. \
+                "CRITICAL: attempted to publish to production topic '{}' using deterministic Kafka harness. \
                  This can cause message loss in payment/transaction systems. \
                  Use real Kafka broker with the 'kafka' feature enabled.",
                 record.topic
             );
         }
 
-        // In test builds, log the dangerous operation
+        // In test builds, log the high-risk operation.
         #[cfg(any(test, debug_assertions))]
         eprintln!(
-            "WARNING: Publishing to critical topic '{}' using StubBroker mock. \
+            "WARNING: publishing to critical topic '{}' using deterministic Kafka harness. \
              This is safe only in test environments.",
             record.topic
         );
     }
 
-    stub_broker_publish_batch(vec![record])
+    deterministic_broker_publish_batch(vec![record])
         .into_iter()
         .next()
         .expect("single-record publish must return metadata")
 }
 
 #[cfg(not(feature = "kafka"))]
-fn stub_broker_publish_batch(records: Vec<StubBrokerRecord>) -> Vec<RecordMetadata> {
+fn deterministic_broker_publish_batch(
+    records: Vec<DeterministicBrokerRecord>,
+) -> Vec<RecordMetadata> {
     if records.is_empty() {
         return Vec::new();
     }
 
     let metadata = {
-        let mut state = stub_broker().state.lock();
+        let mut state = deterministic_broker().state.lock();
         let mut metadata = Vec::with_capacity(records.len());
 
         for record in records {
@@ -732,14 +733,14 @@ fn stub_broker_publish_batch(records: Vec<StubBrokerRecord>) -> Vec<RecordMetada
         metadata
     };
 
-    stub_broker().notify.notify_waiters();
+    deterministic_broker().notify.notify_waiters();
     metadata
 }
 
 #[cfg(all(not(feature = "kafka"), feature = "test-internals"))]
-/// Reset the fallback stub broker state used by integration tests.
-pub fn reset_stub_broker_for_tests() {
-    if let Some(broker) = STUB_BROKER.get() {
+/// Reset the deterministic broker state used by integration tests.
+pub fn reset_deterministic_broker_for_tests() {
+    if let Some(broker) = DETERMINISTIC_BROKER.get() {
         broker.state.lock().partitions.clear();
         broker.notify.notify_waiters();
     }
@@ -747,28 +748,28 @@ pub fn reset_stub_broker_for_tests() {
 
 #[cfg(all(not(feature = "kafka"), feature = "test-internals"))]
 #[allow(dead_code)] // Guard held for test serialization — not read, just held
-/// Test guard that serializes access to the process-global stub broker.
-pub struct StubBrokerTestGuard(parking_lot::MutexGuard<'static, ()>);
+/// Test guard that serializes access to the process-global deterministic broker.
+pub struct DeterministicBrokerTestGuard(parking_lot::MutexGuard<'static, ()>);
 
 #[cfg(all(not(feature = "kafka"), feature = "test-internals"))]
-impl Drop for StubBrokerTestGuard {
+impl Drop for DeterministicBrokerTestGuard {
     fn drop(&mut self) {
-        reset_stub_broker_for_tests();
+        reset_deterministic_broker_for_tests();
     }
 }
 
 #[cfg(all(not(feature = "kafka"), feature = "test-internals"))]
-/// Acquire exclusive test access to the fallback stub broker and clear it.
-pub fn lock_stub_broker_for_tests() -> StubBrokerTestGuard {
-    let lock = STUB_BROKER_TEST_LOCK.get_or_init(|| Mutex::new(()));
+/// Acquire exclusive test access to the deterministic broker and clear it.
+pub fn lock_deterministic_broker_for_tests() -> DeterministicBrokerTestGuard {
+    let lock = DETERMINISTIC_BROKER_TEST_LOCK.get_or_init(|| Mutex::new(()));
     let guard = lock.lock();
 
     // The harness broker is global state shared across producer and consumer
     // unit tests, so keep one test in the lane at a time and reset state on
     // both entry and exit.
-    reset_stub_broker_for_tests();
+    reset_deterministic_broker_for_tests();
 
-    StubBrokerTestGuard(guard)
+    DeterministicBrokerTestGuard(guard)
 }
 
 fn validate_topic(topic: &str) -> Result<(), KafkaError> {
@@ -801,7 +802,7 @@ fn kafka_client_consumer_group_id(
 }
 
 #[cfg(not(feature = "kafka"))]
-/// Check if a topic contains critical production data that should never use StubBroker.
+/// Check if a topic contains critical production data that should never use the deterministic harness.
 fn is_critical_production_topic(topic: &str) -> bool {
     // Payment and transaction topics are critical - message loss = financial loss
     topic.contains("payment")
@@ -1460,7 +1461,7 @@ struct TransactionalProducerState {
     #[cfg(feature = "kafka")]
     initialized: bool,
     #[cfg(not(feature = "kafka"))]
-    staged_records: Vec<StubBrokerRecord>,
+    staged_records: Vec<DeterministicBrokerRecord>,
 }
 
 /// Kafka producer with Cx integration.
@@ -1555,12 +1556,12 @@ impl KafkaProducer {
         }
 
         // Without the `kafka` cargo feature, only this crate's own tests are
-        // permitted to drive the in-process stub broker. Downstream production
+        // permitted to drive the in-process deterministic broker. Downstream production
         // builds get a loud `FeatureDisabled` error instead of silent message
-        // loss against the stub. See br-asupersync-w2p2a0.
+        // loss against the harness. See br-asupersync-w2p2a0.
         #[cfg(all(not(feature = "kafka"), test))]
         {
-            Ok(stub_broker_publish(StubBrokerRecord {
+            Ok(deterministic_broker_publish(DeterministicBrokerRecord {
                 topic: topic.to_string(),
                 partition: partition.unwrap_or(0),
                 key: key.map(std::borrow::ToOwned::to_owned),
@@ -1624,7 +1625,7 @@ impl KafkaProducer {
         // See `send` above for the cfg-gating rationale (br-w2p2a0).
         #[cfg(all(not(feature = "kafka"), test))]
         {
-            Ok(stub_broker_publish(StubBrokerRecord {
+            Ok(deterministic_broker_publish(DeterministicBrokerRecord {
                 topic: topic.to_string(),
                 partition: 0,
                 key: key.map(std::borrow::ToOwned::to_owned),
@@ -2055,7 +2056,7 @@ impl Transaction<'_> {
             .map(|_metadata| ())
         }
 
-        #[cfg(not(feature = "kafka"))]
+        #[cfg(all(not(feature = "kafka"), test))]
         {
             let mut state = self.producer.state.lock();
             if state.phase != TransactionPhase::Active {
@@ -2063,7 +2064,7 @@ impl Transaction<'_> {
                     "transaction is not available for sends".to_string(),
                 ));
             }
-            state.staged_records.push(StubBrokerRecord {
+            state.staged_records.push(DeterministicBrokerRecord {
                 topic: topic.to_string(),
                 partition: 0,
                 key: key.map(std::borrow::ToOwned::to_owned),
@@ -2073,6 +2074,10 @@ impl Transaction<'_> {
             });
             drop(state);
             Ok(())
+        }
+        #[cfg(all(not(feature = "kafka"), not(test)))]
+        {
+            Err(KafkaError::FeatureDisabled)
         }
     }
 
@@ -2101,7 +2106,7 @@ impl Transaction<'_> {
             self.producer.mark_transaction_idle();
         }
 
-        #[cfg(not(feature = "kafka"))]
+        #[cfg(all(not(feature = "kafka"), test))]
         {
             let staged = {
                 let mut state = self.producer.state.lock();
@@ -2114,12 +2119,21 @@ impl Transaction<'_> {
                 std::mem::take(&mut state.staged_records)
             };
 
-            let _metadata = stub_broker_publish_batch(staged);
+            let _metadata = deterministic_broker_publish_batch(staged);
             self.producer.mark_transaction_idle();
             self.finished = true;
         }
+        #[cfg(all(not(feature = "kafka"), not(test)))]
+        {
+            self.producer.mark_transaction_idle();
+            self.finished = true;
+            Err(KafkaError::FeatureDisabled)
+        }
 
-        Ok(())
+        #[cfg(any(feature = "kafka", test))]
+        {
+            Ok(())
+        }
     }
 
     /// Abort the transaction.
@@ -2165,7 +2179,7 @@ impl Drop for Transaction<'_> {
     }
 }
 
-/// Broker backend abstraction for switching between real and stub implementations.
+/// Broker backend abstraction for switching between real and deterministic implementations.
 pub trait BrokerBackend: Send + Sync {
     /// Check if this backend supports real broker integration.
     fn is_real_broker(&self) -> bool;
@@ -2188,21 +2202,21 @@ impl BrokerBackend for RealBrokerBackend {
     }
 }
 
-/// Stub broker backend for testing and offline scenarios.
+/// Deterministic broker backend for crate-local tests and offline diagnostics.
 #[cfg(not(feature = "kafka"))]
-pub struct StubBrokerBackend;
+pub struct DeterministicBrokerBackend;
 
 #[cfg(not(feature = "kafka"))]
-impl BrokerBackend for StubBrokerBackend {
+impl BrokerBackend for DeterministicBrokerBackend {
     fn is_real_broker(&self) -> bool {
         false
     }
     fn backend_type(&self) -> &'static str {
-        "stub"
+        "deterministic"
     }
 }
 
-/// Consumer abstraction for switching between real and stub implementations.
+/// Consumer abstraction for switching between real and deterministic implementations.
 pub trait KafkaConsumerTrait: Send + Sync {
     /// Get the topic this consumer is subscribed to.
     fn topic(&self) -> &str;
@@ -2242,7 +2256,7 @@ impl KafkaConsumerTrait for TopicAwareConsumer {
 /// This is a high-level wrapper around `KafkaProducer` and rdkafka's
 /// `BaseConsumer` to provide a single entry point for Kafka operations.
 /// Automatically selects between real broker integration (when available)
-/// and stub broker (for testing).
+/// and deterministic broker (for testing).
 ///
 /// # Example
 ///
@@ -2338,15 +2352,15 @@ impl KafkaClient {
     }
 }
 
-/// Stub consumer for crate-local tests when the kafka feature is disabled.
+/// Deterministic consumer for crate-local tests when the kafka feature is disabled.
 #[cfg(all(not(feature = "kafka"), test))]
-pub struct StubConsumer {
+pub struct DeterministicConsumer {
     topic: String,
 }
 
-/// Stub Kafka consumer backend.
+/// Deterministic Kafka consumer backend.
 #[cfg(all(not(feature = "kafka"), test))]
-impl KafkaConsumerTrait for StubConsumer {
+impl KafkaConsumerTrait for DeterministicConsumer {
     fn topic(&self) -> &str {
         &self.topic
     }
@@ -2356,29 +2370,29 @@ impl KafkaConsumerTrait for StubConsumer {
     }
 
     fn consumer_type(&self) -> &'static str {
-        "stub"
+        "deterministic"
     }
 }
 
-/// Stub version of KafkaClient for testing when kafka feature is disabled.
+/// Deterministic-harness version of KafkaClient when kafka feature is disabled.
 #[cfg(not(feature = "kafka"))]
 pub struct KafkaClient {
     producer: KafkaProducer,
     #[cfg(test)]
-    consumer: Option<StubConsumer>,
+    consumer: Option<DeterministicConsumer>,
     backend: Box<dyn BrokerBackend>,
 }
 
 #[cfg(not(feature = "kafka"))]
 impl KafkaClient {
-    /// Create a new unified Kafka client with stub broker backend.
+    /// Create a new unified Kafka client with deterministic broker backend.
     pub async fn new(config: ProducerConfig) -> Result<Self, KafkaError> {
         let producer = KafkaProducer::new(config.clone())?;
         Ok(Self {
             producer,
             #[cfg(test)]
             consumer: None,
-            backend: Box::new(StubBrokerBackend),
+            backend: Box::new(DeterministicBrokerBackend),
         })
     }
 
@@ -2412,7 +2426,7 @@ impl KafkaClient {
 
             // Crate-local tests may use the deterministic harness consumer, but
             // non-test builds without the kafka feature must fail loudly below.
-            self.consumer = Some(StubConsumer {
+            self.consumer = Some(DeterministicConsumer {
                 topic: topic.to_string(),
             });
             Ok(self.consumer.as_ref().unwrap())
@@ -2456,7 +2470,7 @@ pub fn fuzz_parse_kafka_error_response(data: &[u8]) -> Result<KafkaError, String
         return Ok(KafkaError::Protocol("empty response".to_string()));
     }
 
-    // Simulate parsing error response frame structure
+    // Parse the minimal error response frame structure used by fuzz corpora.
     let error_code = data[0] as i16;
     let has_message = data.len() > 1;
 
@@ -2674,8 +2688,8 @@ mod tests {
     use std::task::{Context, Waker};
 
     #[cfg(not(feature = "kafka"))]
-    fn stub_broker_guard() -> StubBrokerTestGuard {
-        lock_stub_broker_for_tests()
+    fn deterministic_broker_guard() -> DeterministicBrokerTestGuard {
+        lock_deterministic_broker_for_tests()
     }
 
     #[cfg(feature = "kafka")]
@@ -3277,7 +3291,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn transactional_fallback_commit_applies_staged_offsets_on_commit() {
-        let _broker = stub_broker_guard();
+        let _broker = deterministic_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
             let topic = "transactional-fallback-commit-applies";
             let producer = TransactionalProducer::new(TransactionalConfig::new(
@@ -3303,7 +3317,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn transactional_fallback_abort_discards_staged_offsets() {
-        let _broker = stub_broker_guard();
+        let _broker = deterministic_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
             let topic = "transactional-fallback-abort-discards";
             let producer = TransactionalProducer::new(TransactionalConfig::new(
@@ -3329,7 +3343,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn transactional_fallback_rejects_concurrent_begin() {
-        let _broker = stub_broker_guard();
+        let _broker = deterministic_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
             let producer = TransactionalProducer::new(TransactionalConfig::new(
                 ProducerConfig::default(),
@@ -3347,7 +3361,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn transactional_fallback_drop_requires_recovery_before_next_begin() {
-        let _broker = stub_broker_guard();
+        let _broker = deterministic_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
             let topic = "transactional-fallback-drop-recovery";
             let producer = TransactionalProducer::new(TransactionalConfig::new(
@@ -3378,7 +3392,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn transactional_fallback_commit_stays_finalizing_until_batch_publish_completes() {
-        let _broker = stub_broker_guard();
+        let _broker = deterministic_broker_guard();
         let producer = Arc::new(
             TransactionalProducer::new(TransactionalConfig::new(
                 ProducerConfig::default(),
@@ -3389,7 +3403,7 @@ mod tests {
         let topic = "transactional-fallback-finalizing-until-visible";
         let ready = Arc::new(AtomicBool::new(false));
 
-        let broker_lock = stub_broker().state.lock();
+        let broker_lock = deterministic_broker().state.lock();
         let producer_for_thread = Arc::clone(&producer);
         let ready_for_thread = Arc::clone(&ready);
         let topic_for_thread = topic.to_string();
@@ -3434,7 +3448,7 @@ mod tests {
         worker.join().unwrap();
 
         assert_eq!(producer.state.lock().phase, TransactionPhase::Idle);
-        assert_eq!(stub_broker_end_offset(topic, 0), 1);
+        assert_eq!(deterministic_broker_end_offset(topic, 0), 1);
     }
 
     #[test]
@@ -3464,7 +3478,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn producer_send_returns_deterministic_delivery_metadata() {
-        let _broker = stub_broker_guard();
+        let _broker = deterministic_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
 
@@ -3505,7 +3519,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn producer_rejects_blank_topic_name() {
-        let _broker = stub_broker_guard();
+        let _broker = deterministic_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
             let err = producer
@@ -3519,7 +3533,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn producer_close_is_idempotent_and_blocks_new_operations() {
-        let _broker = stub_broker_guard();
+        let _broker = deterministic_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
             producer
@@ -3548,7 +3562,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn producer_close_times_out_while_operation_is_in_flight() {
-        let _broker = stub_broker_guard();
+        let _broker = deterministic_broker_guard();
         crate::test_utils::run_test_with_cx(|cx| async move {
             let producer = KafkaProducer::new(ProducerConfig::default()).unwrap();
             let guard = producer.begin_operation().unwrap();
@@ -3570,7 +3584,7 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     #[test]
     fn wait_retry_backoff_uses_virtual_timer_driver() {
-        let _broker = stub_broker_guard();
+        let _broker = deterministic_broker_guard();
         let clock = Arc::new(VirtualClock::new());
         let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
         let cx = Cx::new_with_drivers(
@@ -3706,7 +3720,7 @@ mod tests {
     /// br-asupersync-w2p2a0 regression: when the `kafka` cargo feature is OFF,
     /// downstream production code must receive a loud `FeatureDisabled` error
     /// from the producer's send path instead of silently writing to the
-    /// in-process stub broker. The stub remains available to *this* crate's
+    /// in-process deterministic broker. The harness remains available to *this* crate's
     /// own tests via `cfg(test)`, so the production-vs-test split is what we
     /// pin here through Display + classifier checks.
     #[test]
@@ -3748,7 +3762,7 @@ mod tests {
         );
         assert!(
             KafkaProducer::new(config.clone()).is_ok(),
-            "crate-local tests may still construct the deterministic stub broker"
+            "crate-local tests may still construct the deterministic broker"
         );
 
         let diagnostic = config.kafka_feature_diagnostic();

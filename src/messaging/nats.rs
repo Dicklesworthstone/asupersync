@@ -818,14 +818,17 @@ fn parse_nats_jwt_claims(jwt: &str) -> Result<JwtClaimsSummary, NatsError> {
     // Include clock skew tolerance to handle network delays and minor time differences.
     if let Some(exp_timestamp) = expires_at {
         // Get current time as Unix timestamp (seconds since epoch)
-        let now = std::time::SystemTime::now()
+        let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| {
                 NatsError::InvalidAuth(
                     "system clock error: cannot determine current time".to_string(),
                 )
             })?
-            .as_secs() as i64;
+            .as_secs();
+        let now = i64::try_from(now_secs).map_err(|_| {
+            NatsError::InvalidAuth("system clock error: current time exceeds i64".to_string())
+        })?;
 
         // Clock skew tolerance: allow 60 seconds of leeway for network delays
         // and minor time synchronization differences between client and server
