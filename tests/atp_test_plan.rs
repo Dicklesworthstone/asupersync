@@ -65,7 +65,7 @@ fn test_critical_path_modules_have_test_requirements() {
         let module_line = ledger_content
             .lines()
             .find(|line| line.contains(module))
-            .expect(&format!("Could not find module '{}' in ledger", module));
+            .unwrap_or_else(|| panic!("Could not find module '{}' in ledger", module));
 
         // Check that the row has all required columns
         let pipe_count = module_line.matches('|').count();
@@ -117,14 +117,14 @@ fn test_module_test_naming_conventions() {
         let test_name = module_path
             .replace("src/", "")
             .replace(".rs", "_test.rs")
-            .replace("/", "_");
+            .replace('/', "_");
         let expected_test_path = format!("tests/{}", test_name);
 
         // For now, we just check that if a test file exists, it follows the convention
         // In the future, this could be made stricter to require test files
         if Path::new(&expected_test_path).exists() {
             let test_content = fs::read_to_string(&expected_test_path)
-                .expect(&format!("Could not read test file {}", expected_test_path));
+                .unwrap_or_else(|_| panic!("Could not read test file {}", expected_test_path));
 
             // Basic validation that it looks like a proper test file
             assert!(
@@ -174,7 +174,7 @@ fn discover_atp_modules() -> HashSet<String> {
     if let Ok(entries) = fs::read_dir("src/atp") {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map(|s| s == "rs").unwrap_or(false) {
+            if path.extension().is_some_and(|s| s == "rs") {
                 if let Some(path_str) = path.to_str() {
                     modules.insert(path_str.to_string());
                 }
@@ -190,7 +190,11 @@ fn discover_atp_modules() -> HashSet<String> {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                if file_name.starts_with("atp_") && file_name.ends_with(".rs") {
+                if file_name.starts_with("atp_")
+                    && Path::new(file_name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+                {
                     if let Some(path_str) = path.to_str() {
                         modules.insert(path_str.to_string());
                     }
@@ -211,7 +215,7 @@ fn scan_directory_recursive(dir: &str, modules: &mut HashSet<String>) {
                 if let Some(path_str) = path.to_str() {
                     scan_directory_recursive(path_str, modules);
                 }
-            } else if path.extension().map(|s| s == "rs").unwrap_or(false) {
+            } else if path.extension().is_some_and(|s| s == "rs") {
                 if let Some(path_str) = path.to_str() {
                     modules.insert(path_str.to_string());
                 }
@@ -234,7 +238,11 @@ fn parse_ledger_modules() -> HashSet<String> {
                         .trim()
                         .trim_start_matches('`')
                         .trim_end_matches('`');
-                    if module_path.starts_with("src/") && module_path.ends_with(".rs") {
+                    if module_path.starts_with("src/")
+                        && Path::new(module_path)
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+                    {
                         modules.insert(module_path.to_string());
                     }
                 }
