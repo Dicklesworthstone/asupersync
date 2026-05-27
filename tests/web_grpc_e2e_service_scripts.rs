@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use asupersync::Cx;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::server::Interceptor;
@@ -55,6 +56,14 @@ fn init_test(name: &str) {
     init_test_logging();
     test_phase!(name);
 }
+
+trait TestHandlerSyncExt: Handler {
+    fn call_sync(&self, req: Request) -> asupersync::web::response::Response {
+        futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
+    }
+}
+
+impl<T> TestHandlerSyncExt for T where T: Handler + ?Sized {}
 
 // ============================================================================
 // Structured log entry type for schema conformance
@@ -405,7 +414,7 @@ fn t512_e2e_08_rest_auth_cors_security_chain() {
     let req = Request::new("GET", "/")
         .with_header("origin", "https://app.example.com")
         .with_header("authorization", "Bearer e2e-token");
-    let resp = with_security.call(req);
+    let resp = with_security.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "protected-data");
 
@@ -414,7 +423,7 @@ fn t512_e2e_08_rest_auth_cors_security_chain() {
 
     test_section!("unauthenticated_blocked");
     let req = Request::new("GET", "/").with_header("origin", "https://app.example.com");
-    let resp = with_security.call(req);
+    let resp = with_security.call_sync(req);
     assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 
     test_complete!("t512_e2e_08_rest_auth_cors_security_chain");
@@ -635,7 +644,7 @@ fn t512_e2e_15_panic_recovery_drill() {
 
     test_section!("panic_caught_500_returned");
     let req = Request::new("GET", "/crash");
-    let resp = safe.call(req);
+    let resp = safe.call_sync(req);
     assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
 
     let entry = E2eLogEntry::new(
@@ -651,7 +660,7 @@ fn t512_e2e_15_panic_recovery_drill() {
     // After panic recovery, the middleware should still be functional
     let normal_handler = FnHandler::new(|| "ok");
     let safe2 = CatchPanicMiddleware::new(normal_handler);
-    let resp = safe2.call(Request::new("GET", "/ok"));
+    let resp = safe2.call_sync(Request::new("GET", "/ok"));
     assert_eq!(resp.status, StatusCode::OK);
 
     test_complete!("t512_e2e_15_panic_recovery_drill");
@@ -666,7 +675,7 @@ fn t512_e2e_16_load_shed_backpressure_drill() {
 
     test_section!("all_requests_shed_at_zero_capacity");
     for i in 0..5 {
-        let resp = shed.call(Request::new("GET", "/"));
+        let resp = shed.call_sync(Request::new("GET", "/"));
         assert_eq!(
             resp.status,
             StatusCode::SERVICE_UNAVAILABLE,
@@ -705,7 +714,7 @@ fn t512_e2e_17_body_limit_rejection_drill() {
 
     for (size, expected_status) in sizes.iter().zip(expected.iter()) {
         let body = vec![b'a'; *size];
-        let resp = limited.call(Request::new("POST", "/").with_body(body));
+        let resp = limited.call_sync(Request::new("POST", "/").with_body(body));
         assert_eq!(
             resp.status, *expected_status,
             "body size {size}: expected {expected_status:?}"
@@ -764,7 +773,7 @@ fn t512_e2e_19_no_token_leak_in_response() {
     test_section!("token_not_in_body_or_headers");
     let token = "Bearer e2e-secret-token-12345";
     let req = Request::new("GET", "/").with_header("authorization", token);
-    let resp = with_id.call(req);
+    let resp = with_id.call_sync(req);
 
     let body = std::str::from_utf8(&resp.body).unwrap_or("");
     assert!(!body.contains("e2e-secret-token-12345"), "token in body");
@@ -899,7 +908,7 @@ fn t512_e2e_23_custom_header_injection_e2e() {
     let with_id = RequestIdMiddleware::new(with_powered, "x-request-id");
 
     test_section!("both_custom_headers_present");
-    let resp = with_id.call(Request::new("GET", "/"));
+    let resp = with_id.call_sync(Request::new("GET", "/"));
     assert_eq!(resp.status, StatusCode::OK);
     assert!(resp.headers.contains_key("x-request-id"));
     assert_eq!(

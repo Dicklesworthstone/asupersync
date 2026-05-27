@@ -1176,16 +1176,10 @@ impl Server {
     /// all typed extensions that could contain sensitive authentication data.
     ///
     /// Called automatically by error handling paths in dispatch_unary.
-    fn clear_auth_context_from_request(request: &Request<Bytes>) {
-        // Clear AuthContext containing principal, scopes, claims
-        // TODO: Implement remove_typed method in Extensions, or clear context differently
-        // For now, skip explicit clearing as extensions are cleared per-request
-        let _ = request; // Suppress unused parameter warning
-
-        // Clear any other sensitive typed extensions that might be added
-        // by custom interceptors (follow pattern for future extensions)
-        // Note: We only clear explicitly known sensitive types to avoid
-        // accidentally clearing legitimate handler-specific data.
+    fn clear_auth_context_from_request(request: &mut Request<Bytes>) {
+        let _ = request
+            .extensions_mut()
+            .remove_typed::<super::interceptor::AuthContext>();
     }
 
     /// Returns the registered interceptor chain (br-asupersync-mfk14i).
@@ -1270,7 +1264,7 @@ impl Server {
                     }
                 }
                 // asupersync-gqbtfc: Clear AuthContext to prevent state leakage
-                Self::clear_auth_context_from_request(&request);
+                Self::clear_auth_context_from_request(&mut request);
                 return Err(status);
             }
         }
@@ -1293,7 +1287,7 @@ impl Server {
         // BEFORE invoking. This matches the AuthInterceptor contract
         // where downstream response-side interceptors may need to
         // read the request that produced the response.
-        let request_snapshot = request.snapshot(Bytes::new());
+        let mut request_snapshot = request.snapshot(Bytes::new());
 
         // ── Phase 2: invoke the user handler with deadline enforcement. ─
         // Parse deadline from grpc-timeout header to enforce request cancellation.
@@ -1310,7 +1304,7 @@ impl Server {
             // Check if already expired before starting handler
             if call_context.is_expired() {
                 // asupersync-gqbtfc: Clear AuthContext on deadline expiry
-                Self::clear_auth_context_from_request(&request_snapshot);
+                Self::clear_auth_context_from_request(&mut request_snapshot);
                 return Err(Status::deadline_exceeded(
                     "Request deadline already expired",
                 ));
@@ -1324,7 +1318,7 @@ impl Server {
             // Additional safety check: if remaining duration is very small, fail fast
             if remaining_duration < Duration::from_millis(1) {
                 // asupersync-gqbtfc: Clear AuthContext on deadline expiry
-                Self::clear_auth_context_from_request(&request_snapshot);
+                Self::clear_auth_context_from_request(&mut request_snapshot);
                 return Err(Status::deadline_exceeded(
                     "Request deadline already expired or too close to expiry",
                 ));
@@ -1339,7 +1333,7 @@ impl Server {
                 Err(_timeout) => {
                     // Deadline exceeded during handler execution
                     // asupersync-gqbtfc: Clear AuthContext on timeout to prevent state leakage
-                    Self::clear_auth_context_from_request(&request_snapshot);
+                    Self::clear_auth_context_from_request(&mut request_snapshot);
                     return Err(Status::deadline_exceeded("Request deadline exceeded"));
                 }
             }
@@ -1363,7 +1357,7 @@ impl Server {
                     }
                 }
                 // asupersync-gqbtfc: Clear AuthContext after handler error to prevent state leakage
-                Self::clear_auth_context_from_request(&request_snapshot);
+                Self::clear_auth_context_from_request(&mut request_snapshot);
                 return Err(status);
             }
         };
@@ -1379,7 +1373,7 @@ impl Server {
                     }
                 }
                 // asupersync-gqbtfc: Clear AuthContext after response error to prevent state leakage
-                Self::clear_auth_context_from_request(&request_snapshot);
+                Self::clear_auth_context_from_request(&mut request_snapshot);
                 return Err(status);
             }
         }
@@ -2285,9 +2279,8 @@ mod tests {
     fn test_reflection_anonymous_allows_access() {
         init_test("test_reflection_anonymous_allows_access");
 
-        let reflection = ReflectionService::new()
-            .allow_anonymous()
-            .register_handler(&TestService);
+        let reflection = ReflectionService::new().allow_anonymous();
+        reflection.register_handler(&TestService);
 
         // Should be allowed in anonymous mode
         let result = reflection.list_services();
@@ -3151,7 +3144,7 @@ mod tests {
         let long_binary = vec![0u8; MAX_HEADER_VALUE_LEN + 1];
         let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
             "x-large-binary".to_string(),
-            super::super::streaming::MetadataValue::Binary(long_binary),
+            super::super::streaming::MetadataValue::Binary(long_binary.into()),
         )]);
         let status = enforce_metadata_size_limit(&metadata, 64 * 1024)
             .expect_err("oversized binary value must be rejected");
@@ -4833,7 +4826,7 @@ mod tests {
                 *handler_request_ref.lock() = Some(req);
 
                 // Simulate work that will exceed the deadline
-                crate::time::sleep(Duration::from_millis(100)).await;
+                crate::time::sleep(crate::types::Time::ZERO, Duration::from_millis(100)).await;
 
                 Ok::<Response<Bytes>, Status>(Response::new(Bytes::new()))
             }
@@ -5945,7 +5938,8 @@ mod tests {
                 for _ in 0..20 {
                     futures_lite::future::yield_now().await;
                     // Small async delay to allow cancellation
-                    let _ = crate::time::sleep(Duration::from_millis(1)).await;
+                    let _ = crate::time::sleep(crate::types::Time::ZERO, Duration::from_millis(1))
+                        .await;
                 }
 
                 handler_completed_clone.store(true, Ordering::Relaxed);
@@ -5962,7 +5956,7 @@ mod tests {
                 "Request should fail with DEADLINE_EXCEEDED for async operations"
             );
 
-            if let Err(status) = result {
+            if let Err(ref status) = result {
                 assert_eq!(
                     status.code(),
                     Code::DeadlineExceeded,

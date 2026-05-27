@@ -8,6 +8,8 @@
 
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind};
+#[cfg(feature = "messaging-fabric")]
+use crate::messaging::capability::FabricCapability;
 use crate::security::authenticated::AuthenticatedSymbol;
 use crate::sync::Mutex;
 use crate::sync::OwnedMutexGuard;
@@ -1688,19 +1690,20 @@ impl RoutingTable {
     ///
     /// br-asupersync-49wynd: Prevents unauthorized endpoint removal DoS attacks.
     /// Admin capabilities are required for destructive routing operations.
-    fn require_admin_capability(&self, _cx: &Cx) -> Result<(), Error> {
-        // TODO br-asupersync-49wynd: Implement proper admin capability checking
-        // when fine-grained administrative permissions are added to the capability system.
-        // For now, this provides the authorization framework structure.
-        //
-        // In production deployments, this should be extended to check for:
-        // - Admin-level macaroon tokens
-        // - RBAC permissions for endpoint management
-        // - Service mesh admin capabilities
-        //
-        // This prevents the DoS vector by ensuring only authorized callers
-        // can remove endpoints from the routing table.
-        Ok(())
+    fn require_admin_capability(&self, cx: &Cx) -> Result<(), Error> {
+        #[cfg(feature = "messaging-fabric")]
+        {
+            if cx.check_fabric_capability(&FabricCapability::AdminControl) {
+                return Ok(());
+            }
+        }
+        #[cfg(not(feature = "messaging-fabric"))]
+        {
+            let _ = cx;
+        }
+
+        Err(Error::new(ErrorKind::AdmissionDenied)
+            .with_message("routing table endpoint administration requires AdminControl capability"))
     }
 
     /// Registers an endpoint.
@@ -2883,7 +2886,7 @@ mod tests {
         endpoints: &[Arc<Endpoint>],
         target: EndpointId,
     ) -> ObjectId {
-        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, seed);
+        let lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::HashBased, seed);
         for key in 0..10_000 {
             let object_id = ObjectId::new_for_test(key);
             if lb
@@ -2900,6 +2903,14 @@ mod tests {
         let id = SymbolId::new_for_test(1, 0, esi);
         let symbol = Symbol::new(id, vec![esi as u8], SymbolKind::Source);
         AuthenticatedSymbol::new_verified(symbol, AuthenticationTag::zero())
+    }
+
+    #[cfg(feature = "messaging-fabric")]
+    fn test_admin_cx() -> Cx {
+        let cx = Cx::for_testing();
+        cx.grant_fabric_capability(FabricCapability::AdminControl)
+            .expect("admin capability grant should be valid");
+        cx
     }
 
     fn scrub_endpoint_region(region: Option<RegionId>) -> Option<&'static str> {
@@ -3224,7 +3235,7 @@ mod tests {
 
     #[test]
     fn test_load_balancer_hash_based_select_n_is_order_invariant() {
-        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 0x0057_AF1D_u64);
+        let lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::HashBased, 0x0057_AF1D_u64);
         let endpoints: Vec<Arc<Endpoint>> = (1..=8).map(|i| Arc::new(test_endpoint(i))).collect();
         let permuted = vec![
             endpoints[5].clone(),
@@ -3260,7 +3271,7 @@ mod tests {
 
     #[test]
     fn test_load_balancer_hash_based_select_n_preserves_survivors_under_endpoint_removal_m0izs9() {
-        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 0x0057_AF1D_u64);
+        let lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::HashBased, 0x0057_AF1D_u64);
         let oid = ObjectId::new_for_test(42);
 
         // Original membership: 8 endpoints
@@ -3319,8 +3330,8 @@ mod tests {
     fn test_bounded_load_hash_keeps_primary_when_within_capacity() {
         let seed = 0xB011_D1ED_u64;
         let config = BoundedLoadConfig::new(0, 1, 1);
-        let hash_lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, seed);
-        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+        let hash_lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::HashBased, seed);
+        let bounded_lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::BoundedLoadHash, seed)
             .with_bounded_load_config(config);
         let endpoints: Vec<Arc<Endpoint>> = (1..=4)
             .map(|id| Arc::new(test_endpoint(id).with_weight(2)))
@@ -3360,7 +3371,7 @@ mod tests {
     fn test_bounded_load_hash_rebalances_over_capacity_primary() {
         let seed = 0xB011_D1ED_u64;
         let config = BoundedLoadConfig::new(0, 1, 1);
-        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+        let bounded_lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::BoundedLoadHash, seed)
             .with_bounded_load_config(config);
         let endpoints: Vec<Arc<Endpoint>> = (1..=4)
             .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
@@ -3395,8 +3406,8 @@ mod tests {
     fn test_bounded_load_hash_all_over_capacity_falls_back_to_primary() {
         let seed = 0xB011_D1ED_u64;
         let config = BoundedLoadConfig::new(0, 1, 1);
-        let hash_lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, seed);
-        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+        let hash_lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::HashBased, seed);
+        let bounded_lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::BoundedLoadHash, seed)
             .with_bounded_load_config(config);
         let endpoints: Vec<Arc<Endpoint>> = (1..=4)
             .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
@@ -3433,7 +3444,7 @@ mod tests {
     fn test_bounded_load_hash_select_n_prefers_under_capacity_unique_endpoints() {
         let seed = 0xB011_D1ED_u64;
         let config = BoundedLoadConfig::new(0, 1, 1);
-        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+        let bounded_lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::BoundedLoadHash, seed)
             .with_bounded_load_config(config);
         let endpoints: Vec<Arc<Endpoint>> = (1..=5)
             .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
@@ -3458,8 +3469,8 @@ mod tests {
     fn test_bounded_load_hash_select_n_all_over_capacity_falls_back_to_hrw_order() {
         let seed = 0xB011_D1ED_u64;
         let config = BoundedLoadConfig::new(0, 1, 1);
-        let hash_lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, seed);
-        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+        let hash_lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::HashBased, seed);
+        let bounded_lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::BoundedLoadHash, seed)
             .with_bounded_load_config(config);
         let endpoints: Vec<Arc<Endpoint>> = (1..=5)
             .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
@@ -3492,8 +3503,9 @@ mod tests {
 
     #[test]
     fn test_bounded_load_hash_preserves_survivors_under_endpoint_removal() {
-        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, 0x0057_AF1D_u64)
-            .with_bounded_load_config(BoundedLoadConfig::new(250, 1, 1));
+        let lb =
+            LoadBalancer::with_test_salt(LoadBalanceStrategy::BoundedLoadHash, 0x0057_AF1D_u64)
+                .with_bounded_load_config(BoundedLoadConfig::new(250, 1, 1));
         let endpoints_full: Vec<Arc<Endpoint>> =
             (1..=16).map(|i| Arc::new(test_endpoint(i))).collect();
         let initial: Vec<EndpointId> = (0..1024)
@@ -3539,7 +3551,7 @@ mod tests {
     fn test_bounded_load_hash_skew_scenario_logs_operator_artifact() {
         let seed = 0x51A0_B0A7_u64;
         let config = BoundedLoadConfig::new(0, 1, 2);
-        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+        let bounded_lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::BoundedLoadHash, seed)
             .with_bounded_load_config(config);
         let endpoints: Vec<Arc<Endpoint>> = (1..=4)
             .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
@@ -3642,7 +3654,7 @@ mod tests {
     fn test_bounded_load_decision_log_fields_capture_rejected_pressure() {
         let seed = 0x51A0_B0A7_u64;
         let config = BoundedLoadConfig::new(0, 1, 1);
-        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed)
+        let bounded_lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::BoundedLoadHash, seed)
             .with_bounded_load_config(config);
         let endpoints: Vec<Arc<Endpoint>> = (1..=4)
             .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
@@ -3745,7 +3757,7 @@ mod tests {
     #[test]
     fn test_bounded_load_decision_log_fields_cover_no_selection_edges() {
         let seed = 0xB011_D1ED_u64;
-        let bounded_lb = LoadBalancer::with_seed(LoadBalanceStrategy::BoundedLoadHash, seed);
+        let bounded_lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::BoundedLoadHash, seed);
         let endpoints: Vec<Arc<Endpoint>> = (1..=2)
             .map(|id| Arc::new(test_endpoint(id).with_weight(1)))
             .collect();
@@ -4051,7 +4063,7 @@ mod tests {
     #[test]
     fn metamorphic_weighted_round_robin_select_n_ignores_unreceivable_and_zero_weight_decoys() {
         fn weighted_rr_sequence(endpoints: &[Arc<Endpoint>]) -> Vec<Vec<EndpointId>> {
-            let lb = LoadBalancer::with_seed(LoadBalanceStrategy::WeightedRoundRobin, 0x5EED);
+            let lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::WeightedRoundRobin, 0x5EED);
             (0..4)
                 .map(|_| {
                     lb.select_n(endpoints, 2, None)
@@ -4126,6 +4138,7 @@ mod tests {
         assert!(found.is_some()); // Default route
     }
 
+    #[cfg(feature = "messaging-fabric")]
     #[test]
     fn test_remove_endpoint_scrubs_routes_and_restores_default_fallback() {
         let table = Arc::new(RoutingTable::new());
@@ -4150,7 +4163,7 @@ mod tests {
             .expect("initial specific route");
         assert_eq!(initial.endpoint.id, specific.id);
 
-        let test_cx = Cx::for_testing();
+        let test_cx = test_admin_cx();
         let removed = table
             .remove_endpoint(&test_cx, specific.id)
             .expect("remove_endpoint should succeed")
@@ -4171,6 +4184,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "messaging-fabric")]
     #[test]
     fn test_remove_endpoint_drops_empty_default_route() {
         let table = Arc::new(RoutingTable::new());
@@ -4180,7 +4194,7 @@ mod tests {
             RoutingEntry::new(vec![endpoint.clone()], Time::ZERO),
         );
 
-        let test_cx = Cx::for_testing();
+        let test_cx = test_admin_cx();
         let removed = table
             .remove_endpoint(&test_cx, endpoint.id)
             .expect("remove_endpoint should succeed")
@@ -4195,6 +4209,20 @@ mod tests {
             router.route(&symbol, Time::ZERO),
             Err(RoutingError::NoRoute { .. })
         ));
+    }
+
+    #[test]
+    fn test_remove_endpoint_requires_admin_capability() {
+        let table = RoutingTable::new();
+        let endpoint = table.register_endpoint(test_endpoint(11));
+        let test_cx = Cx::for_testing();
+
+        let error = table
+            .remove_endpoint(&test_cx, endpoint.id)
+            .expect_err("plain test context must not administer endpoints");
+
+        assert_eq!(error.kind(), ErrorKind::AdmissionDenied);
+        assert!(table.get_endpoint(endpoint.id).is_some());
     }
 
     // Test 8: Routing entry TTL
@@ -4549,11 +4577,12 @@ mod tests {
         assert_eq!(endpoint.connection_count(), 0);
     }
 
+    #[cfg(feature = "messaging-fabric")]
     #[test]
     fn test_routing_table_updates_endpoint_state() {
         let table = RoutingTable::new();
         let endpoint = table.register_endpoint(test_endpoint(9));
-        let test_cx = Cx::for_testing();
+        let test_cx = test_admin_cx();
 
         assert_eq!(endpoint.state(), EndpointState::Healthy);
         assert!(
@@ -4567,6 +4596,20 @@ mod tests {
                 .update_endpoint_state(&test_cx, EndpointId(999), EndpointState::Healthy)
                 .expect("update_endpoint_state should succeed")
         );
+    }
+
+    #[test]
+    fn test_update_endpoint_state_requires_admin_capability() {
+        let table = RoutingTable::new();
+        let endpoint = table.register_endpoint(test_endpoint(12));
+        let test_cx = Cx::for_testing();
+
+        let error = table
+            .update_endpoint_state(&test_cx, endpoint.id, EndpointState::Removed)
+            .expect_err("plain test context must not mutate endpoint state");
+
+        assert_eq!(error.kind(), ErrorKind::AdmissionDenied);
+        assert_eq!(endpoint.state(), EndpointState::Healthy);
     }
 
     #[test]
@@ -5056,12 +5099,12 @@ mod tests {
         );
     }
 
-    /// `LoadBalancer::with_seed` produces deterministic salts —
+    /// `LoadBalancer::with_test_salt` produces deterministic salts —
     /// useful for tests / lab runs.
     #[test]
-    fn load_balancer_with_seed_is_deterministic() {
-        let lb1 = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 12345);
-        let lb2 = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 12345);
+    fn load_balancer_with_test_salt_is_deterministic() {
+        let lb1 = LoadBalancer::with_test_salt(LoadBalanceStrategy::HashBased, 12345);
+        let lb2 = LoadBalancer::with_test_salt(LoadBalanceStrategy::HashBased, 12345);
         assert_eq!(lb1.hash_ring_salt(), lb2.hash_ring_salt());
         assert_eq!(lb1.hash_ring_salt(), 12345);
     }
@@ -5109,7 +5152,7 @@ mod tests {
         assert!(normal_config.accepts(&extreme_endpoint)); // Should accept some connections
 
         // But not unlimited - simulate high connection count
-        let mut high_conn_endpoint = test_endpoint(3).with_weight(u32::MAX);
+        let high_conn_endpoint = test_endpoint(3).with_weight(u32::MAX);
         high_conn_endpoint
             .active_connections
             .store(100_000, std::sync::atomic::Ordering::Relaxed);

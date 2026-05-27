@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+const OBJECT_SIGNATURE_ALGORITHM: &str = "asupersync-atp-object-hmac-sha256-v1";
+const OBJECT_SIGNATURE_DOMAIN: &[u8] =
+    b"asupersync::net::atp::sdk::object-signature::v1";
+
 /// Transfer request for sending objects/files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferRequest {
@@ -390,7 +394,6 @@ impl AtpSession {
         hasher.update(&file_contents);
         let computed_hash: [u8; 32] = hasher.finalize().into();
 
-        let mut verified = true;
         let mut integrity_check_passed = true;
 
         // Compare with expected hash if provided
@@ -398,7 +401,6 @@ impl AtpSession {
             use subtle::ConstantTimeEq;
             if !bool::from(computed_hash.ct_eq(expected)) {
                 // ubs:ignore - using constant time eq
-                verified = false;
                 integrity_check_passed = false;
             }
         }
@@ -418,13 +420,18 @@ impl AtpSession {
             }
         }
 
+        let signature_valid = self
+            .verify_detached_object_signature(object_path, &computed_hash, size_bytes)
+            .await;
+        let verified = integrity_check_passed && signature_valid.unwrap_or(true);
+
         AtpOutcome::Ok(ObjectVerification {
             path: object_path.to_path_buf(),
             hash: computed_hash.to_vec(),
             size_bytes,
             verified,
             integrity_check_passed,
-            signature_valid: None, // Digital signature verification not implemented
+            signature_valid,
         })
     }
 

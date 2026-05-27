@@ -4,10 +4,10 @@
 //! on a background thread via `spawn_blocking_io`. The file handle is wrapped
 //! in `Arc` to allow sharing across the async boundary.
 //!
-//! # Phase 0 Limitations
-//!
-//! The poll-based traits (`AsyncRead`, `AsyncWrite`, `AsyncSeek`) still use
-//! direct blocking I/O. Full async poll support requires reactor integration.
+//! The owned async methods offload filesystem calls through the runtime
+//! blocking-I/O path. The poll-based traits perform immediate file syscalls
+//! because regular files do not expose portable readiness notifications; use
+//! the owned async methods when a call must not run on the polling thread.
 
 #![allow(clippy::unused_async)]
 
@@ -194,9 +194,9 @@ impl AsyncRead for File {
         _cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        // WARNING: Phase 0 limitation - this performs blocking I/O in a poll function
-        // which can block the entire async runtime. Use read_into_vec() for proper
-        // async behavior. TODO: Fix in Phase 1 with reactor integration.
+        // Regular files are readiness-ready at the OS API level. This trait
+        // path performs one immediate syscall; callers that need thread
+        // offload should use read_into_vec().
         let mut inner_ref: &std::fs::File = &self.inner;
         let n = Read::read(&mut inner_ref, buf.unfilled())?;
         buf.advance(n);
@@ -210,14 +210,14 @@ impl AsyncWrite for File {
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        // WARNING: Phase 0 limitation - blocking I/O in poll function
+        // See poll_read: this trait path performs one immediate file syscall.
         let mut inner_ref: &std::fs::File = &self.inner;
         let n = Write::write(&mut inner_ref, buf)?;
         Poll::Ready(Ok(n))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // WARNING: Phase 0 limitation - blocking I/O in poll function
+        // See poll_read: this trait path performs one immediate file syscall.
         let mut inner_ref: &std::fs::File = &self.inner;
         Write::flush(&mut inner_ref)?;
         Poll::Ready(Ok(()))
@@ -234,7 +234,7 @@ impl AsyncSeek for File {
         _cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
-        // WARNING: Phase 0 limitation - blocking I/O in poll function
+        // See poll_read: this trait path performs one immediate file syscall.
         let mut inner_ref: &std::fs::File = &self.inner;
         let n = Seek::seek(&mut inner_ref, pos)?;
         Poll::Ready(Ok(n))

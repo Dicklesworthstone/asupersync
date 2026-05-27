@@ -585,9 +585,6 @@ mod tests {
     use crate::cx::Cx;
     use crate::obligation::graded::{GradedObligation, Resolution};
     use crate::record::ObligationKind;
-    use crate::test_utils::{DEFAULT_TEST_SEED, test_lab_with_seed};
-    use crate::time::VirtualClock;
-    use crate::types::Time;
     use crate::web::extract::Request;
     use crate::web::response::StatusCode;
 

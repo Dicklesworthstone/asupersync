@@ -127,6 +127,7 @@ fn reflection_service_default_is_locked_fail_closed() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn enable_reflection_recursion_guard_excludes_self() {
     // Pin (L3): when `.enable_reflection()` walks the service
     // registry to register handlers in the reflection registry,

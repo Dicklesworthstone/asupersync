@@ -48,6 +48,7 @@
 
 use std::convert::Infallible;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -64,6 +65,7 @@ use crate::http::compress::{
 };
 use crate::tracing_compat::{debug, warn};
 use crate::types::Time;
+use futures_lite::FutureExt;
 
 use super::extract::Request;
 use super::handler::Handler;
@@ -1659,9 +1661,31 @@ impl<H: Handler> Handler for CatchPanicMiddleware<H> {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
         let cx = cx.clone();
         Box::pin(async move {
-            // TODO: Implement proper async panic catching if needed
-            // For now, just delegate to inner handler
-            self.inner.call(&cx, req).await
+            let method = req.method.clone();
+            let path = req.path.clone();
+            let trace_id = resolve_trace_id(&req);
+
+            match AssertUnwindSafe(self.inner.call(&cx, req))
+                .catch_unwind()
+                .await
+            {
+                Ok(response) => response,
+                Err(payload) => {
+                    let panic_message = panic_payload_message(payload.as_ref());
+                    let _panic_log_fields = (&method, &path, &trace_id, &panic_message);
+                    warn!(
+                        method = %method,
+                        path = %path,
+                        trace_id = trace_id.as_deref().unwrap_or(""),
+                        panic = %panic_message,
+                        "web handler panic recovered"
+                    );
+                    Response::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        b"Internal Server Error".to_vec(),
+                    )
+                }
+            }
         })
     }
 }
@@ -2168,15 +2192,6 @@ mod tests {
     impl_test_sync_call!(CatchPanicMiddleware);
     impl_test_sync_call!(NormalizePathMiddleware);
     impl_test_sync_call!(SetResponseHeaderMiddleware);
-
-    impl<F> FnHandler<F>
-    where
-        Self: Handler,
-    {
-        fn call(&self, req: Request) -> Response {
-            call_sync(self, req)
-        }
-    }
 
     struct CountingHandler {
         calls: Arc<std::sync::atomic::AtomicU32>,

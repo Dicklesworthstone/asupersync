@@ -203,6 +203,14 @@ impl Extensions {
         self.get_typed::<T>().cloned()
     }
 
+    /// Remove a typed value by type, returning whether an entry was present.
+    pub fn remove_typed<T>(&mut self) -> bool
+    where
+        T: Send + Sync + 'static,
+    {
+        self.typed_data.remove(&TypeId::of::<T>()).is_some()
+    }
+
     /// Returns the number of distinct typed entries.
     #[must_use]
     pub fn len(&self) -> usize {

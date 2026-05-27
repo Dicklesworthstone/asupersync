@@ -962,7 +962,7 @@ impl PushPromiseFrame {
         if self.stream_id == 0 {
             return Err(H2Error::protocol("PUSH_PROMISE frame with stream ID 0"));
         }
-        if self.promised_stream_id & 0x7fff_ffff == 0 {
+        if self.promised_stream_id.trailing_zeros() >= 31 {
             return Err(H2Error::protocol(
                 "PUSH_PROMISE frame with promised stream ID 0",
             ));

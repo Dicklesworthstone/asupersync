@@ -20,6 +20,9 @@ use super::extract::Request;
 use super::handler::Handler;
 use super::response::{Response, StatusCode};
 use std::cmp::Ordering;
+use std::panic::AssertUnwindSafe;
+
+use futures_lite::FutureExt;
 
 // ─── Media Type ──────────────────────────────────────────────────────────────
 
@@ -390,10 +393,10 @@ impl<H: Handler> Handler for ErrorHandlerMiddleware<H> {
                 .map(|(_, v)| v.clone())
                 .unwrap_or_default();
 
-            // TODO: Implement proper async panic handling
-            let result: Result<Response, ()> = if self.config.catch_panics {
-                // For now, disable panic catching for async handlers
-                Ok(self.inner.call(&cx, req).await)
+            let result = if self.config.catch_panics {
+                AssertUnwindSafe(self.inner.call(&cx, req))
+                    .catch_unwind()
+                    .await
             } else {
                 Ok(self.inner.call(&cx, req).await)
             };

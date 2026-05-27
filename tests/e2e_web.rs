@@ -17,6 +17,7 @@ use asupersync::web::sse::{
     StreamingSse, StreamingSseTransportStep,
 };
 use serde_json::{Value, json};
+use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -126,6 +127,14 @@ fn web_block_on<F: std::future::Future>(future: F) -> F::Output {
         }
     }
 }
+
+trait WebHandlerSyncExt: Handler {
+    fn call_sync(&self, req: Request) -> Response {
+        web_block_on(Handler::call(self, &Cx::for_testing(), req))
+    }
+}
+
+impl<T> WebHandlerSyncExt for T where T: Handler + ?Sized {}
 
 fn web_poll_body<B: Body + Unpin>(body: &mut B) -> Option<Result<Frame<B::Data>, B::Error>> {
     let waker = web_noop_waker();
@@ -241,8 +250,8 @@ fn web_framework_row(
 struct WebProofPanicHandler;
 
 impl Handler for WebProofPanicHandler {
-    fn call(&self, _req: Request) -> Response {
-        panic!("web framework proof panic");
+    fn call(&self, _cx: &Cx, _req: Request) -> Pin<Box<dyn Future<Output = Response> + Send + '_>> {
+        Box::pin(async { panic!("web framework proof panic") })
     }
 }
 
@@ -287,7 +296,7 @@ fn web_proof_middleware_body_limit(bead_id: &str, artifact_path: &str) -> Value 
     let req = Request::new("POST", "/upload")
         .with_header("content-length", "8")
         .with_body(b"abcdefgh".to_vec());
-    let resp = handler.call(req);
+    let resp = handler.call_sync(req);
     web_framework_row(
         bead_id,
         "middleware-body-limit-short-circuit",
@@ -321,7 +330,7 @@ fn web_proof_middleware_panic_recovery(bead_id: &str, artifact_path: &str) -> Va
         .with_catch_panic()
         .with_response_header("x-frame-options", "DENY", HeaderOverwrite::IfMissing)
         .build();
-    let resp = handler.call(Request::new("GET", "/panic"));
+    let resp = handler.call_sync(Request::new("GET", "/panic"));
     let extra_failure = (resp.headers.get("x-frame-options").map(String::as_str) != Some("DENY"))
         .then(|| "missing x-frame-options=DENY".to_string());
     web_framework_row(

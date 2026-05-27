@@ -747,9 +747,11 @@ mod tests {
             .register_for_test()
             .allow_anonymous();
 
-        // Test without REMOTE capability using a restricted context
-        let restricted_cx = crate::cx::Cx::for_testing_no_caps();
-        let result = crate::cx::Cx::run_with_current(restricted_cx, || reflection.list_services());
+        // Test without REMOTE capability using a restricted ambient context.
+        let cx = crate::cx::Cx::for_testing();
+        let _current = crate::cx::Cx::set_current(Some(cx));
+        let _restricted = crate::cx::Cx::push_restriction(crate::cx::cap::CapMask::none());
+        let result = reflection.list_services();
 
         // Should be denied due to missing REMOTE capability
         assert!(
@@ -777,9 +779,10 @@ mod tests {
             .register_for_test()
             .allow_anonymous();
 
-        // Test with REMOTE capability using full testing context
-        let full_cx = crate::cx::Cx::for_testing();
-        let result = crate::cx::Cx::run_with_current(full_cx, || reflection.list_services());
+        // Test with REMOTE capability using a remote-capable testing context.
+        let full_cx = crate::cx::Cx::for_testing_with_remote(crate::remote::RemoteCap::new());
+        let _current = crate::cx::Cx::set_current(Some(full_cx));
+        let result = reflection.list_services();
 
         // Should succeed with REMOTE capability
         assert!(
@@ -798,14 +801,13 @@ mod tests {
             .register_for_test()
             .allow_anonymous();
 
-        let restricted_cx = crate::cx::Cx::for_testing_no_caps();
+        let restricted_cx = crate::cx::Cx::for_testing();
 
         // Test that capability check applies to both list_services and describe_service
-        let list_result =
-            crate::cx::Cx::run_with_current(restricted_cx.clone(), || reflection.list_services());
-        let describe_result = crate::cx::Cx::run_with_current(restricted_cx, || {
-            reflection.describe_service("test.TestService")
-        });
+        let _current = crate::cx::Cx::set_current(Some(restricted_cx));
+        let _restricted = crate::cx::Cx::push_restriction(crate::cx::cap::CapMask::none());
+        let list_result = reflection.list_services();
+        let describe_result = reflection.describe_service("test.TestService");
 
         // Both should be denied
         assert!(
@@ -833,10 +835,12 @@ mod tests {
                 )))
             });
 
-        let restricted_cx = crate::cx::Cx::for_testing_no_caps();
+        let restricted_cx = crate::cx::Cx::for_testing();
 
         // Even though auth callback would deny, capability check should happen first
-        let result = crate::cx::Cx::run_with_current(restricted_cx, || reflection.list_services());
+        let _current = crate::cx::Cx::set_current(Some(restricted_cx));
+        let _restricted = crate::cx::Cx::push_restriction(crate::cx::cap::CapMask::none());
+        let result = reflection.list_services();
 
         assert!(result.is_err());
         if let Err(status) = result {

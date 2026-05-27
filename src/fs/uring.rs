@@ -281,8 +281,9 @@ impl IoUringFile {
         let path = path.as_ref();
         let c_path = path_to_cstring(path)?;
 
-        // For now, use synchronous open and then io_uring for I/O.
-        // True async open requires a running io_uring event loop.
+        // Open the descriptor synchronously, then use the file-local io_uring
+        // queue for data-path operations. This keeps ownership and cleanup
+        // deterministic before any request can be submitted against the fd.
         // SAFETY: We're calling openat with valid arguments.
         let fd = unsafe { libc::openat(libc::AT_FDCWD, c_path.as_ptr(), flags, mode) };
         if fd < 0 {
@@ -953,8 +954,9 @@ impl std::future::Future for ReadFuture<'_> {
     type Output = io::Result<usize>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // For now, use blocking io_uring operations.
-        // True async requires integration with the runtime's event loop.
+        // Drive the file-local ring to the matching completion for this
+        // future. Completion records for other operations are retained in the
+        // per-operation state and woken via mark_tracked_op_complete.
         let this = self.get_mut();
         if this.done {
             return Poll::Ready(Err(polled_after_completion_error("read")));

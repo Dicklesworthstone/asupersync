@@ -8,8 +8,16 @@ use crate::security::error::{AuthError, AuthErrorKind};
 use crate::security::key::AuthKey;
 use crate::security::tag::AuthenticationTag;
 use crate::types::Symbol;
+use hmac::{Hmac, KeyInit, Mac};
+use parking_lot::RwLock;
+use sha2::Sha256;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+type HmacSha256 = Hmac<Sha256>;
+
+const REPLICA_AUTHORIZATION_DOMAIN: &[u8] = b"asupersync::security::replica_authorization::v1";
 
 /// Authentication mode for the security context.
 ///
@@ -80,6 +88,22 @@ pub struct SecurityContext {
     key: AuthKey,
     mode: AuthMode,
     stats: Arc<AuthStats>,
+    replica_authorizations: Arc<RwLock<BTreeMap<String, ReplicaAuthorization>>>,
+}
+
+/// Signed authorization receipt for a replica membership decision.
+///
+/// The signature is `HMAC-SHA256(SecurityContext.key, domain || replica_id ||
+/// region_scope)`. A record with `region_id == None` grants membership in any
+/// region; a region-scoped record only authorizes that exact region.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicaAuthorization {
+    /// Authorized replica identifier.
+    pub replica_id: String,
+    /// Optional exact region scope.
+    pub region_id: Option<String>,
+    /// Domain-separated HMAC over the authorization tuple.
+    pub signature: [u8; 32],
 }
 
 impl SecurityContext {
@@ -90,6 +114,7 @@ impl SecurityContext {
             key,
             mode: AuthMode::Strict,
             stats: Arc::new(AuthStats::default()),
+            replica_authorizations: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -214,6 +239,7 @@ impl SecurityContext {
             key: self.key.derive_subkey(purpose),
             mode: self.mode,
             stats: Arc::new(AuthStats::default()), // New stats for derived context
+            replica_authorizations: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -221,6 +247,69 @@ impl SecurityContext {
     #[must_use]
     pub fn stats(&self) -> &AuthStats {
         &self.stats
+    }
+
+    /// Authorizes a replica in this context's signed membership registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthErrorKind::MalformedPayload`] when the replica or region
+    /// identifier is not a stable wire-safe identifier.
+    pub fn authorize_replica(
+        &self,
+        replica_id: &str,
+        region_id: Option<&str>,
+    ) -> Result<ReplicaAuthorization, AuthError> {
+        Self::validate_replica_identifier(replica_id)?;
+        if let Some(region_id) = region_id {
+            Self::validate_region_identifier(region_id)?;
+        }
+
+        let record = ReplicaAuthorization {
+            replica_id: replica_id.to_owned(),
+            region_id: region_id.map(str::to_owned),
+            signature: self.replica_authorization_signature(replica_id, region_id),
+        };
+        self.replica_authorizations
+            .write()
+            .insert(replica_id.to_owned(), record.clone());
+        Ok(record)
+    }
+
+    /// Imports an externally-stored signed replica authorization receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthErrorKind::InvalidTag`] if the record signature does not
+    /// verify against this context's key.
+    pub fn import_replica_authorization(
+        &self,
+        record: ReplicaAuthorization,
+    ) -> Result<(), AuthError> {
+        Self::validate_replica_identifier(&record.replica_id)?;
+        if let Some(region_id) = record.region_id.as_deref() {
+            Self::validate_region_identifier(region_id)?;
+        }
+
+        if !self.replica_authorization_signature_matches(&record) {
+            return Err(AuthError::new(
+                AuthErrorKind::InvalidTag,
+                "replica authorization signature mismatch",
+            ));
+        }
+
+        self.replica_authorizations
+            .write()
+            .insert(record.replica_id.clone(), record);
+        Ok(())
+    }
+
+    /// Revokes a replica authorization from the in-memory registry.
+    pub fn revoke_replica_authorization(&self, replica_id: &str) -> bool {
+        self.replica_authorizations
+            .write()
+            .remove(replica_id)
+            .is_some()
     }
 
     /// Validates whether a replica is authorized to participate in symbol assignment.
@@ -237,42 +326,99 @@ impl SecurityContext {
     ///
     /// `true` if the replica is authorized, `false` otherwise.
     ///
-    /// # Security Note
-    ///
-    /// In the current implementation, this is a placeholder that validates
-    /// replica IDs against a basic allow-list pattern. A production implementation
-    /// should verify cryptographic credentials (certificates, signed tokens, etc.)
     #[must_use]
-    pub fn is_replica_authorized(&self, replica_id: &str, _region_id: Option<&str>) -> bool {
-        // asupersync-j18rga: Basic validation - reject obviously invalid IDs
-        if replica_id.is_empty() {
+    pub fn is_replica_authorized(&self, replica_id: &str, region_id: Option<&str>) -> bool {
+        if Self::validate_replica_identifier(replica_id).is_err() {
             return false;
         }
-
-        // Reject replica IDs that look like attack attempts
-        if replica_id.contains("../") || replica_id.contains('\0') || replica_id.len() > 256 {
-            return false;
+        if let Some(region_id) = region_id {
+            if Self::validate_region_identifier(region_id).is_err() {
+                return false;
+            }
         }
 
-        // TODO: In a full implementation, this should:
-        // 1. Verify cryptographic credentials for the replica
-        // 2. Check against an authorized replica registry
-        // 3. Validate region-specific permissions
-        // 4. Check if replica certificates are valid and not revoked
-        //
-        // For now, we implement basic allow-list semantics:
-        // - Allow replica IDs that start with known prefixes
-        // - Reject replica IDs that look like test/mock data
+        let authorizations = self.replica_authorizations.read();
+        let Some(record) = authorizations.get(replica_id) else {
+            return false;
+        };
+        if !self.replica_authorization_signature_matches(record) {
+            return false;
+        }
+        match (record.region_id.as_deref(), region_id) {
+            (None, _) => true,
+            (Some(expected), Some(actual)) => expected == actual,
+            (Some(_), None) => false,
+        }
+    }
 
-        // Accept legitimate-looking replica identifiers
-        replica_id.starts_with("replica-")
-            || replica_id.starts_with("node-")
-            || replica_id.starts_with("r")
-            // Reject obvious test/mock replicas that shouldn't be in production
-            && !replica_id.contains("test")
-            && !replica_id.contains("mock")
-            && !replica_id.contains("fake")
-            && !replica_id.contains("invalid")
+    fn replica_authorization_signature_matches(&self, record: &ReplicaAuthorization) -> bool {
+        use subtle::ConstantTimeEq;
+
+        let expected =
+            self.replica_authorization_signature(&record.replica_id, record.region_id.as_deref());
+        record.signature.ct_eq(&expected).into()
+    }
+
+    fn replica_authorization_signature(
+        &self,
+        replica_id: &str,
+        region_id: Option<&str>,
+    ) -> [u8; 32] {
+        let mut mac =
+            HmacSha256::new_from_slice(self.key.as_bytes()).expect("HMAC accepts any key length");
+        mac.update(REPLICA_AUTHORIZATION_DOMAIN);
+        Self::update_len_prefixed(&mut mac, replica_id.as_bytes());
+        match region_id {
+            Some(region_id) => {
+                mac.update(&[1]);
+                Self::update_len_prefixed(&mut mac, region_id.as_bytes());
+            }
+            None => mac.update(&[0]),
+        }
+        mac.finalize().into_bytes().into()
+    }
+
+    fn update_len_prefixed(mac: &mut HmacSha256, bytes: &[u8]) {
+        mac.update(&(bytes.len() as u64).to_be_bytes());
+        mac.update(bytes);
+    }
+
+    fn validate_replica_identifier(value: &str) -> Result<(), AuthError> {
+        Self::validate_wire_identifier("replica", value)
+    }
+
+    fn validate_region_identifier(value: &str) -> Result<(), AuthError> {
+        Self::validate_wire_identifier("region", value)
+    }
+
+    fn validate_wire_identifier(kind: &str, value: &str) -> Result<(), AuthError> {
+        if value.is_empty() || value.len() > 256 {
+            return Err(AuthError::new(
+                AuthErrorKind::MalformedPayload,
+                format!("{kind} identifier length is outside 1..=256 bytes"),
+            ));
+        }
+        if value.contains("../")
+            || value.contains('\0')
+            || value.bytes().any(|byte| {
+                !matches!(
+                    byte,
+                    b'a'..=b'z'
+                        | b'A'..=b'Z'
+                        | b'0'..=b'9'
+                        | b'.'
+                        | b'_'
+                        | b'-'
+                        | b':'
+                )
+            })
+        {
+            return Err(AuthError::new(
+                AuthErrorKind::MalformedPayload,
+                format!("{kind} identifier contains unsupported bytes"),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -301,22 +447,55 @@ mod tests {
     fn replica_authorization_basic_validation() {
         let ctx = SecurityContext::for_testing(42);
 
-        // Test authorized replica IDs
+        assert!(!ctx.is_replica_authorized("replica-1", None));
+
+        ctx.authorize_replica("replica-1", None)
+            .expect("global replica authorization should mint");
+        ctx.authorize_replica("node-auth", Some("region-a"))
+            .expect("region-scoped replica authorization should mint");
+
         assert!(ctx.is_replica_authorized("replica-1", None));
-        assert!(ctx.is_replica_authorized("node-auth", None));
-        assert!(ctx.is_replica_authorized("r123", None));
+        assert!(ctx.is_replica_authorized("replica-1", Some("any-region")));
+        assert!(ctx.is_replica_authorized("node-auth", Some("region-a")));
+        assert!(!ctx.is_replica_authorized("node-auth", Some("region-b")));
+        assert!(!ctx.is_replica_authorized("node-auth", None));
 
-        // Test unauthorized replica IDs
         assert!(!ctx.is_replica_authorized("", None));
-        assert!(!ctx.is_replica_authorized("test-replica", None));
-        assert!(!ctx.is_replica_authorized("mock-node", None));
-        assert!(!ctx.is_replica_authorized("fake-data", None));
-        assert!(!ctx.is_replica_authorized("invalid-stuff", None));
-
-        // Test security-sensitive patterns
         assert!(!ctx.is_replica_authorized("../../../etc/passwd", None));
         assert!(!ctx.is_replica_authorized("replica\0null", None));
         assert!(!ctx.is_replica_authorized(&"x".repeat(300), None)); // too long
+    }
+
+    #[test]
+    fn replica_authorization_import_rejects_tampered_records() {
+        let issuer = SecurityContext::for_testing(42);
+        let verifier = SecurityContext::for_testing(42);
+        let mut record = issuer
+            .authorize_replica("replica-2", Some("region-a"))
+            .expect("issuer should mint record");
+
+        verifier
+            .import_replica_authorization(record.clone())
+            .expect("matching verifier key should accept record");
+        assert!(verifier.is_replica_authorized("replica-2", Some("region-a")));
+
+        record.signature[0] ^= 0x80;
+        let error = verifier
+            .import_replica_authorization(record)
+            .expect_err("tampered signature must fail closed");
+        assert_eq!(error.kind(), AuthErrorKind::InvalidTag);
+    }
+
+    #[test]
+    fn replica_authorization_revocation_removes_membership() {
+        let ctx = SecurityContext::for_testing(42);
+        ctx.authorize_replica("replica-3", None)
+            .expect("authorization should mint");
+
+        assert!(ctx.is_replica_authorized("replica-3", None));
+        assert!(ctx.revoke_replica_authorization("replica-3"));
+        assert!(!ctx.is_replica_authorized("replica-3", None));
+        assert!(!ctx.revoke_replica_authorization("replica-3"));
     }
 
     #[test]

@@ -16,8 +16,11 @@
 mod common;
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
+use asupersync::Cx;
 use asupersync::bytes::Bytes;
 use asupersync::combinator::rate_limit::RateLimitPolicy;
 use asupersync::web::extract::{
@@ -33,6 +36,14 @@ use asupersync::web::response::{Html, Json, Redirect, StatusCode};
 use asupersync::web::router::{Router, get, post};
 use asupersync::web::session::{MemoryStore, SessionLayer};
 use asupersync::web::sse::{Sse, SseEvent};
+
+trait TestHandlerSyncExt: Handler {
+    fn call_sync(&self, req: Request) -> asupersync::web::response::Response {
+        futures_lite::future::block_on(Handler::call(self, &Cx::for_testing(), req))
+    }
+}
+
+impl<T> TestHandlerSyncExt for T where T: Handler + ?Sized {}
 
 // =========================================================================
 // Handlers
@@ -843,7 +854,7 @@ fn integration_middleware_cors_preflight() {
         .with_header("origin", "https://example.com")
         .with_header("access-control-request-method", "POST");
 
-    let resp = cors.call(req);
+    let resp = cors.call_sync(req);
     assert_eq!(resp.status, StatusCode::NO_CONTENT);
     assert_eq!(
         resp.headers.get("access-control-allow-origin").unwrap(),
@@ -870,7 +881,7 @@ fn integration_middleware_cors_exact_origin() {
 
     // Allowed origin
     let req = Request::new("GET", "/api").with_header("origin", "https://allowed.com");
-    let resp = cors.call(req);
+    let resp = cors.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(
         resp.headers.get("access-control-allow-origin").unwrap(),
@@ -879,7 +890,7 @@ fn integration_middleware_cors_exact_origin() {
 
     // Disallowed origin — no CORS headers, passthrough
     let req = Request::new("GET", "/api").with_header("origin", "https://evil.com");
-    let resp = cors.call(req);
+    let resp = cors.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert!(!resp.headers.contains_key("access-control-allow-origin"));
 
@@ -896,7 +907,7 @@ fn integration_middleware_cors_no_origin_passthrough() {
 
     // No origin header → passthrough without CORS headers
     let req = Request::new("GET", "/api");
-    let resp = cors.call(req);
+    let resp = cors.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert!(!resp.headers.contains_key("access-control-allow-origin"));
 
@@ -911,7 +922,7 @@ fn integration_middleware_timeout() {
     let handler = FnHandler::new(|| -> &'static str { "fast" });
     let timeout_mw = TimeoutMiddleware::new(handler, Duration::from_secs(5));
 
-    let resp = timeout_mw.call(Request::new("GET", "/"));
+    let resp = timeout_mw.call_sync(Request::new("GET", "/"));
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "fast");
 
@@ -930,7 +941,7 @@ fn integration_middleware_catch_panic() {
     let handler = FnHandler::new(panicking_handler);
     let catch = CatchPanicMiddleware::new(handler);
 
-    let resp = catch.call(Request::new("GET", "/"));
+    let resp = catch.call_sync(Request::new("GET", "/"));
     assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
 
     test_complete!("middleware_catch_panic");
@@ -946,17 +957,17 @@ fn integration_middleware_auth_bearer() {
 
     // Valid token
     let req = Request::new("GET", "/secure").with_header("authorization", "Bearer valid-token");
-    let resp = auth.call(req);
+    let resp = auth.call_sync(req);
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "protected");
 
     // Missing token
-    let resp = auth.call(Request::new("GET", "/secure"));
+    let resp = auth.call_sync(Request::new("GET", "/secure"));
     assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 
     // Invalid token
     let req = Request::new("GET", "/secure").with_header("authorization", "Bearer wrong-token");
-    let resp = auth.call(req);
+    let resp = auth.call_sync(req);
     assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
 
     test_complete!("middleware_auth_bearer");
@@ -978,13 +989,13 @@ fn integration_middleware_rate_limit() {
     let rl = RateLimitMiddleware::new(handler, policy);
 
     // First two requests should pass
-    let resp = rl.call(Request::new("GET", "/"));
+    let resp = rl.call_sync(Request::new("GET", "/"));
     assert_eq!(resp.status, StatusCode::OK);
-    let resp = rl.call(Request::new("GET", "/"));
+    let resp = rl.call_sync(Request::new("GET", "/"));
     assert_eq!(resp.status, StatusCode::OK);
 
     // Third should be rate limited
-    let resp = rl.call(Request::new("GET", "/"));
+    let resp = rl.call_sync(Request::new("GET", "/"));
     assert_eq!(resp.status, StatusCode::TOO_MANY_REQUESTS);
 
     test_complete!("middleware_rate_limit");
@@ -1002,7 +1013,7 @@ fn integration_middleware_stack_composition() {
         .with_timeout(Duration::from_secs(5))
         .build();
 
-    let resp = composed.call(Request::new("GET", "/"));
+    let resp = composed.call_sync(Request::new("GET", "/"));
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "inner");
 
@@ -1186,14 +1197,21 @@ fn integration_health_degraded_and_unhealthy() {
 fn integration_session_basic() {
     struct SessionMutatingHandler;
     impl Handler for SessionMutatingHandler {
-        fn call(&self, req: Request) -> asupersync::web::Response {
-            if let Some(session) = req
-                .extensions
-                .get_typed::<asupersync::web::session::Session>()
-            {
-                session.insert("user_id", "123");
-            }
-            asupersync::web::Response::new(StatusCode::OK, b"session-ok".to_vec())
+        fn call(
+            &self,
+            _cx: &Cx,
+            req: Request,
+        ) -> Pin<Box<dyn Future<Output = asupersync::web::response::Response> + Send + '_>>
+        {
+            Box::pin(async move {
+                if let Some(session) = req
+                    .extensions
+                    .get_typed::<asupersync::web::session::Session>()
+                {
+                    session.insert("user_id", "123");
+                }
+                asupersync::web::response::Response::new(StatusCode::OK, b"session-ok".to_vec())
+            })
         }
     }
 

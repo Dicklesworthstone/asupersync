@@ -71,7 +71,7 @@ fn slow_loris_idle_cleanup_removes_streams_at_zero_threshold() {
     // moved at least one ns since the stream was added). This is
     // the model-level contract that the ConnectionState fuzz
     // target (grpc_server_idle_timeout_state_machine) also pins.
-    let mut state = ConnectionState::new();
+    let state = ConnectionState::new();
     for stream_id in 0..8u32 {
         state.add_stream(stream_id, 16).expect("under cap");
     }
