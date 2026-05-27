@@ -21,8 +21,8 @@
 //! - **Close implies quiescence**: no live tasks, no pending obligations, finalizers empty.
 //! - **Cancel-correct stop**: request → drain → finalize, never silent data loss.
 //! - **No ambient authority**: `AppSpec` cannot reach globals; all capabilities flow through `Cx`.
-//! - **Drop bomb**: `AppHandle` panics on drop if not explicitly stopped or joined,
-//!   matching the `GradedObligation` pattern to prevent silent resource leaks.
+//! - **Leak reporting**: unresolved `AppHandle` drops emit structured diagnostics without
+//!   panicking in `Drop`, preserving supervision-tree isolation.
 
 use crate::cx::Cx;
 use crate::cx::registry::RegistryHandle;
@@ -427,9 +427,9 @@ impl AppSpec {
 ///
 /// # Drop semantics
 ///
-/// Panics on drop if neither `stop` nor `join` has been called (leak-preventing
-/// bomb, matching `GradedObligation`). Call [`AppHandle::into_raw`] to opt out
-/// of this guarantee when you know what you're doing.
+/// Reports a leak on drop if neither `stop` nor `join` has been called. Call
+/// [`AppHandle::into_raw`] to opt out of this guarantee when you know what you're
+/// doing.
 pub struct AppHandle {
     /// Application name.
     name: String,
@@ -468,13 +468,6 @@ impl Drop for AppHandle {
                 region_id = ?self.root_region,
                 "APP HANDLE LEAKED: app was dropped without stop() or join(). \
                  Call stop(), join(), or into_raw() to resolve."
-            );
-
-            // Always emit a trace event for deterministic debugging
-            // even without tracing feature enabled
-            eprintln!(
-                "[SUPERVISION LEAK] App '{}' (region {:?}) dropped without proper cleanup",
-                self.name, self.root_region
             );
         }
     }
@@ -1051,9 +1044,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "APP HANDLE LEAKED")]
-    fn app_handle_drop_without_resolve_panics() {
-        init_test("app_handle_drop_without_resolve_panics");
+    fn app_handle_drop_without_resolve_reports_without_panicking() {
+        init_test("app_handle_drop_without_resolve_reports_without_panicking");
         let mut state = RuntimeState::new();
         let root = state.create_root_region(Budget::INFINITE);
         let cx = Cx::new(
@@ -1064,7 +1056,8 @@ mod tests {
 
         let spec = AppSpec::new("leaky");
         let handle = spec.start(&mut state, &cx, root).expect("start ok");
-        drop(handle); // Should panic.
+        drop(handle);
+        crate::test_complete!("app_handle_drop_without_resolve_reports_without_panicking");
     }
 
     #[test]
@@ -2129,8 +2122,16 @@ mod tests {
         init_test("example_chat_room_call_and_cast");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let region = runtime
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("example region should allocate");
+        let cx = Cx::new(
+            region,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
         let scope =
             crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
 
@@ -2183,8 +2184,16 @@ mod tests {
         init_test("example_chat_room_bounded_history");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let region = runtime
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("example region should allocate");
+        let cx = Cx::new(
+            region,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
         let scope =
             crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
 
@@ -2228,8 +2237,16 @@ mod tests {
         let registry = Arc::new(parking_lot::Mutex::new(crate::cx::NameRegistry::new()));
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let region = runtime
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("example region should allocate");
+        let cx = Cx::new(
+            region,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
         let scope =
             crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
 
@@ -2437,8 +2454,16 @@ mod tests {
         init_test("example_chat_clear_resets_history");
 
         let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::default());
-        let region = runtime.state.create_root_region(Budget::INFINITE);
-        let cx = Cx::for_testing();
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let region = runtime
+            .state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("example region should allocate");
+        let cx = Cx::new(
+            region,
+            crate::types::TaskId::testing_default(),
+            Budget::INFINITE,
+        );
         let scope =
             crate::cx::Scope::<crate::types::policy::FailFast>::new(region, Budget::INFINITE);
 

@@ -328,7 +328,7 @@ impl ActorConformanceHarness {
     /// Test basic Actor trait implementation requirements.
     fn test_actor_trait_implementation(&mut self) -> ConformanceTestResult {
         // MUST: Actor trait requires Message type and handle() method
-        let actor = MockActor::new("test_actor");
+        let _actor = MockActor::new("test_actor");
 
         // Verify trait bounds
         let is_send = std::mem::needs_drop::<MockActor>();
@@ -351,7 +351,7 @@ impl ActorConformanceHarness {
     /// Test message type constraint enforcement.
     fn test_message_type_constraint(&mut self) -> ConformanceTestResult {
         // MUST: Message type must be Send + 'static
-        let actor = MockActor::new("test_message_type");
+        let _actor = MockActor::new("test_message_type");
 
         // String implements Send + 'static
         let message_is_send =
@@ -409,7 +409,7 @@ impl ActorConformanceHarness {
         // MUST: Actors spawned within region and cannot outlive it
         // This is enforced by the type system and runtime, so we verify the API
 
-        let actor = CounterActor::new();
+        let _actor = CounterActor::new();
         let has_spawn_method = true; // spawn_actor exists in scope
 
         let verdict = if has_spawn_method {
@@ -429,7 +429,7 @@ impl ActorConformanceHarness {
     /// Test structured concurrency compliance.
     fn test_structured_concurrency_compliance(&mut self) -> ConformanceTestResult {
         // MUST: Actors integrate with structured concurrency model
-        let actor = CounterActor::new();
+        let _actor = CounterActor::new();
 
         // Verify actor follows structured patterns
         let structured_compliance = true; // spawn_actor enforces this
@@ -495,7 +495,7 @@ impl ActorConformanceHarness {
     /// Test exclusive state access during message handling.
     fn test_exclusive_state_access(&mut self) -> ConformanceTestResult {
         // MUST: Actor has exclusive access to state during handle()
-        let actor = MockActor::new("exclusive_test");
+        let _actor = MockActor::new("exclusive_test");
 
         // Exclusive access enforced by &mut self in handle()
         let exclusive_access = true; // Enforced by method signature
@@ -561,7 +561,7 @@ impl ActorConformanceHarness {
     /// Test on_stop called after mailbox drain.
     fn test_on_stop_after_drain(&mut self) -> ConformanceTestResult {
         // MUST: on_stop called after mailbox is drained
-        let actor = CounterActor::new();
+        let _actor = CounterActor::new();
 
         // Lifecycle hook ordering enforced by actor loop implementation
         let correct_drain_order = true; // Verified by actor loop design
@@ -583,7 +583,7 @@ impl ActorConformanceHarness {
     /// Test lifecycle hook calling order.
     fn test_lifecycle_hook_ordering(&mut self) -> ConformanceTestResult {
         // MUST: on_start → handle messages → on_stop
-        let actor = CounterActor::new();
+        let _actor = CounterActor::new();
 
         // Ordering enforced by actor loop structure
         let correct_ordering = true; // Verified by implementation

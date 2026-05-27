@@ -776,7 +776,7 @@ impl PriorityInversionOracle {
         for task_state in tasks.values() {
             worker_tasks
                 .entry(task_state.worker_id)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(task_state);
         }
 

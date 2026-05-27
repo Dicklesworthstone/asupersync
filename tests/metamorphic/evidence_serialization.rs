@@ -129,7 +129,16 @@ fn arb_evidence_record() -> impl Strategy<Value = EvidenceRecord> {
         arb_evidence_detail(),
     )
         .prop_map(
-            |(timestamp, task_inner, task_region, region_inner, region_arena, subsystem, verdict, detail)| {
+            |(
+                timestamp,
+                task_inner,
+                task_region,
+                region_inner,
+                region_arena,
+                subsystem,
+                verdict,
+                detail,
+            )| {
                 EvidenceRecord {
                     timestamp,
                     task_id: TaskId::new_for_test(task_inner, task_region),
@@ -240,11 +249,12 @@ fn mr_ledger_individual_record_preservation() {
 fn mr_evidence_record_binary_roundtrip() {
     proptest!(|(record in arb_evidence_record())| {
         // Serialize to binary format (bincode)
-        let serialized = bincode::serialize(&record)
+        let serialized = bincode::serde::encode_to_vec(&record, bincode::config::legacy())
             .expect("EvidenceRecord should serialize to binary");
 
         // Deserialize back
-        let deserialized: EvidenceRecord = bincode::deserialize(&serialized)
+        let (deserialized, _): (EvidenceRecord, usize) =
+            bincode::serde::decode_from_slice(&serialized, bincode::config::legacy())
             .expect("Binary EvidenceRecord should deserialize back");
 
         // Original and round-trip result must be equal
@@ -263,9 +273,10 @@ fn mr_evidence_record_cross_format_consistency() {
             .expect("Should deserialize from JSON");
 
         // Serialize to binary then deserialize
-        let binary_serialized = bincode::serialize(&record)
+        let binary_serialized = bincode::serde::encode_to_vec(&record, bincode::config::legacy())
             .expect("Should serialize to binary");
-        let from_binary: EvidenceRecord = bincode::deserialize(&binary_serialized)
+        let (from_binary, _): (EvidenceRecord, usize) =
+            bincode::serde::decode_from_slice(&binary_serialized, bincode::config::legacy())
             .expect("Should deserialize from binary");
 
         // Both formats should produce identical records
@@ -298,12 +309,11 @@ fn mr_empty_ledger_stability() {
     let empty_ledger = GeneralizedLedger::new();
 
     // Serialize empty ledger
-    let serialized = serde_json::to_string(&empty_ledger)
-        .expect("Empty ledger should serialize");
+    let serialized = serde_json::to_string(&empty_ledger).expect("Empty ledger should serialize");
 
     // Deserialize back
-    let deserialized: GeneralizedLedger = serde_json::from_str(&serialized)
-        .expect("Empty ledger should deserialize");
+    let deserialized: GeneralizedLedger =
+        serde_json::from_str(&serialized).expect("Empty ledger should deserialize");
 
     // Should still be empty
     assert_eq!(empty_ledger.entries().len(), 0);

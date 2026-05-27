@@ -2910,7 +2910,7 @@ mod io_driver_conformance_integration {
         let report = harness.run_all_tests();
 
         // Generate detailed compliance report
-        let compliance_matrix = report.generate_compliance_matrix();
+        let _compliance_matrix = report.generate_compliance_matrix();
         // IoDriver Event Loop Conformance Report generated
 
         // Verify critical requirements pass

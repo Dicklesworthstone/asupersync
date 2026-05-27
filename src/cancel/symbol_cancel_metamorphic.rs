@@ -327,7 +327,7 @@ fn mr5_listener_notification_completeness() {
 
         // Register multiple listeners
         let mut listeners = Vec::new();
-        for i in 0..listener_count {
+        for _i in 0..listener_count {
             let listener = TestListener::new();
             let listener_clone = listener.clone();
             token.add_listener(listener_clone);

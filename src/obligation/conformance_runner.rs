@@ -99,8 +99,10 @@ impl ObligationConformanceRunner {
             "Generated: {}\n\n",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| format!("Unix timestamp: {}", d.as_secs()))
-                .unwrap_or_else(|_| "Unknown time".to_string())
+                .map_or_else(
+                    |_| "Unknown time".to_string(),
+                    |d| format!("Unix timestamp: {}", d.as_secs()),
+                )
         ));
 
         report.push_str("## Executive Summary\n\n");
@@ -191,7 +193,7 @@ impl ObligationConformanceRunner {
                     ));
                 }
             }
-            report.push_str("\n");
+            report.push('\n');
         }
 
         // Recommendations

@@ -20,7 +20,7 @@ mod tests {
         assert_eq!(table.state(region_id), Some(RegionState::Open));
 
         // First close: open(R) → close(R)
-        let close_result_1 = region.begin_close(None);
+        let _close_result_1 = region.begin_close(None);
 
         // Verify state changed
         assert_eq!(table.state(region_id), Some(RegionState::Closing));
@@ -60,11 +60,11 @@ mod tests {
             (begin_result, finalize_result, complete_result)
         };
 
-        let (begin1, fin1, comp1) = perform_full_close();
+        let (_begin1, _fin1, _comp1) = perform_full_close();
 
-        let state_after_first = table.state(region_id);
+        let _state_after_first = table.state(region_id);
 
-        let (begin2, fin2, comp2) = perform_full_close();
+        let (begin2, _fin2, comp2) = perform_full_close();
 
         // Key property: second sequence should not panic and should return false
         assert!(!begin2, "Second begin_close should return false");
@@ -73,7 +73,7 @@ mod tests {
             "Second complete_close should return false (region may not be ready)"
         );
 
-        let state_after_second = table.state(region_id);
+        let _state_after_second = table.state(region_id);
 
         let (begin3, _fin3, _comp3) = perform_full_close();
         assert!(!begin3, "Third begin_close should return false");
@@ -92,9 +92,9 @@ mod tests {
         // Now the region record still exists but is detached from table
         // Close operations should still be idempotent and not panic
 
-        let close1 = removed_region.begin_close(None);
-        let close2 = removed_region.begin_close(None);
-        let close3 = removed_region.begin_close(None);
+        let _close1 = removed_region.begin_close(None);
+        let _close2 = removed_region.begin_close(None);
+        let _close3 = removed_region.begin_close(None);
 
         // Further operations should also be safe
         let _ = removed_region.begin_finalize();

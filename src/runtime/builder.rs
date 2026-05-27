@@ -3811,6 +3811,7 @@ impl RuntimeInner {
         if let Some(source) = entropy_source {
             runtime_state.set_entropy_source(source);
         }
+        runtime_state.set_spawn_authorization_key(config.security.spawn_authorization_key.clone());
         runtime_state.set_read_biased_region_snapshot(config.enable_read_biased_region_snapshot);
         runtime_state
     }

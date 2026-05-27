@@ -12,12 +12,11 @@
 //! - **File descriptor lifecycle**: registration, reuse, cleanup
 //! - **Thread safety**: concurrent operations and wake functionality
 
-use super::{EpollReactor, Event, Events, Interest, Reactor, Source, Token};
+use super::{EpollReactor, Events, Interest, Reactor, Token};
 use std::collections::HashMap;
 use std::io;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Requirement levels for conformance testing.
@@ -151,7 +150,7 @@ impl EpollConformanceHarness {
         let mut results = Vec::new();
 
         for test in &self.tests {
-            let test_start = Instant::now();
+            let _test_start = Instant::now();
             println!("Running conformance test: {}", test.name());
 
             let result = test.run(ctx);
@@ -519,7 +518,7 @@ impl ConformanceTest for PollConformanceTest {
             use std::io::Write;
 
             let reactor = EpollReactor::new()?;
-            let (mut sock1, mut sock2) = create_test_socket_pair()?;
+            let (sock1, mut sock2) = create_test_socket_pair()?;
             let token = Token::new(1);
 
             // Register for readability

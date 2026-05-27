@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn det_build_hasher_produces_deterministic_hashers() {
-        let builder = DetBuildHasher;
+        let builder = DetBuildHasher::for_lab();
         let mut h1 = builder.build_hasher();
         let mut h2 = builder.build_hasher();
 

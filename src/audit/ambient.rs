@@ -502,9 +502,10 @@ fn validate_audit_operation_authorized(operation_name: &str) {
     // 3. KNOWN_FINDINGS has not been tampered with
 
     // For now, implement basic sanity checks
-    if operation_name.is_empty() {
-        panic!("Invalid audit operation: empty operation name");
-    }
+    assert!(
+        !operation_name.is_empty(),
+        "Invalid audit operation: empty operation name"
+    );
 
     // Validate KNOWN_FINDINGS integrity
     validate_known_findings_integrity();
@@ -577,14 +578,16 @@ fn validate_audit_system_integrity() {
     // For now, just validate that we're not in an obviously compromised state
 
     // Check that critical audit functions exist and are not tampered with
-    if KNOWN_FINDINGS.is_empty() {
-        panic!("KNOWN_FINDINGS is empty - possible audit system tampering");
-    }
+    assert!(
+        !KNOWN_FINDINGS.is_empty(),
+        "KNOWN_FINDINGS is empty - possible audit system tampering"
+    );
 
     // Validate grep patterns are not empty (could indicate tampering)
-    if GREP_PATTERNS.is_empty() {
-        panic!("GREP_PATTERNS is empty - possible audit system tampering");
-    }
+    assert!(
+        !GREP_PATTERNS.is_empty(),
+        "GREP_PATTERNS is empty - possible audit system tampering"
+    );
 }
 
 #[cfg(test)]
@@ -728,14 +731,9 @@ mod tests {
         let warning_count = super::count_by_severity(Severity::Medium);
         let unresolved_count = super::unresolved_count();
 
-        // These should complete without panicking, indicating capability validation passed
-        assert!(warning_count >= 0, "Warning count should be non-negative");
-        assert!(
-            unresolved_count >= 0,
-            "Unresolved count should be non-negative"
-        );
-
-        // The counts should be reasonable (not obviously tampered)
+        // The count calls above should complete without panicking, and the counts
+        // should be reasonable (not obviously tampered).
+        assert!(warning_count <= 100, "Warning count should be reasonable");
         assert!(
             unresolved_count <= 100,
             "Unresolved count should be reasonable"

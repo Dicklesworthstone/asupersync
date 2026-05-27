@@ -17,8 +17,6 @@
 #![allow(dead_code)]
 
 use super::*;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 

@@ -333,7 +333,7 @@ impl ObligationLedger {
         let record = self
             .obligations
             .get_mut(&id)
-            .ok_or_else(|| LedgerError::NotFound { obligation: id })?;
+            .ok_or(LedgerError::NotFound { obligation: id })?;
         if !record.is_pending() {
             return Err(LedgerError::NotPending {
                 obligation: id,
@@ -567,12 +567,12 @@ impl ObligationLedger {
         }
 
         // Check for index overflow
-        let next_index =
-            self.next_index
-                .checked_add(1)
-                .ok_or_else(|| LedgerError::IndexOverflow {
-                    generation: self.generation,
-                })?;
+        let next_index = self
+            .next_index
+            .checked_add(1)
+            .ok_or(LedgerError::IndexOverflow {
+                generation: self.generation,
+            })?;
 
         let idx = ArenaIndex::new(self.next_index, self.generation);
         self.next_index = next_index;
@@ -2448,6 +2448,7 @@ mod tests {
                     format!("Err(AlreadyResolved::{state:?})")
                 }
                 Err(LedgerError::RegionFinalized { .. }) => "Err(RegionFinalized)".to_string(),
+                Err(other) => format!("Err({other:?})"),
             }
         }
 

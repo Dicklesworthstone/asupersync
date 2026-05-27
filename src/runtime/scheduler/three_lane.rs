@@ -1206,6 +1206,22 @@ pub(crate) fn schedule_on_current_local(task: TaskId, priority: u8) -> bool {
 }
 
 #[inline]
+fn move_local_ready_task_to_cancel_lane(
+    local: &Mutex<PriorityScheduler>,
+    local_ready: &LocalReadyQueue,
+    task: TaskId,
+    priority: u8,
+) {
+    let mut local_guard = local.lock();
+    let mut local_ready_guard = local_ready.lock();
+    if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
+        local_ready_guard.remove(pos);
+    }
+    drop(local_ready_guard);
+    local_guard.move_to_cancel_lane(task, priority);
+}
+
+#[inline]
 pub(crate) fn schedule_cancel_on_current_local(task: TaskId, priority: u8) -> bool {
     CURRENT_LOCAL.with(|cell| {
         let borrow = cell.borrow();
@@ -5407,34 +5423,26 @@ impl ThreeLaneWorker {
                 record.wake_state.notify();
             }
         });
-        {
-            let mut local_ready_guard = self.local_ready.lock();
-            if let Some(pos) = local_ready_guard.iter().position(|t| *t == task) {
-                local_ready_guard.remove(pos);
-            }
-            drop(local_ready_guard);
-            let mut local = self.local.lock();
-            local.move_to_cancel_lane(task, priority);
+        move_local_ready_task_to_cancel_lane(&self.local, &self.local_ready, task, priority);
 
-            // Record task enqueue for fairness monitoring
-            let current_time = self.current_time_ns();
-            self.fairness_monitor.lock().record_task_enqueue(
-                task,
-                priority,
-                current_time,
-                0, // Cancel lane = 0
-            );
+        // Record task enqueue for fairness monitoring
+        let current_time = self.current_time_ns();
+        self.fairness_monitor.lock().record_task_enqueue(
+            task,
+            priority,
+            current_time,
+            0, // Cancel lane = 0
+        );
 
-            // Record task enqueue for invariant verification
-            self.invariant_monitor.lock().record_task_requeue(
-                task,
-                "local_cancel_queue",
-                priority,
-                Time::from_nanos(current_time),
-            );
+        // Record task enqueue for invariant verification
+        self.invariant_monitor.lock().record_task_requeue(
+            task,
+            "local_cancel_queue",
+            priority,
+            Time::from_nanos(current_time),
+        );
 
-            self.record_scheduler_evidence_enqueue_at(task, current_time);
-        }
+        self.record_scheduler_evidence_enqueue_at(task, current_time);
         self.parker.unpark();
     }
 
@@ -5999,14 +6007,12 @@ impl ThreeLaneWorker {
                         if schedule_cancel {
                             // Cancel still goes to PriorityScheduler for ordering.
                             // Cancel lane is not stolen by steal_ready_batch_into.
-                            let mut local_ready_guard = self.local_ready.lock();
-                            if let Some(pos) = local_ready_guard.iter().position(|t| *t == task_id)
-                            {
-                                local_ready_guard.remove(pos);
-                            }
-                            drop(local_ready_guard);
-                            let mut local = self.local.lock();
-                            local.schedule_cancel(task_id, cancel_priority);
+                            move_local_ready_task_to_cancel_lane(
+                                &self.local,
+                                &self.local_ready,
+                                task_id,
+                                cancel_priority,
+                            );
                             self.record_scheduler_evidence_enqueue(task_id);
                         } else {
                             // Push to non-stealable local_ready queue.
@@ -6237,13 +6243,12 @@ impl ThreeLaneLocalWaker {
                 // Promote to the local cancel lane, matching `inject_cancel`
                 // and `schedule_local_cancel`: a cancelled local task must not
                 // remain in the non-stealable ready queue.
-                let mut local_ready_guard = self.local_ready.lock();
-                if let Some(pos) = local_ready_guard.iter().position(|t| *t == self.task_id) {
-                    local_ready_guard.remove(pos);
-                }
-                drop(local_ready_guard);
-                let mut local = self.local.lock();
-                local.move_to_cancel_lane(self.task_id, priority);
+                move_local_ready_task_to_cancel_lane(
+                    &self.local,
+                    &self.local_ready,
+                    self.task_id,
+                    priority,
+                );
             } else {
                 // Push to non-stealable local_ready queue.
                 self.local_ready.lock().push_back(self.task_id);
@@ -6366,13 +6371,12 @@ impl ThreeLaneLocalCancelWaker {
         // Promote to local cancel lane, matching global inject_cancel semantics.
         // move_to_cancel_lane relocates from ready/timed if already scheduled.
         {
-            let mut local_ready_guard = self.local_ready.lock();
-            if let Some(pos) = local_ready_guard.iter().position(|t| *t == self.task_id) {
-                local_ready_guard.remove(pos);
-            }
-            drop(local_ready_guard);
-            let mut local = self.local.lock();
-            local.move_to_cancel_lane(self.task_id, priority);
+            move_local_ready_task_to_cancel_lane(
+                &self.local,
+                &self.local_ready,
+                self.task_id,
+                priority,
+            );
         }
         if let Some(collector) = &self.scheduler_evidence {
             collector
@@ -8389,6 +8393,49 @@ mod tests {
         );
         drop(queue);
 
+        assert!(
+            local.lock().is_in_cancel_lane(task_id),
+            "task should be promoted to cancel lane"
+        );
+    }
+
+    #[test]
+    fn local_cancel_promotion_waits_on_local_before_local_ready() {
+        let task_id = TaskId::new_for_test(1, 2);
+        let local_ready = Arc::new(LocalReadyQueue::new(VecDeque::from([task_id])));
+        let local = Arc::new(Mutex::new(PriorityScheduler::new()));
+        let local_guard = local.lock();
+        let worker_local = Arc::clone(&local);
+        let worker_local_ready = Arc::clone(&local_ready);
+
+        let handle = thread::spawn(move || {
+            move_local_ready_task_to_cancel_lane(&worker_local, &worker_local_ready, task_id, 9);
+        });
+
+        thread::sleep(Duration::from_millis(10));
+        let mut local_ready_remained_available = false;
+        for _ in 0..100 {
+            if local_ready.try_lock().is_some() {
+                local_ready_remained_available = true;
+                break;
+            }
+            thread::yield_now();
+        }
+
+        drop(local_guard);
+        handle
+            .join()
+            .expect("local cancel promotion thread should finish");
+
+        assert!(
+            local_ready_remained_available,
+            "local cancel promotion must wait on local before taking local_ready; \
+             taking local_ready first can deadlock against local->local_ready callers"
+        );
+        assert!(
+            !local_ready.lock().contains(&task_id),
+            "local_ready should not retain cancelled task"
+        );
         assert!(
             local.lock().is_in_cancel_lane(task_id),
             "task should be promoted to cancel lane"

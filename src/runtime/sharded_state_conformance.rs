@@ -29,7 +29,7 @@ use crate::runtime::sharded_state::{
 };
 use crate::trace::TraceBufferHandle;
 use crate::trace::distributed::LogicalClockMode;
-use crate::types::{CancelAttributionConfig, RegionId, TaskId, Time};
+use crate::types::{CancelAttributionConfig, RegionId, Time};
 use crate::util::{ArenaIndex, OsEntropy};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -238,16 +238,16 @@ impl ShardedStateConformanceSuite {
                 ConformanceResult::Pass => {
                     passed += 1;
                 }
-                ConformanceResult::Fail { reason } => {
+                ConformanceResult::Fail { reason: _ } => {
                     failed += 1;
                 }
-                ConformanceResult::Skip { reason } => {
+                ConformanceResult::Skip { reason: _ } => {
                     // Test skipped
                 }
             }
         }
 
-        let total = passed + failed;
+        let _total = passed + failed;
         // ShardedState Conformance: tests completed
 
         (passed, failed)

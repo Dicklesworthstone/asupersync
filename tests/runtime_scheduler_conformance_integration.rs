@@ -8,7 +8,7 @@ mod conformance;
 
 use conformance::{
     KernelConformanceHarness, ReactorConformanceHarness, RemoteConformanceHarness,
-    RuntimeRequirementLevel, RuntimeTestCategory, RuntimeTestVerdict, SchedulerConformanceHarness,
+    RuntimeRequirementLevel, RuntimeTestCategory, SchedulerConformanceHarness,
     harness::run_full_runtime_conformance_suite,
 };
 

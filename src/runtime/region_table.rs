@@ -1388,7 +1388,7 @@ mod tests {
     // Invariant: Removing work items in different orders should yield the same final state
     proptest! {
         #[test]
-        fn mr_work_removal_order_independence(remove_tasks_first in any::<bool>()) {
+        fn mr_work_removal_order_independence(_remove_tasks_first in any::<bool>()) {
             fn run_close_with_order(tasks_first: bool) -> (RegionState, usize) {
                 let mut table = RegionTable::new();
                 let root = table.create_root(Budget::default(), Time::ZERO);
@@ -1560,12 +1560,13 @@ mod tests {
             let mut table = RegionTable::new();
             let root = table.create_root(Budget::default(), Time::ZERO);
             let initial_len = table.len();
+            prop_assert_eq!(initial_len, 1);
 
             let mut current_level = vec![root];
             let mut total_regions = 1;
 
             // Build hierarchical tree
-            for (depth, &children_count) in children_per_level.iter().enumerate().take(tree_depth) {
+            for (_depth, &children_count) in children_per_level.iter().enumerate().take(tree_depth) {
                 let mut next_level = Vec::new();
 
                 for parent in &current_level {

@@ -692,6 +692,8 @@ pub struct RuntimeState {
     cancel_attribution: CancelAttributionConfig,
     /// Entropy source for capability-based randomness.
     entropy_source: Arc<dyn EntropySource>,
+    /// Optional root key used to verify spawn capability macaroons.
+    spawn_authorization_key: Option<crate::security::key::AuthKey>,
     /// Optional observability configuration for runtime contexts.
     observability: Option<RuntimeObservability>,
     /// Blocking pool handle for offloading synchronous work.
@@ -798,6 +800,10 @@ impl std::fmt::Debug for RuntimeState {
             .field("logical_clock_mode", &self.logical_clock_mode)
             .field("cancel_attribution", &self.cancel_attribution)
             .field("entropy_source", &"<dyn EntropySource>")
+            .field(
+                "spawn_authorization_enabled",
+                &self.spawn_authorization_key.is_some(),
+            )
             .field("observability", &self.observability.is_some())
             .field("blocking_pool", &self.blocking_pool.is_some())
             .field("obligation_leak_response", &self.obligation_leak_response)
@@ -850,9 +856,9 @@ impl RuntimeState {
         // Create shared instances for pressure monitoring
         let resource_monitor = Arc::new(ResourceMonitor::new(MonitorConfig::default()));
 
-        // Note: PressureGovernor requires Runtime which creates a circular dependency
-        // For now, create a SwarmPressureGovernor without an underlying PressureGovernor
-        // This will be enhanced later when we can safely create the PressureGovernor
+        // RuntimeState owns the resource monitor and exposes the swarm-level
+        // governor. The runtime-level PressureGovernor is attached by the
+        // outer Runtime once the scheduler and state mutex are available.
         let swarm_pressure_governor = SwarmPressureGovernor::new_without_pressure_governor(
             SwarmPressureGovernorConfig::default(),
             Arc::clone(&resource_monitor),
@@ -872,6 +878,7 @@ impl RuntimeState {
             logical_clock_mode: LogicalClockMode::Lamport,
             cancel_attribution: CancelAttributionConfig::default(),
             entropy_source: Arc::new(OsEntropy),
+            spawn_authorization_key: None,
             observability: None,
             blocking_pool: None,
             // br-asupersync-qp2tfx: internal constructors Panic on obligation
@@ -1809,10 +1816,36 @@ impl RuntimeState {
     /// This method provides access to the cryptographic key used to verify
     /// spawn capability macaroons. Returns None if authorization is disabled
     /// or not configured for this runtime.
-    fn get_spawn_authorization_key(&self) -> Option<crate::security::key::AuthKey> {
-        // TODO: RuntimeState doesn't currently have access to config.
-        // For now, return None to enable fail-open authorization (testing mode).
-        None
+    fn get_spawn_authorization_key(&self) -> Option<&crate::security::key::AuthKey> {
+        self.spawn_authorization_key.as_ref()
+    }
+
+    /// Configure the root key used for spawn authorization.
+    pub fn set_spawn_authorization_key(&mut self, key: Option<crate::security::key::AuthKey>) {
+        self.spawn_authorization_key = key;
+    }
+
+    fn spawn_capability_identifier(region: RegionId) -> String {
+        format!("spawn:region_{}", region.as_u64())
+    }
+
+    fn verify_spawn_authorization(
+        &self,
+        caller_cx: &crate::cx::Cx,
+        region: RegionId,
+    ) -> Result<(), SpawnError> {
+        let Some(root_key) = self.get_spawn_authorization_key() else {
+            return Ok(());
+        };
+
+        let spawn_capability = Self::spawn_capability_identifier(region);
+        let verification_context = crate::cx::macaroon::VerificationContext::new();
+        caller_cx
+            .verify_capability(root_key, &spawn_capability, &verification_context)
+            .map_err(|_| SpawnError::AuthorizationDenied {
+                region,
+                cx_id: format!("{:?}", caller_cx.task_id()),
+            })
     }
 
     /// Creates a system-level Cx for internal runtime operations.
@@ -1820,8 +1853,6 @@ impl RuntimeState {
     /// This Cx has elevated privileges and should only be used for
     /// runtime-internal operations like finalizers and builder tasks.
     pub(crate) fn create_system_cx(&self) -> crate::cx::Cx {
-        // Create a minimal Cx for system operations
-        // In a full implementation, this would include system-level macaroons
         crate::cx::Cx::for_testing()
     }
 
@@ -1848,24 +1879,7 @@ impl RuntimeState {
     where
         T: Send + 'static,
     {
-        // Authorization check: verify caller has permission to spawn tasks in the target region
-        use crate::cx::macaroon::VerificationContext;
-
-        let spawn_capability = format!("spawn:region_{:?}", region.0);
-        let verification_context = VerificationContext::new();
-
-        // Check if caller has authorization to spawn in this region
-        if let Some(root_key) = self.get_spawn_authorization_key() {
-            if let Err(_verification_error) =
-                caller_cx.verify_capability(&root_key, &spawn_capability, &verification_context)
-            {
-                return Err(SpawnError::AuthorizationDenied {
-                    region,
-                    cx_id: format!("{:?}", caller_cx.task_id()),
-                });
-            }
-        }
-        // If no root key is configured, proceed without authorization (fail-open for testing)
+        let _ = caller_cx;
 
         use crate::channel::oneshot;
 
@@ -2108,6 +2122,8 @@ impl RuntimeState {
         T: Send + 'static,
     {
         use crate::runtime::{StoredTask, task_handle::JoinError};
+
+        self.verify_spawn_authorization(caller_cx, region)?;
 
         let (task_id, handle, cx, result_tx) =
             self.create_task_infrastructure(caller_cx, region, budget, false)?;
@@ -3806,17 +3822,19 @@ impl RuntimeState {
     fn pop_tracked_finalizer(&mut self, region_id: RegionId) -> Option<(u64, Finalizer)> {
         let finalizer = {
             let region = self.regions.get(region_id.arena_index())?;
-
-            // EDGE CASE VALIDATION: Ensure finalizer stack consistency before popping
-            // This catches corruption where the region exists but has invalid finalizer state
-            debug_assert!(
-                !region.finalizers_empty(),
-                "br-asupersync-mg70eb: attempt to pop finalizer from empty stack \
-                 (region={:?})",
-                region_id
-            );
-
-            region.pop_finalizer()?
+            region.pop_finalizer()
+        };
+        let finalizer = match finalizer {
+            Some(finalizer) => finalizer,
+            None => {
+                debug_assert!(
+                    !self.pending_finalizer_ids.contains_key(&region_id),
+                    "br-asupersync-mg70eb: finalizer ID tracking remains after finalizer stack drained \
+                     (region={:?})",
+                    region_id
+                );
+                return None;
+            }
         };
         let (id, empty_after_pop) = {
             let ids = self
@@ -3940,7 +3958,9 @@ impl RuntimeState {
                     if let Some(region) = self.regions.get(region_id.arena_index()) {
                         if region.state() != crate::record::region::RegionState::Finalizing {
                             // Region state changed unexpectedly - this is a critical validation failure
-                            panic!(
+                            assert_eq!(
+                                region.state(),
+                                crate::record::region::RegionState::Finalizing,
                                 "br-asupersync-vks0tm: critical finalizer validation gap detected - \
                                  region state changed from Finalizing to {:?} during finalizer execution \
                                  (region={:?}, finalizer_id={})",
@@ -4131,9 +4151,11 @@ impl RuntimeState {
             match state {
                 crate::record::region::RegionState::Closing
                 | crate::record::region::RegionState::Draining => {
-                    // Fixed TOCTOU race: Let begin_finalize() do atomic check-and-transition
-                    // instead of separate count checks that could become stale.
-                    let transition_to_finalizing = {
+                    // Only a region with terminal tasks and closed children may enter
+                    // finalization. Non-quiescent Closing/Draining regions stay put while
+                    // task cleanup, child close propagation, or finalizer scheduling makes
+                    // progress.
+                    let transition_to_finalizing = if self.can_region_finalize(region_id) {
                         let Some(region) = self.regions.get(region_id.arena_index()) else {
                             break;
                         };
@@ -4181,6 +4203,8 @@ impl RuntimeState {
                         } else {
                             false
                         }
+                    } else {
+                        false
                     };
 
                     // Check if region needs to transition to Draining (has children but is Closing)
@@ -7121,9 +7145,9 @@ mod tests {
     fn log_quiescence_observation(
         state: &RuntimeState,
         region: RegionId,
-        scenario_id: &str,
-        observation_tick: u64,
-        caller_surface: &str,
+        _scenario_id: &str,
+        _observation_tick: u64,
+        _caller_surface: &str,
     ) -> bool {
         let snapshot = state.snapshot();
         let region_id = IdSnapshot::from(region);
@@ -7136,7 +7160,7 @@ mod tests {
                 |entry| format!("{:?}", entry.state),
             );
         let quiescent = state.is_quiescent();
-        let finalizer_count = if close_state == "Removed" {
+        let _finalizer_count = if close_state == "Removed" {
             0
         } else {
             state.region_finalizer_count(region)
@@ -9269,7 +9293,7 @@ mod tests {
         let mut quiescence_observations = Vec::new();
         let mut first_quiescent_tick = None;
         let observe = |state: &RuntimeState,
-                       scenario_id: &str,
+                       _scenario_id: &str,
                        close_attempt_index: usize,
                        state_transition_sequence: &mut Vec<String>,
                        quiescence_observations: &mut Vec<bool>,
@@ -9286,11 +9310,11 @@ mod tests {
                 );
             state_transition_sequence.push(close_state.clone());
 
-            let pending_child_count = state
+            let _pending_child_count = state
                 .regions
                 .get(root.arena_index())
                 .map_or(0, RegionRecord::child_count);
-            let finalizer_count = if close_state == "Removed" {
+            let _finalizer_count = if close_state == "Removed" {
                 0
             } else {
                 state.region_finalizer_count(root)
@@ -9301,7 +9325,7 @@ mod tests {
             }
             quiescence_observations.push(quiescent);
 
-            let quiescence_tick =
+            let _quiescence_tick =
                 first_quiescent_tick.map_or_else(|| "pending".to_string(), |tick| tick.to_string());
             // Close reentry observation completed
 
@@ -13847,6 +13871,31 @@ mod tests {
             "create_task_with_auth should succeed when authorization is disabled",
             true,
             result.is_ok()
+        );
+
+        let root_key = crate::security::key::AuthKey::from_seed(2026);
+        state.set_spawn_authorization_key(Some(root_key.clone()));
+
+        let denied =
+            state.create_task_with_auth(&test_cx, region, Budget::INFINITE, async { 7_u32 });
+        crate::assert_with_log!(
+            matches!(denied, Err(SpawnError::AuthorizationDenied { .. })),
+            "create_task_with_auth should fail closed when authorization is enabled and no macaroon is attached",
+            true,
+            matches!(denied, Err(SpawnError::AuthorizationDenied { .. }))
+        );
+
+        let spawn_capability = RuntimeState::spawn_capability_identifier(region);
+        let token =
+            crate::cx::macaroon::MacaroonToken::mint(&root_key, &spawn_capability, "runtime-test");
+        let authorized_cx = crate::cx::Cx::for_testing().with_macaroon(token);
+        let authorized =
+            state.create_task_with_auth(&authorized_cx, region, Budget::INFINITE, async { 9_u32 });
+        crate::assert_with_log!(
+            authorized.is_ok(),
+            "create_task_with_auth should accept a macaroon for the target region",
+            true,
+            authorized.is_ok()
         );
 
         crate::test_complete!("create_task_with_authorization_check");

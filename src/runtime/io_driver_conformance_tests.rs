@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::io::{self, ErrorKind};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::task::{Wake, Waker};
 use std::time::{Duration, Instant};
 
@@ -770,7 +770,7 @@ impl ConformanceTest for WakerRegistrationTest {
         let mut driver = IoDriver::new(reactor);
 
         let test_waker = TestWaker::new();
-        let token = driver.register_waker(test_waker.into_waker());
+        let _token = driver.register_waker(test_waker.into_waker());
 
         let passed =
             driver.waker_count() == 1 && driver.stats().registrations == 1 && !driver.is_empty();

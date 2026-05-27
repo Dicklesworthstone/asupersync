@@ -94,10 +94,8 @@ pub fn wall_now() -> Time {
         if let Some(timer_driver) = current_cx.timer_driver() {
             return timer_driver.now();
         }
-        // Cx exists but no timer driver - check if it has time capability
-        if current_cx.runtime_mask.has(crate::cx::cap::CapMask::TIME) {
-            return current_cx.now();
-        }
+        // A Cx without a timer driver must fall through to the raw wall-clock
+        // path. Calling `Cx::now()` here would recurse back through this helper.
     }
 
     // Absolute fallback: no Cx context or capabilities available
@@ -827,6 +825,29 @@ mod tests {
     }
 
     static CURRENT_TIME: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn wall_now_falls_back_when_current_cx_has_no_timer_driver() {
+        init_test("wall_now_falls_back_when_current_cx_has_no_timer_driver");
+
+        let cx = Cx::new(
+            RegionId::new_for_test(0, 6),
+            TaskId::new_for_test(0, 6),
+            Budget::INFINITE,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let first = wall_now();
+        let second = wall_now();
+
+        crate::assert_with_log!(
+            second >= first,
+            "wall clock remains monotonic",
+            true,
+            second >= first
+        );
+        crate::test_complete!("wall_now_falls_back_when_current_cx_has_no_timer_driver");
+    }
 
     fn get_time() -> Time {
         Time::from_nanos(CURRENT_TIME.load(Ordering::SeqCst))

@@ -497,9 +497,10 @@ const MAX_WATCHERS_PER_REGION: usize = 1000;
 const MAX_WATCHERS_PER_NAME: usize = 100;
 const MAX_TOTAL_WATCHERS: usize = 10000;
 
-/// Uses deterministic hash maps for O(1) average lookup behavior while
-/// preserving deterministic public outputs via explicit sorting where needed.
-/// All mutations emit [`RegistryEvent`]s for trace visibility.
+/// Uses deterministic hash maps for O(1) average lookup behavior.
+///
+/// Public outputs remain deterministic through explicit sorting where needed,
+/// and all mutations emit [`RegistryEvent`]s for trace visibility.
 #[derive(Debug)]
 pub struct NameRegistry {
     /// Active leases keyed by name.
@@ -2271,7 +2272,9 @@ mod tests {
         init_test("name_watch_replace_emits_release_then_acquire");
 
         let mut reg = NameRegistry::new();
-        let watch_ref = reg.watch_name("svc", tid(42), rid(9));
+        let watch_ref = reg
+            .watch_name("svc", tid(42), rid(9))
+            .expect("watch registration should succeed");
 
         let mut old_lease = reg.register("svc", tid(1), rid(1), Time::ZERO).unwrap();
         reg.take_name_notifications();

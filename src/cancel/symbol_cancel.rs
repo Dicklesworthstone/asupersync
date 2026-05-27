@@ -1600,6 +1600,11 @@ impl CleanupCoordinator {
         handler: Box<dyn CleanupHandler>,
         mut pending_set: PendingSymbolSet,
     ) {
+        // Take the handler table before the retry-state locks. Keeping this
+        // acquisition out of the pending/completed critical path avoids a
+        // future handlers->pending caller turning this path into an AB-BA cycle.
+        let mut handlers = self.handlers.write();
+
         // Keep `pending` held while draining the cleanup buffer and clearing
         // `completed` so reopening retry state is atomic with respect to
         // register_pending() and cannot drop symbols in the reopen window.
@@ -1615,7 +1620,7 @@ impl CleanupCoordinator {
             return;
         }
 
-        self.handlers.write().insert(object_id, handler);
+        handlers.insert(object_id, handler);
 
         let mut cleanup_buffer = self.cleanup_buffer.write();
         if let Some(buffered_symbols) = cleanup_buffer.remove(&object_id) {
@@ -3344,6 +3349,64 @@ mod tests {
         );
         assert_eq!(stats.pending_symbols, 1);
         assert_eq!(stats.pending_bytes, 3);
+    }
+
+    #[test]
+    fn restore_retry_state_acquires_handler_table_before_pending_state() {
+        use std::sync::Barrier;
+        use std::time::{Duration, Instant};
+
+        let coordinator = Arc::new(CleanupCoordinator::new());
+        let object_id = ObjectId::new_for_test(70);
+        let pending_set = PendingSymbolSet {
+            symbols: vec![Symbol::new_for_test(70, 0, 0, &[1, 2, 3])],
+            total_bytes: 3,
+            _created_at: Time::from_millis(100),
+        };
+        let pending_guard = coordinator.pending.write();
+        let started = Arc::new(Barrier::new(2));
+        let restore_started = Arc::clone(&started);
+        let restore_coordinator = Arc::clone(&coordinator);
+
+        let handle = std::thread::spawn(move || {
+            restore_started.wait();
+            restore_coordinator.restore_retry_state(
+                object_id,
+                Box::new(CountingCleanupHandler),
+                pending_set,
+            );
+        });
+
+        started.wait();
+        let mut saw_handler_table_locked = false;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if coordinator.handlers.try_write().is_none() {
+                saw_handler_table_locked = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+
+        drop(pending_guard);
+        handle
+            .join()
+            .expect("retry-state restoration thread should finish");
+
+        assert!(
+            saw_handler_table_locked,
+            "restore_retry_state must acquire handlers before waiting for pending; \
+             otherwise a handlers->pending caller can form an AB-BA lock cycle"
+        );
+        assert!(
+            coordinator.handlers.read().contains_key(&object_id),
+            "retry restoration should preserve the cleanup handler"
+        );
+        assert_eq!(
+            coordinator.stats().pending_symbols,
+            1,
+            "retry restoration should preserve pending symbols"
+        );
     }
 
     #[test]

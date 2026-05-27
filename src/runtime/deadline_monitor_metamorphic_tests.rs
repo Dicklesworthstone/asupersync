@@ -285,7 +285,7 @@ fn progress_monotonicity() {
     let warnings_with_progress = fixture.get_warnings();
 
     // Metamorphic relation: Progress should reduce warning severity
-    if let Some(warning_no_progress) = warnings_no_progress.first() {
+    if let Some(_warning_no_progress) = warnings_no_progress.first() {
         if let Some(warning_with_progress) = warnings_with_progress.first() {
             // With progress, should not have NoProgress component in warning
             assert!(
@@ -348,7 +348,7 @@ fn duration_history_order_independence() {
     let base_time = Time::from_nanos(0);
 
     // Insert in original order
-    for (i, &duration) in durations.iter().enumerate() {
+    for (_i, &duration) in durations.iter().enumerate() {
         monitor1.record_completion(
             task_id1,
             "test",
@@ -359,7 +359,7 @@ fn duration_history_order_independence() {
     }
 
     // Insert in reverse order
-    for (i, &duration) in durations.iter().rev().enumerate() {
+    for (_i, &duration) in durations.iter().rev().enumerate() {
         monitor2.record_completion(
             task_id2,
             "test",
@@ -370,7 +370,7 @@ fn duration_history_order_independence() {
     }
 
     // Now test adaptive warning thresholds with same total duration
-    let total_duration = Duration::from_secs(10);
+    let _total_duration = Duration::from_secs(10);
 
     // Both monitors should have same history and produce same adaptive thresholds
     // We test this indirectly by checking that both produce the same warning behavior

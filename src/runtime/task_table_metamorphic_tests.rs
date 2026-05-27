@@ -8,7 +8,6 @@
 #![allow(clippy::pedantic, clippy::nursery, clippy::unwrap_used)]
 
 use proptest::prelude::*;
-use std::collections::HashMap;
 
 use super::*;
 use crate::record::task::{TaskPhase, TaskRecord};
@@ -101,7 +100,7 @@ fn apply_operation(
             task_indices.push((task_id, idx));
         }
         TableOperation::Remove { task_index } => {
-            if let Some((task_id, idx)) = task_indices.get(*task_index % task_indices.len().max(1))
+            if let Some((task_id, _idx)) = task_indices.get(*task_index % task_indices.len().max(1))
             {
                 table.remove_task(*task_id);
                 // Note: Not removing from task_indices to allow some operations on non-existent tasks
@@ -334,7 +333,10 @@ fn mr_pool_stats_conservation() {
 
         for op in ops.iter().take(10) {
             match op {
-                TableOperation::Insert { owner, deadline } => {
+                TableOperation::Insert {
+                    owner: _,
+                    deadline: _,
+                } => {
                     // insertions use pooled acquisition
                     if table.recycled_task_record_count() > 0 {
                         expected_hits += 1;
@@ -453,7 +455,7 @@ fn mr_id_canonicalization() {
 
         // Create record with intentionally stale/wrong TaskId
         let stale_id = TaskId::from_arena(ArenaIndex::new(stale_id_value % 1000, 0));
-        let mut record = TaskRecord::new(stale_id, owner, Budget::INFINITE);
+        let record = TaskRecord::new(stale_id, owner, Budget::INFINITE);
         prop_assert_eq!(record.id, stale_id, "Record should start with stale ID");
 
         // Insert task - this should canonicalize the ID

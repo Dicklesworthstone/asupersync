@@ -848,21 +848,20 @@ impl<K: TokenKind> ObligationToken<K> {
     /// The region must be valid and active. Creating obligations outside of proper
     /// region context violates the "no obligation leaks" invariant.
     #[allow(clippy::double_must_use)]
-    #[must_use]
+    #[must_use = "obligation tokens must be committed or aborted"]
     pub fn reserve(description: impl Into<String>, region: RegionId) -> Self {
+        let description = description.into();
         // Validate that the region is not the root region (which should not hold obligations)
         // and that we're in a valid execution context. The root region typically has
         // index 0, generation 0.
-        if region.as_u64() == 0 {
-            panic!(
-                "Cannot create obligation token in root region: obligations must be \
-                 scoped to non-root regions to prevent leaks. Description: {}",
-                description.into()
-            );
-        }
+        assert!(
+            region.as_u64() != 0,
+            "Cannot create obligation token in root region: obligations must be \
+             scoped to non-root regions to prevent leaks. Description: {description}"
+        );
 
         Self {
-            description: description.into(),
+            description,
             region,
             armed: true,
             _kind: PhantomData,
@@ -881,7 +880,7 @@ impl<K: TokenKind> ObligationToken<K> {
     /// is not available. Production code should use `reserve()` with a real
     /// region from the current Cx.
     #[cfg(any(test, feature = "test-internals"))]
-    #[must_use]
+    #[must_use = "obligation tokens must be committed or aborted"]
     pub fn reserve_test(description: impl Into<String>) -> Self {
         Self::reserve(description, RegionId::new_ephemeral())
     }
@@ -1588,9 +1587,12 @@ mod tests {
     #[test]
     fn token_dynamic_kind_bridge_accepts_matching_hot_path_kind() {
         init_test("token_dynamic_kind_bridge_accepts_matching_hot_path_kind");
-        let token: SendPermitToken =
-            ObligationToken::try_reserve_kind(ObligationKind::SendPermit, "hot-path send")
-                .expect("send permit dynamic kind should map to SendPermitToken");
+        let token: SendPermitToken = ObligationToken::try_reserve_kind(
+            ObligationKind::SendPermit,
+            "hot-path send",
+            RegionId::new_ephemeral(),
+        )
+        .expect("send permit dynamic kind should map to SendPermitToken");
 
         let proof = token.commit();
         crate::assert_with_log!(
@@ -1612,8 +1614,12 @@ mod tests {
     #[test]
     fn token_dynamic_kind_bridge_rejects_mismatched_protocol_family() {
         init_test("token_dynamic_kind_bridge_rejects_mismatched_protocol_family");
-        let err = SendPermitToken::try_reserve_kind(ObligationKind::Ack, "wrong dynamic family")
-            .expect_err("Ack must not manufacture a SendPermitToken");
+        let err = SendPermitToken::try_reserve_kind(
+            ObligationKind::Ack,
+            "wrong dynamic family",
+            RegionId::new_ephemeral(),
+        )
+        .expect_err("Ack must not manufacture a SendPermitToken");
 
         crate::assert_with_log!(
             err.expected == ObligationKind::SendPermit,

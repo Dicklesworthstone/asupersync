@@ -948,13 +948,12 @@ impl GlobalProtocol {
         target_label: &str,
     ) -> LoopProgressAnalysis {
         let mut analysis = LoopProgressAnalysis::new();
-        self.analyze_progress_recursive(interaction, target_label, &mut analysis, false);
+        Self::analyze_progress_recursive(interaction, target_label, &mut analysis, false);
         analysis
     }
 
     /// Recursively analyze interaction for progress guarantees.
     fn analyze_progress_recursive(
-        &self,
         interaction: &Interaction,
         target_label: &str,
         analysis: &mut LoopProgressAnalysis,
@@ -968,7 +967,7 @@ impl GlobalProtocol {
                 if !in_choice_branch {
                     analysis.has_progress_guarantee = true;
                 }
-                self.analyze_progress_recursive(then, target_label, analysis, in_choice_branch);
+                Self::analyze_progress_recursive(then, target_label, analysis, in_choice_branch);
             }
             Interaction::Continue { label } => {
                 if label == target_label {
@@ -985,13 +984,13 @@ impl GlobalProtocol {
                 let mut then_analysis = LoopProgressAnalysis::new();
                 let mut else_analysis = LoopProgressAnalysis::new();
 
-                self.analyze_progress_recursive(
+                Self::analyze_progress_recursive(
                     then_branch,
                     target_label,
                     &mut then_analysis,
                     true,
                 );
-                self.analyze_progress_recursive(
+                Self::analyze_progress_recursive(
                     else_branch,
                     target_label,
                     &mut else_analysis,
@@ -1015,22 +1014,22 @@ impl GlobalProtocol {
             }
             Interaction::Loop { body, .. } => {
                 // Nested loops - analyze their body
-                self.analyze_progress_recursive(body, target_label, analysis, in_choice_branch);
+                Self::analyze_progress_recursive(body, target_label, analysis, in_choice_branch);
             }
             Interaction::Seq { first, second } => {
-                self.analyze_progress_recursive(first, target_label, analysis, in_choice_branch);
-                self.analyze_progress_recursive(second, target_label, analysis, in_choice_branch);
+                Self::analyze_progress_recursive(first, target_label, analysis, in_choice_branch);
+                Self::analyze_progress_recursive(second, target_label, analysis, in_choice_branch);
             }
             Interaction::Par { left, right } => {
-                self.analyze_progress_recursive(left, target_label, analysis, in_choice_branch);
-                self.analyze_progress_recursive(right, target_label, analysis, in_choice_branch);
+                Self::analyze_progress_recursive(left, target_label, analysis, in_choice_branch);
+                Self::analyze_progress_recursive(right, target_label, analysis, in_choice_branch);
             }
             Interaction::Compensate {
                 forward,
                 compensate,
             } => {
-                self.analyze_progress_recursive(forward, target_label, analysis, in_choice_branch);
-                self.analyze_progress_recursive(
+                Self::analyze_progress_recursive(forward, target_label, analysis, in_choice_branch);
+                Self::analyze_progress_recursive(
                     compensate,
                     target_label,
                     analysis,

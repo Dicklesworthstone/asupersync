@@ -94,7 +94,7 @@ fn mr1_state_machine_monotonicity() {
 
         // Create regions and track their initial states
         let mut region_ids = Vec::new();
-        for i in 0..region_count {
+        for _i in 0..region_count {
             let region_result = create_test_region(&mut state, None);
 
             if let Ok(region_id) = region_result {
@@ -352,11 +352,11 @@ fn mr5_region_hierarchy_conservation() {
 
         // Build hierarchy
         let mut current_parents = vec![root_id];
-        for (level, &child_count) in child_counts.iter().enumerate() {
+        for (_level, &child_count) in child_counts.iter().enumerate() {
             let mut next_parents = Vec::new();
 
             for &parent_id in &current_parents {
-                for i in 0..child_count {
+                for _i in 0..child_count {
                     if let Ok(child_id) = create_test_region(&mut state, Some(parent_id)) {
                         hierarchy_map.insert(child_id, Some(parent_id));
                         next_parents.push(child_id);
@@ -540,7 +540,7 @@ fn mr8_state_transition_validity() {
         // Create a region to test transitions
         let region_id = create_test_region(&mut state, None).expect("Failed to create region");
 
-        let mut last_state_level = 0u8;
+        let mut _last_state_level = 0u8;
 
         for &transition in &transition_sequences {
             let before_state = if let Some(record) = state.regions.get(region_id.arena_index()) {
@@ -573,7 +573,7 @@ fn mr8_state_transition_validity() {
                 prop_assert!(after_state >= before_state,
                     "Invalid state regression detected: {} -> {}", before_state, after_state);
 
-                last_state_level = after_state;
+                _last_state_level = after_state;
             }
         }
     });

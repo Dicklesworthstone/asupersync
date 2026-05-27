@@ -232,7 +232,7 @@ impl MetaAuditor {
         // Check for common tampering patterns
         for finding in KNOWN_FINDINGS {
             // Suspicious: exempt finding without proper justification
-            if finding.exempt && finding.exemption_reason.map_or(true, |r| r.len() < 20) {
+            if finding.exempt && finding.exemption_reason.is_none_or(|r| r.len() < 20) {
                 suspicious.push(format!(
                     "{}:{} - Exempt without sufficient justification",
                     finding.file, finding.line
@@ -381,7 +381,7 @@ pub fn create_meta_auditor_for_region(region_id: RegionId, cx: &Cx) -> Result<Me
 mod tests {
     use super::*;
     use crate::types::RegionId;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     #[test]
     fn meta_auditor_creation() {

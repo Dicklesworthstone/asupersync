@@ -154,7 +154,7 @@ pub struct ArtifactMetadata {
 }
 
 /// Statistics for cache performance monitoring.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheStatistics {
     /// Total cache hits since creation.
     pub total_hits: u64,
@@ -170,20 +170,6 @@ pub struct CacheStatistics {
     pub avg_access_time_nanos: u64,
     /// Peak memory usage achieved.
     pub peak_memory_bytes: u64,
-}
-
-impl Default for CacheStatistics {
-    fn default() -> Self {
-        Self {
-            total_hits: 0,
-            total_misses: 0,
-            total_evictions: 0,
-            total_stored: 0,
-            current_hit_rate_bps: 0,
-            avg_access_time_nanos: 0,
-            peak_memory_bytes: 0,
-        }
-    }
 }
 
 /// In-memory artifact cache implementation.
@@ -514,8 +500,7 @@ impl ArtifactCache {
         // For lab testing, use a simple implementation
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0)
+            .map_or(0, |d| d.as_nanos() as u64)
     }
 }
 

@@ -353,36 +353,36 @@ fn mr4_receiver_state_independence() {
 
         // Send a successful message and capture telemetry
         let permit1a = tx1.try_reserve().expect("should reserve");
-        let telemetry_post_reserve_1 = tx1.telemetry_snapshot(400);
+        let _telemetry_post_reserve_1 = tx1.telemetry_snapshot(400);
         let send_result1a = permit1a.send(message.clone());
         prop_assert!(send_result1a.is_ok(), "should send successfully");
-        let telemetry_post_send_1 = tx1.telemetry_snapshot(401);
+        let _telemetry_post_send_1 = tx1.telemetry_snapshot(401);
 
         // Reserve and abort another permit with timing
         let permit1b = tx1.try_reserve().expect("should reserve again");
-        let telemetry_pre_abort_1 = tx1.telemetry_snapshot(402);
+        let _telemetry_pre_abort_1 = tx1.telemetry_snapshot(402);
         let abort_start = Instant::now();
         permit1b.abort();
         let abort_duration = abort_start.elapsed();
-        let telemetry_post_abort_1 = tx1.telemetry_snapshot(403);
+        let _telemetry_post_abort_1 = tx1.telemetry_snapshot(403);
 
         // Path 2: Send message, drop a subsequent permit, then receive
         let (tx2, mut rx2) = mpsc::channel(capacity);
 
         // Send a successful message and capture telemetry
         let permit2a = tx2.try_reserve().expect("should reserve");
-        let telemetry_post_reserve_2 = tx2.telemetry_snapshot(500);
+        let _telemetry_post_reserve_2 = tx2.telemetry_snapshot(500);
         let send_result2a = permit2a.send(message.clone());
         prop_assert!(send_result2a.is_ok(), "should send successfully");
-        let telemetry_post_send_2 = tx2.telemetry_snapshot(501);
+        let _telemetry_post_send_2 = tx2.telemetry_snapshot(501);
 
         // Reserve and drop another permit with timing
         let permit2b = tx2.try_reserve().expect("should reserve again");
-        let telemetry_pre_drop_2 = tx2.telemetry_snapshot(502);
+        let _telemetry_pre_drop_2 = tx2.telemetry_snapshot(502);
         let drop_start = Instant::now();
         drop(permit2b);
         let drop_duration = drop_start.elapsed();
-        let telemetry_post_drop_2 = tx2.telemetry_snapshot(503);
+        let _telemetry_post_drop_2 = tx2.telemetry_snapshot(503);
 
         // MR4: Receivers should behave identically (enhanced with telemetry)
         let recv_start_1 = Instant::now();
@@ -465,11 +465,11 @@ fn mr_composite_full_channel_abort_vs_drop() {
 
     // Mix one queued message with reserved slots until the channel is full.
     tx1.try_send(1).expect("first send");
-    let telemetry_after_first_send_1 = tx1.telemetry_snapshot(600);
+    let _telemetry_after_first_send_1 = tx1.telemetry_snapshot(600);
 
     let permit1a = tx1.try_reserve().expect("reserve second logical slot");
     let permit1b = tx1.try_reserve().expect("reserve third logical slot");
-    let telemetry_full_capacity_1 = tx1.telemetry_snapshot(601);
+    let _telemetry_full_capacity_1 = tx1.telemetry_snapshot(601);
 
     // Now channel is at logical capacity (queue full + reserved slots)
     assert!(tx1.try_send(5).is_err(), "channel should be full now");
@@ -483,7 +483,7 @@ fn mr_composite_full_channel_abort_vs_drop() {
     permit1b.abort();
     let abort_duration_1b = abort_start_1b.elapsed();
 
-    let telemetry_after_aborts_1 = tx1.telemetry_snapshot(602);
+    let _telemetry_after_aborts_1 = tx1.telemetry_snapshot(602);
 
     // Should be able to send again after aborts
     let after_abort_result1 = tx1.try_send(2);
@@ -496,11 +496,11 @@ fn mr_composite_full_channel_abort_vs_drop() {
 
     // Mix one queued message with reserved slots until the channel is full.
     tx2.try_send(1).expect("first send");
-    let telemetry_after_first_send_2 = tx2.telemetry_snapshot(700);
+    let _telemetry_after_first_send_2 = tx2.telemetry_snapshot(700);
 
     let permit2a = tx2.try_reserve().expect("reserve second logical slot");
     let permit2b = tx2.try_reserve().expect("reserve third logical slot");
-    let telemetry_full_capacity_2 = tx2.telemetry_snapshot(701);
+    let _telemetry_full_capacity_2 = tx2.telemetry_snapshot(701);
 
     // Now channel is at logical capacity
     assert!(tx2.try_send(5).is_err(), "channel should be full now");
@@ -514,7 +514,7 @@ fn mr_composite_full_channel_abort_vs_drop() {
     drop(permit2b);
     let drop_duration_2b = drop_start_2b.elapsed();
 
-    let telemetry_after_drops_2 = tx2.telemetry_snapshot(702);
+    let _telemetry_after_drops_2 = tx2.telemetry_snapshot(702);
 
     // Should be able to send again after drops
     let after_drop_result1 = tx2.try_send(2);

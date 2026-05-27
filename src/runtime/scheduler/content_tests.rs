@@ -13,11 +13,8 @@
 use crate::runtime::scheduler::content::{
     ContentId, ContentItem, ContentScheduler, PressureSnapshot, PriorityClass, ScheduleReason,
 };
-use crate::runtime::scheduler::stream_priority::{
-    SchedulerIntegration, StreamPriority, StreamPriorityScheduler,
-};
+use crate::runtime::scheduler::stream_priority::{SchedulerIntegration, StreamPriority};
 use crate::types::Time;
-use crate::util::det_hash::DetHashMap;
 
 fn test_content(
     id: u64,

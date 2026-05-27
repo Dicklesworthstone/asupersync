@@ -108,7 +108,7 @@ impl FinalizerEscalation {
     /// This catches policy misconfigurations that could lead to finalizer hangs
     /// or unexpected behavior during budget exhaustion scenarios.
     #[inline]
-    #[must_use]
+    #[must_use = "validate_policy_configuration returns configuration diagnostics"]
     pub fn validate_policy_configuration(self) -> Result<(), &'static str> {
         match self {
             Self::Soft => {

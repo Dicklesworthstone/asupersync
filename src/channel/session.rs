@@ -190,14 +190,12 @@ impl<T> TrackedSender<T> {
         let permit = self.inner.try_reserve()?;
         let obligation = {
             let region = crate::cx::Cx::current()
-                .map(|cx| cx.region_id())
-                .unwrap_or_else(|| {
-                    panic!(
-                        "Cannot create tracked permit outside of task context: \
-                         obligation tokens require region scoping to prevent leaks. \
-                         Use async reserve() method when in async context."
-                    )
-                });
+                .expect(
+                    "Cannot create tracked permit outside of task context: \
+                     obligation tokens require region scoping to prevent leaks. \
+                     Use async reserve() method when in async context.",
+                )
+                .region_id();
             ObligationToken::<SendPermit>::reserve("TrackedPermit(mpsc)", region)
         };
         Ok(TrackedPermit { permit, obligation })

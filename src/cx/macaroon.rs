@@ -3888,19 +3888,13 @@ mod tests {
         // Create a root macaroon with deep third-party caveats
         let mut token = MacaroonToken::mint(&root_key, "test:capability", "test_location");
 
-        // Add a third-party caveat that would trigger deep recursion
-        // This simulates the scenario where verification would recurse deeply
-        let tp_caveat = Caveat::ThirdParty {
-            identifier: "discharge_0".to_string(),
-            vid: vec![0u8; AUTH_KEY_SIZE],
-            location: "test_location".to_string(),
-        };
-
-        token = token.0.add_caveat_raw(tp_caveat);
+        // Add a third-party caveat that would trigger deep recursion.
+        // This simulates the scenario where verification would recurse deeply.
+        token = token.add_third_party_caveat("test_location", "discharge_0", &root_key);
 
         let ctx = VerificationContext::new();
         // Verification should fail with depth exceeded error before stack overflow
-        let result = token.0.verify_with_discharges(&root_key, &ctx, &discharges);
+        let result = token.verify_with_discharges(&root_key, &ctx, &discharges);
 
         match result {
             Err(VerificationError::DischargeChainTooDeep { depth }) => {

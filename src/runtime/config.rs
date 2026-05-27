@@ -1855,19 +1855,11 @@ pub enum RuntimeStateShape {
 }
 
 /// Security configuration for runtime authorization.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SecurityConfig {
     /// Root authorization key for spawn capabilities.
     /// When None, authorization is disabled (fail-open for testing).
     pub spawn_authorization_key: Option<AuthKey>,
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            spawn_authorization_key: None,
-        }
-    }
 }
 
 /// Concrete scheduler, blocking-pool, tracing, and policy settings for a runtime.

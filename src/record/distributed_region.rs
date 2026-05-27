@@ -1082,7 +1082,7 @@ mod tests {
         let now = Time::from_secs(100);
 
         // Simulate heartbeat timeout
-        let transitions = record.detect_partition(now).unwrap();
+        let _transitions = record.detect_partition(now).unwrap();
 
         // Should detect suspects
         let suspect_count = record

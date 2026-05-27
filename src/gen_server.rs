@@ -159,14 +159,13 @@ impl AsyncMaskGuard {
             let mut guard = inner.write();
             // Enforce mask depth cap to prevent overflow and infinite recursion
             // This maintains INV-MASK-BOUNDED invariant in both debug and release builds
-            if guard.mask_depth >= crate::types::task_context::MAX_MASK_DEPTH {
-                panic!(
-                    "mask depth exceeded MAX_MASK_DEPTH ({}) in AsyncMaskGuard::enter: \
-                     this violates INV-MASK-BOUNDED and prevents cancellation from ever \
-                     being observed. Reduce nesting of masked sections.",
-                    crate::types::task_context::MAX_MASK_DEPTH
-                );
-            }
+            assert!(
+                guard.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
+                "mask depth exceeded MAX_MASK_DEPTH ({}) in AsyncMaskGuard::enter: \
+                 this violates INV-MASK-BOUNDED and prevents cancellation from ever \
+                 being observed. Reduce nesting of masked sections.",
+                crate::types::task_context::MAX_MASK_DEPTH
+            );
             guard.mask_depth += 1;
         }
         Self { inner }

@@ -510,15 +510,14 @@ where
         let cx = self.retype::<cap::All>();
         CURRENT_CX_STACK.with(|stack| {
             let mut s = stack.borrow_mut();
-            if s.len() >= crate::types::task_context::MAX_CONTEXT_STACK_DEPTH {
-                panic!(
-                    "context stack depth exceeded MAX_CONTEXT_STACK_DEPTH ({}): this prevents \
-                     stack overflow in pathological nesting scenarios. Consider reducing \
-                     nesting depth or restructuring the code to avoid excessive context \
-                     restriction nesting.",
-                    crate::types::task_context::MAX_CONTEXT_STACK_DEPTH
-                );
-            }
+            assert!(
+                s.len() < crate::types::task_context::MAX_CONTEXT_STACK_DEPTH,
+                "context stack depth exceeded MAX_CONTEXT_STACK_DEPTH ({}): this prevents \
+                 stack overflow in pathological nesting scenarios. Consider reducing \
+                 nesting depth or restructuring the code to avoid excessive context \
+                 restriction nesting.",
+                crate::types::task_context::MAX_CONTEXT_STACK_DEPTH
+            );
             s.push(CurrentCxFrame { cx, mask });
         });
         CurrentCxGuard {
@@ -545,15 +544,14 @@ impl FullCx {
         let pushed = CURRENT_CX_STACK.with(|stack| {
             let mut s = stack.borrow_mut();
             // Check depth limit before attempting to push
-            if s.len() >= crate::types::task_context::MAX_CONTEXT_STACK_DEPTH {
-                panic!(
-                    "context stack depth exceeded MAX_CONTEXT_STACK_DEPTH ({}): this prevents \
-                     stack overflow in pathological nesting scenarios. Consider reducing \
-                     nesting depth or restructuring the code to avoid excessive context \
-                     restriction nesting.",
-                    crate::types::task_context::MAX_CONTEXT_STACK_DEPTH
-                );
-            }
+            assert!(
+                s.len() < crate::types::task_context::MAX_CONTEXT_STACK_DEPTH,
+                "context stack depth exceeded MAX_CONTEXT_STACK_DEPTH ({}): this prevents \
+                 stack overflow in pathological nesting scenarios. Consider reducing \
+                 nesting depth or restructuring the code to avoid excessive context \
+                 restriction nesting.",
+                crate::types::task_context::MAX_CONTEXT_STACK_DEPTH
+            );
             // Intersect with the current top so a push can only
             // ever narrow, never widen.
             let (cx, intersected_mask) = match s.last() {
@@ -2237,14 +2235,13 @@ impl<Caps> Cx<Caps> {
             let mut inner = self.inner.write();
             // Enforce mask depth cap to prevent overflow and infinite recursion
             // This maintains INV-MASK-BOUNDED invariant in both debug and release builds
-            if inner.mask_depth >= crate::types::task_context::MAX_MASK_DEPTH {
-                panic!(
-                    "mask depth exceeded MAX_MASK_DEPTH ({}): this violates INV-MASK-BOUNDED \
-                     and prevents cancellation from ever being observed. \
-                     Reduce nesting of Cx::masked() sections.",
-                    crate::types::task_context::MAX_MASK_DEPTH,
-                );
-            }
+            assert!(
+                inner.mask_depth < crate::types::task_context::MAX_MASK_DEPTH,
+                "mask depth exceeded MAX_MASK_DEPTH ({}): this violates INV-MASK-BOUNDED \
+                 and prevents cancellation from ever being observed. \
+                 Reduce nesting of Cx::masked() sections.",
+                crate::types::task_context::MAX_MASK_DEPTH,
+            );
             inner.mask_depth += 1;
         }
 

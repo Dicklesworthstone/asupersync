@@ -40,6 +40,7 @@ mod conformance_tests {
         primitive: PrimitiveType,
     }
 
+    #[allow(dead_code)]
     #[derive(Debug, Clone, Copy)]
     enum RequirementLevel {
         Must,   // Core contract - MUST pass

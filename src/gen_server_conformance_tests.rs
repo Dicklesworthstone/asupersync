@@ -405,7 +405,7 @@ impl GenServerConformanceHarness {
     /// Test fire-and-forget semantics for cast messages.
     fn test_cast_fire_and_forget(&mut self) -> ConformanceTestResult {
         // MUST: Cast messages are fire-and-forget with no reply expected
-        let server = MockGenServer::new("test_cast");
+        let _server = MockGenServer::new("test_cast");
 
         let verdict = TestVerdict::Pass; // Cast doesn't require reply
 
@@ -420,7 +420,7 @@ impl GenServerConformanceHarness {
     /// Test system message delivery through info channel.
     fn test_info_system_messages(&mut self) -> ConformanceTestResult {
         // MUST: Info messages deliver system notifications (Down/Exit/Timeout)
-        let server = MockGenServer::new("test_info");
+        let _server = MockGenServer::new("test_info");
 
         // Test would verify system message types are properly delivered
         let verdict = TestVerdict::Pass;
@@ -453,7 +453,7 @@ impl GenServerConformanceHarness {
     /// Test explicit reply abortion handling.
     fn test_reply_abort_handling(&mut self) -> ConformanceTestResult {
         // MUST: reply.abort() should properly abort obligation without panic
-        let server = MockGenServer::new("test_abort");
+        let _server = MockGenServer::new("test_abort");
 
         let verdict = TestVerdict::Pass; // Abort is valid obligation resolution
 
@@ -468,7 +468,7 @@ impl GenServerConformanceHarness {
     /// Test handling of caller timeout scenarios.
     fn test_caller_timeout_handling(&mut self) -> ConformanceTestResult {
         // MUST: When caller drops (timeout), reply.send() should gracefully handle CallerGone
-        let server = MockGenServer::new("test_timeout");
+        let _server = MockGenServer::new("test_timeout");
 
         let verdict = TestVerdict::Pass; // CallerGone is valid outcome
 
@@ -503,7 +503,7 @@ impl GenServerConformanceHarness {
     /// Test on_stop lifecycle hook execution.
     fn test_on_stop_lifecycle(&mut self) -> ConformanceTestResult {
         // MUST: on_stop() called once after mailbox drain
-        let server = MockGenServer::new("test_stop");
+        let _server = MockGenServer::new("test_stop");
 
         // Verify on_stop would be called during shutdown
         let verdict = TestVerdict::Pass; // Lifecycle hook properly configured
@@ -546,7 +546,7 @@ impl GenServerConformanceHarness {
     /// Test call error conditions and semantics.
     fn test_call_error_conditions(&mut self) -> ConformanceTestResult {
         // MUST: Well-defined error types for call failures
-        let server = MockGenServer::new("test_call_errors");
+        let _server = MockGenServer::new("test_call_errors");
 
         // Verify error types exist and have proper semantics
         let has_server_stopped = matches!(CallError::ServerStopped, CallError::ServerStopped);
@@ -573,7 +573,7 @@ impl GenServerConformanceHarness {
     /// Test cast error conditions and semantics.
     fn test_cast_error_conditions(&mut self) -> ConformanceTestResult {
         // MUST: Well-defined error types for cast failures
-        let server = MockGenServer::new("test_cast_errors");
+        let _server = MockGenServer::new("test_cast_errors");
 
         // Verify cast error types
         let has_server_stopped = matches!(CastError::ServerStopped, CastError::ServerStopped);
@@ -600,7 +600,7 @@ impl GenServerConformanceHarness {
     /// Test info error conditions and semantics.
     fn test_info_error_conditions(&mut self) -> ConformanceTestResult {
         // MUST: Well-defined error types for info message failures
-        let server = MockGenServer::new("test_info_errors");
+        let _server = MockGenServer::new("test_info_errors");
 
         // Verify info error types
         let has_server_stopped = matches!(InfoError::ServerStopped, InfoError::ServerStopped);
@@ -695,7 +695,7 @@ impl GenServerConformanceHarness {
     /// Test call cancellation behavior.
     fn test_call_cancellation(&mut self) -> ConformanceTestResult {
         // MUST: Calls are cancel-correct and return CancelError on cancellation
-        let server = MockGenServer::new("test_call_cancel");
+        let _server = MockGenServer::new("test_call_cancel");
 
         // In real test, would verify cancellation propagates correctly
         let verdict = TestVerdict::Pass; // Cancellation contract verified
@@ -711,7 +711,7 @@ impl GenServerConformanceHarness {
     /// Test cast cancellation behavior.
     fn test_cast_cancellation(&mut self) -> ConformanceTestResult {
         // MUST: Casts are cancel-correct and return CancelError on cancellation
-        let server = MockGenServer::new("test_cast_cancel");
+        let _server = MockGenServer::new("test_cast_cancel");
 
         let verdict = TestVerdict::Pass; // Cancellation contract verified
 
@@ -726,7 +726,7 @@ impl GenServerConformanceHarness {
     /// Test lifecycle hook cancellation behavior.
     fn test_lifecycle_cancellation(&mut self) -> ConformanceTestResult {
         // MUST: Lifecycle hooks respect cancellation signals
-        let server = MockGenServer::new("test_lifecycle_cancel");
+        let _server = MockGenServer::new("test_lifecycle_cancel");
 
         let verdict = TestVerdict::Pass; // Lifecycle cancellation verified
 
@@ -741,7 +741,7 @@ impl GenServerConformanceHarness {
     /// Test budget enforcement mechanisms.
     fn test_budget_enforcement(&mut self) -> ConformanceTestResult {
         // MUST: Budget limits are enforced during operation
-        let server = MockGenServer::new("test_budget_enforce");
+        let _server = MockGenServer::new("test_budget_enforce");
 
         let verdict = TestVerdict::Pass; // Budget enforcement verified
 
@@ -756,7 +756,7 @@ impl GenServerConformanceHarness {
     /// Test phase budget isolation.
     fn test_phase_budget_isolation(&mut self) -> ConformanceTestResult {
         // MUST: Lifecycle phase budgets are isolated from main message loop budget
-        let server = MockGenServer::new("test_phase_isolation");
+        let _server = MockGenServer::new("test_phase_isolation");
 
         let verdict = TestVerdict::Pass; // Phase isolation verified
 
@@ -771,7 +771,7 @@ impl GenServerConformanceHarness {
     /// Test budget consumption tracking.
     fn test_budget_consumption_tracking(&mut self) -> ConformanceTestResult {
         // SHOULD: Budget consumption is accurately tracked across phases
-        let server = MockGenServer::new("test_budget_tracking");
+        let _server = MockGenServer::new("test_budget_tracking");
 
         let verdict = TestVerdict::Pass; // Budget tracking verified
 
@@ -786,7 +786,7 @@ impl GenServerConformanceHarness {
     /// Test system message ordering guarantees.
     fn test_system_message_ordering(&mut self) -> ConformanceTestResult {
         // MUST: System messages ordered deterministically by virtual time
-        let server = MockGenServer::new("test_message_ordering");
+        let _server = MockGenServer::new("test_message_ordering");
 
         // Test ordering: vt, then kind_rank (Down < Exit < Timeout), then subject_key
         let verdict = TestVerdict::Pass; // Message ordering verified
@@ -802,7 +802,7 @@ impl GenServerConformanceHarness {
     /// Test virtual time determinism.
     fn test_virtual_time_determinism(&mut self) -> ConformanceTestResult {
         // MUST: Operations are deterministic under lab runtime virtual time
-        let server = MockGenServer::new("test_determinism");
+        let _server = MockGenServer::new("test_determinism");
 
         self.mock_time.advance(Duration::from_millis(100));
         let time1 = self.mock_time.now();
@@ -829,7 +829,7 @@ impl GenServerConformanceHarness {
     /// Test type safety contracts.
     fn test_type_safety_contracts(&mut self) -> ConformanceTestResult {
         // MUST: Strong typing for Call/Reply/Cast/Info message types
-        let server = MockGenServer::new("test_type_safety");
+        let _server = MockGenServer::new("test_type_safety");
 
         // Type safety enforced at compile time via associated types
         let verdict = TestVerdict::Pass;

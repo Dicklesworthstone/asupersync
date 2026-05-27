@@ -340,8 +340,8 @@ fn mr_layer_ordering() {
             for later_layer_idx in (current_layer_idx + 1)..layers.len() {
                 let later_layer = &layers[later_layer_idx];
 
-                for current_event in current_layer {
-                    for later_event in later_layer {
+                for _current_event in current_layer {
+                    for _later_event in later_layer {
                         // The later event can depend on the current event,
                         // but not the other way around due to layer ordering
                         // We just verify the layering is consistent with dependency structure
@@ -511,7 +511,7 @@ fn mr_trace_equivalence() {
 #[test]
 fn mr_monoid_identity() {
     let empty_trace = vec![];
-    let empty_monoid = TraceMonoid::from_events(&empty_trace);
+    let _empty_monoid = TraceMonoid::from_events(&empty_trace);
 
     for trace in create_test_traces() {
         let trace_monoid = TraceMonoid::from_events(&trace);
@@ -554,7 +554,7 @@ fn mr_event_order_preservation() {
 
         // Check that dependent events maintain their relative order
         for (i, event_i) in trace.iter().enumerate() {
-            for (j, event_j) in trace.iter().enumerate().skip(i + 1) {
+            for (_j, event_j) in trace.iter().enumerate().skip(i + 1) {
                 if !independent(event_i, event_j) {
                     // These events are dependent, so their order should be preserved
                     // in the canonical form

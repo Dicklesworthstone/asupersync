@@ -5340,7 +5340,7 @@ mod tests {
             final_stats.total <= pool_capacity
         );
 
-        let report = serde_json::json!({
+        let _report = serde_json::json!({
             "scenario_id": SCENARIO_ID,
             "pool_capacity": pool_capacity,
             "acquire_count": acquire_count,

@@ -242,85 +242,85 @@ pub mod server;
 pub mod signal;
 
 // ── Test-only modules ───────────────────────────────────────────────────
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod actor_genserver_monitor_evidence_link_process_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod atp_timing_security_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod bytes_io_time_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod cancel_cx_runtime_channel_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod channel_ordering_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod cli_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod combinator_family_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod cx_obligation_trace_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod cx_scheduler_remote_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod database_grpc_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod database_pool_transaction_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod database_primitives_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod deterministic_state_golden_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod distributed_obligation_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod distributed_primitives_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod distributed_security_codec_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod distributed_service_messaging_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod error_message_golden_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod fs_config_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod fs_protocol_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod golden_artifacts_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod grpc_protocol_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod http_grpc_protocol_metamorphic_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod integration_mutation_testing;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod integration_scenario_mutations;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod io_bytes_time_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod lab_determinism_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod lab_trace_observability_security_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod messaging_primitives_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod messaging_scheduler_deep_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod net_cli_audit_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod net_http_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod obligation_choreography_record_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod obligation_combinator_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod obligation_leak_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod plan_trace_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod protocol_serialization_golden_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod public_api_golden_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod raptorq_deep_dive_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod raptorq_rfc6330_conformance_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_bytes_e2e_tests;
@@ -723,21 +723,21 @@ pub mod real_web_websocket_channel_broadcast_integration_e2e_tests;
 pub mod real_websocket_e2e_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod real_websocket_server_channel_broadcast_e2e_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod runtime_state_machine_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod scheduler_priority_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod server_session_evidence_epoch_spork_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod service_layer_conformance_tests;
 #[cfg(all(test, feature = "real-service-e2e"))]
 pub mod subsystem_mutation_testing;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod supervision_genserver_actor_io_fs_metamorphic_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod sync_primitives_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod sync_scheduler_metamorphic_tests;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod test_logging;
@@ -745,15 +745,15 @@ pub mod test_logging;
 pub mod test_ndjson;
 #[cfg(any(test, feature = "test-internals"))]
 pub mod test_utils;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod timer_wheel_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod tls_test_helpers_comprehensive_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod trace_causality_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod web_protocol_conformance_tests;
-#[cfg(any(test, feature = "test-internals"))]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod web_tls_codec_raptorq_metamorphic_tests;
 
 // Re-exports for convenient access to core types

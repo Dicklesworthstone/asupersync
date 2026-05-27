@@ -385,7 +385,7 @@ fn test_obligation_kinds_distinguishable() -> GradedConformanceResult {
 
     let mut obligations = Vec::new();
     for (i, &kind) in kinds.iter().enumerate() {
-        let ob = GradedObligation::reserve(kind, &format!("test_{}", i));
+        let ob = GradedObligation::reserve(kind, format!("test_{}", i));
         obligations.push(ob);
     }
 

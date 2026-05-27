@@ -555,7 +555,7 @@ fn sanitize_ansi_escape_sequences(input: &str) -> String {
                 if chars.peek() == Some(&'[') {
                     chars.next(); // consume '['
                     // Skip until we find the terminating character (typically a letter)
-                    while let Some(next_ch) = chars.next() {
+                    for next_ch in chars.by_ref() {
                         if next_ch.is_ascii_alphabetic() {
                             break;
                         }

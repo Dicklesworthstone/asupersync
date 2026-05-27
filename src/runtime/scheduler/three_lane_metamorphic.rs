@@ -152,24 +152,19 @@ fn mr2_fairness_counter_monotonicity() {
         // Simulate fairness counter logic
         let mut cancel_streak = 0u32;
         let effective_limit = cancel_limit;
-        let mut last_dispatch_was_cancel = false;
-
         for &dispatch_type in &dispatch_sequence {
             let is_cancel_dispatch = (dispatch_type % 4) == 0; // 25% cancel dispatches
 
             if is_cancel_dispatch {
                 if cancel_streak < effective_limit {
                     cancel_streak += 1;
-                    last_dispatch_was_cancel = true;
                 } else {
                     // Should fall through to non-cancel work due to fairness
                     cancel_streak = 0;
-                    last_dispatch_was_cancel = false;
                 }
             } else {
                 // Non-cancel dispatch resets streak
                 cancel_streak = 0;
-                last_dispatch_was_cancel = false;
             }
 
             // Invariant: cancel streak should never exceed the limit
@@ -178,7 +173,7 @@ fn mr2_fairness_counter_monotonicity() {
 
             // If we hit the limit, next dispatch must be non-cancel (fairness)
             if cancel_streak == effective_limit {
-                prop_assert!(!last_dispatch_was_cancel ||
+                prop_assert!(!is_cancel_dispatch ||
                     dispatch_sequence.len() == 1, // Unless it's the only dispatch
                     "Fairness violation: cancel work continued after hitting limit");
             }
@@ -555,7 +550,7 @@ mod integration_tests {
 
         let mut dispatched_ready_after_limit = false;
 
-        for (i, priority) in dispatch_sequence.iter().enumerate() {
+        for priority in &dispatch_sequence {
             match priority {
                 PriorityClass::Cancel => {
                     if cancel_streak < cancel_limit {

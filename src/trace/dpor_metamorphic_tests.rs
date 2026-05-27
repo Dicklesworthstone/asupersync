@@ -288,7 +288,7 @@ fn mr_independent_events_no_race() {
     ];
 
     for trace in independent_traces {
-        let analysis = detect_races(&trace);
+        let _analysis = detect_races(&trace);
         let hb_report = detect_hb_races(&trace);
 
         // For specific independent cases, verify expected behavior

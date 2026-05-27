@@ -327,8 +327,7 @@ impl GlobalInjector {
                 // Only pop if the last entry is the one we just pushed (FIFO ordering protection)
                 if pending
                     .last()
-                    .map(|last| last.task == entry.task && last.priority == entry.priority)
-                    .unwrap_or(false)
+                    .is_some_and(|last| last.task == entry.task && last.priority == entry.priority)
                 {
                     pending.pop();
                 }

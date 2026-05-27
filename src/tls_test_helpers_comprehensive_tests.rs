@@ -4,7 +4,7 @@
 //! generation functions implemented in ci1875. Tests cover unit functionality, integration
 //! scenarios, error handling, and performance characteristics.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "real-service-e2e"))]
 mod tls_helpers_tests {
     use crate::real_e2e_hardening_consolidation::hardened_examples::{
         generate_test_tls_material, test_certificate, test_private_key,
@@ -311,7 +311,7 @@ mod tls_helpers_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "real-service-e2e"))]
 mod edge_case_tests {
     use super::*;
     use crate::real_e2e_hardening_consolidation::hardened_examples::{
@@ -389,7 +389,7 @@ mod edge_case_tests {
 }
 
 /// Performance benchmark tests (optional, for monitoring performance characteristics)
-#[cfg(test)]
+#[cfg(all(test, feature = "real-service-e2e"))]
 mod performance_tests {
     use super::*;
     use crate::real_e2e_hardening_consolidation::hardened_examples::generate_test_tls_material;

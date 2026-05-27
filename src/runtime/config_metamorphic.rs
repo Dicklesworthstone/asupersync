@@ -34,7 +34,7 @@ fn mr1_validation_consistency() {
         let is_valid_stack = stack_size_mb >= 1;
         let is_valid_budget = poll_budget > 0;
 
-        let expected_valid = is_valid_workers && is_valid_stack && is_valid_budget;
+        let _expected_valid = is_valid_workers && is_valid_stack && is_valid_budget;
 
         // Basic sanity checks that config values are preserved
         prop_assert_eq!(direct_config.worker_threads, worker_threads,
@@ -219,7 +219,7 @@ fn mr6_boundary_behavior() {
         prop_assume!(!test_cases.is_empty() && test_cases.len() <= 10);
 
         for (workers, budget) in test_cases {
-            let config = RuntimeConfig {
+            let _config = RuntimeConfig {
                 worker_threads: workers,
                 poll_budget: budget,
                 ..Default::default()

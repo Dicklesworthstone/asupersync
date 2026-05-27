@@ -358,14 +358,14 @@ fn mr_scaling_linearity() {
         let pool2 = config.create_pool();
 
         // Submit base_task_count tasks to pool1
-        for i in 0..base_task_count {
+        for _i in 0..base_task_count {
             pool1.spawn(move || {
                 thread::sleep(Duration::from_millis(200)); // Long enough to create backlog
             });
         }
 
         // Submit 2×base_task_count tasks to pool2
-        for i in 0..(base_task_count * 2) {
+        for _i in 0..(base_task_count * 2) {
             pool2.spawn(move || {
                 thread::sleep(Duration::from_millis(200));
             });
@@ -457,7 +457,7 @@ fn mr_spawn_shutdown_round_trip() {
 
         // Spawn tasks
         let handles: Vec<_> = (0..task_count)
-            .map(|i| pool.spawn(move || {
+            .map(|_i| pool.spawn(move || {
                 thread::sleep(Duration::from_millis(50));
             }))
             .collect();
@@ -496,7 +496,7 @@ fn mr_configuration_invariance() {
         let pool2 = config.create_pool();
 
         // Submit identical workloads
-        for i in 0..task_count {
+        for _i in 0..task_count {
             pool1.spawn(move || thread::sleep(Duration::from_millis(100)));
             pool2.spawn(move || thread::sleep(Duration::from_millis(100)));
         }

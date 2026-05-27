@@ -402,12 +402,6 @@ fn mr_overflow_conservation() {
 
             let snapshot = WheelSnapshot::capture(&wheel, &tracked_timers);
 
-            // Note: We can't directly access in-wheel timer count, but we can verify
-            // that active_count is consistent with our tracking
-            prop_assert!(snapshot.active_count >= 0,
-                "Active count should be non-negative: active={}",
-                snapshot.active_count);
-
             // Overflow count should be reasonable (≤ total active for long timers)
             prop_assert!(snapshot.overflow_count <= snapshot.active_count,
                 "Overflow count exceeds active count: overflow={}, active={}",
@@ -565,8 +559,8 @@ fn mr_insert_cancel_round_trip() {
         let handle = wheel.register(deadline, dummy_waker());
 
         // Verify timer was inserted (some state should change)
-        let inserted_overflow = wheel.overflow_count();
-        let inserted_ready = live_ready_count(&wheel);
+        let _inserted_overflow = wheel.overflow_count();
+        let _inserted_ready = live_ready_count(&wheel);
 
         // Cancel timer
         wheel.cancel(&handle);
