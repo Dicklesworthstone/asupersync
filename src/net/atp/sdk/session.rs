@@ -527,7 +527,7 @@ mod tests {
             let options = SessionOptions::direct(peer);
 
             let session = sdk.open_session(&cx, options).await;
-            assert!(session.is_err()); // Should fail as daemon is not implemented
+            assert!(session.is_err()); // No daemon service is listening for this test endpoint.
         });
     }
 }

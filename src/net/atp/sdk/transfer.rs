@@ -13,8 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const OBJECT_SIGNATURE_ALGORITHM: &str = "asupersync-atp-object-hmac-sha256-v1";
-const OBJECT_SIGNATURE_DOMAIN: &[u8] =
-    b"asupersync::net::atp::sdk::object-signature::v1";
+const OBJECT_SIGNATURE_DOMAIN: &[u8] = b"asupersync::net::atp::sdk::object-signature::v1";
 
 /// Transfer request for sending objects/files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1068,6 +1067,54 @@ mod tests {
                 AtpOutcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
                 other => panic!("session cancel must not fabricate success: {other:?}"), // ubs:ignore
             }
+        });
+    }
+
+    #[test]
+    fn detached_object_signature_is_session_bound_and_constant_time_checked() {
+        futures_lite::future::block_on(async {
+            use sha2::{Digest, Sha256};
+
+            let config = SessionConfig::default();
+            let sdk = AtpSdk::new_in_process(config.clone());
+            let cx = Cx::for_testing();
+            let peer = PeerId::from_label("signature_peer");
+            let session = sdk
+                .open_session(
+                    &cx,
+                    granted_direct_options(&config, peer, "signature-verification"),
+                )
+                .await
+                .unwrap();
+
+            let object = b"authenticated object payload";
+            let mut hasher = Sha256::new();
+            hasher.update(object);
+            let hash: [u8; 32] = hasher.finalize().into();
+            let signature = session.compute_detached_object_signature(&hash, object.len() as u64);
+            let envelope = serde_json::json!({
+                "algorithm": OBJECT_SIGNATURE_ALGORITHM,
+                "session_id_hex": hex::encode(session.session.session_id.as_bytes()),
+                "hash_hex": hex::encode(hash),
+                "size_bytes": object.len() as u64,
+                "signature_hex": hex::encode(signature),
+            });
+            let payload = serde_json::to_vec(&envelope).unwrap();
+
+            assert!(session.verify_detached_object_signature_payload(
+                &payload,
+                &hash,
+                object.len() as u64
+            ));
+
+            let mut tampered = envelope;
+            tampered["signature_hex"] = serde_json::Value::String(hex::encode([0xAAu8; 32]));
+            let tampered_payload = serde_json::to_vec(&tampered).unwrap();
+            assert!(!session.verify_detached_object_signature_payload(
+                &tampered_payload,
+                &hash,
+                object.len() as u64
+            ));
         });
     }
 
