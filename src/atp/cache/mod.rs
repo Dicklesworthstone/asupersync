@@ -199,6 +199,8 @@ pub struct AtpCache {
     config: CacheConfig,
     /// Cache entry index by cache key.
     entries: HashMap<String, CacheEntry>,
+    /// Byte storage for entries whose storage location is in-memory.
+    memory_storage: HashMap<String, Vec<u8>>,
     /// LRU tracking for eviction policy.
     access_order: Vec<String>,
     /// Cache metrics and statistics.
@@ -213,6 +215,7 @@ impl AtpCache {
         Self {
             config,
             entries: HashMap::new(),
+            memory_storage: HashMap::new(),
             access_order: Vec::new(),
             metrics: CacheMetrics::default(),
             trust_policy: trust::TrustPolicy::default(),
@@ -231,8 +234,14 @@ impl AtpCache {
                 // Entry expired - extract data before removing
                 let storage_location = entry.storage_location.clone();
                 self.entries.remove(&index_key);
-                if let StorageLocation::File(path) = &storage_location {
-                    let _ = std::fs::remove_file(path);
+                match &storage_location {
+                    StorageLocation::File(path) => {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    StorageLocation::Memory(memory_key) => {
+                        self.memory_storage.remove(memory_key);
+                    }
+                    StorageLocation::External(_) => {}
                 }
                 self.access_order.retain(|k| k != &index_key);
                 self.metrics.record_miss();
@@ -267,10 +276,14 @@ impl AtpCache {
                     }
                 }
             }
-            StorageLocation::Memory(_) => {
-                // Memory content - would need proper storage backend integration
-                Ok(Some(Vec::new()))
-            }
+            StorageLocation::Memory(memory_key) => match self.memory_storage.get(memory_key) {
+                Some(content) => Ok(Some(content.clone())),
+                None => {
+                    self.remove(key)?;
+                    self.metrics.record_miss();
+                    Ok(None)
+                }
+            },
             StorageLocation::External(_) => {
                 // External content would need network fetch
                 Err(CacheError::External(
@@ -303,6 +316,8 @@ impl AtpCache {
         let storage_location = if size_bytes < 64 * 1024 {
             // Small content in memory - generate memory key from cache key
             let memory_key = format!("{}:{}", key.manifest_hash, key.content_hash);
+            self.memory_storage
+                .insert(memory_key.clone(), content.to_vec());
             StorageLocation::Memory(memory_key)
         } else {
             // Store in file
@@ -358,9 +373,15 @@ impl AtpCache {
             // Remove from access order
             self.access_order.retain(|k| k != &index_key);
 
-            // Remove file if stored on disk
-            if let StorageLocation::File(path) = &entry.storage_location {
-                let _ = std::fs::remove_file(path); // Ignore errors
+            // Remove backing data if stored in this cache instance.
+            match &entry.storage_location {
+                StorageLocation::File(path) => {
+                    let _ = std::fs::remove_file(path); // Ignore errors
+                }
+                StorageLocation::Memory(memory_key) => {
+                    self.memory_storage.remove(memory_key);
+                }
+                StorageLocation::External(_) => {}
             }
 
             // Update metrics
@@ -411,9 +432,15 @@ impl AtpCache {
             // Evict oldest entry (LRU)
             let to_evict = self.access_order.remove(0);
             if let Some(entry) = self.entries.remove(&to_evict) {
-                // Remove file if needed
-                if let StorageLocation::File(path) = &entry.storage_location {
-                    let _ = std::fs::remove_file(path);
+                // Remove backing data if needed
+                match &entry.storage_location {
+                    StorageLocation::File(path) => {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    StorageLocation::Memory(memory_key) => {
+                        self.memory_storage.remove(memory_key);
+                    }
+                    StorageLocation::External(_) => {}
                 }
 
                 self.metrics.record_eviction(entry.size_bytes);

@@ -130,7 +130,7 @@ impl PairingCode {
 
         let mut hasher = Sha256::new();
         hasher.update(identity.peer_id().as_bytes());
-        hasher.update(&identity.generation().to_le_bytes());
+        hasher.update(identity.generation().to_le_bytes());
 
         // Include actions in deterministic order
         let mut action_strs: Vec<_> = actions.iter().map(|a| format!("{a:?}")).collect();
@@ -139,7 +139,7 @@ impl PairingCode {
             hasher.update(action.as_bytes());
         }
 
-        hasher.update(&scope.digest());
+        hasher.update(scope.digest());
 
         let mut random_bytes = [0u8; 16];
         if let Err(error) = getrandom::fill(&mut random_bytes) {
@@ -147,7 +147,7 @@ impl PairingCode {
                 reason: format!("failed to generate secure pairing code entropy: {error}"),
             });
         }
-        hasher.update(&random_bytes);
+        hasher.update(random_bytes);
 
         let hash = hasher.finalize();
         let Some(code_bytes) = hash.get(..12) else {

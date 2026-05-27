@@ -8,12 +8,10 @@
 mod tests {
     use crate::atp::actor::{TransferActorTopology, TransferChildRole, TransferRegionId};
     use crate::atp::transfer::{
-        PeerCapabilities, TransferActor, TransferActorId, TransferCommandKind, TransferFailureKind,
-        TransferId, TransferManifestRef, TransferProgress, TransferState,
+        IdempotencyKey, PeerCapabilities, TransferActor, TransferActorId, TransferCancelPhase,
+        TransferCommand, TransferCommandKind, TransferFailureKind, TransferId, TransferManifestRef,
+        TransferObligationId, TransferProgress, TransferState,
     };
-    use crate::cx::Cx;
-    use crate::lab::{LabConfig, LabRuntime};
-    use crate::types::{Budget, Outcome};
     use serde_json::json;
     use std::collections::HashMap;
     use std::time::{Duration, SystemTime};
@@ -41,7 +39,7 @@ mod tests {
         offered_bytes: u64,
         verified_bytes: u64,
         committed_bytes: u64,
-        repair_symbols: u32,
+        repair_symbols: u64,
     }
 
     impl TransferTestLogger {
@@ -175,7 +173,7 @@ mod tests {
             TransferManifestRef {
                 schema_version: 1,
                 merkle_root: Self::generate_test_merkle_root(object_count),
-                object_count,
+                object_count: u64::from(object_count),
             }
         }
 
@@ -189,20 +187,20 @@ mod tests {
         }
 
         fn create_test_topology(region_base: u32) -> TransferActorTopology {
-            let supervisor = TransferRegionId::new(region_base);
-            let actor_region = TransferRegionId::new(region_base + 1);
+            let supervisor = TransferRegionId::new(u64::from(region_base));
+            let actor_region = TransferRegionId::new(u64::from(region_base + 1));
 
             TransferActorTopology::new(supervisor, actor_region)
                 .with_child(
-                    TransferRegionId::new(region_base + 2),
+                    TransferRegionId::new(u64::from(region_base + 2)),
                     TransferChildRole::PathRace,
                 )
                 .with_child(
-                    TransferRegionId::new(region_base + 3),
+                    TransferRegionId::new(u64::from(region_base + 3)),
                     TransferChildRole::Writer,
                 )
                 .with_child(
-                    TransferRegionId::new(region_base + 4),
+                    TransferRegionId::new(u64::from(region_base + 4)),
                     TransferChildRole::Finalizer,
                 )
         }
@@ -237,13 +235,21 @@ mod tests {
             actor_id: u32,
             entropy: u64,
         ) -> Result<TransferActor, Box<dyn std::error::Error>> {
-            TransferActor::new(
-                TransferActorId::new(actor_id),
+            Ok(TransferActor::new(
+                TransferActorId::new(u64::from(actor_id)),
                 Self::create_test_transfer_id(entropy),
                 Self::create_test_manifest(5), // 5 objects
                 Self::create_test_peer_capabilities(),
                 Self::create_test_topology(actor_id * 10),
-            )
+            )?)
+        }
+
+        fn command(key: u128, kind: TransferCommandKind) -> TransferCommand {
+            TransferCommand::new(IdempotencyKey::new(key), kind)
+        }
+
+        fn obligation(raw: u64) -> TransferObligationId {
+            TransferObligationId::new(raw)
         }
     }
 
@@ -280,107 +286,113 @@ mod tests {
 
         log.phase("setup");
 
-        // Create deterministic lab runtime for ATP transfer testing
-        let mut runtime = LabRuntime::new(LabConfig::new(0xa7f7_0001).max_steps(20_000));
-        let root = runtime.state.create_root_region(Budget::INFINITE);
+        log.phase("actor_creation");
 
-        runtime.run(&root, |cx| async {
-            log.phase("actor_creation");
+        // Create real transfer actor (NO MOCKS)
+        let mut actor = TransferScenarioFactory::create_transfer_actor(100, 0x1234567890abcdef)
+            .expect("create transfer actor");
 
-            // Create real transfer actor (NO MOCKS)
-            let mut actor = TransferScenarioFactory::create_transfer_actor(100, 0x1234567890abcdef)
-                .expect("create transfer actor");
+        isolation.track_actor(actor.actor_id);
+        log.transfer_snapshot("initial_actor_state", &actor);
 
-            isolation.track_actor(actor.actor_id);
-            log.transfer_snapshot("initial_actor_state", &actor);
+        // Verify initial state
+        assert!(log.assert_transfer_state("initial_state", TransferState::Offered, &actor));
 
-            // Verify initial state
-            assert!(log.assert_transfer_state("initial_state", TransferState::Ready, &actor));
+        log.phase("transfer_start");
 
-            log.phase("transfer_start");
+        actor
+            .apply(TransferScenarioFactory::command(
+                1,
+                TransferCommandKind::Accept {
+                    obligation: TransferScenarioFactory::obligation(1),
+                },
+            ))
+            .expect("accept transfer");
 
-            // Start transfer workflow (real ATP command processing)
-            let start_result = actor.apply(TransferCommandKind::Start {
-                budget: Budget::from_millis(10_000),
-            });
+        // Start transfer workflow (real ATP command processing)
+        let start_result = actor.apply(TransferScenarioFactory::command(
+            2,
+            TransferCommandKind::Start {
+                path_id: 1,
+                obligation: TransferScenarioFactory::obligation(2),
+            },
+        ));
 
-            log.transfer_snapshot("post_start_state", &actor);
+        log.transfer_snapshot("post_start_state", &actor);
 
-            match start_result {
-                Ok(_) => {
-                    assert!(log.assert_transfer_state(
-                        "started_state",
-                        TransferState::Active,
-                        &actor
-                    ));
-                }
-                Err(e) => {
-                    eprintln!("Transfer start failed: {:?}", e);
-                    panic!("Transfer start should succeed");
-                }
+        match start_result {
+            Ok(_) => {
+                assert!(log.assert_transfer_state("started_state", TransferState::Running, &actor));
             }
-
-            log.phase("progress_simulation");
-
-            // Simulate transfer progress (real state updates)
-            actor.progress.offered_bytes = 10_240; // 10KB offered
-            actor.progress.verified_bytes = 5_120; // 5KB verified
-            actor.progress.committed_bytes = 2_048; // 2KB committed
-            actor.progress.repair_symbols = 3;
-
-            log.transfer_snapshot("progress_updated", &actor);
-
-            // Verify progress calculations
-            let in_flight = actor.progress.offered_bytes - actor.progress.verified_bytes;
-            let pending_commit = actor.progress.verified_bytes - actor.progress.committed_bytes;
-
-            assert_eq!(in_flight, 5_120);
-            assert_eq!(pending_commit, 3_072);
-
-            log.phase("pressure_monitoring");
-
-            // Test pressure snapshot generation (real ATP telemetry)
-            let pressure_snapshot = actor.pressure_snapshot("transfer_lifecycle_test", 1);
-
-            eprintln!(
-                "{}",
-                json!({
-                    "ts": SystemTime::now(),
-                    "suite": log.suite_name,
-                    "test": log.test_name,
-                    "phase": log.current_phase,
-                    "event": "pressure_snapshot",
-                    "transfer_id": pressure_snapshot.transfer_id,
-                    "in_flight_bytes": pressure_snapshot.in_flight_bytes,
-                    "receive_buffer_queued_bytes": pressure_snapshot.receive_buffer_queued_bytes
-                })
-            );
-
-            assert!(pressure_snapshot.in_flight_bytes.unwrap_or(0) > 0);
-
-            log.phase("transfer_completion");
-
-            // Complete the transfer
-            let commit_result = actor.apply(TransferCommandKind::Commit { obligation: None });
-
-            log.transfer_snapshot("post_commit_state", &actor);
-
-            match commit_result {
-                Ok(_) => {
-                    assert!(log.assert_transfer_state(
-                        "completed_state",
-                        TransferState::Committed,
-                        &actor
-                    ));
-                }
-                Err(e) => {
-                    eprintln!("Transfer commit failed: {:?}", e);
-                    // Continue test - commit may fail due to incomplete setup
-                }
+            Err(e) => {
+                eprintln!("Transfer start failed: {:?}", e);
+                panic!("Transfer start should succeed");
             }
+        }
 
-            Ok::<(), Box<dyn std::error::Error>>(())
-        });
+        log.phase("progress_simulation");
+
+        // Simulate transfer progress (real state updates)
+        actor.progress.offered_bytes = 10_240; // 10KB offered
+        actor.progress.verified_bytes = 5_120; // 5KB verified
+        actor.progress.committed_bytes = 2_048; // 2KB committed
+        actor.progress.repair_symbols = 3;
+
+        log.transfer_snapshot("progress_updated", &actor);
+
+        // Verify progress calculations
+        let in_flight = actor.progress.offered_bytes - actor.progress.verified_bytes;
+        let pending_commit = actor.progress.verified_bytes - actor.progress.committed_bytes;
+
+        assert_eq!(in_flight, 5_120);
+        assert_eq!(pending_commit, 3_072);
+
+        log.phase("pressure_monitoring");
+
+        // Test pressure snapshot generation (real ATP telemetry)
+        let pressure_snapshot = actor.pressure_snapshot("transfer_lifecycle_test", 1);
+
+        eprintln!(
+            "{}",
+            json!({
+                "ts": SystemTime::now(),
+                "suite": log.suite_name,
+                "test": log.test_name,
+                "phase": log.current_phase,
+                "event": "pressure_snapshot",
+                "transfer_id": pressure_snapshot.transfer_id,
+                "in_flight_bytes": pressure_snapshot.in_flight_bytes,
+                "receive_buffer_queued_bytes": pressure_snapshot.receive_buffer_queued_bytes
+            })
+        );
+
+        assert!(pressure_snapshot.in_flight_bytes.unwrap_or(0) > 0);
+
+        log.phase("transfer_completion");
+
+        // Complete the transfer
+        let commit_result = actor.apply(TransferScenarioFactory::command(
+            3,
+            TransferCommandKind::Commit {
+                obligation: TransferScenarioFactory::obligation(3),
+            },
+        ));
+
+        log.transfer_snapshot("post_commit_state", &actor);
+
+        match commit_result {
+            Ok(_) => {
+                assert!(log.assert_transfer_state(
+                    "completed_state",
+                    TransferState::Committed,
+                    &actor
+                ));
+            }
+            Err(e) => {
+                eprintln!("Transfer commit failed: {:?}", e);
+                // Continue test - commit may fail due to incomplete setup
+            }
+        }
 
         log.phase("teardown");
         log.test_end("pass");
@@ -393,91 +405,96 @@ mod tests {
 
         log.phase("setup");
 
-        let mut runtime = LabRuntime::new(LabConfig::new(0xa7f7_0002).max_steps(30_000));
-        let root = runtime.state.create_root_region(Budget::INFINITE);
+        log.phase("multi_actor_creation");
 
-        runtime.run(&root, |cx| async {
-            log.phase("multi_actor_creation");
+        // Create multiple transfer actors for coordination testing
+        let mut actors = Vec::new();
+        for i in 0..3 {
+            let actor = TransferScenarioFactory::create_transfer_actor(
+                200 + i,
+                0x1111222233334444 + i as u64 * 0x1000000000000000,
+            )
+            .expect("create transfer actor");
 
-            // Create multiple transfer actors for coordination testing
-            let mut actors = Vec::new();
-            for i in 0..3 {
-                let actor = TransferScenarioFactory::create_transfer_actor(
-                    200 + i,
-                    0x1111222233334444 + i as u64 * 0x1000000000000000,
-                )
-                .expect("create transfer actor");
+            isolation.track_actor(actor.actor_id);
+            log.transfer_snapshot(&format!("initial_actor_{}", i), &actor);
+            actors.push(actor);
+        }
 
-                isolation.track_actor(actor.actor_id);
-                log.transfer_snapshot(&format!("initial_actor_{}", i), &actor);
-                actors.push(actor);
+        log.phase("coordination_setup");
+
+        // Start all transfers
+        for (i, actor) in actors.iter_mut().enumerate() {
+            actor
+                .apply(TransferScenarioFactory::command(
+                    100 + i as u128,
+                    TransferCommandKind::Accept {
+                        obligation: TransferScenarioFactory::obligation(100 + i as u64),
+                    },
+                ))
+                .expect("accept transfer");
+            let start_result = actor.apply(TransferScenarioFactory::command(
+                200 + i as u128,
+                TransferCommandKind::Start {
+                    path_id: i as u64 + 1,
+                    obligation: TransferScenarioFactory::obligation(200 + i as u64),
+                },
+            ));
+
+            log.transfer_snapshot(&format!("started_actor_{}", i), actor);
+
+            if let Err(e) = start_result {
+                eprintln!("Actor {} start failed: {:?}", i, e);
             }
+        }
 
-            log.phase("coordination_setup");
+        log.phase("progress_coordination");
 
-            // Start all transfers
-            for (i, actor) in actors.iter_mut().enumerate() {
-                let start_result = actor.apply(TransferCommandKind::Start {
-                    budget: Budget::from_millis(5_000),
-                });
+        // Simulate coordinated progress across actors
+        for (i, actor) in actors.iter_mut().enumerate() {
+            let base_progress = (i + 1) as u64 * 1024;
+            actor.progress.offered_bytes = base_progress * 8;
+            actor.progress.verified_bytes = base_progress * 6;
+            actor.progress.committed_bytes = base_progress * 4;
+            actor.progress.repair_symbols = i as u64 * 2;
 
-                log.transfer_snapshot(&format!("started_actor_{}", i), actor);
+            log.transfer_snapshot(&format!("coordinated_progress_actor_{}", i), actor);
+        }
 
-                if let Err(e) = start_result {
-                    eprintln!("Actor {} start failed: {:?}", i, e);
-                }
-            }
+        log.phase("verification");
 
-            log.phase("progress_coordination");
+        // Verify each actor maintains independent state
+        let mut transfer_ids = std::collections::HashSet::new();
+        let mut region_ids = std::collections::HashSet::new();
 
-            // Simulate coordinated progress across actors
-            for (i, actor) in actors.iter_mut().enumerate() {
-                let base_progress = (i + 1) as u64 * 1024;
-                actor.progress.offered_bytes = base_progress * 8;
-                actor.progress.verified_bytes = base_progress * 6;
-                actor.progress.committed_bytes = base_progress * 4;
-                actor.progress.repair_symbols = i as u32 * 2;
+        for (i, actor) in actors.iter().enumerate() {
+            // Verify unique transfer IDs
+            assert!(
+                transfer_ids.insert(actor.transfer_id.to_hex()),
+                "Transfer ID should be unique for actor {}",
+                i
+            );
 
-                log.transfer_snapshot(&format!("coordinated_progress_actor_{}", i), actor);
-            }
+            // Verify unique region IDs
+            assert!(
+                region_ids.insert(actor.topology.actor_region),
+                "Actor region should be unique for actor {}",
+                i
+            );
 
-            log.phase("verification");
+            // Verify progress is consistent
+            assert!(
+                actor.progress.verified_bytes <= actor.progress.offered_bytes,
+                "Verified bytes should not exceed offered bytes for actor {}",
+                i
+            );
 
-            // Verify each actor maintains independent state
-            let mut transfer_ids = std::collections::HashSet::new();
-            let mut region_ids = std::collections::HashSet::new();
-
-            for (i, actor) in actors.iter().enumerate() {
-                // Verify unique transfer IDs
-                assert!(
-                    transfer_ids.insert(actor.transfer_id.to_hex()),
-                    "Transfer ID should be unique for actor {}",
-                    i
-                );
-
-                // Verify unique region IDs
-                assert!(
-                    region_ids.insert(actor.topology.actor_region),
-                    "Actor region should be unique for actor {}",
-                    i
-                );
-
-                // Verify progress is consistent
-                assert!(
-                    actor.progress.verified_bytes <= actor.progress.offered_bytes,
-                    "Verified bytes should not exceed offered bytes for actor {}",
-                    i
-                );
-
-                assert!(
-                    actor.progress.committed_bytes <= actor.progress.verified_bytes,
-                    "Committed bytes should not exceed verified bytes for actor {}",
-                    i
-                );
-            }
-
-            Ok::<(), Box<dyn std::error::Error>>(())
-        });
+            assert!(
+                actor.progress.committed_bytes <= actor.progress.verified_bytes,
+                "Committed bytes should not exceed verified bytes for actor {}",
+                i
+            );
+        }
 
         log.phase("teardown");
         log.test_end("pass");
@@ -491,81 +508,92 @@ mod tests {
 
         log.phase("setup");
 
-        let mut runtime = LabRuntime::new(LabConfig::new(0xa7f7_0003).max_steps(15_000));
-        let root = runtime.state.create_root_region(Budget::INFINITE);
+        log.phase("actor_setup_for_cancellation");
 
-        runtime.run(&root, |cx| async {
-            log.phase("actor_setup_for_cancellation");
+        let mut actor = TransferScenarioFactory::create_transfer_actor(300, 0xabcdef1234567890)
+            .expect("create transfer actor");
 
-            let mut actor = TransferScenarioFactory::create_transfer_actor(300, 0xabcdef1234567890)
-                .expect("create transfer actor");
+        isolation.track_actor(actor.actor_id);
+        log.transfer_snapshot("pre_cancel_initial", &actor);
 
-            isolation.track_actor(actor.actor_id);
-            log.transfer_snapshot("pre_cancel_initial", &actor);
+        // Start transfer
+        actor
+            .apply(TransferScenarioFactory::command(
+                1,
+                TransferCommandKind::Accept {
+                    obligation: TransferScenarioFactory::obligation(1),
+                },
+            ))
+            .expect("accept before cancellation");
+        let _ = actor.apply(TransferScenarioFactory::command(
+            2,
+            TransferCommandKind::Start {
+                path_id: 1,
+                obligation: TransferScenarioFactory::obligation(2),
+            },
+        ));
 
-            // Start transfer
-            let _ = actor.apply(TransferCommandKind::Start {
-                budget: Budget::from_millis(8_000),
-            });
+        log.transfer_snapshot("pre_cancel_started", &actor);
 
-            log.transfer_snapshot("pre_cancel_started", &actor);
+        log.phase("cancellation_workflow");
 
-            log.phase("cancellation_workflow");
+        // Test cancellation (real ATP cancellation protocol)
+        let cancel_result = actor.apply(TransferScenarioFactory::command(
+            3,
+            TransferCommandKind::Cancel {
+                phase: TransferCancelPhase::Requested,
+            },
+        ));
 
-            // Test cancellation (real ATP cancellation protocol)
-            let cancel_result = actor.apply(TransferCommandKind::Cancel {
-                phase: crate::atp::transfer::TransferCancelPhase::Requested,
-            });
+        log.transfer_snapshot("post_cancel_request", &actor);
 
-            log.transfer_snapshot("post_cancel_request", &actor);
-
-            match cancel_result {
-                Ok(_) => {
-                    assert!(log.assert_transfer_state(
-                        "cancelled_state",
-                        TransferState::Cancelling,
-                        &actor
-                    ));
-                }
-                Err(e) => {
-                    eprintln!("Transfer cancellation failed: {:?}", e);
-                    // Continue test
-                }
+        match cancel_result {
+            Ok(_) => {
+                assert!(log.assert_transfer_state(
+                    "cancelled_state",
+                    TransferState::Cancelling,
+                    &actor
+                ));
             }
-
-            log.phase("failure_simulation");
-
-            // Create new actor for failure testing
-            let mut failure_actor =
-                TransferScenarioFactory::create_transfer_actor(301, 0xfedcba0987654321)
-                    .expect("create failure test actor");
-
-            isolation.track_actor(failure_actor.actor_id);
-            log.transfer_snapshot("failure_actor_initial", &failure_actor);
-
-            // Test failure handling (real ATP failure protocol)
-            let fail_result = failure_actor.apply(TransferCommandKind::Fail {
-                kind: TransferFailureKind::NetworkError,
-            });
-
-            log.transfer_snapshot("post_failure", &failure_actor);
-
-            match fail_result {
-                Ok(_) => {
-                    assert!(log.assert_transfer_state(
-                        "failed_state",
-                        TransferState::Failed,
-                        &failure_actor
-                    ));
-                }
-                Err(e) => {
-                    eprintln!("Transfer failure handling failed: {:?}", e);
-                    // Continue test
-                }
+            Err(e) => {
+                eprintln!("Transfer cancellation failed: {:?}", e);
+                // Continue test
             }
+        }
 
-            Ok::<(), Box<dyn std::error::Error>>(())
-        });
+        log.phase("failure_simulation");
+
+        // Create new actor for failure testing
+        let mut failure_actor =
+            TransferScenarioFactory::create_transfer_actor(301, 0xfedcba0987654321)
+                .expect("create failure test actor");
+
+        isolation.track_actor(failure_actor.actor_id);
+        log.transfer_snapshot("failure_actor_initial", &failure_actor);
+
+        // Test failure handling (real ATP failure protocol)
+        let fail_result = failure_actor.apply(TransferScenarioFactory::command(
+            4,
+            TransferCommandKind::Fail {
+                kind: TransferFailureKind::Peer,
+            },
+        ));
+
+        log.transfer_snapshot("post_failure", &failure_actor);
+
+        match fail_result {
+            Ok(_) => {
+                assert!(log.assert_transfer_state(
+                    "failed_state",
+                    TransferState::Failed,
+                    &failure_actor
+                ));
+            }
+            Err(e) => {
+                eprintln!("Transfer failure handling failed: {:?}", e);
+                // Continue test
+            }
+        }
 
         log.phase("teardown");
         log.test_end("pass");

@@ -229,7 +229,7 @@ impl RepairRoiE2eHarness {
 
             policy_results.push(PolicyResult {
                 policy_name: policy_name.to_string(),
-                policy_config: policy.clone(),
+                policy_config: *policy,
                 scenario_results,
             });
         }
@@ -261,7 +261,7 @@ impl RepairRoiE2eHarness {
         let mut simulator = RepairRoiSimulator::new();
         simulator.add_regime(scenario.regime.clone());
         // Configure simulator to use the specific policy for this scenario
-        simulator.configure_policy(policy.clone());
+        simulator.configure_policy(*policy);
 
         for (config_index, config) in scenario.transfer_configs.iter().enumerate() {
             match self.execute_transfer_config(scenario, config, &mut simulator) {
@@ -383,7 +383,7 @@ impl RepairRoiE2eHarness {
 
             if score > best_score {
                 best_score = score;
-                best_policy = metric.policy_name.clone();
+                best_policy.clone_from(&metric.policy_name);
             }
         }
 
@@ -978,14 +978,14 @@ mod tests {
         };
 
         // This should validate successfully
-        let harness = RepairRoiE2eHarness::new(LabRuntime::new());
+        let harness = RepairRoiE2eHarness::new(LabRuntime::new(crate::lab::LabConfig::default()));
         assert!(harness.validate_expected_outcome(&outcome, &result));
     }
 
     #[test]
     fn test_policy_comparison_configuration() {
         // Test that we can configure multiple policies for comparison
-        let lab_runtime = LabRuntime::new();
+        let lab_runtime = LabRuntime::new(crate::lab::LabConfig::default());
         let policies = RepairRoiE2eHarness::create_comparison_policies();
 
         // Should create 3 different policies (Conservative, Aggressive, Balanced)
@@ -1010,9 +1010,9 @@ mod tests {
     #[test]
     fn test_policy_comparison_result_structure() {
         // Test the policy comparison result structure
-        let lab_runtime = LabRuntime::new();
+        let lab_runtime = LabRuntime::new(crate::lab::LabConfig::default());
         let policies = RepairRoiE2eHarness::create_comparison_policies();
-        let mut harness = RepairRoiE2eHarness::new(lab_runtime).with_policies(policies);
+        let harness = RepairRoiE2eHarness::new(lab_runtime).with_policies(policies);
 
         // This would normally execute scenarios, but for testing we just verify structure
         let scenarios = &harness.scenarios.clone();
@@ -1047,7 +1047,7 @@ mod tests {
     #[test]
     fn test_policy_comparison_best_policy_selection() {
         // Test the logic for determining the best policy
-        let harness = RepairRoiE2eHarness::new(LabRuntime::new());
+        let harness = RepairRoiE2eHarness::new(LabRuntime::new(crate::lab::LabConfig::default()));
 
         let test_metrics = vec![
             PolicyMetrics {

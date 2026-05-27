@@ -1,9 +1,14 @@
 //! ATP Mailbox Relay - Communication with mailbox relay servers.
 
 use super::*;
+use crate::runtime::spawn_blocking;
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
 use std::net::SocketAddr;
+use std::net::TcpStream;
 use std::time::Duration;
+
+const RELAY_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// Client for communicating with mailbox relay servers.
 #[derive(Debug)]
@@ -19,7 +24,7 @@ pub struct RelayClient {
 }
 
 /// Authentication credentials for relay access.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RelayCredentials {
     /// Client identifier
     pub client_id: String,
@@ -188,50 +193,11 @@ impl RelayClient {
 
     /// Send message to relay and await response.
     pub async fn send_message(&self, message: RelayMessage) -> MailboxResult<RelayResponse> {
-        // Simplified implementation for foundational structure
-        match message {
-            RelayMessage::Store { target_peer, chunks, metadata } => {
-                Ok(RelayResponse::StoreComplete {
-                    transfer_id: MailboxTransferId::new(),
-                    receipt: "store-receipt-123".to_string(),
-                })
-            }
-
-            RelayMessage::Retrieve { transfer_id, .. } => {
-                Ok(RelayResponse::RetrieveResult {
-                    transfer_id,
-                    chunks: Vec::new(),
-                    metadata: MailboxTransferMetadata {
-                        transfer_id,
-                        destination_peer: PeerId::new("placeholder"),
-                        created_at: crate::types::Time::now(),
-                        expires_at: crate::types::Time::now(),
-                        total_size: 0,
-                        chunk_count: 0,
-                        encrypted_metadata: Vec::new(),
-                    },
-                })
-            }
-
-            RelayMessage::List { .. } => {
-                Ok(RelayResponse::TransferList {
-                    transfers: Vec::new(),
-                    total_count: 0,
-                })
-            }
-
-            RelayMessage::Delete { transfer_id, .. } => {
-                Ok(RelayResponse::DeleteComplete { transfer_id })
-            }
-
-            RelayMessage::Status => {
-                Ok(RelayResponse::StatusInfo {
-                    version: "1.0".to_string(),
-                    available_storage: 1_000_000_000,
-                    active_transfers: 0,
-                })
-            }
-        }
+        let endpoint = self.endpoint;
+        let timeout = self.timeout;
+        let credentials = self.credentials.clone();
+        spawn_blocking(move || send_relay_message_blocking(endpoint, timeout, credentials, message))
+            .await
     }
 
     /// Get relay capabilities.
@@ -259,6 +225,16 @@ impl RelayProtocol {
         }
     }
 
+    /// Protocol version this codec will advertise.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// Feature set advertised by this protocol codec.
+    pub fn features(&self) -> &RelayFeatures {
+        &self.features
+    }
+
     /// Serialize message to bytes.
     pub fn serialize_message(&self, message: &RelayMessage) -> Result<Vec<u8>, String> {
         serde_json::to_vec(message).map_err(|e| format!("Serialization error: {}", e))
@@ -278,6 +254,101 @@ impl RelayProtocol {
     pub fn deserialize_response(&self, data: &[u8]) -> Result<RelayResponse, String> {
         serde_json::from_slice(data).map_err(|e| format!("Deserialization error: {}", e))
     }
+}
+
+fn send_relay_message_blocking(
+    endpoint: SocketAddr,
+    timeout: Duration,
+    credentials: Option<RelayCredentials>,
+    message: RelayMessage,
+) -> MailboxResult<RelayResponse> {
+    let mut stream = TcpStream::connect_timeout(&endpoint, timeout).map_err(|err| {
+        MailboxError::NetworkError {
+            details: format!("failed to connect to relay {endpoint}: {err}"),
+        }
+    })?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|err| MailboxError::NetworkError {
+            details: format!("failed to set relay read timeout: {err}"),
+        })?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|err| MailboxError::NetworkError {
+            details: format!("failed to set relay write timeout: {err}"),
+        })?;
+
+    let envelope = RelayRequestEnvelope {
+        version: "1.0",
+        credentials: credentials.as_ref(),
+        message: &message,
+    };
+    let payload = serde_json::to_vec(&envelope).map_err(|err| MailboxError::RelayError {
+        message: format!("failed to encode relay request: {err}"),
+    })?;
+    write_frame(&mut stream, &payload)?;
+
+    let response_payload = read_frame(&mut stream)?;
+    let response: RelayResponse =
+        serde_json::from_slice(&response_payload).map_err(|err| MailboxError::RelayError {
+            message: format!("failed to decode relay response: {err}"),
+        })?;
+
+    Ok(response)
+}
+
+#[derive(Serialize)]
+struct RelayRequestEnvelope<'a> {
+    version: &'static str,
+    credentials: Option<&'a RelayCredentials>,
+    message: &'a RelayMessage,
+}
+
+fn write_frame(stream: &mut TcpStream, payload: &[u8]) -> MailboxResult<()> {
+    if payload.len() > RELAY_MAX_FRAME_BYTES {
+        return Err(MailboxError::RelayError {
+            message: format!(
+                "relay request exceeds maximum frame size: {} > {}",
+                payload.len(),
+                RELAY_MAX_FRAME_BYTES
+            ),
+        });
+    }
+
+    let len = u32::try_from(payload.len()).map_err(|_| MailboxError::RelayError {
+        message: "relay request length does not fit u32".to_string(),
+    })?;
+    stream
+        .write_all(&len.to_be_bytes())
+        .and_then(|()| stream.write_all(payload))
+        .map_err(|err| MailboxError::NetworkError {
+            details: format!("failed to write relay frame: {err}"),
+        })
+}
+
+fn read_frame(stream: &mut TcpStream) -> MailboxResult<Vec<u8>> {
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .map_err(|err| MailboxError::NetworkError {
+            details: format!("failed to read relay response length: {err}"),
+        })?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > RELAY_MAX_FRAME_BYTES {
+        return Err(MailboxError::RelayError {
+            message: format!(
+                "relay response exceeds maximum frame size: {len} > {RELAY_MAX_FRAME_BYTES}"
+            ),
+        });
+    }
+
+    let mut payload = vec![0u8; len];
+    stream
+        .read_exact(&mut payload)
+        .map_err(|err| MailboxError::NetworkError {
+            details: format!("failed to read relay response payload: {err}"),
+        })?;
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -313,7 +384,7 @@ mod tests {
         let deserialized = protocol.deserialize_message(&serialized).unwrap();
 
         match deserialized {
-            RelayMessage::Status => {},
+            RelayMessage::Status => {}
             _ => panic!("Unexpected message type"),
         }
     }
@@ -325,17 +396,35 @@ mod tests {
         assert!(!features.encryption_algorithms.is_empty());
     }
 
-    #[tokio::test]
-    async fn test_relay_message_handling() {
-        let endpoint = "127.0.0.1:8080".parse().unwrap();
+    #[test]
+    fn test_relay_message_handling() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request_payload = read_frame(&mut stream).unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&request_payload).unwrap();
+            assert_eq!(request["version"], "1.0");
+            assert_eq!(request["message"], "Status");
+
+            let response = RelayResponse::StatusInfo {
+                version: "1.0".to_string(),
+                available_storage: 1_000_000_000,
+                active_transfers: 0,
+            };
+            let payload = serde_json::to_vec(&response).unwrap();
+            write_frame(&mut stream, &payload).unwrap();
+        });
         let client = RelayClient::new(endpoint);
 
-        let response = client.send_message(RelayMessage::Status).await.unwrap();
+        let response =
+            futures_lite::future::block_on(client.send_message(RelayMessage::Status)).unwrap();
+        server.join().unwrap();
 
         match response {
             RelayResponse::StatusInfo { version, .. } => {
                 assert_eq!(version, "1.0");
-            },
+            }
             _ => panic!("Unexpected response type"),
         }
     }

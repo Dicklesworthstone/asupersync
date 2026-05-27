@@ -247,6 +247,7 @@ fn parse_ledger_modules() -> HashSet<String> {
 
 /// Test helper to validate test file structure
 #[cfg(test)]
+#[allow(dead_code)]
 mod test_helpers {
     use super::*;
 
@@ -257,8 +258,6 @@ mod test_helpers {
 
         // Check for required test types
         let has_unit_tests = content.contains("#[test]");
-        let has_property_tests = content.contains("proptest") || content.contains("quickcheck");
-        let has_error_tests = content.contains("should_fail") || content.contains("panic");
 
         if !has_unit_tests {
             return Err("Test file must contain unit tests (#[test])".to_string());

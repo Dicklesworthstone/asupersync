@@ -279,7 +279,7 @@ impl WebTransportAdapter {
     pub async fn start_session(&mut self, object_id: ObjectId, _url: &str) -> Result<String> {
         let session_id = format!(
             "wt-{}-{}",
-            object_id.to_string(),
+            object_id,
             SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -553,6 +553,7 @@ impl WebTransportStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_lite::future::block_on;
 
     #[test]
     fn test_webtransport_config_default() {
@@ -567,82 +568,88 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_webtransport_session_lifecycle() {
-        let mut adapter = WebTransportAdapter::new(WebTransportConfig::default());
-        let object_id = ObjectId::Content(crate::atp::object::ContentId::new([1; 32]));
+    #[test]
+    fn test_webtransport_session_lifecycle() {
+        block_on(async {
+            let mut adapter = WebTransportAdapter::new(WebTransportConfig::default());
+            let object_id = ObjectId::Content(crate::atp::object::ContentId::new([1; 32]));
 
-        // Start session
-        let session_id = adapter
-            .start_session(object_id, "https://example.com")
-            .await
-            .unwrap();
-        assert_eq!(adapter.stats.active_sessions, 1);
+            // Start session
+            let session_id = adapter
+                .start_session(object_id, "https://example.com")
+                .await
+                .unwrap();
+            assert_eq!(adapter.stats.active_sessions, 1);
 
-        // Create stream
-        let stream_id = adapter.create_stream(&session_id, 128).await.unwrap();
-        assert_eq!(stream_id, 0); // First stream should be ID 0
+            // Create stream
+            let stream_id = adapter.create_stream(&session_id, 128).await.unwrap();
+            assert_eq!(stream_id, 0); // First stream should be ID 0
 
-        // Send frame
-        let data = b"ATP frame data";
-        adapter
-            .send_frame(&session_id, stream_id, data)
-            .await
-            .unwrap();
+            // Send frame
+            let data = b"ATP frame data";
+            adapter
+                .send_frame(&session_id, stream_id, data)
+                .await
+                .unwrap();
 
-        // Send datagram
-        let datagram_data = b"ATP datagram";
-        adapter
-            .send_datagram(&session_id, datagram_data)
-            .await
-            .unwrap();
+            // Send datagram
+            let datagram_data = b"ATP datagram";
+            adapter
+                .send_datagram(&session_id, datagram_data)
+                .await
+                .unwrap();
 
-        // Close session
-        adapter.close_session(&session_id).await.unwrap();
-        assert_eq!(adapter.stats.active_sessions, 0);
+            // Close session
+            adapter.close_session(&session_id).await.unwrap();
+            assert_eq!(adapter.stats.active_sessions, 0);
+        });
     }
 
-    #[tokio::test]
-    async fn test_webtransport_negotiation() {
-        let adapter = WebTransportAdapter::new(WebTransportConfig::default());
-        let trace_id = TraceId::new_for_test(1, 1);
+    #[test]
+    fn test_webtransport_negotiation() {
+        block_on(async {
+            let adapter = WebTransportAdapter::new(WebTransportConfig::default());
+            let trace_id = TraceId::from_parts(1, 1);
 
-        let negotiation = adapter.negotiate(trace_id).await.unwrap();
-        assert_eq!(negotiation.selected_adapter, AdapterType::WebTransport);
-        assert_eq!(
-            negotiation.feature_parity.object_support,
-            FeatureSupport::Full
-        );
-        assert_eq!(
-            negotiation.feature_parity.proof_support,
-            FeatureSupport::Partial
-        );
+            let negotiation = adapter.negotiate(trace_id).await.unwrap();
+            assert_eq!(negotiation.selected_adapter, AdapterType::WebTransport);
+            assert_eq!(
+                negotiation.feature_parity.object_support,
+                FeatureSupport::Full
+            );
+            assert_eq!(
+                negotiation.feature_parity.proof_support,
+                FeatureSupport::Partial
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn test_stream_limits() {
-        let config = WebTransportConfig {
-            session_config: WebTransportSessionConfig {
-                max_bidirectional_streams: 1, // Limit to 1 stream
-                max_unidirectional_streams: 1,
-                session_timeout: Duration::from_secs(300),
-                close_timeout: Duration::from_secs(5),
-            },
-            ..Default::default()
-        };
+    #[test]
+    fn test_stream_limits() {
+        block_on(async {
+            let config = WebTransportConfig {
+                session_config: WebTransportSessionConfig {
+                    max_bidirectional_streams: 1, // Limit to 1 stream
+                    max_unidirectional_streams: 1,
+                    session_timeout: Duration::from_secs(300),
+                    close_timeout: Duration::from_secs(5),
+                },
+                ..Default::default()
+            };
 
-        let mut adapter = WebTransportAdapter::new(config);
-        let object_id = ObjectId::Content(crate::atp::object::ContentId::new([1; 32]));
-        let session_id = adapter
-            .start_session(object_id, "https://example.com")
-            .await
-            .unwrap();
+            let mut adapter = WebTransportAdapter::new(config);
+            let object_id = ObjectId::Content(crate::atp::object::ContentId::new([1; 32]));
+            let session_id = adapter
+                .start_session(object_id, "https://example.com")
+                .await
+                .unwrap();
 
-        // First stream should succeed
-        adapter.create_stream(&session_id, 128).await.unwrap();
+            // First stream should succeed
+            adapter.create_stream(&session_id, 128).await.unwrap();
 
-        // Second stream should fail due to limit
-        let result = adapter.create_stream(&session_id, 128).await;
-        assert!(result.is_err());
+            // Second stream should fail due to limit
+            let result = adapter.create_stream(&session_id, 128).await;
+            assert!(result.is_err());
+        });
     }
 }

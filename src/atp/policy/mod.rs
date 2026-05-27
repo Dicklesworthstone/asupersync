@@ -137,7 +137,7 @@ impl TemporalScope {
     /// Check if uses are exhausted.
     #[must_use]
     pub fn uses_exhausted(&self, current_uses: u64) -> bool {
-        self.max_uses.map_or(false, |max| current_uses >= max)
+        self.max_uses.is_some_and(|max| current_uses >= max)
     }
 }
 
@@ -203,7 +203,7 @@ impl Capability {
         hasher.update(self.grant_id.as_bytes());
         hasher.update(self.subject.as_bytes());
         hasher.update(self.issuer.as_bytes());
-        hasher.update(&self.scope.digest());
+        hasher.update(self.scope.digest());
 
         // Serialize actions in deterministic order
         let mut actions: Vec<_> = self.actions.iter().collect();
@@ -215,7 +215,7 @@ impl Capability {
         // Add temporal constraints
         if let Some(not_before) = self.temporal.not_before {
             hasher.update(
-                &not_before
+                not_before
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs()
@@ -224,7 +224,7 @@ impl Capability {
         }
         if let Some(not_after) = self.temporal.not_after {
             hasher.update(
-                &not_after
+                not_after
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs()
@@ -232,10 +232,10 @@ impl Capability {
             );
         }
         if let Some(max_uses) = self.temporal.max_uses {
-            hasher.update(&max_uses.to_le_bytes());
+            hasher.update(max_uses.to_le_bytes());
         }
 
-        hasher.update(&self.constraints.digest());
+        hasher.update(self.constraints.digest());
         hasher.finalize().into()
     }
 

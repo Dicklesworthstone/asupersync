@@ -156,7 +156,7 @@ fn bench_load_balancer_hash_based(c: &mut Criterion) {
 
     for &endpoint_count in &[8usize, 32, 128, 512] {
         let endpoints = build_loaded_endpoints(endpoint_count, Some(7), true);
-        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 0x0057_AF1D_u64);
+        let lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::HashBased, 0x0057_AF1D_u64);
         group.throughput(Throughput::Elements(endpoint_count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(endpoint_count),
@@ -186,7 +186,7 @@ fn bench_load_balancer_hash_based_select_n(c: &mut Criterion) {
             .iter()
             .filter(|endpoint| endpoint.state().can_receive())
             .count();
-        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 0x0057_AF1D_u64);
+        let lb = LoadBalancer::with_test_salt(LoadBalanceStrategy::HashBased, 0x0057_AF1D_u64);
 
         for &fanout in &[3usize, 8] {
             if fanout > available {

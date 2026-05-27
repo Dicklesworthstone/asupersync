@@ -9,11 +9,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
 const CONTENT_ID_DOMAIN: &[u8] = b"asupersync.atp.content-id.v1\0";
 const MANIFEST_ID_DOMAIN: &[u8] = b"asupersync.atp.manifest-id.v1\0";
+const STREAM_ID_DOMAIN: &[u8] = b"asupersync.atp.stream-id.v1\0";
+static STREAM_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn domain_separated_sha256(domain: &[u8], payload: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -450,9 +454,8 @@ impl Object {
     /// Create a stream object with rolling manifests.
     #[must_use]
     pub fn stream() -> Self {
-        // Stream gets a unique manifest ID that will be updated
-        let manifest_bytes = b"stream-placeholder";
-        let manifest_id = ManifestId::from_manifest_bytes(manifest_bytes);
+        let manifest_bytes = Self::stream_identity_bytes();
+        let manifest_id = ManifestId::from_manifest_bytes(&manifest_bytes);
 
         Self {
             id: ObjectId::manifest(manifest_id),
@@ -465,6 +468,22 @@ impl Object {
             children: Vec::new(),
             content: None,
         }
+    }
+
+    fn stream_identity_bytes() -> Vec<u8> {
+        let counter = STREAM_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let timestamp_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let process_id = u64::from(std::process::id());
+
+        let mut bytes = Vec::with_capacity(STREAM_ID_DOMAIN.len() + 32);
+        bytes.extend_from_slice(STREAM_ID_DOMAIN);
+        bytes.extend_from_slice(&counter.to_be_bytes());
+        bytes.extend_from_slice(&process_id.to_be_bytes());
+        bytes.extend_from_slice(&timestamp_nanos.to_be_bytes());
+        bytes
     }
 
     /// Create an application-defined object.
@@ -818,6 +837,14 @@ mod tests {
         assert_eq!(stream.metadata.kind, ObjectKind::StreamObject);
         assert!(stream.id.is_manifest_addressed());
         assert!(stream.children.is_empty());
+    }
+
+    #[test]
+    fn stream_objects_get_distinct_manifest_ids() {
+        let first = Object::stream();
+        let second = Object::stream();
+
+        assert_ne!(first.id, second.id);
     }
 
     #[test]

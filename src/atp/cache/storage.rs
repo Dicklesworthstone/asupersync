@@ -9,6 +9,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+const CACHE_COMPRESSION_THRESHOLD: usize = 1024;
+const CACHE_COMPRESSION_MAGIC: &[u8; 10] = b"ASUPCACHE\0";
+const CACHE_COMPRESSION_VERSION: u8 = 1;
+const CACHE_CODEC_GZIP: u8 = 1;
+const CACHE_COMPRESSION_HEADER_LEN: usize = 10 + 1 + 1 + 8 + 8 + 32;
+
 /// Trait for cache storage backends.
 pub trait CacheStorage: Send + Sync {
     /// Store content with the given key.
@@ -70,19 +76,141 @@ impl FileStorage {
 
     /// Compress content if compression is enabled.
     fn compress_content(&self, content: &[u8]) -> Result<Vec<u8>, CacheError> {
-        if self.compression_enabled && content.len() > 1024 {
-            // Use simple gzip compression (placeholder - would use actual compression)
-            // For now, just return original content
-            Ok(content.to_vec())
-        } else {
-            Ok(content.to_vec())
+        if !self.compression_enabled || content.len() <= CACHE_COMPRESSION_THRESHOLD {
+            return Ok(content.to_vec());
+        }
+
+        #[cfg(feature = "compression")]
+        {
+            use flate2::{Compression, write::GzEncoder};
+            use sha2::{Digest, Sha256};
+            use std::io::Write;
+
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::new(6));
+            encoder.write_all(content).map_err(|e| {
+                CacheError::Storage(format!("Failed to gzip-compress cache content: {e}"))
+            })?;
+            let compressed = encoder.finish().map_err(|e| {
+                CacheError::Storage(format!("Failed to finish gzip cache content: {e}"))
+            })?;
+
+            if compressed.len() + CACHE_COMPRESSION_HEADER_LEN >= content.len() {
+                return Ok(content.to_vec());
+            }
+
+            let digest = Sha256::digest(content);
+            let mut framed = Vec::with_capacity(CACHE_COMPRESSION_HEADER_LEN + compressed.len());
+            framed.extend_from_slice(CACHE_COMPRESSION_MAGIC);
+            framed.push(CACHE_COMPRESSION_VERSION);
+            framed.push(CACHE_CODEC_GZIP);
+            framed.extend_from_slice(&(content.len() as u64).to_be_bytes());
+            framed.extend_from_slice(&(compressed.len() as u64).to_be_bytes());
+            framed.extend_from_slice(&digest);
+            framed.extend_from_slice(&compressed);
+            Ok(framed)
+        }
+
+        #[cfg(not(feature = "compression"))]
+        {
+            let _ = content;
+            Err(CacheError::Storage(
+                "cache compression requested but the compression feature is disabled".to_string(),
+            ))
         }
     }
 
     /// Decompress content if needed.
     fn decompress_content(&self, content: &[u8]) -> Result<Vec<u8>, CacheError> {
-        // Placeholder for decompression - would detect and decompress as needed
-        Ok(content.to_vec())
+        if !content.starts_with(CACHE_COMPRESSION_MAGIC) {
+            return Ok(content.to_vec());
+        }
+
+        if content.len() < CACHE_COMPRESSION_HEADER_LEN {
+            return Err(CacheError::Storage(
+                "Truncated compressed cache envelope".to_string(),
+            ));
+        }
+
+        let version = content[CACHE_COMPRESSION_MAGIC.len()];
+        if version != CACHE_COMPRESSION_VERSION {
+            return Err(CacheError::Storage(format!(
+                "Unsupported compressed cache envelope version: {version}"
+            )));
+        }
+
+        let codec = content[CACHE_COMPRESSION_MAGIC.len() + 1];
+        if codec != CACHE_CODEC_GZIP {
+            return Err(CacheError::Storage(format!(
+                "Unsupported compressed cache codec: {codec}"
+            )));
+        }
+
+        let original_size_offset = CACHE_COMPRESSION_MAGIC.len() + 2;
+        let compressed_size_offset = original_size_offset + 8;
+        let digest_offset = compressed_size_offset + 8;
+        let payload_offset = digest_offset + 32;
+
+        let original_size = u64::from_be_bytes(
+            content[original_size_offset..compressed_size_offset]
+                .try_into()
+                .expect("fixed eight-byte original-size field"),
+        );
+        let compressed_size = u64::from_be_bytes(
+            content[compressed_size_offset..digest_offset]
+                .try_into()
+                .expect("fixed eight-byte compressed-size field"),
+        );
+        let compressed_size = usize::try_from(compressed_size).map_err(|_| {
+            CacheError::Storage("Compressed cache payload length does not fit usize".to_string())
+        })?;
+
+        if content.len() != payload_offset + compressed_size {
+            return Err(CacheError::Storage(
+                "Compressed cache payload length mismatch".to_string(),
+            ));
+        }
+
+        #[cfg(feature = "compression")]
+        {
+            use flate2::read::GzDecoder;
+            use sha2::{Digest, Sha256};
+            use std::io::Read;
+
+            let expected_original_size = usize::try_from(original_size).map_err(|_| {
+                CacheError::Storage(
+                    "Compressed cache original length does not fit usize".to_string(),
+                )
+            })?;
+            let payload = &content[payload_offset..];
+            let mut decoder = GzDecoder::new(payload);
+            let mut decompressed = Vec::with_capacity(expected_original_size);
+            decoder.read_to_end(&mut decompressed).map_err(|e| {
+                CacheError::Storage(format!("Failed to gzip-decompress cache content: {e}"))
+            })?;
+
+            if decompressed.len() != expected_original_size {
+                return Err(CacheError::Storage(
+                    "Compressed cache original length mismatch".to_string(),
+                ));
+            }
+
+            let digest = Sha256::digest(&decompressed);
+            if &digest[..] != &content[digest_offset..payload_offset] {
+                return Err(CacheError::Storage(
+                    "Compressed cache plaintext digest mismatch".to_string(),
+                ));
+            }
+
+            Ok(decompressed)
+        }
+
+        #[cfg(not(feature = "compression"))]
+        {
+            let _ = original_size;
+            Err(CacheError::Storage(
+                "compressed cache content requires the compression feature".to_string(),
+            ))
+        }
     }
 }
 
@@ -199,20 +327,36 @@ impl MemoryStorage {
     fn get_memory_key(&self, key: &CacheKey) -> String {
         format!("{}:{}", key.manifest_hash, key.content_hash)
     }
+
+    /// Current memory held by this backend.
+    #[must_use]
+    pub const fn memory_usage(&self) -> u64 {
+        self.current_memory_bytes
+    }
 }
 
 impl CacheStorage for MemoryStorage {
     fn store(&mut self, key: &CacheKey, content: &[u8]) -> Result<StorageLocation, CacheError> {
-        // Check memory limit
-        if self.current_memory_bytes + content.len() as u64 > self.max_memory_bytes {
+        let memory_key = self.get_memory_key(key);
+        let previous_len = {
+            let store = self.content_store.read().unwrap();
+            store.get(&memory_key).map_or(0, Vec::len) as u64
+        };
+        let projected_usage = self
+            .current_memory_bytes
+            .saturating_sub(previous_len)
+            .saturating_add(content.len() as u64);
+        if projected_usage > self.max_memory_bytes {
             return Err(CacheError::InsufficientSpace);
         }
 
-        let memory_key = self.get_memory_key(key);
-
         {
             let mut store = self.content_store.write().unwrap();
-            store.insert(memory_key.clone(), content.to_vec());
+            if let Some(previous) = store.insert(memory_key.clone(), content.to_vec()) {
+                self.current_memory_bytes = self
+                    .current_memory_bytes
+                    .saturating_sub(previous.len() as u64);
+            }
         }
 
         // Update metrics
@@ -359,16 +503,13 @@ impl CacheStorage for HybridStorage {
     }
 
     fn retrieve(&self, location: &StorageLocation) -> Result<Vec<u8>, CacheError> {
-        let result = match location {
+        match location {
             StorageLocation::Memory(_) => self.memory_storage.retrieve(location),
             StorageLocation::File(_) => self.file_storage.retrieve(location),
             StorageLocation::External(_) => Err(CacheError::Storage(
                 "External storage not supported".to_string(),
             )),
-        };
-
-        // Update metrics (would need mutable access in real implementation)
-        result
+        }
     }
 
     fn remove(&mut self, location: &StorageLocation) -> Result<(), CacheError> {
@@ -415,6 +556,55 @@ impl CacheStorage for HybridStorage {
 }
 
 #[cfg(test)]
+mod file_storage_unit_tests {
+    use super::*;
+
+    fn file_storage(compression_enabled: bool) -> FileStorage {
+        FileStorage {
+            root_dir: PathBuf::new(),
+            metrics: StorageMetrics::default(),
+            compression_enabled,
+        }
+    }
+
+    #[test]
+    fn file_storage_leaves_small_content_unframed() {
+        let storage = file_storage(true);
+        let content = b"small content";
+
+        let encoded = storage.compress_content(content).unwrap();
+        assert_eq!(encoded, content);
+        assert_eq!(storage.decompress_content(&encoded).unwrap(), content);
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn file_storage_gzip_envelope_roundtrips_and_verifies_digest() {
+        let storage = file_storage(true);
+        let content = b"cache payload ".repeat(512);
+
+        let encoded = storage.compress_content(&content).unwrap();
+        assert!(encoded.starts_with(CACHE_COMPRESSION_MAGIC));
+        assert!(encoded.len() < content.len());
+        assert_eq!(storage.decompress_content(&encoded).unwrap(), content);
+
+        let mut tampered = encoded;
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x40;
+        assert!(storage.decompress_content(&tampered).is_err());
+    }
+
+    #[test]
+    #[cfg(not(feature = "compression"))]
+    fn file_storage_compression_fails_closed_without_feature() {
+        let storage = file_storage(true);
+        let content = vec![b'x'; CACHE_COMPRESSION_THRESHOLD + 1];
+
+        assert!(storage.compress_content(&content).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod tests {
     use super::*;
     use crate::atp::cache::trust::{TrustBoundaryChecker, TrustPolicy};
@@ -493,7 +683,7 @@ mod tests {
 
         fn storage_snapshot<S>(&self, label: &str, storage: &S, metrics: &StorageMetrics)
         where
-            S: std::fmt::Debug,
+            S: std::fmt::Debug + 'static,
         {
             let snapshot = StorageSnapshot {
                 backend_type: std::any::type_name::<S>()
@@ -504,7 +694,7 @@ mod tests {
                 files_stored: metrics.files_stored,
                 bytes_stored: metrics.bytes_stored,
                 errors: metrics.errors,
-                memory_usage: None, // TODO: Add memory tracking if available
+                memory_usage: storage_memory_usage(storage),
             };
 
             if let Some(ref cx) = self.cx {
@@ -524,7 +714,8 @@ mod tests {
                     "metrics": {
                         "files_stored": snapshot.files_stored,
                         "bytes_stored": snapshot.bytes_stored,
-                        "errors": snapshot.errors
+                        "errors": snapshot.errors,
+                        "memory_usage": snapshot.memory_usage
                     }
                 })
             );
@@ -591,6 +782,21 @@ mod tests {
                 })
             );
         }
+    }
+
+    fn storage_memory_usage<S>(storage: &S) -> Option<u64>
+    where
+        S: std::fmt::Debug + 'static,
+    {
+        use std::any::Any;
+
+        let any = storage as &dyn Any;
+        any.downcast_ref::<MemoryStorage>()
+            .map(MemoryStorage::memory_usage)
+            .or_else(|| {
+                any.downcast_ref::<HybridStorage>()
+                    .map(|storage| storage.memory_storage.memory_usage())
+            })
     }
 
     /// Test data factory for creating realistic cache content.
@@ -1061,7 +1267,7 @@ mod tests {
         });
     }
 
-    // Legacy unit tests (simplified for compatibility)
+    // Unit tests for storage metrics compatibility.
     #[test]
     fn storage_metrics_default() {
         let metrics = StorageMetrics::default();

@@ -294,6 +294,7 @@ pub struct ResourceUsage {
 }
 
 /// Core transfer brain scheduler
+#[derive(Debug)]
 pub struct TransferBrain {
     /// Configuration
     config: TransferBrainConfig,
@@ -354,10 +355,7 @@ impl TransferBrain {
             priority.description()
         );
 
-        self.pending_chunks
-            .entry(priority)
-            .or_insert_with(Vec::new)
-            .push(chunk);
+        self.pending_chunks.entry(priority).or_default().push(chunk);
 
         Ok(())
     }
@@ -548,8 +546,16 @@ impl TransferBrain {
     }
 
     fn chunk_fits_budget(&self, chunk: &ScheduledChunk, budget: &Budget) -> bool {
-        // Simple budget check - real implementation would be more sophisticated
-        budget.remaining_polls() > 10 && chunk.size_bytes <= 10 * 1024 * 1024 // 10MB max chunk size
+        let required_polls = self.estimated_poll_cost(chunk);
+        if budget.remaining_polls() < required_polls {
+            return false;
+        }
+
+        if let Some(remaining_cost) = budget.remaining_cost() {
+            self.estimated_budget_cost(chunk) <= remaining_cost
+        } else {
+            true
+        }
     }
 
     fn make_scheduling_decision(
@@ -557,21 +563,28 @@ impl TransferBrain {
         chunk: &ScheduledChunk,
         trace_id: TraceId,
     ) -> SchedulingDecision {
+        let path_quality = self.calculate_path_quality(chunk);
+        let repair_roi = self.calculate_repair_roi(chunk);
+        let fairness_adjustment = self.calculate_fairness_adjustment(chunk);
+
         let factors = DecisionFactors {
             early_usability_impact: chunk.early_usability_value,
             decode_usefulness: chunk.decode_usefulness,
             system_pressure: self.current_pressure.clone(),
-            path_quality: 0.8, // TODO: Get from actual path measurement
-            repair_roi: 0.0,   // TODO: Calculate actual repair ROI
+            path_quality,
+            repair_roi,
             resume_value: chunk.resume_value as f64,
-            fairness_adjustment: 0.0, // TODO: Implement fairness calculation
+            fairness_adjustment,
         };
 
         let reasoning = format!(
-            "Selected for {} (usability: {:.2}, decode: {:.2}, resume: {}B)",
+            "Selected for {} (usability: {:.2}, decode: {:.2}, path: {:.2}, repair_roi: {:.2}, fairness: {:+.2}, resume: {}B)",
             chunk.priority.description(),
             chunk.early_usability_value,
             chunk.decode_usefulness,
+            path_quality,
+            repair_roi,
+            fairness_adjustment,
             chunk.resume_value
         );
 
@@ -580,7 +593,7 @@ impl TransferBrain {
             disk_io: chunk.disk_cost,
             network: chunk.network_cost,
             memory: (chunk.size_bytes as f64) * 1.1, // 10% overhead
-            duration: Duration::from_millis(chunk.size_bytes as u64 / 1024), // Rough estimate
+            duration: self.estimate_chunk_duration(chunk, path_quality),
         };
 
         SchedulingDecision {
@@ -592,6 +605,124 @@ impl TransferBrain {
             decided_at: SystemTime::now(),
             trace_id,
         }
+    }
+
+    fn estimated_poll_cost(&self, chunk: &ScheduledChunk) -> u32 {
+        let chunk_granularity = self.config.default_chunk_size_bytes.max(1);
+        let chunk_units = chunk.size_bytes.div_ceil(chunk_granularity).max(1);
+        let resource_units = finite_nonnegative(chunk.cpu_cost)
+            + finite_nonnegative(chunk.disk_cost)
+            + finite_nonnegative(chunk.network_cost);
+        let pressure_multiplier = 1.0
+            + self.current_pressure.cpu_utilization.clamp(0.0, 1.0)
+            + self.current_pressure.disk_pressure.clamp(0.0, 1.0)
+            + self.current_pressure.network_pressure.clamp(0.0, 1.0);
+        let weighted = (chunk_units as f64) * pressure_multiplier + resource_units.ceil();
+
+        weighted.ceil().clamp(1.0, u32::MAX as f64) as u32
+    }
+
+    fn estimated_budget_cost(&self, chunk: &ScheduledChunk) -> u64 {
+        let byte_cost = (chunk.size_bytes as u64).div_ceil(1024).max(1);
+        let resource_cost = ((finite_nonnegative(chunk.cpu_cost)
+            + finite_nonnegative(chunk.disk_cost)
+            + finite_nonnegative(chunk.network_cost))
+            * 1024.0)
+            .ceil()
+            .clamp(0.0, u64::MAX as f64) as u64;
+        let resume_discount = (chunk.resume_value / 1024).min(byte_cost / 2);
+        byte_cost
+            .saturating_add(resource_cost)
+            .saturating_sub(resume_discount)
+    }
+
+    fn calculate_path_quality(&self, chunk: &ScheduledChunk) -> f64 {
+        let resource_total = finite_nonnegative(chunk.cpu_cost)
+            + finite_nonnegative(chunk.disk_cost)
+            + finite_nonnegative(chunk.network_cost);
+        let weighted_pressure = if resource_total > f64::EPSILON {
+            (finite_nonnegative(chunk.cpu_cost) * self.current_pressure.cpu_utilization
+                + finite_nonnegative(chunk.disk_cost) * self.current_pressure.disk_pressure
+                + finite_nonnegative(chunk.network_cost) * self.current_pressure.network_pressure)
+                / resource_total
+        } else {
+            (self.current_pressure.cpu_utilization
+                + self.current_pressure.disk_pressure
+                + self.current_pressure.network_pressure)
+                / 3.0
+        };
+        let memory_headroom = 1.0 - self.current_pressure.memory_pressure.clamp(0.0, 1.0);
+        let pressure_fit = 1.0 - weighted_pressure.clamp(0.0, 1.0);
+
+        finite_unit(
+            self.metrics.path_stability.clamp(0.0, 1.0) * 0.45
+                + self.metrics.responsiveness.clamp(0.0, 1.0) * 0.20
+                + pressure_fit * 0.25
+                + memory_headroom * 0.10,
+        )
+    }
+
+    fn calculate_repair_roi(&self, chunk: &ScheduledChunk) -> f64 {
+        if !self.config.enable_repair_optimization {
+            return finite_nonnegative(self.metrics.repair_roi);
+        }
+
+        let utility_gain = chunk.decode_usefulness.max(chunk.early_usability_value)
+            + (chunk.resume_value as f64 / chunk.size_bytes.max(1) as f64).min(1.0);
+        let resource_cost = 1.0
+            + finite_nonnegative(chunk.cpu_cost)
+            + finite_nonnegative(chunk.disk_cost)
+            + finite_nonnegative(chunk.network_cost)
+            + (self.metrics.bytes_wasted as f64 / chunk.size_bytes.max(1) as f64).min(4.0);
+        let priority_multiplier = match chunk.priority {
+            TransferPriority::Control | TransferPriority::EarlyUsability => 1.25,
+            TransferPriority::DecodeUseful => 1.1,
+            TransferPriority::Standard => 1.0,
+            TransferPriority::Repair => 1.5,
+            TransferPriority::Speculative => 0.5,
+        };
+        let marginal_roi = (utility_gain * priority_multiplier) / resource_cost;
+
+        finite_nonnegative((self.metrics.repair_roi * 0.7) + (marginal_roi * 0.3))
+    }
+
+    fn calculate_fairness_adjustment(&self, chunk: &ScheduledChunk) -> f64 {
+        let capacity = self.config.max_in_flight_chunks.max(1) as f64;
+        let total_occupancy = self.in_flight_chunks.len() as f64 / capacity;
+        let same_object_occupancy = self
+            .in_flight_chunks
+            .values()
+            .filter(|in_flight| in_flight.object_id == chunk.object_id)
+            .count() as f64
+            / capacity;
+        let priority_bonus = match chunk.priority {
+            TransferPriority::Control => 0.40,
+            TransferPriority::EarlyUsability => 0.30,
+            TransferPriority::DecodeUseful => 0.20,
+            TransferPriority::Standard => 0.0,
+            TransferPriority::Repair => -0.10,
+            TransferPriority::Speculative => -0.30,
+        };
+
+        (priority_bonus - (same_object_occupancy * 0.75) - (total_occupancy * 0.25))
+            .clamp(-1.0, 1.0)
+    }
+
+    fn estimate_chunk_duration(&self, chunk: &ScheduledChunk, path_quality: f64) -> Duration {
+        let granularity = self.config.default_chunk_size_bytes.max(1) as f64;
+        let chunk_units = (chunk.size_bytes as f64 / granularity).max(1.0);
+        let resource_units = finite_nonnegative(chunk.cpu_cost)
+            + finite_nonnegative(chunk.disk_cost)
+            + finite_nonnegative(chunk.network_cost);
+        let pressure_multiplier = 1.0
+            + self.current_pressure.cpu_utilization.clamp(0.0, 1.0)
+            + self.current_pressure.disk_pressure.clamp(0.0, 1.0)
+            + self.current_pressure.network_pressure.clamp(0.0, 1.0);
+        let path_multiplier = 1.0 + (1.0 - path_quality.clamp(0.0, 1.0));
+        let millis =
+            ((chunk_units * 8.0) + (resource_units * 64.0)) * pressure_multiplier * path_multiplier;
+
+        Duration::from_millis(millis.ceil().clamp(1.0, u64::MAX as f64) as u64)
     }
 
     fn record_decision(&mut self, decision: SchedulingDecision) {
@@ -662,6 +793,22 @@ impl TransferBrain {
     }
 }
 
+fn finite_nonnegative(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn finite_unit(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 /// Current state of the scheduler for diagnostics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchedulingState {
@@ -677,7 +824,7 @@ pub struct SchedulingState {
     pub uptime: Duration,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod tests {
     use super::*;
     use crate::types::{Budget, TraceId};

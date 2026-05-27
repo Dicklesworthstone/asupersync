@@ -6,7 +6,7 @@
 use crate::Cx;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 /// Schema version for ATP transfer plans
@@ -284,6 +284,131 @@ impl Default for PlannerConfig {
     }
 }
 
+fn analyze_directory_tree(source_path: &Path) -> Result<ObjectGraphSummary, PlannerError> {
+    let mut summary = ObjectGraphSummary {
+        object_count: 0,
+        total_bytes: 0,
+        file_count: 0,
+        directory_count: 0,
+        largest_file_bytes: 0,
+        small_files_count: 0,
+    };
+    let mut stack = vec![source_path.to_path_buf()];
+
+    while let Some(path) = stack.pop() {
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            PlannerError::InvalidInput(format!(
+                "Cannot read source metadata for {}: {error}",
+                path.display()
+            ))
+        })?;
+
+        summary.object_count = summary.object_count.saturating_add(1);
+        if metadata.is_dir() {
+            summary.directory_count = summary.directory_count.saturating_add(1);
+            for entry in std::fs::read_dir(&path).map_err(|error| {
+                PlannerError::InvalidInput(format!(
+                    "Cannot read source directory {}: {error}",
+                    path.display()
+                ))
+            })? {
+                let entry = entry.map_err(|error| {
+                    PlannerError::InvalidInput(format!(
+                        "Cannot read source directory entry in {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                stack.push(entry.path());
+            }
+        } else {
+            let len = metadata.len();
+            summary.file_count = summary.file_count.saturating_add(1);
+            summary.total_bytes = summary.total_bytes.saturating_add(len);
+            summary.largest_file_bytes = summary.largest_file_bytes.max(len);
+            if len < 1024 * 1024 {
+                summary.small_files_count = summary.small_files_count.saturating_add(1);
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+fn available_space_bytes(path: &Path) -> Result<u64, PlannerError> {
+    #[cfg(unix)]
+    {
+        let stats = nix::sys::statvfs::statvfs(path).map_err(|error| {
+            PlannerError::PlanningFailed(format!(
+                "Cannot inspect available disk space for {}: {error}",
+                path.display()
+            ))
+        })?;
+        let available =
+            u128::from(stats.blocks_available()).saturating_mul(u128::from(stats.fragment_size()));
+        Ok(available.min(u128::from(u64::MAX)) as u64)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(PlannerError::PlanningFailed(
+            "disk space probing is not supported on this target".to_string(),
+        ))
+    }
+}
+
+fn deterministic_local_cache_ratio(object_graph: &ObjectGraphSummary) -> f64 {
+    if object_graph.total_bytes == 0 {
+        return 0.0;
+    }
+
+    let small_file_ratio = if object_graph.file_count == 0 {
+        0.0
+    } else {
+        object_graph.small_files_count as f64 / object_graph.file_count as f64
+    };
+    let directory_bonus = if object_graph.directory_count > 0 {
+        0.05
+    } else {
+        0.0
+    };
+    (0.10 + small_file_ratio * 0.25 + directory_bonus).min(0.60)
+}
+
+fn deterministic_remote_cache_ratio(object_graph: &ObjectGraphSummary) -> f64 {
+    if object_graph.total_bytes == 0 {
+        return 0.0;
+    }
+
+    let graph_scale = (object_graph.object_count as f64).log2().max(0.0) / 20.0;
+    (0.05 + graph_scale).min(0.40)
+}
+
+fn cache_locations_for_ratios(local_hit_ratio: f64, remote_hit_ratio: f64) -> Vec<String> {
+    let mut locations = Vec::new();
+    if local_hit_ratio > 0.0 {
+        locations.push("local".to_string());
+    }
+    if remote_hit_ratio > 0.0 {
+        locations.push("relay".to_string());
+    }
+    locations
+}
+
+fn completed_bytes_for_path(path: &Path) -> Result<u64, PlannerError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        PlannerError::InvalidInput(format!(
+            "Cannot read resume metadata for {}: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.is_dir() {
+        Ok(analyze_directory_tree(path)?.total_bytes)
+    } else {
+        Ok(metadata.len())
+    }
+}
+
 impl AtpTransferPlanner {
     /// Create a new transfer planner
     pub fn new(config: PlannerConfig) -> Self {
@@ -418,9 +543,6 @@ impl AtpTransferPlanner {
         _cx: &Cx,
         source_path: &PathBuf,
     ) -> Result<ObjectGraphSummary, PlannerError> {
-        // For now, provide a basic implementation
-        // In a real implementation, this would recursively analyze the source
-
         if !source_path.exists() {
             return Err(PlannerError::InvalidInput(format!(
                 "Source path does not exist: {}",
@@ -439,19 +561,10 @@ impl AtpTransferPlanner {
                 file_count: 1,
                 directory_count: 0,
                 largest_file_bytes: metadata.len(),
-                small_files_count: if metadata.len() < 1024 * 1024 { 1 } else { 0 },
+                small_files_count: u64::from(metadata.len() < 1024 * 1024),
             })
         } else {
-            // For directories, provide estimated values
-            // Real implementation would walk the directory tree
-            Ok(ObjectGraphSummary {
-                object_count: 100,              // Estimated
-                total_bytes: 100 * 1024 * 1024, // 100MB estimated
-                file_count: 95,
-                directory_count: 5,
-                largest_file_bytes: 10 * 1024 * 1024, // 10MB estimated
-                small_files_count: 80,
-            })
+            analyze_directory_tree(source_path)
         }
     }
 
@@ -476,23 +589,20 @@ impl AtpTransferPlanner {
 
     async fn analyze_disk_allocation(
         &self,
-        destination_path: &PathBuf,
+        destination_path: &Path,
         object_graph: &ObjectGraphSummary,
     ) -> Result<DiskAllocationPlan, PlannerError> {
-        // Get parent directory for space check
-        let _parent_dir = destination_path
+        let parent_dir = destination_path
             .parent()
             .ok_or_else(|| PlannerError::InvalidInput("Invalid destination path".to_string()))?;
 
-        // For now, provide estimated values
-        // Real implementation would use statvfs or similar
-        let available_space = 1_000_000_000_000; // 1TB estimated
+        let available_space = available_space_bytes(parent_dir)?;
 
         let required_space = object_graph.total_bytes;
         let temp_space_needed = required_space / 4; // 25% temp space
 
         Ok(DiskAllocationPlan {
-            destination_path: destination_path.clone(),
+            destination_path: destination_path.to_path_buf(),
             required_space,
             available_space,
             preallocation_strategy: "sparse".to_string(),
@@ -565,14 +675,21 @@ impl AtpTransferPlanner {
         object_graph: &ObjectGraphSummary,
         options: &PlannerOptions,
     ) -> Result<CacheAnalysis, PlannerError> {
-        // Simulate cache analysis
-        let local_hit_ratio = if options.cache_enabled { 0.3 } else { 0.0 };
-        let remote_hit_ratio = if options.cache_enabled { 0.2 } else { 0.0 };
+        let local_hit_ratio = if options.cache_enabled {
+            deterministic_local_cache_ratio(object_graph)
+        } else {
+            0.0
+        };
+        let remote_hit_ratio = if options.cache_enabled {
+            deterministic_remote_cache_ratio(object_graph)
+        } else {
+            0.0
+        };
 
         let bytes_from_cache = (object_graph.total_bytes as f64 * local_hit_ratio) as u64;
 
         let cache_locations = if options.cache_enabled {
-            vec!["local".to_string(), "relay".to_string()]
+            cache_locations_for_ratios(local_hit_ratio, remote_hit_ratio)
         } else {
             vec![]
         };
@@ -594,8 +711,9 @@ impl AtpTransferPlanner {
         let resume_available = options.allow_resume && destination_path.exists();
 
         let (bytes_completed, chunks_completed) = if resume_available {
-            // In real implementation, would check journal/state files
-            (1024 * 1024, 16) // Simulate 1MB/16 chunks completed
+            let completed = completed_bytes_for_path(destination_path)?;
+            let chunks = completed.div_ceil(u64::from(self.config.default_chunk_size.max(1)));
+            (completed, chunks)
         } else {
             (0, 0)
         };
@@ -693,7 +811,7 @@ impl AtpTransferPlanner {
             .max()
             .unwrap_or(self.config.default_bandwidth_bps);
 
-        let effective_bytes = bytes_on_wire - cache_analysis.bytes_from_cache;
+        let effective_bytes = bytes_on_wire.saturating_sub(cache_analysis.bytes_from_cache);
         let transfer_seconds = effective_bytes as f64 / best_bandwidth as f64;
 
         // Add setup overhead
@@ -803,17 +921,18 @@ impl PlanExecutionTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_lite::future::block_on;
     use std::collections::HashMap;
     use tempfile::TempDir;
 
-    #[tokio::test]
-    async fn test_planner_creation() {
+    #[test]
+    fn test_planner_creation() {
         let planner = AtpTransferPlanner::new_default();
         assert_eq!(planner.config.default_chunk_size, 64 * 1024);
     }
 
-    #[tokio::test]
-    async fn test_plan_id_generation() {
+    #[test]
+    fn test_plan_id_generation() {
         let planner = AtpTransferPlanner::new_default();
         let id1 = planner.generate_plan_id();
         let id2 = planner.generate_plan_id();
@@ -823,38 +942,37 @@ mod tests {
         assert!(id2.starts_with("plan_"));
     }
 
-    #[tokio::test]
-    async fn test_object_graph_analysis_file() {
-        use crate::runtime::test_utils::TestRuntime;
+    #[test]
+    fn test_object_graph_analysis_file() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let planner = AtpTransferPlanner::new_default();
 
-        let runtime = TestRuntime::new().await.unwrap();
-        let cx = runtime.root_cx();
-        let planner = AtpTransferPlanner::new_default();
+            let temp_dir = TempDir::new().unwrap();
+            let test_file = temp_dir.path().join("test.txt");
 
-        let temp_dir = TempDir::new().unwrap();
-        let test_file = temp_dir.path().join("test.txt");
+            // Create test file
+            std::fs::write(&test_file, b"test content").unwrap();
 
-        // Create test file
-        tokio::fs::write(&test_file, b"test content").await.unwrap();
+            let result = planner.analyze_object_graph(&cx, &test_file).await.unwrap();
 
-        let result = planner.analyze_object_graph(&cx, &test_file).await.unwrap();
-
-        assert_eq!(result.object_count, 1);
-        assert_eq!(result.file_count, 1);
-        assert_eq!(result.directory_count, 0);
-        assert_eq!(result.total_bytes, 12); // "test content" length
+            assert_eq!(result.object_count, 1);
+            assert_eq!(result.file_count, 1);
+            assert_eq!(result.directory_count, 0);
+            assert_eq!(result.total_bytes, 12); // "test content" length
+        });
     }
 
-    #[tokio::test]
-    async fn test_planning_options_default() {
+    #[test]
+    fn test_planning_options_default() {
         let options = PlannerOptions::default();
         assert_eq!(options.transfer_mode, TransferMode::Direct);
         assert!(options.cache_enabled);
         assert!(options.allow_resume);
     }
 
-    #[tokio::test]
-    async fn test_chunking_profile_generation() {
+    #[test]
+    fn test_chunking_profile_generation() {
         let planner = AtpTransferPlanner::new_default();
 
         let object_graph = ObjectGraphSummary {
@@ -873,69 +991,75 @@ mod tests {
         assert_eq!(profile.repair_overhead_ratio, 0.1);
     }
 
-    #[tokio::test]
-    async fn test_path_candidates_generation() {
-        let planner = AtpTransferPlanner::new_default();
+    #[test]
+    fn test_path_candidates_generation() {
+        block_on(async {
+            let planner = AtpTransferPlanner::new_default();
 
-        let options = PlannerOptions {
-            transfer_mode: TransferMode::Direct,
-            ..Default::default()
-        };
+            let options = PlannerOptions {
+                transfer_mode: TransferMode::Direct,
+                ..Default::default()
+            };
 
-        let candidates = planner.generate_path_candidates(&options).await.unwrap();
+            let candidates = planner.generate_path_candidates(&options).await.unwrap();
 
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].path_type, "direct");
-        assert!(candidates[0].preferred);
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].path_type, "direct");
+            assert!(candidates[0].preferred);
+        });
     }
 
-    #[tokio::test]
-    async fn test_swarm_path_candidates() {
-        let planner = AtpTransferPlanner::new_default();
+    #[test]
+    fn test_swarm_path_candidates() {
+        block_on(async {
+            let planner = AtpTransferPlanner::new_default();
 
-        let options = PlannerOptions {
-            transfer_mode: TransferMode::Swarm,
-            ..Default::default()
-        };
+            let options = PlannerOptions {
+                transfer_mode: TransferMode::Swarm,
+                ..Default::default()
+            };
 
-        let candidates = planner.generate_path_candidates(&options).await.unwrap();
+            let candidates = planner.generate_path_candidates(&options).await.unwrap();
 
-        assert_eq!(candidates.len(), 3);
-        assert!(candidates[0].preferred);
-        assert!(!candidates[1].preferred);
-        assert!(!candidates[2].preferred);
+            assert_eq!(candidates.len(), 3);
+            assert!(candidates[0].preferred);
+            assert!(!candidates[1].preferred);
+            assert!(!candidates[2].preferred);
+        });
     }
 
-    #[tokio::test]
-    async fn test_cache_analysis() {
-        let planner = AtpTransferPlanner::new_default();
+    #[test]
+    fn test_cache_analysis() {
+        block_on(async {
+            let planner = AtpTransferPlanner::new_default();
 
-        let object_graph = ObjectGraphSummary {
-            object_count: 1,
-            total_bytes: 1024 * 1024,
-            file_count: 1,
-            directory_count: 0,
-            largest_file_bytes: 1024 * 1024,
-            small_files_count: 0,
-        };
+            let object_graph = ObjectGraphSummary {
+                object_count: 1,
+                total_bytes: 1024 * 1024,
+                file_count: 1,
+                directory_count: 0,
+                largest_file_bytes: 1024 * 1024,
+                small_files_count: 0,
+            };
 
-        let options = PlannerOptions {
-            cache_enabled: true,
-            ..Default::default()
-        };
+            let options = PlannerOptions {
+                cache_enabled: true,
+                ..Default::default()
+            };
 
-        let cache_analysis = planner
-            .analyze_cache_opportunities(&object_graph, &options)
-            .await
-            .unwrap();
+            let cache_analysis = planner
+                .analyze_cache_opportunities(&object_graph, &options)
+                .await
+                .unwrap();
 
-        assert!(cache_analysis.local_hit_ratio > 0.0);
-        assert!(cache_analysis.bytes_from_cache > 0);
-        assert!(!cache_analysis.cache_locations.is_empty());
+            assert!(cache_analysis.local_hit_ratio > 0.0);
+            assert!(cache_analysis.bytes_from_cache > 0);
+            assert!(!cache_analysis.cache_locations.is_empty());
+        });
     }
 
-    #[tokio::test]
-    async fn test_bytes_on_wire_calculation() {
+    #[test]
+    fn test_bytes_on_wire_calculation() {
         let planner = AtpTransferPlanner::new_default();
 
         let object_graph = ObjectGraphSummary {
@@ -963,8 +1087,8 @@ mod tests {
         assert_eq!(bytes_on_wire, 909312);
     }
 
-    #[tokio::test]
-    async fn test_execution_tracker() {
+    #[test]
+    fn test_execution_tracker() {
         let mut tracker = PlanExecutionTracker::new("test_plan".to_string());
 
         tracker.record_deviation(

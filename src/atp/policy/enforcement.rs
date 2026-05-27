@@ -92,6 +92,14 @@ pub enum EnforcementMode {
     Disabled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CapabilityPreferenceKey {
+    scope_breadth: u32,
+    action_breadth: u32,
+    constraint_breadth: u64,
+    temporal_breadth: u64,
+}
+
 impl Default for EnforcementContext {
     fn default() -> Self {
         Self {
@@ -302,7 +310,7 @@ impl PolicyEnforcer {
         if !capability.is_valid(usage_count) {
             let now = SystemTime::now();
             if !capability.temporal.is_valid_at(now) {
-                if capability.temporal.not_before.map_or(false, |nb| now < nb) {
+                if capability.temporal.not_before.is_some_and(|nb| now < nb) {
                     return Some(DenialReason::NotYetValid);
                 }
                 return Some(DenialReason::Expired);
@@ -356,12 +364,23 @@ impl PolicyEnforcer {
 
     /// Select the best capability from matching ones (most restrictive).
     fn select_best_capability<'a>(&self, capabilities: &[&'a Capability]) -> &'a Capability {
-        // For now, select the one with the least broad scope
-        // In a real implementation, this could be more sophisticated
         capabilities
             .iter()
-            .min_by_key(|cap| self.capability_scope_breadth(&cap.scope))
+            .min_by(|left, right| {
+                self.capability_preference_key(left)
+                    .cmp(&self.capability_preference_key(right))
+                    .then_with(|| left.grant_id.cmp(&right.grant_id))
+            })
             .unwrap() // ubs:ignore - capabilities slice is guaranteed non-empty by caller
+    }
+
+    fn capability_preference_key(&self, capability: &Capability) -> CapabilityPreferenceKey {
+        CapabilityPreferenceKey {
+            scope_breadth: self.capability_scope_breadth(&capability.scope),
+            action_breadth: capability.actions.len() as u32,
+            constraint_breadth: self.capability_constraint_breadth(capability),
+            temporal_breadth: self.capability_temporal_breadth(capability),
+        }
     }
 
     /// Get a rough measure of capability scope breadth (lower = more restrictive).
@@ -374,6 +393,55 @@ impl PolicyEnforcer {
             ResourceScope::Path(_) => 100,
             ResourceScope::Object(_) => 50,
         }
+    }
+
+    fn capability_constraint_breadth(&self, capability: &Capability) -> u64 {
+        let constraints = &capability.constraints;
+        let transfer_size = constraints
+            .max_transfer_size
+            .map_or(1_000_000_000_000, |max| max.min(1_000_000_000_000));
+        let bandwidth = constraints
+            .max_bandwidth
+            .map_or(1_000_000_000_000, |max| max.min(1_000_000_000_000));
+        let ip_breadth = constraints
+            .allowed_ips
+            .as_ref()
+            .map_or(1_000_000, |ips| ips.len() as u64);
+        let hour_breadth =
+            constraints
+                .allowed_hours
+                .map_or(24, |(start, end)| match start.cmp(&end) {
+                    std::cmp::Ordering::Equal => 24,
+                    std::cmp::Ordering::Less => u64::from(end - start),
+                    std::cmp::Ordering::Greater => u64::from(24 - start + end),
+                });
+        let security_breadth = if constraints.min_security_level.is_some() {
+            1
+        } else {
+            1_000
+        };
+
+        transfer_size
+            .saturating_add(bandwidth)
+            .saturating_add(ip_breadth.saturating_mul(1_000))
+            .saturating_add(hour_breadth.saturating_mul(10_000))
+            .saturating_add(security_breadth)
+    }
+
+    fn capability_temporal_breadth(&self, capability: &Capability) -> u64 {
+        let now = SystemTime::now();
+        let validity_window = capability
+            .temporal
+            .not_after
+            .map_or(1_000_000_000, |not_after| {
+                not_after
+                    .duration_since(now)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .min(1_000_000_000)
+            });
+        let use_window = capability.temporal.max_uses.unwrap_or(1_000_000_000);
+        validity_window.saturating_add(use_window)
     }
 
     /// Create an administrative capability for disabled enforcement.

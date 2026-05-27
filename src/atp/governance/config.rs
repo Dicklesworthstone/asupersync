@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Complete resource governance configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AtpGovernanceConfig {
     /// Selected power profile (can be overridden by custom limits).
     pub power_profile: AtpPowerProfile,
@@ -24,20 +24,8 @@ pub struct AtpGovernanceConfig {
     pub metadata: AtpGovernanceMetadata,
 }
 
-impl Default for AtpGovernanceConfig {
-    fn default() -> Self {
-        Self {
-            power_profile: AtpPowerProfile::default(),
-            custom_limits: AtpCustomLimits::default(),
-            fairness_policy: AtpFairnessPolicy::default(),
-            dry_run: false,
-            metadata: AtpGovernanceMetadata::default(),
-        }
-    }
-}
-
 /// Custom resource limits that override profile defaults.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AtpCustomLimits {
     /// Override for maximum bandwidth (bytes per second).
     pub max_bandwidth_bytes_per_second: Option<u64>,
@@ -53,20 +41,6 @@ pub struct AtpCustomLimits {
     pub background_priority: Option<bool>,
     /// Override for metered network setting.
     pub metered_network: Option<bool>,
-}
-
-impl Default for AtpCustomLimits {
-    fn default() -> Self {
-        Self {
-            max_bandwidth_bytes_per_second: None,
-            max_in_flight_bytes: None,
-            max_repair_symbols_per_second: None,
-            max_disk_write_concurrency: None,
-            max_relay_cost_micros_per_mib: None,
-            background_priority: None,
-            metered_network: None,
-        }
-    }
 }
 
 /// Metadata for governance configuration diagnostics.
@@ -216,7 +190,7 @@ impl AtpGovernanceConfig {
 }
 
 /// CLI arguments for resource governance configuration.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AtpGovernanceCliArgs {
     /// Power profile selection.
     pub profile: Option<String>,
@@ -238,23 +212,6 @@ pub struct AtpGovernanceCliArgs {
     pub fairness: Option<String>,
     /// Enable dry-run mode.
     pub dry_run: bool,
-}
-
-impl Default for AtpGovernanceCliArgs {
-    fn default() -> Self {
-        Self {
-            profile: None,
-            bandwidth: None,
-            in_flight: None,
-            repair_rate: None,
-            disk_concurrency: None,
-            relay_cost_ms_per_mib: None,
-            background: false,
-            metered: false,
-            fairness: None,
-            dry_run: false,
-        }
-    }
 }
 
 impl AtpGovernanceCliArgs {
@@ -354,6 +311,9 @@ fn parse_size_string(size: &str) -> Result<u64, String> {
         (size.as_str(), "")
     };
 
+    let number_part = number_part.trim();
+    let suffix = suffix.trim();
+
     let number: u64 = number_part
         .parse()
         .map_err(|_| format!("Invalid number in size string: {number_part}"))?;
@@ -400,8 +360,8 @@ mod tests {
         let budget = config.resolve_budget();
         assert_eq!(budget.max_bandwidth_bytes_per_second, Some(1_048_576));
         assert!(budget.background_priority);
-        // Other limits should come from balanced profile
-        assert_eq!(budget.max_in_flight_bytes, Some(64 * 1_048_576));
+        // Other limits should come from the balanced profile.
+        assert_eq!(budget.max_in_flight_bytes, Some(128 * 1_048_576));
     }
 
     #[test]

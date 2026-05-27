@@ -4,12 +4,11 @@
 //! including rarest-first, sequential, and adaptive strategies.
 
 use super::*;
-use crate::types::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Piece selection strategy enumeration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PieceSelectionStrategy {
     /// Prioritize rarest pieces first to maximize swarm efficiency
     RarestFirst,
@@ -306,63 +305,63 @@ pub struct AdaptiveStrategyEngine {
 #[derive(Debug, Clone)]
 pub struct StrategyPerformance {
     /// Strategy that was active
-    strategy: PieceSelectionStrategy,
+    pub strategy: PieceSelectionStrategy,
 
     /// Time period for this measurement
-    time_period: std::time::Duration,
+    pub time_period: std::time::Duration,
 
     /// Average download speed during period
-    avg_download_speed: f64,
+    pub avg_download_speed: f64,
 
     /// Average latency during period
-    avg_latency: std::time::Duration,
+    pub avg_latency: std::time::Duration,
 
     /// Success rate during period
-    success_rate: f64,
+    pub success_rate: f64,
 
     /// Swarm efficiency score
-    efficiency_score: f64,
+    pub efficiency_score: f64,
 
     /// Timestamp of measurement
-    timestamp: std::time::Instant,
+    pub timestamp: std::time::Instant,
 }
 
 /// Piece selection context for strategy decision making.
 #[derive(Debug)]
 pub struct PieceSelectionContext {
     /// Available pieces and their redundancy
-    piece_redundancy: HashMap<PieceId, u32>,
+    pub piece_redundancy: HashMap<PieceId, u32>,
 
     /// Active peer information
-    active_peers: HashMap<PeerId, PeerInfo>,
+    pub active_peers: HashMap<PeerId, PeerInfo>,
 
     /// Current transfer progress
-    transfer_progress: f64,
+    pub transfer_progress: f64,
 
     /// Remaining time estimate
-    estimated_time_remaining: Option<std::time::Duration>,
+    pub estimated_time_remaining: Option<std::time::Duration>,
 
     /// Current performance metrics
-    current_performance: Option<StrategyPerformance>,
+    pub current_performance: Option<StrategyPerformance>,
 }
 
 /// Information about a peer relevant to strategy decisions.
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
     /// Peer quality metrics
-    quality_score: f64,
+    pub quality_score: f64,
 
     /// Current load (active requests)
-    active_requests: u32,
+    pub active_requests: u32,
 
     /// Available pieces from this peer
-    available_pieces: HashSet<PieceId>,
+    pub available_pieces: HashSet<PieceId>,
 
     /// Recent response time
-    recent_response_time: std::time::Duration,
+    pub recent_response_time: std::time::Duration,
 
     /// Connection reliability
-    reliability: f64,
+    pub reliability: f64,
 }
 
 impl AdaptiveStrategyEngine {
@@ -428,22 +427,14 @@ impl AdaptiveStrategyEngine {
         max_pieces: usize,
     ) -> Vec<PieceId> {
         match self.current_strategy {
-            PieceSelectionStrategy::RarestFirst => {
-                self.select_rarest_first(context, max_pieces)
-            }
-            PieceSelectionStrategy::Sequential => {
-                self.select_sequential(context, max_pieces)
-            }
-            PieceSelectionStrategy::Random => {
-                self.select_random(context, max_pieces)
-            }
+            PieceSelectionStrategy::RarestFirst => self.select_rarest_first(context, max_pieces),
+            PieceSelectionStrategy::Sequential => self.select_sequential(context, max_pieces),
+            PieceSelectionStrategy::Random => self.select_random(context, max_pieces),
             PieceSelectionStrategy::Adaptive => {
                 // Adaptive strategy combines multiple approaches
                 self.select_adaptive(context, max_pieces)
             }
-            PieceSelectionStrategy::Endgame => {
-                self.select_endgame(context, max_pieces)
-            }
+            PieceSelectionStrategy::Endgame => self.select_endgame(context, max_pieces),
         }
     }
 
@@ -453,7 +444,8 @@ impl AdaptiveStrategyEngine {
         context: &PieceSelectionContext,
         max_pieces: usize,
     ) -> Vec<PieceId> {
-        let mut pieces_by_rarity: Vec<(PieceId, u32)> = context.piece_redundancy
+        let mut pieces_by_rarity: Vec<(PieceId, u32)> = context
+            .piece_redundancy
             .iter()
             .map(|(piece_id, redundancy)| (*piece_id, *redundancy))
             .collect();
@@ -481,17 +473,13 @@ impl AdaptiveStrategyEngine {
     }
 
     /// Random piece selection.
-    fn select_random(
-        &self,
-        context: &PieceSelectionContext,
-        max_pieces: usize,
-    ) -> Vec<PieceId> {
+    fn select_random(&self, context: &PieceSelectionContext, max_pieces: usize) -> Vec<PieceId> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
         let mut available_pieces: Vec<PieceId> = context.piece_redundancy.keys().copied().collect();
 
-        // Simple shuffle using hash-based ordering
+        // Stable hash ordering gives deterministic spread without global RNG state.
         available_pieces.sort_by_key(|piece_id| {
             let mut hasher = DefaultHasher::new();
             piece_id.hash(&mut hasher);
@@ -502,11 +490,7 @@ impl AdaptiveStrategyEngine {
     }
 
     /// Adaptive piece selection combining multiple strategies.
-    fn select_adaptive(
-        &self,
-        context: &PieceSelectionContext,
-        max_pieces: usize,
-    ) -> Vec<PieceId> {
+    fn select_adaptive(&self, context: &PieceSelectionContext, max_pieces: usize) -> Vec<PieceId> {
         let half = max_pieces / 2;
 
         // Combine rarest-first with sequential for balance
@@ -515,20 +499,24 @@ impl AdaptiveStrategyEngine {
 
         if remaining > 0 {
             let sequential = self.select_sequential(context, remaining);
-            selected.extend(sequential.into_iter().filter(|p| !selected.contains(p)));
+            for piece_id in sequential {
+                if selected.len() >= max_pieces {
+                    break;
+                }
+                if !selected.contains(&piece_id) {
+                    selected.push(piece_id);
+                }
+            }
         }
 
         selected
     }
 
     /// Endgame mode piece selection.
-    fn select_endgame(
-        &self,
-        context: &PieceSelectionContext,
-        max_pieces: usize,
-    ) -> Vec<PieceId> {
+    fn select_endgame(&self, context: &PieceSelectionContext, max_pieces: usize) -> Vec<PieceId> {
         // In endgame, request all remaining pieces aggressively
-        context.piece_redundancy
+        context
+            .piece_redundancy
             .keys()
             .take(max_pieces)
             .copied()
@@ -541,19 +529,23 @@ impl AdaptiveStrategyEngine {
         StrategyPerformance {
             strategy: self.current_strategy,
             time_period: self.config.monitoring_window,
-            avg_download_speed: context.current_performance
+            avg_download_speed: context
+                .current_performance
                 .as_ref()
                 .map(|p| p.avg_download_speed)
                 .unwrap_or(1_000_000.0),
-            avg_latency: context.current_performance
+            avg_latency: context
+                .current_performance
                 .as_ref()
                 .map(|p| p.avg_latency)
                 .unwrap_or(std::time::Duration::from_millis(100)),
-            success_rate: context.current_performance
+            success_rate: context
+                .current_performance
                 .as_ref()
                 .map(|p| p.success_rate)
                 .unwrap_or(0.9),
-            efficiency_score: context.current_performance
+            efficiency_score: context
+                .current_performance
                 .as_ref()
                 .map(|p| p.efficiency_score)
                 .unwrap_or(0.8),
@@ -582,11 +574,14 @@ impl AdaptiveStrategyEngine {
         }
 
         // Find strategy with highest score
-        let best_strategy = self.strategy_scores
+        let best_strategy = self
+            .strategy_scores
             .iter()
             .filter(|(strategy, _)| **strategy != PieceSelectionStrategy::Adaptive)
             .max_by(|(_, score_a), (_, score_b)| {
-                score_a.partial_cmp(score_b).unwrap_or(std::cmp::Ordering::Equal)
+                score_a
+                    .partial_cmp(score_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(strategy, _)| *strategy)
             .unwrap_or(PieceSelectionStrategy::RarestFirst);
@@ -603,7 +598,8 @@ impl AdaptiveStrategyEngine {
     /// Calculate performance score from metrics.
     fn calculate_performance_score(&self, performance: &StrategyPerformance) -> f64 {
         let speed_score = (performance.avg_download_speed / 1_000_000.0).min(1.0);
-        let latency_score = (1.0 / (performance.avg_latency.as_millis() as f64 / 1000.0 + 1.0)).min(1.0);
+        let latency_score =
+            (1.0 / (performance.avg_latency.as_millis() as f64 / 1000.0 + 1.0)).min(1.0);
         let success_score = performance.success_rate;
         let efficiency_score = performance.efficiency_score;
 

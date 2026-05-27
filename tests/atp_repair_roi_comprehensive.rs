@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn test_threshold_hysteresis() {
         // Create policies with slightly different thresholds
-        let mut base_policy = AtpRepairCoordinatorPolicy::default();
+        let base_policy = AtpRepairCoordinatorPolicy::default();
 
         let mut high_threshold_policy = base_policy;
         high_threshold_policy.resume_value_floor_permille += 50; // Slightly higher threshold
@@ -202,7 +202,7 @@ mod tests {
         for (regime_name, regime_results) in &results {
             let default_policy_results: Vec<_> = regime_results
                 .iter()
-                .filter(|r| {
+                .filter(|_| {
                     // This is a heuristic to identify default policy results
                     // In practice, you'd track which policy was used
                     true
@@ -450,16 +450,16 @@ mod tests {
                 "Swarm should have multiple peers"
             );
             assert!(
-                result.roi_inputs.multi_peer_usefulness_permille > 0,
-                "Swarm should have multi-peer usefulness"
+                result.roi_inputs.available_peer_count > 1,
+                "Swarm should have multiple repair peers"
             );
         }
 
         for result in single_peer_results {
             assert_eq!(result.regime.swarm_peer_count, 1, "Single peer scenario");
             assert_eq!(
-                result.roi_inputs.multi_peer_usefulness_permille, 0,
-                "Single peer should have no multi-peer usefulness"
+                result.roi_inputs.available_peer_count, 1,
+                "Single peer should expose exactly one repair peer"
             );
         }
     }

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[path = "../src/atp/actor/mod.rs"]
 mod actor;
 #[path = "../src/atp/autotune.rs"]

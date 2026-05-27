@@ -42,13 +42,11 @@
 //! }
 //! ```
 
-use crate::cx::Cx;
 use crate::types::Time;
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod client;
 pub mod encryption;
@@ -57,26 +55,30 @@ pub mod relay;
 pub mod storage;
 
 pub use client::MailboxClient;
-pub use encryption::{MailboxKey, EncryptedChunk, ChunkNonce};
+pub use encryption::{ChunkNonce, EncryptedChunk, MailboxKey};
 pub use quota::{QuotaManager, QuotaPolicy, QuotaUsage};
-pub use relay::{RelayClient, RelayProtocol, RelayMessage};
-pub use storage::{MailboxStorage, MailboxEntry, TransferState};
+pub use relay::{RelayClient, RelayMessage, RelayProtocol, RelayResponse};
+pub use storage::{MailboxEntry, MailboxStorage, TransferState};
 
 /// Unique identifier for a mailbox transfer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MailboxTransferId(pub uuid::Uuid);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MailboxTransferId(pub [u8; 16]);
 
 impl MailboxTransferId {
     pub fn new() -> Self {
-        Self(uuid::Uuid::new_v4())
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).expect("OS entropy unavailable for mailbox transfer id");
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self(bytes)
     }
 
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
+        Self(bytes)
     }
 
     pub fn to_bytes(self) -> [u8; 16] {
-        self.0.into_bytes()
+        self.0
     }
 }
 
@@ -84,6 +86,66 @@ impl Default for MailboxTransferId {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl fmt::Display for MailboxTransferId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let b = self.0;
+        write!(
+            f,
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            b[0],
+            b[1],
+            b[2],
+            b[3],
+            b[4],
+            b[5],
+            b[6],
+            b[7],
+            b[8],
+            b[9],
+            b[10],
+            b[11],
+            b[12],
+            b[13],
+            b[14],
+            b[15]
+        )
+    }
+}
+
+impl Serialize for MailboxTransferId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for MailboxTransferId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        parse_transfer_id(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+fn parse_transfer_id(raw: &str) -> Result<MailboxTransferId, String> {
+    let compact = raw.replace('-', "");
+    if compact.len() != 32 {
+        return Err(format!(
+            "mailbox transfer id must contain 32 hex digits, got {}",
+            compact.len()
+        ));
+    }
+    let decoded =
+        hex::decode(&compact).map_err(|err| format!("invalid mailbox transfer id hex: {err}"))?;
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&decoded);
+    Ok(MailboxTransferId(bytes))
 }
 
 /// Unique identifier for a peer in the ATP network.
@@ -100,9 +162,18 @@ impl PeerId {
     }
 }
 
+impl fmt::Display for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Configuration for mailbox client operations.
 #[derive(Debug, Clone)]
 pub struct MailboxConfig {
+    /// Local peer identity used for relay list/retrieve operations
+    pub local_peer_id: PeerId,
+
     /// Relay server endpoint for mailbox storage
     pub relay_endpoint: SocketAddr,
 
@@ -127,9 +198,12 @@ pub struct MailboxConfig {
 
 impl Default for MailboxConfig {
     fn default() -> Self {
+        let encryption_key = MailboxKey::generate();
+        let local_peer_id = derive_peer_id_from_key(&encryption_key);
         Self {
+            local_peer_id,
             relay_endpoint: "127.0.0.1:8080".parse().unwrap(),
-            encryption_key: MailboxKey::generate(),
+            encryption_key,
             quota_limit: 100_000_000, // 100MB default
             default_retention: Duration::from_secs(7 * 24 * 3600), // 1 week
             operation_timeout: Duration::from_secs(30),
@@ -137,6 +211,22 @@ impl Default for MailboxConfig {
             tamper_detection: true,
         }
     }
+}
+
+fn derive_peer_id_from_key(key: &MailboxKey) -> PeerId {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(key.as_bytes());
+    PeerId::new(format!("peer-{}", hex::encode(&digest[..8])))
+}
+
+pub(crate) fn mailbox_time_now() -> Time {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64;
+    Time::from_nanos(nanos)
 }
 
 /// Mailbox transfer metadata visible to the relay (encrypted content is opaque).
@@ -274,14 +364,14 @@ pub enum MailboxError {
     #[error("Transfer expired: {transfer_id}, expired at {expired_at:?}")]
     TransferExpired {
         transfer_id: MailboxTransferId,
-        expired_at: Time
+        expired_at: Time,
     },
 
     /// Tamper evidence detected
     #[error("Tamper detected in {transfer_id}: {evidence}")]
     TamperDetected {
         transfer_id: MailboxTransferId,
-        evidence: String
+        evidence: String,
     },
 
     /// Invalid configuration
@@ -340,8 +430,10 @@ mod tests {
         let deserialized: MailboxEvent = serde_json::from_str(&serialized).unwrap();
 
         match (event, deserialized) {
-            (MailboxEvent::TransferUploadStarted { total_size: s1, .. },
-             MailboxEvent::TransferUploadStarted { total_size: s2, .. }) => {
+            (
+                MailboxEvent::TransferUploadStarted { total_size: s1, .. },
+                MailboxEvent::TransferUploadStarted { total_size: s2, .. },
+            ) => {
                 assert_eq!(s1, s2);
             }
             _ => panic!("Event type mismatch after serialization"),
@@ -365,15 +457,16 @@ mod tests {
     // These tests freeze the JSON serialization format to detect unintended changes
     // Fixed timestamp: 1640995200000000 = 2022-01-01T00:00:00Z
 
+    fn fixed_transfer_id() -> MailboxTransferId {
+        MailboxTransferId::from_bytes([
+            0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4,
+            0x30, 0xc8,
+        ])
+    }
+
     #[test]
     fn golden_mailbox_transfer_id_serialization() {
-        use uuid::Uuid;
-
-        let fixed_uuid = Uuid::from_bytes([
-            0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
-            0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
-        ]);
-        let transfer_id = MailboxTransferId(fixed_uuid);
+        let transfer_id = fixed_transfer_id();
 
         insta::assert_json_snapshot!(transfer_id, @r###"
         "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
@@ -391,19 +484,12 @@ mod tests {
 
     #[test]
     fn golden_mailbox_transfer_metadata_serialization() {
-        use uuid::Uuid;
-
-        let fixed_uuid = Uuid::from_bytes([
-            0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
-            0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
-        ]);
-
         let metadata = MailboxTransferMetadata {
-            transfer_id: MailboxTransferId(fixed_uuid),
+            transfer_id: fixed_transfer_id(),
             destination_peer: PeerId::new("peer-destination-node"),
             created_at: Time::from_micros(1640995200000000), // 2022-01-01T00:00:00Z
             expires_at: Time::from_micros(1640995200000000 + 604800000000), // +1 week
-            total_size: 2048576, // 2MB
+            total_size: 2048576,                             // 2MB
             chunk_count: 4,
             encrypted_metadata: vec![0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe],
         };
@@ -433,17 +519,11 @@ mod tests {
     #[test]
     fn golden_mailbox_operation_result_serialization() {
         use crate::atp::mailbox::quota::QuotaUsage;
-        use uuid::Uuid;
         use std::time::{SystemTime, UNIX_EPOCH};
-
-        let fixed_uuid = Uuid::from_bytes([
-            0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
-            0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
-        ]);
 
         let result = MailboxOperationResult {
             success: true,
-            transfer_id: Some(MailboxTransferId(fixed_uuid)),
+            transfer_id: Some(fixed_transfer_id()),
             quota_usage: QuotaUsage {
                 bytes_used: 1048576, // 1MB
                 active_transfers: 3,
@@ -483,15 +563,8 @@ mod tests {
 
     #[test]
     fn golden_mailbox_event_transfer_upload_started_serialization() {
-        use uuid::Uuid;
-
-        let fixed_uuid = Uuid::from_bytes([
-            0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
-            0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
-        ]);
-
         let event = MailboxEvent::TransferUploadStarted {
-            transfer_id: MailboxTransferId(fixed_uuid),
+            transfer_id: fixed_transfer_id(),
             destination: PeerId::new("peer-upload-target"),
             total_size: 3145728, // 3MB
         };
@@ -511,7 +584,7 @@ mod tests {
     fn golden_mailbox_event_quota_warning_serialization() {
         let event = MailboxEvent::QuotaWarning {
             current_usage: 85000000, // 85MB
-            quota_limit: 100000000, // 100MB
+            quota_limit: 100000000,  // 100MB
             utilization_percent: 85.0,
         };
 
@@ -528,15 +601,8 @@ mod tests {
 
     #[test]
     fn golden_mailbox_event_tamper_detected_serialization() {
-        use uuid::Uuid;
-
-        let fixed_uuid = Uuid::from_bytes([
-            0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1,
-            0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
-        ]);
-
         let event = MailboxEvent::TamperDetected {
-            transfer_id: MailboxTransferId(fixed_uuid),
+            transfer_id: fixed_transfer_id(),
             tamper_type: "checksum_mismatch".to_string(),
             evidence: "expected_hash=abc123, actual_hash=def456".to_string(),
         };

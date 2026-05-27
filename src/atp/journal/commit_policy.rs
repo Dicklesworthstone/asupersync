@@ -3,13 +3,14 @@
 use std::path::Path;
 
 /// Policy for when to perform fsync operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FsyncPolicy {
     /// Never fsync (fastest, least durable)
     Never,
     /// Fsync after every write operation
     EveryWrite,
     /// Fsync only verified chunks
+    #[default]
     VerifiedChunks,
     /// Fsync only before final commit
     BeforeCommit,
@@ -47,16 +48,11 @@ impl FsyncPolicy {
     }
 }
 
-impl Default for FsyncPolicy {
-    fn default() -> Self {
-        Self::VerifiedChunks
-    }
-}
-
 /// Policy for atomic commit operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CommitPolicy {
     /// Atomic rename (POSIX guarantee within same filesystem)
+    #[default]
     AtomicRename,
     /// Copy then verify integrity
     CopyAndVerify,
@@ -102,12 +98,6 @@ impl CommitPolicy {
     }
 }
 
-impl Default for CommitPolicy {
-    fn default() -> Self {
-        Self::AtomicRename
-    }
-}
-
 /// Atomic operation policy combining fsync and commit strategies
 #[derive(Debug, Clone)]
 pub struct AtomicPolicy {
@@ -139,7 +129,7 @@ impl Default for AtomicPolicy {
 }
 
 /// Policy for handling backup and rollback scenarios
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BackupPolicy {
     /// No backup, overwrite existing files
     None,
@@ -148,6 +138,7 @@ pub enum BackupPolicy {
     /// Create backup with .bak suffix
     Suffix,
     /// Move existing to quarantine directory
+    #[default]
     Quarantine,
 }
 
@@ -180,12 +171,6 @@ impl BackupPolicy {
                 Some(parent.join(".quarantine").join(filename))
             }
         }
-    }
-}
-
-impl Default for BackupPolicy {
-    fn default() -> Self {
-        Self::Quarantine
     }
 }
 

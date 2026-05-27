@@ -494,7 +494,7 @@ impl RepairCoordinator {
                 } else {
                     0.0
                 },
-                resource_pressure: (transfer.cpu_pressure + transfer.memory_pressure) / 2.0,
+                resource_pressure: f64::midpoint(transfer.cpu_pressure, transfer.memory_pressure),
             },
             decided_at: SystemTime::now(),
             trace_id,
@@ -640,8 +640,8 @@ impl RepairCoordinator {
 
         // Calculate costs
         let overhead_multiplier = mode.typical_overhead_multiplier();
-        let encode_cpu_cost = Duration::from_millis((transfer.missing_bytes / 1024 / 10) as u64); // ~0.1ms per KB
-        let decode_cpu_cost = Duration::from_millis((transfer.missing_bytes / 1024 / 20) as u64); // ~0.05ms per KB
+        let encode_cpu_cost = Duration::from_millis(transfer.missing_bytes / 1024 / 10); // ~0.1ms per KB
+        let decode_cpu_cost = Duration::from_millis(transfer.missing_bytes / 1024 / 20); // ~0.05ms per KB
         let bandwidth_overhead = (transfer.missing_bytes as f64 * overhead_multiplier) as u64;
         let memory_overhead = (transfer.missing_bytes as f64 * 0.1) as u64; // 10% memory overhead
 
@@ -789,7 +789,7 @@ impl RepairCoordinator {
             } else {
                 0.0
             },
-            resource_pressure: (transfer.cpu_pressure + transfer.memory_pressure) / 2.0,
+            resource_pressure: f64::midpoint(transfer.cpu_pressure, transfer.memory_pressure),
         }
     }
 
@@ -873,6 +873,11 @@ impl RepairCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::object::ContentId;
+
+    fn test_object_id() -> ObjectId {
+        ObjectId::content(ContentId::from_bytes(b"test-object"))
+    }
 
     fn create_test_path() -> PathCharacteristics {
         PathCharacteristics {
@@ -992,10 +997,14 @@ mod tests {
         let mut coordinator = RepairCoordinator::new(config);
         let path = create_test_path();
         let transfer = create_test_transfer();
-        let object_id = ObjectId::from("test-object");
+        let object_id = test_object_id();
 
-        let decision =
-            coordinator.decide_repair_mode(object_id, &path, &transfer, TraceId::new())?;
+        let decision = coordinator.decide_repair_mode(
+            object_id,
+            &path,
+            &transfer,
+            TraceId::from_parts(1, 1),
+        )?;
 
         // Should make a decision
         assert!(!decision.reasoning.is_empty());
@@ -1010,7 +1019,7 @@ mod tests {
         let mut coordinator = RepairCoordinator::new(config);
 
         let telemetry = RepairTelemetry {
-            object_id: ObjectId::from("test-object"),
+            object_id: test_object_id(),
             mode: RepairMode::Tail,
             predicted_roi: RepairRoi {
                 roi_ratio: 1.5,

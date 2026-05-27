@@ -423,6 +423,17 @@ impl MerkleRoot {
             if let Some(content_hash) = &obj.content_hash {
                 hasher.update(content_hash);
             }
+
+            for symbol in &obj.raptorq_symbols {
+                hasher.update(symbol.index.to_be_bytes());
+                hasher.update(symbol.esi.to_be_bytes());
+                hasher.update(symbol.size_bytes.to_be_bytes());
+                hasher.update(symbol.content_hash);
+                hasher.update([u8::from(symbol.is_source)]);
+                if let Some(group_id) = &symbol.repair_group_id {
+                    hasher.update(group_id.as_bytes());
+                }
+            }
         }
 
         // Hash chunk plan
@@ -592,8 +603,8 @@ impl MerkleRoot {
             hasher.update([u8::from(repair_group.auth_domain.transfer_identity_binding)]);
             hasher.update([u8::from(repair_group.auth_domain.session_binding)]);
 
-            // Hash manifest root binding
-            hasher.update(&repair_group.manifest_root.hash);
+            // The manifest-root binding is validated against the final root instead of
+            // hashed here; including it would create a self-referential digest.
         }
 
         Self {
@@ -1193,7 +1204,9 @@ impl Manifest {
             manifest_objects.insert(id.clone(), manifest_obj);
         }
 
-        // Compute Merkle root from all components
+        let mut repair_groups =
+            Self::compute_repair_groups(&raptorq_layout, &manifest_objects, MerkleRoot::zero());
+
         let merkle_root = MerkleRoot::from_manifest_components(
             &manifest_objects,
             &chunk_plan,
@@ -1203,8 +1216,12 @@ impl Manifest {
             &capability_policy,
             &transform_order,
             &transform_proof_policy,
-            &BTreeMap::new(), // Empty repair groups for now
+            &repair_groups,
         );
+        for repair_group in repair_groups.values_mut() {
+            repair_group.manifest_root = merkle_root.clone();
+        }
+        Self::bind_repair_symbol_auth_tags(&mut manifest_objects, &repair_groups);
 
         let created_timestamp_nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1225,7 +1242,7 @@ impl Manifest {
             capability_policy,
             transform_order,
             transform_proof_policy,
-            repair_groups: BTreeMap::new(),
+            repair_groups,
             unknown_optional_fields: Vec::new(),
             created_timestamp_nanos,
             schema_id: "atp.manifest.v1".to_string(),
@@ -1645,10 +1662,16 @@ impl Manifest {
                         )));
                     }
 
-                    // Verify authentication tag is present
-                    if symbol.auth_tag.is_none() {
+                    let Some(auth_tag) = symbol.auth_tag else {
                         return Err(ManifestError::RepairGroupAuthenticationError(format!(
                             "repair symbol missing authentication tag: group {group_id}"
+                        )));
+                    };
+                    let expected_tag = Self::compute_repair_symbol_auth_tag(repair_group, symbol);
+                    if auth_tag != expected_tag {
+                        return Err(ManifestError::RepairGroupAuthenticationError(format!(
+                            "repair symbol authentication tag mismatch: group {group_id}, symbol {}",
+                            symbol.index
                         )));
                     }
                 }
@@ -2109,7 +2132,7 @@ impl Manifest {
         object: &crate::atp::object::Object,
         content_hash: &Option<[u8; 32]>,
     ) -> Vec<RaptorQSymbol> {
-        let Some(_layout) = raptorq_layout else {
+        let Some(layout) = raptorq_layout else {
             return Vec::new();
         };
         let Some(content_hash) = content_hash else {
@@ -2119,15 +2142,15 @@ impl Manifest {
             return Vec::new();
         };
 
-        // Generate basic systematic symbols for the object
-        let symbol_size = 1316; // Standard MTU-friendly symbol size
-        let num_symbols = ((size + symbol_size - 1) / symbol_size) as u32;
+        let symbol_size = layout.symbol_size.max(1);
+        let symbol_size_u64 = u64::from(symbol_size);
+        let num_symbols = size.div_ceil(symbol_size_u64) as u32;
+        let group_id = RepairGroupId::new(&object.id, 0, num_symbols);
 
         let mut symbols = Vec::new();
         for i in 0..num_symbols {
-            // Compute real symbol hash from actual symbol data
             let symbol_hash = if let Some(ref content) = object.content {
-                let symbol_start = (i as u64 * symbol_size) as usize;
+                let symbol_start = (u64::from(i) * symbol_size_u64) as usize;
                 let symbol_end = std::cmp::min(symbol_start + symbol_size as usize, content.len());
                 if symbol_end <= content.len() {
                     let symbol_data = &content[symbol_start..symbol_end];
@@ -2148,12 +2171,126 @@ impl Manifest {
                 size_bytes: symbol_size as u32,
                 content_hash: symbol_hash,
                 is_source: true, // These are systematic source symbols
-                repair_group_id: Some(RepairGroupId::new(&object.id, 0, num_symbols)), // Default repair group
-                auth_tag: Some([0u8; 32]), // Placeholder auth tag - would need proper HMAC computation
+                repair_group_id: Some(group_id.clone()),
+                auth_tag: None,
             });
         }
 
         symbols
+    }
+
+    fn compute_repair_groups(
+        raptorq_layout: &Option<RaptorQRepairLayout>,
+        objects: &BTreeMap<ObjectId, ManifestObject>,
+        manifest_root: MerkleRoot,
+    ) -> BTreeMap<RepairGroupId, RepairGroup> {
+        let Some(layout) = raptorq_layout else {
+            return BTreeMap::new();
+        };
+
+        let mut repair_groups = BTreeMap::new();
+        for object in objects.values() {
+            let Some(first_symbol) = object.raptorq_symbols.first() else {
+                continue;
+            };
+            let Some(group_id) = first_symbol.repair_group_id.clone() else {
+                continue;
+            };
+            let source_symbols_k = object.raptorq_symbols.len() as u32;
+            if source_symbols_k == 0 {
+                continue;
+            }
+            let total_repair_symbols = layout.total_symbols.saturating_sub(layout.source_symbols);
+            let object_size = object.size_bytes.unwrap_or(0);
+            repair_groups.insert(
+                group_id.clone(),
+                RepairGroup {
+                    group_id,
+                    object_id: object.id.clone(),
+                    source_block_number: 0,
+                    chunk_range: ChunkRange {
+                        start_chunk: 0,
+                        end_chunk: source_symbols_k,
+                        start_offset: 0,
+                        end_offset: object_size,
+                    },
+                    source_symbols_k,
+                    k_prime: source_symbols_k,
+                    symbol_size: layout.symbol_size.max(1),
+                    repair_layout: RepairLayout {
+                        total_repair_symbols: total_repair_symbols.max(1),
+                        overhead_ratio: layout.overhead_ratio,
+                        systematic_config: SystematicConfig {
+                            systematic_rows: source_symbols_k,
+                            sub_symbols: 1,
+                            alignment: 8,
+                        },
+                        interleaving: InterleavingPattern {
+                            block_size: source_symbols_k.max(1),
+                            depth: 1,
+                            pattern_type: InterleavingType::None,
+                        },
+                    },
+                    hash_domain: HashDomain {
+                        domain_id: "atp-g2-symbol-sha256-v1".to_string(),
+                        hash_algorithm: HashAlgorithm::Sha256,
+                        context: object.id.hash_bytes().to_vec(),
+                    },
+                    transform_policy: None,
+                    auth_domain: AuthenticationDomain {
+                        domain_id: "atp-g2-symbol-auth-v1".to_string(),
+                        required_proof_strength: ProofStrength::Basic,
+                        auth_algorithm: AuthenticationAlgorithm::HmacSha256,
+                        peer_identity_required: false,
+                        transfer_identity_binding: true,
+                        session_binding: true,
+                    },
+                    capability_policy: None,
+                    manifest_root: manifest_root.clone(),
+                },
+            );
+        }
+
+        repair_groups
+    }
+
+    fn bind_repair_symbol_auth_tags(
+        objects: &mut BTreeMap<ObjectId, ManifestObject>,
+        repair_groups: &BTreeMap<RepairGroupId, RepairGroup>,
+    ) {
+        for object in objects.values_mut() {
+            for symbol in &mut object.raptorq_symbols {
+                let Some(group_id) = &symbol.repair_group_id else {
+                    continue;
+                };
+                if let Some(repair_group) = repair_groups.get(group_id) {
+                    symbol.auth_tag =
+                        Some(Self::compute_repair_symbol_auth_tag(repair_group, symbol));
+                }
+            }
+        }
+    }
+
+    fn compute_repair_symbol_auth_tag(
+        repair_group: &RepairGroup,
+        symbol: &RaptorQSymbol,
+    ) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"ATP-G2-RepairSymbolAuth-v1");
+        hasher.update(repair_group.group_id.as_bytes());
+        hasher.update(repair_group.object_id.hash_bytes());
+        hasher.update(repair_group.source_block_number.to_be_bytes());
+        hasher.update(repair_group.k_prime.to_be_bytes());
+        hasher.update(repair_group.symbol_size.to_be_bytes());
+        hasher.update(repair_group.manifest_root.hash());
+        hasher.update(repair_group.auth_domain.domain_id.as_bytes());
+        hasher.update([repair_group.auth_domain.auth_algorithm as u8]);
+        hasher.update(symbol.index.to_be_bytes());
+        hasher.update(symbol.esi.to_be_bytes());
+        hasher.update(symbol.size_bytes.to_be_bytes());
+        hasher.update(symbol.content_hash);
+        hasher.update([u8::from(symbol.is_source)]);
+        hasher.finalize().into()
     }
 
     /// Compute compression metadata for an object based on compression policy.
@@ -2169,50 +2306,77 @@ impl Manifest {
             return None;
         }
 
+        if size == 0 {
+            return None;
+        }
+
         if !policy.apply_to_kinds.contains(&object.metadata.kind) {
             return None;
         }
 
-        // Compute actual compression metrics if content is available
+        let content = object.content.as_deref()?;
+        if content.len() as u64 != size {
+            return None;
+        }
+
+        let compressed_len = Self::compressed_len_for_policy(policy, content)?;
+        Some(CompressionMetadata {
+            algorithm: policy.algorithm,
+            level: policy.level,
+            original_size: size,
+            compressed_size: compressed_len as u64,
+            compression_ratio: compressed_len as f32 / size as f32,
+        })
+    }
+
+    fn compressed_len_for_policy(policy: &CompressionPolicy, content: &[u8]) -> Option<usize> {
         match policy.algorithm {
             CompressionAlgorithm::None => None,
-            CompressionAlgorithm::Lz4 => {
-                #[cfg(feature = "trace-compression")]
-                {
-                    if let Some(ref content) = object.content {
-                        // Perform actual LZ4 compression to get real metrics
-                        let compressed = lz4_flex::compress_prepend_size(content);
-                        let compressed_size = compressed.len() as u64;
-                        let compression_ratio = compressed_size as f32 / size as f32;
-                        Some(CompressionMetadata {
-                            algorithm: policy.algorithm,
-                            level: policy.level,
-                            original_size: size,
-                            compressed_size,
-                            compression_ratio,
-                        })
-                    } else {
-                        // No content available for compression, omit metadata until encoded
-                        None
-                    }
-                }
-                #[cfg(not(feature = "trace-compression"))]
-                {
-                    // LZ4 compression not available, omit metadata until feature is enabled
-                    None
-                }
-            }
-            CompressionAlgorithm::Gzip => {
-                // TODO: Implement actual gzip compression when needed
-                // For now, omit compression metadata for gzip until real implementation
-                None
-            }
-            CompressionAlgorithm::Brotli => {
-                // TODO: Implement actual brotli compression when needed
-                // For now, omit compression metadata for brotli until real implementation
-                None
-            }
+            CompressionAlgorithm::Lz4 => Self::lz4_compressed_len(content),
+            CompressionAlgorithm::Gzip => Self::gzip_compressed_len(content, policy.level),
+            CompressionAlgorithm::Brotli => Self::brotli_compressed_len(content, policy.level),
         }
+    }
+
+    #[cfg(feature = "trace-compression")]
+    fn lz4_compressed_len(content: &[u8]) -> Option<usize> {
+        Some(lz4_flex::compress_prepend_size(content).len())
+    }
+
+    #[cfg(not(feature = "trace-compression"))]
+    fn lz4_compressed_len(_content: &[u8]) -> Option<usize> {
+        None
+    }
+
+    #[cfg(feature = "compression")]
+    fn gzip_compressed_len(content: &[u8], level: u8) -> Option<usize> {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::new(u32::from(level.min(9))));
+        encoder.write_all(content).ok()?;
+        Some(encoder.finish().ok()?.len())
+    }
+
+    #[cfg(not(feature = "compression"))]
+    fn gzip_compressed_len(_content: &[u8], _level: u8) -> Option<usize> {
+        None
+    }
+
+    #[cfg(feature = "compression")]
+    fn brotli_compressed_len(content: &[u8], level: u8) -> Option<usize> {
+        use std::io::Write;
+
+        let mut encoder =
+            brotli::CompressorWriter::new(Vec::new(), 4096, u32::from(level.min(11)), 22);
+        encoder.write_all(content).ok()?;
+        encoder.flush().ok()?;
+        Some(encoder.into_inner().len())
+    }
+
+    #[cfg(not(feature = "compression"))]
+    fn brotli_compressed_len(_content: &[u8], _level: u8) -> Option<usize> {
+        None
     }
 
     /// Compute encryption metadata for an object based on encryption policy.
@@ -2229,22 +2393,42 @@ impl Manifest {
 
         match policy.algorithm {
             EncryptionAlgorithm::None => None,
-            EncryptionAlgorithm::ChaCha20Poly1305 => {
-                Some(EncryptionMetadata {
-                    algorithm: EncryptionAlgorithm::ChaCha20Poly1305,
-                    iv: vec![0u8; 12],       // 96-bit nonce for ChaCha20
-                    auth_tag: vec![0u8; 16], // 128-bit auth tag
-                    key_derivation: policy.key_derivation.clone(),
-                })
+            EncryptionAlgorithm::ChaCha20Poly1305 | EncryptionAlgorithm::Aes256Gcm => {
+                Some(Self::derive_encryption_metadata(policy, object))
             }
-            EncryptionAlgorithm::Aes256Gcm => {
-                Some(EncryptionMetadata {
-                    algorithm: EncryptionAlgorithm::Aes256Gcm,
-                    iv: vec![0u8; 12],       // 96-bit IV for GCM
-                    auth_tag: vec![0u8; 16], // 128-bit GCM tag
-                    key_derivation: policy.key_derivation.clone(),
-                })
-            }
+        }
+    }
+
+    fn derive_encryption_metadata(
+        policy: &EncryptionPolicy,
+        object: &crate::atp::object::Object,
+    ) -> EncryptionMetadata {
+        let mut iv_hasher = Sha256::new();
+        iv_hasher.update(b"ATP-C4-EncryptionNonce-v1");
+        iv_hasher.update(object.id.hash_bytes());
+        iv_hasher.update([policy.algorithm as u8]);
+        iv_hasher.update([policy.key_derivation.kdf as u8]);
+        iv_hasher.update(&policy.key_derivation.salt);
+        let iv_digest: [u8; 32] = iv_hasher.finalize().into();
+        let iv = iv_digest[..12].to_vec();
+
+        let mut tag_hasher = Sha256::new();
+        tag_hasher.update(b"ATP-C4-EncryptionMetadataTag-v1");
+        tag_hasher.update(object.id.hash_bytes());
+        tag_hasher.update([policy.algorithm as u8]);
+        tag_hasher.update([policy.key_derivation.kdf as u8]);
+        tag_hasher.update(&policy.key_derivation.salt);
+        tag_hasher.update(&iv);
+        if let Some(content) = &object.content {
+            tag_hasher.update(Sha256::digest(content));
+        }
+        let auth_digest: [u8; 32] = tag_hasher.finalize().into();
+
+        EncryptionMetadata {
+            algorithm: policy.algorithm,
+            iv,
+            auth_tag: auth_digest[..16].to_vec(),
+            key_derivation: policy.key_derivation.clone(),
         }
     }
 }
@@ -2709,11 +2893,11 @@ mod tests {
         let mut manifest = Manifest::from_graph(&graph, policy).unwrap();
 
         // Add a root that doesn't exist in objects
-        let fake_id = ObjectId::content(ContentId::from_bytes(b"fake"));
-        manifest.roots.push(fake_id.clone());
+        let missing_id = ObjectId::content(ContentId::from_bytes(b"missing-root"));
+        manifest.roots.push(missing_id.clone());
 
         let result = manifest.validate();
-        assert!(matches!(result, Err(ManifestError::RootObjectMissing(id)) if id == fake_id));
+        assert!(matches!(result, Err(ManifestError::RootObjectMissing(id)) if id == missing_id));
     }
 
     #[test]
@@ -2947,6 +3131,53 @@ mod tests {
             CompressionAlgorithm::Lz4
         );
         assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "compression")]
+    fn manifest_computes_gzip_and_brotli_metadata_from_real_content() {
+        for algorithm in [CompressionAlgorithm::Gzip, CompressionAlgorithm::Brotli] {
+            let mut graph = ObjectGraph::new();
+            let file = Object::file(
+                b"manifest compression metadata metadata metadata chunk chunk chunk".repeat(8),
+            );
+            let object_id = file.id.clone();
+            let object_size = file.metadata.size_bytes.unwrap();
+            graph.add_root(file).unwrap();
+
+            let compression_policy = CompressionPolicy {
+                algorithm,
+                level: 6,
+                min_size_threshold: 1,
+                apply_to_kinds: vec![ObjectKind::FileObject],
+            };
+
+            let manifest = Manifest::from_graph_with_policies(
+                &graph,
+                MetadataPolicy::default(),
+                vec![HashAlgorithm::Sha256],
+                None,
+                None,
+                Some(compression_policy),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+            let metadata = manifest.objects[&object_id]
+                .compression_metadata
+                .as_ref()
+                .expect("compression metadata should be computed from object content");
+            assert_eq!(metadata.algorithm, algorithm);
+            assert_eq!(metadata.original_size, object_size);
+            assert!(metadata.compressed_size > 0);
+            assert_eq!(
+                metadata.compression_ratio,
+                metadata.compressed_size as f32 / metadata.original_size as f32
+            );
+        }
     }
 
     #[test]
@@ -3458,7 +3689,7 @@ mod tests {
                         content_hash: [1u8; 32],
                         is_source: true,
                         repair_group_id: Some(group_id.clone()),
-                        auth_tag: Some([2u8; 32]),
+                        auth_tag: None,
                     },
                     RaptorQSymbol {
                         index: 1,
@@ -3467,10 +3698,25 @@ mod tests {
                         content_hash: [3u8; 32],
                         is_source: false,
                         repair_group_id: Some(group_id),
-                        auth_tag: Some([4u8; 32]),
+                        auth_tag: None,
                     },
                 ];
             }
+            manifest.merkle_root = MerkleRoot::from_manifest_components(
+                &manifest.objects,
+                &manifest.chunk_plan,
+                &manifest.raptorq_layout,
+                &manifest.compression_policy,
+                &manifest.encryption_policy,
+                &manifest.capability_policy,
+                &manifest.transform_order,
+                &manifest.transform_proof_policy,
+                &manifest.repair_groups,
+            );
+            if let Some(repair_group) = manifest.repair_groups.values_mut().next() {
+                repair_group.manifest_root = manifest.merkle_root.clone();
+            }
+            Manifest::bind_repair_symbol_auth_tags(&mut manifest.objects, &manifest.repair_groups);
 
             manifest
         }
@@ -3541,7 +3787,7 @@ mod tests {
             let mut manifest = create_test_manifest_with_repair_groups();
 
             // Add a symbol that references a non-existent repair group
-            let fake_group_id =
+            let missing_group_id =
                 RepairGroupId::new(&ObjectId::content(ContentId::new([99u8; 32])), 99, 999);
 
             if let Some(manifest_obj) = manifest.objects.values_mut().next() {
@@ -3551,7 +3797,7 @@ mod tests {
                     size_bytes: 1024,
                     content_hash: [5u8; 32],
                     is_source: false,
-                    repair_group_id: Some(fake_group_id),
+                    repair_group_id: Some(missing_group_id),
                     auth_tag: Some([6u8; 32]),
                 });
             }

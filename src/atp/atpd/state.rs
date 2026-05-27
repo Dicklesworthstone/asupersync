@@ -1,7 +1,16 @@
 //! Persistent atpd state schema and redacted export model.
 
+#[cfg(test)]
 use crate::asupersync::atp::inbox::ObjectDigest;
+#[cfg(test)]
 use crate::asupersync::atp::quota::{
+    QuotaAllocation, QuotaBucket, QuotaError, QuotaLedger, QuotaRow, QuotaUsage, RetentionClock,
+    RetentionPolicy, RetentionRecord,
+};
+#[cfg(not(test))]
+use crate::atp::inbox::ObjectDigest;
+#[cfg(not(test))]
+use crate::atp::quota::{
     QuotaAllocation, QuotaBucket, QuotaError, QuotaLedger, QuotaRow, QuotaUsage, RetentionClock,
     RetentionPolicy, RetentionRecord,
 };
@@ -131,6 +140,7 @@ pub enum StateSensitivity {
 
 impl StateSensitivity {
     /// Return true when default listings must redact the record payload.
+    #[allow(dead_code)]
     #[must_use]
     pub const fn redact_by_default(self) -> bool {
         !matches!(self, Self::Public)
@@ -283,6 +293,7 @@ pub struct AtpdIntegrityReport {
 
 impl AtpdIntegrityReport {
     /// Return true when the schema and quota ledger are internally consistent.
+    #[allow(dead_code)]
     #[must_use]
     pub fn is_clean(&self) -> bool {
         self.missing_collections.is_empty() && self.quota_mismatches.is_empty()

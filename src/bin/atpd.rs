@@ -11,23 +11,33 @@
 
 #![allow(unsafe_code)]
 
-use anyhow::Result;
-use asupersync::atp::identity::PeerId;
-use asupersync::cx::Cx;
-use asupersync::runtime::{RuntimeBuilder, RuntimeConfig};
-use asupersync::supervision::{SupervisorConfig, SupervisorTree};
-use asupersync::types::{Budget, Time};
+use asupersync::atp::atpd::AtpdAppSpec;
+use asupersync::atp::identity::DurablePeerIdentity;
+use asupersync::atp::supervision::{AtpdChildRole, AtpdRegionId};
+use asupersync::net::atp::protocol::PeerId;
+use asupersync::runtime::RuntimeBuilder;
+use asupersync::security::{IdentityKeyStore, KeyStoreError};
+use asupersync::types::Time;
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::error::Error;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use toml;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
-#[cfg(unix)]
-extern crate libc;
+type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
+
+fn cli_error(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
+    Box::new(std::io::Error::other(message.into()))
+}
 
 /// ATP Daemon - Always-on ATP transfer service
 #[derive(Parser)]
@@ -55,7 +65,7 @@ struct AtpdCli {
     pid_file: PathBuf,
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 enum AtpdCommand {
     /// Start the ATP daemon
     Start(StartArgs),
@@ -73,7 +83,7 @@ enum AtpdCommand {
     Identity(IdentityArgs),
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct StartArgs {
     /// Bind address for ATP service
     #[arg(long, default_value = "0.0.0.0:8472")]
@@ -96,7 +106,7 @@ struct StartArgs {
     enable_mailbox: bool,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct InitArgs {
     /// Data directory to initialize
     #[arg(long, default_value = "/var/lib/atpd")]
@@ -111,13 +121,13 @@ struct InitArgs {
     copy_identity: Option<PathBuf>,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 struct IdentityArgs {
     #[command(subcommand)]
     action: IdentityAction,
 }
 
-#[derive(Subcommand)]
+#[derive(Clone, Subcommand)]
 enum IdentityAction {
     /// Show current daemon identity
     Show,
@@ -293,7 +303,6 @@ pub struct LogRotationConfig {
 /// ATP Daemon state
 pub struct AtpdState {
     config: AtpdConfig,
-    supervisor: SupervisorTree,
     runtime_handle: asupersync::runtime::RuntimeHandle,
     start_time: Time,
     peer_directory: HashMap<PeerId, PeerInfo>,
@@ -429,10 +438,10 @@ impl Default for AtpdConfig {
 fn load_daemon_config(config_path: &PathBuf) -> Result<AtpdConfig> {
     if config_path.exists() {
         let content = std::fs::read_to_string(config_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read config file: {}", e))?;
+            .map_err(|e| cli_error(format!("Failed to read config file: {e}")))?;
 
         let config: AtpdConfig = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse config file: {}", e))?;
+            .map_err(|e| cli_error(format!("Failed to parse config file: {e}")))?;
 
         Ok(config)
     } else {
@@ -442,13 +451,444 @@ fn load_daemon_config(config_path: &PathBuf) -> Result<AtpdConfig> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonSignal {
+    Interrupt,
+    Terminate,
+    Reload,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DirectoryStats {
+    files: u64,
+    directories: u64,
+    bytes: u64,
+}
+
+#[derive(Debug)]
+struct DiagnosticsEndpoint {
+    shutdown: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+    local_addr: SocketAddr,
+}
+
+impl DiagnosticsEndpoint {
+    fn stop(mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        let _ = TcpStream::connect(self.local_addr);
+        if let Some(thread) = self.thread.take() {
+            if let Err(err) = thread.join() {
+                warn!("diagnostics endpoint thread panicked: {:?}", err);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DaemonHealthSnapshot {
+    status: &'static str,
+    peer_id: String,
+    bind_addr: SocketAddr,
+    data_dir: PathBuf,
+    cache_dir: PathBuf,
+    max_concurrent_transfers: u32,
+    relay_enabled: bool,
+    mailbox_enabled: bool,
+    service_order: Vec<&'static str>,
+    started_at_micros: u64,
+    reload_count: u64,
+}
+
+impl DaemonHealthSnapshot {
+    fn from_state(
+        state: &AtpdState,
+        identity: &DurablePeerIdentity,
+        service_order: &[AtpdChildRole],
+        started_at_micros: u64,
+        reload_count: u64,
+    ) -> Self {
+        Self {
+            status: "running",
+            peer_id: identity.peer_id_hex(),
+            bind_addr: state.config.network.bind_addr,
+            data_dir: state.config.storage.data_dir.clone(),
+            cache_dir: state.config.storage.cache_dir.clone(),
+            max_concurrent_transfers: state.config.transfers.max_concurrent,
+            relay_enabled: state.config.network.enable_relay,
+            mailbox_enabled: state.config.network.enable_mailbox,
+            service_order: service_order
+                .iter()
+                .map(|role| role.service_name())
+                .collect(),
+            started_at_micros,
+            reload_count,
+        }
+    }
+}
+
+impl AtpdState {
+    fn transfer_count(&self) -> usize {
+        self.active_transfers.len()
+    }
+
+    fn peer_count(&self) -> usize {
+        self.peer_directory.len()
+    }
+
+    fn inbox_count(&self) -> usize {
+        self.inbox_messages.len()
+    }
+
+    fn runtime_attached(&self) -> bool {
+        let _ = &self.runtime_handle;
+        true
+    }
+}
+
+fn current_time_micros() -> Result<u64> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| cli_error(format!("system clock is before UNIX_EPOCH: {e}")))?;
+    u64::try_from(elapsed.as_micros())
+        .map_err(|_| cli_error("current timestamp does not fit in u64 microseconds"))
+}
+
+fn current_time_nanos_lossy() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn resolve_data_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+fn identity_store_path(config: &AtpdConfig) -> PathBuf {
+    resolve_data_path(&config.storage.data_dir, &config.identity.private_key_path)
+}
+
+fn init_identity_store_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("identity").join("private.key")
+}
+
+fn peer_id_path_for_store(store_path: &Path) -> PathBuf {
+    store_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("peer_id")
+}
+
+fn generate_strong_identity_seed() -> Result<[u8; 32]> {
+    let mut seed = [0u8; 32];
+    getrandom::fill(&mut seed).map_err(|e| {
+        cli_error(format!(
+            "secure random identity seed generation failed: {e}"
+        ))
+    })?;
+    Ok(seed)
+}
+
+fn create_identity_store(store_path: &Path) -> Result<DurablePeerIdentity> {
+    if store_path.exists() {
+        return Err(cli_error(format!(
+            "identity store already exists at {}",
+            store_path.display()
+        )));
+    }
+
+    let peer_id_path = peer_id_path_for_store(store_path);
+    if peer_id_path.exists() {
+        return Err(cli_error(format!(
+            "peer-id sidecar already exists at {}",
+            peer_id_path.display()
+        )));
+    }
+
+    for _ in 0..8 {
+        let seed = generate_strong_identity_seed()?;
+        match IdentityKeyStore::create(store_path, seed, current_time_micros()?) {
+            Ok(store) => {
+                let identity = DurablePeerIdentity::from_key_store(&store)?;
+                write_peer_id_sidecar(&peer_id_path, &identity)?;
+                return Ok(identity);
+            }
+            Err(KeyStoreError::WeakSeed(_)) => continue,
+            Err(err) => return Err(Box::new(err)),
+        }
+    }
+
+    Err(cli_error(
+        "secure random generator repeatedly produced weak identity seed material",
+    ))
+}
+
+fn load_identity_store(store_path: &Path) -> Result<DurablePeerIdentity> {
+    let store = IdentityKeyStore::load(store_path)?;
+    Ok(DurablePeerIdentity::from_key_store(&store)?)
+}
+
+fn write_peer_id_sidecar(path: &Path, identity: &DurablePeerIdentity) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut file = OpenOptions::new().create_new(true).write(true).open(path)?;
+    file.write_all(identity.peer_id_hex().as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn copy_identity_store_without_overwrite(
+    source_path: &Path,
+    destination_path: &Path,
+) -> Result<DurablePeerIdentity> {
+    let source_identity = load_identity_store(source_path)?;
+    if destination_path.exists() {
+        return Err(cli_error(format!(
+            "destination identity store already exists at {}",
+            destination_path.display()
+        )));
+    }
+
+    let peer_id_path = peer_id_path_for_store(destination_path);
+    if peer_id_path.exists() {
+        return Err(cli_error(format!(
+            "destination peer-id sidecar already exists at {}",
+            peer_id_path.display()
+        )));
+    }
+
+    if let Some(parent) = destination_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let bytes = std::fs::read(source_path)?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(destination_path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    harden_identity_file(destination_path)?;
+
+    let imported_identity = load_identity_store(destination_path)?;
+    if imported_identity.peer_id_hex() != source_identity.peer_id_hex() {
+        return Err(cli_error(
+            "imported identity does not match the validated source identity",
+        ));
+    }
+    write_peer_id_sidecar(&peer_id_path, &imported_identity)?;
+    Ok(imported_identity)
+}
+
+fn export_identity_store_without_overwrite(
+    source_path: &Path,
+    destination_path: &Path,
+) -> Result<DurablePeerIdentity> {
+    let identity = load_identity_store(source_path)?;
+    if destination_path.exists() {
+        return Err(cli_error(format!(
+            "export destination already exists at {}",
+            destination_path.display()
+        )));
+    }
+    if let Some(parent) = destination_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let bytes = std::fs::read(source_path)?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(destination_path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    harden_identity_file(destination_path)?;
+    Ok(identity)
+}
+
+fn harden_identity_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn process_is_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if result == 0 {
+            return true;
+        }
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        errno != libc::ESRCH
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+fn read_pid_file(path: &Path) -> Result<u32> {
+    let pid_content = std::fs::read_to_string(path)
+        .map_err(|e| cli_error(format!("Failed to read PID file: {e}")))?;
+    pid_content
+        .trim()
+        .parse()
+        .map_err(|e| cli_error(format!("Invalid PID in file: {e}")))
+}
+
+fn directory_stats(path: &Path) -> Result<DirectoryStats> {
+    let mut stats = DirectoryStats::default();
+    if !path.exists() {
+        return Ok(stats);
+    }
+
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        for entry in std::fs::read_dir(&current)? {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_dir() {
+                stats.directories = stats.directories.saturating_add(1);
+                stack.push(entry.path());
+            } else if metadata.is_file() {
+                stats.files = stats.files.saturating_add(1);
+                stats.bytes = stats.bytes.saturating_add(metadata.len());
+            }
+        }
+    }
+    Ok(stats)
+}
+
+fn install_signal_listener() -> Result<mpsc::Receiver<DaemonSignal>> {
+    let (sender, receiver) = mpsc::channel();
+
+    #[cfg(unix)]
+    {
+        use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
+        use signal_hook::iterator::Signals;
+
+        let mut signals = Signals::new([SIGINT, SIGTERM, SIGHUP])?;
+        thread::spawn(move || {
+            for signal in signals.forever() {
+                let event = match signal {
+                    SIGINT => DaemonSignal::Interrupt,
+                    SIGTERM => DaemonSignal::Terminate,
+                    SIGHUP => DaemonSignal::Reload,
+                    _ => continue,
+                };
+                if sender.send(event).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = sender;
+    }
+
+    Ok(receiver)
+}
+
+fn start_diagnostics_endpoint(
+    addr: SocketAddr,
+    snapshot: Arc<Mutex<DaemonHealthSnapshot>>,
+) -> Result<DiagnosticsEndpoint> {
+    let listener = TcpListener::bind(addr)?;
+    listener.set_nonblocking(true)?;
+    let local_addr = listener.local_addr()?;
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let thread_shutdown = Arc::clone(&shutdown);
+    let thread_snapshot = Arc::clone(&snapshot);
+
+    let thread = thread::spawn(move || {
+        while !thread_shutdown.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _peer_addr)) => {
+                    if let Err(err) = serve_diagnostics_connection(stream, &thread_snapshot) {
+                        warn!("diagnostics endpoint connection failed: {}", err);
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(err) => {
+                    warn!("diagnostics endpoint accept failed: {}", err);
+                    thread::sleep(Duration::from_millis(250));
+                }
+            }
+        }
+    });
+
+    Ok(DiagnosticsEndpoint {
+        shutdown,
+        thread: Some(thread),
+        local_addr,
+    })
+}
+
+fn serve_diagnostics_connection(
+    mut stream: TcpStream,
+    snapshot: &Arc<Mutex<DaemonHealthSnapshot>>,
+) -> Result<()> {
+    let mut request = [0u8; 1024];
+    let _ = stream.read(&mut request);
+
+    let snapshot = snapshot
+        .lock()
+        .map_err(|_| cli_error("diagnostics snapshot mutex poisoned"))?;
+    let body = serde_json::to_vec_pretty(&*snapshot)?;
+    let header = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(header.as_bytes())?;
+    stream.write_all(&body)?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn prepare_daemon_directories(config: &AtpdConfig) -> Result<()> {
+    std::fs::create_dir_all(&config.storage.data_dir)?;
+    std::fs::create_dir_all(&config.storage.cache_dir)?;
+    std::fs::create_dir_all(&config.storage.journal.journal_path)?;
+    std::fs::create_dir_all(config.storage.data_dir.join("inbox"))?;
+    std::fs::create_dir_all(config.storage.data_dir.join("mailbox"))?;
+    std::fs::create_dir_all(config.storage.data_dir.join("transfers"))?;
+    std::fs::create_dir_all(config.storage.data_dir.join("diagnostics"))?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = AtpdCli::parse();
+    let command = cli.command.clone();
 
     // Initialize logging
     init_logging(&cli.log_level)?;
 
-    match cli.command {
+    match command {
         AtpdCommand::Start(args) => start_daemon(cli, args),
         AtpdCommand::Stop => stop_daemon(cli),
         AtpdCommand::Status => show_status(cli),
@@ -482,7 +922,7 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
     info!("Starting ATP daemon...");
 
     // Load configuration
-    let mut config = load_config(&cli.config).unwrap_or_else(|_| {
+    let mut config = load_daemon_config(&cli.config).unwrap_or_else(|_| {
         warn!(
             "Failed to load config from {}, using defaults",
             cli.config.display()
@@ -493,13 +933,14 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
     // Override config with command line arguments
     config.network.bind_addr = args.bind;
     config.storage.data_dir = args.data_dir.clone();
+    config.storage.cache_dir = args.data_dir.join("cache");
+    config.storage.journal.journal_path = args.data_dir.join("journal");
+    config.identity.private_key_path = init_identity_store_path(&args.data_dir);
     config.transfers.max_concurrent = args.max_transfers;
     config.network.enable_relay = args.enable_relay;
     config.network.enable_mailbox = args.enable_mailbox;
 
-    // Create data directory if it doesn't exist
-    std::fs::create_dir_all(&config.storage.data_dir)?;
-    std::fs::create_dir_all(&config.storage.cache_dir)?;
+    prepare_daemon_directories(&config)?;
 
     // Initialize runtime
     let runtime = RuntimeBuilder::new()
@@ -517,57 +958,164 @@ fn start_daemon(cli: AtpdCli, args: StartArgs) -> Result<()> {
     );
 
     // Enter the runtime and run the daemon
-    runtime.block_on(async { run_daemon_service(config, runtime_handle).await })?;
+    runtime
+        .block_on(async { run_daemon_service(config, cli.config.clone(), runtime_handle).await })?;
 
     info!("ATP daemon stopped");
     Ok(())
 }
 
 async fn run_daemon_service(
-    config: AtpdConfig,
+    mut config: AtpdConfig,
+    config_path: PathBuf,
     runtime_handle: asupersync::runtime::RuntimeHandle,
 ) -> Result<()> {
-    // Create supervisor tree for daemon components
-    let supervisor_config = SupervisorConfig::builder()
-        .with_name("atpd-supervisor")
-        .with_restart_policy(asupersync::supervision::RestartPolicy::OneForOne)
-        .build();
+    prepare_daemon_directories(&config)?;
+    let identity_path = identity_store_path(&config);
+    let identity = load_identity_store(&identity_path).map_err(|err| {
+        cli_error(format!(
+            "daemon identity is not initialized at {}; run `atpd init --new-identity --data-dir {}` first: {err}",
+            identity_path.display(),
+            config.storage.data_dir.display()
+        ))
+    })?;
 
-    let _supervisor = SupervisorTree::start(supervisor_config).await?;
+    let mut app_spec = AtpdAppSpec::default_daemon(AtpdRegionId::new(1));
+    if config.network.enable_relay {
+        app_spec = app_spec.with_relay();
+    }
+    if config.network.discovery.enable_relay_discovery {
+        app_spec = app_spec.with_rendezvous();
+    }
+    let compiled_app = app_spec.compile()?;
+    for event in compiled_app.start_events() {
+        if let Some(role) = event.role {
+            info!(
+                service = role.service_name(),
+                action = %event.action,
+                "starting ATP daemon child service"
+            );
+        }
+    }
 
     // Initialize daemon state
-    let _daemon_state = AtpdState {
+    let mut daemon_state = AtpdState {
         config: config.clone(),
-        supervisor: _supervisor,
         runtime_handle,
-        start_time: Time::from_nanos(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as u64,
-        ),
+        start_time: Time::from_nanos(current_time_nanos_lossy()),
         peer_directory: HashMap::new(),
         active_transfers: HashMap::new(),
         inbox_messages: Vec::new(),
     };
 
-    // Start daemon services
-    info!("Starting ATP daemon services...");
+    info!(
+        peer_id = identity.peer_id_hex(),
+        services = compiled_app.start_order.len(),
+        "ATP daemon services started"
+    );
+    info!(
+        runtime_attached = daemon_state.runtime_attached(),
+        active_transfers = daemon_state.transfer_count(),
+        known_peers = daemon_state.peer_count(),
+        inbox_messages = daemon_state.inbox_count(),
+        "ATP daemon state initialized"
+    );
 
-    // TODO: Start actual daemon services:
-    // - Identity service
-    // - Network listener
-    // - Transfer manager
-    // - Inbox/mailbox handler
-    // - Cache manager
-    // - Discovery service
-    // - Health check service
-    // - Metrics service
+    let signal_rx = install_signal_listener()?;
+    let started_at_micros = current_time_micros()?;
+    let reload_count = 0u64;
+    let health_snapshot = Arc::new(Mutex::new(DaemonHealthSnapshot::from_state(
+        &daemon_state,
+        &identity,
+        &compiled_app.start_order,
+        started_at_micros,
+        reload_count,
+    )));
+    let diagnostics_endpoint = if daemon_state.config.diagnostics.enable_metrics
+        || daemon_state.config.diagnostics.enable_debug
+    {
+        match daemon_state.config.diagnostics.metrics_bind {
+            Some(addr) => {
+                let endpoint = start_diagnostics_endpoint(addr, Arc::clone(&health_snapshot))?;
+                info!(
+                    bind_addr = %endpoint.local_addr,
+                    "ATP daemon diagnostics endpoint started"
+                );
+                Some(endpoint)
+            }
+            None => {
+                warn!("diagnostics enabled but no metrics_bind address configured");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
-    // For now, just wait for shutdown signal
-    tokio::signal::ctrl_c().await?;
+    let mut reload_count = reload_count;
+    loop {
+        match signal_rx.recv_timeout(Duration::from_secs(
+            daemon_state
+                .config
+                .service
+                .health_check
+                .interval_secs
+                .max(1),
+        )) {
+            Ok(DaemonSignal::Reload) => {
+                let reloaded = load_daemon_config(&config_path)?;
+                prepare_daemon_directories(&reloaded)?;
+                let reloaded_identity = load_identity_store(&identity_store_path(&reloaded))?;
+                config = reloaded;
+                daemon_state.config = config.clone();
+                reload_count = reload_count.saturating_add(1);
+                *health_snapshot
+                    .lock()
+                    .map_err(|_| cli_error("diagnostics snapshot mutex poisoned"))? =
+                    DaemonHealthSnapshot::from_state(
+                        &daemon_state,
+                        &reloaded_identity,
+                        &compiled_app.start_order,
+                        started_at_micros,
+                        reload_count,
+                    );
+                info!(reload_count, "ATP daemon configuration reloaded");
+            }
+            Ok(DaemonSignal::Interrupt | DaemonSignal::Terminate) => {
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if daemon_state.config.service.health_check.enable {
+                    info!(
+                        uptime_nanos = current_time_nanos_lossy()
+                            .saturating_sub(daemon_state.start_time.as_nanos()),
+                        active_transfers = daemon_state.transfer_count(),
+                        known_peers = daemon_state.peer_count(),
+                        "ATP daemon health check"
+                    );
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                warn!("daemon signal listener disconnected; stopping daemon");
+                break;
+            }
+        }
+    }
 
     info!("Received shutdown signal, stopping daemon...");
+    for event in compiled_app.shutdown_events() {
+        match event.role {
+            Some(role) => info!(
+                service = role.service_name(),
+                action = %event.action,
+                "stopping ATP daemon child service"
+            ),
+            None => info!(action = %event.action, "joining ATP daemon root"),
+        }
+    }
+    if let Some(endpoint) = diagnostics_endpoint {
+        endpoint.stop();
+    }
     Ok(())
 }
 
@@ -580,14 +1128,7 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
         return Ok(());
     }
 
-    // Read PID from file
-    let pid_content = std::fs::read_to_string(&cli.pid_file)
-        .map_err(|e| anyhow::anyhow!("Failed to read PID file: {}", e))?;
-
-    let pid: u32 = pid_content
-        .trim()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
+    let pid = read_pid_file(&cli.pid_file)?;
 
     #[cfg(unix)]
     {
@@ -642,17 +1183,16 @@ fn stop_daemon(cli: AtpdCli) -> Result<()> {
                     let _ = std::fs::remove_file(&cli.pid_file);
                 }
                 libc::EPERM => {
-                    return Err(anyhow::anyhow!(
+                    return Err(cli_error(format!(
                         "Permission denied: cannot send signal to process {}",
                         pid
-                    ));
+                    )));
                 }
                 _ => {
-                    return Err(anyhow::anyhow!(
+                    return Err(cli_error(format!(
                         "Failed to send signal to process {}: errno {}",
-                        pid,
-                        errno
-                    ));
+                        pid, errno
+                    )));
                 }
             }
         }
@@ -676,27 +1216,12 @@ fn show_status(cli: AtpdCli) -> Result<()> {
         return Ok(());
     }
 
-    // Read PID from file
-    let pid_content = std::fs::read_to_string(&cli.pid_file)
-        .map_err(|e| anyhow::anyhow!("Failed to read PID file: {}", e))?;
-
-    let pid: u32 = pid_content
-        .trim()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid PID in file: {}", e))?;
+    let pid = read_pid_file(&cli.pid_file)?;
 
     // Check if process is actually running using native libc call
     #[cfg(unix)]
     {
-        let is_running = unsafe {
-            let result = libc::kill(pid as libc::pid_t, 0);
-            if result == 0 {
-                true
-            } else {
-                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-                errno != libc::ESRCH // Process exists if error is not "no such process"
-            }
-        };
+        let is_running = process_is_running(pid);
 
         if is_running {
             println!("ATP daemon: RUNNING (PID: {})", pid);
@@ -720,12 +1245,43 @@ fn show_status(cli: AtpdCli) -> Result<()> {
     Ok(())
 }
 
-fn reload_daemon(_cli: AtpdCli) -> Result<()> {
+fn reload_daemon(cli: AtpdCli) -> Result<()> {
     info!("Reloading ATP daemon configuration...");
-    // TODO: Implement config reload
-    // - Send reload signal to running daemon
-    // - Validate new configuration
-    println!("ATP daemon reload requested (not yet implemented)");
+
+    let _config = load_daemon_config(&cli.config)?;
+    if !cli.pid_file.exists() {
+        return Err(cli_error(format!(
+            "cannot reload ATP daemon because PID file is missing: {}",
+            cli.pid_file.display()
+        )));
+    }
+    let pid = read_pid_file(&cli.pid_file)?;
+
+    #[cfg(unix)]
+    {
+        let signal_result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGHUP) };
+        if signal_result == 0 {
+            println!(
+                "Sent reload signal to ATP daemon (PID: {}, config: {})",
+                pid,
+                cli.config.display()
+            );
+        } else {
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+            return Err(cli_error(format!(
+                "failed to send SIGHUP to ATP daemon process {pid}: errno {errno}"
+            )));
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        return Err(cli_error(
+            "daemon reload by signal is only supported on Unix platforms",
+        ));
+    }
+
     Ok(())
 }
 
@@ -744,19 +1300,28 @@ fn init_daemon(_cli: AtpdCli, args: InitArgs) -> Result<()> {
         args.data_dir.display()
     );
 
+    if args.new_identity && args.copy_identity.is_some() {
+        return Err(cli_error(
+            "--new-identity and --copy-identity are mutually exclusive",
+        ));
+    }
+
+    let store_path = init_identity_store_path(&args.data_dir);
     if args.new_identity {
         info!("Generating new daemon identity...");
-        // TODO: Generate new identity
-        // - Create new Ed25519 key pair
-        // - Generate peer ID
-        // - Save to identity directory
-        println!("Identity generation (not yet implemented)");
+        let identity = create_identity_store(&store_path)?;
+        println!("Generated ATP daemon identity");
+        println!("  Key store: {}", store_path.display());
+        println!("  Peer ID: {}", identity.peer_id_hex());
     }
 
     if let Some(source_path) = args.copy_identity {
         info!("Copying identity from {}", source_path.display());
-        // TODO: Copy identity files
-        println!("Identity copy (not yet implemented)");
+        let identity = copy_identity_store_without_overwrite(&source_path, &store_path)?;
+        println!("Imported ATP daemon identity");
+        println!("  Source: {}", source_path.display());
+        println!("  Key store: {}", store_path.display());
+        println!("  Peer ID: {}", identity.peer_id_hex());
     }
 
     println!("ATP daemon initialization complete");
@@ -777,12 +1342,7 @@ fn show_diagnostics(cli: AtpdCli) -> Result<()> {
                 if let Ok(pid) = pid_content.trim().parse::<u32>() {
                     #[cfg(unix)]
                     {
-                        use std::process::Command;
-                        let running = Command::new("kill")
-                            .args(["-0", &pid.to_string()])
-                            .output()
-                            .map(|o| o.status.success())
-                            .unwrap_or(false);
+                        let running = process_is_running(pid);
 
                         if running {
                             println!("  Status: ✅ RUNNING (PID: {})", pid);
@@ -839,26 +1399,76 @@ fn show_diagnostics(cli: AtpdCli) -> Result<()> {
     println!("  Hostname: {}", hostname);
     println!();
 
-    // Future placeholder sections (not yet implemented)
-    println!("📈 Transfer Statistics: (not yet available)");
-    println!("🤝 Peer Directory: (not yet available)");
-    println!("💾 Cache Status: (not yet available)");
-    println!("📋 Journal Status: (not yet available)");
+    let config = load_daemon_config(&cli.config)?;
+    let identity_path = identity_store_path(&config);
+    let identity_status = load_identity_store(&identity_path);
+    let cache_stats = directory_stats(&config.storage.cache_dir)?;
+    let journal_stats = directory_stats(&config.storage.journal.journal_path)?;
+    let inbox_stats = directory_stats(&config.storage.data_dir.join("inbox"))?;
+    let transfer_stats = directory_stats(&config.storage.data_dir.join("transfers"))?;
+
+    println!("📈 Transfer State:");
+    println!("  Files: {}", transfer_stats.files);
+    println!("  Bytes: {}", transfer_stats.bytes);
+    println!("  Max concurrent: {}", config.transfers.max_concurrent);
+    println!();
+
+    println!("🤝 Peer Identity:");
+    match identity_status {
+        Ok(identity) => {
+            println!("  Peer ID: {}", identity.peer_id_hex());
+            println!("  Key store: {}", identity_path.display());
+        }
+        Err(err) => {
+            println!("  Status: identity unavailable: {}", err);
+            println!("  Key store: {}", identity_path.display());
+        }
+    }
+    println!();
+
+    println!("💾 Cache Status:");
+    println!("  Directory: {}", config.storage.cache_dir.display());
+    println!("  Files: {}", cache_stats.files);
+    println!("  Directories: {}", cache_stats.directories);
+    println!("  Bytes: {}", cache_stats.bytes);
+    println!("  Limit bytes: {}", config.storage.max_cache_size);
+    println!();
+
+    println!("📋 Journal Status:");
+    println!(
+        "  Directory: {}",
+        config.storage.journal.journal_path.display()
+    );
+    println!("  Enabled: {}", config.storage.journal.enable);
+    println!("  Files: {}", journal_stats.files);
+    println!("  Bytes: {}", journal_stats.bytes);
+    println!();
+
+    println!("📥 Inbox Status:");
+    println!(
+        "  Directory: {}",
+        config.storage.data_dir.join("inbox").display()
+    );
+    println!("  Files: {}", inbox_stats.files);
+    println!("  Bytes: {}", inbox_stats.bytes);
 
     Ok(())
 }
 
-fn manage_identity(_cli: AtpdCli, args: IdentityArgs) -> Result<()> {
+fn manage_identity(cli: AtpdCli, args: IdentityArgs) -> Result<()> {
     match args.action {
         IdentityAction::Show => {
             info!("Showing daemon identity...");
 
             // Load daemon configuration to find data directory
-            let config = load_daemon_config(&_cli.config)?;
+            let config = load_daemon_config(&cli.config)?;
 
-            let identity_dir = config.storage.data_dir.join("identity");
-            let peer_id_file = identity_dir.join("peer_id");
-            let private_key_file = identity_dir.join("private_key");
+            let private_key_file = identity_store_path(&config);
+            let identity_dir = private_key_file
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+            let peer_id_file = peer_id_path_for_store(&private_key_file);
 
             println!("=== ATP Daemon Identity ===");
             println!();
@@ -874,16 +1484,26 @@ fn manage_identity(_cli: AtpdCli, args: IdentityArgs) -> Result<()> {
             println!();
 
             println!("🆔 Peer Identity:");
+            match load_identity_store(&private_key_file) {
+                Ok(identity) => {
+                    println!("  Peer ID: {}", identity.peer_id_hex());
+                    println!("  Fingerprint: {}", identity.fingerprint().to_hex());
+                    println!("  Generation: {}", identity.generation());
+                    println!("  Status: ✅ Valid key store");
+                }
+                Err(err) => {
+                    println!("  Status: ❌ Cannot load identity: {}", err);
+                }
+            }
             if peer_id_file.exists() {
                 match std::fs::read_to_string(&peer_id_file) {
                     Ok(peer_id) => {
-                        println!("  Peer ID: {}", peer_id.trim());
-                        println!("  Status: ✅ Valid");
+                        println!("  Sidecar Peer ID: {}", peer_id.trim());
                     }
-                    Err(e) => println!("  Status: ❌ Cannot read peer ID: {}", e),
+                    Err(e) => println!("  Sidecar Status: ❌ Cannot read peer ID: {}", e),
                 }
             } else {
-                println!("  Status: ❌ Peer ID file not found");
+                println!("  Sidecar Status: ❌ Peer ID file not found");
             }
             println!();
 
@@ -923,27 +1543,33 @@ fn manage_identity(_cli: AtpdCli, args: IdentityArgs) -> Result<()> {
         }
         IdentityAction::Generate => {
             info!("Generating new daemon identity...");
-            // TODO: Generate new identity
-            println!("Identity generation (not yet implemented)");
+            let config = load_daemon_config(&cli.config)?;
+            let store_path = identity_store_path(&config);
+            let identity = create_identity_store(&store_path)?;
+            println!("Generated ATP daemon identity");
+            println!("  Key store: {}", store_path.display());
+            println!("  Peer ID: {}", identity.peer_id_hex());
         }
         IdentityAction::Import { path } => {
             info!("Importing identity from {}", path.display());
-            // TODO: Import identity
-            println!("Identity import (not yet implemented)");
+            let config = load_daemon_config(&cli.config)?;
+            let store_path = identity_store_path(&config);
+            let identity = copy_identity_store_without_overwrite(&path, &store_path)?;
+            println!("Imported ATP daemon identity");
+            println!("  Source: {}", path.display());
+            println!("  Key store: {}", store_path.display());
+            println!("  Peer ID: {}", identity.peer_id_hex());
         }
         IdentityAction::Export { path } => {
             info!("Exporting identity to {}", path.display());
-            // TODO: Export identity
-            println!("Identity export (not yet implemented)");
+            let config = load_daemon_config(&cli.config)?;
+            let store_path = identity_store_path(&config);
+            let identity = export_identity_store_without_overwrite(&store_path, &path)?;
+            println!("Exported ATP daemon identity");
+            println!("  Source: {}", store_path.display());
+            println!("  Destination: {}", path.display());
+            println!("  Peer ID: {}", identity.peer_id_hex());
         }
     }
     Ok(())
-}
-
-fn load_config(path: &std::path::Path) -> Result<AtpdConfig> {
-    let content = std::fs::read_to_string(path)?;
-
-    let config: AtpdConfig = toml::from_str(&content)?;
-
-    Ok(config)
 }

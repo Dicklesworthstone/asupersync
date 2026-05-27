@@ -6,17 +6,17 @@ use std::fmt;
 /// Encryption key for mailbox operations.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MailboxKey {
-    /// Key material (simplified for foundational implementation)
+    /// Key material for AES-256-GCM.
     key_material: [u8; 32],
 }
 
 impl MailboxKey {
     /// Generate a new random mailbox key.
+    #[must_use]
     pub fn generate() -> Self {
-        // Simplified key generation for foundational implementation
-        Self {
-            key_material: [0u8; 32], // In real implementation, use secure random
-        }
+        let mut key_material = [0u8; 32];
+        getrandom::fill(&mut key_material).expect("OS entropy unavailable for mailbox key");
+        Self { key_material }
     }
 
     /// Create key from bytes.
@@ -62,30 +62,58 @@ pub struct ChunkNonce {
 
 impl ChunkNonce {
     /// Generate a new random nonce.
-    pub fn generate() -> Self {
-        // Simplified nonce generation
-        Self {
-            bytes: [0u8; 12], // In real implementation, use secure random
-        }
+    pub fn generate() -> Result<Self, String> {
+        let mut bytes = [0u8; 12];
+        getrandom::fill(&mut bytes)
+            .map_err(|err| format!("OS entropy unavailable for mailbox nonce: {err}"))?;
+        Ok(Self { bytes })
     }
 }
 
 impl EncryptedChunk {
     /// Encrypt data with the given key.
     pub fn encrypt(data: &[u8], key: &MailboxKey) -> Result<Self, String> {
-        // Simplified encryption for foundational implementation
-        let nonce = ChunkNonce::generate();
+        use aes_gcm::aead::{AeadInPlace, KeyInit};
+        use aes_gcm::{Aes256Gcm, Nonce};
+
+        let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
+            .map_err(|err| format!("invalid mailbox key: {err}"))?;
+        let nonce = ChunkNonce::generate()?;
+        let mut encrypted = data.to_vec();
+        let tag = cipher
+            .encrypt_in_place_detached(
+                Nonce::from_slice(&nonce.bytes),
+                b"atp-mailbox-v1",
+                &mut encrypted,
+            )
+            .map_err(|err| format!("mailbox encryption failed: {err}"))?;
+        let mut tag_bytes = [0u8; 16];
+        tag_bytes.copy_from_slice(tag.as_slice());
+
         Ok(Self {
-            data: data.to_vec(), // In real implementation, actually encrypt
+            data: encrypted,
             nonce,
-            tag: [0u8; 16], // In real implementation, compute authentication tag
+            tag: tag_bytes,
         })
     }
 
     /// Decrypt chunk with the given key.
     pub fn decrypt(&self, key: &MailboxKey) -> Result<Vec<u8>, String> {
-        // Simplified decryption for foundational implementation
-        Ok(self.data.clone()) // In real implementation, actually decrypt and verify
+        use aes_gcm::aead::{AeadInPlace, KeyInit};
+        use aes_gcm::{Aes256Gcm, Nonce, Tag};
+
+        let cipher = Aes256Gcm::new_from_slice(key.as_bytes())
+            .map_err(|err| format!("invalid mailbox key: {err}"))?;
+        let mut decrypted = self.data.clone();
+        cipher
+            .decrypt_in_place_detached(
+                Nonce::from_slice(&self.nonce.bytes),
+                b"atp-mailbox-v1",
+                &mut decrypted,
+                Tag::from_slice(&self.tag),
+            )
+            .map_err(|_| "mailbox authentication failed".to_string())?;
+        Ok(decrypted)
     }
 }
 
@@ -112,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_chunk_nonce_generation() {
-        let nonce = ChunkNonce::generate();
+        let nonce = ChunkNonce::generate().unwrap();
         assert_eq!(nonce.bytes.len(), 12);
     }
 }

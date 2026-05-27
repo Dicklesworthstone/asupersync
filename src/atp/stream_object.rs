@@ -241,6 +241,15 @@ impl StreamManifest {
 
     /// Add a new epoch to the manifest.
     pub fn add_epoch(&mut self, epoch: StreamEpoch) -> AtpOutcome<()> {
+        if matches!(
+            self.stream_state,
+            StreamState::Complete | StreamState::Cancelled | StreamState::Failed
+        ) {
+            return Outcome::err(AtpError::Protocol(
+                crate::net::atp::protocol::outcome::ProtocolError::SessionStateMismatch,
+            ));
+        }
+
         // Validate epoch sequence
         if let Some(last_epoch) = self.epochs.last() {
             if epoch.epoch_sequence <= last_epoch.epoch_sequence {
@@ -915,12 +924,9 @@ fn object_id_artifact_id(object_id: &ObjectId) -> String {
 }
 
 fn system_time_unix_nanos(time: SystemTime) -> u64 {
-    time.duration_since(UNIX_EPOCH)
-        .map(|duration| match u64::try_from(duration.as_nanos()) {
-            Ok(nanos) => nanos,
-            Err(_) => u64::MAX,
-        })
-        .unwrap_or(0)
+    time.duration_since(UNIX_EPOCH).map_or(0, |duration| {
+        u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+    })
 }
 
 // Additional StreamObject methods for ATP-E4 early usability support
@@ -943,7 +949,7 @@ impl StreamManifest {
     /// Check if large streams require explicit prefix policy.
     pub fn requires_explicit_prefix_policy(&self) -> bool {
         self.expected_total_bytes()
-            .map_or(false, |size| size > 10_000_000) // 10MB threshold
+            .is_some_and(|size| size > 10_000_000) // 10MB threshold
     }
 
     /// Check if consumption policy allows reading a given range.
@@ -973,6 +979,7 @@ impl StreamManifest {
         );
 
         let _ = self.add_epoch(cancellation_epoch);
+        self.stream_state = StreamState::Cancelled;
     }
 
     /// Invalidate content from a given offset due to verification failure.

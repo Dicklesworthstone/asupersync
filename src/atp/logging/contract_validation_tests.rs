@@ -11,7 +11,7 @@
 #![cfg(test)]
 
 use super::*;
-use crate::atp::logging::failure_bundle::*;
+use crate::atp::logging::failure_bundle::{self, *};
 use crate::atp::logging::redaction::*;
 use crate::atp::logging::replay_artifacts::*;
 use crate::atp::logging::schema::*;
@@ -102,7 +102,7 @@ fn test_atp_subsystem_completeness() {
 
     for required in required_subsystems {
         assert!(
-            subsystem_names.contains(&required),
+            subsystem_names.iter().any(|name| name == required),
             "Missing required subsystem: {}",
             required
         );
@@ -248,56 +248,71 @@ fn test_failure_bundle_schema_validation() {
                 env.insert("ATP_LOG_LEVEL".to_string(), "debug".to_string());
                 env
             },
-            system_info: SystemInfo {
+            system_info: failure_bundle::SystemInfo {
                 os: "Linux".to_string(),
                 os_version: "6.17.0".to_string(),
                 arch: "x86_64".to_string(),
-                available_memory_bytes: 8589934592, // 8GB
+                memory_total: 8_589_934_592,           // 8GB
+                disk_space_available: 107_374_182_400, // 100GB
                 cpu_count: 8,
             },
             atp_config: Some(json!({"quic_enabled": true})),
-            resource_limits: ResourceLimits {
-                max_memory_bytes: 1073741824, // 1GB
-                max_cpu_percent: 80,
-                max_open_files: 1024,
-                max_network_connections: 100,
+            resource_limits: failure_bundle::ResourceLimits {
+                max_memory: Some(1_073_741_824), // 1GB
+                max_disk: Some(10_737_418_240),  // 10GB
+                max_bandwidth: Some(10_000_000),
+                max_file_descriptors: Some(1024),
             },
         },
         seed: 0x123456789abcdef0,
-        trace_data: TraceData {
-            events: vec![
-                json!({
-                    "timestamp": "2026-05-25T12:00:01Z",
-                    "event": "transfer_started",
-                    "data": {"object_id": "obj-123"}
-                }),
-                json!({
-                    "timestamp": "2026-05-25T12:00:02Z",
-                    "event": "transfer_failed",
-                    "data": {"error": "connection_timeout"}
-                }),
+        trace_data: failure_bundle::TraceData {
+            log_events: vec![
+                create_test_event(
+                    AtpSubsystem::Transfer,
+                    "transfer_started",
+                    json!({"object_id": "obj-123"}),
+                ),
+                create_test_event(
+                    AtpSubsystem::Transfer,
+                    "transfer_failed",
+                    json!({"error": "connection_timeout"}),
+                ),
             ],
-            trace_summary: json!({
-                "total_events": 2,
-                "error_count": 1,
-                "duration_ms": 1000
-            }),
+            trace_timeline: vec![failure_bundle::TraceEvent {
+                timestamp: "2026-05-25T12:00:01Z".to_string(),
+                event_type: "transfer_started".to_string(),
+                thread_id: "test-thread".to_string(),
+                data: json!({"object_id": "obj-123"}),
+            }],
+            performance_metrics: HashMap::from([("duration_ms".to_string(), 1000.0)]),
+            error_chain: vec![failure_bundle::ErrorInfo {
+                message: "connection_timeout".to_string(),
+                error_type: "network".to_string(),
+                stack_trace: None,
+                context: HashMap::from([("phase".to_string(), "transfer".to_string())]),
+            }],
         },
-        qlog_data: Some(QlogData {
-            qlog_version: "0.3".to_string(),
-            events: vec![json!({
-                "time": 0.0,
-                "name": "connection_started",
-                "data": {}
-            })],
+        qlog_data: Some(failure_bundle::QlogData {
+            connection_events: vec![failure_bundle::QuicEvent {
+                timestamp: "2026-05-25T12:00:00Z".to_string(),
+                connection_id: TEST_CONNECTION_ID.to_string(),
+                event_type: "connection_started".to_string(),
+                data: json!({}),
+            }],
+            packet_traces: Vec::new(),
+            connection_stats: HashMap::new(),
         }),
-        path_log: Some(PathLog {
-            discovery_attempts: vec![json!({
-                "candidate": "192.168.1.100:443",
-                "result": "success",
-                "latency_ms": 45
-            })],
-            selected_path: Some("quic+udp://192.168.1.100:443".to_string()),
+        path_log: Some(failure_bundle::PathLog {
+            discovered_paths: vec![failure_bundle::PathInfo {
+                path_id: "path-1".to_string(),
+                local_endpoint: "127.0.0.1:12345".to_string(),
+                remote_endpoint: "192.168.1.100:443".to_string(),
+                path_type: "quic+udp".to_string(),
+                metrics: HashMap::from([("latency_ms".to_string(), 45.0)]),
+            }],
+            nat_classification: HashMap::new(),
+            stun_bindings: Vec::new(),
+            relay_info: None,
         }),
         repair_log: None,
         journal_digest: None,
@@ -321,7 +336,7 @@ fn test_failure_bundle_schema_validation() {
     assert_eq!(parsed.metadata.bundle_id, "bundle-12345");
     assert_eq!(parsed.command.exit_code, Some(1));
     assert_eq!(parsed.seed, 0x123456789abcdef0);
-    assert_eq!(parsed.trace_data.events.len(), 2);
+    assert_eq!(parsed.trace_data.log_events.len(), 2);
 
     // Replay command must be non-empty and include seed
     assert!(!parsed.replay_command.is_empty());
@@ -689,58 +704,6 @@ fn get_sensitive_field_patterns() -> Vec<&'static str> {
         "credentials",
         "authorization",
     ]
-}
-
-// Mock structs to support the tests (these would be real implementations)
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct TraceData {
-    events: Vec<Value>,
-    trace_summary: Value,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct QlogData {
-    qlog_version: String,
-    events: Vec<Value>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct PathLog {
-    discovery_attempts: Vec<Value>,
-    selected_path: Option<String>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct RepairLog {
-    repair_sessions: Vec<Value>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct JournalDigest {
-    entries: Vec<Value>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct ProofBundle {
-    proofs: Vec<Value>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct SystemInfo {
-    os: String,
-    os_version: String,
-    arch: String,
-    available_memory_bytes: u64,
-    cpu_count: u32,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct ResourceLimits {
-    max_memory_bytes: u64,
-    max_cpu_percent: u32,
-    max_open_files: u32,
-    max_network_connections: u32,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

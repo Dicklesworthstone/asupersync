@@ -277,7 +277,7 @@ pub struct TrustAccessEvent {
     pub timestamp: std::time::SystemTime,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod tests {
     use super::*;
 

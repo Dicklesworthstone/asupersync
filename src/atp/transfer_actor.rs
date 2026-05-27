@@ -10,11 +10,11 @@ use crate::atp::transfer_brain::{
 use crate::channel::{mpsc, oneshot};
 use crate::cx::Cx;
 use crate::error::{Error, ErrorKind, Result};
-use crate::time::Sleep;
+use crate::time::{Sleep, wall_now};
 use crate::types::{RegionId, TaskId, TraceId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 #[cfg(feature = "tracing-integration")]
 use tracing::{debug, error, info, warn};
 
@@ -320,7 +320,7 @@ impl TransferActor {
             message_tx: message_tx.clone(),
         };
 
-        let handle = TransferActorHandle { message_tx, config };
+        let handle = TransferActorHandle { message_tx };
 
         (actor, handle)
     }
@@ -334,7 +334,7 @@ impl TransferActor {
 
         loop {
             // Check for cancellation
-            if cx.is_cancelled() {
+            if cx.is_cancel_requested() {
                 info!("Transfer actor cancelled, shutting down");
                 break;
             }
@@ -342,12 +342,13 @@ impl TransferActor {
             // Try to receive a message (non-blocking)
             match self.message_rx.try_recv() {
                 Ok(msg) => {
-                    if let Err(e) = self.handle_message(msg).await {
-                        error!("Error handling message: {:?}", e);
+                    let shutdown = matches!(msg, TransferMessage::Shutdown);
+                    if self.handle_message(cx, msg).await.is_err() {
+                        error!("Error handling transfer actor message");
                     }
 
                     // Check if it's shutdown
-                    if matches!(msg, TransferMessage::Shutdown) {
+                    if shutdown {
                         break;
                     }
                 }
@@ -359,7 +360,7 @@ impl TransferActor {
                     }
 
                     // Small delay to avoid busy spinning
-                    Sleep::new(SystemTime::now() + Duration::from_millis(10)).await;
+                    Sleep::after(wall_now(), Duration::from_millis(10)).await;
                 }
             }
         }
@@ -368,7 +369,7 @@ impl TransferActor {
         Ok(())
     }
 
-    async fn handle_message(&mut self, message: TransferMessage) -> Result<()> {
+    async fn handle_message(&mut self, cx: &Cx, message: TransferMessage) -> Result<()> {
         match message {
             TransferMessage::StartSession {
                 object_id,
@@ -380,7 +381,7 @@ impl TransferActor {
                 let result = self
                     .start_session(object_id, region_id, task_id, trace_id)
                     .await;
-                if let Err(_) = response_tx.send(result) {
+                if response_tx.send(cx, result).is_err() {
                     debug!("Failed to send start session response");
                 }
             }
@@ -391,7 +392,7 @@ impl TransferActor {
                 response_tx,
             } => {
                 let result = self.schedule_chunk(session_id, chunk).await;
-                let _ = response_tx.send(result);
+                let _ = response_tx.send(cx, result);
             }
 
             TransferMessage::CompleteChunk {
@@ -404,7 +405,7 @@ impl TransferActor {
                 let result = self
                     .complete_chunk(session_id, chunk_id, success, bytes_transferred)
                     .await;
-                let _ = response_tx.send(result);
+                let _ = response_tx.send(cx, result);
             }
 
             TransferMessage::UpdatePressure { pressure } => {
@@ -416,7 +417,7 @@ impl TransferActor {
                 response_tx,
             } => {
                 let result = self.pause_session(session_id).await;
-                let _ = response_tx.send(result);
+                let _ = response_tx.send(cx, result);
             }
 
             TransferMessage::ResumeSession {
@@ -424,7 +425,7 @@ impl TransferActor {
                 response_tx,
             } => {
                 let result = self.resume_session(session_id).await;
-                let _ = response_tx.send(result);
+                let _ = response_tx.send(cx, result);
             }
 
             TransferMessage::CancelSession {
@@ -432,7 +433,7 @@ impl TransferActor {
                 response_tx,
             } => {
                 let result = self.cancel_session(session_id).await;
-                let _ = response_tx.send(result);
+                let _ = response_tx.send(cx, result);
             }
 
             TransferMessage::GetSessionStatus {
@@ -440,12 +441,12 @@ impl TransferActor {
                 response_tx,
             } => {
                 let result = self.get_session_status(session_id).await;
-                let _ = response_tx.send(result);
+                let _ = response_tx.send(cx, result);
             }
 
             TransferMessage::GetAllSessions { response_tx } => {
                 let result = self.get_all_sessions().await;
-                let _ = response_tx.send(result);
+                let _ = response_tx.send(cx, result);
             }
 
             TransferMessage::Shutdown => {
@@ -518,18 +519,14 @@ impl TransferActor {
         success: bool,
         bytes_transferred: u64,
     ) -> Result<()> {
+        let pressure = self.current_pressure.clone();
         let session = self
             .sessions
             .get_mut(&session_id)
             .ok_or_else(|| Error::new(ErrorKind::ObjectMismatch))?;
 
-        let actual_resources = crate::atp::transfer_brain::ResourceUsage {
-            cpu: 0.1, // TODO: Measure actual CPU usage
-            disk_io: 0.05,
-            network: bytes_transferred as f64,
-            memory: chunk_id.size as f64,
-            duration: Duration::from_millis(100), // TODO: Measure actual duration
-        };
+        let actual_resources =
+            measured_completion_resources(session, &pressure, &chunk_id, bytes_transferred);
 
         session
             .brain
@@ -665,28 +662,22 @@ impl TransferActor {
         }
     }
 
-    async fn start_pressure_monitor(&self) -> tokio::task::JoinHandle<()> {
+    pub async fn run_pressure_monitor(&self, cx: &Cx) -> Result<()> {
         let tx = self.message_tx.clone();
         let interval = self.config.pressure_monitor_interval;
+        let mut sampler = SystemPressureSampler::new();
 
-        tokio::spawn(async move {
-            let mut interval_timer = tokio::time::interval(interval);
-
-            loop {
-                interval_timer.tick().await;
-
-                // TODO: Implement actual system pressure monitoring
-                let pressure = SystemPressure {
-                    cpu_utilization: 0.3, // Placeholder
-                    disk_pressure: 0.2,
-                    network_pressure: 0.1,
-                    memory_pressure: 0.4,
-                    measured_at: SystemTime::now(),
-                };
-
-                let _ = tx.send(TransferMessage::UpdatePressure { pressure });
+        loop {
+            if cx.is_cancel_requested() {
+                return Ok(());
             }
-        })
+
+            Sleep::after(wall_now(), interval).await;
+            let pressure = sampler.sample();
+            tx.send(cx, TransferMessage::UpdatePressure { pressure })
+                .await
+                .map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
+        }
     }
 }
 
@@ -694,13 +685,13 @@ impl TransferActor {
 #[derive(Clone)]
 pub struct TransferActorHandle {
     message_tx: mpsc::Sender<TransferMessage>,
-    config: TransferActorConfig,
 }
 
 impl TransferActorHandle {
     /// Start a new transfer session
     pub async fn start_session(
         &self,
+        cx: &Cx,
         object_id: ObjectId,
         region_id: RegionId,
         task_id: TaskId,
@@ -709,141 +700,398 @@ impl TransferActorHandle {
         let (response_tx, response_rx) = oneshot::channel();
 
         self.message_tx
-            .send(TransferMessage::StartSession {
-                object_id,
-                region_id,
-                task_id,
-                trace_id,
-                response_tx,
-            })
+            .send(
+                cx,
+                TransferMessage::StartSession {
+                    object_id,
+                    region_id,
+                    task_id,
+                    trace_id,
+                    response_tx,
+                },
+            )
             .await
             .map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
 
+        let mut response_rx = response_rx;
         response_rx
+            .recv(cx)
             .await
             .map_err(|_| Error::new(ErrorKind::ChannelClosed))?
     }
 
     /// Schedule a chunk for transfer
-    pub async fn schedule_chunk(&self, session_id: SessionId, chunk: ScheduledChunk) -> Result<()> {
-        let (response_tx, mut response_rx) = mpsc::unbounded_channel();
+    pub async fn schedule_chunk(
+        &self,
+        cx: &Cx,
+        session_id: SessionId,
+        chunk: ScheduledChunk,
+    ) -> Result<()> {
+        let (response_tx, mut response_rx) = oneshot::channel();
 
         self.message_tx
-            .send(TransferMessage::ScheduleChunk {
-                session_id,
-                chunk,
-                response_tx,
-            })
+            .send(
+                cx,
+                TransferMessage::ScheduleChunk {
+                    session_id,
+                    chunk,
+                    response_tx,
+                },
+            )
+            .await
             .map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
 
         response_rx
-            .recv()
+            .recv(cx)
             .await
-            .ok_or_else(|| Error::new(ErrorKind::ChannelClosed))?
+            .map_err(|_| Error::new(ErrorKind::ChannelClosed))?
     }
 
     /// Complete a chunk transfer
     pub async fn complete_chunk(
         &self,
+        cx: &Cx,
         session_id: SessionId,
         chunk_id: ChunkId,
         success: bool,
         bytes_transferred: u64,
     ) -> Result<()> {
-        let (response_tx, mut response_rx) = mpsc::unbounded_channel();
+        let (response_tx, mut response_rx) = oneshot::channel();
 
         self.message_tx
-            .send(TransferMessage::CompleteChunk {
-                session_id,
-                chunk_id,
-                success,
-                bytes_transferred,
-                response_tx,
-            })
+            .send(
+                cx,
+                TransferMessage::CompleteChunk {
+                    session_id,
+                    chunk_id,
+                    success,
+                    bytes_transferred,
+                    response_tx,
+                },
+            )
+            .await
             .map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
 
         response_rx
-            .recv()
+            .recv(cx)
             .await
-            .ok_or_else(|| Error::new(ErrorKind::ChannelClosed))?
+            .map_err(|_| Error::new(ErrorKind::ChannelClosed))?
     }
 
     /// Get session status
-    pub async fn get_session_status(&self, session_id: SessionId) -> Result<TransferSessionStatus> {
-        let (response_tx, mut response_rx) = mpsc::unbounded_channel();
+    pub async fn get_session_status(
+        &self,
+        cx: &Cx,
+        session_id: SessionId,
+    ) -> Result<TransferSessionStatus> {
+        let (response_tx, mut response_rx) = oneshot::channel();
 
         self.message_tx
-            .send(TransferMessage::GetSessionStatus {
-                session_id,
-                response_tx,
-            })
+            .send(
+                cx,
+                TransferMessage::GetSessionStatus {
+                    session_id,
+                    response_tx,
+                },
+            )
+            .await
             .map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
 
         response_rx
-            .recv()
+            .recv(cx)
             .await
-            .ok_or_else(|| Error::new(ErrorKind::ChannelClosed))?
+            .map_err(|_| Error::new(ErrorKind::ChannelClosed))?
     }
 
     /// Shutdown the transfer actor
-    pub fn shutdown(&self) -> Result<()> {
+    pub async fn shutdown(&self, cx: &Cx) -> Result<()> {
         self.message_tx
-            .send(TransferMessage::Shutdown)
+            .send(cx, TransferMessage::Shutdown)
+            .await
             .map_err(|_| Error::new(ErrorKind::ChannelClosed))?;
         Ok(())
     }
+}
+fn measured_completion_resources(
+    session: &TransferSession,
+    pressure: &SystemPressure,
+    chunk_id: &ChunkId,
+    bytes_transferred: u64,
+) -> crate::atp::transfer_brain::ResourceUsage {
+    let duration = session
+        .last_activity
+        .elapsed()
+        .unwrap_or(Duration::ZERO)
+        .max(Duration::from_millis(1));
+    let duration_secs = duration.as_secs_f64().max(0.001);
+    let cpu_seconds = pressure.cpu_utilization.clamp(0.0, 1.0) * duration_secs;
+    let disk_bytes = chunk_id.size.max(bytes_transferred as usize) as f64
+        * pressure.disk_pressure.clamp(0.0, 1.0).max(0.01);
+
+    crate::atp::transfer_brain::ResourceUsage {
+        cpu: cpu_seconds,
+        disk_io: disk_bytes,
+        network: bytes_transferred as f64,
+        memory: chunk_id.size as f64,
+        duration,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SystemPressureSampler {
+    previous_cpu: Option<CpuSnapshot>,
+    previous_disk: Option<DiskSnapshot>,
+    previous_network: Option<NetworkSnapshot>,
+    peak_network_bytes_per_second: f64,
+}
+
+impl SystemPressureSampler {
+    fn new() -> Self {
+        Self {
+            previous_cpu: read_cpu_snapshot(),
+            previous_disk: read_disk_snapshot(),
+            previous_network: read_network_snapshot(),
+            peak_network_bytes_per_second: 0.0,
+        }
+    }
+
+    fn sample(&mut self) -> SystemPressure {
+        let cpu_snapshot = read_cpu_snapshot();
+        let cpu_utilization = cpu_snapshot
+            .as_ref()
+            .and_then(|current| {
+                self.previous_cpu
+                    .as_ref()
+                    .map(|previous| current.utilization_since(previous))
+            })
+            .unwrap_or(0.0);
+        self.previous_cpu = cpu_snapshot;
+
+        let disk_snapshot = read_disk_snapshot();
+        let disk_pressure = disk_snapshot
+            .as_ref()
+            .and_then(|current| {
+                self.previous_disk
+                    .as_ref()
+                    .map(|previous| current.pressure_since(previous))
+            })
+            .unwrap_or(0.0);
+        self.previous_disk = disk_snapshot;
+
+        let network_snapshot = read_network_snapshot();
+        let network_pressure = network_snapshot
+            .as_ref()
+            .and_then(|current| {
+                self.previous_network.as_ref().map(|previous| {
+                    current.pressure_since(previous, &mut self.peak_network_bytes_per_second)
+                })
+            })
+            .unwrap_or(0.0);
+        self.previous_network = network_snapshot;
+
+        SystemPressure {
+            cpu_utilization,
+            disk_pressure,
+            network_pressure,
+            memory_pressure: read_memory_pressure().unwrap_or(0.0),
+            measured_at: SystemTime::now(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CpuSnapshot {
+    idle: u64,
+    total: u64,
+}
+
+impl CpuSnapshot {
+    fn utilization_since(self, previous: &Self) -> f64 {
+        let total_delta = self.total.saturating_sub(previous.total);
+        if total_delta == 0 {
+            return 0.0;
+        }
+
+        let idle_delta = self.idle.saturating_sub(previous.idle);
+        ((total_delta.saturating_sub(idle_delta)) as f64 / total_delta as f64).clamp(0.0, 1.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DiskSnapshot {
+    weighted_io_millis: u64,
+    sampled_at: Instant,
+}
+
+impl DiskSnapshot {
+    fn pressure_since(self, previous: &Self) -> f64 {
+        let elapsed_millis = self
+            .sampled_at
+            .saturating_duration_since(previous.sampled_at)
+            .as_millis()
+            .max(1) as f64;
+        let io_delta = self
+            .weighted_io_millis
+            .saturating_sub(previous.weighted_io_millis) as f64;
+
+        (io_delta / elapsed_millis).clamp(0.0, 1.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NetworkSnapshot {
+    bytes: u64,
+    sampled_at: Instant,
+}
+
+impl NetworkSnapshot {
+    fn pressure_since(self, previous: &Self, peak_bytes_per_second: &mut f64) -> f64 {
+        let elapsed_secs = self
+            .sampled_at
+            .saturating_duration_since(previous.sampled_at)
+            .as_secs_f64()
+            .max(0.001);
+        let byte_delta = self.bytes.saturating_sub(previous.bytes) as f64;
+        let bytes_per_second = byte_delta / elapsed_secs;
+        *peak_bytes_per_second = (*peak_bytes_per_second).max(bytes_per_second);
+
+        if *peak_bytes_per_second <= f64::EPSILON {
+            0.0
+        } else {
+            (bytes_per_second / *peak_bytes_per_second).clamp(0.0, 1.0)
+        }
+    }
+}
+
+fn read_cpu_snapshot() -> Option<CpuSnapshot> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let cpu_line = stat.lines().find(|line| line.starts_with("cpu "))?;
+    let mut values = cpu_line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|field| field.parse::<u64>().ok());
+    let user = values.next()?;
+    let nice = values.next()?;
+    let system = values.next()?;
+    let idle = values.next()?;
+    let iowait = values.next().unwrap_or(0);
+    let irq = values.next().unwrap_or(0);
+    let softirq = values.next().unwrap_or(0);
+    let steal = values.next().unwrap_or(0);
+    let idle_all = idle.saturating_add(iowait);
+    let total = user
+        .saturating_add(nice)
+        .saturating_add(system)
+        .saturating_add(idle)
+        .saturating_add(iowait)
+        .saturating_add(irq)
+        .saturating_add(softirq)
+        .saturating_add(steal);
+
+    Some(CpuSnapshot {
+        idle: idle_all,
+        total,
+    })
+}
+
+fn read_memory_pressure() -> Option<f64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let mut total_kib = None;
+    let mut available_kib = None;
+
+    for line in meminfo.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            total_kib = rest
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<u64>().ok());
+        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            available_kib = rest
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<u64>().ok());
+        }
+    }
+
+    let total_kib = total_kib?;
+    if total_kib == 0 {
+        return None;
+    }
+    let available_kib = available_kib?;
+    Some((1.0 - (available_kib as f64 / total_kib as f64)).clamp(0.0, 1.0))
+}
+
+fn read_disk_snapshot() -> Option<DiskSnapshot> {
+    let diskstats = std::fs::read_to_string("/proc/diskstats").ok()?;
+    let weighted_io_millis = diskstats
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            let device = *fields.get(2)?;
+            if device.starts_with("loop") || device.starts_with("ram") {
+                return None;
+            }
+            fields.get(13)?.parse::<u64>().ok()
+        })
+        .fold(0_u64, u64::saturating_add);
+
+    Some(DiskSnapshot {
+        weighted_io_millis,
+        sampled_at: Instant::now(),
+    })
+}
+
+fn read_network_snapshot() -> Option<NetworkSnapshot> {
+    let netdev = std::fs::read_to_string("/proc/net/dev").ok()?;
+    let bytes = netdev
+        .lines()
+        .skip(2)
+        .filter_map(|line| {
+            let (interface, counters) = line.split_once(':')?;
+            if interface.trim() == "lo" {
+                return None;
+            }
+            let mut fields = counters.split_whitespace();
+            let rx_bytes = fields.next()?.parse::<u64>().ok()?;
+            let tx_bytes = fields.nth(7)?.parse::<u64>().ok()?;
+            Some(rx_bytes.saturating_add(tx_bytes))
+        })
+        .fold(0_u64, u64::saturating_add);
+
+    Some(NetworkSnapshot {
+        bytes,
+        sampled_at: Instant::now(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::atp::transfer_brain::{ScheduledChunk, TransferPriority};
-    // TODO: Reimplement tests with asupersync async primitives
 
-    // TODO: Reimplement with asupersync async primitives
-    /*
     #[test]
     fn test_transfer_actor_creation() {
         let config = TransferActorConfig::default();
-        let (actor, handle) = TransferActor::new(config);
+        let (actor, _handle) = TransferActor::new(config);
 
-        // Should be able to create handle
-        // TODO: Fix assertion for asupersync channels
+        assert_eq!(actor.session_counter, 0);
+        assert!(actor.sessions.is_empty());
     }
 
     #[test]
-    fn test_session_lifecycle() {
-        let config = TransferActorConfig {
-            enable_resource_monitoring: false, // Disable for test
-            ..TransferActorConfig::default()
-        };
-        let (mut actor, handle) = TransferActor::new(config);
-
-        // Start actor in background
-        let cx = crate::cx::Cx::root();
-        tokio::spawn(async move {
-            let _ = actor.run(&cx).await;
-        });
-
-        // Start a session
+    fn test_session_state_transition() {
         let object_id = ObjectId::from("test-object");
-        let region_id = RegionId::new();
-        let task_id = TaskId::new();
-        let trace_id = TraceId::new();
+        let session_id = SessionId::new(object_id.clone(), 1);
+        let mut session = TransferSession::new(
+            session_id,
+            object_id,
+            RegionId::new(),
+            TaskId::new(),
+            TransferBrainConfig::default(),
+            TraceId::new(),
+        );
 
-        let session_id = timeout(Duration::from_secs(1),
-            handle.start_session(object_id.clone(), region_id, task_id, trace_id))
-            .await.unwrap().unwrap();
-
-        // Get session status
-        let status = timeout(Duration::from_secs(1),
-            handle.get_session_status(session_id.clone()))
-            .await.unwrap().unwrap();
-
-        assert_eq!(status.object_id, object_id);
-        assert_eq!(status.state, SessionState::Initializing);
-
-        // handle.shutdown().unwrap();
+        assert_eq!(session.state, SessionState::Initializing);
+        session.transition_to(SessionState::Active);
+        assert_eq!(session.state, SessionState::Active);
     }
-    */
 }

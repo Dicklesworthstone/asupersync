@@ -4,6 +4,7 @@
 //! enabling independent validation of transfer completeness and integrity without
 //! access to the original transfer infrastructure.
 
+use crate::atp::proof::replay::ReplayableEventKind;
 use crate::atp::proof::{AtpProofBundle, ProofStrength};
 use crate::atp::verifier::{AtpVerifier, VerificationError};
 use serde::{Deserialize, Serialize};
@@ -765,14 +766,16 @@ impl AtpBundleVerifier {
             missing_replay_data.push("replay_pointers".to_string());
         }
 
-        // Estimate event coverage (simplified)
-        let event_coverage = if replay_supported && bundle.journal.is_complete {
-            0.9 // Assume good coverage if we have pointers and complete journal
-        } else if replay_supported {
-            0.5 // Partial coverage with incomplete journal
-        } else {
-            0.0 // No replay capability
-        };
+        let (event_coverage, invalid_pointer_count) = self.replay_event_coverage(bundle);
+        if invalid_pointer_count > 0 {
+            missing_replay_data.push("invalid_replay_pointer".to_string());
+            warnings.push(VerificationWarning {
+                code: "invalid_replay_pointer".to_string(),
+                message: format!("{invalid_pointer_count} replay pointer(s) failed validation"),
+                category: VerificationCategory::ReplayCapability,
+                context: BTreeMap::new(),
+            });
+        }
 
         if !replay_supported {
             warnings.push(VerificationWarning {
@@ -812,6 +815,73 @@ impl AtpBundleVerifier {
             event_coverage,
             missing_replay_data,
         }
+    }
+
+    fn replay_event_coverage(&self, bundle: &AtpProofBundle) -> (f64, usize) {
+        use std::collections::HashSet;
+
+        if bundle.replay_pointers.is_empty() {
+            return (0.0, 0);
+        }
+
+        let required = [
+            ReplayableEventKind::SessionStart,
+            ReplayableEventKind::ChunkTransfer,
+            ReplayableEventKind::VerificationStage,
+            ReplayableEventKind::SessionEnd,
+        ];
+        let all_kinds = [
+            ReplayableEventKind::SessionStart,
+            ReplayableEventKind::PeerAuth,
+            ReplayableEventKind::PathSetup,
+            ReplayableEventKind::ChunkTransfer,
+            ReplayableEventKind::RepairSymbol,
+            ReplayableEventKind::RaptorQDecode,
+            ReplayableEventKind::VerificationStage,
+            ReplayableEventKind::JournalWrite,
+            ReplayableEventKind::SessionEnd,
+            ReplayableEventKind::Error,
+        ];
+
+        let mut covered = HashSet::new();
+        let mut total_events = 0u64;
+        let mut invalid_pointer_count = 0usize;
+        for pointer in bundle.replay_pointers.values() {
+            if pointer.validate().is_err() {
+                invalid_pointer_count += 1;
+                continue;
+            }
+            total_events = total_events.saturating_add(pointer.event_count());
+            let pointer_kinds = pointer.event_filter.as_ref().map_or_else(
+                || all_kinds.to_vec(),
+                |filter| {
+                    let mut kinds = if filter.include_kinds.is_empty() {
+                        all_kinds.to_vec()
+                    } else {
+                        filter.include_kinds.clone()
+                    };
+                    kinds.retain(|kind| !filter.exclude_kinds.contains(kind));
+                    kinds
+                },
+            );
+            covered.extend(pointer_kinds);
+        }
+
+        if total_events == 0 {
+            return (0.0, invalid_pointer_count);
+        }
+
+        let critical_covered = required
+            .iter()
+            .filter(|kind| covered.contains(kind))
+            .count() as f64;
+        let critical_ratio = critical_covered / required.len() as f64;
+        let journal_factor = if bundle.journal.is_complete {
+            1.0
+        } else {
+            0.75
+        };
+        (critical_ratio * journal_factor, invalid_pointer_count)
     }
 
     fn generate_transfer_summary(&self, bundle: &AtpProofBundle) -> TransferSummary {

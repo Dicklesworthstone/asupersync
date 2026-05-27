@@ -43,14 +43,13 @@
 //! }
 //! ```
 
-use crate::atp::mailbox::{PeerId, MailboxTransferId};
-use crate::cx::Cx;
+use crate::atp::mailbox::{MailboxTransferId, PeerId};
 use crate::types::Time;
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod coordinator;
 pub mod peer_selection;
@@ -59,9 +58,9 @@ pub mod quality;
 pub mod strategy;
 
 pub use coordinator::SwarmCoordinator;
-pub use peer_selection::{PeerSelector, PeerQuality, PeerReputation};
-pub use piece_tracker::{PieceTracker, PieceMap, PieceStatus};
-pub use quality::{QualityMetrics, PathQuality, PeerScore};
+pub use peer_selection::{PathQuality, PeerQuality, PeerReputation, PeerScore, PeerSelector};
+pub use piece_tracker::{PieceMap, PieceStatus, PieceTracker};
+pub use quality::QualityMetrics;
 pub use strategy::{PieceSelectionStrategy, SwarmStrategy};
 
 /// Unique identifier for a piece of data in the swarm.
@@ -76,6 +75,21 @@ impl PieceId {
     pub fn as_u64(self) -> u64 {
         self.0
     }
+}
+
+impl fmt::Display for PieceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+pub(crate) fn swarm_time_now() -> Time {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64;
+    Time::from_nanos(nanos)
 }
 
 /// Configuration for swarm coordination behavior.
@@ -180,7 +194,10 @@ impl Default for PeerCapabilities {
         Self {
             max_concurrent_uploads: 4,
             preferred_chunk_size: 1024 * 1024, // 1MB
-            supported_strategies: vec![PieceSelectionStrategy::RarestFirst, PieceSelectionStrategy::Sequential],
+            supported_strategies: vec![
+                PieceSelectionStrategy::RarestFirst,
+                PieceSelectionStrategy::Sequential,
+            ],
             bandwidth_estimate: None,
             supports_repair_symbols: false,
             participates_in_incentives: true,
@@ -269,6 +286,14 @@ pub struct SwarmQualityMetrics {
 /// Events emitted during swarm operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SwarmEvent {
+    /// Transfer coordination started
+    TransferStarted {
+        transfer_id: MailboxTransferId,
+        object_id: String,
+        total_pieces: u64,
+        peer_count: usize,
+    },
+
     /// Peer joined the swarm
     PeerJoined {
         peer_id: PeerId,
@@ -387,7 +412,10 @@ pub enum SwarmError {
 
     /// Invalid piece state
     #[error("Invalid piece state for {piece_id}: {current_state}")]
-    InvalidPieceState { piece_id: PieceId, current_state: String },
+    InvalidPieceState {
+        piece_id: PieceId,
+        current_state: String,
+    },
 }
 
 /// Type alias for swarm operation results.
@@ -413,7 +441,10 @@ mod tests {
         let config = SwarmConfig::default();
 
         assert_eq!(config.max_peers, 8);
-        assert_eq!(config.piece_selection_strategy, PieceSelectionStrategy::RarestFirst);
+        assert_eq!(
+            config.piece_selection_strategy,
+            PieceSelectionStrategy::RarestFirst
+        );
         assert_eq!(config.peer_quality_threshold, 0.5);
         assert!(config.enable_incentives);
     }
@@ -434,9 +465,9 @@ mod tests {
             peer_id: PeerId::new("test-peer"),
             piece_id: PieceId::new(42),
             priority: 100,
-            estimated_completion: Time::now(),
+            estimated_completion: swarm_time_now(),
             retry_count: 0,
-            assigned_at: Time::now(),
+            assigned_at: swarm_time_now(),
         };
 
         let serialized = serde_json::to_string(&assignment).unwrap();
@@ -474,8 +505,16 @@ mod tests {
         let deserialized: SwarmEvent = serde_json::from_str(&serialized).unwrap();
 
         match (event, deserialized) {
-            (SwarmEvent::PeerJoined { available_pieces: p1, .. },
-             SwarmEvent::PeerJoined { available_pieces: p2, .. }) => {
+            (
+                SwarmEvent::PeerJoined {
+                    available_pieces: p1,
+                    ..
+                },
+                SwarmEvent::PeerJoined {
+                    available_pieces: p2,
+                    ..
+                },
+            ) => {
                 assert_eq!(p1, p2);
             }
             _ => panic!("Event type mismatch after serialization"),

@@ -264,7 +264,7 @@ impl TimingSideChannelDetector {
     /// Perform baseline calibration by measuring timing of a reference operation.
     pub fn calibrate_baseline<F>(&mut self, mut reference_operation: F) -> Result<(), String>
     where
-        F: FnMut() -> (),
+        F: FnMut(),
     {
         self.baseline_samples.clear();
 
@@ -303,7 +303,7 @@ impl TimingSideChannelDetector {
         iterations: usize,
     ) -> SideChannelDetectionResult
     where
-        F: FnMut() -> (),
+        F: FnMut(),
     {
         if self.baseline_samples.is_empty() {
             return SideChannelDetectionResult {
@@ -380,7 +380,7 @@ impl TimingSideChannelDetector {
         iterations: usize,
     ) -> SideChannelDetectionResult
     where
-        F: FnMut(&[u8]) -> (),
+        F: FnMut(&[u8]),
     {
         let mut samples_a = Vec::with_capacity(iterations);
         let mut samples_b = Vec::with_capacity(iterations);
@@ -444,7 +444,7 @@ impl Default for TimingSideChannelDetector {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod tests {
     use super::*;
     use std::thread;

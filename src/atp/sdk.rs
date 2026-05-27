@@ -293,7 +293,7 @@ impl AtpSession {
             "transfer_actor",
             match TransferActor::new(
                 TransferActorId::new(1), // Generate unique actor ID
-                transfer_id.clone(),
+                transfer_id,
                 TransferManifestRef {
                     schema_version: 1,
                     merkle_root: manifest_root,
@@ -310,12 +310,12 @@ impl AtpSession {
         ));
 
         // Insert into registry (need to access the Arc contents)
-        let shard = self.active_transfers.shard_for(transfer_id.clone());
+        let shard = self.active_transfers.shard_for(transfer_id);
         let mut transfers = self.active_transfers.shards[shard]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         transfers.insert(
-            transfer_id.clone(),
+            transfer_id,
             TransferRegistryEntry {
                 actor: actor_handle.clone(),
                 direction: TransferDirection::Send,
@@ -589,7 +589,7 @@ impl AtpSession {
         let mut hasher = Sha256::new();
         hasher.update(b"ATP-MANIFEST-ROOT-V1\0");
         hasher.update(object_id.hash_bytes());
-        hasher.update(&self.local_peer_id);
+        hasher.update(self.local_peer_id);
         hasher.update(self.session_id.as_bytes());
 
         let hash = hasher.finalize();
@@ -1056,24 +1056,19 @@ impl StreamHandle {
     pub fn verified_epochs_count(&self) -> usize {
         self.manifest
             .as_ref()
-            .map(|m| m.verified_epochs().len())
-            .unwrap_or(0)
+            .map_or(0, |m| m.verified_epochs().len())
     }
 
     /// Get the latest verified offset in the stream.
     pub fn latest_verified_offset(&self) -> u64 {
         self.manifest
             .as_ref()
-            .map(|m| m.latest_verified_offset())
-            .unwrap_or(0)
+            .map_or(0, |m| m.latest_verified_offset())
     }
 
     /// Check if the stream has a final manifest.
     pub fn is_finalized(&self) -> bool {
-        self.manifest
-            .as_ref()
-            .map(|m| m.is_complete())
-            .unwrap_or(false)
+        self.manifest.as_ref().is_some_and(|m| m.is_complete())
     }
 
     /// Build a structured SDK report for prefix-first consumption.
@@ -2041,7 +2036,7 @@ mod tests {
             );
 
             // 3. receive_object must not fabricate a receipt for a send-side transfer
-            let transfer_id = handle.transfer_id.clone();
+            let transfer_id = handle.transfer_id;
             match session.receive_object(cx, transfer_id).await {
                 Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch)) => {}
                 other => panic!("receive_object must fail closed without receive state: {other:?}"),

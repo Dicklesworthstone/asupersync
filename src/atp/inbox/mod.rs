@@ -130,7 +130,7 @@ impl GrantScope {
                 max_bytes,
             } => {
                 let type_ok = object_types.is_empty() || object_types.contains(object_type);
-                let size_ok = max_bytes.map_or(true, |limit| bytes <= limit);
+                let size_ok = max_bytes.is_none_or(|limit| bytes <= limit);
                 type_ok && size_ok
             }
             Self::Inbox | Self::PathPrefix(_) | Self::ObjectGraph(_) => false,
@@ -151,8 +151,8 @@ impl GrantQuota {
     /// Return true when byte and item counts fit inside the quota.
     #[must_use]
     pub fn permits(self, bytes: u64, items: u64) -> bool {
-        let bytes_ok = self.max_bytes.map_or(true, |limit| bytes <= limit);
-        let items_ok = self.max_items.map_or(true, |limit| items <= limit);
+        let bytes_ok = self.max_bytes.is_none_or(|limit| bytes <= limit);
+        let items_ok = self.max_items.is_none_or(|limit| items <= limit);
         bytes_ok && items_ok
     }
 }
@@ -221,7 +221,7 @@ impl ReceiveGrant {
         !self.revoked
             && self
                 .expires_at_epoch_secs
-                .map_or(true, |expires_at| now_epoch_secs <= expires_at)
+                .is_none_or(|expires_at| now_epoch_secs <= expires_at)
     }
 
     /// Check a path-scoped operation.

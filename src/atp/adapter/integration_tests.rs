@@ -6,144 +6,162 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use crate::test_utils::test_cx;
+    use crate::atp::object::{ContentId, ObjectId};
     use crate::types::TraceId;
+    use futures_lite::future::block_on;
+    use std::collections::HashMap;
     use std::time::Duration;
+
+    fn trace_id(ts_ms: u64, random: u128) -> TraceId {
+        TraceId::from_parts(ts_ms, random)
+    }
+
+    fn test_object_id(label: &str) -> ObjectId {
+        ObjectId::content(ContentId::from_bytes(label.as_bytes()))
+    }
 
     /// Test adapter preference ordering and fallback behavior.
     #[test]
-    async fn test_adapter_preference_ordering() {
-        let config = AdapterConfig {
-            preferred_adapters: vec![
-                AdapterType::NativeQuic,
-                AdapterType::WebTransport,
-                AdapterType::MasqueConnectUdp,
-                AdapterType::TcpTlsFallback,
-            ],
-            downgrade_policy: DowngradePolicy::AllowDowngrade,
-            required_features: vec![RequiredFeature::ObjectVerification],
-            ..Default::default()
-        };
+    fn test_adapter_preference_ordering() {
+        block_on(async {
+            let config = AdapterConfig {
+                preferred_adapters: vec![
+                    AdapterType::NativeQuic,
+                    AdapterType::WebTransport,
+                    AdapterType::MasqueConnectUdp,
+                    AdapterType::TcpTlsFallback,
+                ],
+                downgrade_policy: DowngradePolicy::AllowDowngrade,
+                required_features: vec![RequiredFeature::ObjectVerification],
+                ..Default::default()
+            };
 
-        let mut manager = AdapterManager::new(config);
-        let trace_id = TraceId::new_for_test(1, 1);
+            let mut manager = AdapterManager::new(config);
+            let trace_id = trace_id(1, 1);
 
-        let negotiation = manager
-            .negotiate_adapter(&[RequiredFeature::ObjectVerification], trace_id)
-            .await
-            .unwrap();
+            let negotiation = manager
+                .negotiate_adapter(&[RequiredFeature::ObjectVerification], trace_id)
+                .await
+                .unwrap();
 
-        // Should select the first preferred adapter (NativeQuic)
-        assert_eq!(negotiation.selected_adapter, AdapterType::NativeQuic);
-        assert!(negotiation.downgrade_reasons.is_empty());
+            // Should select the first preferred adapter (NativeQuic)
+            assert_eq!(negotiation.selected_adapter, AdapterType::NativeQuic);
+            assert!(negotiation.downgrade_reasons.is_empty());
+        });
     }
 
     /// Test strict downgrade policy preventing fallbacks.
     #[test]
-    async fn test_strict_downgrade_policy() {
-        let config = AdapterConfig {
-            preferred_adapters: vec![AdapterType::NativeQuic],
-            downgrade_policy: DowngradePolicy::Strict,
-            required_features: vec![RequiredFeature::ObjectVerification],
-            ..Default::default()
-        };
+    fn test_strict_downgrade_policy() {
+        block_on(async {
+            let config = AdapterConfig {
+                preferred_adapters: vec![AdapterType::NativeQuic],
+                downgrade_policy: DowngradePolicy::Strict,
+                required_features: vec![RequiredFeature::ObjectVerification],
+                ..Default::default()
+            };
 
-        let mut manager = AdapterManager::new(config);
-        let trace_id = TraceId::new_for_test(1, 1);
+            let mut manager = AdapterManager::new(config);
+            let trace_id = trace_id(1, 1);
 
-        // This should succeed since we're simulating ideal conditions
-        let result = manager
-            .negotiate_adapter(&[RequiredFeature::ObjectVerification], trace_id)
-            .await;
+            // This should succeed since we're simulating ideal conditions
+            let result = manager
+                .negotiate_adapter(&[RequiredFeature::ObjectVerification], trace_id)
+                .await;
 
-        assert!(result.is_ok());
+            assert!(result.is_ok());
+        });
     }
 
     /// Test feature requirement enforcement.
     #[test]
-    async fn test_feature_requirement_enforcement() {
-        let config = AdapterConfig {
-            preferred_adapters: vec![AdapterType::TcpTlsFallback],
-            downgrade_policy: DowngradePolicy::AllowDowngrade,
-            required_features: vec![RequiredFeature::ObjectVerification],
-            ..Default::default()
-        };
+    fn test_feature_requirement_enforcement() {
+        block_on(async {
+            let config = AdapterConfig {
+                preferred_adapters: vec![AdapterType::TcpTlsFallback],
+                downgrade_policy: DowngradePolicy::AllowDowngrade,
+                required_features: vec![RequiredFeature::ObjectVerification],
+                ..Default::default()
+            };
 
-        let mut manager = AdapterManager::new(config);
-        let trace_id = TraceId::new_for_test(1, 1);
+            let mut manager = AdapterManager::new(config);
+            let trace_id = trace_id(1, 1);
 
-        // Test that TCP fallback meets object verification requirements
-        let negotiation = manager
-            .negotiate_adapter(&[RequiredFeature::ObjectVerification], trace_id)
-            .await
-            .unwrap();
+            // Test that TCP fallback meets object verification requirements
+            let negotiation = manager
+                .negotiate_adapter(&[RequiredFeature::ObjectVerification], trace_id)
+                .await
+                .unwrap();
 
-        assert_eq!(negotiation.selected_adapter, AdapterType::TcpTlsFallback);
+            assert_eq!(negotiation.selected_adapter, AdapterType::TcpTlsFallback);
 
-        // Verify performance caveats are reported for TCP fallback
-        assert!(!negotiation.performance_caveats.is_empty());
-        assert!(
-            negotiation
-                .performance_caveats
-                .iter()
-                .any(|caveat| { matches!(caveat, PerformanceCaveat::HeadOfLineBlocking) })
-        );
+            // Verify performance caveats are reported for TCP fallback
+            assert!(!negotiation.performance_caveats.is_empty());
+            assert!(
+                negotiation
+                    .performance_caveats
+                    .iter()
+                    .any(|caveat| { matches!(caveat, PerformanceCaveat::HeadOfLineBlocking) })
+            );
+        });
     }
 
     /// Test performance caveat reporting for different adapters.
     #[test]
-    async fn test_performance_caveat_reporting() {
-        let mut manager = AdapterManager::new(AdapterConfig::default());
-        let trace_id = TraceId::new_for_test(1, 1);
+    fn test_performance_caveat_reporting() {
+        block_on(async {
+            let mut manager = AdapterManager::new(AdapterConfig::default());
+            let trace_id = trace_id(1, 1);
 
-        // Test WebTransport caveats
-        let config_wt = AdapterConfig {
-            preferred_adapters: vec![AdapterType::WebTransport],
-            ..Default::default()
-        };
-        manager.config = config_wt;
+            // Test WebTransport caveats
+            let config_wt = AdapterConfig {
+                preferred_adapters: vec![AdapterType::WebTransport],
+                ..Default::default()
+            };
+            manager.config = config_wt;
 
-        let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
-        assert_eq!(negotiation.selected_adapter, AdapterType::WebTransport);
-        assert!(
-            negotiation
+            let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
+            assert_eq!(negotiation.selected_adapter, AdapterType::WebTransport);
+            assert!(
+                negotiation
+                    .performance_caveats
+                    .iter()
+                    .any(|caveat| { matches!(caveat, PerformanceCaveat::NestedTransportOverhead) })
+            );
+
+            // Test TCP fallback caveats
+            let config_tcp = AdapterConfig {
+                preferred_adapters: vec![AdapterType::TcpTlsFallback],
+                ..Default::default()
+            };
+            manager.config = config_tcp;
+
+            let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
+            assert_eq!(negotiation.selected_adapter, AdapterType::TcpTlsFallback);
+
+            // Verify all expected TCP caveats are present
+            let has_hol_blocking = negotiation
                 .performance_caveats
                 .iter()
-                .any(|caveat| { matches!(caveat, PerformanceCaveat::NestedTransportOverhead) })
-        );
+                .any(|caveat| matches!(caveat, PerformanceCaveat::HeadOfLineBlocking));
+            let has_no_mux = negotiation
+                .performance_caveats
+                .iter()
+                .any(|caveat| matches!(caveat, PerformanceCaveat::NoMultiplexing));
+            let has_latency = negotiation
+                .performance_caveats
+                .iter()
+                .any(|caveat| matches!(caveat, PerformanceCaveat::IncreasedLatency(_)));
 
-        // Test TCP fallback caveats
-        let config_tcp = AdapterConfig {
-            preferred_adapters: vec![AdapterType::TcpTlsFallback],
-            ..Default::default()
-        };
-        manager.config = config_tcp;
-
-        let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
-        assert_eq!(negotiation.selected_adapter, AdapterType::TcpTlsFallback);
-
-        // Verify all expected TCP caveats are present
-        let has_hol_blocking = negotiation
-            .performance_caveats
-            .iter()
-            .any(|caveat| matches!(caveat, PerformanceCaveat::HeadOfLineBlocking));
-        let has_no_mux = negotiation
-            .performance_caveats
-            .iter()
-            .any(|caveat| matches!(caveat, PerformanceCaveat::NoMultiplexing));
-        let has_latency = negotiation
-            .performance_caveats
-            .iter()
-            .any(|caveat| matches!(caveat, PerformanceCaveat::IncreasedLatency(_)));
-
-        assert!(has_hol_blocking);
-        assert!(has_no_mux);
-        assert!(has_latency);
+            assert!(has_hol_blocking);
+            assert!(has_no_mux);
+            assert!(has_latency);
+        });
     }
 
     /// Test adapter feature parity matrix accuracy.
     #[test]
-    async fn test_feature_parity_matrix() {
+    fn test_feature_parity_matrix() {
         let manager = AdapterManager::new(AdapterConfig::default());
 
         // Native QUIC should have full support for all features
@@ -181,126 +199,134 @@ mod tests {
 
     /// Test adapter session management.
     #[test]
-    async fn test_adapter_session_management() {
-        let mut manager = AdapterManager::new(AdapterConfig::default());
-        let trace_id = TraceId::new_for_test(1, 1);
-        let object_id = crate::atp::object::ObjectId::new_for_test();
+    fn test_adapter_session_management() {
+        block_on(async {
+            let mut manager = AdapterManager::new(AdapterConfig::default());
+            let trace_id = trace_id(1, 1);
+            let object_id = test_object_id("adapter-session-management");
 
-        // Negotiate adapter
-        let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
+            // Negotiate adapter
+            let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
 
-        // Start session
-        let session_id = manager
-            .start_session(negotiation.clone(), object_id)
-            .await
-            .unwrap();
+            // Start session
+            let session_id = manager
+                .start_session(negotiation.clone(), object_id)
+                .await
+                .unwrap();
 
-        // Verify session exists
-        assert!(manager.active_sessions.contains_key(&session_id));
+            // Verify session exists
+            assert!(manager.active_sessions.contains_key(&session_id));
 
-        // Verify metrics updated
-        assert!(
-            manager
-                .metrics()
-                .sessions_by_adapter
-                .get(&negotiation.selected_adapter)
-                .is_some()
-        );
+            // Verify metrics updated
+            assert!(
+                manager
+                    .metrics()
+                    .sessions_by_adapter
+                    .get(&negotiation.selected_adapter)
+                    .is_some()
+            );
+        });
     }
 
     /// Test adapter metadata generation.
     #[test]
-    async fn test_adapter_metadata_generation() {
-        let mut manager = AdapterManager::new(AdapterConfig::default());
-        let trace_id = TraceId::new_for_test(42, 123);
+    fn test_adapter_metadata_generation() {
+        block_on(async {
+            let mut manager = AdapterManager::new(AdapterConfig::default());
+            let trace_id = trace_id(42, 123);
 
-        let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
+            let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
 
-        // Verify metadata structure
-        assert_eq!(negotiation.adapter_metadata.version, "1.0.0");
-        assert!(
-            negotiation
-                .adapter_metadata
-                .security_params
-                .tls_version
-                .is_some()
-        );
-        assert!(negotiation.adapter_metadata.replay_pointer.is_some());
-        assert_eq!(
-            negotiation
-                .adapter_metadata
-                .replay_pointer
-                .as_ref()
-                .unwrap(),
-            &format!("trace-{}", trace_id.as_u128())
-        );
+            // Verify metadata structure
+            assert_eq!(negotiation.adapter_metadata.version, "1.0.0");
+            assert!(
+                negotiation
+                    .adapter_metadata
+                    .security_params
+                    .tls_version
+                    .is_some()
+            );
+            assert!(negotiation.adapter_metadata.replay_pointer.is_some());
+            assert_eq!(
+                negotiation
+                    .adapter_metadata
+                    .replay_pointer
+                    .as_ref()
+                    .unwrap(),
+                &format!("trace-{}", trace_id.as_u128())
+            );
+        });
     }
 
     /// Test caveat reporting configuration.
     #[test]
-    async fn test_caveat_reporting_configuration() {
-        let config = AdapterConfig {
-            caveat_reporting: CaveatReporting {
-                report_performance: true,
-                report_hol_blocking: true,
-                report_diagnostic_limits: true,
-                include_timing: true,
-            },
-            preferred_adapters: vec![AdapterType::TcpTlsFallback],
-            ..Default::default()
-        };
+    fn test_caveat_reporting_configuration() {
+        block_on(async {
+            let config = AdapterConfig {
+                caveat_reporting: CaveatReporting {
+                    report_performance: true,
+                    report_hol_blocking: true,
+                    report_diagnostic_limits: true,
+                    include_timing: true,
+                },
+                preferred_adapters: vec![AdapterType::TcpTlsFallback],
+                ..Default::default()
+            };
 
-        let mut manager = AdapterManager::new(config);
-        let trace_id = TraceId::new_for_test(1, 1);
+            let mut manager = AdapterManager::new(config);
+            let trace_id = trace_id(1, 1);
 
-        let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
+            let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
 
-        // With full caveat reporting enabled, TCP fallback should report all issues
-        assert!(!negotiation.performance_caveats.is_empty());
-        assert!(negotiation.performance_caveats.len() >= 4); // HOL, NoMux, Latency, Throughput
+            // With full caveat reporting enabled, TCP fallback should report all issues
+            assert!(!negotiation.performance_caveats.is_empty());
+            assert!(negotiation.performance_caveats.len() >= 4); // HOL, NoMux, Latency, Throughput
+        });
     }
 
     /// Test downgrade policy configurations.
     #[test]
-    async fn test_downgrade_policy_variations() {
-        let trace_id = TraceId::new_for_test(1, 1);
+    fn test_downgrade_policy_variations() {
+        block_on(async {
+            let trace_id = trace_id(1, 1);
 
-        // Test AllowSpecific policy
-        let config = AdapterConfig {
-            preferred_adapters: vec![AdapterType::NativeQuic],
-            downgrade_policy: DowngradePolicy::AllowSpecific(vec![
-                AdapterType::WebTransport,
-                AdapterType::TcpTlsFallback,
-            ]),
-            ..Default::default()
-        };
+            // Test AllowSpecific policy
+            let config = AdapterConfig {
+                preferred_adapters: vec![AdapterType::NativeQuic],
+                downgrade_policy: DowngradePolicy::AllowSpecific(vec![
+                    AdapterType::WebTransport,
+                    AdapterType::TcpTlsFallback,
+                ]),
+                ..Default::default()
+            };
 
-        let mut manager = AdapterManager::new(config);
-        let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
+            let mut manager = AdapterManager::new(config);
+            let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
 
-        // Should succeed with first preference
-        assert_eq!(negotiation.selected_adapter, AdapterType::NativeQuic);
+            // Should succeed with first preference
+            assert_eq!(negotiation.selected_adapter, AdapterType::NativeQuic);
 
-        // Test FallbackOnly policy
-        let config = AdapterConfig {
-            preferred_adapters: vec![AdapterType::NativeQuic],
-            downgrade_policy: DowngradePolicy::FallbackOnly(AdapterType::TcpTlsFallback),
-            ..Default::default()
-        };
+            // Test FallbackOnly policy
+            let config = AdapterConfig {
+                preferred_adapters: vec![AdapterType::NativeQuic],
+                downgrade_policy: DowngradePolicy::FallbackOnly(AdapterType::TcpTlsFallback),
+                ..Default::default()
+            };
 
-        manager.config = config;
-        let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
+            manager.config = config;
+            let negotiation = manager.negotiate_adapter(&[], trace_id).await.unwrap();
 
-        // Should succeed with preferred adapter in this simulation
-        assert!(matches!(
-            negotiation.selected_adapter,
-            AdapterType::NativeQuic | AdapterType::TcpTlsFallback
-        ));
+            // Should succeed with preferred adapter in this simulation
+            assert!(matches!(
+                negotiation.selected_adapter,
+                AdapterType::NativeQuic | AdapterType::TcpTlsFallback
+            ));
+        });
     }
 
     /// Test adapter-specific configuration handling.
     #[test]
-    async fn test_adapter_specific_configurations() {
+    fn test_adapter_specific_configurations() {
         let mut adapter_configs = HashMap::new();
         adapter_configs.insert(
             AdapterType::WebTransport,
@@ -366,68 +392,68 @@ mod tests {
 
     /// Test end-to-end adapter workflow with different scenarios.
     #[test]
-    async fn test_end_to_end_adapter_workflow() {
-        let cx = test_cx();
+    fn test_end_to_end_adapter_workflow() {
+        block_on(async {
+            // Scenario 1: Ideal conditions - should select native QUIC
+            let mut manager = AdapterManager::new(AdapterConfig::default());
+            let trace_id = trace_id(1, 1);
 
-        // Scenario 1: Ideal conditions - should select native QUIC
-        let mut manager = AdapterManager::new(AdapterConfig::default());
-        let trace_id = TraceId::new_for_test(1, 1);
+            let negotiation = manager
+                .negotiate_adapter(
+                    &[
+                        RequiredFeature::ObjectVerification,
+                        RequiredFeature::StreamProtocol,
+                    ],
+                    trace_id,
+                )
+                .await
+                .unwrap();
 
-        let negotiation = manager
-            .negotiate_adapter(
-                &[
-                    RequiredFeature::ObjectVerification,
-                    RequiredFeature::StreamProtocol,
-                ],
-                trace_id,
-            )
-            .await
-            .unwrap();
+            assert_eq!(negotiation.selected_adapter, AdapterType::NativeQuic);
 
-        assert_eq!(negotiation.selected_adapter, AdapterType::NativeQuic);
+            // Start session and verify it works
+            let object_id = test_object_id("end-to-end-adapter-workflow");
+            let session_id = manager.start_session(negotiation, object_id).await.unwrap();
+            assert!(!session_id.is_empty());
 
-        // Start session and verify it works
-        let object_id = crate::atp::object::ObjectId::new_for_test();
-        let session_id = manager.start_session(negotiation, object_id).await.unwrap();
-        assert!(!session_id.is_empty());
+            // Scenario 2: Browser environment - prefer WebTransport
+            let config = AdapterConfig {
+                preferred_adapters: vec![AdapterType::WebTransport, AdapterType::TcpTlsFallback],
+                required_features: vec![RequiredFeature::ObjectVerification],
+                ..Default::default()
+            };
 
-        // Scenario 2: Browser environment - prefer WebTransport
-        let config = AdapterConfig {
-            preferred_adapters: vec![AdapterType::WebTransport, AdapterType::TcpTlsFallback],
-            required_features: vec![RequiredFeature::ObjectVerification],
-            ..Default::default()
-        };
+            let mut browser_manager = AdapterManager::new(config);
+            let negotiation = browser_manager
+                .negotiate_adapter(&[RequiredFeature::ObjectVerification], trace_id)
+                .await
+                .unwrap();
 
-        let mut browser_manager = AdapterManager::new(config);
-        let negotiation = browser_manager
-            .negotiate_adapter(&[RequiredFeature::ObjectVerification], trace_id)
-            .await
-            .unwrap();
+            assert_eq!(negotiation.selected_adapter, AdapterType::WebTransport);
+            assert!(
+                negotiation
+                    .performance_caveats
+                    .iter()
+                    .any(|caveat| { matches!(caveat, PerformanceCaveat::NestedTransportOverhead) })
+            );
 
-        assert_eq!(negotiation.selected_adapter, AdapterType::WebTransport);
-        assert!(
-            negotiation
-                .performance_caveats
-                .iter()
-                .any(|caveat| { matches!(caveat, PerformanceCaveat::NestedTransportOverhead) })
-        );
+            // Scenario 3: Highly restrictive environment - TCP only
+            let config = AdapterConfig {
+                preferred_adapters: vec![AdapterType::TcpTlsFallback],
+                downgrade_policy: DowngradePolicy::Strict,
+                required_features: vec![RequiredFeature::ObjectVerification],
+                ..Default::default()
+            };
 
-        // Scenario 3: Highly restrictive environment - TCP only
-        let config = AdapterConfig {
-            preferred_adapters: vec![AdapterType::TcpTlsFallback],
-            downgrade_policy: DowngradePolicy::Strict,
-            required_features: vec![RequiredFeature::ObjectVerification],
-            ..Default::default()
-        };
+            let mut restrictive_manager = AdapterManager::new(config);
+            let negotiation = restrictive_manager
+                .negotiate_adapter(&[RequiredFeature::ObjectVerification], trace_id)
+                .await
+                .unwrap();
 
-        let mut restrictive_manager = AdapterManager::new(config);
-        let negotiation = restrictive_manager
-            .negotiate_adapter(&[RequiredFeature::ObjectVerification], trace_id)
-            .await
-            .unwrap();
-
-        assert_eq!(negotiation.selected_adapter, AdapterType::TcpTlsFallback);
-        assert!(negotiation.performance_caveats.len() >= 3); // Multiple TCP limitations
+            assert_eq!(negotiation.selected_adapter, AdapterType::TcpTlsFallback);
+            assert!(negotiation.performance_caveats.len() >= 3); // Multiple TCP limitations
+        });
     }
 
     /// Test display implementations for human-readable output.

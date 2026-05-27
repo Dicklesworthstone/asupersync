@@ -7,12 +7,11 @@
 #[cfg(test)]
 mod tests {
     use super::super::{
-        AtpFairnessCoordinator, AtpFairnessPolicy, AtpResourceBudget, AtpResourceDemand,
-        AtpResourceGovernor, AtpTransferId,
+        AtpDemandPriority, AtpFairnessCoordinator, AtpFairnessPolicy, AtpResourceBudget,
+        AtpResourceDemand, AtpResourceGovernor, AtpTransferId,
         config::{AtpCustomLimits, AtpGovernanceConfig},
     };
     use crate::atp::profiles::{AtpPowerProfile, AtpResourceProfile};
-    use std::collections::BTreeMap;
 
     /// Test that governance correctly enforces bandwidth limits across profiles.
     #[test]
@@ -80,6 +79,7 @@ mod tests {
                 repair_symbols_per_second: 1_000,
                 disk_write_concurrency: 2,
                 relay_cost_micros_per_mib: None,
+                priority: AtpDemandPriority::Foreground,
             },
         );
 
@@ -91,6 +91,7 @@ mod tests {
                 repair_symbols_per_second: 2_000,
                 disk_write_concurrency: 4,
                 relay_cost_micros_per_mib: Some(500_000),
+                priority: AtpDemandPriority::Foreground,
             },
         );
 
@@ -102,6 +103,7 @@ mod tests {
                 repair_symbols_per_second: 500,
                 disk_write_concurrency: 1,
                 relay_cost_micros_per_mib: Some(1_000_000),
+                priority: AtpDemandPriority::Foreground,
             },
         );
 
@@ -258,9 +260,8 @@ mod tests {
         assert!(!decision.violations.is_empty());
         assert_eq!(decision.reason_code, "resource_budget_exceeded");
 
-        // In a real dry-run implementation, the decision would be logged
-        // but enforcement would be skipped. Here we just verify that the
-        // governance logic still works correctly.
+        // Dry-run enforcement is resolved by the caller; this gate remains
+        // deterministic so the caller can log or enforce the same decision.
     }
 
     /// Test concurrent transfer lifecycle with fairness coordinator.
@@ -323,6 +324,7 @@ mod tests {
             repair_symbols_per_second: 1_024,
             disk_write_concurrency: 2,
             relay_cost_micros_per_mib: Some(500_000),
+            priority: AtpDemandPriority::Foreground,
         };
 
         // Governance decisions should be fast since they're used frequently

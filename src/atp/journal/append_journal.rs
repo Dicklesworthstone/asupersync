@@ -1258,8 +1258,7 @@ impl AppendJournal {
             .current_file
             .as_ref()
             .and_then(|path| std::fs::metadata(path).ok())
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+            .map_or(0, |meta| meta.len());
 
         JournalStats {
             generation: self.generation,
@@ -1310,8 +1309,7 @@ impl AppendJournal {
             .current_file
             .as_ref()
             .and_then(|path| std::fs::metadata(path).ok())
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+            .map_or(0, |meta| meta.len());
 
         Outcome::Ok(current_size >= self.config.max_journal_size)
     }
@@ -1436,7 +1434,7 @@ impl AppendJournal {
             }
 
             if !found_sequence && !entries.is_empty() {
-                max_sequence = entries.last().map(|e| e.sequence).unwrap_or(0);
+                max_sequence = entries.last().map_or(0, |e| e.sequence);
                 found_sequence = true;
             }
 

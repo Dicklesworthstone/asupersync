@@ -124,7 +124,7 @@ impl ResourceScope {
                 max_size_bytes,
             } => {
                 let type_allowed = object_types.is_empty() || object_types.contains(object_type);
-                let size_allowed = max_size_bytes.map_or(true, |max| size_bytes <= max);
+                let size_allowed = max_size_bytes.is_none_or(|max| size_bytes <= max);
                 type_allowed && size_allowed
             }
             _ => false,
@@ -145,7 +145,7 @@ impl ResourceScope {
             }
             Self::Path(scope) => {
                 hasher.update(b"path");
-                hasher.update(&scope.digest());
+                hasher.update(scope.digest());
             }
             Self::Inbox => hasher.update(b"inbox"),
             Self::Team(team) => {
@@ -171,7 +171,7 @@ impl ResourceScope {
                     hasher.update(obj_type.as_bytes());
                 }
                 if let Some(max_size) = max_size_bytes {
-                    hasher.update(&max_size.to_le_bytes());
+                    hasher.update(max_size.to_le_bytes());
                 }
             }
         }
@@ -243,7 +243,7 @@ impl PathScope {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(self.pattern.as_bytes());
-        hasher.update(&[u8::from(self.recursive)]);
+        hasher.update([u8::from(self.recursive)]);
 
         let mut sorted_exclusions: Vec<_> = self.exclusions.iter().collect();
         sorted_exclusions.sort();
@@ -274,13 +274,13 @@ impl ScopeConstraints {
     /// Check if transfer size constraint is satisfied.
     #[must_use]
     pub fn check_transfer_size(&self, size: u64) -> bool {
-        self.max_transfer_size.map_or(true, |max| size <= max)
+        self.max_transfer_size.is_none_or(|max| size <= max)
     }
 
     /// Check if bandwidth constraint is satisfied.
     #[must_use]
     pub fn check_bandwidth(&self, bytes_per_sec: u64) -> bool {
-        self.max_bandwidth.map_or(true, |max| bytes_per_sec <= max)
+        self.max_bandwidth.is_none_or(|max| bytes_per_sec <= max)
     }
 
     /// Check if IP address is allowed.
@@ -321,10 +321,10 @@ impl ScopeConstraints {
         let mut hasher = Sha256::new();
 
         if let Some(max_size) = self.max_transfer_size {
-            hasher.update(&max_size.to_le_bytes());
+            hasher.update(max_size.to_le_bytes());
         }
         if let Some(max_bw) = self.max_bandwidth {
-            hasher.update(&max_bw.to_le_bytes());
+            hasher.update(max_bw.to_le_bytes());
         }
         if let Some(ref level) = self.min_security_level {
             hasher.update(level.as_bytes());
@@ -337,7 +337,7 @@ impl ScopeConstraints {
             }
         }
         if let Some((start, end)) = self.allowed_hours {
-            hasher.update(&[start, end]);
+            hasher.update([start, end]);
         }
 
         hasher.finalize().into()

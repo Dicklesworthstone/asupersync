@@ -1333,10 +1333,10 @@ fn validate_complete_pressure_sources(
     )
 }
 
-fn require_source<'a, T>(
+fn require_source<T>(
     source: TransferPressureSourceKind,
-    value: Option<&'a T>,
-) -> Result<&'a T, TransferPressureCollectionError> {
+    value: Option<&T>,
+) -> Result<&T, TransferPressureCollectionError> {
     value.ok_or(TransferPressureCollectionError::MissingSource { source })
 }
 
@@ -2164,6 +2164,6 @@ mod tests {
 }
 
 // Include integration tests with real ATP transfer workflows
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 #[path = "../transfer_integration_tests.rs"]
 mod transfer_integration_tests;

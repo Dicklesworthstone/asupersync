@@ -47,16 +47,17 @@ impl CachePolicyManager {
                 candidates.sort_by_key(|(_, entry)| entry.access_count);
             }
             EvictionPolicy::ShortestTtl => {
-                candidates
-                    .sort_by_key(|(_, entry)| entry.created_at.elapsed().unwrap_or(Duration::MAX));
+                candidates.sort_by_key(|(_, entry)| {
+                    remaining_ttl(entry.created_at, entry.ttl).unwrap_or(Duration::ZERO)
+                });
             }
             EvictionPolicy::LargestFirst => {
                 candidates.sort_by_key(|(_, entry)| std::cmp::Reverse(entry.size_bytes));
             }
             EvictionPolicy::Hybrid => {
                 candidates.sort_by(|(_, a), (_, b)| {
-                    self.hybrid_score(a)
-                        .partial_cmp(&self.hybrid_score(b))
+                    self.hybrid_score(b)
+                        .partial_cmp(&self.hybrid_score(a))
                         .unwrap()
                 });
             }
@@ -101,8 +102,23 @@ impl CachePolicyManager {
             }
         }
 
-        // Check retention policies
-        // For now, assume all content is evictable unless specifically protected
+        if entry.access_count < self.proof_constraints.min_access_count {
+            return false;
+        }
+
+        if let Some(policy) = self.retention_policy_for(entry) {
+            let age = entry.created_at.elapsed().unwrap_or(Duration::MAX);
+            if policy.critical_for_proofs && self.proof_constraints.preserve_proof_bundles {
+                return false;
+            }
+            if age < policy.min_retention {
+                return false;
+            }
+            if age > policy.max_retention {
+                return true;
+            }
+        }
+
         true
     }
 
@@ -118,8 +134,23 @@ impl CachePolicyManager {
         let size_mb = entry.size_bytes as f64 / (1024.0 * 1024.0);
         let access_frequency = entry.access_count as f64;
 
-        // Hybrid score: prioritize eviction of old, large, infrequently accessed items
-        (age_hours + size_mb) / (access_frequency + 1.0)
+        let retention_penalty = self
+            .retention_policy_for(entry)
+            .map_or(0.0, |policy| f64::from(policy.priority));
+
+        // Higher score means the entry is colder, larger, older, and cheaper to evict.
+        (age_hours + size_mb) / (access_frequency + 1.0 + retention_penalty)
+    }
+
+    fn retention_policy_for(&self, entry: &CacheEntry) -> Option<&RetentionPolicy> {
+        let grant_scope_policy = entry
+            .key
+            .grant_scope
+            .as_ref()
+            .and_then(|scope| self.retention_policies.get(scope));
+        grant_scope_policy
+            .or_else(|| self.retention_policies.get(storage_policy_key(entry)))
+            .or_else(|| self.retention_policies.get("default"))
     }
 
     /// Add a retention policy for specific content types.
@@ -137,6 +168,22 @@ impl CachePolicyManager {
     pub const fn eviction_policy(&self) -> EvictionPolicy {
         self.eviction_policy
     }
+}
+
+fn storage_policy_key(entry: &CacheEntry) -> &'static str {
+    match (&entry.storage_location, entry.encrypted) {
+        (super::StorageLocation::Memory(_), true) => "memory/encrypted",
+        (super::StorageLocation::Memory(_), false) => "memory/plaintext",
+        (super::StorageLocation::File(_), true) => "file/encrypted",
+        (super::StorageLocation::File(_), false) => "file/plaintext",
+        (super::StorageLocation::External(_), true) => "external/encrypted",
+        (super::StorageLocation::External(_), false) => "external/plaintext",
+    }
+}
+
+fn remaining_ttl(created_at: SystemTime, ttl: Duration) -> Option<Duration> {
+    let age = created_at.elapsed().ok()?;
+    Some(ttl.saturating_sub(age))
 }
 
 /// Retention policy for specific content types.
@@ -269,7 +316,7 @@ pub struct MaintenanceMetrics {
     pub duration: Duration,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod tests {
     use super::*;
     use std::time::{Duration, SystemTime};

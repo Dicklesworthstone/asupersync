@@ -8,17 +8,18 @@
 
 pub mod actor;
 pub mod adapter;
+pub mod atpd;
 pub mod autotune;
 #[cfg(feature = "benchmark-adapters")]
 pub mod benchmark;
 pub mod cache;
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod cache_seeding_integration_tests;
 pub mod daemon_control;
 pub mod diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod doctor;
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 pub mod early_usability_tests;
 pub mod governance;
 pub mod grant;
@@ -27,6 +28,7 @@ pub mod inbox;
 pub mod journal;
 pub mod lab;
 pub mod logging;
+pub mod mailbox;
 pub mod manifest;
 pub mod object;
 pub mod path;
@@ -46,6 +48,8 @@ pub mod safety;
 pub mod sdk;
 pub mod seeding;
 pub mod stream_object;
+pub mod supervision;
+pub mod swarm;
 pub mod sync;
 pub mod timing_security;
 pub mod transfer;

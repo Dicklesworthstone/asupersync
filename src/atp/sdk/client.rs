@@ -1,44 +1,62 @@
-//! ATP Client Implementation for SDK
+//! ATP client bridge for SDK-side session and writer operations.
 
-use super::AtpError;
-use crate::net::atp::sink::{AtpWriter as AtpWriterTrait, writer::AtpWriter};
-use crate::atp::session::AtpSession;
-use std::sync::Arc;
+use super::{AtpConfig, AtpSession};
+use crate::atp::object::{ContentId, ObjectId};
+use crate::atp::writer::{AtpWriter, TransferProof, WriterConfig};
+use crate::cx::Cx;
+use crate::net::atp::protocol::outcome::AtpOutcome;
+use crate::types::outcome::Outcome;
+use sha2::{Digest, Sha256};
 
-/// Internal ATP client implementation
+/// Internal ATP client implementation backed by a real SDK session.
+#[derive(Debug, Clone)]
 pub struct AtpClientImpl {
-    session: Arc<AtpSession>,
-    writer: AtpWriter,
+    session: AtpSession,
 }
 
 impl AtpClientImpl {
-    pub async fn new() -> Result<Self, AtpError> {
-        // Create ATP session (simplified for now)
-        let session = Arc::new(AtpSession::new_placeholder());
-        let writer = AtpWriter::new(session.clone());
-
-        Ok(Self {
-            session,
-            writer,
-        })
-    }
-
-    pub fn get_writer(&mut self) -> &mut AtpWriter {
-        &mut self.writer
-    }
-}
-
-// Placeholder implementations for missing types
-impl AtpSession {
-    pub fn new_placeholder() -> Self {
-        // In real implementation, would establish actual ATP session
-        AtpSession {
-            // session fields
+    /// Open a client with an explicit context and SDK configuration.
+    pub async fn open(cx: &Cx, config: AtpConfig) -> AtpOutcome<Self> {
+        match AtpSession::open(cx, config).await {
+            Outcome::Ok(session) => Outcome::ok(Self { session }),
+            Outcome::Err(error) => Outcome::Err(error),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
         }
     }
-}
 
-// Temporary struct for compilation
-pub struct AtpSession {
-    // Placeholder
+    /// Borrow the underlying session for advanced operations.
+    #[must_use]
+    pub const fn session(&self) -> &AtpSession {
+        &self.session
+    }
+
+    /// Create a writer for a remote peer using the session's writer policy.
+    pub fn create_writer(
+        &self,
+        remote_peer: [u8; 32],
+        writer_config: Option<WriterConfig>,
+    ) -> AtpOutcome<AtpWriter> {
+        self.session.create_writer(remote_peer, writer_config)
+    }
+
+    /// Write a buffer by constructing a content-addressed writer and finalizing it.
+    pub async fn write_buffer(
+        &self,
+        cx: &Cx,
+        remote_peer: [u8; 32],
+        data: &[u8],
+        writer_config: Option<WriterConfig>,
+    ) -> AtpOutcome<TransferProof> {
+        self.session
+            .write_buffer(cx, data, remote_peer, writer_config)
+            .await
+    }
+
+    /// Create a deterministic object ID for client-local write preparation.
+    #[must_use]
+    pub fn object_id_for_buffer(data: &[u8]) -> ObjectId {
+        let digest: [u8; 32] = Sha256::digest(data).into();
+        ObjectId::content(ContentId::new(digest))
+    }
 }

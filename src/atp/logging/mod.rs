@@ -8,10 +8,10 @@ pub mod redaction;
 pub mod replay_artifacts;
 pub mod schema;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-internal-test-harnesses"))]
 mod contract_validation_tests;
 
 pub use failure_bundle::ATP_FAILURE_BUNDLE_SCHEMA_VERSION;

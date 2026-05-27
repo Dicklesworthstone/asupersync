@@ -1491,11 +1491,7 @@ impl RaptorQDecodeMetadata {
         } else {
             0.0
         };
-        let excess_repair_symbols = if proof.received.repair_count > proof.config.k {
-            proof.received.repair_count - proof.config.k
-        } else {
-            0
-        };
+        let excess_repair_symbols = proof.received.repair_count.saturating_sub(proof.config.k);
         let failure_reason = match &proof.outcome {
             crate::raptorq::proof::ProofOutcome::Success { .. } => None,
             crate::raptorq::proof::ProofOutcome::Failure { reason } => {
@@ -1568,23 +1564,11 @@ impl RaptorQDecodeMetadata {
             regime_type: regime_type.to_string(),
             loss_rate,
             burst_loss_events: burst_events,
-            tail_repair_activations: if loss_rate > 0.3 { 1 } else { 0 },
-            lossy_repair_activations: if loss_rate > 0.2 { 1 } else { 0 },
-            resume_repair_operations: if regime_type == "mobile-unstable" {
-                1
-            } else {
-                0
-            },
-            relay_expensive_activations: if regime_type == "relay-expensive" {
-                1
-            } else {
-                0
-            },
-            mobile_unstable_activations: if regime_type == "mobile-unstable" {
-                1
-            } else {
-                0
-            },
+            tail_repair_activations: u32::from(loss_rate > 0.3),
+            lossy_repair_activations: u32::from(loss_rate > 0.2),
+            resume_repair_operations: u32::from(regime_type == "mobile-unstable"),
+            relay_expensive_activations: u32::from(regime_type == "relay-expensive"),
+            mobile_unstable_activations: u32::from(regime_type == "mobile-unstable"),
             total_fallback_triggers: burst_events,
             repair_roi: if loss_rate > 0.5 { 0.8 } else { 0.95 },
         });
@@ -1617,8 +1601,7 @@ impl RaptorQConformanceResult {
             rfc6330_compliant: success,
             verified_guarantees,
             systematic_encoding_valid: proof.config.k > 0,
-            repair_equation_correct: proof.elimination.pivot_events.len()
-                <= proof.config.k as usize,
+            repair_equation_correct: proof.elimination.pivot_events.len() <= proof.config.k,
             inactivation_decode_conformant: proof.elimination.pivots > 0 || proof.config.k == 0,
             linear_algebra_valid: proof.peeling.solved > 0 || proof.config.k == 0,
             gf256_operations_correct: !corruption_detected,

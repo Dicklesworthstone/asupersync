@@ -375,7 +375,7 @@ impl GrantTemplate {
     /// Apply this template to a create request.
     pub fn apply_to_request(&self, request: &mut CreateGrantRequest) {
         request.scope = self.scope.clone();
-        request.actions = self.actions.clone();
+        request.actions.clone_from(&self.actions);
         request.temporal = self.temporal.clone();
         request.constraints = self.constraints.clone();
         if request.description.is_none() {
@@ -397,7 +397,7 @@ mod tests {
         let mut actions = HashSet::new();
         actions.insert(CapabilityAction::Read);
 
-        let mut capability = crate::atp::policy::Capability::new(
+        let capability = crate::atp::policy::Capability::new(
             "test-grant".to_string(),
             PeerId::test(1),
             PeerId::test(2),

@@ -7,6 +7,7 @@
 //! - JSON output contracts for machine parsing
 //! - UX-optimized defaults with expert diagnostics
 
+use crate::cli::output::Outputtable;
 use clap::{Args, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1593,3 +1594,113 @@ pub struct AtpIntegrityStatus {
     /// Pending verification count.
     pub pending_verification: u32,
 }
+
+macro_rules! impl_atp_output {
+    ($ty:ty, $summary:expr, $tsv:expr) => {
+        impl Outputtable for $ty {
+            fn human_format(&self) -> String {
+                $summary(self)
+            }
+
+            fn human_summary(&self) -> String {
+                self.human_format()
+            }
+
+            fn tsv_format(&self) -> String {
+                $tsv(self)
+            }
+        }
+    };
+}
+
+impl_atp_output!(
+    AtpCiOutput,
+    |output: &AtpCiOutput| format!(
+        "ATP CI {}: {} artifact(s), {} byte(s), success={}",
+        output.summary.operation,
+        output.summary.artifacts_processed,
+        output.summary.bytes_transferred,
+        output.summary.success
+    ),
+    |output: &AtpCiOutput| format!(
+        "{}\t{}\t{}\t{}",
+        output.summary.operation,
+        output.summary.artifacts_processed,
+        output.summary.bytes_transferred,
+        output.summary.success
+    )
+);
+
+impl_atp_output!(
+    AtpDatasetOutput,
+    |output: &AtpDatasetOutput| format!(
+        "ATP dataset {}: {} dataset(s), {} byte(s), success={}",
+        output.summary.operation,
+        output.summary.datasets_processed,
+        output.summary.total_size_bytes,
+        output.summary.success
+    ),
+    |output: &AtpDatasetOutput| format!(
+        "{}\t{}\t{}\t{}",
+        output.summary.operation,
+        output.summary.datasets_processed,
+        output.summary.total_size_bytes,
+        output.summary.success
+    )
+);
+
+impl_atp_output!(
+    AtpFuzzOutput,
+    |output: &AtpFuzzOutput| format!(
+        "ATP fuzz {}: target={}, {} case(s), {} byte(s), success={}",
+        output.summary.operation,
+        output.summary.target,
+        output.summary.test_cases_processed,
+        output.corpus_stats.total_size_bytes,
+        output.summary.success
+    ),
+    |output: &AtpFuzzOutput| format!(
+        "{}\t{}\t{}\t{}\t{}",
+        output.summary.operation,
+        output.summary.target,
+        output.summary.test_cases_processed,
+        output.corpus_stats.total_size_bytes,
+        output.summary.success
+    )
+);
+
+impl_atp_output!(
+    AtpReleaseOutput,
+    |output: &AtpReleaseOutput| format!(
+        "ATP release {}: {} release(s), {} byte(s), success={}",
+        output.summary.operation,
+        output.summary.releases_processed,
+        output.summary.total_size_bytes,
+        output.summary.success
+    ),
+    |output: &AtpReleaseOutput| format!(
+        "{}\t{}\t{}\t{}",
+        output.summary.operation,
+        output.summary.releases_processed,
+        output.summary.total_size_bytes,
+        output.summary.success
+    )
+);
+
+impl_atp_output!(
+    AtpArchiveOutput,
+    |output: &AtpArchiveOutput| format!(
+        "ATP archive {}: {} archive(s), {} byte(s), success={}",
+        output.summary.operation,
+        output.summary.archives_processed,
+        output.summary.total_size_bytes,
+        output.summary.success
+    ),
+    |output: &AtpArchiveOutput| format!(
+        "{}\t{}\t{}\t{}",
+        output.summary.operation,
+        output.summary.archives_processed,
+        output.summary.total_size_bytes,
+        output.summary.success
+    )
+);

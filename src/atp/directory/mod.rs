@@ -93,7 +93,7 @@ impl PeerDirectory {
             .ok_or(DirectoryError::PeerNotFound(peer_id))?;
         if peer.display_name != display_name {
             peer.aliases.insert(peer.display_name.clone());
-            peer.display_name = display_name.clone();
+            peer.display_name.clone_from(&display_name);
         }
         self.audit(
             actor,
@@ -155,7 +155,7 @@ impl PeerDirectory {
                 })?;
         if device.device_name != device_name {
             device.aliases.insert(device.device_name.clone());
-            device.device_name = device_name.clone();
+            device.device_name.clone_from(&device_name);
         }
         self.audit(
             actor,

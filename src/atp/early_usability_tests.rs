@@ -3,33 +3,71 @@
 //! Tests prefix range tracking, gap rejection, invalidation after manifest mismatch,
 //! cancellation, resume, sparse ranges, and consumer API invariants per ATP-E4 acceptance criteria.
 
-use crate::atp::sdk::{DirectoryHandle, StreamHandle};
+use crate::atp::object::{ContentId, ObjectId};
+use crate::atp::sdk::{
+    DirectoryHandle, StreamEarlyUsabilityState, StreamFinalCommitState, StreamHandle,
+};
 use crate::atp::stream_object::{
-    ConsumptionPolicy, StreamObject, StreamPrefixProofArtifact, StreamPrefixRecord,
+    ByteRange, ConsumptionPolicy, EpochState, PrefixExposureDecision, PrefixExposureRecord,
+    PrefixVerifiedState, StreamEpoch, StreamManifest, StreamPrefixProofArtifact, StreamProofRecord,
 };
 use crate::atp::sync::{
-    DirectoryEarlyUsabilityPolicy, DirectoryFinalCommitState, DirectoryManifest, DirectoryPath,
+    DirectoryEarlyUsabilityPolicy, DirectoryEntryKind, DirectoryEntryMetadata,
+    DirectoryFinalCommitState, DirectoryManifest, DirectoryManifestEntry, DirectoryPath,
+    PathNormalizationRules,
 };
-use crate::types::{Time, TraceId};
-use anyhow::Result;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
+
+fn test_object_id(seed: u8) -> ObjectId {
+    ObjectId::content(ContentId::new([seed; 32]))
+}
+
+fn new_stream_manifest(seed: u8) -> StreamManifest {
+    StreamManifest::new(test_object_id(seed))
+}
+
+fn add_epoch(stream: &mut StreamManifest, sequence: u64, start: u64, end: u64, state: EpochState) {
+    stream
+        .add_epoch(StreamEpoch::new(
+            sequence,
+            stream.object_id.clone(),
+            ByteRange::new(start, end),
+            state,
+            vec![],
+        ))
+        .expect("add stream epoch");
+}
+
+fn add_file(manifest: &mut DirectoryManifest, path: &str, content_id: &str, size_bytes: u64) {
+    let path = DirectoryPath::normalize(path, manifest.path_rules).expect("normalize path");
+    let entry = DirectoryManifestEntry::new(
+        path,
+        DirectoryEntryKind::File,
+        Some(content_id.to_string()),
+        DirectoryEntryMetadata {
+            size_bytes: Some(size_bytes),
+            ..DirectoryEntryMetadata::default()
+        },
+    );
+    manifest.insert(entry).expect("insert manifest entry");
+}
 
 /// Test verified prefix tracking with valid ranges
 #[test]
 fn test_verified_prefix_tracking() {
-    let mut stream = StreamObject::new("test-stream", 1024);
+    let mut stream = new_stream_manifest(1);
 
     // Add verified chunks sequentially
     assert_eq!(stream.verified_prefix_end(), 0);
 
-    stream.mark_chunk_verified(0, 64);
+    stream.mark_chunk_verified(0, 64).expect("verify 0..64");
     assert_eq!(stream.verified_prefix_end(), 64);
 
-    stream.mark_chunk_verified(64, 64);
+    stream.mark_chunk_verified(64, 64).expect("verify 64..128");
     assert_eq!(stream.verified_prefix_end(), 128);
 
-    // Gap should stop prefix growth
-    stream.mark_chunk_verified(256, 64);
+    // Gapped epochs are rejected before they can extend the prefix.
+    assert!(stream.mark_chunk_verified(256, 64).is_err());
     assert_eq!(
         stream.verified_prefix_end(),
         128,
@@ -40,18 +78,23 @@ fn test_verified_prefix_tracking() {
 /// Test gap rejection in prefix exposure
 #[test]
 fn test_gap_rejection_in_prefix() {
-    let mut stream = StreamObject::new("test-stream", 1000);
+    let mut stream = new_stream_manifest(2);
 
-    // Create verified chunks with gaps
-    stream.mark_chunk_verified(0, 100); // 0-100
-    stream.mark_chunk_verified(200, 100); // 200-300 (gap 100-200)
-    stream.mark_chunk_verified(400, 100); // 400-500 (gap 300-400)
+    // Create a verified prefix and prove gapped chunks are rejected.
+    stream.mark_chunk_verified(0, 100).expect("verify 0..100");
+    assert!(stream.mark_chunk_verified(200, 100).is_err());
+    assert!(stream.mark_chunk_verified(400, 100).is_err());
 
     // Prefix should only include contiguous verified range
     assert_eq!(stream.verified_prefix_end(), 100);
 
     // Fill first gap
-    stream.mark_chunk_verified(100, 100);
+    stream
+        .mark_chunk_verified(100, 100)
+        .expect("verify 100..200");
+    stream
+        .mark_chunk_verified(200, 100)
+        .expect("verify 200..300");
     assert_eq!(stream.verified_prefix_end(), 300);
 
     // Still gap at 300-400
@@ -61,17 +104,25 @@ fn test_gap_rejection_in_prefix() {
     );
 
     // Fill final gap
-    stream.mark_chunk_verified(300, 100);
+    stream
+        .mark_chunk_verified(300, 100)
+        .expect("verify 300..400");
+    stream
+        .mark_chunk_verified(400, 100)
+        .expect("verify 400..500");
     assert_eq!(stream.verified_prefix_end(), 500);
 }
 
 /// Test prefix invalidation after manifest mismatch
 #[test]
 fn test_prefix_invalidation_after_manifest_mismatch() {
-    let mut stream = StreamObject::new("test-stream", 1000);
+    let mut stream = new_stream_manifest(3);
 
     // Build up verified prefix
-    stream.mark_chunk_verified(0, 300);
+    stream.mark_chunk_verified(0, 200).expect("verify 0..200");
+    stream
+        .mark_chunk_verified(200, 100)
+        .expect("verify 200..300");
     assert_eq!(stream.verified_prefix_end(), 300);
 
     // Simulate manifest mismatch that invalidates some verified content
@@ -91,10 +142,10 @@ fn test_prefix_invalidation_after_manifest_mismatch() {
 /// Test cancellation preserves safe prefix state
 #[test]
 fn test_cancellation_preserves_prefix_state() {
-    let mut stream = StreamObject::new("test-stream", 1000);
+    let mut stream = new_stream_manifest(4);
 
     // Build verified prefix
-    stream.mark_chunk_verified(0, 200);
+    stream.mark_chunk_verified(0, 200).expect("verify 0..200");
     let prefix_before_cancel = stream.verified_prefix_end();
 
     // Cancel stream
@@ -108,11 +159,8 @@ fn test_cancellation_preserves_prefix_state() {
     );
 
     // No new chunks should be verifiable after cancellation
-    let result = std::panic::catch_unwind(|| {
-        stream.mark_chunk_verified(200, 100);
-    });
     assert!(
-        result.is_err(),
+        stream.mark_chunk_verified(200, 100).is_err(),
         "Should not allow new verifications after cancellation"
     );
 }
@@ -121,16 +169,21 @@ fn test_cancellation_preserves_prefix_state() {
 #[test]
 fn test_resume_maintains_prefix_safety() {
     // Original stream state
-    let mut stream = StreamObject::new("test-stream", 1000);
-    stream.mark_chunk_verified(0, 300);
+    let mut stream = new_stream_manifest(5);
+    stream
+        .mark_chunk_verified(0, 300)
+        .expect("verify original prefix");
     let original_prefix = stream.verified_prefix_end();
+    assert_eq!(original_prefix, 300);
 
     // Simulate resume with partial state
     let resume_point = 150;
-    let mut resumed_stream = StreamObject::new("test-stream", 1000);
+    let mut resumed_stream = new_stream_manifest(5);
 
     // Resume should only expose verified content up to safe resume point
-    resumed_stream.mark_chunk_verified(0, resume_point);
+    resumed_stream
+        .mark_chunk_verified(0, resume_point)
+        .expect("verify resume prefix");
     assert!(resumed_stream.verified_prefix_end() <= resume_point);
 
     // Consumer API should enforce resume safety
@@ -140,26 +193,21 @@ fn test_resume_maintains_prefix_safety() {
     );
 
     // Re-verification beyond resume point should be allowed
-    resumed_stream.mark_chunk_verified(resume_point, 100);
+    resumed_stream
+        .mark_chunk_verified(resume_point, 100)
+        .expect("verify after resume point");
     assert_eq!(resumed_stream.verified_prefix_end(), resume_point + 100);
 }
 
 /// Test sparse range handling
 #[test]
 fn test_sparse_range_handling() {
-    let mut stream = StreamObject::new("test-stream", 10000);
+    let mut stream = new_stream_manifest(6);
 
-    // Create sparse verified ranges
-    let ranges = vec![
-        (0, 100),    // Start
-        (500, 200),  // Middle gap
-        (1500, 300), // Larger gap
-        (9000, 500), // Near end
-    ];
-
-    for (offset, size) in ranges {
-        stream.mark_chunk_verified(offset, size);
-    }
+    stream.mark_chunk_verified(0, 100).expect("verify prefix");
+    assert!(stream.mark_chunk_verified(500, 200).is_err());
+    assert!(stream.mark_chunk_verified(1500, 300).is_err());
+    assert!(stream.mark_chunk_verified(9000, 500).is_err());
 
     // Only contiguous prefix from start should be consumable
     assert_eq!(stream.verified_prefix_end(), 100);
@@ -172,28 +220,32 @@ fn test_sparse_range_handling() {
     );
 
     // Fill gaps sequentially
-    stream.mark_chunk_verified(100, 400); // Fill to connect with 500-700
+    stream
+        .mark_chunk_verified(100, 400)
+        .expect("verify 100..500");
+    stream
+        .mark_chunk_verified(500, 200)
+        .expect("verify 500..700");
     assert_eq!(stream.verified_prefix_end(), 700);
 
-    stream.mark_chunk_verified(700, 800); // Fill to connect with 1500-1800
+    stream
+        .mark_chunk_verified(700, 800)
+        .expect("verify 700..1500");
+    stream
+        .mark_chunk_verified(1500, 300)
+        .expect("verify 1500..1800");
     assert_eq!(stream.verified_prefix_end(), 1800);
 }
 
 /// Test directory small file early exposure policy
 #[test]
 fn test_directory_small_file_early_exposure() {
-    let mut manifest = DirectoryManifest::new();
+    let mut manifest = DirectoryManifest::new(PathNormalizationRules::default());
 
     // Add mixed file sizes
-    manifest
-        .add_file("small.txt", "content1", Some(50))
-        .unwrap();
-    manifest
-        .add_file("medium.txt", "content2", Some(5000))
-        .unwrap();
-    manifest
-        .add_file("large.bin", "content3", Some(50000))
-        .unwrap();
+    add_file(&mut manifest, "small.txt", "content1", 50);
+    add_file(&mut manifest, "medium.txt", "content2", 5000);
+    add_file(&mut manifest, "large.bin", "content3", 50000);
 
     let verified_content = vec!["content1", "content2"]
         .into_iter()
@@ -202,8 +254,7 @@ fn test_directory_small_file_early_exposure() {
 
     let policy = DirectoryEarlyUsabilityPolicy {
         expose_metadata_before_final: true,
-        small_file_threshold_bytes: 1000,
-        expose_small_files_early: true,
+        max_small_file_bytes: 1000,
     };
 
     let report = manifest.early_usability_report(
@@ -249,10 +300,10 @@ fn test_directory_small_file_early_exposure() {
 /// Test consumer API invariants
 #[test]
 fn test_consumer_api_invariants() {
-    let mut stream = StreamObject::new("test-stream", 1000);
+    let mut stream = new_stream_manifest(7);
 
     // Build verified content
-    stream.mark_chunk_verified(0, 400);
+    stream.mark_chunk_verified(0, 400).expect("verify 0..400");
 
     // Consumer API should never expose unverified content as verified
     let verified_end = stream.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly);
@@ -280,27 +331,25 @@ fn test_consumer_api_invariants() {
 /// Test stream prefix proof artifact serialization
 #[test]
 fn test_stream_prefix_proof_artifact_serialization() {
-    let record = StreamPrefixRecord {
-        object_id: "test-object".to_string(),
-        object_hash: "abc123".to_string(),
-        prefix_start: 0,
-        prefix_end: 1024,
-        verified: true,
-        exposed_to_consumer: true,
-        invalidation_reason: None,
-        exposure_decision: "verified content within policy".to_string(),
-        replay_pointer: "test-replay-ptr".to_string(),
-        policy: ConsumptionPolicy::VerifiedOnly,
-        timestamp: std::time::SystemTime::now(),
-        epoch: 42,
-    };
-
-    let artifact = StreamPrefixProofArtifact {
-        schema_version: "asupersync.atp.stream-prefix-proof.v1".to_string(),
-        records: vec![record.clone()],
-        final_offset: Some(2048),
-        signature_hex: Some("deadbeef".to_string()),
-    };
+    let object_id = test_object_id(9);
+    let exposure = PrefixExposureRecord::new(
+        object_id.clone(),
+        Some(ByteRange::new(0, 1024)),
+        PrefixVerifiedState::Verified,
+        PrefixExposureDecision::Expose,
+        ConsumptionPolicy::VerifiedOnly,
+        Some("test-replay-ptr".to_string()),
+    );
+    let mut proof = StreamProofRecord::new(
+        object_id,
+        vec![42],
+        2048,
+        ConsumptionPolicy::VerifiedOnly,
+        false,
+    );
+    proof.record_prefix_exposure(exposure);
+    proof.sign(vec![0xde, 0xad, 0xbe, 0xef]);
+    let artifact = proof.to_artifact();
 
     // Test serialization round-trip
     let json = serde_json::to_string(&artifact).expect("serialize artifact");
@@ -308,26 +357,45 @@ fn test_stream_prefix_proof_artifact_serialization() {
         serde_json::from_str(&json).expect("deserialize artifact");
 
     assert_eq!(artifact.schema_version, deserialized.schema_version);
-    assert_eq!(artifact.records.len(), deserialized.records.len());
+    assert_eq!(
+        artifact.prefix_exposures.len(),
+        deserialized.prefix_exposures.len()
+    );
     assert_eq!(artifact.final_offset, deserialized.final_offset);
+    assert_eq!(
+        artifact.consumer_signature_hex,
+        deserialized.consumer_signature_hex
+    );
 
-    let original_record = &artifact.records[0];
-    let roundtrip_record = &deserialized.records[0];
+    let original_record = &artifact.prefix_exposures[0];
+    let roundtrip_record = &deserialized.prefix_exposures[0];
 
     assert_eq!(original_record.object_id, roundtrip_record.object_id);
-    assert_eq!(original_record.prefix_start, roundtrip_record.prefix_start);
-    assert_eq!(original_record.prefix_end, roundtrip_record.prefix_end);
-    assert_eq!(original_record.verified, roundtrip_record.verified);
-    assert_eq!(original_record.policy, roundtrip_record.policy);
+    assert_eq!(original_record.prefix_range, roundtrip_record.prefix_range);
+    assert_eq!(
+        original_record.verified_state,
+        roundtrip_record.verified_state
+    );
+    assert_eq!(
+        original_record.consumption_policy,
+        roundtrip_record.consumption_policy
+    );
 }
 
 /// Test policy enforcement for large streams
 #[test]
 fn test_large_stream_policy_enforcement() {
-    let mut stream = StreamObject::new("large-media-file", 100_000_000); // 100MB
+    let mut stream = new_stream_manifest(8);
 
     // Verify initial chunks
-    stream.mark_chunk_verified(0, 1_000_000); // 1MB verified
+    add_epoch(&mut stream, 1, 0, 1_000_000, EpochState::Verified);
+    add_epoch(
+        &mut stream,
+        2,
+        1_000_000,
+        100_000_000,
+        EpochState::Provisional,
+    );
 
     // VerifiedOnly policy should only expose verified content
     let verified_end = stream.consumable_prefix_end(ConsumptionPolicy::VerifiedOnly);
@@ -358,11 +426,9 @@ fn test_large_stream_policy_enforcement() {
 /// Test directory metadata exposure with final commit separation
 #[test]
 fn test_directory_metadata_final_commit_separation() {
-    let mut manifest = DirectoryManifest::new();
-    manifest.add_file("doc.md", "content1", Some(1000)).unwrap();
-    manifest
-        .add_file("config.json", "content2", Some(200))
-        .unwrap();
+    let mut manifest = DirectoryManifest::new(PathNormalizationRules::default());
+    add_file(&mut manifest, "doc.md", "content1", 1000);
+    add_file(&mut manifest, "config.json", "content2", 200);
 
     let verified = vec!["content1".to_string()]
         .into_iter()
@@ -370,8 +436,7 @@ fn test_directory_metadata_final_commit_separation() {
 
     let policy = DirectoryEarlyUsabilityPolicy {
         expose_metadata_before_final: true,
-        small_file_threshold_bytes: 500,
-        expose_small_files_early: true,
+        max_small_file_bytes: 500,
     };
 
     // Test pending state
@@ -415,8 +480,7 @@ fn test_directory_metadata_final_commit_separation() {
     // Same file should be withheld in pending if policy is strict
     let strict_policy = DirectoryEarlyUsabilityPolicy {
         expose_metadata_before_final: false,
-        small_file_threshold_bytes: 500,
-        expose_small_files_early: false,
+        max_small_file_bytes: 500,
     };
 
     let strict_pending = manifest.early_usability_report(
@@ -441,24 +505,22 @@ fn test_directory_metadata_final_commit_separation() {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use crate::atp::sdk::{DirectoryHandle, StreamHandle};
-    use std::fs;
-    use tempfile::TempDir;
 
     /// Integration test for directory handle early usability reporting
     #[test]
     fn test_directory_handle_early_usability_integration() {
-        let temp_dir = TempDir::new().expect("create temp dir");
-
-        // Create test files
-        fs::write(temp_dir.path().join("small.txt"), "small content").expect("write small file");
-        fs::write(temp_dir.path().join("large.bin"), "x".repeat(10000)).expect("write large file");
-
-        let handle = DirectoryHandle::new(temp_dir.path()).expect("create directory handle");
+        let mut manifest = DirectoryManifest::new(PathNormalizationRules::default());
+        add_file(&mut manifest, "small.txt", "small-content", 50);
+        add_file(&mut manifest, "large.bin", "large-content", 10_000);
+        let mut handle = DirectoryHandle::new("integration-directory", manifest);
+        handle.mark_content_verified("small-content");
+        handle.mark_content_verified("large-content");
 
         // Test early usability report
-        let report = handle
-            .early_usability_report(ConsumptionPolicy::VerifiedOnly, "integration-test-replay");
+        let report = handle.early_usability_report(
+            DirectoryEarlyUsabilityPolicy::small_files_up_to(1024),
+            "integration-test-replay",
+        );
 
         assert!(
             !report.metadata_paths.is_empty(),
@@ -473,25 +535,32 @@ mod integration_tests {
     /// Integration test for stream handle prefix consumption
     #[test]
     fn test_stream_handle_prefix_consumption_integration() {
-        let handle = StreamHandle::new("test-stream", 10000).expect("create stream handle");
+        let mut manifest = new_stream_manifest(10);
 
         // Build verified prefix
-        handle.mark_chunk_verified(0, 1000);
-        handle.mark_chunk_verified(1000, 1000);
+        add_epoch(&mut manifest, 1, 0, 1000, EpochState::Verified);
+        add_epoch(&mut manifest, 2, 1000, 2000, EpochState::Verified);
+
+        let handle = StreamHandle {
+            stream_id: "test-stream".to_string(),
+            total_bytes: 10_000,
+            bytes_sent: 2_000,
+            manifest: Some(manifest),
+        };
 
         // Test prefix consumption
-        let verified_end = handle.verified_prefix_end();
+        let report = handle.early_usability_report(ConsumptionPolicy::VerifiedOnly);
+        let verified_end = report.verified_prefix_end;
         assert_eq!(verified_end, 2000, "Should have 2KB verified prefix");
 
         // Test consumption policy enforcement
-        let can_consume_verified =
-            handle.can_consume_range(0, 2000, ConsumptionPolicy::VerifiedOnly);
+        let can_consume_verified = report.policy_exposed_prefix == Some(ByteRange::new(0, 2000));
         assert!(
             can_consume_verified,
             "Should allow consumption of verified range"
         );
 
-        let can_consume_beyond = handle.can_consume_range(0, 3000, ConsumptionPolicy::VerifiedOnly);
+        let can_consume_beyond = report.policy_prefix_end >= 3000;
         assert!(
             !can_consume_beyond,
             "Should reject consumption beyond verified range"

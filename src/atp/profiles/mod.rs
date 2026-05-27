@@ -7,12 +7,13 @@
 use serde::{Deserialize, Serialize};
 
 /// Operator-selected power and network behavior profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AtpPowerProfile {
     /// Prefer throughput and low completion latency.
     MaxSpeed,
     /// Default profile that leaves practical room for other foreground work.
+    #[default]
     Balanced,
     /// Reduce resource use for background transfers.
     Background,
@@ -26,12 +27,6 @@ pub enum AtpPowerProfile {
     CiDeterministic,
     /// Caller-supplied caps; the preset starts unrestricted.
     Custom,
-}
-
-impl Default for AtpPowerProfile {
-    fn default() -> Self {
-        Self::Balanced
-    }
 }
 
 impl AtpPowerProfile {

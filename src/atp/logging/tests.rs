@@ -11,7 +11,8 @@
 //! - Performance measurement event formatting
 
 use super::*;
-use serde_json::json;
+use crate::atp_log;
+use serde_json::{Value, json};
 use std::time::{Duration, UNIX_EPOCH};
 
 fn context() -> EventContext {

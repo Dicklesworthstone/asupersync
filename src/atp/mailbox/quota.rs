@@ -2,6 +2,7 @@
 
 use super::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 /// Manages quota limits and usage tracking.
@@ -15,6 +16,12 @@ pub struct QuotaManager {
 
     /// Quota policy
     policy: QuotaPolicy,
+
+    /// Active reservations by reservation identifier.
+    active_reservations: HashMap<u64, ReservationRecord>,
+
+    /// Monotonic reservation identifier source.
+    next_reservation_id: u64,
 }
 
 /// Quota usage tracking.
@@ -69,7 +76,7 @@ impl Default for QuotaPolicy {
             max_bytes: 100_000_000, // 100 MB
             max_active_transfers: 10,
             retention_period: Duration::from_secs(7 * 24 * 3600), // 1 week
-            grace_period: Duration::from_secs(3600), // 1 hour
+            grace_period: Duration::from_secs(3600),              // 1 hour
             auto_cleanup: true,
         }
     }
@@ -85,6 +92,8 @@ impl QuotaManager {
                 max_bytes: limit,
                 ..Default::default()
             },
+            active_reservations: HashMap::new(),
+            next_reservation_id: 1,
         }
     }
 
@@ -94,7 +103,14 @@ impl QuotaManager {
             limit: policy.max_bytes,
             current_usage: QuotaUsage::default(),
             policy,
+            active_reservations: HashMap::new(),
+            next_reservation_id: 1,
         }
+    }
+
+    /// Current byte limit enforced by this manager.
+    pub fn limit(&self) -> u64 {
+        self.limit
     }
 
     /// Check if operation would exceed quota.
@@ -126,27 +142,41 @@ impl QuotaManager {
         self.current_usage.active_transfers += 1;
         self.current_usage.last_updated = SystemTime::now();
 
-        Ok(QuotaReservation {
-            manager_id: 0, // Simplified ID
+        let reservation_id = self.next_reservation_id;
+        self.next_reservation_id = self.next_reservation_id.saturating_add(1);
+        let reservation = QuotaReservation {
+            manager_id: reservation_id,
             bytes_reserved: bytes,
             reserved_at: SystemTime::now(),
-        })
+        };
+        self.active_reservations.insert(
+            reservation_id,
+            ReservationRecord {
+                bytes_reserved: bytes,
+                reserved_at: reservation.reserved_at,
+            },
+        );
+
+        Ok(reservation)
     }
 
     /// Release quota reservation.
     pub fn release_quota(&mut self, reservation: QuotaReservation) {
-        if self.current_usage.bytes_used >= reservation.bytes_reserved {
-            self.current_usage.bytes_used -= reservation.bytes_reserved;
-        } else {
-            self.current_usage.bytes_used = 0;
-        }
+        if let Some(record) = self.active_reservations.remove(&reservation.manager_id) {
+            debug_assert_eq!(record.bytes_reserved, reservation.bytes_reserved);
+            debug_assert_eq!(record.reserved_at, reservation.reserved_at);
+            self.current_usage.bytes_used = self
+                .current_usage
+                .bytes_used
+                .saturating_sub(record.bytes_reserved);
 
-        if self.current_usage.active_transfers > 0 {
-            self.current_usage.active_transfers -= 1;
-        }
+            if self.current_usage.active_transfers > 0 {
+                self.current_usage.active_transfers -= 1;
+            }
 
-        self.current_usage.total_transfers += 1;
-        self.current_usage.last_updated = SystemTime::now();
+            self.current_usage.total_transfers += 1;
+            self.current_usage.last_updated = SystemTime::now();
+        }
     }
 
     /// Get current usage.
@@ -170,15 +200,60 @@ impl QuotaManager {
 
     /// Perform quota cleanup.
     pub fn perform_cleanup(&mut self) -> CleanupResult {
-        let freed_bytes = self.current_usage.bytes_used / 2; // Simplified cleanup
+        let start = SystemTime::now();
+        let cutoff_age = self
+            .policy
+            .retention_period
+            .saturating_add(self.policy.grace_period);
+        let now = SystemTime::now();
+        let target_usage = self.policy.max_bytes.saturating_mul(80) / 100;
+        let mut candidates = self
+            .active_reservations
+            .iter()
+            .filter_map(|(id, reservation)| {
+                let age = now
+                    .duration_since(reservation.reserved_at)
+                    .unwrap_or(Duration::ZERO);
+                if age >= cutoff_age || self.current_usage.bytes_used > target_usage {
+                    Some((*id, reservation.reserved_at, reservation.bytes_reserved))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|(_, reserved_at, _)| *reserved_at);
 
-        self.current_usage.bytes_used -= freed_bytes;
+        let mut freed_bytes = 0u64;
+        let mut transfers_removed = 0u32;
+        for (id, _, bytes_reserved) in candidates {
+            if self.current_usage.bytes_used <= target_usage
+                && now
+                    .duration_since(
+                        self.active_reservations
+                            .get(&id)
+                            .map_or(now, |reservation| reservation.reserved_at),
+                    )
+                    .unwrap_or(Duration::ZERO)
+                    < cutoff_age
+            {
+                break;
+            }
+
+            if self.active_reservations.remove(&id).is_some() {
+                self.current_usage.bytes_used =
+                    self.current_usage.bytes_used.saturating_sub(bytes_reserved);
+                self.current_usage.active_transfers =
+                    self.current_usage.active_transfers.saturating_sub(1);
+                freed_bytes = freed_bytes.saturating_add(bytes_reserved);
+                transfers_removed = transfers_removed.saturating_add(1);
+            }
+        }
         self.current_usage.last_updated = SystemTime::now();
 
         CleanupResult {
             bytes_freed: freed_bytes,
-            transfers_removed: 0, // Simplified
-            cleanup_duration: Duration::from_millis(100),
+            transfers_removed,
+            cleanup_duration: start.elapsed().unwrap_or(Duration::ZERO),
         }
     }
 }
@@ -186,7 +261,13 @@ impl QuotaManager {
 /// Quota reservation handle.
 #[derive(Debug)]
 pub struct QuotaReservation {
-    manager_id: u32,
+    manager_id: u64,
+    bytes_reserved: u64,
+    reserved_at: SystemTime,
+}
+
+#[derive(Debug, Clone)]
+struct ReservationRecord {
     bytes_reserved: u64,
     reserved_at: SystemTime,
 }

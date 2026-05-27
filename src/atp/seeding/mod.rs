@@ -133,7 +133,7 @@ impl ManifestAuthorization {
     /// Check if this authorization is still valid.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        self.active && self.expires_at.map_or(true, |exp| exp > SystemTime::now())
+        self.active && self.expires_at.is_none_or(|exp| exp > SystemTime::now())
     }
 }
 

@@ -108,6 +108,8 @@ pub struct AtpWriter {
     progress_callback: Option<Arc<dyn Fn(WriterProgress) + Send + Sync>>,
     /// Resume token for interrupted transfers.
     resume_token: Option<ResumeToken>,
+    /// Wall-clock instant when this writer was constructed.
+    created_at: SystemTime,
 }
 
 #[derive(Debug, Clone)]
@@ -249,6 +251,7 @@ impl AtpWriter {
             resumed_transfer: false,
             progress_callback: None,
             resume_token: None,
+            created_at: SystemTime::now(),
         }
     }
 
@@ -283,6 +286,7 @@ impl AtpWriter {
             resumed_transfer: true,
             progress_callback: None,
             resume_token: Some(resume_token),
+            created_at: SystemTime::now(),
         };
 
         Outcome::ok(writer)
@@ -305,11 +309,11 @@ impl AtpWriter {
     pub fn progress(&self) -> WriterProgress {
         WriterProgress {
             bytes_written: self.bytes_written,
-            total_bytes: None,      // Unknown for streaming
-            transfer_rate_bps: 0.0, // TODO: Calculate from recent history
+            total_bytes: None, // Unknown for streaming
+            transfer_rate_bps: self.transfer_rate_bps(),
             estimated_completion: None,
             chunks_completed: self.progress_chunks_completed(),
-            chunks_in_flight: 0, // TODO: Track from transfer state
+            chunks_in_flight: self.pending_buffer_chunks(),
             state: self.state,
         }
     }
@@ -379,7 +383,7 @@ impl AtpWriter {
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-        };
+        }
 
         // Finalize the transfer
         self.finalize(cx).await
@@ -451,7 +455,7 @@ impl AtpWriter {
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
             }
         }
-        self.refresh_placeholder_object_id();
+        self.materialize_content_object_id_if_needed();
         match self.refresh_transfer_identity() {
             Outcome::Ok(()) => {}
             Outcome::Err(e) => return Outcome::Err(e),
@@ -503,7 +507,7 @@ impl AtpWriter {
                 Outcome::Panicked(payload) => return Outcome::Panicked(payload),
             }
         }
-        self.refresh_placeholder_object_id();
+        self.materialize_content_object_id_if_needed();
         match self.refresh_transfer_identity() {
             Outcome::Ok(()) => {}
             Outcome::Err(e) => return Outcome::Err(e),
@@ -606,6 +610,32 @@ impl AtpWriter {
         let base_chunks = div_ceil_u64(self.base_verified_bytes, chunk_size);
         let local_chunks = u64::try_from(self.verified_chunks.len()).unwrap_or(u64::MAX);
         base_chunks.saturating_add(local_chunks)
+    }
+
+    fn pending_buffer_chunks(&self) -> u64 {
+        if self.buffer.is_empty() {
+            return 0;
+        }
+
+        div_ceil_u64(
+            self.buffer.len() as u64,
+            u64::try_from(self.file_stream_chunk_len())
+                .unwrap_or(u64::MAX)
+                .max(1),
+        )
+    }
+
+    fn transfer_rate_bps(&self) -> f64 {
+        if self.bytes_written == 0 {
+            return 0.0;
+        }
+
+        match SystemTime::now().duration_since(self.created_at) {
+            Ok(elapsed) if elapsed.as_secs_f64() > 0.0 => {
+                self.bytes_written as f64 / elapsed.as_secs_f64()
+            }
+            _ => 0.0,
+        }
     }
 
     async fn initialize_transfer(&mut self, cx: &Cx) -> AtpOutcome<()> {
@@ -797,7 +827,7 @@ impl AtpWriter {
         hasher.finalize().to_vec()
     }
 
-    fn refresh_placeholder_object_id(&mut self) {
+    fn materialize_content_object_id_if_needed(&mut self) {
         if self.object_id.hash_bytes().iter().all(|byte| *byte == 0) {
             self.object_id = ObjectId::content(ContentId::new(self.current_verified_hash()));
         }

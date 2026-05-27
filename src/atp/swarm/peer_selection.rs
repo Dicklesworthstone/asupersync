@@ -56,7 +56,7 @@ impl Default for PeerSelectionConfig {
 
 /// Historical quality data for a peer.
 #[derive(Debug, Clone)]
-struct QualityHistory {
+pub struct QualityHistory {
     /// Recent evaluations
     evaluations: Vec<QualityEvaluation>,
 
@@ -72,7 +72,7 @@ struct QualityHistory {
 
 /// Single quality evaluation for a peer.
 #[derive(Debug, Clone)]
-struct QualityEvaluation {
+pub(crate) struct QualityEvaluation {
     /// Evaluation timestamp
     timestamp: Time,
 
@@ -131,7 +131,7 @@ impl Default for PeerQuality {
             successful_transfers: 0,
             failed_transfers: 0,
             verification_failures: 0,
-            last_updated: Time::now(),
+            last_updated: swarm_time_now(),
         }
     }
 }
@@ -176,7 +176,7 @@ impl Default for PeerReputation {
             reciprocity_ratio: 1.0,
             tokens_earned: 0,
             tokens_spent: 0,
-            joined_at: Time::now(),
+            joined_at: swarm_time_now(),
             session_count: 0,
             cooperation_score: 0.8,
         }
@@ -281,7 +281,8 @@ impl PeerSelector {
                 details: format!(
                     "No peers meet quality threshold {} (best: {})",
                     quality_threshold,
-                    candidates.iter()
+                    candidates
+                        .iter()
                         .map(|p| p.quality.overall_score)
                         .fold(0.0_f64, f64::max)
                 ),
@@ -315,22 +316,23 @@ impl PeerSelector {
         &self,
         piece_id: &PieceId,
         available_peers: &HashMap<PeerId, SwarmPeer>,
-        active_requests: &HashMap<PieceId, super::coordinator::PieceRequest>,
+        active_loads: &HashMap<PeerId, usize>,
     ) -> SwarmResult<PeerId> {
-        // Filter peers that have the piece and aren't overloaded
         let mut candidates = Vec::new();
 
         for (peer_id, peer) in available_peers {
             if peer.available_pieces.contains(piece_id) {
-                // Check if peer is not overloaded
-                let active_count = active_requests
-                    .values()
-                    .filter(|req| req.peer_id == *peer_id)
-                    .count();
+                let active_count =
+                    active_loads.get(peer_id).copied().unwrap_or(0) + peer.pending_requests.len();
 
                 if active_count < peer.capabilities.max_concurrent_uploads {
                     let score = self.calculate_peer_score(peer);
-                    candidates.push((score.composite_score, peer_id.clone()));
+                    let load_headroom: f64 = 1.0
+                        - (active_count as f64 / peer.capabilities.max_concurrent_uploads as f64);
+                    candidates.push((
+                        score.composite_score * 0.85 + load_headroom.clamp(0.0, 1.0) * 0.15,
+                        peer_id.clone(),
+                    ));
                 }
             }
         }
@@ -342,7 +344,11 @@ impl PeerSelector {
         }
 
         // Sort by score and select best
-        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.as_str().cmp(b.1.as_str()))
+        });
 
         Ok(candidates[0].1.clone())
     }
@@ -381,7 +387,7 @@ impl PeerSelector {
             reliability_score,
             latency_score,
             reputation_score,
-            calculated_at: Time::now(),
+            calculated_at: swarm_time_now(),
         }
     }
 
@@ -394,14 +400,15 @@ impl PeerSelector {
         success: bool,
     ) {
         let evaluation = QualityEvaluation {
-            timestamp: Time::now(),
+            timestamp: swarm_time_now(),
             download_speed,
             latency,
             reliability: if success { 1.0 } else { 0.0 },
             quality_score: self.calculate_quality_score(download_speed, latency, success),
         };
 
-        let history = self.quality_history
+        let history = self
+            .quality_history
             .entry(peer_id.clone())
             .or_insert_with(|| QualityHistory {
                 evaluations: Vec::new(),
@@ -421,35 +428,55 @@ impl PeerSelector {
 
         // Trim old evaluations
         let cutoff_time = Time::from_nanos(
-            Time::now().as_nanos() - self.selection_config.max_evaluation_age.as_nanos() as u128
+            swarm_time_now()
+                .as_nanos()
+                .saturating_sub(self.selection_config.max_evaluation_age.as_nanos() as u64),
         );
 
-        history.evaluations.retain(|eval| eval.timestamp > cutoff_time);
+        history
+            .evaluations
+            .retain(|eval| eval.timestamp > cutoff_time);
 
         // Update reputation score
-        history.reputation_score = self.calculate_reputation_score(history);
+        history.reputation_score = Self::calculate_reputation_score(history);
     }
 
     /// Calculate quality score from metrics.
-    fn calculate_quality_score(&self, download_speed: f64, latency: Duration, success: bool) -> f64 {
+    fn calculate_quality_score(
+        &self,
+        download_speed: f64,
+        latency: Duration,
+        success: bool,
+    ) -> f64 {
         let speed_factor = (download_speed / 1_000_000.0).min(1.0); // Normalize to 1 MB/s
         let latency_factor = (1000.0 / (latency.as_millis() as f64 + 100.0)).min(1.0);
         let success_factor = if success { 1.0 } else { 0.1 };
 
-        (speed_factor * 0.4 + latency_factor * 0.3 + success_factor * 0.3).min(1.0).max(0.0)
+        (speed_factor * 0.4 + latency_factor * 0.3 + success_factor * 0.3)
+            .min(1.0)
+            .max(0.0)
     }
 
     /// Calculate reputation score from history.
-    fn calculate_reputation_score(&self, history: &QualityHistory) -> f64 {
+    fn calculate_reputation_score(history: &QualityHistory) -> f64 {
         if history.evaluations.is_empty() {
             return history.reputation_score;
         }
 
         // Calculate recent average quality
-        let recent_quality: f64 = history.evaluations
+        let recent_quality: f64 = history
+            .evaluations
             .iter()
-            .map(|eval| eval.quality_score)
-            .sum::<f64>() / history.evaluations.len() as f64;
+            .map(|eval| {
+                let speed_score = (eval.download_speed / 1_000_000.0).clamp(0.0, 1.0);
+                let latency_score = (1.0 / (1.0 + eval.latency.as_secs_f64())).clamp(0.0, 1.0);
+                eval.quality_score * 0.50
+                    + speed_score * 0.20
+                    + latency_score * 0.15
+                    + eval.reliability.clamp(0.0, 1.0) * 0.15
+            })
+            .sum::<f64>()
+            / history.evaluations.len() as f64;
 
         // Calculate success rate
         let total_transfers = history.successful_transfers + history.failed_transfers;
@@ -460,7 +487,9 @@ impl PeerSelector {
         };
 
         // Weighted average of recent quality and long-term success rate
-        (recent_quality * 0.6 + success_rate * 0.4).min(1.0).max(0.0)
+        (recent_quality * 0.6 + success_rate * 0.4)
+            .min(1.0)
+            .max(0.0)
     }
 
     /// Get quality history for a peer.
@@ -470,16 +499,19 @@ impl PeerSelector {
 
     /// Clean up old quality data.
     pub fn cleanup_old_data(&mut self) {
-        let cutoff_time = Time::from_nanos(
-            Time::now().as_nanos() - (self.selection_config.max_evaluation_age.as_nanos() as u128) * 2
-        );
+        let cutoff_time = Time::from_nanos(swarm_time_now().as_nanos().saturating_sub(
+            (self.selection_config.max_evaluation_age.as_nanos() as u64).saturating_mul(2),
+        ));
 
         for history in self.quality_history.values_mut() {
-            history.evaluations.retain(|eval| eval.timestamp > cutoff_time);
+            history
+                .evaluations
+                .retain(|eval| eval.timestamp > cutoff_time);
         }
 
         // Remove peers with no recent data
-        self.quality_history.retain(|_, history| !history.evaluations.is_empty());
+        self.quality_history
+            .retain(|_, history| !history.evaluations.is_empty());
     }
 }
 
@@ -499,7 +531,7 @@ mod tests {
                 ..Default::default()
             },
             reputation: PeerReputation::default(),
-            last_seen: Time::now(),
+            last_seen: swarm_time_now(),
             pending_requests: BTreeSet::new(),
             capabilities: PeerCapabilities::default(),
         }
@@ -523,16 +555,14 @@ mod tests {
         let selector = PeerSelector::new();
         let candidates = vec![
             create_test_peer("peer1", 0.8, 1000000.0),
-            create_test_peer("peer2", 0.3, 500000.0),  // Below threshold
+            create_test_peer("peer2", 0.3, 500000.0), // Below threshold
             create_test_peer("peer3", 0.7, 2000000.0),
         ];
 
         let selected = selector.select_peers(&candidates, 5, 0.5).unwrap();
         assert_eq!(selected.len(), 2);
 
-        let selected_ids: Vec<_> = selected.iter()
-            .map(|p| p.peer_id.as_str())
-            .collect();
+        let selected_ids: Vec<_> = selected.iter().map(|p| p.peer_id.as_str()).collect();
         assert!(selected_ids.contains(&"peer1"));
         assert!(selected_ids.contains(&"peer3"));
         assert!(!selected_ids.contains(&"peer2"));
@@ -568,12 +598,7 @@ mod tests {
         let mut selector = PeerSelector::new();
         let peer_id = PeerId::new("test-peer");
 
-        selector.update_peer_quality(
-            &peer_id,
-            1_000_000.0,
-            Duration::from_millis(100),
-            true,
-        );
+        selector.update_peer_quality(&peer_id, 1_000_000.0, Duration::from_millis(100), true);
 
         let history = selector.get_quality_history(&peer_id).unwrap();
         assert_eq!(history.evaluations.len(), 1);
@@ -590,12 +615,7 @@ mod tests {
 
         let peer_id = PeerId::new("test-peer");
 
-        selector.update_peer_quality(
-            &peer_id,
-            1_000_000.0,
-            Duration::from_millis(100),
-            true,
-        );
+        selector.update_peer_quality(&peer_id, 1_000_000.0, Duration::from_millis(100), true);
 
         // Wait for data to become old
         std::thread::sleep(Duration::from_millis(200));

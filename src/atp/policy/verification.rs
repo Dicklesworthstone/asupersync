@@ -88,7 +88,7 @@ impl CapabilitySigner {
 
         if let Some(not_before) = temporal.not_before {
             hasher.update(
-                &not_before
+                not_before
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs()
@@ -97,7 +97,7 @@ impl CapabilitySigner {
         }
         if let Some(not_after) = temporal.not_after {
             hasher.update(
-                &not_after
+                not_after
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs()
@@ -105,7 +105,7 @@ impl CapabilitySigner {
             );
         }
         if let Some(max_uses) = temporal.max_uses {
-            hasher.update(&max_uses.to_le_bytes());
+            hasher.update(max_uses.to_le_bytes());
         }
 
         hasher.finalize().into()
@@ -259,7 +259,7 @@ impl CapabilityVerifier {
 
         if let Some(not_before) = temporal.not_before {
             hasher.update(
-                &not_before
+                not_before
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs()
@@ -268,7 +268,7 @@ impl CapabilityVerifier {
         }
         if let Some(not_after) = temporal.not_after {
             hasher.update(
-                &not_after
+                not_after
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs()
@@ -276,7 +276,7 @@ impl CapabilityVerifier {
             );
         }
         if let Some(max_uses) = temporal.max_uses {
-            hasher.update(&max_uses.to_le_bytes());
+            hasher.update(max_uses.to_le_bytes());
         }
 
         hasher.finalize().into()

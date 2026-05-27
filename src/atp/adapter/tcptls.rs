@@ -309,21 +309,16 @@ impl TcpTlsAdapter {
 
     /// Negotiate TCP/TLS adapter with performance caveats.
     pub async fn negotiate(&self, trace_id: TraceId) -> Result<AdapterNegotiation> {
-        let mut performance_caveats = Vec::new();
-
-        // TCP/TLS has inherent limitations
-        performance_caveats.push(PerformanceCaveat::HeadOfLineBlocking);
-        performance_caveats.push(PerformanceCaveat::NoMultiplexing);
-        performance_caveats.push(PerformanceCaveat::IncreasedLatency(Duration::from_millis(
-            100,
-        )));
-        performance_caveats.push(PerformanceCaveat::ReducedThroughput(0.7)); // 30% reduction
-
-        // Add specific warnings about TCP limitations
-        performance_caveats.push(PerformanceCaveat::ReliabilityConcerns(
-            "TCP fallback provides basic connectivity but with significant performance limitations"
-                .to_string(),
-        ));
+        let performance_caveats = vec![
+            PerformanceCaveat::HeadOfLineBlocking,
+            PerformanceCaveat::NoMultiplexing,
+            PerformanceCaveat::IncreasedLatency(Duration::from_millis(100)),
+            PerformanceCaveat::ReducedThroughput(0.7),
+            PerformanceCaveat::ReliabilityConcerns(
+                "TCP fallback provides basic connectivity but with significant performance limitations"
+                    .to_string(),
+            ),
+        ];
 
         Ok(AdapterNegotiation {
             selected_adapter: AdapterType::TcpTlsFallback,
@@ -339,7 +334,7 @@ impl TcpTlsAdapter {
     pub async fn connect(&mut self, object_id: ObjectId, endpoint: &str) -> Result<String> {
         let connection_id = format!(
             "tcptls-{}-{}",
-            object_id.to_string(),
+            object_id,
             SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -355,7 +350,7 @@ impl TcpTlsAdapter {
             remote_endpoint: endpoint.to_string(),
             tls_info: TlsConnectionInfo {
                 version: self.config.tls_config.min_tls_version,
-                cipher_suite: "".to_string(),
+                cipher_suite: String::new(),
                 cert_fingerprint: None,
                 alpn_protocol: None,
                 sni_hostname: self.config.tls_config.sni_hostname.clone(),
@@ -717,6 +712,7 @@ impl TcpTlsStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_lite::future::block_on;
 
     #[test]
     fn test_tcptls_config_default() {
@@ -726,65 +722,71 @@ mod tests {
         assert!(config.fallback_config.enable_warnings);
     }
 
-    #[tokio::test]
-    async fn test_tcptls_connection_lifecycle() {
-        let mut adapter = TcpTlsAdapter::new(TcpTlsConfig::default());
-        let object_id = ObjectId::Content(crate::atp::object::ContentId::new([1; 32]));
+    #[test]
+    fn test_tcptls_connection_lifecycle() {
+        block_on(async {
+            let mut adapter = TcpTlsAdapter::new(TcpTlsConfig::default());
+            let object_id = ObjectId::Content(crate::atp::object::ContentId::new([1; 32]));
 
-        // Connect
-        let connection_id = adapter
-            .connect(object_id, "server.example.com:443")
-            .await
-            .unwrap();
-        assert_eq!(adapter.stats.active_connections, 1);
+            // Connect
+            let connection_id = adapter
+                .connect(object_id, "server.example.com:443")
+                .await
+                .unwrap();
+            assert_eq!(adapter.stats.active_connections, 1);
 
-        // Send frame
-        let data = b"ATP frame over TCP/TLS";
-        adapter.send_frame(&connection_id, data).await.unwrap();
+            // Send frame
+            let data = b"ATP frame over TCP/TLS";
+            adapter.send_frame(&connection_id, data).await.unwrap();
 
-        // Receive frame
-        let _received = adapter.receive_frame(&connection_id).await.unwrap();
+            // Receive frame
+            let _received = adapter.receive_frame(&connection_id).await.unwrap();
 
-        // Close connection
-        adapter.close_connection(&connection_id).await.unwrap();
-        assert_eq!(adapter.stats.active_connections, 0);
+            // Close connection
+            adapter.close_connection(&connection_id).await.unwrap();
+            assert_eq!(adapter.stats.active_connections, 0);
+        });
     }
 
-    #[tokio::test]
-    async fn test_tcptls_negotiation() {
-        let adapter = TcpTlsAdapter::new(TcpTlsConfig::default());
-        let trace_id = TraceId::new_for_test(1, 1);
+    #[test]
+    fn test_tcptls_negotiation() {
+        block_on(async {
+            let adapter = TcpTlsAdapter::new(TcpTlsConfig::default());
+            let trace_id = TraceId::from_parts(1, 1);
 
-        let negotiation = adapter.negotiate(trace_id).await.unwrap();
-        assert_eq!(negotiation.selected_adapter, AdapterType::TcpTlsFallback);
+            let negotiation = adapter.negotiate(trace_id).await.unwrap();
+            assert_eq!(negotiation.selected_adapter, AdapterType::TcpTlsFallback);
 
-        // TCP/TLS should have significant performance caveats
-        assert!(!negotiation.performance_caveats.is_empty());
-        let has_hol_blocking = negotiation
-            .performance_caveats
-            .iter()
-            .any(|c| matches!(c, PerformanceCaveat::HeadOfLineBlocking));
-        assert!(has_hol_blocking);
+            // TCP/TLS should have significant performance caveats
+            assert!(!negotiation.performance_caveats.is_empty());
+            let has_hol_blocking = negotiation
+                .performance_caveats
+                .iter()
+                .any(|c| matches!(c, PerformanceCaveat::HeadOfLineBlocking));
+            assert!(has_hol_blocking);
+        });
     }
 
-    #[tokio::test]
-    async fn test_hol_blocking_detection() {
-        let mut adapter = TcpTlsAdapter::new(TcpTlsConfig::default());
-        let object_id = ObjectId::Content(crate::atp::object::ContentId::new([1; 32]));
-        let connection_id = adapter
-            .connect(object_id, "server.example.com:443")
-            .await
-            .unwrap();
+    #[test]
+    fn test_hol_blocking_detection() {
+        block_on(async {
+            let mut adapter = TcpTlsAdapter::new(TcpTlsConfig::default());
+            let object_id = ObjectId::Content(crate::atp::object::ContentId::new([1; 32]));
+            let connection_id = adapter
+                .connect(object_id, "server.example.com:443")
+                .await
+                .unwrap();
 
-        // Send large frame that should trigger HOL blocking warning
-        let large_data = vec![0xAA; 128 * 1024]; // 128KB frame
-        adapter
-            .send_frame(&connection_id, &large_data)
-            .await
-            .unwrap();
+            // Send large frame that should trigger HOL blocking warning
+            let large_data = vec![0xAA; 128 * 1024]; // 128KB frame
+            adapter
+                .send_frame(&connection_id, &large_data)
+                .await
+                .unwrap();
 
-        // Check that HOL blocking was detected
-        let connection = adapter.connections.get(&connection_id).unwrap();
-        assert!(connection.stats.hol_blocking_events > 0);
+            // Check that HOL blocking was detected
+            let connection = adapter.connections.get(&connection_id).unwrap();
+            assert!(connection.stats.hol_blocking_events > 0);
+        });
     }
 }

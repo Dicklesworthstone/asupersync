@@ -249,7 +249,7 @@ impl GrantManager {
         );
 
         let mut new_capability = old_grant.capability.clone();
-        new_capability.grant_id = new_grant_id.clone();
+        new_capability.grant_id.clone_from(&new_grant_id);
         new_capability.issued_at = SystemTime::now();
 
         // Sign the new capability
@@ -410,9 +410,9 @@ impl GrantManager {
         let mut hasher = Sha256::new();
         hasher.update(self.identity.peer_id().as_bytes());
         hasher.update(request.subject.as_bytes());
-        hasher.update(&request.scope.digest());
+        hasher.update(request.scope.digest());
         hasher.update(
-            &SystemTime::now()
+            SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos()

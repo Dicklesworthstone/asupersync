@@ -13,6 +13,7 @@ use super::supervision::{
 };
 use std::fmt;
 
+#[allow(unused_imports)]
 pub use state::{
     ATPD_STATE_SCHEMA_VERSION, AtpdExportMode, AtpdIntegrityReport, AtpdPersistentState,
     AtpdQuotaMismatch, AtpdSchemaVersion, AtpdStateCollection, AtpdStateError, AtpdStateExport,

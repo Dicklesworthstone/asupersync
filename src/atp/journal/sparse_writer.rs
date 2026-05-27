@@ -3,14 +3,15 @@
 use super::{
     ChunkRange, CommitPolicy, PlatformCapabilities, RangeTracker, SparseRange, TempPathManager,
 };
-use crate::atp::manifest::{ManifestVersion, MerkleRoot};
-use crate::atp::object::ObjectId;
+use crate::atp::manifest::{Manifest, MerkleRoot};
+use crate::atp::object::{ContentId, ObjectId};
 use crate::cx::Cx;
 use crate::types::outcome::Outcome;
 use parking_lot::{Mutex, MutexGuard};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -308,16 +309,143 @@ impl SparseWriter {
     pub async fn verify(
         &self,
         _cx: &Cx,
-        _expected_manifest: &ManifestVersion,
+        expected_manifest: &Manifest,
     ) -> Outcome<(), SparseWriterError> {
+        if let Err(error) = expected_manifest.validate() {
+            return self.fail_verification(format!("manifest validation failed: {error}"));
+        }
+
+        let verification_input = {
+            let mut state = self.lock_state();
+            state.verification_state = VerificationState::InProgress;
+
+            if !Self::is_complete_locked(&state) {
+                return Self::fail_verification_locked(
+                    &mut state,
+                    "writer is incomplete; cannot verify sparse output".to_owned(),
+                );
+            }
+
+            let Some(temp_path) = state.temp_path.clone() else {
+                return Self::fail_verification_locked(
+                    &mut state,
+                    "writer has no temporary file to verify".to_owned(),
+                );
+            };
+
+            if let Some(file) = state.temp_file.as_mut() {
+                if let Err(error) = file.flush() {
+                    return Self::fail_verification_locked(
+                        &mut state,
+                        format!("flush before verification failed: {error}"),
+                    );
+                }
+            }
+
+            (
+                state.object_id.clone(),
+                temp_path,
+                state.expected_size,
+                state.written_chunks.clone(),
+            )
+        };
+
+        let (object_id, temp_path, expected_size, written_chunks) = verification_input;
+        let Some(manifest_object) = expected_manifest.objects.get(&object_id) else {
+            return self.fail_verification(format!("manifest does not contain object {object_id}"));
+        };
+
+        let mut file = match File::open(&temp_path) {
+            Ok(file) => file,
+            Err(error) => {
+                return self.fail_verification(format!("open for verification failed: {error}"));
+            }
+        };
+        let mut bytes = Vec::new();
+        if let Err(error) = file.read_to_end(&mut bytes) {
+            return self.fail_verification(format!("read for verification failed: {error}"));
+        }
+
+        if let Some(expected_size) = expected_size {
+            if bytes.len() as u64 != expected_size {
+                return self.fail_verification(format!(
+                    "writer expected size {expected_size}, found {} bytes",
+                    bytes.len()
+                ));
+            }
+        }
+        if let Some(manifest_size) = manifest_object.size_bytes {
+            if bytes.len() as u64 != manifest_size {
+                return self.fail_verification(format!(
+                    "manifest expected size {manifest_size}, found {} bytes",
+                    bytes.len()
+                ));
+            }
+        }
+
+        for (offset, metadata) in &written_chunks {
+            let end = match offset.checked_add(metadata.size) {
+                Some(end) => end,
+                None => {
+                    return self.fail_verification(format!(
+                        "written chunk at {offset} overflows with size {}",
+                        metadata.size
+                    ));
+                }
+            };
+            let Some(chunk) = bytes.get(*offset as usize..end as usize) else {
+                return self.fail_verification(format!(
+                    "written chunk at {offset}..{end} is outside verified file"
+                ));
+            };
+            let actual_hash: [u8; 32] = Sha256::digest(chunk).into();
+            if actual_hash != metadata.hash {
+                return self
+                    .fail_verification(format!("written chunk hash mismatch at offset {offset}"));
+            }
+        }
+
+        if let Some(expected_hash) = manifest_object.content_hash {
+            let actual_hash = if object_id.is_content_addressed() {
+                *ContentId::from_bytes(&bytes).hash()
+            } else {
+                Sha256::digest(&bytes).into()
+            };
+            if actual_hash != expected_hash {
+                return self.fail_verification("manifest content hash mismatch".to_owned());
+            }
+        } else if manifest_object.chunk_boundaries.is_empty() {
+            return self.fail_verification(
+                "manifest object has no content hash or chunk boundaries".to_owned(),
+            );
+        }
+
+        for boundary in &manifest_object.chunk_boundaries {
+            let end = match boundary.byte_offset.checked_add(boundary.size_bytes) {
+                Some(end) => end,
+                None => {
+                    return self.fail_verification(format!(
+                        "manifest chunk {} overflows at offset {} with size {}",
+                        boundary.index, boundary.byte_offset, boundary.size_bytes
+                    ));
+                }
+            };
+            let Some(chunk) = bytes.get(boundary.byte_offset as usize..end as usize) else {
+                return self.fail_verification(format!(
+                    "manifest chunk {} range {}..{} is outside verified file",
+                    boundary.index, boundary.byte_offset, end
+                ));
+            };
+            let actual_hash: [u8; 32] = Sha256::digest(chunk).into();
+            if actual_hash != boundary.content_hash {
+                return self
+                    .fail_verification(format!("manifest chunk {} hash mismatch", boundary.index));
+            }
+        }
+
         let mut state = self.lock_state();
-        state.verification_state = VerificationState::InProgress;
-
-        // TODO: Implement manifest verification logic
-        // This would compute hashes of written chunks and compare against manifest
-
         state.verification_state = VerificationState::Verified {
-            manifest_root: MerkleRoot::zero(),
+            manifest_root: expected_manifest.merkle_root.clone(),
         };
 
         Outcome::ok(())
@@ -510,17 +638,8 @@ impl SparseWriter {
         file.write_all(data)
             .map_err(|e| SparseWriterError::WriteFailed(e.to_string()))?;
 
-        // Compute hash
-        let hash = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut hasher = DefaultHasher::new();
-            data.hash(&mut hasher);
-            let hash_u64 = hasher.finish();
-            let mut hash_bytes = [0u8; 32];
-            hash_bytes[0..8].copy_from_slice(&hash_u64.to_le_bytes());
-            hash_bytes
-        };
+        // Compute a stable content digest for later manifest verification.
+        let hash = Sha256::digest(data).into();
 
         // Apply fsync if required
         let synced = if options.force_sync
@@ -605,7 +724,9 @@ impl SparseWriter {
                     Ok(_) => {}
                     Err(e) => return Outcome::Err(SparseWriterError::CommitFailed(e.to_string())),
                 }
-                // TODO: Add verification step
+                if let Err(error) = Self::verify_copied_file(temp_path, final_path) {
+                    return Outcome::Err(error);
+                }
             }
             CommitPolicy::LinkAndUnlink => {
                 #[cfg(unix)]
@@ -662,6 +783,49 @@ impl SparseWriter {
 
         state.temp_file = None;
         Ok(())
+    }
+
+    fn fail_verification(&self, reason: String) -> Outcome<(), SparseWriterError> {
+        let mut state = self.lock_state();
+        Self::fail_verification_locked(&mut state, reason)
+    }
+
+    fn fail_verification_locked(
+        state: &mut SparseWriterState,
+        reason: String,
+    ) -> Outcome<(), SparseWriterError> {
+        state.verification_state = VerificationState::Failed {
+            reason: reason.clone(),
+        };
+        Outcome::Err(SparseWriterError::VerificationFailed(reason))
+    }
+
+    fn verify_copied_file(source: &Path, destination: &Path) -> Result<(), SparseWriterError> {
+        let source_digest = Self::file_digest(source)?;
+        let destination_digest = Self::file_digest(destination)?;
+        if source_digest != destination_digest {
+            return Err(SparseWriterError::CommitFailed(
+                "copy verification failed: destination digest differs from temp file".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn file_digest(path: &Path) -> Result<[u8; 32], SparseWriterError> {
+        let mut file =
+            File::open(path).map_err(|error| SparseWriterError::CommitFailed(error.to_string()))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| SparseWriterError::CommitFailed(error.to_string()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(hasher.finalize().into())
     }
 }
 
@@ -721,6 +885,9 @@ pub enum SparseWriterError {
     #[error("Data not verified")]
     NotVerified,
 
+    #[error("Verification failed: {0}")]
+    VerificationFailed(String),
+
     #[error("Commit failed: {0}")]
     CommitFailed(String),
 }
@@ -728,7 +895,9 @@ pub enum SparseWriterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atp::manifest::Manifest;
     use crate::atp::object::ContentId;
+    use crate::atp::object::{MetadataPolicy, Object, ObjectGraph};
 
     fn create_test_cx() -> Cx {
         Cx::for_testing()
@@ -736,6 +905,30 @@ mod tests {
 
     fn test_object_id(label: &str) -> ObjectId {
         ObjectId::content(ContentId::from_bytes(label.as_bytes()))
+    }
+
+    fn unique_temp_path(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("test clock should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "asupersync_sparse_writer_{label}_{}_{}",
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    fn manifest_for_content(content: &[u8]) -> (ObjectId, Manifest) {
+        let object = Object::file(content.to_vec());
+        let object_id = object.id.clone();
+        let mut graph = ObjectGraph::new();
+        graph
+            .add_root(object)
+            .expect("test object graph should build");
+        let manifest = Manifest::from_graph(&graph, MetadataPolicy::portable())
+            .expect("manifest should build");
+        (object_id, manifest)
     }
 
     #[test]
@@ -770,9 +963,14 @@ mod tests {
             assert!(!writer.is_complete()); // Still has gaps
 
             // Fill remaining gaps
-            let fill_data = vec![0u8; 494];
+            let fill_data = vec![0u8; 495];
             writer
                 .write_chunk(&cx, 5, &fill_data, WriteOptions::default())
+                .await
+                .unwrap();
+            let middle_fill = vec![0u8; 488];
+            writer
+                .write_chunk(&cx, 506, &middle_fill, WriteOptions::default())
                 .await
                 .unwrap();
             let end_fill = vec![0u8; 3];
@@ -836,6 +1034,75 @@ mod tests {
             let stats = writer.get_stats();
             // Note: actual preallocation depends on platform support
             assert!(stats.allocated_size <= 1024 * 1024);
+        });
+    }
+
+    #[test]
+    fn verify_checks_manifest_content_hash_and_records_real_root() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let content = b"verified sparse writer content";
+            let (object_id, manifest) = manifest_for_content(content);
+            let writer = SparseWriter::new(
+                &cx,
+                object_id,
+                unique_temp_path("verify_success"),
+                SparseWriterConfig::default(),
+            )
+            .await
+            .unwrap();
+
+            writer.set_expected_size(content.len() as u64).unwrap();
+            writer
+                .write_chunk(&cx, 0, content, WriteOptions::default())
+                .await
+                .unwrap();
+
+            writer.verify(&cx, &manifest).await.unwrap();
+
+            let stats = writer.get_stats();
+            assert_eq!(
+                stats.verification_state,
+                VerificationState::Verified {
+                    manifest_root: manifest.merkle_root
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn verify_fails_closed_on_manifest_content_mismatch() {
+        futures_lite::future::block_on(async {
+            let cx = create_test_cx();
+            let expected = b"expected bytes";
+            let actual = b"tampered bytes";
+            assert_eq!(expected.len(), actual.len());
+            let (object_id, manifest) = manifest_for_content(expected);
+            let writer = SparseWriter::new(
+                &cx,
+                object_id,
+                unique_temp_path("verify_mismatch"),
+                SparseWriterConfig::default(),
+            )
+            .await
+            .unwrap();
+
+            writer.set_expected_size(actual.len() as u64).unwrap();
+            writer
+                .write_chunk(&cx, 0, actual, WriteOptions::default())
+                .await
+                .unwrap();
+
+            let result = writer.verify(&cx, &manifest).await;
+
+            assert!(matches!(
+                result,
+                Outcome::Err(SparseWriterError::VerificationFailed(_))
+            ));
+            assert!(matches!(
+                writer.get_stats().verification_state,
+                VerificationState::Failed { .. }
+            ));
         });
     }
 }

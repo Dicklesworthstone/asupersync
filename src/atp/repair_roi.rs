@@ -429,8 +429,10 @@ impl RepairRoiSimulator {
                             .saturating_add(roi_inputs.decode_cpu_micros)
                             .saturating_add(bandwidth_cost);
 
+                        let net_roi = i128::from(result.gross_benefit_micros)
+                            - i128::from(result.total_cost_micros);
                         result.net_roi_micros =
-                            result.gross_benefit_micros as i64 - result.total_cost_micros as i64;
+                            net_roi.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
 
                         result.calculate_efficiency_metrics();
                         regime_results.push(result);

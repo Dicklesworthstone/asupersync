@@ -9,7 +9,6 @@
 
 use asupersync::atp::object::{ContentId, ObjectId};
 use asupersync::atp::stream_object::*;
-use std::time::{Duration, SystemTime};
 
 fn test_object_id() -> ObjectId {
     ObjectId::content(ContentId::new([42u8; 32]))

@@ -760,6 +760,7 @@ impl fmt::Display for FeatureSupport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_lite::future::block_on;
 
     #[test]
     fn test_adapter_parity_matrix() {
@@ -794,17 +795,19 @@ mod tests {
         assert!(manager.check_feature_requirement(tcp_parity, &RequiredFeature::StreamProtocol));
     }
 
-    #[tokio::test]
-    async fn test_adapter_negotiation() {
-        let mut manager = AdapterManager::new(AdapterConfig::default());
-        let requirements = vec![RequiredFeature::ObjectVerification];
-        let trace_id = TraceId::new_for_test(1, 1);
+    #[test]
+    fn test_adapter_negotiation() {
+        block_on(async {
+            let mut manager = AdapterManager::new(AdapterConfig::default());
+            let requirements = vec![RequiredFeature::ObjectVerification];
+            let trace_id = TraceId::from_parts(1, 1);
 
-        let negotiation = manager
-            .negotiate_adapter(&requirements, trace_id)
-            .await
-            .unwrap();
-        assert_eq!(negotiation.selected_adapter, AdapterType::NativeQuic);
+            let negotiation = manager
+                .negotiate_adapter(&requirements, trace_id)
+                .await
+                .unwrap();
+            assert_eq!(negotiation.selected_adapter, AdapterType::NativeQuic);
+        });
     }
 
     #[test]

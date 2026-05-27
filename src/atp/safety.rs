@@ -565,7 +565,7 @@ impl QuarantineQueue {
     }
 
     /// Return queue items in stable digest order.
-    #[must_use]
+    #[must_use = "iterators are lazy; consume the returned iterator"]
     pub fn items(&self) -> impl Iterator<Item = &QuarantineQueueItem> {
         self.items.values()
     }

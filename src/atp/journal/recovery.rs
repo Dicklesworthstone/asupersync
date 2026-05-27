@@ -433,11 +433,13 @@ pub async fn recover_journal_and_bitmap(
     Ok((journal, bitmaps))
 }
 
-/// Load an existing chunk bitmap from disk, or return a fresh empty one if no
-/// file exists yet. Malformed or truncated bitmaps fail closed with
-/// `RecoveryError::BitmapRecovery` rather than silently degrading to an empty
-/// bitmap — losing chunk state on restart would let a partially-completed
-/// transfer re-fetch already-verified data and overwrite the disk image.
+/// Load an existing chunk bitmap from disk.
+///
+/// Returns a fresh empty bitmap if no file exists yet. Malformed or truncated
+/// bitmaps fail closed with `RecoveryError::BitmapRecovery` rather than
+/// silently degrading to an empty bitmap; losing chunk state on restart would
+/// let a partially-completed transfer re-fetch already-verified data and
+/// overwrite the disk image.
 ///
 /// The fallback path constructs an empty bitmap that derives its `transfer_id`
 /// from the on-disk filename (`transfer_<id>.bitmap`) so the caller's recovery

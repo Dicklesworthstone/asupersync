@@ -671,7 +671,7 @@ impl PathRace {
 
     /// Iterate candidates in deterministic candidate-id order for path doctor
     /// documents, trace logs, and proof summaries.
-    #[must_use]
+    #[must_use = "iterators are lazy; consume the returned iterator"]
     pub fn candidates(&self) -> impl Iterator<Item = &PathCandidate> + '_ {
         self.candidates.values()
     }

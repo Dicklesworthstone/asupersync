@@ -4,7 +4,6 @@
 //! for swarm transfers and peer performance.
 
 use super::*;
-use crate::types::Time;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -75,6 +74,12 @@ pub struct TransferQualityMetrics {
 
     /// Verification failure rate over time
     pub verification_failures: VecDeque<TimestampedMetric<f64>>,
+
+    /// Total verification attempts observed for this transfer
+    pub verification_attempt_count: u64,
+
+    /// Total verification failures observed for this transfer
+    pub verification_failure_count: u64,
 
     /// Swarm health score over time
     pub health_scores: VecDeque<TimestampedMetric<f64>>,
@@ -245,7 +250,7 @@ pub enum TransferQualityStatus {
 }
 
 /// Timestamped metric data point.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TimestampedMetric<T> {
     /// Timestamp when metric was recorded
     pub timestamp: Instant,
@@ -306,6 +311,8 @@ impl QualityMetrics {
             upload_rate_history: VecDeque::new(),
             peer_response_times: HashMap::new(),
             verification_failures: VecDeque::new(),
+            verification_attempt_count: 0,
+            verification_failure_count: 0,
             health_scores: VecDeque::new(),
             current_status: TransferQualityStatus::Healthy { health_score: 1.0 },
         };
@@ -353,17 +360,23 @@ impl QualityMetrics {
 
     /// Record download rate for a transfer.
     pub fn record_download_rate(&mut self, transfer_id: &MailboxTransferId, rate: f64) {
+        let max_history_length = self.config.max_history_length;
         if let Some(metrics) = self.transfer_metrics.get_mut(transfer_id) {
-            metrics.download_rate_history.push_back(TimestampedMetric::new(rate));
-            self.trim_history(&mut metrics.download_rate_history);
+            metrics
+                .download_rate_history
+                .push_back(TimestampedMetric::new(rate));
+            Self::trim_history(&mut metrics.download_rate_history, max_history_length);
         }
     }
 
     /// Record upload rate for a transfer.
     pub fn record_upload_rate(&mut self, transfer_id: &MailboxTransferId, rate: f64) {
+        let max_history_length = self.config.max_history_length;
         if let Some(metrics) = self.transfer_metrics.get_mut(transfer_id) {
-            metrics.upload_rate_history.push_back(TimestampedMetric::new(rate));
-            self.trim_history(&mut metrics.upload_rate_history);
+            metrics
+                .upload_rate_history
+                .push_back(TimestampedMetric::new(rate));
+            Self::trim_history(&mut metrics.upload_rate_history, max_history_length);
         }
     }
 
@@ -374,42 +387,56 @@ impl QualityMetrics {
         peer_id: &PeerId,
         response_time: Duration,
     ) {
+        let max_history_length = self.config.max_history_length;
         if let Some(metrics) = self.transfer_metrics.get_mut(transfer_id) {
-            let peer_times = metrics.peer_response_times
+            let peer_times = metrics
+                .peer_response_times
                 .entry(peer_id.clone())
                 .or_insert_with(VecDeque::new);
 
             peer_times.push_back(TimestampedMetric::new(response_time));
-            self.trim_history(peer_times);
+            Self::trim_history(peer_times, max_history_length);
         }
 
         // Also record in peer metrics
         if let Some(peer_metrics) = self.peer_metrics.get_mut(peer_id) {
-            peer_metrics.response_times.push_back(TimestampedMetric::new(response_time));
+            peer_metrics
+                .response_times
+                .push_back(TimestampedMetric::new(response_time));
             peer_metrics.last_activity = Instant::now();
-            self.trim_history(&mut peer_metrics.response_times);
+            Self::trim_history(&mut peer_metrics.response_times, max_history_length);
         }
     }
 
     /// Record peer download speed.
     pub fn record_peer_download_speed(&mut self, peer_id: &PeerId, speed: f64) {
+        let max_history_length = self.config.max_history_length;
         if let Some(metrics) = self.peer_metrics.get_mut(peer_id) {
-            metrics.download_speeds.push_back(TimestampedMetric::new(speed));
+            metrics
+                .download_speeds
+                .push_back(TimestampedMetric::new(speed));
             metrics.last_activity = Instant::now();
-            self.trim_history(&mut metrics.download_speeds);
+            Self::trim_history(&mut metrics.download_speeds, max_history_length);
+        }
+    }
+
+    /// Record a successful verification attempt.
+    pub fn record_verification_success(&mut self, transfer_id: &MailboxTransferId) {
+        if let Some(metrics) = self.transfer_metrics.get_mut(transfer_id) {
+            metrics.verification_attempt_count =
+                metrics.verification_attempt_count.saturating_add(1);
+            Self::record_current_verification_rate(metrics, self.config.max_history_length);
         }
     }
 
     /// Record verification failure.
     pub fn record_verification_failure(&mut self, transfer_id: &MailboxTransferId) {
         if let Some(metrics) = self.transfer_metrics.get_mut(transfer_id) {
-            // Calculate current failure rate
-            let current_failures = metrics.verification_failures.len() as f64;
-            let total_attempts = current_failures + 100.0; // Placeholder calculation
-            let failure_rate = current_failures / total_attempts;
-
-            metrics.verification_failures.push_back(TimestampedMetric::new(failure_rate));
-            self.trim_history(&mut metrics.verification_failures);
+            metrics.verification_attempt_count =
+                metrics.verification_attempt_count.saturating_add(1);
+            metrics.verification_failure_count =
+                metrics.verification_failure_count.saturating_add(1);
+            Self::record_current_verification_rate(metrics, self.config.max_history_length);
         }
     }
 
@@ -430,7 +457,12 @@ impl QualityMetrics {
         health_factors.push(network_efficiency);
 
         // Factor 4: Resource utilization (inverse - lower is better)
-        let resource_efficiency = 1.0 - (self.global_metrics.resource_utilization.bandwidth_utilization / 100.0);
+        let resource_efficiency = 1.0
+            - (self
+                .global_metrics
+                .resource_utilization
+                .bandwidth_utilization
+                / 100.0);
         health_factors.push(resource_efficiency.clamp(0.0, 1.0));
 
         // Calculate weighted average
@@ -451,8 +483,13 @@ impl QualityMetrics {
     }
 
     /// Get transfer quality status.
-    pub fn get_transfer_status(&self, transfer_id: &MailboxTransferId) -> Option<&TransferQualityStatus> {
-        self.transfer_metrics.get(transfer_id).map(|m| &m.current_status)
+    pub fn get_transfer_status(
+        &self,
+        transfer_id: &MailboxTransferId,
+    ) -> Option<&TransferQualityStatus> {
+        self.transfer_metrics
+            .get(transfer_id)
+            .map(|m| &m.current_status)
     }
 
     /// Get peer quality summary.
@@ -479,10 +516,26 @@ impl QualityMetrics {
     }
 
     /// Trim history to maintain configured maximum length.
-    fn trim_history<T>(&self, history: &mut VecDeque<TimestampedMetric<T>>) {
-        while history.len() > self.config.max_history_length {
+    fn trim_history<T>(history: &mut VecDeque<TimestampedMetric<T>>, max_history_length: usize) {
+        while history.len() > max_history_length {
             history.pop_front();
         }
+    }
+
+    fn record_current_verification_rate(
+        metrics: &mut TransferQualityMetrics,
+        max_history_length: usize,
+    ) {
+        let failure_rate = if metrics.verification_attempt_count == 0 {
+            0.0
+        } else {
+            metrics.verification_failure_count as f64 / metrics.verification_attempt_count as f64
+        };
+
+        metrics
+            .verification_failures
+            .push_back(TimestampedMetric::new(failure_rate.clamp(0.0, 1.0)));
+        Self::trim_history(&mut metrics.verification_failures, max_history_length);
     }
 
     /// Calculate average peer quality across all peers.
@@ -491,7 +544,9 @@ impl QualityMetrics {
             return 0.5; // Neutral score
         }
 
-        let total_quality: f64 = self.peer_metrics.values()
+        let total_quality: f64 = self
+            .peer_metrics
+            .values()
             .map(|metrics| self.calculate_peer_reliability(metrics))
             .sum();
 
@@ -502,25 +557,60 @@ impl QualityMetrics {
     fn calculate_transfer_success_rate(&self) -> f64 {
         let total_transfers = self.transfer_metrics.len();
         if total_transfers == 0 {
-            return 1.0; // No transfers, assume success
+            return 0.5;
         }
 
-        let successful_transfers = self.transfer_metrics.values()
-            .filter(|metrics| metrics.completed_at.is_some())
-            .filter(|metrics| matches!(metrics.current_status, TransferQualityStatus::Healthy { .. }))
-            .count();
+        let aggregate_quality: f64 = self
+            .transfer_metrics
+            .values()
+            .map(|metrics| {
+                let status_score = match &metrics.current_status {
+                    TransferQualityStatus::Healthy { health_score } => health_score.to_owned(),
+                    TransferQualityStatus::Degraded { health_score, .. } => {
+                        health_score.to_owned() * 0.75
+                    }
+                    TransferQualityStatus::Critical { health_score, .. } => {
+                        health_score.to_owned() * 0.25
+                    }
+                };
+                let completion_weight = if metrics.completed_at.is_some() {
+                    1.0
+                } else {
+                    0.85
+                };
+                (status_score * completion_weight).clamp(0.0, 1.0)
+            })
+            .sum();
 
-        successful_transfers as f64 / total_transfers as f64
+        aggregate_quality / total_transfers as f64
     }
 
     /// Calculate network efficiency.
     fn calculate_network_efficiency(&self) -> f64 {
-        // Simplified calculation - in practice this would be more sophisticated
-        let bandwidth_efficiency = self.global_metrics.network_efficiency.effective_bandwidth_ratio;
-        let redundancy_efficiency = self.global_metrics.network_efficiency.redundancy_efficiency;
-        let discovery_efficiency = self.global_metrics.network_efficiency.peer_discovery_success_rate;
+        let efficiency = &self.global_metrics.network_efficiency;
+        let observed = [
+            efficiency.effective_bandwidth_ratio,
+            efficiency.redundancy_efficiency,
+            efficiency.peer_discovery_success_rate,
+            efficiency.request_response_efficiency,
+        ];
 
-        (bandwidth_efficiency + redundancy_efficiency + discovery_efficiency) / 3.0
+        let mut weighted_sum = 0.0;
+        let mut total_weight = 0.0;
+        let weights = [0.35, 0.25, 0.15, 0.25];
+
+        for (value, weight) in observed.into_iter().zip(weights) {
+            if value > 0.0 {
+                weighted_sum += value.clamp(0.0, 1.0) * weight;
+                total_weight += weight;
+            }
+        }
+
+        if total_weight == 0.0 {
+            0.5
+        } else {
+            (weighted_sum / total_weight).clamp(0.0, 1.0)
+        }
     }
 
     /// Calculate average download speed for a peer.
@@ -539,7 +629,9 @@ impl QualityMetrics {
             return Duration::from_secs(0);
         }
 
-        let total_nanos: u128 = metrics.response_times.iter()
+        let total_nanos: u128 = metrics
+            .response_times
+            .iter()
             .map(|m| m.value.as_nanos())
             .sum();
 
@@ -549,7 +641,28 @@ impl QualityMetrics {
     /// Calculate reliability score for a peer.
     fn calculate_peer_reliability(&self, metrics: &PeerQualityMetrics) -> f64 {
         if metrics.reliability_scores.is_empty() {
-            return 0.8; // Default assumption
+            let uptime_score = (metrics.uptime_percentage / 100.0).clamp(0.0, 1.0);
+            let connection_uptime =
+                (metrics.connection_quality.uptime_percentage / 100.0).clamp(0.0, 1.0);
+            let loss_score = (1.0 - metrics.connection_quality.packet_loss_rate).clamp(0.0, 1.0);
+            let reconnection_score = (1.0
+                / (1.0 + f64::from(metrics.connection_quality.reconnection_count) * 0.25))
+                .clamp(0.0, 1.0);
+            let response_score = {
+                let avg = self.calculate_average_response_time(metrics);
+                if avg.is_zero() {
+                    0.5
+                } else {
+                    (1.0 / (1.0 + avg.as_secs_f64())).clamp(0.0, 1.0)
+                }
+            };
+
+            return (uptime_score * 0.25
+                + connection_uptime * 0.20
+                + loss_score * 0.25
+                + reconnection_score * 0.15
+                + response_score * 0.15)
+                .clamp(0.0, 1.0);
         }
 
         let total: f64 = metrics.reliability_scores.iter().map(|m| m.value).sum();
@@ -626,7 +739,14 @@ mod tests {
 
         let transfer_metrics = metrics.transfer_metrics.get(&transfer_id).unwrap();
         assert_eq!(transfer_metrics.download_rate_history.len(), 1);
-        assert_eq!(transfer_metrics.peer_response_times.get(&peer_id).unwrap().len(), 1);
+        assert_eq!(
+            transfer_metrics
+                .peer_response_times
+                .get(&peer_id)
+                .unwrap()
+                .len(),
+            1
+        );
 
         let peer_metrics = metrics.peer_metrics.get(&peer_id).unwrap();
         assert_eq!(peer_metrics.response_times.len(), 1);

@@ -1215,7 +1215,7 @@ mod tests {
         let good_bundle = ProofBundleVerification {
             merkle_root: merkle_root.clone(),
             entries: vec![entry.clone()],
-            expected_digest: ContentId::from_bytes(b"placeholder"),
+            expected_digest: ContentId::from_bytes(b"proof-bundle-seed"),
         };
         let expected_digest = proof_bundle_digest(&good_bundle);
 
@@ -1250,7 +1250,7 @@ mod tests {
                 stage: VerificationStage::ChunkHash,
                 digest: ContentId::from_bytes(b"chunk"),
             }],
-            expected_digest: ContentId::from_bytes(b"placeholder"),
+            expected_digest: ContentId::from_bytes(b"proof-bundle-seed"),
         };
         let incomplete = ProofBundleVerification {
             expected_digest: proof_bundle_digest(&incomplete),
@@ -1283,7 +1283,7 @@ mod tests {
         let bundle = ProofBundleVerification {
             merkle_root: MerkleRoot::new([6; 32]),
             entries,
-            expected_digest: ContentId::from_bytes(b"placeholder"),
+            expected_digest: ContentId::from_bytes(b"proof-bundle-seed"),
         };
         let bundle = ProofBundleVerification {
             expected_digest: proof_bundle_digest(&bundle),
@@ -1315,7 +1315,7 @@ mod tests {
         let bundle = ProofBundleVerification {
             merkle_root: MerkleRoot::new([7; 32]),
             entries,
-            expected_digest: ContentId::from_bytes(b"placeholder"),
+            expected_digest: ContentId::from_bytes(b"proof-bundle-seed"),
         };
         let bundle = ProofBundleVerification {
             expected_digest: proof_bundle_digest(&bundle),
@@ -1414,12 +1414,12 @@ mod tests {
     fn pipeline_proof(cancelled: bool) -> VerifierPipelineProof {
         let manifest_root = MerkleRoot::new([42; 32]);
         let proof_entries = complete_proof_entries();
-        let placeholder = ProofBundleVerification {
+        let seed_bundle = ProofBundleVerification {
             merkle_root: manifest_root.clone(),
             entries: proof_entries.clone(),
-            expected_digest: ContentId::from_bytes(b"placeholder"),
+            expected_digest: ContentId::from_bytes(b"proof-bundle-seed"),
         };
-        let expected_proof_digest = proof_bundle_digest(&placeholder);
+        let expected_proof_digest = proof_bundle_digest(&seed_bundle);
 
         VerifierPipelineProof {
             transfer_id: "transfer-42".to_string(),

@@ -335,7 +335,7 @@ impl MasqueAdapter {
         }
 
         for tunnel_id in to_remove {
-            if let Ok(()) = self.close_tunnel(cx, &tunnel_id).await {
+            if matches!(self.close_tunnel(cx, &tunnel_id).await, Ok(())) {
                 cx.trace("masque_tunnel_idle_cleanup");
             }
         }
@@ -364,11 +364,11 @@ pub struct MasqueHealthStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::test_cx;
+    use futures_lite::future::block_on;
     use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
-    async fn test_masque_adapter_creation() {
+    fn test_masque_adapter_creation() {
         let config = MasqueConfig::default();
         let adapter = MasqueAdapter::new(config);
 
@@ -378,125 +378,139 @@ mod tests {
     }
 
     #[test]
-    async fn test_tunnel_establishment() {
-        let mut adapter = MasqueAdapter::new(MasqueConfig::default());
-        let cx = test_cx();
-        let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 8080);
+    fn test_tunnel_establishment() {
+        block_on(async {
+            let mut adapter = MasqueAdapter::new(MasqueConfig::default());
+            let cx = Cx::for_testing();
+            let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 8080);
 
-        let tunnel_id = adapter.establish_tunnel(&cx, target_addr).await.unwrap();
+            let tunnel_id = adapter.establish_tunnel(&cx, target_addr).await.unwrap();
 
-        assert!(!tunnel_id.is_empty());
-        assert_eq!(adapter.stats.active_tunnels, 1);
-        assert_eq!(adapter.stats.total_tunnels_created, 1);
-        assert!(adapter.tunnels.contains_key(&tunnel_id));
-    }
-
-    #[test]
-    async fn test_datagram_size_limits() {
-        let mut adapter = MasqueAdapter::new(MasqueConfig {
-            max_datagram_size: 1000,
-            ..Default::default()
+            assert!(!tunnel_id.is_empty());
+            assert_eq!(adapter.stats.active_tunnels, 1);
+            assert_eq!(adapter.stats.total_tunnels_created, 1);
+            assert!(adapter.tunnels.contains_key(&tunnel_id));
         });
-        let cx = test_cx();
-        let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 8080);
+    }
 
-        let tunnel_id = adapter.establish_tunnel(&cx, target_addr).await.unwrap();
+    #[test]
+    fn test_datagram_size_limits() {
+        block_on(async {
+            let mut adapter = MasqueAdapter::new(MasqueConfig {
+                max_datagram_size: 1000,
+                ..Default::default()
+            });
+            let cx = Cx::for_testing();
+            let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 8080);
 
-        // Test payload within limits
-        let small_payload = vec![0u8; 500];
-        assert!(
+            let tunnel_id = adapter.establish_tunnel(&cx, target_addr).await.unwrap();
+
+            // Test payload within limits
+            let small_payload = vec![0u8; 500];
+            assert!(
+                adapter
+                    .send_datagram(&cx, &tunnel_id, &small_payload)
+                    .await
+                    .is_ok()
+            );
+
+            // Test payload exceeding limits
+            let large_payload = vec![0u8; 1500];
+            let result = adapter.send_datagram(&cx, &tunnel_id, &large_payload).await;
+            assert!(matches!(result, Err(MasqueError::DatagramTooLarge { .. })));
+        });
+    }
+
+    #[test]
+    fn test_tunnel_lifecycle() {
+        block_on(async {
+            let mut adapter = MasqueAdapter::new(MasqueConfig::default());
+            let cx = Cx::for_testing();
+            let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 8080);
+
+            // Establish tunnel
+            let tunnel_id = adapter.establish_tunnel(&cx, target_addr).await.unwrap();
+            assert_eq!(adapter.stats.active_tunnels, 1);
+
+            // Send some data
+            let payload = vec![0u8; 100];
             adapter
-                .send_datagram(&cx, &tunnel_id, &small_payload)
+                .send_datagram(&cx, &tunnel_id, &payload)
                 .await
-                .is_ok()
-        );
+                .unwrap();
 
-        // Test payload exceeding limits
-        let large_payload = vec![0u8; 1500];
-        let result = adapter.send_datagram(&cx, &tunnel_id, &large_payload).await;
-        assert!(matches!(result, Err(MasqueError::DatagramTooLarge { .. })));
+            // Close tunnel
+            adapter.close_tunnel(&cx, &tunnel_id).await.unwrap();
+            assert_eq!(adapter.stats.active_tunnels, 0);
+            assert_eq!(adapter.stats.total_tunnels_closed, 1);
+            assert!(!adapter.tunnels.contains_key(&tunnel_id));
+        });
     }
 
     #[test]
-    async fn test_tunnel_lifecycle() {
-        let mut adapter = MasqueAdapter::new(MasqueConfig::default());
-        let cx = test_cx();
-        let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 8080);
+    fn test_tunnel_not_found_error() {
+        block_on(async {
+            let mut adapter = MasqueAdapter::new(MasqueConfig::default());
+            let cx = Cx::for_testing();
 
-        // Establish tunnel
-        let tunnel_id = adapter.establish_tunnel(&cx, target_addr).await.unwrap();
-        assert_eq!(adapter.stats.active_tunnels, 1);
-
-        // Send some data
-        let payload = vec![0u8; 100];
-        adapter
-            .send_datagram(&cx, &tunnel_id, &payload)
-            .await
-            .unwrap();
-
-        // Close tunnel
-        adapter.close_tunnel(&cx, &tunnel_id).await.unwrap();
-        assert_eq!(adapter.stats.active_tunnels, 0);
-        assert_eq!(adapter.stats.total_tunnels_closed, 1);
-        assert!(!adapter.tunnels.contains_key(&tunnel_id));
+            let result = adapter.send_datagram(&cx, "nonexistent", &[]).await;
+            assert!(matches!(result, Err(MasqueError::TunnelNotFound { .. })));
+        });
     }
 
     #[test]
-    async fn test_tunnel_not_found_error() {
-        let mut adapter = MasqueAdapter::new(MasqueConfig::default());
-        let cx = test_cx();
+    fn test_health_check() {
+        block_on(async {
+            let adapter = MasqueAdapter::new(MasqueConfig::default());
+            let cx = Cx::for_testing();
 
-        let result = adapter.send_datagram(&cx, "nonexistent", &[]).await;
-        assert!(matches!(result, Err(MasqueError::TunnelNotFound { .. })));
+            let health = adapter.health_check(&cx).await.unwrap();
+
+            assert!(health.proxy_reachable);
+            assert!(!health.auth_valid); // No auth configured in default
+            assert!(health.avg_latency > Duration::ZERO);
+            assert_eq!(health.active_tunnels, 0);
+        });
     }
 
     #[test]
-    async fn test_health_check() {
-        let adapter = MasqueAdapter::new(MasqueConfig::default());
-        let cx = test_cx();
+    fn test_overhead_tracking() {
+        block_on(async {
+            let mut adapter = MasqueAdapter::new(MasqueConfig::default());
+            let cx = Cx::for_testing();
+            let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 8080);
 
-        let health = adapter.health_check(&cx).await.unwrap();
+            let tunnel_id = adapter.establish_tunnel(&cx, target_addr).await.unwrap();
 
-        assert!(health.proxy_reachable);
-        assert!(!health.auth_valid); // No auth configured in default
-        assert!(health.avg_latency > Duration::ZERO);
-        assert_eq!(health.active_tunnels, 0);
+            // Send data and verify overhead tracking
+            let payload = vec![0u8; 1000];
+            adapter
+                .send_datagram(&cx, &tunnel_id, &payload)
+                .await
+                .unwrap();
+
+            assert!(adapter.stats.total_payload_bytes > 0);
+            assert!(adapter.stats.total_overhead_bytes > 0);
+            assert!(adapter.stats.current_overhead_ratio > 0.0);
+            assert!(adapter.stats.current_overhead_ratio < 1.0);
+        });
     }
 
     #[test]
-    async fn test_overhead_tracking() {
-        let mut adapter = MasqueAdapter::new(MasqueConfig::default());
-        let cx = test_cx();
-        let target_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 8080);
+    fn test_authentication_config() {
+        block_on(async {
+            let config = MasqueConfig {
+                proxy_auth: Some(MasqueAuth::Bearer {
+                    token: "test-token".to_string(),
+                }),
+                ..Default::default()
+            };
 
-        let tunnel_id = adapter.establish_tunnel(&cx, target_addr).await.unwrap();
+            let adapter = MasqueAdapter::new(config);
+            let cx = Cx::for_testing();
 
-        // Send data and verify overhead tracking
-        let payload = vec![0u8; 1000];
-        adapter
-            .send_datagram(&cx, &tunnel_id, &payload)
-            .await
-            .unwrap();
-
-        assert!(adapter.stats.total_payload_bytes > 0);
-        assert!(adapter.stats.total_overhead_bytes > 0);
-        assert!(adapter.stats.current_overhead_ratio > 0.0);
-        assert!(adapter.stats.current_overhead_ratio < 1.0);
-    }
-
-    #[test]
-    async fn test_authentication_config() {
-        let config = MasqueConfig {
-            proxy_auth: Some(MasqueAuth::Bearer {
-                token: "test-token".to_string(),
-            }),
-            ..Default::default()
-        };
-
-        let adapter = MasqueAdapter::new(config);
-        let cx = test_cx();
-
-        let health = adapter.health_check(&cx).await.unwrap();
-        assert!(health.auth_valid);
+            let health = adapter.health_check(&cx).await.unwrap();
+            assert!(health.auth_valid);
+        });
     }
 }

@@ -195,8 +195,7 @@ impl SecureDaemonController {
                             .iter()
                             .map(|s| s.to_string_lossy().into_owned())
                             .collect::<Vec<_>>()
-                            .join(" ")
-                            .into(),
+                            .join(" "),
                         working_dir: process
                             .cwd()
                             .unwrap_or_else(|| std::path::Path::new("/"))
@@ -205,8 +204,7 @@ impl SecureDaemonController {
                             "{:?}",
                             process
                                 .user_id()
-                                .map(|uid| uid.to_string())
-                                .unwrap_or_else(|| "0".to_string())
+                                .map_or_else(|| "0".to_string(), |uid| uid.to_string())
                         ),
                         cpu_usage: process.cpu_usage(),
                         memory_usage: process.memory(),

@@ -415,7 +415,7 @@ impl PlatformCapabilities {
                 .open(&path)
             {
                 Ok(file) => return Some((path, file)),
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
                 Err(_) => return None,
             }
         }
