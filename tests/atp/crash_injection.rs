@@ -161,7 +161,7 @@ impl FaultInjector {
         }
 
         // Execute normal operation
-        operation().map_err(|e| FaultInjectionError::OperationFailed(e))
+        operation().map_err(FaultInjectionError::OperationFailed)
     }
 
     /// Inject verifier stage crash
@@ -174,7 +174,7 @@ impl FaultInjector {
             VerificationStage::Commit => FaultPoint::VerifyCommit,
             VerificationStage::ProofBundle => FaultPoint::VerifyProofBundle,
             VerificationStage::Finalizer => FaultPoint::VerifyFinalizer,
-            _ => return, // Unknown stage
+            VerificationStage::RepairSymbol => return, // No crash point is modeled for repair symbols.
         };
 
         self.configure_fault(FaultConfig {
@@ -258,7 +258,7 @@ impl std::error::Error for FaultInjectionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::OperationFailed(err) => Some(err.as_ref()),
-            _ => None,
+            Self::FaultInjected { .. } => None,
         }
     }
 }

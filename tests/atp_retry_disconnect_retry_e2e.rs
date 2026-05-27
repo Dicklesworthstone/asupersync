@@ -62,7 +62,7 @@ fn disconnect_retry_preserves_idempotency() {
         retry_key,
         manifest_hash.to_vec(),
         peer_id.to_string(),
-        end_time + 1000_000_000, // 1 second later
+        end_time + 1_000_000_000, // 1 second later
         1024 * 1024,
         100,
     );

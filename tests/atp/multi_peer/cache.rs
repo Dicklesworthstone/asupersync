@@ -713,7 +713,7 @@ mod tests {
             );
 
             assert!(
-                contract.validate_scenario(&scenario).is_ok(),
+                contract.validate_scenario(scenario).is_ok(),
                 "Scenario {} should pass cache contract validation",
                 scenario.scenario_id
             );

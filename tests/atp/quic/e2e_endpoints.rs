@@ -145,7 +145,7 @@ pub struct QLogEvent {
 impl QuicE2EEndpoint {
     /// Create new E2E endpoint
     pub fn new(config: E2EConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let socket = Arc::new(UdpSocket::bind(&config.client_addr)?);
+        let socket = Arc::new(UdpSocket::bind(config.client_addr)?);
         socket.set_nonblocking(true)?;
 
         let state = Arc::new(Mutex::new(EndpointState {
@@ -193,7 +193,7 @@ impl QuicE2EEndpoint {
         });
 
         // Bind to server address
-        let server_socket = UdpSocket::bind(&self.config.server_addr)?;
+        let server_socket = UdpSocket::bind(self.config.server_addr)?;
         server_socket.set_nonblocking(true)?;
 
         let mut buffer = [0u8; 2048];
@@ -234,7 +234,7 @@ impl QuicE2EEndpoint {
         });
 
         // Connect socket to server
-        self.socket.connect(&self.config.server_addr)?;
+        self.socket.connect(self.config.server_addr)?;
 
         // Send test data
         let test_data = self.generate_test_data();

@@ -360,7 +360,7 @@ mod tests {
         for chunk_start in (0..total_len).step_by(chunk_size) {
             let chunk_end = (chunk_start + chunk_size).min(total_len);
             let chunk = encoded.slice(chunk_start..chunk_end);
-            decode_buf.extend_from_slice(&chunk);
+            decode_buf.extend_from_slice(chunk);
 
             // Try to decode
             match decoder.decode(&mut decode_buf).unwrap() {
@@ -373,7 +373,6 @@ mod tests {
                 None => {
                     // Should need more data
                     assert!(chunk_end < total_len);
-                    continue;
                 }
             }
         }
@@ -492,7 +491,7 @@ mod tests {
         let result2 = codec2.decode(&mut buf2);
         assert!(matches!(
             result2,
-            Err(FrameError::ExtensionTooLarge { .. }) | Err(FrameError::InvalidFormat(_))
+            Err(FrameError::ExtensionTooLarge { .. } | FrameError::InvalidFormat(_))
         ));
 
         // Test 3: Version that would truncate (DoS vulnerability)

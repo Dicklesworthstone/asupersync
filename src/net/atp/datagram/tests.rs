@@ -220,7 +220,11 @@ fn test_expired_datagram_cleanup() {
     let frame = DatagramFrame::with_length(Bytes::from_static(b"expired"));
     let metadata = DatagramMetadata::new("test")
         .with_priority(DatagramPriority::Normal)
-        .with_expiration(Instant::now() - Duration::from_secs(1));
+        .with_expiration(
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .expect("test instant should support one-second subtraction"),
+        );
 
     controller.enqueue_datagram(frame, metadata).unwrap();
 

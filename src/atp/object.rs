@@ -1112,8 +1112,7 @@ mod tests {
         graph.add_root(file).unwrap();
 
         // Verify it's in roots and not in objects_with_parents
-        let roots: Vec<_> = graph.roots().cloned().collect();
-        assert!(roots.contains(&file_id));
+        assert!(graph.roots().any(|root| root == &file_id));
         assert!(!graph.has_parent(&file_id));
 
         // Create a directory that contains the file as a child

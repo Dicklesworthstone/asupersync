@@ -492,7 +492,7 @@ mod tests {
 
         assert!(close.priority > ping.priority);
         assert!(close.ack_eliciting);
-        assert!(!ping.retransmittable || ping.retransmittable); // PING is retransmittable
+        assert!(ping.retransmittable); // PING is retransmittable
     }
 
     #[test]

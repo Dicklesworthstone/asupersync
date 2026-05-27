@@ -42,13 +42,12 @@ fn run_contract_smoke() -> Value {
         .output()
         .expect("run ATP-N9 workflow acceptance smoke contract");
 
-    if !output.status.success() {
-        panic!(
-            "ATP-N9 runner failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    assert!(
+        output.status.success(),
+        "ATP-N9 runner failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     serde_json::from_slice(&output.stdout).expect("runner stdout must be JSON")
 }
 

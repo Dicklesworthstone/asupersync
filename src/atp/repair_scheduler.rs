@@ -886,7 +886,7 @@ mod tests {
 
     fn create_test_peer_id(port: u16) -> PeerId {
         PeerId::new(
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
             [port as u8; 32],
         )
     }

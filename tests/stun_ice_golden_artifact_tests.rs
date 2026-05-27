@@ -5,7 +5,6 @@
 //! compatibility and detect unexpected serialization changes.
 
 use asupersync::net::stun::{IceCandidate, IceCandidateType, StunError};
-use serde_json;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 /// Golden artifact test infrastructure.
@@ -310,14 +309,14 @@ mod ice_candidate_tests {
     fn ice_candidate_edge_cases_golden() {
         // Test edge cases: empty foundation, max priority, etc.
         let edge_case_candidate = IceCandidate {
-            foundation: "".to_string(),  // Empty foundation
+            foundation: String::new(),   // Empty foundation
             component: 65535,            // Max component ID
             protocol: "tcp".to_string(), // TCP instead of UDP
             priority: 0,                 // Min priority
-            address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 0)),
+            address: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
             candidate_type: IceCandidateType::PeerReflexive,
             related_address: Some(SocketAddr::V4(SocketAddrV4::new(
-                Ipv4Addr::new(255, 255, 255, 255),
+                Ipv4Addr::BROADCAST,
                 65535,
             ))),
         };
@@ -374,7 +373,7 @@ mod stun_protocol_tests {
                 StunAttribute {
                     attr_type: 0x8022, // SOFTWARE
                     attr_name: "SOFTWARE".to_string(),
-                    value: "asupersync-stun-0.3.2".as_bytes().to_vec(),
+                    value: b"asupersync-stun-0.3.2".to_vec(),
                 },
             ],
         }

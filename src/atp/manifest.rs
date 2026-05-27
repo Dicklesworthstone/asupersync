@@ -2782,8 +2782,8 @@ mod tests {
     #[test]
     fn deterministic_float_normal_values() {
         // Normal values should be unchanged
-        let f32_val = 3.14159f32;
-        let f64_val = 3.14159265358979323846f64;
+        let f32_val = std::f32::consts::PI;
+        let f64_val = std::f64::consts::PI;
 
         assert_eq!(
             deterministic_f32_be_bytes(f32_val),
@@ -3236,7 +3236,7 @@ mod tests {
                 capability: "read:public".to_string(),
                 target: "user:*".to_string(),
                 constraints: vec!["time:business_hours".to_string()],
-                expires_at: Some(1640995200_000_000_000), // 2022-01-01 00:00:00 UTC
+                expires_at: Some(1_640_995_200_000_000_000), // 2022-01-01 00:00:00 UTC
             }],
         };
 

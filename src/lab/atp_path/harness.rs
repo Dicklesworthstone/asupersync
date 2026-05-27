@@ -986,15 +986,9 @@ mod tests {
         let result = harness.execute_scenario(&scenario).await.unwrap();
 
         // Verify we have all expected trace event types
-        let event_kinds: Vec<_> = result
-            .trace_events
-            .iter()
-            .map(|e| std::mem::discriminant(&e.event))
-            .collect();
-
         // Should have discovery started, connection attempt, path failed,
         // fallback selected, loser drained, and transfer completed events
-        assert!(event_kinds.len() >= 6);
+        assert!(result.trace_events.len() >= 6);
 
         // Verify we have discovery started events
         assert!(

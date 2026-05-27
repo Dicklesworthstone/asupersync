@@ -37,10 +37,10 @@ mod tests {
 
                 // Net ROI should be consistent with gross - total
                 let expected_net_roi =
-                    result.gross_benefit_micros as i64 - result.total_cost_micros as i64;
-                let tolerance = 1000i64; // Allow small rounding errors
+                    i128::from(result.gross_benefit_micros) - i128::from(result.total_cost_micros);
+                let tolerance = 1000i128; // Allow small rounding errors
                 assert!(
-                    (result.net_roi_micros - expected_net_roi).abs() <= tolerance,
+                    (i128::from(result.net_roi_micros) - expected_net_roi).abs() <= tolerance,
                     "Net ROI calculation inconsistent for regime {}: expected {}, got {}",
                     regime_name,
                     expected_net_roi,
@@ -311,7 +311,7 @@ mod tests {
         for (regime_name, regime_results1) in &results1 {
             let regime_results2 = results2
                 .get(regime_name)
-                .expect(&format!("Regime {} should exist in both runs", regime_name));
+                .unwrap_or_else(|| panic!("Regime {} should exist in both runs", regime_name));
 
             assert_eq!(
                 regime_results1.len(),

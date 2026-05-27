@@ -300,7 +300,7 @@ async fn test_atp_path_lab_coverage_matrix() -> Result<(), Box<dyn std::error::E
     for (regime, expected_kind) in path_matrix {
         let mut harness = AtpPathLabHarness::new(harness_config.clone());
 
-        let scenario = AtpLabScenario::new(&format!("test-{}", regime.label()), 0xA7F0_0000)
+        let scenario = AtpLabScenario::new(format!("test-{}", regime.label()), 0xA7F0_0000)
             .with_regime(regime);
 
         let result = harness.execute_scenario(&scenario).await?;

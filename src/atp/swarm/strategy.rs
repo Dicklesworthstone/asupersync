@@ -614,7 +614,7 @@ mod tests {
             PeerInfo {
                 quality_score: 0.8,
                 active_requests: 2,
-                available_pieces: [PieceId::new(0), PieceId::new(1)].iter().cloned().collect(),
+                available_pieces: [PieceId::new(0), PieceId::new(1)].iter().copied().collect(),
                 recent_response_time: std::time::Duration::from_millis(100),
                 reliability: 0.9,
             },

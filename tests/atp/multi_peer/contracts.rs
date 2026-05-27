@@ -304,7 +304,7 @@ impl MultiPeerContract for CacheContract {
 
         // Validate expected cache behavior
         if let Some(expected_cache) = &result.scenario.expectations.cache_metrics {
-            for (_peer_id, actual_metrics) in &result.cache_metrics {
+            for actual_metrics in result.cache_metrics.values() {
                 if let Some(expected_hits) = expected_cache.hits {
                     if actual_metrics.hits.unwrap_or(0) != expected_hits {
                         return Err(format!(
@@ -496,13 +496,13 @@ impl MultiPeerContract for AdversarialContract {
         }
 
         // Verify honest peers exist
-        let honest_peers: Vec<_> = scenario
+        let honest_peer_count = scenario
             .peers
             .iter()
             .filter(|peer| !matches!(peer.role, PeerRole::Malicious))
-            .collect();
+            .count();
 
-        if honest_peers.len() < 2 {
+        if honest_peer_count < 2 {
             return Err("Adversarial scenario requires at least 2 honest peers".to_string());
         }
 
@@ -533,7 +533,7 @@ impl MultiPeerContract for AdversarialContract {
         for selection in &result.transfer_metrics.source_selections {
             if !selection.rejected_peers.is_empty() {
                 // Check that rejection reasons are provided
-                for (_peer, reason) in &selection.rejected_peers {
+                for reason in selection.rejected_peers.values() {
                     if reason.is_empty() {
                         return Err("Peer rejection must include reason".to_string());
                     }
@@ -567,7 +567,7 @@ impl SchemaValidator {
         ];
 
         for field in &required_fields {
-            if !parsed.get(field).is_some() {
+            if parsed.get(field).is_none() {
                 return Err(format!("Missing required field: {}", field));
             }
         }
@@ -594,7 +594,7 @@ impl SchemaValidator {
         // Check required fields
         let required_fields = ["timestamp", "event_type", "peers"];
         for field in &required_fields {
-            if !parsed.get(field).is_some() {
+            if parsed.get(field).is_none() {
                 return Err(format!("Missing required field: {}", field));
             }
         }
@@ -800,15 +800,14 @@ mod tests {
                 peer_rejections: 0,
                 source_selections: Vec::new(),
             },
-            cache_metrics: [(
+            cache_metrics: std::iter::once((
                 "relay-cache".to_string(),
                 CacheMetrics {
                     hits: Some(0),
                     misses: Some(1),
                     evictions: Some(0),
                 },
-            )]
-            .into_iter()
+            ))
             .collect(),
             verification_results: VerificationResults {
                 crypto_verified: false,
@@ -897,15 +896,14 @@ mod tests {
                 peer_rejections: 1,
                 source_selections: Vec::new(),
             },
-            cache_metrics: [(
+            cache_metrics: std::iter::once((
                 "seed-cache".to_string(),
                 CacheMetrics {
                     hits: Some(0),
                     misses: Some(0),
                     evictions: Some(0),
                 },
-            )]
-            .into_iter()
+            ))
             .collect(),
             verification_results: VerificationResults {
                 crypto_verified: false,

@@ -23,13 +23,12 @@ fn run_dashboard(args: &[&str]) -> String {
         .stderr(Stdio::piped())
         .output()
         .expect("run ATP completion dashboard");
-    if !output.status.success() {
-        panic!(
-            "dashboard command failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    assert!(
+        output.status.success(),
+        "dashboard command failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8(output.stdout).expect("dashboard stdout is utf8")
 }
 

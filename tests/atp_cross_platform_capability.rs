@@ -412,8 +412,7 @@ fn detect_udp_socket_bind() -> CapabilityStatus {
                 "local_addr".to_string(),
                 socket
                     .local_addr()
-                    .map(|addr| addr.to_string())
-                    .unwrap_or_else(|_| "<unknown>".to_string()),
+                    .map_or_else(|_| "<unknown>".to_string(), |addr| addr.to_string()),
             )]),
         ),
         Err(error) => unsupported(format!("udp loopback bind failed: {error}")),
@@ -429,8 +428,7 @@ fn detect_ipv6_loopback() -> CapabilityStatus {
                 "local_addr".to_string(),
                 socket
                     .local_addr()
-                    .map(|addr| addr.to_string())
-                    .unwrap_or_else(|_| "<unknown>".to_string()),
+                    .map_or_else(|_| "<unknown>".to_string(), |addr| addr.to_string()),
             )]),
         ),
         Err(error) => unsupported(format!("ipv6 loopback udp bind failed: {error}")),

@@ -270,12 +270,12 @@ fn test_producer_cancellation_scenario() {
     assert_eq!(manifest.verified_epochs().len(), 1);
     assert_eq!(manifest.provisional_epochs().len(), 0);
 
-    let invalidated_epochs: Vec<_> = manifest
+    let invalidated_epoch_count = manifest
         .epochs
         .iter()
         .filter(|e| e.state == EpochState::Invalidated)
-        .collect();
-    assert_eq!(invalidated_epochs.len(), 1);
+        .count();
+    assert_eq!(invalidated_epoch_count, 1);
 
     // Consumer should only see verified data
     let consumer = PrefixConsumer::new(manifest, ConsumptionPolicy::VerifiedOnly);

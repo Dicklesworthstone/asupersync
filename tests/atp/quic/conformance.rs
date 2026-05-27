@@ -673,14 +673,13 @@ fn test_ack_range_encoding(
     }
 
     let ack_frame = QuicFrame::Ack {
-        largest_acknowledged: varint(expected.first().map(|(_, end)| *end).unwrap_or(0)),
+        largest_acknowledged: varint(expected.first().map_or(0, |(_, end)| *end)),
         ack_delay: varint(0),
         ack_range_count: varint(expected.len().saturating_sub(1) as u64),
         first_ack_range: varint(
             expected
                 .first()
-                .map(|(start, end)| end.saturating_sub(*start))
-                .unwrap_or(0),
+                .map_or(0, |(start, end)| end.saturating_sub(*start)),
         ),
         ack_ranges: expected
             .iter()
@@ -737,11 +736,11 @@ fn test_connection_close(error_code: u64, reason: &str) -> Result<(), Box<dyn st
 }
 
 fn packet_number_encoded_len(packet_number: u64) -> Result<usize, Box<dyn std::error::Error>> {
-    if packet_number <= u8::MAX as u64 {
+    if u8::try_from(packet_number).is_ok() {
         Ok(1)
-    } else if packet_number <= u16::MAX as u64 {
+    } else if u16::try_from(packet_number).is_ok() {
         Ok(2)
-    } else if packet_number <= u32::MAX as u64 {
+    } else if u32::try_from(packet_number).is_ok() {
         Ok(4)
     } else {
         Err(format!("packet number {packet_number} exceeds 4-byte QUIC packet encoding").into())

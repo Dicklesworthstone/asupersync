@@ -407,7 +407,7 @@ impl ScenarioStats {
                         covered_features.insert("peer_rejection");
                     }
                 }
-                _ => {}
+                ScenarioType::Hybrid(_) => {}
             }
 
             if scenario.transfer.encrypted {

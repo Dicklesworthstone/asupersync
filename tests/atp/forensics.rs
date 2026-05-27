@@ -430,8 +430,9 @@ impl AtpMinimizer {
             artifact
                 .test_case
                 .as_ref()
-                .map(|test_case| test_case.test_function.as_str())
-                .unwrap_or("<unknown-test>"),
+                .map_or("<unknown-test>", |test_case| {
+                    test_case.test_function.as_str()
+                }),
             artifact.context.operation
         )];
 
@@ -686,7 +687,7 @@ fn is_default_json(value: &serde_json::Value) -> bool {
         serde_json::Value::String(text) => text.is_empty(),
         serde_json::Value::Array(items) => items.is_empty(),
         serde_json::Value::Object(map) => map.is_empty(),
-        _ => false,
+        serde_json::Value::Bool(_) => false,
     }
 }
 

@@ -1496,15 +1496,15 @@ mod tests {
     }
 
     fn receive_actions() -> BTreeSet<AllowAction> {
-        [AllowAction::Receive].into_iter().collect()
+        std::iter::once(AllowAction::Receive).collect()
     }
 
     fn cache_actions() -> BTreeSet<AllowAction> {
-        [AllowAction::Cache].into_iter().collect()
+        std::iter::once(AllowAction::Cache).collect()
     }
 
     fn seed_actions() -> BTreeSet<AllowAction> {
-        [AllowAction::Seed].into_iter().collect()
+        std::iter::once(AllowAction::Seed).collect()
     }
 
     fn offer(item_id: &str, path: &str, bytes_total: u64) -> InboxOffer {
@@ -1987,7 +1987,7 @@ mod tests {
                 "peer-a",
                 cache_actions(),
                 GrantScope::Cache {
-                    object_types: ["artifact".to_string()].into_iter().collect(),
+                    object_types: std::iter::once("artifact".to_string()).collect(),
                     max_bytes: Some(512),
                 },
             )

@@ -405,7 +405,7 @@ mod tests {
         let secret_key = [1u8; 32];
         let handler = RetryTokenHandler::new(secret_key, 300); // 5 minute lifetime
 
-        let client_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 12345);
+        let client_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 12345);
         let original_dest_cid = b"original_cid";
 
         let token = handler
@@ -421,7 +421,7 @@ mod tests {
         let secret_key = [1u8; 32];
         let handler = RetryTokenHandler::new(secret_key, 300);
 
-        let client_addr1 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 12345);
+        let client_addr1 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 12345);
         let client_addr2 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 12345);
         let original_dest_cid = b"original_cid";
 
@@ -438,7 +438,7 @@ mod tests {
         let secret_key = [1u8; 32];
         let handler = RetryTokenHandler::new(secret_key, 300);
 
-        let client_addr = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 12345);
+        let client_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 12345);
         let original_dest_cid1 = b"original_cid1";
         let original_dest_cid2 = b"original_cid2";
 

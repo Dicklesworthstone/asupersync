@@ -372,10 +372,10 @@ fn test_stream_fsm_validation() -> TestResult {
 
     // After close, stream should eventually transition to LocalClosed
     // We need to drain the send data to trigger the state transition
-    if let Some((_, _, fin)) = stream.get_send_data(1000) {
-        if !fin {
-            return TestResult::failed("Close should produce FIN frame".to_string());
-        }
+    if let Some((_, _, fin)) = stream.get_send_data(1000)
+        && !fin
+    {
+        return TestResult::failed("Close should produce FIN frame".to_string());
     }
 
     // Test stream reset (invalid transition test)
@@ -619,7 +619,7 @@ fn test_error_timing_consistency() -> TestResult {
     let stream_id = StreamId::new(0);
 
     // Create different error conditions that should have consistent timing
-    let errors = vec![
+    let errors = [
         StreamError::StreamNotFound { stream_id },
         StreamError::StreamClosed {
             stream_id,
@@ -669,7 +669,7 @@ fn test_typed_error_invariant_preservation() -> TestResult {
     // Test typed errors preserve security invariants using real ATP error types
     let stream_id = StreamId::new(0);
 
-    let errors = vec![
+    let errors = [
         StreamError::StreamNotFound { stream_id },
         StreamError::FlowControlViolation {
             stream_id,
@@ -887,11 +887,7 @@ fn test_side_channel_timing_consistency() -> TestResult {
     }
 
     // Timing should be similar (within reasonable bounds)
-    let timing_diff = if data_time > control_time {
-        data_time - control_time
-    } else {
-        control_time - data_time
-    };
+    let timing_diff = data_time.abs_diff(control_time);
 
     // Allow for some variation, but should be consistent
     if timing_diff.as_millis() > 50 {

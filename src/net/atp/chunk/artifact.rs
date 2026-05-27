@@ -1064,7 +1064,7 @@ mod tests {
         assert!(ArtifactProfile::validate_build_context(&valid_context).is_ok());
 
         let invalid_context = ArtifactBuildContext {
-            build_system: "".to_string(), // Empty!
+            build_system: String::new(), // Empty!
             build_timestamp: None,
             environment_hash: [1; 32],
             toolchain_version: "rustc-1.70.0".to_string(),

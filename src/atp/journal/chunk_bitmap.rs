@@ -1021,9 +1021,9 @@ mod tests {
             assert!(
                 matches!(
                     result,
-                    Err(ChunkBitmapDecodeError::Truncated { .. })
-                        | Err(ChunkBitmapDecodeError::ChecksumMismatch { .. })
-                        | Err(ChunkBitmapDecodeError::BadMagic { .. })
+                    Err(ChunkBitmapDecodeError::Truncated { .. }
+                        | ChunkBitmapDecodeError::ChecksumMismatch { .. }
+                        | ChunkBitmapDecodeError::BadMagic { .. })
                 ),
                 "cut={cut} must fail closed, got {result:?}"
             );

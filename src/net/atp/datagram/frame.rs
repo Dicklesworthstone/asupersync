@@ -414,8 +414,11 @@ mod tests {
         // Test expiration
         assert!(!metadata.is_expired());
 
-        metadata =
-            metadata.with_expiration(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        metadata = metadata.with_expiration(
+            std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .expect("test instant should support one-second subtraction"),
+        );
         assert!(metadata.is_expired());
     }
 

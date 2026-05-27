@@ -1047,14 +1047,13 @@ mod tests {
     #[test]
     fn test_piece_selection_strategies() {
         let needed_pieces = vec![PieceId::new(1), PieceId::new(2), PieceId::new(3)];
-        let peers = [(
+        let peers = std::iter::once((
             PeerId::new("peer-a"),
             test_peer(
                 "peer-a",
                 [PieceId::new(1), PieceId::new(2), PieceId::new(3)],
             ),
-        )]
-        .into_iter()
+        ))
         .collect::<HashMap<_, _>>();
 
         let sequential = SequentialStrategy::new();

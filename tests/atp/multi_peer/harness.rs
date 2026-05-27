@@ -373,10 +373,10 @@ impl TestReportGenerator {
     pub fn summary_text(report: &TestReport) -> String {
         let mut summary = String::new();
 
-        summary.push_str(&format!("Multi-Peer Test Report\n"));
+        summary.push_str("Multi-Peer Test Report\n");
         summary.push_str(&format!("Generated: {:?}\n\n", report.generated_at));
 
-        summary.push_str(&format!("Overall Results:\n"));
+        summary.push_str("Overall Results:\n");
         summary.push_str(&format!("  Total Scenarios: {}\n", report.total_scenarios));
         summary.push_str(&format!("  Successful: {}\n", report.successful));
         summary.push_str(&format!("  Failed: {}\n", report.failed));

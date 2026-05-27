@@ -222,8 +222,7 @@ mod tests {
                 manager
                     .metrics()
                     .sessions_by_adapter
-                    .get(&negotiation.selected_adapter)
-                    .is_some()
+                    .contains_key(&negotiation.selected_adapter)
             );
         });
     }

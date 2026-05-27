@@ -497,7 +497,7 @@ mod tests {
     fn test_swarm_event_serialization() {
         let event = SwarmEvent::PeerJoined {
             peer_id: PeerId::new("new-peer"),
-            available_pieces: [PieceId::new(1), PieceId::new(2)].iter().cloned().collect(),
+            available_pieces: [PieceId::new(1), PieceId::new(2)].iter().copied().collect(),
             capabilities: PeerCapabilities::default(),
         };
 
