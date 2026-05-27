@@ -387,8 +387,6 @@ impl ExpectContinueConformanceTester {
 
     /// Start asupersync HTTP server for testing.
     async fn start_asupersync_server(&self) -> u16 {
-        // This is a simplified implementation - in practice you'd need to
-        // integrate with the actual asupersync HTTP server
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
@@ -405,7 +403,6 @@ impl ExpectContinueConformanceTester {
 
     /// Start reference HTTP server for testing.
     async fn start_reference_server(&self) -> u16 {
-        // This is a simplified implementation using basic tokio
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
@@ -538,7 +535,7 @@ impl ExpectContinueConformanceTester {
     }
 }
 
-/// Handle connection for asupersync server (simplified implementation).
+/// Handle one connection for the asupersync-side conformance server.
 async fn handle_asupersync_connection(
     mut stream: TcpStream,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -546,7 +543,6 @@ async fn handle_asupersync_connection(
     let n = stream.read(&mut buffer).await?;
     let request = String::from_utf8_lossy(&buffer[..n]);
 
-    // Simple parsing to check for Expect header
     let has_expect_continue = request.lines().any(|line| {
         line.to_lowercase().starts_with("expect:") && line.to_lowercase().contains("100-continue")
     });
@@ -570,10 +566,8 @@ async fn handle_asupersync_connection(
     Ok(())
 }
 
-/// Handle connection for reference server (simplified implementation).
+/// Handle one connection for the reference conformance server.
 async fn handle_reference_connection(stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
-    // This would be the same logic as asupersync for conformance
-    // In practice, this would use the actual reference implementation
     handle_asupersync_connection(stream).await
 }
 

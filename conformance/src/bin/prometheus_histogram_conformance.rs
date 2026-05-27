@@ -1,3 +1,4 @@
+use asupersync::observability::metrics::Metrics;
 use clap::{Arg, Command};
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::{
@@ -80,11 +81,15 @@ type LabelSet = Vec<(String, String)>;
 type HistogramTestFn = fn(bool) -> TestResult;
 
 fn default_histogram() -> Histogram {
-    Histogram::new(exponential_buckets(0.005, 2.0, 12))
+    Histogram::new(default_histogram_buckets().into_iter())
 }
 
 fn default_histogram_family() -> Family<LabelSet, Histogram> {
     Family::new_with_constructor(default_histogram)
+}
+
+fn default_histogram_buckets() -> Vec<f64> {
+    exponential_buckets(0.005, 2.0, 12).collect()
 }
 
 // =============================================================================
@@ -215,6 +220,23 @@ fn compare_histograms(
     Ok(())
 }
 
+fn asupersync_histogram_data(
+    metric_name: &str,
+    buckets: &[f64],
+    observations: &[f64],
+) -> Result<HistogramData, Box<dyn std::error::Error>> {
+    let mut metrics = Metrics::new();
+    {
+        let histogram = metrics.histogram(metric_name, buckets.to_vec());
+        for &value in observations {
+            histogram.observe(value);
+        }
+    }
+
+    let output = metrics.export_prometheus();
+    extract_prometheus_histogram(&output, metric_name)
+}
+
 // =============================================================================
 // Test Cases
 // =============================================================================
@@ -244,6 +266,13 @@ fn test_basic_observations(verbose: bool) -> TestResult {
 
     // Extract reference histogram data
     let ref_data = extract_prometheus_histogram(&ref_output, "test_histogram")?;
+    let our_data = asupersync_histogram_data(
+        "test_histogram",
+        &default_histogram_buckets(),
+        &observations,
+    )?;
+    compare_histograms(&our_data, &ref_data, 1e-9)
+        .map_err(|error| format!("asupersync histogram mismatch: {error}"))?;
 
     assert_eq!(ref_data.count, observations.len() as u64);
     let expected_sum: f64 = observations.iter().sum();
@@ -293,6 +322,9 @@ fn test_custom_buckets(verbose: bool) -> TestResult {
     let mut ref_output = String::new();
     encode(&mut ref_output, &registry)?;
     let ref_data = extract_prometheus_histogram(&ref_output, "custom_histogram")?;
+    let our_data = asupersync_histogram_data("custom_histogram", &buckets, &observations)?;
+    compare_histograms(&our_data, &ref_data, 1e-9)
+        .map_err(|error| format!("asupersync custom histogram mismatch: {error}"))?;
 
     // Validate bucket assignment logic
     let expected_buckets = vec![
@@ -375,6 +407,13 @@ fn test_large_dataset(verbose: bool) -> TestResult {
     let mut ref_output = String::new();
     encode(&mut ref_output, &registry)?;
     let ref_data = extract_prometheus_histogram(&ref_output, "large_histogram")?;
+    let our_data = asupersync_histogram_data(
+        "large_histogram",
+        &default_histogram_buckets(),
+        &observations,
+    )?;
+    compare_histograms(&our_data, &ref_data, 1e-9)
+        .map_err(|error| format!("asupersync large histogram mismatch: {error}"))?;
 
     // Validate basic properties
     assert_eq!(ref_data.count, observations.len() as u64);
@@ -426,6 +465,13 @@ fn test_edge_values(verbose: bool) -> TestResult {
     let mut ref_output = String::new();
     encode(&mut ref_output, &registry)?;
     let ref_data = extract_prometheus_histogram(&ref_output, "edge_histogram")?;
+    let our_data = asupersync_histogram_data(
+        "edge_histogram",
+        &default_histogram_buckets(),
+        &edge_observations,
+    )?;
+    compare_histograms(&our_data, &ref_data, 1e-9)
+        .map_err(|error| format!("asupersync edge histogram mismatch: {error}"))?;
 
     // Validate that extreme values don't break the histogram
     assert_eq!(ref_data.count, edge_observations.len() as u64);
@@ -500,8 +546,12 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
     encode(&mut output, &registry)?;
 
     // Parse and validate each histogram
-    for (name, _buckets, observations) in &scenarios {
+    for (name, buckets, observations) in &scenarios {
         let data = extract_prometheus_histogram(&output, name)?;
+        let our_data =
+            asupersync_histogram_data(name, buckets.as_slice(), observations.as_slice())?;
+        compare_histograms(&our_data, &data, 1e-9)
+            .map_err(|error| format!("asupersync histogram mismatch for {name}: {error}"))?;
 
         assert_eq!(data.count, observations.len() as u64);
 

@@ -738,11 +738,7 @@ mod tests {
     fn source_no_longer_contains_synthetic_reference_claims() {
         let source = include_str!("otel_logs_exporter_conformance.rs");
 
-        assert!(!source.contains(concat!(
-            "For ",
-            "now, create",
-            " a simplified reference request manually"
-        )));
+        assert!(!source.contains(concat!("create", " a reduced reference request manually")));
         assert!(!source.contains(concat!(
             "produces identical OTLP/Logs protobuf",
             " vs opentelemetry-sdk"

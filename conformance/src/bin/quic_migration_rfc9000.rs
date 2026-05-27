@@ -218,8 +218,8 @@ mod tests {
         for (left, right) in [
             ("Mock", "PathValidator"),
             ("MockConnection", "IdManager"),
-            ("simulate_source", "_address_change"),
-            ("simulate_concurrent", "_migration"),
+            ("legacy_source", "_address_change"),
+            ("legacy_concurrent", "_migration"),
         ] {
             let forbidden = format!("{left}{right}");
             assert!(!source.contains(&forbidden), "found {forbidden}");

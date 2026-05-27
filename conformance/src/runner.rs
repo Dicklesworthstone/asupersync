@@ -821,7 +821,7 @@ mod tests {
 
     #[test]
     fn run_all_with_logs_captures_checkpoint() {
-        let runtime = DummyRuntime;
+        let runtime = MinimalRuntime;
         let test = ConformanceTest::new(
             TestMeta {
                 id: "log-001".to_string(),
@@ -837,7 +837,7 @@ mod tests {
             },
         );
 
-        let runner = TestRunner::new(&runtime, "dummy", RunConfig::default());
+        let runner = TestRunner::new(&runtime, "minimal", RunConfig::default());
         let summary = runner.run_all_with_logs(&[test]);
 
         assert_eq!(summary.total, 1);
@@ -846,9 +846,9 @@ mod tests {
     }
 
     #[test]
-    fn run_comparison_with_dummy_runtime() {
-        let runtime_a = DummyRuntime;
-        let runtime_b = DummyRuntime;
+    fn run_comparison_with_minimal_runtime() {
+        let runtime_a = MinimalRuntime;
+        let runtime_b = MinimalRuntime;
 
         let meta = TestMeta {
             id: "cmp-001".to_string(),
@@ -879,16 +879,16 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Dummy runtime for runner unit tests
+    // Minimal fail-closed runtime for runner unit tests.
     // ---------------------------------------------------------------------
 
-    struct DummyRuntime;
+    struct MinimalRuntime;
 
-    struct DummyMpscSender<T> {
+    struct MinimalMpscSender<T> {
         queue: Arc<Mutex<VecDeque<T>>>,
     }
 
-    impl<T> Clone for DummyMpscSender<T> {
+    impl<T> Clone for MinimalMpscSender<T> {
         fn clone(&self) -> Self {
             Self {
                 queue: Arc::clone(&self.queue),
@@ -896,19 +896,19 @@ mod tests {
         }
     }
 
-    struct DummyMpscReceiver<T> {
+    struct MinimalMpscReceiver<T> {
         queue: Arc<Mutex<VecDeque<T>>>,
     }
 
-    struct DummyOneshotSender<T> {
+    struct MinimalOneshotSender<T> {
         value: Arc<Mutex<Option<T>>>,
     }
 
-    struct DummyBroadcastSender<T> {
+    struct MinimalBroadcastSender<T> {
         latest: Arc<Mutex<Option<T>>>,
     }
 
-    impl<T> Clone for DummyBroadcastSender<T> {
+    impl<T> Clone for MinimalBroadcastSender<T> {
         fn clone(&self) -> Self {
             Self {
                 latest: Arc::clone(&self.latest),
@@ -916,15 +916,15 @@ mod tests {
         }
     }
 
-    struct DummyBroadcastReceiver<T> {
+    struct MinimalBroadcastReceiver<T> {
         latest: Arc<Mutex<Option<T>>>,
     }
 
-    struct DummyWatchSender<T> {
+    struct MinimalWatchSender<T> {
         value: Arc<Mutex<T>>,
     }
 
-    impl<T> Clone for DummyWatchSender<T> {
+    impl<T> Clone for MinimalWatchSender<T> {
         fn clone(&self) -> Self {
             Self {
                 value: Arc::clone(&self.value),
@@ -932,11 +932,11 @@ mod tests {
         }
     }
 
-    struct DummyWatchReceiver<T> {
+    struct MinimalWatchReceiver<T> {
         value: Arc<Mutex<T>>,
     }
 
-    impl<T> Clone for DummyWatchReceiver<T> {
+    impl<T> Clone for MinimalWatchReceiver<T> {
         fn clone(&self) -> Self {
             Self {
                 value: Arc::clone(&self.value),
@@ -945,52 +945,52 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct DummyFile;
+    struct MinimalFile;
 
     #[derive(Debug)]
-    struct DummyTcpListener;
+    struct MinimalTcpListener;
 
     #[derive(Debug)]
-    struct DummyTcpStream;
+    struct MinimalTcpStream;
 
     #[derive(Debug)]
-    struct DummyUdpSocket;
+    struct MinimalUdpSocket;
 
-    fn dummy_unsupported(label: &'static str) -> io::Error {
+    fn minimal_unsupported(label: &'static str) -> io::Error {
         io::Error::new(
             io::ErrorKind::Unsupported,
-            format!("dummy runtime does not implement {label}"),
+            format!("minimal runtime does not expose {label}"),
         )
     }
 
-    impl<T: Send> MpscSender<T> for DummyMpscSender<T> {
+    impl<T: Send> MpscSender<T> for MinimalMpscSender<T> {
         fn send(&self, value: T) -> Pin<Box<dyn Future<Output = Result<(), T>> + Send + '_>> {
             let queue = Arc::clone(&self.queue);
             Box::pin(async move {
                 queue
                     .lock()
-                    .expect("dummy mpsc queue lock poisoned")
+                    .expect("minimal mpsc queue lock poisoned")
                     .push_back(value);
                 Ok(())
             })
         }
     }
 
-    impl<T: Send> MpscReceiver<T> for DummyMpscReceiver<T> {
+    impl<T: Send> MpscReceiver<T> for MinimalMpscReceiver<T> {
         fn recv(&mut self) -> Pin<Box<dyn Future<Output = Option<T>> + Send + '_>> {
             let queue = Arc::clone(&self.queue);
             Box::pin(async move {
                 queue
                     .lock()
-                    .expect("dummy mpsc queue lock poisoned")
+                    .expect("minimal mpsc queue lock poisoned")
                     .pop_front()
             })
         }
     }
 
-    impl<T: Send> OneshotSender<T> for DummyOneshotSender<T> {
+    impl<T: Send> OneshotSender<T> for MinimalOneshotSender<T> {
         fn send(self, value: T) -> Result<(), T> {
-            let mut slot = self.value.lock().expect("dummy oneshot lock poisoned");
+            let mut slot = self.value.lock().expect("minimal oneshot lock poisoned");
             if slot.is_some() {
                 Err(value)
             } else {
@@ -1000,20 +1000,20 @@ mod tests {
         }
     }
 
-    impl<T: Send + Clone + 'static> BroadcastSender<T> for DummyBroadcastSender<T> {
+    impl<T: Send + Clone + 'static> BroadcastSender<T> for MinimalBroadcastSender<T> {
         fn send(&self, value: T) -> Result<usize, T> {
-            *self.latest.lock().expect("dummy broadcast lock poisoned") = Some(value);
+            *self.latest.lock().expect("minimal broadcast lock poisoned") = Some(value);
             Ok(1)
         }
 
         fn subscribe(&self) -> Box<dyn BroadcastReceiver<T>> {
-            Box::new(DummyBroadcastReceiver {
+            Box::new(MinimalBroadcastReceiver {
                 latest: Arc::clone(&self.latest),
             })
         }
     }
 
-    impl<T: Send + Clone + 'static> BroadcastReceiver<T> for DummyBroadcastReceiver<T> {
+    impl<T: Send + Clone + 'static> BroadcastReceiver<T> for MinimalBroadcastReceiver<T> {
         fn recv(
             &mut self,
         ) -> Pin<Box<dyn Future<Output = Result<T, BroadcastRecvError>> + Send + '_>> {
@@ -1021,21 +1021,21 @@ mod tests {
             Box::pin(async move {
                 latest
                     .lock()
-                    .expect("dummy broadcast lock poisoned")
+                    .expect("minimal broadcast lock poisoned")
                     .clone()
                     .ok_or(BroadcastRecvError::Closed)
             })
         }
     }
 
-    impl<T: Send + Sync> WatchSender<T> for DummyWatchSender<T> {
+    impl<T: Send + Sync> WatchSender<T> for MinimalWatchSender<T> {
         fn send(&self, value: T) -> Result<(), T> {
-            *self.value.lock().expect("dummy watch lock poisoned") = value;
+            *self.value.lock().expect("minimal watch lock poisoned") = value;
             Ok(())
         }
     }
 
-    impl<T: Send + Sync + Clone> WatchReceiver<T> for DummyWatchReceiver<T> {
+    impl<T: Send + Sync + Clone> WatchReceiver<T> for MinimalWatchReceiver<T> {
         fn changed(
             &mut self,
         ) -> Pin<Box<dyn Future<Output = Result<(), WatchRecvError>> + Send + '_>> {
@@ -1045,94 +1045,94 @@ mod tests {
         fn borrow_and_clone(&self) -> T {
             self.value
                 .lock()
-                .expect("dummy watch lock poisoned")
+                .expect("minimal watch lock poisoned")
                 .clone()
         }
     }
 
-    impl crate::AsyncFile for DummyFile {
+    impl crate::AsyncFile for MinimalFile {
         fn write_all<'a>(
             &'a mut self,
             _buf: &'a [u8],
         ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("file write_all")) })
+            Box::pin(async { Err(minimal_unsupported("file write_all")) })
         }
 
         fn read_exact<'a>(
             &'a mut self,
             _buf: &'a mut [u8],
         ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("file read_exact")) })
+            Box::pin(async { Err(minimal_unsupported("file read_exact")) })
         }
 
         fn read_to_end<'a>(
             &'a mut self,
             _buf: &'a mut Vec<u8>,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<usize>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("file read_to_end")) })
+            Box::pin(async { Err(minimal_unsupported("file read_to_end")) })
         }
 
         fn seek<'a>(
             &'a mut self,
             _pos: std::io::SeekFrom,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<u64>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("file seek")) })
+            Box::pin(async { Err(minimal_unsupported("file seek")) })
         }
 
         fn sync_all(&self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
-            Box::pin(async { Err(dummy_unsupported("file sync_all")) })
+            Box::pin(async { Err(minimal_unsupported("file sync_all")) })
         }
 
         fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
-            Box::pin(async { Err(dummy_unsupported("file shutdown")) })
+            Box::pin(async { Err(minimal_unsupported("file shutdown")) })
         }
     }
 
-    impl crate::TcpListener for DummyTcpListener {
-        type Stream = DummyTcpStream;
+    impl crate::TcpListener for MinimalTcpListener {
+        type Stream = MinimalTcpStream;
 
         fn local_addr(&self) -> std::io::Result<SocketAddr> {
-            Err(dummy_unsupported("tcp listener local_addr"))
+            Err(minimal_unsupported("tcp listener local_addr"))
         }
 
         fn accept(
             &mut self,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<(Self::Stream, SocketAddr)>> + Send + '_>>
         {
-            Box::pin(async { Err(dummy_unsupported("tcp listener accept")) })
+            Box::pin(async { Err(minimal_unsupported("tcp listener accept")) })
         }
     }
 
-    impl crate::TcpStream for DummyTcpStream {
+    impl crate::TcpStream for MinimalTcpStream {
         fn read<'a>(
             &'a mut self,
             _buf: &'a mut [u8],
         ) -> Pin<Box<dyn Future<Output = std::io::Result<usize>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("tcp stream read")) })
+            Box::pin(async { Err(minimal_unsupported("tcp stream read")) })
         }
 
         fn read_exact<'a>(
             &'a mut self,
             _buf: &'a mut [u8],
         ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("tcp stream read_exact")) })
+            Box::pin(async { Err(minimal_unsupported("tcp stream read_exact")) })
         }
 
         fn write_all<'a>(
             &'a mut self,
             _buf: &'a [u8],
         ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("tcp stream write_all")) })
+            Box::pin(async { Err(minimal_unsupported("tcp stream write_all")) })
         }
 
         fn shutdown(&mut self) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + '_>> {
-            Box::pin(async { Err(dummy_unsupported("tcp stream shutdown")) })
+            Box::pin(async { Err(minimal_unsupported("tcp stream shutdown")) })
         }
     }
 
-    impl crate::UdpSocket for DummyUdpSocket {
+    impl crate::UdpSocket for MinimalUdpSocket {
         fn local_addr(&self) -> std::io::Result<SocketAddr> {
-            Err(dummy_unsupported("udp socket local_addr"))
+            Err(minimal_unsupported("udp socket local_addr"))
         }
 
         fn send_to<'a>(
@@ -1140,7 +1140,7 @@ mod tests {
             _buf: &'a [u8],
             _addr: SocketAddr,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<usize>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("udp socket send_to")) })
+            Box::pin(async { Err(minimal_unsupported("udp socket send_to")) })
         }
 
         fn recv_from<'a>(
@@ -1148,25 +1148,25 @@ mod tests {
             _buf: &'a mut [u8],
         ) -> Pin<Box<dyn Future<Output = std::io::Result<(usize, SocketAddr)>> + Send + 'a>>
         {
-            Box::pin(async { Err(dummy_unsupported("udp socket recv_from")) })
+            Box::pin(async { Err(minimal_unsupported("udp socket recv_from")) })
         }
     }
 
-    impl RuntimeInterface for DummyRuntime {
+    impl RuntimeInterface for MinimalRuntime {
         type JoinHandle<T: Send + 'static> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
-        type MpscSender<T: Send + 'static> = DummyMpscSender<T>;
-        type MpscReceiver<T: Send + 'static> = DummyMpscReceiver<T>;
-        type OneshotSender<T: Send + 'static> = DummyOneshotSender<T>;
+        type MpscSender<T: Send + 'static> = MinimalMpscSender<T>;
+        type MpscReceiver<T: Send + 'static> = MinimalMpscReceiver<T>;
+        type OneshotSender<T: Send + 'static> = MinimalOneshotSender<T>;
         type OneshotReceiver<T: Send + 'static> =
             Pin<Box<dyn Future<Output = Result<T, OneshotRecvError>> + Send>>;
-        type BroadcastSender<T: Send + Clone + 'static> = DummyBroadcastSender<T>;
-        type BroadcastReceiver<T: Send + Clone + 'static> = DummyBroadcastReceiver<T>;
-        type WatchSender<T: Send + Sync + 'static> = DummyWatchSender<T>;
-        type WatchReceiver<T: Send + Sync + Clone + 'static> = DummyWatchReceiver<T>;
-        type File = DummyFile;
-        type TcpListener = DummyTcpListener;
-        type TcpStream = DummyTcpStream;
-        type UdpSocket = DummyUdpSocket;
+        type BroadcastSender<T: Send + Clone + 'static> = MinimalBroadcastSender<T>;
+        type BroadcastReceiver<T: Send + Clone + 'static> = MinimalBroadcastReceiver<T>;
+        type WatchSender<T: Send + Sync + 'static> = MinimalWatchSender<T>;
+        type WatchReceiver<T: Send + Sync + Clone + 'static> = MinimalWatchReceiver<T>;
+        type File = MinimalFile;
+        type TcpListener = MinimalTcpListener;
+        type TcpStream = MinimalTcpStream;
+        type UdpSocket = MinimalUdpSocket;
 
         fn spawn<F>(&self, future: F) -> Self::JoinHandle<F::Output>
         where
@@ -1201,10 +1201,10 @@ mod tests {
         ) -> (Self::MpscSender<T>, Self::MpscReceiver<T>) {
             let queue = Arc::new(Mutex::new(VecDeque::new()));
             (
-                DummyMpscSender {
+                MinimalMpscSender {
                     queue: Arc::clone(&queue),
                 },
-                DummyMpscReceiver { queue },
+                MinimalMpscReceiver { queue },
             )
         }
 
@@ -1216,11 +1216,11 @@ mod tests {
             let receiver: Self::OneshotReceiver<T> = Box::pin(async move {
                 receiver_value
                     .lock()
-                    .expect("dummy oneshot lock poisoned")
+                    .expect("minimal oneshot lock poisoned")
                     .take()
                     .ok_or(OneshotRecvError)
             });
-            (DummyOneshotSender { value }, receiver)
+            (MinimalOneshotSender { value }, receiver)
         }
 
         fn broadcast_channel<T: Send + Clone + 'static>(
@@ -1229,10 +1229,10 @@ mod tests {
         ) -> (Self::BroadcastSender<T>, Self::BroadcastReceiver<T>) {
             let latest = Arc::new(Mutex::new(None));
             (
-                DummyBroadcastSender {
+                MinimalBroadcastSender {
                     latest: Arc::clone(&latest),
                 },
-                DummyBroadcastReceiver { latest },
+                MinimalBroadcastReceiver { latest },
             )
         }
 
@@ -1242,10 +1242,10 @@ mod tests {
         ) -> (Self::WatchSender<T>, Self::WatchReceiver<T>) {
             let value = Arc::new(Mutex::new(initial));
             (
-                DummyWatchSender {
+                MinimalWatchSender {
                     value: Arc::clone(&value),
                 },
-                DummyWatchReceiver { value },
+                MinimalWatchReceiver { value },
             )
         }
 
@@ -1253,41 +1253,41 @@ mod tests {
             &'a self,
             _path: &'a Path,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::File>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("file_create")) })
+            Box::pin(async { Err(minimal_unsupported("file_create")) })
         }
 
         fn file_open<'a>(
             &'a self,
             _path: &'a Path,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::File>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("file_open")) })
+            Box::pin(async { Err(minimal_unsupported("file_open")) })
         }
 
         fn tcp_listen<'a>(
             &'a self,
             _addr: &'a str,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::TcpListener>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("tcp_listen")) })
+            Box::pin(async { Err(minimal_unsupported("tcp_listen")) })
         }
 
         fn tcp_connect<'a>(
             &'a self,
             _addr: SocketAddr,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::TcpStream>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("tcp_connect")) })
+            Box::pin(async { Err(minimal_unsupported("tcp_connect")) })
         }
 
         fn udp_bind<'a>(
             &'a self,
             _addr: &'a str,
         ) -> Pin<Box<dyn Future<Output = std::io::Result<Self::UdpSocket>> + Send + 'a>> {
-            Box::pin(async { Err(dummy_unsupported("udp_bind")) })
+            Box::pin(async { Err(minimal_unsupported("udp_bind")) })
         }
     }
 
     #[test]
-    fn dummy_runtime_channels_are_non_panicking() {
-        let runtime = DummyRuntime;
+    fn minimal_runtime_channels_are_non_panicking() {
+        let runtime = MinimalRuntime;
 
         let (tx, mut rx) = runtime.mpsc_channel::<u32>(4);
         assert_eq!(runtime.block_on(tx.send(7)), Ok(()));
@@ -1313,39 +1313,39 @@ mod tests {
     }
 
     #[test]
-    fn dummy_runtime_io_surfaces_fail_closed_with_unsupported_errors() {
-        let runtime = DummyRuntime;
+    fn minimal_runtime_io_surfaces_fail_closed_with_unsupported_errors() {
+        let runtime = MinimalRuntime;
 
         let create_err = runtime
-            .block_on(runtime.file_create(Path::new("dummy.txt")))
-            .expect_err("dummy file_create should fail closed");
+            .block_on(runtime.file_create(Path::new("minimal.txt")))
+            .expect_err("minimal file_create should fail closed");
         assert_eq!(create_err.kind(), io::ErrorKind::Unsupported);
 
         let open_err = runtime
-            .block_on(runtime.file_open(Path::new("dummy.txt")))
-            .expect_err("dummy file_open should fail closed");
+            .block_on(runtime.file_open(Path::new("minimal.txt")))
+            .expect_err("minimal file_open should fail closed");
         assert_eq!(open_err.kind(), io::ErrorKind::Unsupported);
 
         let listen_err = runtime
             .block_on(runtime.tcp_listen("127.0.0.1:0"))
-            .expect_err("dummy tcp_listen should fail closed");
+            .expect_err("minimal tcp_listen should fail closed");
         assert_eq!(listen_err.kind(), io::ErrorKind::Unsupported);
 
         let connect_err = runtime
             .block_on(runtime.tcp_connect(SocketAddr::from(([127, 0, 0, 1], 80))))
-            .expect_err("dummy tcp_connect should fail closed");
+            .expect_err("minimal tcp_connect should fail closed");
         assert_eq!(connect_err.kind(), io::ErrorKind::Unsupported);
 
         let bind_err = runtime
             .block_on(runtime.udp_bind("127.0.0.1:0"))
-            .expect_err("dummy udp_bind should fail closed");
+            .expect_err("minimal udp_bind should fail closed");
         assert_eq!(bind_err.kind(), io::ErrorKind::Unsupported);
 
-        let mut file = DummyFile;
+        let mut file = MinimalFile;
         assert_eq!(
             runtime
                 .block_on(file.write_all(b"abc"))
-                .expect_err("dummy file write_all should fail closed")
+                .expect_err("minimal file write_all should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
@@ -1353,7 +1353,7 @@ mod tests {
         assert_eq!(
             runtime
                 .block_on(file.read_exact(&mut buf))
-                .expect_err("dummy file read_exact should fail closed")
+                .expect_err("minimal file read_exact should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
@@ -1361,110 +1361,110 @@ mod tests {
         assert_eq!(
             runtime
                 .block_on(file.read_to_end(&mut bytes))
-                .expect_err("dummy file read_to_end should fail closed")
+                .expect_err("minimal file read_to_end should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
         assert_eq!(
             runtime
                 .block_on(file.seek(std::io::SeekFrom::Start(0)))
-                .expect_err("dummy file seek should fail closed")
+                .expect_err("minimal file seek should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
         assert_eq!(
             runtime
                 .block_on(file.sync_all())
-                .expect_err("dummy file sync_all should fail closed")
+                .expect_err("minimal file sync_all should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
         assert_eq!(
             runtime
                 .block_on(file.shutdown())
-                .expect_err("dummy file shutdown should fail closed")
+                .expect_err("minimal file shutdown should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
 
-        let mut listener = DummyTcpListener;
+        let mut listener = MinimalTcpListener;
         assert_eq!(
             listener
                 .local_addr()
-                .expect_err("dummy tcp local_addr should fail closed")
+                .expect_err("minimal tcp local_addr should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
         assert_eq!(
             runtime
                 .block_on(listener.accept())
-                .expect_err("dummy tcp accept should fail closed")
+                .expect_err("minimal tcp accept should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
 
-        let mut stream = DummyTcpStream;
+        let mut stream = MinimalTcpStream;
         assert_eq!(
             runtime
                 .block_on(stream.read(&mut buf))
-                .expect_err("dummy tcp read should fail closed")
+                .expect_err("minimal tcp read should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
         assert_eq!(
             runtime
                 .block_on(stream.read_exact(&mut buf))
-                .expect_err("dummy tcp read_exact should fail closed")
+                .expect_err("minimal tcp read_exact should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
         assert_eq!(
             runtime
                 .block_on(stream.write_all(b"abc"))
-                .expect_err("dummy tcp write_all should fail closed")
+                .expect_err("minimal tcp write_all should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
         assert_eq!(
             runtime
                 .block_on(stream.shutdown())
-                .expect_err("dummy tcp shutdown should fail closed")
+                .expect_err("minimal tcp shutdown should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
 
-        let socket = DummyUdpSocket;
+        let socket = MinimalUdpSocket;
         assert_eq!(
             socket
                 .local_addr()
-                .expect_err("dummy udp local_addr should fail closed")
+                .expect_err("minimal udp local_addr should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
         assert_eq!(
             runtime
                 .block_on(socket.send_to(b"abc", SocketAddr::from(([127, 0, 0, 1], 80))))
-                .expect_err("dummy udp send_to should fail closed")
+                .expect_err("minimal udp send_to should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
         assert_eq!(
             runtime
                 .block_on(socket.recv_from(&mut buf))
-                .expect_err("dummy udp recv_from should fail closed")
+                .expect_err("minimal udp recv_from should fail closed")
                 .kind(),
             io::ErrorKind::Unsupported
         );
     }
 
     #[test]
-    fn dummy_runtime_contains_no_panic_based_placeholders() {
+    fn minimal_runtime_contains_no_panic_based_markers() {
         let runner_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/runner.rs");
         let source = std::fs::read_to_string(&runner_path)
             .unwrap_or_else(|_| panic!("could not read {}", runner_path.display()));
         assert!(
-            !source.contains("panic!(\"dummy"),
-            "runner dummy runtime still contains panic-based placeholders"
+            !source.contains("panic!(\"minimal"),
+            "runner minimal runtime contains panic-based markers"
         );
     }
 

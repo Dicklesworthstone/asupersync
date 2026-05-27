@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicI64, AtomicU64};
 enum ConformanceTestResult {
     Pass,
     Fail { reason: String },
-    ExpectedFailure { reason: String },
 }
 
 /// Test metadata for conformance tracking
@@ -97,7 +96,6 @@ fn run_all_tests(verbose: bool) -> ConformanceTestResult {
     let mut total = 0;
     let mut passed = 0;
     let mut failed = 0;
-    let mut xfail = 0;
 
     // Run all test cases
     let results = vec![
@@ -119,18 +117,11 @@ fn run_all_tests(verbose: bool) -> ConformanceTestResult {
                 failed += 1;
                 println!("✗ {}: FAIL - {}", name, reason);
             }
-            ConformanceTestResult::ExpectedFailure { ref reason } => {
-                xfail += 1;
-                println!("? {}: XFAIL - {}", name, reason);
-            }
         }
     }
 
     println!("\n=== Summary ===");
-    println!(
-        "Total: {} | Passed: {} | Failed: {} | Expected Failures: {}",
-        total, passed, failed, xfail
-    );
+    println!("Total: {} | Passed: {} | Failed: {}", total, passed, failed);
     println!(
         "Success Rate: {:.1}%",
         (passed as f32 / total as f32) * 100.0
@@ -156,7 +147,7 @@ fn exit_if_failed(result: &ConformanceTestResult) {
 fn exit_code_for_result(result: &ConformanceTestResult) -> i32 {
     match result {
         ConformanceTestResult::Fail { .. } => 1,
-        ConformanceTestResult::Pass | ConformanceTestResult::ExpectedFailure { .. } => 0,
+        ConformanceTestResult::Pass => 0,
     }
 }
 
@@ -205,9 +196,6 @@ fn run_counter_basic_test(verbose: bool) -> ConformanceTestResult {
                 println!("✗ Test failed: {}", reason);
                 println!("Our output:\n{}", our_output);
                 println!("Reference output:\n{}", reference_output);
-            }
-            ConformanceTestResult::ExpectedFailure { reason } => {
-                println!("? Expected failure: {}", reason);
             }
         }
     }
@@ -264,9 +252,6 @@ fn run_gauge_basic_test(verbose: bool) -> ConformanceTestResult {
                 println!("✗ Test failed: {}", reason);
                 println!("Our output:\n{}", our_output);
                 println!("Reference output:\n{}", reference_output);
-            }
-            ConformanceTestResult::ExpectedFailure { reason } => {
-                println!("? Expected failure: {}", reason);
             }
         }
     }
@@ -325,9 +310,6 @@ fn run_histogram_basic_test(verbose: bool) -> ConformanceTestResult {
                 println!("✗ Test failed: {}", reason);
                 println!("Our output:\n{}", our_output);
                 println!("Reference output:\n{}", reference_output);
-            }
-            ConformanceTestResult::ExpectedFailure { reason } => {
-                println!("? Expected failure: {}", reason);
             }
         }
     }
@@ -467,9 +449,6 @@ fn run_comprehensive_test(verbose: bool) -> ConformanceTestResult {
                 }
                 println!("Outputs saved to /tmp/our_output.txt and /tmp/reference_output.txt");
             }
-            ConformanceTestResult::ExpectedFailure { reason } => {
-                println!("? Expected failure: {}", reason);
-            }
         }
     }
 
@@ -537,9 +516,6 @@ fn run_edge_cases_test(verbose: bool) -> ConformanceTestResult {
                 println!("✗ Test failed: {}", reason);
                 println!("Our output:\n{}", our_output);
                 println!("Reference output:\n{}", reference_output);
-            }
-            ConformanceTestResult::ExpectedFailure { reason } => {
-                println!("? Expected failure: {}", reason);
             }
         }
     }
@@ -671,13 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn pass_and_expected_failure_verdicts_exit_zero() {
+    fn pass_verdict_exits_zero() {
         assert_eq!(exit_code_for_result(&ConformanceTestResult::Pass), 0);
-        assert_eq!(
-            exit_code_for_result(&ConformanceTestResult::ExpectedFailure {
-                reason: "documented divergence".to_string(),
-            }),
-            0
-        );
     }
 }

@@ -487,7 +487,7 @@ impl EnablePushConformanceTester {
 }
 
 fn reference_unavailable_status() -> &'static str {
-    "unavailable: no live h2 peer wired; no simulated reference parity"
+    "unavailable: no live h2 peer wired; reference parity unavailable"
 }
 
 fn assert_settings_parser_accepts_enable_push(

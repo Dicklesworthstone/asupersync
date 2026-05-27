@@ -77,7 +77,7 @@ pub struct PingConnectionState {
 pub struct SerializablePingFrame {
     pub opaque_data: [u8; 8],
     pub ack: bool,
-    /// Simulated timestamp for RTT calculation (milliseconds)
+    /// Deterministic timestamp for RTT calculation (milliseconds)
     pub timestamp_ms: u64,
 }
 

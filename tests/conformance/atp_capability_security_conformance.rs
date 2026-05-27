@@ -11,6 +11,7 @@
 
 use asupersync::cx::Cx;
 use asupersync::net::atp::sdk::{AtpSdk, SdkMode, SessionConfig, TransferId, TransferPolicy};
+use asupersync::net::atp::test_utils::fixtures;
 use asupersync::net::atp::test_utils::*;
 use asupersync::types::{Budget, Outcome};
 use serde::{Deserialize, Serialize};
@@ -189,7 +190,7 @@ const ATP_SECURITY_CASES: &[SecurityConformanceCase] = &[
 fn test_explicit_cx_required(_cx: &Cx) -> SecurityConformanceResult {
     // Verify SDK constructor requires context-aware initialization
     let config = SessionConfig {
-        local_peer: mocks::test_peer_id(1),
+        local_peer: fixtures::test_peer_id(1),
         session_timeout_ms: 30000,
         enable_compression: false,
         enable_repair: false,
@@ -288,7 +289,7 @@ fn test_transfer_capability_validation(_cx: &Cx) -> SecurityConformanceResult {
 fn test_session_capability_validation(_cx: &Cx) -> SecurityConformanceResult {
     // Test session creation with capability validation
     let config = SessionConfig {
-        local_peer: mocks::test_peer_id(1),
+        local_peer: fixtures::test_peer_id(1),
         session_timeout_ms: 30000,
         enable_compression: false,
         enable_repair: false,
@@ -488,7 +489,7 @@ fn test_security_api_design() {
     // Test 1: SDK operations require Cx context
     // This should be enforced at compile time
     let config = SessionConfig {
-        local_peer: mocks::test_peer_id(1),
+        local_peer: fixtures::test_peer_id(1),
         session_timeout_ms: 30000,
         enable_compression: false,
         enable_repair: false,

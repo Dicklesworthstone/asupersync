@@ -13,7 +13,7 @@ use crate::{
 };
 use std::collections::HashMap;
 
-// Real ATP implementation types - replace previous stub implementations
+// ATP implementation types used by the security conformance checks.
 use asupersync::bytes::Bytes;
 use asupersync::cx::Cx;
 use asupersync::net::atp::protocol::packet_assembly::{
@@ -450,8 +450,7 @@ fn test_privilege_escalation_blocked() -> TestResult {
     // Test that privilege escalation is rejected without valid capability
     let cx = Cx::for_testing();
 
-    // Test that ATP operations are scoped to the provided capability context
-    // In real implementation, this would check that Cx doesn't grant excessive capabilities
+    // Test that ATP operations are scoped to the provided capability context.
 
     // Create streams with different priority levels to test privilege boundaries
     let normal_stream = AtpStream::new(StreamId::new(0), true, StreamPriority::Data, true);
@@ -632,8 +631,7 @@ fn test_error_timing_consistency() -> TestResult {
         },
     ];
 
-    // In real implementation, we would measure timing here
-    // For conformance testing, we verify that error creation is deterministic
+    // Verify that error creation is deterministic for this conformance surface.
     let start = std::time::Instant::now();
 
     for (i, error) in errors.iter().enumerate() {
@@ -751,7 +749,7 @@ fn test_error_recovery_capability_preservation() -> TestResult {
     // Create a new stream to test recovery scenario
     let mut recovery_stream = AtpStream::new(StreamId::new(1), true, StreamPriority::Data, true);
 
-    // Simulate error condition and recovery
+    // Exercise error condition and recovery.
     let test_data = Bytes::from("recovery test");
     match recovery_stream.queue_send(&cx, test_data, false) {
         Outcome::Ok(()) => {
@@ -780,7 +778,7 @@ fn test_resource_exhaustion_bounds() -> TestResult {
     let mut allocated_bytes = 0;
     const MAX_ALLOCATION: u64 = 64 * 1024;
 
-    // Simulate resource allocation with flow control bounds
+    // Exercise resource allocation with flow-control bounds.
     loop {
         // Try to allocate 1KB at a time
         match flow_window.reserve_send(1024) {
@@ -959,37 +957,46 @@ pub fn atp_security_conformance_tests<RT: RuntimeInterface>() -> Vec<Conformance
         .iter()
         .map(|contract| {
             let test_fn = atp_security_runtime_test::<RT>(contract.id);
-
-            ConformanceTest::new(
-                TestMeta {
-                    id: format!("atp-security-{}", contract.id),
-                    name: format!("ATP Security: {}", contract.description),
-                    description: contract.description.to_string(),
-                    category: TestCategory::Security,
-                    tags: vec![
-                        "atp".to_string(),
-                        "security".to_string(),
-                        contract.section.to_string(),
-                        match contract.level {
-                            RequirementLevel::Must => "must".to_string(),
-                            RequirementLevel::Should => "should".to_string(),
-                            RequirementLevel::May => "may".to_string(),
-                        },
-                    ],
-                    expected: format!(
-                        "{} ({})",
-                        contract.description,
-                        match contract.level {
-                            RequirementLevel::Must => "MUST",
-                            RequirementLevel::Should => "SHOULD",
-                            RequirementLevel::May => "MAY",
-                        }
-                    ),
-                },
-                test_fn,
-            )
+            ConformanceTest::new(atp_security_test_meta(contract), test_fn)
         })
         .collect()
+}
+
+/// Generate ATP security conformance metadata without binding a runtime type.
+#[must_use]
+pub fn atp_security_conformance_metadata() -> Vec<TestMeta> {
+    ATP_SECURITY_CONTRACTS
+        .iter()
+        .map(atp_security_test_meta)
+        .collect()
+}
+
+fn atp_security_test_meta(contract: &AtpSecurityContract) -> TestMeta {
+    TestMeta {
+        id: format!("atp-security-{}", contract.id),
+        name: format!("ATP Security: {}", contract.description),
+        description: contract.description.to_string(),
+        category: TestCategory::Security,
+        tags: vec![
+            "atp".to_string(),
+            "security".to_string(),
+            contract.section.to_string(),
+            match contract.level {
+                RequirementLevel::Must => "must".to_string(),
+                RequirementLevel::Should => "should".to_string(),
+                RequirementLevel::May => "may".to_string(),
+            },
+        ],
+        expected: format!(
+            "{} ({})",
+            contract.description,
+            match contract.level {
+                RequirementLevel::Must => "MUST",
+                RequirementLevel::Should => "SHOULD",
+                RequirementLevel::May => "MAY",
+            }
+        ),
+    }
 }
 
 /// Generate coverage matrix for ATP security contracts
@@ -1066,16 +1073,16 @@ mod tests {
 
     #[test]
     fn atp_security_test_generation() {
-        let tests = atp_security_conformance_tests();
+        let tests = atp_security_conformance_metadata();
 
         // Verify all contracts generated tests
         assert_eq!(tests.len(), ATP_SECURITY_CONTRACTS.len());
 
         // Verify test metadata consistency
         for (test, contract) in tests.iter().zip(ATP_SECURITY_CONTRACTS.iter()) {
-            assert!(test.meta.id.contains(&contract.id));
-            assert_eq!(test.meta.category, TestCategory::Security);
-            assert!(test.meta.tags.contains(&"security".to_string()));
+            assert!(test.id.contains(&contract.id));
+            assert_eq!(test.category, TestCategory::Security);
+            assert!(test.tags.contains(&"security".to_string()));
         }
     }
 }

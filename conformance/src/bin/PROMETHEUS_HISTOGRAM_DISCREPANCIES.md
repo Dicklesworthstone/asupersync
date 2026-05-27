@@ -71,7 +71,7 @@ Each test case validates:
 ## Update Procedures
 
 1. When adding new test cases, update the coverage matrix
-2. When discovering new discrepancies, add DISC-XXX entries
+2. When discovering new discrepancies, add entries with the next `DISC-###` identifier
 3. Review date for each discrepancy should be < 6 months old
 4. Investigate discrepancies marked as temporary should be revisited quarterly
 

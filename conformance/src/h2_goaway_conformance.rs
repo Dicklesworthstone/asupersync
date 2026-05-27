@@ -340,7 +340,7 @@ impl GoAwayConformanceTester {
         let mut connection = Connection::client(settings);
         accept_peer_settings(&mut connection)?;
 
-        // Simulate existing streams
+        // Create existing streams from the case fixture.
         for &stream_id in &case.existing_streams {
             if let Err(e) = create_local_stream(&mut connection, stream_id) {
                 return Err(format!("Failed to create stream {}: {}", stream_id, e));

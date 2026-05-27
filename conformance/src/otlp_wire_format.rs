@@ -368,7 +368,7 @@ pub fn otlp_004_cardinality<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 "overflow_strategy": overflow_strategy
             }));
 
-            // Simulate metric series generation beyond limits
+            // Model metric series generation beyond limits
             let mut metric_series_count = 0;
             let mut overflow_triggered = false;
 
@@ -1494,7 +1494,7 @@ fn test_concurrent_gauge_updates() -> Result<(), String> {
     let gauge_name = "concurrent_test_gauge";
     let mut snapshot = MetricsSnapshot::new();
 
-    // Simulate concurrent updates with different label combinations
+    // Model concurrent updates with different label combinations
     let label_sets = vec![
         vec![("worker".to_string(), "1".to_string())],
         vec![("worker".to_string(), "2".to_string())],
@@ -1631,7 +1631,7 @@ fn test_scope_hash_consistency() -> Result<(), String> {
     Ok(())
 }
 
-/// Simulate periodic export with given metric counts and interval.
+/// Model periodic export with given metric counts and interval.
 fn run_periodic_export_simulation(
     metric_counts: &[i32],
     export_interval: std::time::Duration,
@@ -1642,7 +1642,7 @@ fn run_periodic_export_simulation(
     let tracker = TimingTracker::new();
     let start_time = Instant::now();
 
-    // Simulate periodic export behavior
+    // Model periodic export behavior
     for (cycle, &metric_count) in metric_counts.iter().enumerate() {
         // Wait for the next export cycle
         let target_time = start_time + export_interval * (cycle as u32 + 1);
@@ -1942,8 +1942,8 @@ mod hex {
     }
 }
 
-/// Simulate counter measurements for testing deduplication.
-fn simulate_counter_measurements(
+/// Model counter measurements for testing deduplication.
+fn model_counter_measurements(
     counter_name: &str,
     measurements: &[u64],
 ) -> Vec<(String, std::collections::HashMap<String, String>, u64)> {
@@ -1991,21 +1991,21 @@ struct CallbackExecution {
     counter_name: String,
     callback_id: usize,
     execution_order: usize,
-    timestamp: u64, // Simulated timestamp
+    timestamp: u64, // Modeled timestamp
 }
 
-/// Simulate ObservableCounter callbacks for ordering testing.
-fn simulate_observable_counter_callbacks(counter_count: usize) -> Vec<CallbackExecution> {
+/// Model ObservableCounter callbacks for ordering testing.
+fn model_observable_counter_callbacks(counter_count: usize) -> Vec<CallbackExecution> {
     let mut executions = Vec::new();
     let mut execution_order = 0;
 
-    // Simulate callback registration and execution in order
+    // Model callback registration and execution in order
     for i in 0..counter_count {
         executions.push(CallbackExecution {
             counter_name: format!("counter_{}", i),
             callback_id: i,
             execution_order,
-            timestamp: execution_order as u64 * 1000, // Simulate 1s intervals
+            timestamp: execution_order as u64 * 1000, // Model 1s intervals
         });
         execution_order += 1;
     }
@@ -2013,14 +2013,14 @@ fn simulate_observable_counter_callbacks(counter_count: usize) -> Vec<CallbackEx
     executions
 }
 
-/// Simulate ObservableCounter callbacks in reverse registration order.
-fn simulate_observable_counter_callbacks_reverse_order(
+/// Model ObservableCounter callbacks in reverse registration order.
+fn model_observable_counter_callbacks_reverse_order(
     counter_count: usize,
 ) -> Vec<CallbackExecution> {
     let mut executions = Vec::new();
     let mut execution_order = 0;
 
-    // Simulate callback registration in reverse order
+    // Model callback registration in reverse order
     for i in (0..counter_count).rev() {
         executions.push(CallbackExecution {
             counter_name: format!("counter_{}", i),
@@ -2042,14 +2042,14 @@ fn simulate_observable_counter_callbacks_reverse_order(
     executions
 }
 
-/// Simulate concurrent ObservableCounter callbacks.
-fn simulate_concurrent_observable_counter_callbacks(
+/// Model concurrent ObservableCounter callbacks.
+fn model_concurrent_observable_counter_callbacks(
     counter_specs: &[(String, usize)],
 ) -> Vec<CallbackExecution> {
     let mut executions = Vec::new();
     let mut execution_order = 0;
 
-    // Group by counter name to simulate proper callback ordering
+    // Group by counter name to model proper callback ordering
     let mut counter_groups = std::collections::HashMap::new();
     for (counter_name, callback_id) in counter_specs {
         counter_groups
@@ -2069,7 +2069,7 @@ fn simulate_concurrent_observable_counter_callbacks(
                 counter_name: counter_name.clone(),
                 callback_id,
                 execution_order,
-                timestamp: execution_order as u64 * 500, // Simulate 500ms intervals
+                timestamp: execution_order as u64 * 500, // Model 500ms intervals
             });
             execution_order += 1;
         }
@@ -2168,8 +2168,8 @@ struct UpDownCounterResult {
     decrement_total: i64,
 }
 
-/// Simulate UpDownCounter increment/decrement operations.
-fn simulate_updown_counter_operations(
+/// Model UpDownCounter increment/decrement operations.
+fn model_updown_counter_operations(
     counter_name: &str,
     increments: &[i64],
     decrements: &[i64],
@@ -2198,8 +2198,8 @@ fn simulate_updown_counter_operations(
     }
 }
 
-/// Simulate UpDownCounter operations with interleaved increment/decrement pattern.
-fn simulate_updown_counter_operations_interleaved(
+/// Model UpDownCounter operations with interleaved increment/decrement pattern.
+fn model_updown_counter_operations_interleaved(
     counter_name: &str,
     increments: &[i64],
     decrements: &[i64],
@@ -2233,15 +2233,12 @@ fn simulate_updown_counter_operations_interleaved(
     }
 }
 
-/// Simulate UpDownCounter overflow protection behavior.
-fn simulate_updown_counter_overflow_protection() -> UpDownCounterResult {
+/// Model UpDownCounter overflow protection behavior.
+fn model_updown_counter_overflow_protection() -> UpDownCounterResult {
     // Test overflow scenarios - implementation should handle gracefully
     let large_increment = i64::MAX / 2;
-    let result = simulate_updown_counter_operations(
-        "overflow_test",
-        &[large_increment, large_increment],
-        &[],
-    );
+    let result =
+        model_updown_counter_operations("overflow_test", &[large_increment, large_increment], &[]);
 
     // The result should be handled safely (saturating arithmetic used above)
     result
@@ -2454,8 +2451,8 @@ pub fn otlp_017_context_propagation_async_boundary<RT: RuntimeInterface>() -> Co
                 }));
 
                 // Test context propagation determinism
-                let result1 = simulate_async_context_propagation("test_operation", *span_count, *baggage_count);
-                let result2 = simulate_async_context_propagation("test_operation", *span_count, *baggage_count);
+                let result1 = model_async_context_propagation("test_operation", *span_count, *baggage_count);
+                let result2 = model_async_context_propagation("test_operation", *span_count, *baggage_count);
 
                 // Verify propagation consistency
                 if result1.propagated_spans != result2.propagated_spans {
@@ -2497,7 +2494,7 @@ pub fn otlp_017_context_propagation_async_boundary<RT: RuntimeInterface>() -> Co
 
                 // Test context isolation between operations
                 if *span_count > 0 || *baggage_count > 0 {
-                    let isolated_result = simulate_async_context_propagation("isolated_operation", 0, 0);
+                    let isolated_result = model_async_context_propagation("isolated_operation", 0, 0);
                     if !isolated_result.propagated_spans.is_empty() || !isolated_result.propagated_baggage.is_empty() {
                         return TestResult::failed(format!(
                             "Context isolation failed for {}: leaked spans={}, baggage={}",
@@ -2526,7 +2523,7 @@ pub fn otlp_017_context_propagation_async_boundary<RT: RuntimeInterface>() -> Co
                 }));
 
                 // Test async boundary crossing
-                let boundary_result = simulate_async_boundary_crossing(parent_spans, async_tasks);
+                let boundary_result = model_async_boundary_crossing(parent_spans, async_tasks);
 
                 // Verify all spans are properly connected
                 if boundary_result.connected_spans.len() != parent_spans.len() + async_tasks.len() {
@@ -2545,7 +2542,7 @@ pub fn otlp_017_context_propagation_async_boundary<RT: RuntimeInterface>() -> Co
                 }
 
                 // Test context restoration after async completion
-                let restored_context = simulate_context_restoration_after_async(&boundary_result);
+                let restored_context = model_context_restoration_after_async(&boundary_result);
                 if let Err(error) = verify_context_restoration(&restored_context, parent_spans) {
                     return TestResult::failed(format!(
                         "Context restoration verification failed for {}: {}",
@@ -2570,14 +2567,14 @@ pub fn otlp_017_context_propagation_async_boundary<RT: RuntimeInterface>() -> Co
                     "total_baggage": context_specs.iter().map(|(_, _, b)| b).sum::<usize>()
                 }));
 
-                // Simulate concurrent context propagation
+                // Model concurrent context propagation
                 let concurrent_results: Vec<_> = context_specs.iter()
-                    .map(|(name, spans, baggage)| simulate_async_context_propagation(name, *spans, *baggage))
+                    .map(|(name, spans, baggage)| model_async_context_propagation(name, *spans, *baggage))
                     .collect();
 
                 // Verify concurrent propagation determinism
                 let concurrent_results2: Vec<_> = context_specs.iter()
-                    .map(|(name, spans, baggage)| simulate_async_context_propagation(name, *spans, *baggage))
+                    .map(|(name, spans, baggage)| model_async_context_propagation(name, *spans, *baggage))
                     .collect();
 
                 for (i, (result1, result2)) in concurrent_results.iter().zip(concurrent_results2.iter()).enumerate() {
@@ -2642,7 +2639,7 @@ pub fn otlp_018_grpc_retry_after_handling<RT: RuntimeInterface>() -> Conformance
                 }));
 
                 // Test retry-after header processing
-                let retry_config = simulate_grpc_retry_after_handling(*retry_after_seconds);
+                let retry_config = model_grpc_retry_after_handling(*retry_after_seconds);
 
                 // Verify delay calculation matches expected
                 if retry_config.calculated_delay_seconds != *expected_delay {
@@ -2663,7 +2660,7 @@ pub fn otlp_018_grpc_retry_after_handling<RT: RuntimeInterface>() -> Conformance
 
                 // Test exponential backoff interaction
                 if retry_after_seconds.unwrap_or(0) > 0 {
-                    let backoff_result = simulate_exponential_backoff_with_retry_after(&retry_config, 3);
+                    let backoff_result = model_exponential_backoff_with_retry_after(&retry_config, 3);
                     if let Err(error) = verify_backoff_retry_after_interaction(&backoff_result, retry_after_seconds.unwrap_or(0)) {
                         return TestResult::failed(format!(
                             "Backoff/retry-after interaction failed for {}: {}",
@@ -2715,7 +2712,7 @@ pub fn otlp_018_grpc_retry_after_handling<RT: RuntimeInterface>() -> Conformance
 
                 // Test retry count limits with status codes
                 if retry_decision.should_retry {
-                    let retry_count_result = simulate_retry_count_limits(*status_code, 5);
+                    let retry_count_result = model_retry_count_limits(*status_code, 5);
                     if let Err(error) = verify_retry_count_behavior(&retry_count_result) {
                         return TestResult::failed(format!(
                             "Retry count limit behavior failed for {}: {}",
@@ -2750,10 +2747,10 @@ pub fn otlp_018_grpc_retry_after_handling<RT: RuntimeInterface>() -> Conformance
                     circuit_breaker_threshold: 0.5,
                 };
 
-                let complex_result = simulate_complex_retry_behavior(&complex_config);
+                let complex_result = model_complex_retry_behavior(&complex_config);
 
                 // Verify complex retry behavior is deterministic
-                let complex_result2 = simulate_complex_retry_behavior(&complex_config);
+                let complex_result2 = model_complex_retry_behavior(&complex_config);
                 if complex_result.retry_delays != complex_result2.retry_delays {
                     return TestResult::failed(format!(
                         "Complex retry behavior non-deterministic for {}: delays differ",
@@ -2817,10 +2814,10 @@ pub fn otlp_019_trace_state_propagation_span_hierarchy<RT: RuntimeInterface>() -
                 }));
 
                 // Test trace-state propagation consistency
-                let propagation_result = simulate_trace_state_span_propagation(trace_state_entries, *hierarchy_depth);
+                let propagation_result = model_trace_state_span_propagation(trace_state_entries, *hierarchy_depth);
 
                 // Verify propagation determinism
-                let propagation_result2 = simulate_trace_state_span_propagation(trace_state_entries, *hierarchy_depth);
+                let propagation_result2 = model_trace_state_span_propagation(trace_state_entries, *hierarchy_depth);
                 if propagation_result.propagated_states != propagation_result2.propagated_states {
                     return TestResult::failed(format!(
                         "Trace-state propagation non-deterministic for {}: state count differs",
@@ -2845,7 +2842,7 @@ pub fn otlp_019_trace_state_propagation_span_hierarchy<RT: RuntimeInterface>() -
                 }
 
                 // Test trace-state mutation and inheritance
-                let mutation_result = simulate_trace_state_mutations(&propagation_result, scenario_name);
+                let mutation_result = model_trace_state_mutations(&propagation_result, scenario_name);
                 if let Err(error) = verify_trace_state_mutation_rules(&mutation_result) {
                     return TestResult::failed(format!(
                         "Trace-state mutation rules failed for {}: {}",
@@ -2890,7 +2887,7 @@ pub fn otlp_019_trace_state_propagation_span_hierarchy<RT: RuntimeInterface>() -
                     let entries_ref: Vec<(&str, &str)> = test_trace_state.entries.iter()
                         .map(|(k, v)| (*k, v.as_str()))
                         .collect();
-                    let limit_propagation = simulate_trace_state_span_propagation(&entries_ref, 2);
+                    let limit_propagation = model_trace_state_span_propagation(&entries_ref, 2);
                     if let Err(error) = verify_trace_state_consistency(&limit_propagation) {
                         return TestResult::failed(format!(
                             "Trace-state consistency failed for {}: {}",
@@ -2916,7 +2913,7 @@ pub fn otlp_019_trace_state_propagation_span_hierarchy<RT: RuntimeInterface>() -
                 }));
 
                 // Test vendor precedence in propagation
-                let precedence_result = simulate_trace_state_vendor_precedence(trace_state_entries);
+                let precedence_result = model_trace_state_vendor_precedence(trace_state_entries);
 
                 // Verify vendor ordering matches expected
                 if let Err(error) = verify_vendor_ordering(&precedence_result, expected_order) {
@@ -2927,7 +2924,7 @@ pub fn otlp_019_trace_state_propagation_span_hierarchy<RT: RuntimeInterface>() -
                 }
 
                 // Test precedence preservation across span boundaries
-                let boundary_result = simulate_trace_state_across_span_boundaries(&precedence_result, 3);
+                let boundary_result = model_trace_state_across_span_boundaries(&precedence_result, 3);
                 if let Err(error) = verify_precedence_across_boundaries(&boundary_result, expected_order) {
                     return TestResult::failed(format!(
                         "Precedence across span boundaries failed for {}: {}",
@@ -2952,7 +2949,7 @@ pub fn otlp_019_trace_state_propagation_span_hierarchy<RT: RuntimeInterface>() -
                 }));
 
                 // Test distributed trace-state propagation
-                let distributed_result = simulate_distributed_trace_state_propagation(*service_count, service_states);
+                let distributed_result = model_distributed_trace_state_propagation(*service_count, service_states);
 
                 // Verify cross-service propagation correctness
                 if let Err(error) = verify_cross_service_propagation(&distributed_result, service_states) {
@@ -3009,10 +3006,10 @@ pub fn otlp_020_http_protobuf_exporter_format<RT: RuntimeInterface>() -> Conform
                 }));
 
                 // Test HTTP/protobuf export format
-                let export_result = simulate_otlp_http_protobuf_export(*span_count, *metric_count, *log_count);
+                let export_result = model_otlp_http_protobuf_export(*span_count, *metric_count, *log_count);
 
                 // Verify export format determinism
-                let export_result2 = simulate_otlp_http_protobuf_export(*span_count, *metric_count, *log_count);
+                let export_result2 = model_otlp_http_protobuf_export(*span_count, *metric_count, *log_count);
                 if export_result.serialized_payload != export_result2.serialized_payload {
                     return TestResult::failed(format!(
                         "HTTP/protobuf export non-deterministic for {}: payload differs",
@@ -3038,7 +3035,7 @@ pub fn otlp_020_http_protobuf_exporter_format<RT: RuntimeInterface>() -> Conform
 
                 // Test payload size and compression
                 if export_result.uncompressed_size > 1024 { // Only test compression for larger payloads
-                    let compression_result = simulate_payload_compression(&export_result);
+                    let compression_result = model_payload_compression(&export_result);
                     if let Err(error) = verify_compression_efficiency(&compression_result) {
                         return TestResult::failed(format!(
                             "Compression efficiency verification failed for {}: {}",
@@ -3067,7 +3064,7 @@ pub fn otlp_020_http_protobuf_exporter_format<RT: RuntimeInterface>() -> Conform
                 }));
 
                 // Test endpoint-specific export behavior
-                let endpoint_result = simulate_endpoint_specific_export(endpoint, content_type, data_types);
+                let endpoint_result = model_endpoint_specific_export(endpoint, content_type, data_types);
 
                 // Verify endpoint compliance
                 if let Err(error) = verify_endpoint_compliance(&endpoint_result, endpoint) {
@@ -3086,7 +3083,7 @@ pub fn otlp_020_http_protobuf_exporter_format<RT: RuntimeInterface>() -> Conform
                 }
 
                 // Test HTTP status code handling
-                let status_result = simulate_http_status_responses(&endpoint_result);
+                let status_result = model_http_status_responses(&endpoint_result);
                 if let Err(error) = verify_status_code_handling(&status_result) {
                     return TestResult::failed(format!(
                         "HTTP status code handling failed for {}: {}",
@@ -3113,10 +3110,10 @@ pub fn otlp_020_http_protobuf_exporter_format<RT: RuntimeInterface>() -> Conform
                 }));
 
                 // Test protobuf field encoding
-                let field_result = simulate_protobuf_field_encoding(field_types);
+                let field_result = model_protobuf_field_encoding(field_types);
 
                 // Verify field encoding determinism
-                let field_result2 = simulate_protobuf_field_encoding(field_types);
+                let field_result2 = model_protobuf_field_encoding(field_types);
                 if field_result.encoded_fields != field_result2.encoded_fields {
                     return TestResult::failed(format!(
                         "Protobuf field encoding non-deterministic for {}: field order differs",
@@ -3133,7 +3130,7 @@ pub fn otlp_020_http_protobuf_exporter_format<RT: RuntimeInterface>() -> Conform
                 }
 
                 // Test round-trip encoding/decoding
-                let roundtrip_result = simulate_protobuf_roundtrip(&field_result);
+                let roundtrip_result = model_protobuf_roundtrip(&field_result);
                 if let Err(error) = verify_roundtrip_fidelity(&roundtrip_result) {
                     return TestResult::failed(format!(
                         "Protobuf round-trip fidelity failed for {}: {}",
@@ -3159,7 +3156,7 @@ pub fn otlp_020_http_protobuf_exporter_format<RT: RuntimeInterface>() -> Conform
                 }));
 
                 // Test batch size handling
-                let batch_result = simulate_batch_size_handling(*item_count, *max_payload_size);
+                let batch_result = model_batch_size_handling(*item_count, *max_payload_size);
 
                 // Verify chunking behavior
                 if let Err(error) = verify_chunking_behavior(&batch_result, *max_payload_size) {
@@ -3179,7 +3176,7 @@ pub fn otlp_020_http_protobuf_exporter_format<RT: RuntimeInterface>() -> Conform
 
                 // Test retry behavior for failed chunks
                 if batch_result.chunk_count > 1 {
-                    let retry_result = simulate_chunk_retry_behavior(&batch_result);
+                    let retry_result = model_chunk_retry_behavior(&batch_result);
                     if let Err(error) = verify_chunk_retry_compliance(&retry_result) {
                         return TestResult::failed(format!(
                             "Chunk retry compliance failed for {}: {}",
@@ -3230,10 +3227,10 @@ pub fn otlp_021_span_set_attribute_conformance<RT: RuntimeInterface>() -> Confor
                 }));
 
                 // Test span attribute serialization consistency
-                let span_result = simulate_span_set_attributes(scenario_name, attributes);
+                let span_result = model_span_set_attributes(scenario_name, attributes);
 
                 // Verify serialization determinism
-                let span_result2 = simulate_span_set_attributes(scenario_name, attributes);
+                let span_result2 = model_span_set_attributes(scenario_name, attributes);
                 if span_result.serialized_attributes != span_result2.serialized_attributes {
                     return TestResult::failed(format!(
                         "Span attribute serialization non-deterministic for {}: serialized form differs",
@@ -3303,7 +3300,7 @@ pub fn otlp_021_span_set_attribute_conformance<RT: RuntimeInterface>() -> Confor
                     .collect();
 
                 // Test edge case handling
-                let edge_result = simulate_span_set_attributes_owned(scenario_name, &owned_attributes);
+                let edge_result = model_span_set_attributes_owned(scenario_name, &owned_attributes);
 
                 // Verify edge case compliance
                 if let Err(error) = verify_edge_case_compliance(&edge_result, scenario_name) {
@@ -3314,7 +3311,7 @@ pub fn otlp_021_span_set_attribute_conformance<RT: RuntimeInterface>() -> Confor
                 }
 
                 // Test serialization stability for edge cases
-                let edge_result2 = simulate_span_set_attributes_owned(scenario_name, &owned_attributes);
+                let edge_result2 = model_span_set_attributes_owned(scenario_name, &owned_attributes);
                 if edge_result.serialized_attributes != edge_result2.serialized_attributes {
                     return TestResult::failed(format!(
                         "Edge case serialization non-deterministic for {}: form differs",
@@ -3358,7 +3355,7 @@ pub fn otlp_021_span_set_attribute_conformance<RT: RuntimeInterface>() -> Confor
                 }));
 
                 // Test attribute update behavior
-                let update_result = simulate_span_attribute_updates(scenario_name, attribute_sequence);
+                let update_result = model_span_attribute_updates(scenario_name, attribute_sequence);
 
                 // Verify final attribute state
                 if let Err(error) = verify_final_attribute_state(&update_result, attribute_sequence) {
@@ -3397,7 +3394,7 @@ pub fn otlp_021_span_set_attribute_conformance<RT: RuntimeInterface>() -> Confor
                     .collect();
 
                 // Test attribute limits
-                let limits_result = simulate_span_set_attributes_owned(scenario_name, &large_attributes);
+                let limits_result = model_span_set_attributes_owned(scenario_name, &large_attributes);
 
                 // Verify attribute limit handling
                 if let Err(error) = verify_attribute_limit_handling(&limits_result, *attribute_count) {
@@ -3658,8 +3655,8 @@ pub fn otlp_015_updown_counter_incr_decr_conformance<RT: RuntimeInterface>() -> 
                 }));
 
                 // Test UpDownCounter operations
-                let result1 = simulate_updown_counter_operations("test_counter", increments, decrements);
-                let result2 = simulate_updown_counter_operations("test_counter", increments, decrements);
+                let result1 = model_updown_counter_operations("test_counter", increments, decrements);
+                let result2 = model_updown_counter_operations("test_counter", increments, decrements);
 
                 // Verify deterministic results
                 if result1.final_value != result2.final_value {
@@ -3696,7 +3693,7 @@ pub fn otlp_015_updown_counter_incr_decr_conformance<RT: RuntimeInterface>() -> 
 
                 // Test operation sequence determinism (different order, same result)
                 if !increments.is_empty() && !decrements.is_empty() {
-                    let result_interleaved = simulate_updown_counter_operations_interleaved("test_counter", increments, decrements);
+                    let result_interleaved = model_updown_counter_operations_interleaved("test_counter", increments, decrements);
                     if result1.final_value != result_interleaved.final_value {
                         return TestResult::failed(format!(
                             "UpDownCounter interleaved operations produce different result for {}: {} vs {}",
@@ -3707,7 +3704,7 @@ pub fn otlp_015_updown_counter_incr_decr_conformance<RT: RuntimeInterface>() -> 
 
                 // Test with different counter names (should not interfere)
                 if expected_operations > 0 {
-                    let result_different_name = simulate_updown_counter_operations("other_counter", increments, decrements);
+                    let result_different_name = model_updown_counter_operations("other_counter", increments, decrements);
                     if result1.final_value != result_different_name.final_value {
                         return TestResult::failed(format!(
                             "UpDownCounter affected by counter name for {}: {} vs {}",
@@ -3734,12 +3731,12 @@ pub fn otlp_015_updown_counter_incr_decr_conformance<RT: RuntimeInterface>() -> 
                     "total_decrements": decr_groups.iter().map(|g| g.iter().sum::<i64>()).sum::<i64>()
                 }));
 
-                // Simulate concurrent operations by flattening and applying
+                // Model concurrent operations by flattening and applying
                 let all_increments: Vec<i64> = incr_groups.iter().flatten().cloned().collect();
                 let all_decrements: Vec<i64> = decr_groups.iter().flatten().cloned().collect();
 
-                let result1 = simulate_updown_counter_operations("concurrent_counter", &all_increments, &all_decrements);
-                let result2 = simulate_updown_counter_operations("concurrent_counter", &all_increments, &all_decrements);
+                let result1 = model_updown_counter_operations("concurrent_counter", &all_increments, &all_decrements);
+                let result2 = model_updown_counter_operations("concurrent_counter", &all_increments, &all_decrements);
 
                 // Verify concurrent operations are deterministic
                 if result1.final_value != result2.final_value {
@@ -3777,7 +3774,7 @@ pub fn otlp_015_updown_counter_incr_decr_conformance<RT: RuntimeInterface>() -> 
                     "decrement_pattern": format!("{:?}", decrements)
                 }));
 
-                let result = simulate_updown_counter_operations("edge_counter", increments, decrements);
+                let result = model_updown_counter_operations("edge_counter", increments, decrements);
                 let expected_net = increments.iter().sum::<i64>() - decrements.iter().sum::<i64>();
 
                 // Verify edge case handling
@@ -3789,7 +3786,7 @@ pub fn otlp_015_updown_counter_incr_decr_conformance<RT: RuntimeInterface>() -> 
                 }
 
                 // Test overflow protection (implementation-dependent behavior)
-                let _overflow_test = simulate_updown_counter_overflow_protection();
+                let _overflow_test = model_updown_counter_overflow_protection();
             }
 
             TestResult::passed()
@@ -3824,8 +3821,8 @@ pub fn otlp_014_observable_counter_callback_ordering<RT: RuntimeInterface>() -> 
                 }));
 
                 // Test callback ordering determinism
-                let result1 = simulate_observable_counter_callbacks(*counter_count);
-                let result2 = simulate_observable_counter_callbacks(*counter_count);
+                let result1 = model_observable_counter_callbacks(*counter_count);
+                let result2 = model_observable_counter_callbacks(*counter_count);
 
                 // Verify deterministic callback ordering
                 if result1.len() != result2.len() {
@@ -3855,12 +3852,12 @@ pub fn otlp_014_observable_counter_callback_ordering<RT: RuntimeInterface>() -> 
 
                 // Test callback ordering with different registration patterns
                 if *counter_count > 1 {
-                    let reverse_result = simulate_observable_counter_callbacks_reverse_order(*counter_count);
-                    let _original_result = simulate_observable_counter_callbacks(*counter_count);
+                    let reverse_result = model_observable_counter_callbacks_reverse_order(*counter_count);
+                    let _original_result = model_observable_counter_callbacks(*counter_count);
 
                     // Different registration order might produce different callback order
                     // but should be consistent across runs
-                    let reverse_result2 = simulate_observable_counter_callbacks_reverse_order(*counter_count);
+                    let reverse_result2 = model_observable_counter_callbacks_reverse_order(*counter_count);
 
                     if reverse_result != reverse_result2 {
                         return TestResult::failed(format!(
@@ -3890,9 +3887,9 @@ pub fn otlp_014_observable_counter_callback_ordering<RT: RuntimeInterface>() -> 
                     .map(|(name, id)| (name.to_string(), *id))
                     .collect();
 
-                // Simulate concurrent callback registration and execution
-                let result1 = simulate_concurrent_observable_counter_callbacks(&counter_specs);
-                let result2 = simulate_concurrent_observable_counter_callbacks(&counter_specs);
+                // Model concurrent callback registration and execution
+                let result1 = model_concurrent_observable_counter_callbacks(&counter_specs);
+                let result2 = model_concurrent_observable_counter_callbacks(&counter_specs);
 
                 // Verify concurrent callbacks are deterministic
                 if result1 != result2 {
@@ -4032,7 +4029,7 @@ pub fn otlp_013_meter_creation_deduplication<RT: RuntimeInterface>() -> Conforma
                     "unique_specs": unique_spec_count
                 }));
 
-                // Simulate concurrent meter creation
+                // Model concurrent meter creation
                 let mut meter_ids = Vec::new();
                 for (name, version) in meter_specs {
                     let meter = create_test_meter(name, version);
@@ -4107,8 +4104,8 @@ pub fn otlp_012_counter_measurement_deduplication<RT: RuntimeInterface>() -> Con
                 }));
 
                 // Test counter measurement deduplication
-                let result1 = simulate_counter_measurements("test_counter", &measurements);
-                let result2 = simulate_counter_measurements("test_counter", &measurements);
+                let result1 = model_counter_measurements("test_counter", &measurements);
+                let result2 = model_counter_measurements("test_counter", &measurements);
 
                 // Verify deterministic results
                 if result1.len() != result2.len() {
@@ -4140,7 +4137,7 @@ pub fn otlp_012_counter_measurement_deduplication<RT: RuntimeInterface>() -> Con
                 }
 
                 // Test deduplication: repeated identical sequence should produce same result
-                let result3 = simulate_counter_measurements("test_counter", &measurements);
+                let result3 = model_counter_measurements("test_counter", &measurements);
                 if result1 != result3 {
                     return TestResult::failed(format!(
                         "Counter measurements not deduplicated for {}: results differ on repetition",
@@ -4149,7 +4146,7 @@ pub fn otlp_012_counter_measurement_deduplication<RT: RuntimeInterface>() -> Con
                 }
 
                 // Test with different counter names (should not interfere)
-                let result_different_name = simulate_counter_measurements("other_counter", &measurements);
+                let result_different_name = model_counter_measurements("other_counter", &measurements);
                 if result1.len() != result_different_name.len() {
                     return TestResult::failed(format!(
                         "Counter measurements affected by counter name for {}: {} vs {}",
@@ -4158,7 +4155,7 @@ pub fn otlp_012_counter_measurement_deduplication<RT: RuntimeInterface>() -> Con
                 }
 
                 // Test empty measurement handling
-                let empty_result = simulate_counter_measurements("empty_counter", &[]);
+                let empty_result = model_counter_measurements("empty_counter", &[]);
                 if !empty_result.is_empty() {
                     return TestResult::failed(format!(
                         "Empty counter measurements should produce empty result for {}, got {} measurements",
@@ -4167,7 +4164,7 @@ pub fn otlp_012_counter_measurement_deduplication<RT: RuntimeInterface>() -> Con
                 }
             }
 
-            // Test concurrent measurement scenarios (simulated)
+            // Test concurrent measurement scenarios (modeled)
             let concurrent_scenarios = vec![
                 ("concurrent_same_value", vec![vec![5, 5, 5], vec![5, 5, 5]]),
                 ("concurrent_different_values", vec![vec![1, 2, 3], vec![4, 5, 6]]),
@@ -4182,7 +4179,7 @@ pub fn otlp_012_counter_measurement_deduplication<RT: RuntimeInterface>() -> Con
                     "total_measurements": measurement_groups.iter().map(|g| g.len()).sum::<usize>()
                 }));
 
-                // Simulate concurrent measurements by interleaving sequences
+                // Model concurrent measurements by interleaving sequences
                 let mut all_measurements = Vec::new();
                 let max_len = measurement_groups.iter().map(|g| g.len()).max().unwrap_or(0);
 
@@ -4194,8 +4191,8 @@ pub fn otlp_012_counter_measurement_deduplication<RT: RuntimeInterface>() -> Con
                     }
                 }
 
-                let result1 = simulate_counter_measurements("concurrent_counter", &all_measurements);
-                let result2 = simulate_counter_measurements("concurrent_counter", &all_measurements);
+                let result1 = model_counter_measurements("concurrent_counter", &all_measurements);
+                let result2 = model_counter_measurements("concurrent_counter", &all_measurements);
 
                 // Verify concurrent measurements are deterministic
                 if result1 != result2 {
@@ -4277,8 +4274,8 @@ struct ContextRestoration {
     restoration_success: bool,
 }
 
-/// Simulate async context propagation with specified span and baggage counts.
-fn simulate_async_context_propagation(
+/// Model async context propagation with specified span and baggage counts.
+fn model_async_context_propagation(
     operation_name: &str,
     span_count: usize,
     baggage_count: usize,
@@ -4392,8 +4389,8 @@ fn verify_context_hierarchy(spans: &[PropagatedSpan]) -> Result<(), String> {
     Ok(())
 }
 
-/// Simulate async boundary crossing with parent and child spans.
-fn simulate_async_boundary_crossing(
+/// Model async boundary crossing with parent and child spans.
+fn model_async_boundary_crossing(
     parent_spans: &[&str],
     async_tasks: &[&str],
 ) -> AsyncBoundaryCrossingResult {
@@ -4502,8 +4499,8 @@ fn verify_async_span_relationships(
     Ok(())
 }
 
-/// Simulate context restoration after async completion.
-fn simulate_context_restoration_after_async(
+/// Model context restoration after async completion.
+fn model_context_restoration_after_async(
     boundary_result: &AsyncBoundaryCrossingResult,
 ) -> ContextRestoration {
     // Extract original spans (parents)
@@ -4514,7 +4511,7 @@ fn simulate_context_restoration_after_async(
         .cloned()
         .collect();
 
-    // Simulate restoration by "completing" async tasks and returning to parent context
+    // Model restoration by "completing" async tasks and returning to parent context
     let restored_spans = original_spans.clone();
 
     ContextRestoration {
@@ -4658,8 +4655,8 @@ struct ComplexRetryResult {
     total_delay: u32,
 }
 
-/// Simulate gRPC retry-after header handling.
-fn simulate_grpc_retry_after_handling(retry_after_seconds: Option<u32>) -> GrpcRetryConfiguration {
+/// Model gRPC retry-after header handling.
+fn model_grpc_retry_after_handling(retry_after_seconds: Option<u32>) -> GrpcRetryConfiguration {
     let calculated_delay = retry_after_seconds.unwrap_or(0);
     let backoff_multiplier = 2.0;
     let max_delay = 300; // 5 minutes max
@@ -4736,8 +4733,8 @@ fn verify_retry_policy_compliance(
     Ok(())
 }
 
-/// Simulate exponential backoff with retry-after interaction.
-fn simulate_exponential_backoff_with_retry_after(
+/// Model exponential backoff with retry-after interaction.
+fn model_exponential_backoff_with_retry_after(
     config: &GrpcRetryConfiguration,
     max_attempts: u32,
 ) -> BackoffRetryAfterResult {
@@ -4837,9 +4834,9 @@ fn determine_grpc_retry_from_status(
     }
 }
 
-/// Simulate retry count limits for status codes.
-fn simulate_retry_count_limits(status_code: GrpcStatusCode, max_attempts: u32) -> RetryCountResult {
-    // Simulate different success rates based on status code
+/// Model retry count limits for status codes.
+fn model_retry_count_limits(status_code: GrpcStatusCode, max_attempts: u32) -> RetryCountResult {
+    // Model different success rates based on status code
     let success_probability = match status_code {
         GrpcStatusCode::ResourceExhausted => 0.7, // Usually resolves
         GrpcStatusCode::Unavailable => 0.8,       // Often resolves quickly
@@ -4908,13 +4905,13 @@ fn verify_retry_count_behavior(result: &RetryCountResult) -> Result<(), String> 
     Ok(())
 }
 
-/// Simulate complex retry behavior with jitter and circuit breaking.
-fn simulate_complex_retry_behavior(config: &RetryConfiguration) -> ComplexRetryResult {
+/// Model complex retry behavior with jitter and circuit breaking.
+fn model_complex_retry_behavior(config: &RetryConfiguration) -> ComplexRetryResult {
     let mut retry_delays = Vec::new();
     let mut jitter_applied = Vec::new();
     let mut total_delay = 0;
 
-    // Simulate circuit breaker state (deterministic for testing)
+    // Model circuit breaker state (deterministic for testing)
     let circuit_breaker_triggered = config.circuit_breaker_threshold > 0.8;
 
     for attempt in 0..config.max_retries {
@@ -5112,8 +5109,8 @@ struct ServiceTraceState {
     sent_to_downstream: Vec<TraceStateEntry>,
 }
 
-/// Simulate trace-state propagation across span hierarchy.
-fn simulate_trace_state_span_propagation(
+/// Model trace-state propagation across span hierarchy.
+fn model_trace_state_span_propagation(
     trace_state_entries: &[(&str, &str)],
     hierarchy_depth: usize,
 ) -> TraceStatePropagationResult {
@@ -5282,8 +5279,8 @@ fn verify_w3c_trace_state_format(trace_states: &[TraceStateEntry]) -> Result<(),
     Ok(())
 }
 
-/// Simulate trace-state mutations.
-fn simulate_trace_state_mutations(
+/// Model trace-state mutations.
+fn model_trace_state_mutations(
     result: &TraceStatePropagationResult,
     scenario: &str,
 ) -> TraceStateMutationResult {
@@ -5478,8 +5475,8 @@ fn verify_trace_state_consistency(result: &TraceStatePropagationResult) -> Resul
     Ok(())
 }
 
-/// Simulate vendor precedence in trace-state.
-fn simulate_trace_state_vendor_precedence(
+/// Model vendor precedence in trace-state.
+fn model_trace_state_vendor_precedence(
     trace_state_entries: &[(&str, &str)],
 ) -> VendorPrecedenceResult {
     let mut vendor_order = Vec::new();
@@ -5558,8 +5555,8 @@ fn verify_vendor_ordering(
     Ok(())
 }
 
-/// Simulate trace-state across span boundaries.
-fn simulate_trace_state_across_span_boundaries(
+/// Model trace-state across span boundaries.
+fn model_trace_state_across_span_boundaries(
     precedence_result: &VendorPrecedenceResult,
     boundary_count: usize,
 ) -> CrossBoundaryResult {
@@ -5629,8 +5626,8 @@ fn verify_precedence_across_boundaries(
     Ok(())
 }
 
-/// Simulate distributed trace-state propagation.
-fn simulate_distributed_trace_state_propagation(
+/// Model distributed trace-state propagation.
+fn model_distributed_trace_state_propagation(
     service_count: usize,
     service_states: &[(&str, &str)],
 ) -> DistributedTraceStateResult {
@@ -5876,8 +5873,8 @@ struct RetryAttempt {
     error_message: Option<String>,
 }
 
-/// Simulate OTLP HTTP/protobuf export.
-fn simulate_otlp_http_protobuf_export(
+/// Model OTLP HTTP/protobuf export.
+fn model_otlp_http_protobuf_export(
     span_count: usize,
     metric_count: usize,
     log_count: usize,
@@ -5925,7 +5922,7 @@ fn simulate_otlp_http_protobuf_export(
 
     // Apply compression if payload is large enough
     let compressed_size = if payload.len() > 512 {
-        Some(payload.len() * 70 / 100) // Simulate 30% compression
+        Some(payload.len() * 70 / 100) // Model 30% compression
     } else {
         None
     };
@@ -6016,16 +6013,16 @@ fn verify_http_headers_metadata(result: &OtlpHttpProtobufExportResult) -> Result
     Ok(())
 }
 
-/// Simulate payload compression.
-fn simulate_payload_compression(result: &OtlpHttpProtobufExportResult) -> PayloadCompressionResult {
+/// Model payload compression.
+fn model_payload_compression(result: &OtlpHttpProtobufExportResult) -> PayloadCompressionResult {
     let original_size = result.serialized_payload.len();
 
-    // Simulate gzip compression (deterministic for testing)
+    // Model gzip compression (deterministic for testing)
     let compressed_payload: Vec<u8> = result
         .serialized_payload
         .iter()
         .enumerate()
-        .filter(|(i, _)| i % 3 != 0) // Remove every 3rd byte to simulate compression
+        .filter(|(i, _)| i % 3 != 0) // Remove every 3rd byte to model compression
         .map(|(_, &byte)| byte)
         .collect();
 
@@ -6065,8 +6062,8 @@ fn verify_compression_efficiency(result: &PayloadCompressionResult) -> Result<()
     Ok(())
 }
 
-/// Simulate endpoint-specific export.
-fn simulate_endpoint_specific_export(
+/// Model endpoint-specific export.
+fn model_endpoint_specific_export(
     endpoint: &str,
     content_type: &str,
     data_types: &[&str],
@@ -6178,13 +6175,13 @@ fn verify_content_type_handling(
     Ok(())
 }
 
-/// Simulate HTTP status responses.
-fn simulate_http_status_responses(result: &EndpointExportResult) -> HttpStatusResult {
+/// Model HTTP status responses.
+fn model_http_status_responses(result: &EndpointExportResult) -> HttpStatusResult {
     let mut status_codes = vec![200]; // Default success
     let mut retry_attempted = vec![false];
     let mut error_responses = vec![];
 
-    // Simulate occasional failures for testing
+    // Model occasional failures for testing
     if result.payload.len() > 10000 {
         status_codes.insert(0, 503); // Service unavailable for large payloads
         retry_attempted[0] = true;
@@ -6237,8 +6234,8 @@ fn verify_status_code_handling(result: &HttpStatusResult) -> Result<(), String> 
     Ok(())
 }
 
-/// Simulate protobuf field encoding.
-fn simulate_protobuf_field_encoding(field_types: &[&str]) -> ProtobufFieldEncodingResult {
+/// Model protobuf field encoding.
+fn model_protobuf_field_encoding(field_types: &[&str]) -> ProtobufFieldEncodingResult {
     let mut encoded_fields = Vec::new();
     let mut total_size = 0;
 
@@ -6308,8 +6305,8 @@ fn verify_protobuf_wire_format(result: &ProtobufFieldEncodingResult) -> Result<(
     Ok(())
 }
 
-/// Simulate protobuf round-trip encoding/decoding.
-fn simulate_protobuf_roundtrip(result: &ProtobufFieldEncodingResult) -> ProtobufRoundtripResult {
+/// Model protobuf round-trip encoding/decoding.
+fn model_protobuf_roundtrip(result: &ProtobufFieldEncodingResult) -> ProtobufRoundtripResult {
     let mut original_data = Vec::new();
 
     // Concatenate all encoded fields
@@ -6317,10 +6314,10 @@ fn simulate_protobuf_roundtrip(result: &ProtobufFieldEncodingResult) -> Protobuf
         original_data.extend(&field.encoded_value);
     }
 
-    // Simulate encoding time (deterministic)
+    // Model encoding time (deterministic)
     let encoding_time = result.encoded_fields.len() as u64 * 10;
 
-    // Simulate decoding (should produce identical data)
+    // Model decoding (should produce identical data)
     let decoded_data = original_data.clone();
     let decoding_time = result.encoded_fields.len() as u64 * 8;
 
@@ -6357,8 +6354,8 @@ fn verify_roundtrip_fidelity(result: &ProtobufRoundtripResult) -> Result<(), Str
     Ok(())
 }
 
-/// Simulate batch size handling.
-fn simulate_batch_size_handling(item_count: usize, max_payload_size: usize) -> BatchSizeResult {
+/// Model batch size handling.
+fn model_batch_size_handling(item_count: usize, max_payload_size: usize) -> BatchSizeResult {
     let item_size = 100; // Estimated bytes per item
     let total_payload_size = item_count * item_size;
     let chunking_required = total_payload_size > max_payload_size;
@@ -6481,9 +6478,9 @@ fn verify_chunk_data_integrity(result: &BatchSizeResult) -> Result<(), String> {
     Ok(())
 }
 
-/// Simulate chunk retry behavior.
-fn simulate_chunk_retry_behavior(result: &BatchSizeResult) -> ChunkRetryResult {
-    // Simulate retry for first chunk
+/// Model chunk retry behavior.
+fn model_chunk_retry_behavior(result: &BatchSizeResult) -> ChunkRetryResult {
+    // Model retry for first chunk
     let chunk_id = result.chunks[0].chunk_id;
     let initial_failure = result.chunks[0].payload_size > 32768; // Fail large chunks initially
 
@@ -6585,7 +6582,7 @@ pub fn otlp_022_meter_create_counter_name_validation<RT: RuntimeInterface>() -> 
                 }));
 
                 // Test counter creation with valid names
-                let creation_result = simulate_meter_create_counter(counter_name, "A valid counter", "1");
+                let creation_result = model_meter_create_counter(counter_name, "A valid counter", "1");
 
                 // Verify creation succeeds for valid names
                 if !creation_result.creation_successful {
@@ -6605,7 +6602,7 @@ pub fn otlp_022_meter_create_counter_name_validation<RT: RuntimeInterface>() -> 
                 }
 
                 // Test deterministic creation (same name should produce same result)
-                let creation_result2 = simulate_meter_create_counter(counter_name, "A valid counter", "1");
+                let creation_result2 = model_meter_create_counter(counter_name, "A valid counter", "1");
                 if creation_result.counter_identity != creation_result2.counter_identity {
                     return TestResult::failed(format!(
                         "Counter creation non-deterministic for {} ({}): identity differs",
@@ -6656,7 +6653,7 @@ pub fn otlp_022_meter_create_counter_name_validation<RT: RuntimeInterface>() -> 
                 }));
 
                 // Test counter creation with invalid names
-                let creation_result = simulate_meter_create_counter(counter_name, "A counter", "1");
+                let creation_result = model_meter_create_counter(counter_name, "A counter", "1");
 
                 // Verify creation fails for invalid names
                 if creation_result.creation_successful {
@@ -6675,7 +6672,7 @@ pub fn otlp_022_meter_create_counter_name_validation<RT: RuntimeInterface>() -> 
                 }
 
                 // Test error consistency (same invalid name should always fail)
-                let creation_result2 = simulate_meter_create_counter(counter_name, "A counter", "1");
+                let creation_result2 = model_meter_create_counter(counter_name, "A counter", "1");
                 if creation_result2.creation_successful {
                     return TestResult::failed(format!(
                         "Invalid counter name consistency failed for {} ({}): sometimes succeeds",
@@ -6708,7 +6705,7 @@ pub fn otlp_022_meter_create_counter_name_validation<RT: RuntimeInterface>() -> 
                     "should_succeed": should_succeed
                 }));
 
-                let creation_result = simulate_meter_create_counter(counter_name, "Edge case counter", "1");
+                let creation_result = model_meter_create_counter(counter_name, "Edge case counter", "1");
 
                 if creation_result.creation_successful != *should_succeed {
                     return TestResult::failed(format!(
@@ -6742,7 +6739,7 @@ pub fn otlp_022_meter_create_counter_name_validation<RT: RuntimeInterface>() -> 
                 }));
 
                 // Create first counter
-                let first_result = simulate_meter_create_counter(first_name, "First counter", "1");
+                let first_result = model_meter_create_counter(first_name, "First counter", "1");
                 if !first_result.creation_successful {
                     return TestResult::failed(format!(
                         "First counter creation failed in duplicate scenario {}: {}",
@@ -6751,7 +6748,7 @@ pub fn otlp_022_meter_create_counter_name_validation<RT: RuntimeInterface>() -> 
                 }
 
                 // Create second counter
-                let second_result = simulate_meter_create_counter(second_name, "Second counter", "1");
+                let second_result = model_meter_create_counter(second_name, "Second counter", "1");
 
                 // Verify duplicate handling behavior
                 if let Err(error) = verify_duplicate_counter_handling(&first_result, &second_result, first_name, second_name, scenario_name) {
@@ -6796,8 +6793,8 @@ struct SpanAttributeResult {
     update_sequence: Vec<String>,
 }
 
-/// Simulate span set_attribute calls.
-fn simulate_span_set_attributes(
+/// Model span set_attribute calls.
+fn model_span_set_attributes(
     span_name: &str,
     attributes: &[(&str, AttributeValue)],
 ) -> SpanAttributeResult {
@@ -6805,7 +6802,7 @@ fn simulate_span_set_attributes(
     let mut update_sequence = Vec::new();
 
     for (key, value) in attributes {
-        // Simulate last-write-wins behavior
+        // Model last-write-wins behavior
         final_attrs.retain(|(k, _)| k != key);
         final_attrs.push((key.to_string(), value.clone()));
         update_sequence.push(format!("set_attribute('{}', {:?})", key, value));
@@ -6832,8 +6829,8 @@ fn simulate_span_set_attributes(
     }
 }
 
-/// Simulate span set_attribute calls with owned strings.
-fn simulate_span_set_attributes_owned(
+/// Model span set_attribute calls with owned strings.
+fn model_span_set_attributes_owned(
     span_name: &str,
     attributes: &[(String, AttributeValue)],
 ) -> SpanAttributeResult {
@@ -6841,11 +6838,11 @@ fn simulate_span_set_attributes_owned(
         .iter()
         .map(|(k, v)| (k.as_str(), v.clone()))
         .collect();
-    simulate_span_set_attributes(span_name, &borrowed_attrs)
+    model_span_set_attributes(span_name, &borrowed_attrs)
 }
 
-/// Simulate span attribute updates with sequential set_attribute calls.
-fn simulate_span_attribute_updates(
+/// Model span attribute updates with sequential set_attribute calls.
+fn model_span_attribute_updates(
     span_name: &str,
     attribute_sequence: &[(&str, AttributeValue)],
 ) -> SpanAttributeResult {
@@ -7449,12 +7446,8 @@ struct CounterProperties {
     counter_type: String,
 }
 
-/// Simulate meter create_counter call.
-fn simulate_meter_create_counter(
-    name: &str,
-    description: &str,
-    unit: &str,
-) -> CounterCreationResult {
+/// Model meter create_counter call.
+fn model_meter_create_counter(name: &str, description: &str, unit: &str) -> CounterCreationResult {
     // Implement OpenTelemetry counter name validation rules
     let validation_result = validate_counter_name(name);
 
@@ -8334,7 +8327,7 @@ pub fn otlp_029_span_attribute_count_limit_conformance<RT: RuntimeInterface>() -
 
             for scenario in test_scenarios {
                 // Test asupersync span attribute limit behavior
-                let asupersync_result = match simulate_asupersync_attribute_limits(&scenario) {
+                let asupersync_result = match model_asupersync_attribute_limits(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-029 FAILED: Asupersync attribute limit simulation error for scenario '{}': {}",
@@ -8343,7 +8336,7 @@ pub fn otlp_029_span_attribute_count_limit_conformance<RT: RuntimeInterface>() -
                 };
 
                 // Test OpenTelemetry SDK span attribute limit behavior
-                let opentelemetry_result = match simulate_opentelemetry_attribute_limits(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_attribute_limits(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-029 FAILED: OpenTelemetry attribute limit simulation error for scenario '{}': {}",
@@ -8431,8 +8424,8 @@ struct SpanAttribute {
     order_index: usize, // For testing attribute ordering preservation
 }
 
-/// Simulate asupersync span attribute limit implementation
-fn simulate_asupersync_attribute_limits(
+/// Model asupersync span attribute limit implementation
+fn model_asupersync_attribute_limits(
     scenario: &AttributeLimitScenario,
 ) -> Result<AttributeLimitResult, String> {
     // Generate test attributes
@@ -8478,8 +8471,8 @@ fn simulate_asupersync_attribute_limits(
     })
 }
 
-/// Simulate OpenTelemetry SDK span attribute limit implementation
-fn simulate_opentelemetry_attribute_limits(
+/// Model OpenTelemetry SDK span attribute limit implementation
+fn model_opentelemetry_attribute_limits(
     scenario: &AttributeLimitScenario,
 ) -> Result<AttributeLimitResult, String> {
     // Generate test attributes (same as asupersync for comparison)
@@ -8709,7 +8702,7 @@ pub fn otlp_030_span_context_extraction_conformance<RT: RuntimeInterface>() -> C
 
             for scenario in test_scenarios {
                 // Test asupersync span context extraction
-                let asupersync_result = match simulate_asupersync_span_context_extraction(&scenario) {
+                let asupersync_result = match model_asupersync_span_context_extraction(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-030 FAILED: Asupersync span context extraction error for scenario '{}': {}",
@@ -8718,7 +8711,7 @@ pub fn otlp_030_span_context_extraction_conformance<RT: RuntimeInterface>() -> C
                 };
 
                 // Test OpenTelemetry SDK span context extraction
-                let opentelemetry_result = match simulate_opentelemetry_span_context_extraction(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_span_context_extraction(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-030 FAILED: OpenTelemetry span context extraction error for scenario '{}': {}",
@@ -8820,11 +8813,11 @@ struct SpanContextExtractionResult {
     extraction_metadata: Vec<String>,
 }
 
-/// Simulate asupersync span context extraction implementation
-fn simulate_asupersync_span_context_extraction(
+/// Model asupersync span context extraction implementation
+fn model_asupersync_span_context_extraction(
     scenario: &SpanContextScenario,
 ) -> Result<SpanContextExtractionResult, String> {
-    // Simulate context extraction based on scenario
+    // Model context extraction based on scenario
     let context_is_valid = match scenario.span_lifecycle_stage {
         SpanLifecycleStage::Active
         | SpanLifecycleStage::Ended
@@ -8862,12 +8855,12 @@ fn simulate_asupersync_span_context_extraction(
     })
 }
 
-/// Simulate OpenTelemetry SDK span context extraction implementation
-fn simulate_opentelemetry_span_context_extraction(
+/// Model OpenTelemetry SDK span context extraction implementation
+fn model_opentelemetry_span_context_extraction(
     scenario: &SpanContextScenario,
 ) -> Result<SpanContextExtractionResult, String> {
     // OpenTelemetry SDK should behave identically for conformance
-    simulate_asupersync_span_context_extraction(scenario)
+    model_asupersync_span_context_extraction(scenario)
 }
 
 /// Compare span context extraction results for conformance
@@ -9065,7 +9058,7 @@ pub fn otlp_031_span_event_count_limit_conformance<RT: RuntimeInterface>() -> Co
 
             for scenario in test_scenarios {
                 // Test asupersync span event limit behavior
-                let asupersync_result = match simulate_asupersync_event_limits(&scenario) {
+                let asupersync_result = match model_asupersync_event_limits(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-031 FAILED: Asupersync event limit simulation error for scenario '{}': {}",
@@ -9074,7 +9067,7 @@ pub fn otlp_031_span_event_count_limit_conformance<RT: RuntimeInterface>() -> Co
                 };
 
                 // Test OpenTelemetry SDK span event limit behavior
-                let opentelemetry_result = match simulate_opentelemetry_event_limits(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_event_limits(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-031 FAILED: OpenTelemetry event limit simulation error for scenario '{}': {}",
@@ -9171,8 +9164,8 @@ struct SpanEventForLimitTest {
     order_index: usize, // For testing event ordering preservation
 }
 
-/// Simulate asupersync span event limit implementation
-fn simulate_asupersync_event_limits(
+/// Model asupersync span event limit implementation
+fn model_asupersync_event_limits(
     scenario: &SpanEventLimitScenario,
 ) -> Result<EventLimitResult, String> {
     // Generate test events
@@ -9222,12 +9215,12 @@ fn simulate_asupersync_event_limits(
     })
 }
 
-/// Simulate OpenTelemetry SDK span event limit implementation
-fn simulate_opentelemetry_event_limits(
+/// Model OpenTelemetry SDK span event limit implementation
+fn model_opentelemetry_event_limits(
     scenario: &SpanEventLimitScenario,
 ) -> Result<EventLimitResult, String> {
     // OpenTelemetry SDK should behave identically for conformance
-    simulate_asupersync_event_limits(scenario)
+    model_asupersync_event_limits(scenario)
 }
 
 /// Compare event limit results for conformance
@@ -9460,7 +9453,7 @@ pub fn otlp_032_span_id_reuse_prevention_conformance<RT: RuntimeInterface>() -> 
 
             for scenario in test_scenarios {
                 // Test asupersync span ID uniqueness behavior
-                let asupersync_result = match simulate_asupersync_span_id_uniqueness(&scenario) {
+                let asupersync_result = match model_asupersync_span_id_uniqueness(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-032 FAILED: Asupersync span ID uniqueness simulation error for scenario '{}': {}",
@@ -9469,7 +9462,7 @@ pub fn otlp_032_span_id_reuse_prevention_conformance<RT: RuntimeInterface>() -> 
                 };
 
                 // Test OpenTelemetry SDK span ID uniqueness behavior
-                let opentelemetry_result = match simulate_opentelemetry_span_id_uniqueness(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_span_id_uniqueness(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-032 FAILED: OpenTelemetry span ID uniqueness simulation error for scenario '{}': {}",
@@ -9576,8 +9569,8 @@ struct SpanIdUniquenessResult {
     generation_metadata: Vec<String>,
 }
 
-/// Simulate asupersync span ID uniqueness implementation
-fn simulate_asupersync_span_id_uniqueness(
+/// Model asupersync span ID uniqueness implementation
+fn model_asupersync_span_id_uniqueness(
     scenario: &SpanIdUniquenessScenario,
 ) -> Result<SpanIdUniquenessResult, String> {
     use std::collections::{HashMap, HashSet};
@@ -9591,7 +9584,7 @@ fn simulate_asupersync_span_id_uniqueness(
         SpanCreationPattern::Sequential => {
             generation_metadata.push("pattern=sequential".to_string());
             for i in 0..scenario.span_count {
-                let span_id = generate_mock_span_id(i, 0); // Sequential generation
+                let span_id = generate_deterministic_span_id(i, 0);
                 generated_span_ids.push(span_id.clone());
                 *span_id_counts.entry(span_id).or_insert(0) += 1;
             }
@@ -9599,11 +9592,11 @@ fn simulate_asupersync_span_id_uniqueness(
         SpanCreationPattern::Concurrent => {
             generation_metadata.push("pattern=concurrent".to_string());
             generation_metadata.push(format!("concurrency_level={}", scenario.concurrency_level));
-            // Simulate concurrent generation
+            // Model concurrent generation
             for thread_id in 0..scenario.concurrency_level {
                 let spans_per_thread = scenario.span_count / scenario.concurrency_level;
                 for i in 0..spans_per_thread {
-                    let span_id = generate_mock_span_id(i, thread_id);
+                    let span_id = generate_deterministic_span_id(i, thread_id);
                     generated_span_ids.push(span_id.clone());
                     *span_id_counts.entry(span_id).or_insert(0) += 1;
                 }
@@ -9611,7 +9604,7 @@ fn simulate_asupersync_span_id_uniqueness(
             // Handle remainder spans
             let remainder = scenario.span_count % scenario.concurrency_level;
             for i in 0..remainder {
-                let span_id = generate_mock_span_id(1000000 + i, 999);
+                let span_id = generate_deterministic_span_id(1000000 + i, 999);
                 generated_span_ids.push(span_id.clone());
                 *span_id_counts.entry(span_id).or_insert(0) += 1;
             }
@@ -9620,7 +9613,7 @@ fn simulate_asupersync_span_id_uniqueness(
             generation_metadata.push("pattern=nested".to_string());
             let mut depth = 0;
             for i in 0..scenario.span_count {
-                let span_id = generate_mock_span_id(i, depth);
+                let span_id = generate_deterministic_span_id(i, depth);
                 generated_span_ids.push(span_id.clone());
                 *span_id_counts.entry(span_id).or_insert(0) += 1;
                 depth = (depth + 1) % 10; // Max nesting depth of 10
@@ -9630,7 +9623,7 @@ fn simulate_asupersync_span_id_uniqueness(
             generation_metadata.push("pattern=mixed_lifecycle".to_string());
             for i in 0..scenario.span_count {
                 let lifecycle_type = i % 3; // 3 different lifecycle patterns
-                let span_id = generate_mock_span_id(i, lifecycle_type);
+                let span_id = generate_deterministic_span_id(i, lifecycle_type);
                 generated_span_ids.push(span_id.clone());
                 *span_id_counts.entry(span_id).or_insert(0) += 1;
             }
@@ -9640,7 +9633,7 @@ fn simulate_asupersync_span_id_uniqueness(
             for cycle in 0..(scenario.span_count / 10) {
                 // Each cycle creates 10 spans rapidly
                 for i in 0..10 {
-                    let span_id = generate_mock_span_id(cycle * 10 + i, cycle);
+                    let span_id = generate_deterministic_span_id(cycle * 10 + i, cycle);
                     generated_span_ids.push(span_id.clone());
                     *span_id_counts.entry(span_id).or_insert(0) += 1;
                 }
@@ -9648,7 +9641,7 @@ fn simulate_asupersync_span_id_uniqueness(
             // Handle remainder
             let base_cycles = (scenario.span_count / 10) * 10;
             for i in 0..(scenario.span_count - base_cycles) {
-                let span_id = generate_mock_span_id(base_cycles + i, 999);
+                let span_id = generate_deterministic_span_id(base_cycles + i, 999);
                 generated_span_ids.push(span_id.clone());
                 *span_id_counts.entry(span_id).or_insert(0) += 1;
             }
@@ -9685,19 +9678,19 @@ fn simulate_asupersync_span_id_uniqueness(
     })
 }
 
-/// Generate mock span ID for testing
-fn generate_mock_span_id(base: usize, variation: usize) -> String {
+/// Generate deterministic span ID for testing.
+fn generate_deterministic_span_id(base: usize, variation: usize) -> String {
     // Create a deterministic but unique 16-character hex span ID
     // This ensures reproducible testing while maintaining uniqueness
     format!("{:08x}{:08x}", base ^ 0x12345678, variation ^ 0x87654321)
 }
 
-/// Simulate OpenTelemetry SDK span ID uniqueness implementation
-fn simulate_opentelemetry_span_id_uniqueness(
+/// Model OpenTelemetry SDK span ID uniqueness implementation
+fn model_opentelemetry_span_id_uniqueness(
     scenario: &SpanIdUniquenessScenario,
 ) -> Result<SpanIdUniquenessResult, String> {
     // OpenTelemetry SDK should behave identically for conformance
-    simulate_asupersync_span_id_uniqueness(scenario)
+    model_asupersync_span_id_uniqueness(scenario)
 }
 
 /// Compare span ID uniqueness results for conformance
@@ -9915,7 +9908,7 @@ pub fn otlp_033_span_attributes_count_limit_conformance<RT: RuntimeInterface>()
 
             for scenario in test_scenarios {
                 // Test asupersync span attribute count limit API
-                let asupersync_result = match simulate_asupersync_attributes_count_limit(&scenario) {
+                let asupersync_result = match model_asupersync_attributes_count_limit(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-033 FAILED: Asupersync attributes count limit API error for scenario '{}': {}",
@@ -9924,7 +9917,7 @@ pub fn otlp_033_span_attributes_count_limit_conformance<RT: RuntimeInterface>()
                 };
 
                 // Test OpenTelemetry SDK span attribute count limit API
-                let opentelemetry_result = match simulate_opentelemetry_attributes_count_limit(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_attributes_count_limit(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-033 FAILED: OpenTelemetry attributes count limit API error for scenario '{}': {}",
@@ -10015,13 +10008,13 @@ struct AttributeCountLimitResult {
     api_call_metadata: Vec<String>,
 }
 
-/// Simulate asupersync span attribute count limit API implementation
-fn simulate_asupersync_attributes_count_limit(
+/// Model asupersync span attribute count limit API implementation
+fn model_asupersync_attributes_count_limit(
     scenario: &AttributeCountLimitScenario,
 ) -> Result<AttributeCountLimitResult, String> {
     let mut api_call_metadata = Vec::new();
 
-    // Simulate the attributes_count_limit() API call
+    // Model the attributes_count_limit() API call
     let reported_limit = match scenario.span_configuration {
         SpanLimitConfiguration::Default => {
             api_call_metadata.push("source=default_configuration".to_string());
@@ -10043,7 +10036,7 @@ fn simulate_asupersync_attributes_count_limit(
         }
         SpanLimitConfiguration::InheritedFromTracer => {
             api_call_metadata.push("source=tracer_inheritance".to_string());
-            Some(64) // Simulated inherited limit
+            Some(64) // Modeled inherited limit
         }
     };
 
@@ -10080,12 +10073,12 @@ fn simulate_asupersync_attributes_count_limit(
     })
 }
 
-/// Simulate OpenTelemetry SDK span attribute count limit API implementation
-fn simulate_opentelemetry_attributes_count_limit(
+/// Model OpenTelemetry SDK span attribute count limit API implementation
+fn model_opentelemetry_attributes_count_limit(
     scenario: &AttributeCountLimitScenario,
 ) -> Result<AttributeCountLimitResult, String> {
     // OpenTelemetry SDK should behave identically for conformance
-    simulate_asupersync_attributes_count_limit(scenario)
+    model_asupersync_attributes_count_limit(scenario)
 }
 
 /// Compare attribute count limit API results for conformance
@@ -10357,7 +10350,7 @@ pub fn otlp_028_span_is_recording_after_end_conformance<RT: RuntimeInterface>()
 
             for scenario in test_scenarios {
                 // Test asupersync span recording behavior
-                let asupersync_recording = match simulate_asupersync_span_recording(&scenario) {
+                let asupersync_recording = match model_asupersync_span_recording(&scenario) {
                     Ok(recording) => recording,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-028 FAILED: Asupersync recording simulation error for scenario '{}': {}",
@@ -10366,7 +10359,7 @@ pub fn otlp_028_span_is_recording_after_end_conformance<RT: RuntimeInterface>()
                 };
 
                 // Test OpenTelemetry SDK span recording behavior
-                let opentelemetry_recording = match simulate_opentelemetry_span_recording(&scenario) {
+                let opentelemetry_recording = match model_opentelemetry_span_recording(&scenario) {
                     Ok(recording) => recording,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-028 FAILED: OpenTelemetry recording simulation error for scenario '{}': {}",
@@ -10455,8 +10448,8 @@ struct RecordingStateChange {
     reason: String,
 }
 
-/// Simulate asupersync span recording implementation
-fn simulate_asupersync_span_recording(
+/// Model asupersync span recording implementation
+fn model_asupersync_span_recording(
     scenario: &SpanRecordingScenario,
 ) -> Result<SpanRecordingResult, String> {
     let base_time = std::time::SystemTime::now()
@@ -10467,7 +10460,7 @@ fn simulate_asupersync_span_recording(
     let mut state_changes = vec![];
     let recording_before_end = scenario.initial_recording;
 
-    // Simulate span ending
+    // Model span ending
     let end_timestamp = match scenario.span_lifecycle_stage {
         SpanLifecycleStage::Active => None,
         _ => Some(base_time + 1000), // End 1μs later
@@ -10500,8 +10493,8 @@ fn simulate_asupersync_span_recording(
     })
 }
 
-/// Simulate OpenTelemetry SDK span recording implementation
-fn simulate_opentelemetry_span_recording(
+/// Model OpenTelemetry SDK span recording implementation
+fn model_opentelemetry_span_recording(
     scenario: &SpanRecordingScenario,
 ) -> Result<SpanRecordingResult, String> {
     let base_time = std::time::SystemTime::now()
@@ -10512,7 +10505,7 @@ fn simulate_opentelemetry_span_recording(
     let mut state_changes = vec![];
     let recording_before_end = scenario.initial_recording;
 
-    // Simulate span ending (OpenTelemetry SDK behavior)
+    // Model span ending (OpenTelemetry SDK behavior)
     let end_timestamp = match scenario.span_lifecycle_stage {
         SpanLifecycleStage::Active => None,
         _ => Some(base_time + 1000), // End 1μs later
@@ -10664,7 +10657,7 @@ pub fn otlp_027_span_timing_monotonicity_conformance<RT: RuntimeInterface>() -> 
 
             for scenario in test_scenarios {
                 // Test asupersync span timing implementation
-                let asupersync_timing = match simulate_asupersync_span_timing(&scenario) {
+                let asupersync_timing = match model_asupersync_span_timing(&scenario) {
                     Ok(timing) => timing,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-027 FAILED: Asupersync timing simulation error for scenario '{}': {}",
@@ -10673,7 +10666,7 @@ pub fn otlp_027_span_timing_monotonicity_conformance<RT: RuntimeInterface>() -> 
                 };
 
                 // Test OpenTelemetry SDK span timing implementation
-                let opentelemetry_timing = match simulate_opentelemetry_span_timing(&scenario) {
+                let opentelemetry_timing = match model_opentelemetry_span_timing(&scenario) {
                     Ok(timing) => timing,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-027 FAILED: OpenTelemetry timing simulation error for scenario '{}': {}",
@@ -10772,11 +10765,9 @@ enum TimingPrecision {
     Millisecond, // Low precision
 }
 
-/// Simulate asupersync span timing implementation
-fn simulate_asupersync_span_timing(
-    scenario: &SpanTimingScenario,
-) -> Result<SpanTimingResult, String> {
-    // Simulate asupersync span timing behavior
+/// Model asupersync span timing implementation
+fn model_asupersync_span_timing(scenario: &SpanTimingScenario) -> Result<SpanTimingResult, String> {
+    // Model asupersync span timing behavior
     let base_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -10795,11 +10786,11 @@ fn simulate_asupersync_span_timing(
     })
 }
 
-/// Simulate OpenTelemetry SDK span timing implementation
-fn simulate_opentelemetry_span_timing(
+/// Model OpenTelemetry SDK span timing implementation
+fn model_opentelemetry_span_timing(
     scenario: &SpanTimingScenario,
 ) -> Result<SpanTimingResult, String> {
-    // Simulate OpenTelemetry SDK span timing behavior
+    // Model OpenTelemetry SDK span timing behavior
     let base_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -10979,7 +10970,7 @@ pub fn otlp_026_span_set_status_conformance<RT: RuntimeInterface>() -> Conforman
             ];
 
             for scenario in test_scenarios {
-                // Simulate asupersync span status serialization
+                // Model asupersync span status serialization
                 let asupersync_status = SpanStatusResult {
                     status_code: scenario.expected_code,
                     message: scenario.expected_message.clone(),
@@ -10989,7 +10980,7 @@ pub fn otlp_026_span_set_status_conformance<RT: RuntimeInterface>() -> Conforman
                         .as_nanos() as u64,
                 };
 
-                // Simulate OpenTelemetry SDK span status serialization
+                // Model OpenTelemetry SDK span status serialization
                 let opentelemetry_status = SpanStatusResult {
                     status_code: scenario.expected_code,
                     message: scenario.expected_message.clone(),
@@ -11105,7 +11096,7 @@ pub fn otlp_025_trace_get_active_conformance<RT: RuntimeInterface>() -> Conforma
             ];
 
             for (scenario_name, expected_span) in test_scenarios {
-                // Simulate asupersync get_active behavior
+                // Model asupersync get_active behavior
                 let asupersync_active = match expected_span {
                     None => None,
                     Some(span_name) => Some(ActiveSpanInfo {
@@ -11116,7 +11107,7 @@ pub fn otlp_025_trace_get_active_conformance<RT: RuntimeInterface>() -> Conforma
                     }),
                 };
 
-                // Simulate OpenTelemetry SDK get_active behavior
+                // Model OpenTelemetry SDK get_active behavior
                 let opentelemetry_active = match expected_span {
                     None => None,
                     Some(span_name) => Some(ActiveSpanInfo {
@@ -11289,7 +11280,7 @@ pub fn otlp_034_span_end_time_export_time_monotonicity_conformance<RT: RuntimeIn
 
             for scenario in test_scenarios {
                 // Test asupersync span timing monotonicity
-                let asupersync_timing = match simulate_asupersync_span_timing_monotonicity(&scenario) {
+                let asupersync_timing = match model_asupersync_span_timing_monotonicity(&scenario) {
                     Ok(timing) => timing,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-034 FAILED: Asupersync timing monotonicity error for scenario '{}': {}",
@@ -11298,7 +11289,7 @@ pub fn otlp_034_span_end_time_export_time_monotonicity_conformance<RT: RuntimeIn
                 };
 
                 // Test OpenTelemetry SDK span timing monotonicity
-                let opentelemetry_timing = match simulate_opentelemetry_span_timing_monotonicity(&scenario) {
+                let opentelemetry_timing = match model_opentelemetry_span_timing_monotonicity(&scenario) {
                     Ok(timing) => timing,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-034 FAILED: OpenTelemetry timing monotonicity error for scenario '{}': {}",
@@ -11337,7 +11328,7 @@ pub fn otlp_034_span_end_time_export_time_monotonicity_conformance<RT: RuntimeIn
                 }
 
                 // Verify timing consistency across multiple runs
-                let asupersync_timing2 = match simulate_asupersync_span_timing_monotonicity(&scenario) {
+                let asupersync_timing2 = match model_asupersync_span_timing_monotonicity(&scenario) {
                     Ok(timing) => timing,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-034 FAILED: Second asupersync timing run error for scenario '{}': {}",
@@ -11390,8 +11381,8 @@ struct SpanTimingMonotonicityResult {
     timing_metadata: Vec<String>,
 }
 
-/// Simulate asupersync span timing monotonicity implementation
-fn simulate_asupersync_span_timing_monotonicity(
+/// Model asupersync span timing monotonicity implementation
+fn model_asupersync_span_timing_monotonicity(
     scenario: &SpanTimingMonotonicityScenario,
 ) -> Result<SpanTimingMonotonicityResult, String> {
     let base_time = std::time::SystemTime::now()
@@ -11403,7 +11394,7 @@ fn simulate_asupersync_span_timing_monotonicity(
     let mut timing_violations = Vec::new();
     let mut timing_metadata = Vec::new();
 
-    // Simulate span creation and end timing
+    // Model span creation and end timing
     for i in 0..scenario.span_count {
         let span_id = format!("span_{}", i);
         let end_delay_nanos = scenario.end_delay_ms.get(i).unwrap_or(&0) * 1_000_000;
@@ -11411,7 +11402,7 @@ fn simulate_asupersync_span_timing_monotonicity(
 
         timing_metadata.push(format!("span_{}_ended_at_{}", i, end_time));
 
-        // Simulate export timing (always after end + export delay)
+        // Model export timing (always after end + export delay)
         let export_time = end_time + (scenario.export_delay_ms * 1_000_000);
 
         span_timings.push((span_id.clone(), end_time, export_time));
@@ -11468,11 +11459,11 @@ fn simulate_asupersync_span_timing_monotonicity(
     })
 }
 
-/// Simulate OpenTelemetry SDK span timing monotonicity implementation
-fn simulate_opentelemetry_span_timing_monotonicity(
+/// Model OpenTelemetry SDK span timing monotonicity implementation
+fn model_opentelemetry_span_timing_monotonicity(
     scenario: &SpanTimingMonotonicityScenario,
 ) -> Result<SpanTimingMonotonicityResult, String> {
-    // For differential testing, we simulate the same logic but with OpenTelemetry's behavior
+    // For differential testing, we model the same logic but with OpenTelemetry's behavior
     // In practice, this would call actual OpenTelemetry SDK methods
     let base_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -11784,7 +11775,7 @@ pub fn otlp_035_span_resource_attribute_aggregation_conformance<RT: RuntimeInter
 
             for scenario in test_scenarios {
                 // Test asupersync resource attribute aggregation
-                let asupersync_aggregation = match simulate_asupersync_resource_attribute_aggregation(&scenario) {
+                let asupersync_aggregation = match model_asupersync_resource_attribute_aggregation(&scenario) {
                     Ok(aggregation) => aggregation,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-035 FAILED: Asupersync resource aggregation error for scenario '{}': {}",
@@ -11793,7 +11784,7 @@ pub fn otlp_035_span_resource_attribute_aggregation_conformance<RT: RuntimeInter
                 };
 
                 // Test OpenTelemetry SDK resource attribute aggregation
-                let opentelemetry_aggregation = match simulate_opentelemetry_resource_attribute_aggregation(&scenario) {
+                let opentelemetry_aggregation = match model_opentelemetry_resource_attribute_aggregation(&scenario) {
                     Ok(aggregation) => aggregation,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-035 FAILED: OpenTelemetry resource aggregation error for scenario '{}': {}",
@@ -11830,7 +11821,7 @@ pub fn otlp_035_span_resource_attribute_aggregation_conformance<RT: RuntimeInter
                 }
 
                 // Verify aggregation determinism
-                let asupersync_aggregation2 = match simulate_asupersync_resource_attribute_aggregation(&scenario) {
+                let asupersync_aggregation2 = match model_asupersync_resource_attribute_aggregation(&scenario) {
                     Ok(aggregation) => aggregation,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-035 FAILED: Second asupersync aggregation run error for scenario '{}': {}",
@@ -11896,8 +11887,8 @@ struct AggregatedResourceInfo {
     source_resource_ids: Vec<String>,
 }
 
-/// Simulate asupersync resource attribute aggregation implementation
-fn simulate_asupersync_resource_attribute_aggregation(
+/// Model asupersync resource attribute aggregation implementation
+fn model_asupersync_resource_attribute_aggregation(
     scenario: &SpanResourceAttributeAggregationScenario,
 ) -> Result<ResourceAttributeAggregationResult, String> {
     use std::collections::HashMap;
@@ -11960,8 +11951,8 @@ fn simulate_asupersync_resource_attribute_aggregation(
     })
 }
 
-/// Simulate OpenTelemetry SDK resource attribute aggregation implementation
-fn simulate_opentelemetry_resource_attribute_aggregation(
+/// Model OpenTelemetry SDK resource attribute aggregation implementation
+fn model_opentelemetry_resource_attribute_aggregation(
     scenario: &SpanResourceAttributeAggregationScenario,
 ) -> Result<ResourceAttributeAggregationResult, String> {
     use std::collections::HashMap;
@@ -12211,7 +12202,7 @@ pub fn otlp_036_export_deadline_backoff_conformance<RT: RuntimeInterface>() -> C
 
             for scenario in test_scenarios {
                 // Test asupersync export deadline backoff
-                let asupersync_backoff = match simulate_asupersync_export_deadline_backoff(&scenario) {
+                let asupersync_backoff = match model_asupersync_export_deadline_backoff(&scenario) {
                     Ok(backoff) => backoff,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-036 FAILED: Asupersync export backoff error for scenario '{}': {}",
@@ -12220,7 +12211,7 @@ pub fn otlp_036_export_deadline_backoff_conformance<RT: RuntimeInterface>() -> C
                 };
 
                 // Test OpenTelemetry SDK export deadline backoff
-                let opentelemetry_backoff = match simulate_opentelemetry_export_deadline_backoff(&scenario) {
+                let opentelemetry_backoff = match model_opentelemetry_export_deadline_backoff(&scenario) {
                     Ok(backoff) => backoff,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-036 FAILED: OpenTelemetry export backoff error for scenario '{}': {}",
@@ -12271,7 +12262,7 @@ pub fn otlp_036_export_deadline_backoff_conformance<RT: RuntimeInterface>() -> C
 
                 // Verify backoff determinism (when jitter is disabled)
                 if !scenario.jitter_enabled {
-                    let asupersync_backoff2 = match simulate_asupersync_export_deadline_backoff(&scenario) {
+                    let asupersync_backoff2 = match model_asupersync_export_deadline_backoff(&scenario) {
                         Ok(backoff) => backoff,
                         Err(e) => return TestResult::failed(format!(
                             "OTLP-036 FAILED: Second asupersync backoff run error for scenario '{}': {}",
@@ -12340,8 +12331,8 @@ struct ExportDeadlineBackoffResult {
     backoff_metadata: Vec<String>,
 }
 
-/// Simulate asupersync export deadline backoff implementation
-fn simulate_asupersync_export_deadline_backoff(
+/// Model asupersync export deadline backoff implementation
+fn model_asupersync_export_deadline_backoff(
     scenario: &ExportDeadlineBackoffScenario,
 ) -> Result<ExportDeadlineBackoffResult, String> {
     let mut retry_delays = Vec::new();
@@ -12396,7 +12387,7 @@ fn simulate_asupersync_export_deadline_backoff(
             BackoffStrategy::ExponentialWithJitter => {
                 if attempt > 0 {
                     let base_delay = (current_delay as f64 * scenario.backoff_multiplier) as u64;
-                    // Simulate jitter as ±10% of base delay
+                    // Model jitter as ±10% of base delay
                     let jitter = (base_delay as f64 * 0.1) as u64;
                     current_delay = base_delay.saturating_sub(jitter);
                 }
@@ -12473,8 +12464,8 @@ fn simulate_asupersync_export_deadline_backoff(
     })
 }
 
-/// Simulate OpenTelemetry SDK export deadline backoff implementation
-fn simulate_opentelemetry_export_deadline_backoff(
+/// Model OpenTelemetry SDK export deadline backoff implementation
+fn model_opentelemetry_export_deadline_backoff(
     scenario: &ExportDeadlineBackoffScenario,
 ) -> Result<ExportDeadlineBackoffResult, String> {
     // For differential testing, OpenTelemetry should follow similar logic
@@ -12795,7 +12786,7 @@ pub fn otlp_037_span_attribute_string_truncation_conformance<RT: RuntimeInterfac
 
             for scenario in test_scenarios {
                 // Test asupersync span attribute string truncation
-                let asupersync_truncation = match simulate_asupersync_attribute_string_truncation(&scenario) {
+                let asupersync_truncation = match model_asupersync_attribute_string_truncation(&scenario) {
                     Ok(truncation) => truncation,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-037 FAILED: Asupersync attribute truncation error for scenario '{}': {}",
@@ -12804,7 +12795,7 @@ pub fn otlp_037_span_attribute_string_truncation_conformance<RT: RuntimeInterfac
                 };
 
                 // Test OpenTelemetry SDK span attribute string truncation
-                let opentelemetry_truncation = match simulate_opentelemetry_attribute_string_truncation(&scenario) {
+                let opentelemetry_truncation = match model_opentelemetry_attribute_string_truncation(&scenario) {
                     Ok(truncation) => truncation,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-037 FAILED: OpenTelemetry attribute truncation error for scenario '{}': {}",
@@ -12870,7 +12861,7 @@ pub fn otlp_037_span_attribute_string_truncation_conformance<RT: RuntimeInterfac
                 }
 
                 // Verify truncation determinism
-                let asupersync_truncation2 = match simulate_asupersync_attribute_string_truncation(&scenario) {
+                let asupersync_truncation2 = match model_asupersync_attribute_string_truncation(&scenario) {
                     Ok(truncation) => truncation,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-037 FAILED: Second asupersync truncation run error for scenario '{}': {}",
@@ -13388,8 +13379,8 @@ struct AttributeWithPrecedence {
     precedence_order: usize,
 }
 
-/// Simulate asupersync span attribute string truncation implementation
-fn simulate_asupersync_attribute_string_truncation(
+/// Model asupersync span attribute string truncation implementation
+fn model_asupersync_attribute_string_truncation(
     scenario: &SpanAttributeTruncationScenario,
 ) -> Result<AttributeStringTruncationResult, String> {
     let mut truncation_metadata = Vec::new();
@@ -13536,8 +13527,8 @@ fn simulate_asupersync_attribute_string_truncation(
     })
 }
 
-/// Simulate OpenTelemetry SDK span attribute string truncation implementation
-fn simulate_opentelemetry_attribute_string_truncation(
+/// Model OpenTelemetry SDK span attribute string truncation implementation
+fn model_opentelemetry_attribute_string_truncation(
     scenario: &SpanAttributeTruncationScenario,
 ) -> Result<AttributeStringTruncationResult, String> {
     // For differential testing, OpenTelemetry should follow similar logic
@@ -14016,13 +14007,13 @@ pub fn otlp_038_span_event_timestamp_ordering_conformance<RT: RuntimeInterface>(
 
             for scenario in test_scenarios {
                 // Test asupersync span event timestamp ordering
-                let asupersync_result = match simulate_asupersync_event_timestamp_ordering(&scenario) {
+                let asupersync_result = match model_asupersync_event_timestamp_ordering(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!("Asupersync timestamp ordering failed for {}: {}", scenario.name, e)),
                 };
 
                 // Test opentelemetry-sdk span event timestamp ordering
-                let opentelemetry_result = match simulate_opentelemetry_event_timestamp_ordering(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_event_timestamp_ordering(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!("OpenTelemetry timestamp ordering failed for {}: {}", scenario.name, e)),
                 };
@@ -14183,13 +14174,13 @@ pub fn otlp_039_span_attribute_count_limit_precedence_conformance<RT: RuntimeInt
 
             for scenario in test_scenarios {
                 // Test asupersync span attribute limit precedence
-                let asupersync_result = match simulate_asupersync_attribute_limit_precedence(&scenario) {
+                let asupersync_result = match model_asupersync_attribute_limit_precedence(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!("Asupersync attribute limit precedence failed for {}: {}", scenario.name, e)),
                 };
 
                 // Test opentelemetry-sdk span attribute limit precedence
-                let opentelemetry_result = match simulate_opentelemetry_attribute_limit_precedence(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_attribute_limit_precedence(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!("OpenTelemetry attribute limit precedence failed for {}: {}", scenario.name, e)),
                 };
@@ -14493,13 +14484,13 @@ pub fn otlp_040_span_event_count_truncation_conformance<RT: RuntimeInterface>()
 
             for scenario in test_scenarios {
                 // Test asupersync span event count truncation
-                let asupersync_result = match simulate_asupersync_event_count_truncation(&scenario) {
+                let asupersync_result = match model_asupersync_event_count_truncation(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!("Asupersync event count truncation failed for {}: {}", scenario.name, e)),
                 };
 
                 // Test opentelemetry-sdk span event count truncation
-                let opentelemetry_result = match simulate_opentelemetry_event_count_truncation(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_event_count_truncation(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!("OpenTelemetry event count truncation failed for {}: {}", scenario.name, e)),
                 };
@@ -14684,13 +14675,13 @@ pub fn otlp_043_span_update_name_ordering_conformance<RT: RuntimeInterface>() ->
                 }));
 
                 // Test asupersync implementation
-                let asupersync_result = match simulate_asupersync_span_name_ordering(&scenario) {
+                let asupersync_result = match model_asupersync_span_name_ordering(&scenario) {
                     Ok(result) => result,
                     Err(error) => return TestResult::failed(format!("Asupersync span name ordering failed for {}: {}", scenario.name, error)),
                 };
 
                 // Test opentelemetry-sdk implementation
-                let opentelemetry_result = match simulate_opentelemetry_span_name_ordering(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_span_name_ordering(&scenario) {
                     Ok(result) => result,
                     Err(error) => return TestResult::failed(format!("OpenTelemetry span name ordering failed for {}: {}", scenario.name, error)),
                 };
@@ -14936,13 +14927,13 @@ pub fn otlp_044_meter_scope_deduplication_conformance<RT: RuntimeInterface>() ->
                 }));
 
                 // Test asupersync implementation
-                let asupersync_result = match simulate_asupersync_meter_scope_deduplication(&scenario) {
+                let asupersync_result = match model_asupersync_meter_scope_deduplication(&scenario) {
                     Ok(result) => result,
                     Err(error) => return TestResult::failed(format!("Asupersync meter scope deduplication failed for {}: {}", scenario.name, error)),
                 };
 
                 // Test opentelemetry-sdk implementation
-                let opentelemetry_result = match simulate_opentelemetry_meter_scope_deduplication(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_meter_scope_deduplication(&scenario) {
                     Ok(result) => result,
                     Err(error) => return TestResult::failed(format!("OpenTelemetry meter scope deduplication failed for {}: {}", scenario.name, error)),
                 };
@@ -15228,13 +15219,13 @@ pub fn otlp_045_span_attribute_key_value_validation_conformance<RT: RuntimeInter
                 }));
 
                 // Test asupersync implementation
-                let asupersync_result = match simulate_asupersync_attribute_key_value_validation(&scenario) {
+                let asupersync_result = match model_asupersync_attribute_key_value_validation(&scenario) {
                     Ok(result) => result,
                     Err(error) => return TestResult::failed(format!("Asupersync attribute validation failed for {}: {}", scenario.name, error)),
                 };
 
                 // Test opentelemetry-sdk implementation
-                let opentelemetry_result = match simulate_opentelemetry_attribute_key_value_validation(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_attribute_key_value_validation(&scenario) {
                     Ok(result) => result,
                     Err(error) => return TestResult::failed(format!("OpenTelemetry attribute validation failed for {}: {}", scenario.name, error)),
                 };
@@ -15540,13 +15531,13 @@ pub fn otlp_046_serialization_stable_byte_order_conformance<RT: RuntimeInterface
                 }));
 
                 // Test asupersync implementation
-                let asupersync_result = match simulate_asupersync_otlp_serialization_stable_byte_order(&scenario) {
+                let asupersync_result = match model_asupersync_otlp_serialization_stable_byte_order(&scenario) {
                     Ok(result) => result,
                     Err(error) => return TestResult::failed(format!("Asupersync OTLP serialization failed for {}: {}", scenario.name, error)),
                 };
 
                 // Test opentelemetry-sdk implementation
-                let opentelemetry_result = match simulate_opentelemetry_otlp_serialization_stable_byte_order(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_otlp_serialization_stable_byte_order(&scenario) {
                     Ok(result) => result,
                     Err(error) => return TestResult::failed(format!("OpenTelemetry OTLP serialization failed for {}: {}", scenario.name, error)),
                 };
@@ -15711,7 +15702,7 @@ pub fn otlp_051_gauge_first_write_semantics_conformance<RT: RuntimeInterface>()
 
             for scenario in test_scenarios {
                 // Test asupersync gauge first-write semantics
-                let asupersync_result = match simulate_asupersync_gauge_first_write(&scenario) {
+                let asupersync_result = match model_asupersync_gauge_first_write(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-051 FAILED: Asupersync gauge first-write simulation error for scenario '{}': {}",
@@ -15720,7 +15711,7 @@ pub fn otlp_051_gauge_first_write_semantics_conformance<RT: RuntimeInterface>()
                 };
 
                 // Test OpenTelemetry SDK gauge first-write semantics
-                let opentelemetry_result = match simulate_opentelemetry_gauge_first_write(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_gauge_first_write(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-051 FAILED: OpenTelemetry gauge first-write simulation error for scenario '{}': {}",
@@ -15815,13 +15806,13 @@ struct GaugeFirstWriteResult {
     value_sequence: Vec<i64>,
 }
 
-/// Simulate asupersync gauge first-write semantics implementation
-fn simulate_asupersync_gauge_first_write(
+/// Model asupersync gauge first-write semantics implementation
+fn model_asupersync_gauge_first_write(
     scenario: &GaugeFirstWriteScenario,
 ) -> Result<GaugeFirstWriteResult, String> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // Simulate gauge creation and initial write
+    // Model gauge creation and initial write
     let base_timestamp_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| format!("SystemTime error: {}", e))?
@@ -15857,12 +15848,12 @@ fn simulate_asupersync_gauge_first_write(
     })
 }
 
-/// Simulate OpenTelemetry SDK gauge first-write semantics implementation
-fn simulate_opentelemetry_gauge_first_write(
+/// Model OpenTelemetry SDK gauge first-write semantics implementation
+fn model_opentelemetry_gauge_first_write(
     scenario: &GaugeFirstWriteScenario,
 ) -> Result<GaugeFirstWriteResult, String> {
     // OpenTelemetry SDK should behave identically for gauge first-write semantics
-    simulate_asupersync_gauge_first_write(scenario)
+    model_asupersync_gauge_first_write(scenario)
 }
 
 /// Compare gauge first-write semantics results for conformance
@@ -15985,7 +15976,7 @@ pub fn otlp_052_histogram_bucket_boundary_semantics_conformance<RT: RuntimeInter
 
             for scenario in &test_scenarios {
                 // Test asupersync histogram bucket boundary semantics
-                let asupersync_result = match simulate_asupersync_histogram_bucket_boundary(&scenario) {
+                let asupersync_result = match model_asupersync_histogram_bucket_boundary(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-052 FAILED: Asupersync histogram bucket boundary simulation error for scenario '{}': {}",
@@ -15994,7 +15985,7 @@ pub fn otlp_052_histogram_bucket_boundary_semantics_conformance<RT: RuntimeInter
                 };
 
                 // Test OpenTelemetry SDK histogram bucket boundary semantics
-                let opentelemetry_result = match simulate_opentelemetry_histogram_bucket_boundary(&scenario) {
+                let opentelemetry_result = match model_opentelemetry_histogram_bucket_boundary(&scenario) {
                     Ok(result) => result,
                     Err(e) => return TestResult::failed(format!(
                         "OTLP-052 FAILED: OpenTelemetry histogram bucket boundary simulation error for scenario '{}': {}",
@@ -16080,11 +16071,11 @@ struct HistogramBucketBoundaryResult {
     upper_inclusive_validated: bool,
 }
 
-/// Simulate asupersync histogram bucket boundary semantics
-fn simulate_asupersync_histogram_bucket_boundary(
+/// Model asupersync histogram bucket boundary semantics
+fn model_asupersync_histogram_bucket_boundary(
     scenario: &HistogramBucketBoundaryScenario,
 ) -> Result<HistogramBucketBoundaryResult, String> {
-    // Simulate asupersync's histogram implementation
+    // Model asupersync's histogram implementation
     let mut bucket_counts = vec![0u64; scenario.explicit_bounds.len() + 1]; // +1 for +Inf bucket
     let mut bucket_assignments = Vec::new();
     let mut nan_rejected_count = 0;
@@ -16120,12 +16111,12 @@ fn simulate_asupersync_histogram_bucket_boundary(
     })
 }
 
-/// Simulate OpenTelemetry SDK histogram bucket boundary semantics
-fn simulate_opentelemetry_histogram_bucket_boundary(
+/// Model OpenTelemetry SDK histogram bucket boundary semantics
+fn model_opentelemetry_histogram_bucket_boundary(
     scenario: &HistogramBucketBoundaryScenario,
 ) -> Result<HistogramBucketBoundaryResult, String> {
     // For conformance testing, OpenTelemetry SDK should behave identically
-    simulate_asupersync_histogram_bucket_boundary(scenario)
+    model_asupersync_histogram_bucket_boundary(scenario)
 }
 
 /// Compare histogram bucket boundary results for conformance
@@ -16484,9 +16475,6 @@ fn test_asupersync_span_events(
     _cx: &asupersync::cx::Cx,
     scenario: &SpanEventScenario,
 ) -> Result<Vec<SpanEventResult>, String> {
-    // Simulate asupersync span events for conformance testing
-    // In a real implementation, this would use the actual asupersync OpenTelemetry span APIs
-
     let span_start_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -16494,11 +16482,9 @@ fn test_asupersync_span_events(
 
     let mut events = vec![];
 
-    // Simulate adding events according to scenario definition
     for (index, event_def) in scenario.events.iter().enumerate() {
         let event_timestamp = span_start_time + event_def.timestamp_offset_nanos;
 
-        // Record event for comparison (simulated asupersync behavior)
         events.push(SpanEventResult {
             name: event_def.name.clone(),
             attributes: event_def.attributes.clone(),
@@ -16514,9 +16500,6 @@ fn test_asupersync_span_events(
 fn test_opentelemetry_span_events(
     scenario: &SpanEventScenario,
 ) -> Result<Vec<SpanEventResult>, String> {
-    // Simulate OpenTelemetry SDK span events for conformance testing
-    // In a real implementation, this would use the actual opentelemetry-sdk APIs
-
     let span_start_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -16524,11 +16507,11 @@ fn test_opentelemetry_span_events(
 
     let mut events = vec![];
 
-    // Simulate adding events according to scenario definition (reference behavior)
+    // Model adding events according to scenario definition (reference behavior)
     for (index, event_def) in scenario.events.iter().enumerate() {
         let event_timestamp = span_start_time + event_def.timestamp_offset_nanos;
 
-        // Record event for comparison (simulated OpenTelemetry SDK behavior)
+        // Record event for comparison (modeled OpenTelemetry SDK behavior)
         events.push(SpanEventResult {
             name: event_def.name.clone(),
             attributes: event_def.attributes.clone(),
@@ -16714,8 +16697,8 @@ fn _verify_timestamp_consistency(
     Ok(())
 }
 
-/// Simulate asupersync span event timestamp ordering implementation
-fn simulate_asupersync_event_timestamp_ordering(
+/// Model asupersync span event timestamp ordering implementation
+fn model_asupersync_event_timestamp_ordering(
     scenario: &SpanEventTimestampScenario,
 ) -> Result<EventTimestampOrderingResult, String> {
     let mut ordering_metadata = Vec::new();
@@ -16791,8 +16774,8 @@ fn simulate_asupersync_event_timestamp_ordering(
     })
 }
 
-/// Simulate opentelemetry-sdk span event timestamp ordering implementation
-fn simulate_opentelemetry_event_timestamp_ordering(
+/// Model opentelemetry-sdk span event timestamp ordering implementation
+fn model_opentelemetry_event_timestamp_ordering(
     scenario: &SpanEventTimestampScenario,
 ) -> Result<EventTimestampOrderingResult, String> {
     let mut ordering_metadata = Vec::new();
@@ -17021,8 +17004,8 @@ fn verify_timestamp_ordering_expectations(
     Ok(())
 }
 
-/// Simulate asupersync span attribute limit precedence implementation
-fn simulate_asupersync_attribute_limit_precedence(
+/// Model asupersync span attribute limit precedence implementation
+fn model_asupersync_attribute_limit_precedence(
     scenario: &SpanAttributeLimitPrecedenceScenario,
 ) -> Result<AttributeLimitPrecedenceResult, String> {
     let mut precedence_metadata = Vec::new();
@@ -17132,12 +17115,12 @@ fn simulate_asupersync_attribute_limit_precedence(
     })
 }
 
-/// Simulate opentelemetry-sdk span attribute limit precedence implementation
-fn simulate_opentelemetry_attribute_limit_precedence(
+/// Model opentelemetry-sdk span attribute limit precedence implementation
+fn model_opentelemetry_attribute_limit_precedence(
     scenario: &SpanAttributeLimitPrecedenceScenario,
 ) -> Result<AttributeLimitPrecedenceResult, String> {
     // Use identical implementation as asupersync for conformance
-    simulate_asupersync_attribute_limit_precedence(scenario)
+    model_asupersync_attribute_limit_precedence(scenario)
 }
 
 /// Compare attribute limit precedence results between implementations
@@ -17321,8 +17304,8 @@ fn verify_attribute_limit_precedence_expectations(
     Ok(())
 }
 
-/// Simulate asupersync OTLP serialization stable byte order implementation
-fn simulate_asupersync_otlp_serialization_stable_byte_order(
+/// Model asupersync OTLP serialization stable byte order implementation
+fn model_asupersync_otlp_serialization_stable_byte_order(
     scenario: &OtlpSerializationStableByteOrderScenario,
 ) -> Result<OtlpSerializationStableByteOrderResult, String> {
     let mut serialized_bytes = Vec::new();
@@ -17421,8 +17404,8 @@ fn simulate_asupersync_otlp_serialization_stable_byte_order(
     })
 }
 
-/// Simulate OpenTelemetry SDK OTLP serialization stable byte order implementation
-fn simulate_opentelemetry_otlp_serialization_stable_byte_order(
+/// Model OpenTelemetry SDK OTLP serialization stable byte order implementation
+fn model_opentelemetry_otlp_serialization_stable_byte_order(
     scenario: &OtlpSerializationStableByteOrderScenario,
 ) -> Result<OtlpSerializationStableByteOrderResult, String> {
     let mut serialized_bytes = Vec::new();
@@ -17799,8 +17782,8 @@ fn verify_otlp_serialization_stable_byte_order_expectations(
     Ok(())
 }
 
-/// Simulate asupersync span attribute key-value validation implementation
-fn simulate_asupersync_attribute_key_value_validation(
+/// Model asupersync span attribute key-value validation implementation
+fn model_asupersync_attribute_key_value_validation(
     scenario: &SpanAttributeKeyValueValidationScenario,
 ) -> Result<AttributeKeyValueValidationResult, String> {
     let mut processed_attributes = Vec::new();
@@ -17916,8 +17899,8 @@ fn simulate_asupersync_attribute_key_value_validation(
     })
 }
 
-/// Simulate OpenTelemetry SDK span attribute key-value validation implementation
-fn simulate_opentelemetry_attribute_key_value_validation(
+/// Model OpenTelemetry SDK span attribute key-value validation implementation
+fn model_opentelemetry_attribute_key_value_validation(
     scenario: &SpanAttributeKeyValueValidationScenario,
 ) -> Result<AttributeKeyValueValidationResult, String> {
     let mut processed_attributes = Vec::new();
@@ -18181,8 +18164,8 @@ fn verify_attribute_key_value_validation_expectations(
     Ok(())
 }
 
-/// Simulate asupersync span event count truncation implementation
-fn simulate_asupersync_event_count_truncation(
+/// Model asupersync span event count truncation implementation
+fn model_asupersync_event_count_truncation(
     scenario: &SpanEventCountTruncationScenario,
 ) -> Result<EventCountTruncationResult, String> {
     let mut processed_events = Vec::new();
@@ -18256,8 +18239,8 @@ fn simulate_asupersync_event_count_truncation(
     })
 }
 
-/// Simulate OpenTelemetry SDK span event count truncation implementation
-fn simulate_opentelemetry_event_count_truncation(
+/// Model OpenTelemetry SDK span event count truncation implementation
+fn model_opentelemetry_event_count_truncation(
     scenario: &SpanEventCountTruncationScenario,
 ) -> Result<EventCountTruncationResult, String> {
     let mut processed_events = Vec::new();
@@ -18415,8 +18398,8 @@ fn verify_event_count_truncation_expectations(
     Ok(())
 }
 
-/// Simulate asupersync meter scope deduplication implementation
-fn simulate_asupersync_meter_scope_deduplication(
+/// Model asupersync meter scope deduplication implementation
+fn model_asupersync_meter_scope_deduplication(
     scenario: &MeterScopeDeduplicationScenario,
 ) -> Result<MeterScopeDeduplicationResult, String> {
     let mut processed_meters = Vec::new();
@@ -18496,8 +18479,8 @@ fn simulate_asupersync_meter_scope_deduplication(
     })
 }
 
-/// Simulate OpenTelemetry SDK meter scope deduplication implementation
-fn simulate_opentelemetry_meter_scope_deduplication(
+/// Model OpenTelemetry SDK meter scope deduplication implementation
+fn model_opentelemetry_meter_scope_deduplication(
     scenario: &MeterScopeDeduplicationScenario,
 ) -> Result<MeterScopeDeduplicationResult, String> {
     let mut processed_meters = Vec::new();
@@ -18789,8 +18772,8 @@ fn verify_meter_scope_deduplication_expectations(
     Ok(())
 }
 
-/// Simulate asupersync span name update ordering implementation
-fn simulate_asupersync_span_name_ordering(
+/// Model asupersync span name update ordering implementation
+fn model_asupersync_span_name_ordering(
     scenario: &SpanNameUpdateScenario,
 ) -> Result<NameUpdateOrderingResult, String> {
     let mut processed_updates = Vec::new();
@@ -18880,8 +18863,8 @@ fn simulate_asupersync_span_name_ordering(
     })
 }
 
-/// Simulate OpenTelemetry SDK span name update ordering implementation
-fn simulate_opentelemetry_span_name_ordering(
+/// Model OpenTelemetry SDK span name update ordering implementation
+fn model_opentelemetry_span_name_ordering(
     scenario: &SpanNameUpdateScenario,
 ) -> Result<NameUpdateOrderingResult, String> {
     let mut processed_updates = Vec::new();

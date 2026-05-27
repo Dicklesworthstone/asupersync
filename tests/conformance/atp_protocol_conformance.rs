@@ -9,6 +9,7 @@
 use asupersync::cx::Cx;
 use asupersync::net::atp::protocol::{AtpFrame, FrameType, ProtocolVersion};
 use asupersync::net::atp::sdk::{AtpSdk, SdkMode, SessionConfig, TransferPolicy};
+use asupersync::net::atp::test_utils::fixtures;
 use asupersync::net::atp::test_utils::*;
 use asupersync::types::Outcome;
 use serde::{Deserialize, Serialize};
@@ -258,7 +259,7 @@ fn test_frame_validation(_cx: &Cx) -> ConformanceResult {
 /// Test that sessions must have timeout configuration.
 fn test_session_timeout_required(_cx: &Cx) -> ConformanceResult {
     let config = SessionConfig {
-        local_peer: mocks::test_peer_id(1),
+        local_peer: fixtures::test_peer_id(1),
         session_timeout_ms: 0,
         enable_compression: false,
         enable_repair: false,
@@ -280,7 +281,7 @@ fn test_session_timeout_required(_cx: &Cx) -> ConformanceResult {
 /// Test that sessions must respect concurrent transfer limits.
 fn test_concurrent_transfer_limits(_cx: &Cx) -> ConformanceResult {
     let config = SessionConfig {
-        local_peer: mocks::test_peer_id(1),
+        local_peer: fixtures::test_peer_id(1),
         session_timeout_ms: 30000,
         enable_compression: false,
         enable_repair: false,
@@ -306,7 +307,7 @@ fn test_concurrent_transfer_limits(_cx: &Cx) -> ConformanceResult {
 /// Test that sessions should support compression configuration.
 fn test_compression_configuration(_cx: &Cx) -> ConformanceResult {
     let mut config = SessionConfig {
-        local_peer: mocks::test_peer_id(1),
+        local_peer: fixtures::test_peer_id(1),
         session_timeout_ms: 30000,
         enable_compression: false,
         enable_repair: false,

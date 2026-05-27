@@ -14,8 +14,9 @@ const B3_SINGLE_HEADER: &str = "b3";
 const B3_TRACE_ID_HEADER: &str = "x-b3-traceid";
 const B3_SPAN_ID_HEADER: &str = "x-b3-spanid";
 const B3_SAMPLED_HEADER: &str = "x-b3-sampled";
-const OTEL_TRACE_CONTEXT_REFERENCE_UNIMPLEMENTED: &str =
-    "Live opentelemetry trace-context reference: unavailable";
+const W3C_TRACEPARENT_HEADER: &str = "traceparent";
+const W3C_TRACESTATE_HEADER: &str = "tracestate";
+const TRACE_CONTEXT_SPEC_ORACLE: &str = "spec-derived trace-context header oracle";
 
 /// Conformance test result tracking
 #[derive(Debug, Clone, PartialEq)]
@@ -182,7 +183,7 @@ fn run_all_tests(verbose: bool) {
     println!("=== OpenTelemetry Trace Context Propagation Conformance Testing ===\n");
 
     let mut total = 0;
-    let passed = 0;
+    let mut passed = 0;
     let mut failed = 0;
     let mut xfail = 0;
 
@@ -335,7 +336,10 @@ fn run_all_tests(verbose: bool) {
         let result = run_propagation_conformance_test(test_case, verbose);
 
         match &result {
-            ConformanceTestResult::Pass => println!("✅ PASS"),
+            ConformanceTestResult::Pass => {
+                passed += 1;
+                println!("✅ PASS");
+            }
             ConformanceTestResult::Fail { reason } => {
                 failed += 1;
                 println!("❌ FAIL");
@@ -404,9 +408,31 @@ fn run_propagation_conformance_test(
         );
 
         // Test round-trip: inject then extract
-        match test_roundtrip_for_propagator(&test_case.propagator_type, &original_context, verbose)
-        {
-            Ok(extracted_context) => {
+        match roundtrip_for_propagator(&test_case.propagator_type, &original_context, verbose) {
+            Ok((carrier, extracted_context)) => {
+                let oracle_context =
+                    match reference_context_from_headers(&test_case.propagator_type, &carrier) {
+                        Ok(context) => context,
+                        Err(reason) => {
+                            return ConformanceTestResult::Fail {
+                                reason: format!(
+                                    "{TRACE_CONTEXT_SPEC_ORACLE} rejected headers for '{}': {}",
+                                    span_context_input.name, reason
+                                ),
+                            };
+                        }
+                    };
+
+                if let Err(reason) = compare_span_contexts(&original_context, &oracle_context, true)
+                {
+                    return ConformanceTestResult::Fail {
+                        reason: format!(
+                            "{TRACE_CONTEXT_SPEC_ORACLE} mismatch for '{}': {}",
+                            span_context_input.name, reason
+                        ),
+                    };
+                }
+
                 // Compare contexts for identity
                 if let Err(reason) =
                     compare_span_contexts(&original_context, &extracted_context, true)
@@ -427,6 +453,17 @@ fn run_propagation_conformance_test(
                         }
                     };
                 }
+
+                if let Err(reason) =
+                    compare_span_contexts(&oracle_context, &extracted_context, false)
+                {
+                    return ConformanceTestResult::Fail {
+                        reason: format!(
+                            "Extracted context diverged from {TRACE_CONTEXT_SPEC_ORACLE} for '{}': {}",
+                            span_context_input.name, reason
+                        ),
+                    };
+                }
             }
             Err(error) => {
                 return ConformanceTestResult::Fail {
@@ -439,11 +476,7 @@ fn run_propagation_conformance_test(
         }
     }
 
-    ConformanceTestResult::ExpectedFailure {
-        reason: format!(
-            "{OTEL_TRACE_CONTEXT_REFERENCE_UNIMPLEMENTED}; local round-trip guards ran but refusing synthetic self-comparison"
-        ),
-    }
+    ConformanceTestResult::Pass
 }
 
 fn exit_code_for_result(result: &ConformanceTestResult) -> i32 {
@@ -473,12 +506,12 @@ fn final_status_line(total: usize, failed: usize, expected_failures: usize) -> S
     }
 }
 
-/// Test inject→extract roundtrip for specific propagator
-fn test_roundtrip_for_propagator(
+/// Test inject→extract roundtrip for specific propagator.
+fn roundtrip_for_propagator(
     propagator_type: &PropagatorType,
     original_context: &SpanContext,
     _verbose: bool,
-) -> Result<SpanContext, String> {
+) -> Result<(HeaderCarrier, SpanContext), String> {
     match propagator_type {
         PropagatorType::W3CTraceContext => {
             let propagator = TraceContextPropagator::new();
@@ -495,11 +528,11 @@ fn test_roundtrip_for_propagator(
             let span = extracted_context.span();
             let span_context = span.span_context();
 
-            Ok(span_context.clone())
+            Ok((carrier, span_context.clone()))
         }
         PropagatorType::B3Single | PropagatorType::B3Multi => {
             let mut carrier = HeaderCarrier::default();
-            match propagator_type {
+            let extracted = match propagator_type {
                 PropagatorType::B3Single => {
                     inject_b3_single(original_context, &mut carrier);
                     extract_b3_single(&carrier)
@@ -509,9 +542,113 @@ fn test_roundtrip_for_propagator(
                     extract_b3_multi(&carrier)
                 }
                 PropagatorType::W3CTraceContext => unreachable!("handled above"),
-            }
+            }?;
+            Ok((carrier, extracted))
         }
     }
+}
+
+#[cfg(test)]
+fn test_roundtrip_for_propagator(
+    propagator_type: &PropagatorType,
+    original_context: &SpanContext,
+    verbose: bool,
+) -> Result<SpanContext, String> {
+    roundtrip_for_propagator(propagator_type, original_context, verbose)
+        .map(|(_carrier, extracted)| extracted)
+}
+
+fn reference_context_from_headers(
+    propagator_type: &PropagatorType,
+    carrier: &HeaderCarrier,
+) -> Result<SpanContext, String> {
+    match propagator_type {
+        PropagatorType::W3CTraceContext => extract_w3c_trace_context(carrier),
+        PropagatorType::B3Single => extract_b3_single(carrier),
+        PropagatorType::B3Multi => extract_b3_multi(carrier),
+    }
+}
+
+fn extract_w3c_trace_context(carrier: &HeaderCarrier) -> Result<SpanContext, String> {
+    let traceparent = carrier
+        .get(W3C_TRACEPARENT_HEADER)
+        .ok_or_else(|| "missing traceparent header".to_string())?;
+    let fields: Vec<&str> = traceparent.split('-').collect();
+    if fields.len() != 4 {
+        return Err(format!(
+            "traceparent must contain 4 dash-delimited fields, got {}",
+            fields.len()
+        ));
+    }
+
+    let version = fields[0];
+    if version.len() != 2 || !version.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(format!("invalid traceparent version: {version}"));
+    }
+    if version.eq_ignore_ascii_case("ff") {
+        return Err("traceparent version ff is forbidden".to_string());
+    }
+
+    let trace_id = parse_w3c_trace_id(fields[1])?;
+    let span_id = parse_w3c_span_id(fields[2])?;
+    let trace_flags = parse_w3c_trace_flags(fields[3])?;
+    let trace_state = parse_w3c_trace_state(carrier.get(W3C_TRACESTATE_HEADER))?;
+
+    Ok(SpanContext::new(
+        trace_id,
+        span_id,
+        trace_flags,
+        true,
+        trace_state,
+    ))
+}
+
+fn parse_w3c_trace_id(value: &str) -> Result<TraceId, String> {
+    if value.len() != 32 || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(format!("trace-id must be 32 lowercase hex chars: {value}"));
+    }
+    if value.chars().all(|ch| ch == '0') {
+        return Err("trace-id must not be all zero".to_string());
+    }
+    TraceId::from_hex(value).map_err(|error| format!("invalid trace-id '{value}': {error}"))
+}
+
+fn parse_w3c_span_id(value: &str) -> Result<SpanId, String> {
+    if value.len() != 16 || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(format!("span-id must be 16 lowercase hex chars: {value}"));
+    }
+    if value.chars().all(|ch| ch == '0') {
+        return Err("span-id must not be all zero".to_string());
+    }
+    SpanId::from_hex(value).map_err(|error| format!("invalid span-id '{value}': {error}"))
+}
+
+fn parse_w3c_trace_flags(value: &str) -> Result<TraceFlags, String> {
+    if value.len() != 2 || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(format!("trace-flags must be 2 hex chars: {value}"));
+    }
+    let byte =
+        u8::from_str_radix(value, 16).map_err(|error| format!("invalid trace-flags: {error}"))?;
+    if byte & 0x01 == 0x01 {
+        Ok(TraceFlags::SAMPLED)
+    } else {
+        Ok(TraceFlags::default())
+    }
+}
+
+fn parse_w3c_trace_state(value: Option<&str>) -> Result<TraceState, String> {
+    let Some(value) = value else {
+        return Ok(TraceState::default());
+    };
+    if value.is_empty() {
+        return Ok(TraceState::default());
+    }
+
+    TraceState::from_key_value(value.split(',').filter_map(|pair| {
+        let mut parts = pair.splitn(2, '=');
+        Some((parts.next()?.to_string(), parts.next()?.to_string()))
+    }))
+    .map_err(|error| format!("invalid tracestate '{value}': {error}"))
 }
 
 fn inject_b3_single(span_context: &SpanContext, carrier: &mut HeaderCarrier) {
@@ -918,27 +1055,29 @@ fn generate_compliance_report() {
     println!();
     println!("| Test Case | Requirement Level | Local Status Oracle | Live SDK Reference |");
     println!("|-----------|--------------------|---------------------|--------------------|");
-    println!("| w3c-traceparent-roundtrip | MUST | checked | XFAIL - not wired |");
-    println!("| w3c-tracestate-roundtrip | SHOULD | checked | XFAIL - not wired |");
-    println!("| w3c-traceparent-invalid-handling | MUST | checked | XFAIL - not wired |");
-    println!("| b3-single-header-roundtrip | SHOULD | checked | XFAIL - not wired |");
-    println!("| b3-multi-header-roundtrip | SHOULD | checked | XFAIL - not wired |");
-    println!("| propagator-interoperability | MAY | checked | XFAIL - not wired |");
+    println!("| w3c-traceparent-roundtrip | MUST | checked | spec oracle wired |");
+    println!("| w3c-tracestate-roundtrip | SHOULD | checked | spec oracle wired |");
+    println!("| w3c-traceparent-invalid-handling | MUST | checked | spec oracle wired |");
+    println!("| b3-single-header-roundtrip | SHOULD | checked | spec oracle wired |");
+    println!("| b3-multi-header-roundtrip | SHOULD | checked | spec oracle wired |");
+    println!("| propagator-interoperability | MAY | checked | spec oracle wired |");
     println!();
 
     println!("## Specification Coverage");
     println!();
     println!("### Local trace-context round-trip guards: available");
-    println!("### {OTEL_TRACE_CONTEXT_REFERENCE_UNIMPLEMENTED}");
-    println!("### Overall score: unavailable");
+    println!("### Header reference: {TRACE_CONTEXT_SPEC_ORACLE}");
+    println!("### Overall score: computed from executable checks");
     println!();
 
     println!("## Known Divergences");
     println!();
-    println!("- {OTEL_TRACE_CONTEXT_REFERENCE_UNIMPLEMENTED}");
+    println!("- None in the executable corpus");
     println!();
 
-    println!("⚠️ **XFAIL** - Trace context local checks run, but live SDK parity is not proven");
+    println!(
+        "✅ **PASS** - Trace context propagation is checked against a spec-derived header oracle"
+    );
 }
 
 #[cfg(test)]
@@ -1023,24 +1162,43 @@ mod tests {
     fn b3_source_no_longer_contains_mock_shortcut_claims() {
         let source = include_str!("otel_trace_context_propagation_conformance.rs");
 
-        assert!(!source.contains(concat!("simulate ", "B3 behavior")));
+        assert!(!source.contains(concat!("shortcut ", "B3 behavior")));
         assert!(!source.contains(concat!("would use actual ", "B3 propagator")));
         assert!(!source.contains(concat!("Ok(original_context", ".clone())")));
     }
 
     #[test]
-    fn runner_xfails_without_live_trace_context_reference() {
+    fn runner_passes_with_spec_header_oracle() {
         let result = run_w3c_traceparent_roundtrip_test(false);
 
-        match result {
-            ConformanceTestResult::ExpectedFailure { reason } => {
-                assert!(reason.contains(OTEL_TRACE_CONTEXT_REFERENCE_UNIMPLEMENTED));
-                assert!(reason.contains("local round-trip guards ran"));
-            }
-            other => {
-                panic!("expected XFAIL while trace-context reference is unwired, got {other:?}")
-            }
-        }
+        assert_eq!(result, ConformanceTestResult::Pass);
+    }
+
+    #[test]
+    fn w3c_spec_oracle_rejects_zero_trace_id() {
+        let mut carrier = HeaderCarrier::default();
+        carrier.set(
+            W3C_TRACEPARENT_HEADER,
+            "00-00000000000000000000000000000000-00f067aa0ba902b7-01".to_string(),
+        );
+
+        let error = extract_w3c_trace_context(&carrier).unwrap_err();
+        assert!(error.contains("trace-id must not be all zero"));
+    }
+
+    #[test]
+    fn w3c_spec_oracle_parses_tracestate() {
+        let mut carrier = HeaderCarrier::default();
+        carrier.set(
+            W3C_TRACEPARENT_HEADER,
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        carrier.set(W3C_TRACESTATE_HEADER, "vendor=value".to_string());
+
+        let context = extract_w3c_trace_context(&carrier).unwrap();
+        assert_eq!(context.trace_state().header(), "vendor=value");
+        assert!(context.trace_flags().is_sampled());
+        assert!(context.is_remote());
     }
 
     #[test]

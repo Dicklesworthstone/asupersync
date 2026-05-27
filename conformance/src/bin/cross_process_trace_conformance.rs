@@ -234,7 +234,7 @@ fn test_w3c_roundtrip(verbose: bool) -> TestResult {
     .with_baggage("version", "1.0.0")
     .with_baggage("region", "us-west-2");
 
-    // Convert to W3C headers (simulate sending across process boundary)
+    // Convert to W3C headers for a process-boundary handoff.
     let w3c_headers = to_w3c_headers(&original_ctx);
 
     if verbose {
@@ -249,7 +249,7 @@ fn test_w3c_roundtrip(verbose: bool) -> TestResult {
         }
     }
 
-    // Parse headers back (simulate receiving in another process)
+    // Parse headers back on the receiving side of the handoff.
     let (parsed_trace_id, parsed_span_id, parsed_flags) =
         parse_w3c_traceparent(&w3c_headers.traceparent)?;
 
@@ -478,7 +478,7 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
         println!("  Testing comprehensive cross-process scenario");
     }
 
-    // Simulate: Service A -> Service B -> Service C
+    // Exercise Service A -> Service B -> Service C propagation.
     let mut rng = DetRng::new(900);
 
     // Service A initiates request

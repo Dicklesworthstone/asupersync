@@ -11,8 +11,6 @@ use asupersync::http::h1::types::{Method, RequestBuilder, Version};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-// Note: Using simplified hyper-style reference formatting instead of actual hyper APIs
-
 /// Test verdict for request building conformance cases.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestBuildingTestVerdict {

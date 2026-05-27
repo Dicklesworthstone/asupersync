@@ -440,14 +440,15 @@ mod tests {
         let sum = 0.0;
         let count = 0u64;
 
+        assert!(observations.is_empty());
         assert_eq!(bucket_counts.iter().sum::<u64>(), count);
         assert_eq!(sum, 0.0);
     }
 
     #[test]
     fn test_floating_point_precision() {
-        let a = 0.1 + 0.2;
-        let b = 0.3;
+        let a: f64 = 0.1 + 0.2;
+        let b: f64 = 0.3;
 
         // Demonstrate floating point precision issues
         assert!((a - b).abs() < f64::EPSILON * 10.0);

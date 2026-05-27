@@ -448,7 +448,7 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
         println!("  Testing comprehensive trace context scenario");
     }
 
-    // Simulate a request flow: API → Database → Cache
+    // Exercise a request flow: API -> Database -> Cache
     let mut rng = DetRng::new(400);
     let base_trace_id = DistTraceId::new(0x4bf92f3577b34da6, 0xa3ce929d0e0e4736);
 

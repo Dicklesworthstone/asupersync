@@ -8,10 +8,10 @@
 //! transfer specification, tagged by requirement level for coverage accounting.
 
 use asupersync::atp::object::{
-    ContentId, ManifestId, Object, ObjectGraph, ObjectId, ObjectKind, MetadataPolicy
+    ContentId, ManifestId, MetadataPolicy, Object, ObjectGraph, ObjectId, ObjectKind,
 };
-use asupersync::atp::safety::{DestinationPolicy, ReceivePlan};
 use asupersync::atp::planner::TransferPlanner;
+use asupersync::atp::safety::{DestinationPolicy, ReceivePlan};
 use asupersync::cx::Cx;
 use asupersync::types::Outcome;
 use serde::{Deserialize, Serialize};
@@ -100,7 +100,6 @@ const OBJECT_GRAPH_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Object references MUST be valid",
         test_fn: test_object_reference_validity,
     },
-
     // Content Addressing Requirements
     ConformanceCase {
         id: "OBJ-CONTENT-001",
@@ -126,7 +125,6 @@ const OBJECT_GRAPH_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Manifest identifiers MUST be collision-resistant",
         test_fn: test_manifest_id_collision_resistance,
     },
-
     // Transfer Atomicity Requirements
     ConformanceCase {
         id: "OBJ-ATOMIC-001",
@@ -152,7 +150,6 @@ const OBJECT_GRAPH_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Transfers SHOULD support incremental progress",
         test_fn: test_incremental_transfer_progress,
     },
-
     // Corruption Detection Requirements
     ConformanceCase {
         id: "OBJ-CORRUPT-001",
@@ -178,7 +175,6 @@ const OBJECT_GRAPH_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Corruption SHOULD be reported with details",
         test_fn: test_corruption_error_reporting,
     },
-
     // Metadata Preservation Requirements
     ConformanceCase {
         id: "OBJ-META-001",
@@ -196,7 +192,6 @@ const OBJECT_GRAPH_CONFORMANCE_CASES: &[ConformanceCase] = &[
         description: "Portable metadata policy SHOULD be default",
         test_fn: test_portable_metadata_default,
     },
-
     // Graph Validation Requirements
     ConformanceCase {
         id: "OBJ-VALID-001",
@@ -250,7 +245,10 @@ fn test_object_graph_acyclic(_cx: &Cx) -> ConformanceResult {
     // For now, we verify the structure prevents obvious cycles
     if graph.object_count() != 2 {
         return ConformanceResult::Fail {
-            reason: format!("Expected 2 objects in graph, found {}", graph.object_count()),
+            reason: format!(
+                "Expected 2 objects in graph, found {}",
+                graph.object_count()
+            ),
         };
     }
 
@@ -269,7 +267,8 @@ fn test_object_graph_reachability(_cx: &Cx) -> ConformanceResult {
     // Create unreachable object
     let unreachable_content = b"unreachable content";
     let unreachable_id = ObjectId::Content(ContentId::from_bytes(unreachable_content));
-    let unreachable_obj = Object::new_file(unreachable_id.clone(), unreachable_content.len() as u64);
+    let unreachable_obj =
+        Object::new_file(unreachable_id.clone(), unreachable_content.len() as u64);
 
     // Add objects to graph
     if let Err(_) = graph.add_object(root_obj) {
@@ -329,7 +328,10 @@ fn test_content_id_cryptographic_security(_cx: &Cx) -> ConformanceResult {
     // Verify hash length (SHA-256 produces 32 bytes)
     if content_id.hash().len() != 32 {
         return ConformanceResult::Fail {
-            reason: format!("Content ID hash should be 32 bytes (SHA-256), got {}", content_id.hash().len()),
+            reason: format!(
+                "Content ID hash should be 32 bytes (SHA-256), got {}",
+                content_id.hash().len()
+            ),
         };
     }
 
@@ -391,14 +393,18 @@ fn test_manifest_id_collision_resistance(_cx: &Cx) -> ConformanceResult {
     // Different manifests should have different IDs
     if manifest_id1 == manifest_id2 {
         return ConformanceResult::Fail {
-            reason: "Different manifests should have different manifest IDs (collision detected)".to_string(),
+            reason: "Different manifests should have different manifest IDs (collision detected)"
+                .to_string(),
         };
     }
 
     // Verify hash length for security (SHA-256)
     if manifest_id1.hash().len() != 32 {
         return ConformanceResult::Fail {
-            reason: format!("Manifest ID hash should be 32 bytes (SHA-256), got {}", manifest_id1.hash().len()),
+            reason: format!(
+                "Manifest ID hash should be 32 bytes (SHA-256), got {}",
+                manifest_id1.hash().len()
+            ),
         };
     }
 
@@ -409,7 +415,8 @@ fn test_manifest_id_collision_resistance(_cx: &Cx) -> ConformanceResult {
 fn test_transfer_atomicity(_cx: &Cx) -> ConformanceResult {
     // Expected failure: transfer atomicity implementation not yet complete
     ConformanceResult::ExpectedFailure {
-        reason: "Transfer atomicity implementation pending - tracked in ATP transfer roadmap".to_string(),
+        reason: "Transfer atomicity implementation pending - tracked in ATP transfer roadmap"
+            .to_string(),
     }
 }
 
@@ -417,7 +424,9 @@ fn test_transfer_atomicity(_cx: &Cx) -> ConformanceResult {
 fn test_partial_transfer_rollback(_cx: &Cx) -> ConformanceResult {
     // Expected failure: rollback mechanism implementation not yet complete
     ConformanceResult::ExpectedFailure {
-        reason: "Partial transfer rollback implementation pending - tracked in ATP transfer roadmap".to_string(),
+        reason:
+            "Partial transfer rollback implementation pending - tracked in ATP transfer roadmap"
+                .to_string(),
     }
 }
 
@@ -425,7 +434,9 @@ fn test_partial_transfer_rollback(_cx: &Cx) -> ConformanceResult {
 fn test_incremental_transfer_progress(_cx: &Cx) -> ConformanceResult {
     // Expected failure: incremental progress implementation not yet complete
     ConformanceResult::ExpectedFailure {
-        reason: "Incremental transfer progress implementation pending - tracked in ATP transfer roadmap".to_string(),
+        reason:
+            "Incremental transfer progress implementation pending - tracked in ATP transfer roadmap"
+                .to_string(),
     }
 }
 
@@ -438,7 +449,10 @@ fn test_corruption_detection_transfer(_cx: &Cx) -> ConformanceResult {
     let content_id = ContentId::from_bytes(original_content);
 
     // Create object with mismatched content and ID (simulates corruption)
-    let obj = Object::new_file(ObjectId::Content(content_id), corrupted_content.len() as u64);
+    let obj = Object::new_file(
+        ObjectId::Content(content_id),
+        corrupted_content.len() as u64,
+    );
 
     // The object creation itself should be fine, but verification should catch mismatch
     // For now, we test that the infrastructure exists
@@ -449,7 +463,9 @@ fn test_corruption_detection_transfer(_cx: &Cx) -> ConformanceResult {
     }
 
     ConformanceResult::ExpectedFailure {
-        reason: "Runtime content verification implementation pending - tracked in ATP transfer roadmap".to_string(),
+        reason:
+            "Runtime content verification implementation pending - tracked in ATP transfer roadmap"
+                .to_string(),
     }
 }
 
@@ -457,7 +473,9 @@ fn test_corruption_detection_transfer(_cx: &Cx) -> ConformanceResult {
 fn test_corrupt_manifest_rejection(_cx: &Cx) -> ConformanceResult {
     // Expected failure: manifest verification implementation not yet complete
     ConformanceResult::ExpectedFailure {
-        reason: "Manifest corruption detection implementation pending - tracked in ATP transfer roadmap".to_string(),
+        reason:
+            "Manifest corruption detection implementation pending - tracked in ATP transfer roadmap"
+                .to_string(),
     }
 }
 
@@ -486,7 +504,8 @@ fn test_metadata_preservation_policy(_cx: &Cx) -> ConformanceResult {
 
     if portable_policy.preserve_unix_permissions {
         return ConformanceResult::Fail {
-            reason: "Portable metadata policy should not preserve platform-specific permissions".to_string(),
+            reason: "Portable metadata policy should not preserve platform-specific permissions"
+                .to_string(),
         };
     }
 
@@ -556,20 +575,7 @@ fn test_duplicate_child_name_rejection(_cx: &Cx) -> ConformanceResult {
 
 /// Create a test context for conformance testing.
 fn test_cx() -> Cx {
-    // Create a minimal test context
-    // Note: This is a simplified version for testing
-    use asupersync::types::Budget;
-    use asupersync::runtime::Runtime;
-    use asupersync::lab::{LabConfig, LabRuntime};
-
-    let config = LabConfig::default();
-    let runtime = LabRuntime::new(config);
-    let root = runtime.state.create_root_region(Budget::INFINITE);
-
-    // Create a test Cx - this may need adjustment based on actual Cx creation requirements
-    runtime.run(&root, |cx| async {
-        cx.clone()
-    }).unwrap()
+    Cx::for_testing()
 }
 
 /// Main conformance test runner with summary reporting.
@@ -590,17 +596,26 @@ fn atp_object_graph_transfer_full_conformance() {
             }
             ConformanceResult::Fail { reason } => {
                 fail += 1;
-                eprintln!("FAIL {}: {}\n  reason: {}", case.id, case.description, reason);
+                eprintln!(
+                    "FAIL {}: {}\n  reason: {}",
+                    case.id, case.description, reason
+                );
                 "FAIL"
             }
             ConformanceResult::Skipped { reason } => {
                 skipped += 1;
-                eprintln!("SKIP {}: {}\n  reason: {}", case.id, case.description, reason);
+                eprintln!(
+                    "SKIP {}: {}\n  reason: {}",
+                    case.id, case.description, reason
+                );
                 "SKIP"
             }
             ConformanceResult::ExpectedFailure { reason } => {
                 xfail += 1;
-                eprintln!("XFAIL {}: {}\n  reason: {}", case.id, case.description, reason);
+                eprintln!(
+                    "XFAIL {}: {}\n  reason: {}",
+                    case.id, case.description, reason
+                );
                 "XFAIL"
             }
         };
@@ -609,10 +624,12 @@ fn atp_object_graph_transfer_full_conformance() {
     }
 
     let total = OBJECT_GRAPH_CONFORMANCE_CASES.len();
-    let must_tests = OBJECT_GRAPH_CONFORMANCE_CASES.iter()
+    let must_tests = OBJECT_GRAPH_CONFORMANCE_CASES
+        .iter()
         .filter(|c| c.level == RequirementLevel::Must)
         .count();
-    let must_passing = OBJECT_GRAPH_CONFORMANCE_CASES.iter()
+    let must_passing = OBJECT_GRAPH_CONFORMANCE_CASES
+        .iter()
         .filter(|c| c.level == RequirementLevel::Must)
         .filter(|c| matches!((c.test_fn)(&cx), ConformanceResult::Pass))
         .count();
@@ -624,8 +641,10 @@ fn atp_object_graph_transfer_full_conformance() {
     println!("SKIP: {skipped}");
     println!("XFAIL: {xfail}");
     println!();
-    println!("MUST requirement compliance: {must_passing}/{must_tests} ({:.1}%)",
-             (must_passing as f64 / must_tests as f64) * 100.0);
+    println!(
+        "MUST requirement compliance: {must_passing}/{must_tests} ({:.1}%)",
+        (must_passing as f64 / must_tests as f64) * 100.0
+    );
 
     // For now, accept expected failures but require no unexpected failures
     assert_eq!(fail, 0, "Unexpected test failures detected");
@@ -650,8 +669,10 @@ fn atp_object_graph_transfer_coverage_matrix() {
             ConformanceResult::ExpectedFailure { .. } => "⚠️ XFAIL",
         };
 
-        println!("| {} | {} | {:?} | {:?} | {} | {} |",
-                case.id, case.section, case.level, case.category, status, case.description);
+        println!(
+            "| {} | {} | {:?} | {:?} | {} | {} |",
+            case.id, case.section, case.level, case.category, status, case.description
+        );
     }
 }
 
@@ -691,20 +712,31 @@ mod infrastructure_tests {
     #[test]
     fn test_conformance_infrastructure() {
         // Test that we have defined test cases
-        assert!(!OBJECT_GRAPH_CONFORMANCE_CASES.is_empty(), "Should have ATP object graph transfer conformance test cases");
+        assert!(
+            !OBJECT_GRAPH_CONFORMANCE_CASES.is_empty(),
+            "Should have ATP object graph transfer conformance test cases"
+        );
 
         // Test that all requirement levels are covered
-        let has_must = OBJECT_GRAPH_CONFORMANCE_CASES.iter().any(|c| c.level == RequirementLevel::Must);
-        let has_should = OBJECT_GRAPH_CONFORMANCE_CASES.iter().any(|c| c.level == RequirementLevel::Should);
+        let has_must = OBJECT_GRAPH_CONFORMANCE_CASES
+            .iter()
+            .any(|c| c.level == RequirementLevel::Must);
+        let has_should = OBJECT_GRAPH_CONFORMANCE_CASES
+            .iter()
+            .any(|c| c.level == RequirementLevel::Should);
 
         assert!(has_must, "Should have MUST requirements tested");
         assert!(has_should, "Should have SHOULD requirements tested");
 
         // Test that all categories are covered
-        let categories: std::collections::HashSet<_> = OBJECT_GRAPH_CONFORMANCE_CASES.iter()
+        let categories: std::collections::HashSet<_> = OBJECT_GRAPH_CONFORMANCE_CASES
+            .iter()
             .map(|c| c.category)
             .collect();
 
-        assert!(categories.len() > 1, "Should cover multiple test categories");
+        assert!(
+            categories.len() > 1,
+            "Should cover multiple test categories"
+        );
     }
 }
