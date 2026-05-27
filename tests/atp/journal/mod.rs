@@ -356,8 +356,7 @@ impl JournalTestHarness {
                         .config
                         .journal_path
                         .metadata()
-                        .map(|metadata| metadata.len())
-                        .unwrap_or(0);
+                        .map_or(0, |metadata| metadata.len());
                     self.artifacts.push(artifact);
                 }
                 (Err(e), false) => {
@@ -425,8 +424,7 @@ impl JournalTestHarness {
     pub fn verify_bitmap_consistency(&self) -> Result<(), String> {
         for artifact in &self.artifacts {
             // Check bitmap updates are properly sequenced
-            let mut expected_sequence = 0;
-            for update in &artifact.bitmap_updates {
+            for (expected_sequence, update) in artifact.bitmap_updates.iter().enumerate() {
                 if update.sequence_number() != expected_sequence {
                     return Err(format!(
                         "Bitmap sequence gap: expected {}, got {}",
@@ -434,7 +432,6 @@ impl JournalTestHarness {
                         update.sequence_number()
                     ));
                 }
-                expected_sequence += 1;
             }
         }
 

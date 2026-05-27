@@ -393,17 +393,13 @@ impl AtpE2eProofSuite {
 
         if let Some(recovery_state) = &artifact.recovery_state {
             match recovery_state {
-                RecoveryState::PartialCompletion => {
-                    // Verify partial state is consistent
-                    if artifact.chunk_ranges.is_empty() {
-                        return Err("Partial completion but no chunks recorded".to_string());
-                    }
+                // Verify partial state is consistent.
+                RecoveryState::PartialCompletion if artifact.chunk_ranges.is_empty() => {
+                    return Err("Partial completion but no chunks recorded".to_string());
                 }
-                RecoveryState::VerificationFailed => {
-                    // Verify no final commit on verification failure
-                    if artifact.final_commit_record.is_some() {
-                        return Err("Final commit despite verification failure".to_string());
-                    }
+                // Verify no final commit on verification failure.
+                RecoveryState::VerificationFailed if artifact.final_commit_record.is_some() => {
+                    return Err("Final commit despite verification failure".to_string());
                 }
                 _ => {
                     // Other states are valid

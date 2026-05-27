@@ -72,7 +72,7 @@ fn test_journal_append_recovery_basic() -> Result<(), Box<dyn std::error::Error>
         artifact.record_verification_hash("journal_checksum".to_string(), checksum);
         artifact.record_recovery_state(RecoveryState::Completed);
 
-        artifact.journal_size = config.journal_path.metadata().map(|m| m.len()).unwrap_or(0);
+        artifact.journal_size = config.journal_path.metadata().map_or(0, |m| m.len());
 
         Ok(artifact)
     })?;
