@@ -13,15 +13,11 @@
 src/runtime/reactor/io_uring.rs:IoUringReactor (Linux export; without io-uring feature returns Err(Unsupported)) [DOCUMENT]
 
 # Feature-gated harness doubles
-src/messaging/kafka.rs:StubBroker (cfg(not(feature = "kafka")) deterministic harness broker) [DOCUMENT]
 src/transport/mock.rs:SimNetwork (cfg(any(test, feature = "test-internals")) test double) [QUARANTINE]
 
 # TLS feature-gated stubs that return proper "feature not enabled" errors
 src/tls/types.rs:Certificate::from_pem (cfg(not(feature = "tls")) returns feature error) [DOCUMENT]
 src/tls/types.rs:PrivateKey::from_pem (cfg(not(feature = "tls")) returns feature error) [DOCUMENT]
-
-# Conformance test doubles (test-scoped)
-conformance/src/runner.rs:Dummy* (test-only runtime doubles, replaced with Err(Unsupported)) [QUARANTINE]
 
 # Historical design document (moved to docs/design/)
 docs/design/api_skeleton_v4.rs:skeleton_placeholder! (design reference, not compiled) [RETIRE]
